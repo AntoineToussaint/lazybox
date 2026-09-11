@@ -53,6 +53,22 @@ const FIXTURES: &[ByteFixture] = &[
         ready: false,
     },
     ByteFixture {
+        name: "trust_folder_modern",
+        bytes: include_bytes!("fixtures/trust_folder_modern.bin"),
+        expected: AgentState::InputNeeded,
+        ready: false,
+    },
+    // The same gate answered, composer repainted beneath. The question and
+    // the `Yes, I trust this folder` label are still in the window, so this
+    // is the transcript that separates a live gate from an agent merely
+    // TALKING about one — the false positive that latched a sticky `?`.
+    ByteFixture {
+        name: "trust_folder_modern_answered",
+        bytes: include_bytes!("fixtures/trust_folder_modern_answered.bin"),
+        expected: AgentState::Idle,
+        ready: true,
+    },
+    ByteFixture {
         name: "conversational_question",
         bytes: include_bytes!("fixtures/conversational_question.bin"),
         expected: AgentState::Idle,

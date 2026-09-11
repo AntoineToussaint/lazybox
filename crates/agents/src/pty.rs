@@ -18,6 +18,21 @@ pub enum PromptShape {
     /// Free-text elicitation — the answer is composed text plus Enter;
     /// a bare digit is just typing into the field.
     FreeText,
+    /// A modal whose options carry NO keys: the answer is a cursor move
+    /// plus Enter. Claude's modern folder-trust gate is the case —
+    /// `❯ No, exit` / `  Yes, I trust this folder`, selected with the
+    /// arrows.
+    ///
+    /// It is neither of the other two, and calling it either one breaks a
+    /// different caller. As `Chooser` a bare `1` would read as an answer and
+    /// optimistically flip the pill to `Working` while the gate is still up
+    /// (clearing the detect buffer that was the only evidence of it). As
+    /// `FreeText` an inject would deliver immediately and paste the work
+    /// prompt straight into the gate — the "y eats my prompt" race. The two
+    /// predicates that matter are written as `== Chooser` and `!= FreeText`,
+    /// so this variant is correctly excluded from the keystroke flip and
+    /// correctly defers injects without either call site special-casing it.
+    ArrowSelect,
 }
 
 /// How a shell-hosted agent expects programmatic prompt input to be framed.

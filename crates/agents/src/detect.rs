@@ -122,6 +122,47 @@ pub const CLAUDE_BLOCKING_INTERSTITIAL_PHRASES: &[&str] = &[
     "mcp servers need authentication",
 ];
 
+/// Question wordings of Claude's workspace / folder-trust gate — the startup
+/// chooser that asks whether you trust the directory before it will read or
+/// edit anything.
+///
+/// Both wordings are carried: the older `Do you trust the files in this
+/// folder?` and the current `Quick safety check: Is this a project you created
+/// or one you trust?`. `trust this folder` also matches the affirmative option
+/// label both render, so a window that kept only the options still matches.
+///
+/// These phrases are NOT sufficient on their own (#1641 follow-up). Unlike
+/// every other single-match table here — `mcp server needs authentication`,
+/// the limit banners — these are ordinary English that an agent's own prose
+/// produces constantly ("I answered `Yes, I trust this folder`"), and the file
+/// this very table lives in contains them. A match is only a live gate when
+/// the gate's own option chrome is on screen too; that pairing is
+/// `trust_gate_pos`, which is what the classifier consumes.
+///
+/// Matched space-free like every other phrase table, and — via
+/// `trust_gate_pos` — newline-free as well, so a narrow pane that wraps the
+/// long question mid-phrase does not hide the gate. The readiness veto in
+/// [`claude_ready_for_prompt`] matches them directly (spaces only) because
+/// there the conservative direction is to veto, not to classify.
+pub const CLAUDE_TRUST_GATE_PHRASES: &[&str] = &[
+    "do you trust the files in this folder",
+    "trust this folder",
+    "is this a project you created",
+];
+
+/// The subset of [`CLAUDE_TRUST_GATE_PHRASES`] that
+/// [`claude_unattended_startup_nudge`] can actually answer: the older
+/// numbered rendering (`❯ 1. Yes, proceed` / `2. No, exit`), whose affirmative
+/// is the single keystroke `1`.
+///
+/// Split out rather than duplicated inline so the wording has ONE home. The
+/// nudge deliberately does not widen to the whole table: the modern gate's
+/// options are unnumbered, so its affirmative is a cursor move plus Enter, and
+/// its default selection is `No, exit` — a nudge that misread the arrow
+/// position would EXIT the agent instead of trusting the folder. It stays
+/// unanswered-but-visible (`InputNeeded`) rather than answered wrongly.
+pub const CLAUDE_TRUST_GATE_NUMBERED_PHRASES: &[&str] = &["do you trust the files in this folder"];
+
 /// Phrases Claude Code renders ONLY when it has hit its provider usage /
 /// monthly / weekly limit and paused on the "limit reached — Wait?" prompt
 /// (issues #847, #1337). No normal chat output produces these as a live
@@ -498,6 +539,40 @@ pub fn claude_state_chunked(recent_output: &[u8], last_chunk_start: usize) -> Op
     Some(claude_state_of(&s, &compact, Some(compact_mark)))
 }
 
+/// Chunk-aware observation: [`claude_state_chunked`]'s state plus the
+/// interaction shape of the prompt behind an `InputNeeded`.
+///
+/// Only the folder-trust gate needs to say anything the blanket
+/// [`AgentObservation::from_state`] mapping gets wrong. That mapping calls
+/// every `InputNeeded` a [`PromptShape::Chooser`] — "one keystroke answers" —
+/// which is true of the legacy numbered gate (`❯ 1. Yes, proceed`) and false
+/// of the modern one, whose options are unnumbered labels driven by the
+/// arrows. Reporting the modern gate as a chooser armed the daemon's
+/// optimistic answered-flip: a bare `1` — the keystroke habit every other
+/// Claude dialog teaches — would commit `Working` and clear the detect buffer
+/// while the gate was still up, leaving a blocked agent reported as running.
+/// The distinction is structural, so it is read off the same screen the state
+/// was: numbered options present → `Chooser`, absent → [`PromptShape::ArrowSelect`].
+pub fn claude_observation_chunked(
+    recent_output: &[u8],
+    last_chunk_start: usize,
+) -> Option<AgentObservation> {
+    let mark = last_chunk_start.min(recent_output.len());
+    let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
+    let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
+    let decision = classify(&s, &compact, Some(compact_mark));
+    decision.log(&compact);
+    if decision.trigger == Some(Trigger::WorkspaceTrustGate) {
+        let shape = if has_numbered_chooser_options(&s) {
+            PromptShape::Chooser
+        } else {
+            PromptShape::ArrowSelect
+        };
+        return Some(AgentObservation::input_needed(shape));
+    }
+    Some(AgentObservation::from_state(decision.state))
+}
+
 /// Classify Claude's state from an already-stripped buffer `s` and its
 /// space-free form `compact` (see [`compact_lower`]), then emit one
 /// `trace`-level record of why. Returns `AgentState` directly (never the
@@ -538,6 +613,8 @@ enum Trigger {
     /// A startup blocker an unattended spawn can't clear — an MCP server
     /// awaiting interactive auth (`CLAUDE_BLOCKING_INTERSTITIAL_PHRASES`).
     BlockingInterstitial,
+    /// The workspace / folder-trust gate (`CLAUDE_TRUST_GATE_PHRASES`).
+    WorkspaceTrustGate,
     /// A provider usage / monthly-limit block
     /// (`CLAUDE_USAGE_LIMIT_PHRASES`) — the distinct `LimitReached` state.
     UsageLimit,
@@ -832,6 +909,40 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
         return d;
     }
 
+    // The folder-trust gate. Placed ahead of the chooser rules because the
+    // modern gate's options are UNNUMBERED labels (`❯ No, exit` / `  Yes, I
+    // trust this folder`), which `has_numbered_chooser_options` structurally
+    // cannot recognize — that blind spot is the whole bug (#1641): the gate
+    // read as `Idle`, so the spawn-time inject gate (#1444), which releases
+    // held keystrokes the moment the agent reports `InputNeeded`, could not
+    // see that the agent was waiting on the user. Keystrokes parked for the
+    // injection's full `PENDING_READY_CAP` and the console read as frozen for
+    // a minute.
+    //
+    // Placed AFTER the blocked-state branches, not before them. The question
+    // wordings are ordinary English that survives in scrollback, so letting
+    // them outrank a live usage-limit banner turned a `LimitReached` — which
+    // `Shift-K` / `a R` recover and the `rate-limited` filter counts — into a
+    // plain `InputNeeded` nothing resumes, and turned an `AwaitingReset` into
+    // a state whose inject-gate release types into the very composer where a
+    // keystroke CANCELS the parked wait.
+    //
+    // Gated on the composer footer (`idle_pos`) as well as the work anchor,
+    // exactly like [`claude_unattended_startup_nudge`] already gates the same
+    // marker: the gate REPLACES the composer — every captured rendering of it,
+    // legacy and modern, carries no composer chrome — so a footer painted
+    // after it proves it was answered and what is left is scrollback. Without
+    // that gate an agent that merely finished a turn TALKING about folder
+    // trust latched a sticky `?` that nothing could clear: `InputNeeded`
+    // outranks a fresh `Stop` hook (`hooks_gate_allows_causal`), resists
+    // demotion, and re-derives identically on every quiet reclassify.
+    let trust_pos = trust_gate_pos(compact);
+    if marker_at_least_as_recent(trust_pos, idle_pos.max(work_anchor_against(trust_pos))) {
+        d.state = AgentState::InputNeeded;
+        d.trigger = Some(Trigger::WorkspaceTrustGate);
+        return d;
+    }
+
     // WEAK: arrow + numbered options, gated on the full composer footer
     // (incl. `Tab to amend`) so injected prose / parked prompts stay Idle.
     if has_arrow && has_chooser && chooser_live && (has_recency_anchor || corroborated) {
@@ -980,12 +1091,28 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     {
         return false;
     }
-    // Folder-trust prompts don't always render as a numbered chooser
-    // (older builds, alt phrasings), so `claude_state` can read them as
-    // Idle. Veto explicitly — pasting the work prompt into the trust
-    // dialog is the original "y eats my prompt" race. Matched space-free
-    // like every other footer phrase.
-    if compact.contains("trustthisfolder") || compact.contains("doyoutrustthefiles") {
+    // Folder-trust prompts don't always render a recognizable chooser (older
+    // builds, alt phrasings), so `classify` can read one as Idle. Veto on the
+    // BARE phrase here — deliberately weaker evidence than the classifier's
+    // [`trust_gate_pos`] demands. The asymmetry is the point: a wrong `?` is
+    // sticky and self-sustaining, while a wrong "not ready" only delays a
+    // paste, and the failure it prevents — the work prompt typed into the
+    // trust dialog — is the original "y eats my prompt" race.
+    //
+    // Bounded by the RELIABLE end-of-turn anchor (`resting_pos`: `? for
+    // shortcuts` / bypass, never the ambiguous `Tab to amend`, which a real
+    // dialog's own footer carries) and by a live work anchor, exactly like the
+    // STRONG phrase tier. Unbounded, this vetoed forever on prose: `--resume`
+    // repaints the prior conversation, so a session that had ever discussed
+    // folder trust could never signal ready, and the spawn-time injection
+    // failed out at `HARD_DEADLINE + PENDING_READY_CAP` with "agent did not
+    // become ready" — dropping the work prompt on every retry, since the
+    // replayed transcript is static.
+    let trust_phrase_pos = last_compact_match_pos(&compact, CLAUDE_TRUST_GATE_PHRASES);
+    if marker_at_least_as_recent(
+        trust_phrase_pos,
+        decision.resting_pos.max(decision.work_pos),
+    ) {
         return false;
     }
     // The composer must actually be on screen. The boot banner is also
@@ -1009,13 +1136,7 @@ pub fn claude_unattended_startup_nudge(
 
     let screen = strip_ansi_lossy(recent_output);
     let compact = compact_lower(&screen);
-    let trust = last_compact_match_pos(
-        &compact,
-        &[
-            "do you trust the files in this folder",
-            "do you trust this folder",
-        ],
-    );
+    let trust = last_compact_match_pos(&compact, CLAUDE_TRUST_GATE_NUMBERED_PHRASES);
     let bypass = last_compact_match_pos(
         &compact,
         &["bypass permissions mode", "bypass permissions warning"],
@@ -1068,15 +1189,62 @@ pub fn claude_working_supersedes_dialog(recent_output: &[u8]) -> bool {
     dialog_marker_pos(&compact).is_some_and(|marker| work > marker)
 }
 
+/// Bottom-most marker of a LIVE folder-trust gate, or `None`.
+///
+/// A [`CLAUDE_TRUST_GATE_PHRASES`] match is necessary but NOT sufficient:
+/// those wordings are ordinary English an agent's own prose reproduces (this
+/// file's own tests contain them), and on its own the phrase latched a sticky
+/// `InputNeeded` that no later reading could clear. The gate's own option
+/// chrome must be on screen with it — the `No, exit` decline label, which both
+/// the numbered and the unnumbered rendering paint, or the modern
+/// `Enter to confirm` footer. Prose that merely discusses folder trust carries
+/// neither.
+///
+/// `esc to cancel` is deliberately NOT accepted as that corroboration: it is
+/// the generic permission-dialog footer (see [`dialog_marker_pos`]), so it
+/// pairs with a trust phrase in any transcript that quotes a permission
+/// dialog. The two accepted tokens belong to this gate alone.
+///
+/// The returned offset is the CHROME's — the bottom of the gate, since the
+/// gate paints its options and footer below its question. That is what the
+/// caller's recency comparison needs: is the whole gate above a composer
+/// footer that replaced it?
+fn trust_gate_pos(compact: &str) -> Option<usize> {
+    // Chrome first: two `rfind`s over tokens that essentially never occur in
+    // ordinary agent output, so the common chunk pays only those and skips
+    // the phrase scan entirely.
+    let chrome = compact
+        .rfind("no,exit")
+        .max(compact.rfind("entertoconfirm"))?;
+    // The phrase is matched against a NEWLINE-STRIPPED copy, and only as a
+    // presence test — `chrome` is the recency anchor. `compact_lower` removes
+    // spaces but keeps newlines, so a pane narrow enough to wrap the long
+    // question mid-phrase (`…is this a project you\ncreated…`) broke a plain
+    // match and the gate read as `Idle` again — the original freeze, surviving
+    // in exactly the split panes `]]v` exists to create. Recency is unaffected
+    // because the gate paints its chrome below its question.
+    let flat: String = compact
+        .chars()
+        .filter(|c| *c != '\n' && *c != '\r')
+        .collect();
+    last_compact_match_pos(&flat, CLAUDE_TRUST_GATE_PHRASES)?;
+    Some(chrome)
+}
+
 /// Most recent dialog-shaped marker in the compacted buffer: chooser
-/// markers, a standalone consent phrase, a yes/no choice marker, or the
-/// `Esc to cancel` dialog footer. `None` when nothing dialog-shaped is
-/// in the window.
+/// markers, a standalone consent phrase, a yes/no choice marker, a live
+/// folder-trust gate, or the `Esc to cancel` dialog footer. `None` when
+/// nothing dialog-shaped is in the window.
 fn dialog_marker_pos(compact: &str) -> Option<usize> {
     [
         chooser_pos(compact),
         last_compact_match_pos(compact, CLAUDE_STANDALONE_PROMPT_PHRASES),
         last_compact_match_pos(compact, CLAUDE_CHOICE_MARKERS),
+        // Without this the trust gate had no demotion evidence: a stale-hook
+        // `Working` correction needs `claude_working_supersedes_dialog`, which
+        // reads this list, so a `?` raised by the gate could never be demoted
+        // by the agent visibly running again.
+        trust_gate_pos(compact),
         last_compact_match_pos(compact, CLAUDE_USAGE_LIMIT_PHRASES),
         last_compact_match_pos(compact, CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES),
         compact.rfind("esctocancel"),
@@ -2319,10 +2487,32 @@ mod tests {
 
     #[test]
     fn ready_vetoes_trust_folder_prompt_matched_space_free() {
-        // The trust dialog's footer arrives spaceless from the status bar;
-        // the veto must still fire so a paste can't land in it.
+        // The trust dialog arrives spaceless from the status bar; the veto
+        // must still fire so a paste can't land in it.
         assert!(!claude_ready_for_prompt(
+            "Doyoutrustthefilesinthisfolder?\n❯1.Yes,proceed\n2.No,exit".as_bytes()
+        ));
+        assert!(!claude_ready_for_prompt(
+            "Do you trust the files in this folder?\n❯ 1. Yes, proceed\n  2. No, exit".as_bytes()
+        ));
+        // The veto is deliberately broader than the classifier's
+        // `trust_gate_pos`: a rendering with NO recognizable option chrome
+        // still blocks the paste. `Tab to amend` is a dialog's own footer, so
+        // it must not count as the end-of-turn anchor that clears it.
+        assert!(!claude_ready_for_prompt(
+            b"Do you trust the files in this folder?\n\nEsc to cancel \xc2\xb7 Tab to amend\n"
+        ));
+        // But it IS bounded, by the reliable resting footer: a trust phrase
+        // above a live composer is answered-or-prose, and pasting is safe.
+        // Unbounded, a `--resume` that repainted a conversation about folder
+        // trust could never signal ready — the injection then failed out at
+        // `HARD_DEADLINE + PENDING_READY_CAP` and dropped the work prompt.
+        assert!(claude_ready_for_prompt(
             b"Do you trust the files in this folder?\n? for shortcuts"
+        ));
+        assert!(claude_ready_for_prompt(
+            "Do you trust the files in this folder?\n❯ 1. Yes, proceed\n  2. No, exit\n? for shortcuts"
+                .as_bytes()
         ));
     }
 
@@ -3079,6 +3269,221 @@ mod tests {
             "Esc to cancel · Tab to amend · ctrl+e to explain",
         );
         assert_eq!(claude_state(buf.as_bytes()), Some(AgentState::Idle));
+    }
+
+    /// The modern gate as one screen, reused by the tests below. Verbatim
+    /// from a real spawn into a fresh worktree: the options are UNNUMBERED
+    /// labels under a selection arrow, so the structural-chooser rule
+    /// (arrow + `1.`/`2.`) cannot see it.
+    const MODERN_TRUST_GATE: &str = concat!(
+        "Accessing workspace:\n",
+        "/Users/u/.lazybox/v2/github-o-r/issue-96\n\n",
+        "Quick safety check: Is this a project you created or one you trust? ",
+        "(Like your own code, a well-known open source project, or work from your team). ",
+        "If not, take a moment to review what's in this folder first.\n\n",
+        "Claude Code'll be able to read, edit, and execute files here.\n\n",
+        "Security guide\n\n",
+        "❯ No, exit\n",
+        "  Yes, I trust this folder\n\n",
+        "Enter to confirm · Esc to cancel\n",
+    );
+
+    /// Regression (#1641): Claude's folder-trust gate must report
+    /// `InputNeeded`. Its options are UNNUMBERED labels under a selection
+    /// arrow, so the structural-chooser rule can't see it, and its question is
+    /// in no consent-phrase table — it classified as `Idle`. The spawn-time
+    /// inject gate (#1444) releases held keystrokes the moment the agent
+    /// reports `InputNeeded`, so with the gate invisible every keystroke
+    /// parked for the injection's full `PENDING_READY_CAP`: the console froze
+    /// for a minute, then recovered on its own.
+    #[test]
+    fn folder_trust_gate_is_input_needed() {
+        assert_eq!(
+            claude_state(MODERN_TRUST_GATE.as_bytes()),
+            Some(AgentState::InputNeeded)
+        );
+        assert!(
+            !claude_ready_for_prompt(MODERN_TRUST_GATE.as_bytes()),
+            "the work prompt must never be pasted into the trust gate",
+        );
+
+        // Answered: the agent is streaming again, so a trust phrase left in
+        // scrollback must not pin `InputNeeded`.
+        let cleared = format!("{MODERN_TRUST_GATE}\n✻ Thinking… (5s · esc to interrupt)\n");
+        assert_eq!(
+            claude_state(cleared.as_bytes()),
+            Some(AgentState::Working),
+            "a newer working anchor proves the gate was answered",
+        );
+    }
+
+    /// The legacy gate, asserted at the branch that actually handles it.
+    ///
+    /// Its arrow + `1.`/`2.` shape ALREADY classified as `InputNeeded` through
+    /// `StructuralChooser` before the trust table existed, so asserting the
+    /// state alone proves nothing about the trust rule — the original form of
+    /// this test passed with the whole table deleted. Pin the trigger instead,
+    /// and pin the shape: the legacy gate IS answerable by the single
+    /// keystroke `1`, which is what `claude_unattended_startup_nudge` writes.
+    #[test]
+    fn legacy_numbered_trust_gate_fires_the_trust_branch() {
+        let legacy = concat!(
+            "Do you trust the files in this folder?\n",
+            "❯ 1. Yes, proceed\n",
+            "  2. No, exit\n",
+        );
+        let compact = compact_lower(legacy);
+        let d = classify(legacy, &compact, None);
+        assert_eq!(d.state, AgentState::InputNeeded);
+        assert_eq!(d.trigger, Some(Trigger::WorkspaceTrustGate));
+        assert_eq!(
+            claude_observation_chunked(legacy.as_bytes(), 0).and_then(|o| o.prompt_shape()),
+            Some(PromptShape::Chooser),
+            "the numbered gate is answered by the single keystroke `1`",
+        );
+    }
+
+    /// The modern gate is NOT a chooser: its options carry no keys, so a bare
+    /// `1` is not an answer. Reporting `Chooser` armed the daemon's optimistic
+    /// answered-flip (`chooser_submission`), which commits `Working` and
+    /// clears the detect buffer — a still-blocked agent reported as running,
+    /// with the only on-screen evidence of the gate thrown away.
+    #[test]
+    fn modern_trust_gate_is_not_a_bare_keystroke_chooser() {
+        let shape = claude_observation_chunked(MODERN_TRUST_GATE.as_bytes(), 0)
+            .and_then(|o| o.prompt_shape());
+        assert_eq!(shape, Some(PromptShape::ArrowSelect));
+        // The two daemon predicates this feeds, spelled out: no optimistic
+        // flip on a bare keystroke, but injects still defer.
+        assert_ne!(shape, Some(PromptShape::Chooser));
+        assert_ne!(shape, Some(PromptShape::FreeText));
+    }
+
+    /// Regression: an agent that merely FINISHES A TURN talking about folder
+    /// trust must stay `Idle`.
+    ///
+    /// The gate's question wordings are ordinary English — and `trust this
+    /// folder` is a substring of the affirmative option label, which this very
+    /// file quotes. Matched on the phrase alone and gated only on the work
+    /// anchor, the agent's own prose raised a sticky `?`: `InputNeeded`
+    /// outranks a fresh `Stop` hook (`hooks_gate_allows_causal`), resists
+    /// ambiguous demotion, and re-derives identically on every quiet
+    /// reclassify — so it never cleared until the user typed.
+    #[test]
+    fn prose_about_folder_trust_is_not_a_gate() {
+        // The label quoted mid-answer, turn over, composer at rest.
+        let quoted = concat!(
+            "● I reviewed the detector. The affirmative option label is\n",
+            "  `Yes, I trust this folder`, which is the token the table keys on.\n\n",
+            "? for shortcuts\n",
+        );
+        assert_eq!(claude_state(quoted.as_bytes()), Some(AgentState::Idle));
+
+        // The other wording, under the bypass-mode footer lazybox actually
+        // spawns with (`--dangerously-skip-permissions`).
+        let paraphrased = concat!(
+            "● The prompt asks: Is this a project you created or one you trust?\n",
+            "  I've summarised it above.\n\n",
+            "bypass permissions on (shift+tab to cycle)\n",
+        );
+        assert_eq!(claude_state(paraphrased.as_bytes()), Some(AgentState::Idle));
+
+        // The user's own question sitting in the composer.
+        let typed = concat!(
+            "> do you trust this folder for the new sandbox?\n",
+            "? for shortcuts\n",
+        );
+        assert_eq!(claude_state(typed.as_bytes()), Some(AgentState::Idle));
+
+        // And readiness is not vetoed forever by prose: `--resume` repaints
+        // the prior conversation, so a bare-phrase veto meant a session that
+        // had ever discussed folder trust could never signal ready and its
+        // injection failed out, dropping the work prompt on every retry.
+        assert!(claude_ready_for_prompt(quoted.as_bytes()));
+    }
+
+    /// Even a transcript that quotes the gate's own chrome must not latch a
+    /// `?` once the composer is painted back beneath it — that footer is the
+    /// proof the gate is gone. This is the shape of an agent printing this
+    /// file's own tests, or a diff of them.
+    #[test]
+    fn trust_gate_above_a_composer_footer_is_scrollback() {
+        let answered = format!("{MODERN_TRUST_GATE}\n? for shortcuts\n");
+        assert_eq!(claude_state(answered.as_bytes()), Some(AgentState::Idle));
+        assert!(
+            dialog_marker_pos(&compact_lower(&answered)).is_some(),
+            "the gate must still register as demotion evidence for \
+             `claude_working_supersedes_dialog`, or a `?` it raised could \
+             never be cleared by the agent visibly running again",
+        );
+    }
+
+    /// A pane narrow enough to wrap the long question mid-phrase must still
+    /// see the gate. `compact_lower` strips spaces but KEEPS newlines, so a
+    /// plain phrase match broke on the wrap and the gate read `Idle` again —
+    /// the original freeze, in exactly the split panes `]]v` exists to create.
+    #[test]
+    fn a_wrapped_trust_question_is_still_a_gate() {
+        // ~40 columns: both the question AND the affirmative label wrap.
+        let narrow = concat!(
+            "Quick safety check: Is this a project you\n",
+            "created or one you trust?\n",
+            "❯ No, exit\n",
+            "  Yes, I trust this\n",
+            "  folder\n",
+            "Enter to confirm · Esc to cancel\n",
+        );
+        assert_eq!(
+            claude_state(narrow.as_bytes()),
+            Some(AgentState::InputNeeded)
+        );
+
+        // The chrome alone is not a trust gate — some other modal's decline
+        // label must not conjure one out of nothing.
+        let other_modal = concat!(
+            "Discard the draft?\n",
+            "❯ No, exit\n",
+            "  Yes, discard\n",
+            "Enter to confirm · Esc to cancel\n",
+        );
+        let compact = compact_lower(other_modal);
+        assert_eq!(trust_gate_pos(&compact), None);
+    }
+
+    /// A live provider block outranks the trust gate, not the other way round.
+    ///
+    /// Classified ahead of the limit branches, a trust phrase still in the
+    /// window turned a `LimitReached` — which `Shift-K` / `a R` recover and
+    /// the `rate-limited` filter counts — into a plain `InputNeeded` that
+    /// nothing resumes.
+    #[test]
+    fn a_usage_limit_outranks_a_trust_phrase_in_the_window() {
+        let limit = concat!(
+            "Do you trust the files in this folder?\n",
+            "❯ 1. Yes, proceed\n",
+            "  2. No, exit\n",
+            "Claude usage limit reached. Your limit will reset at 3pm.\n",
+            "❯ 1. Wait\n",
+            "  2. Exit\n",
+        );
+        assert_eq!(
+            claude_state(limit.as_bytes()),
+            Some(AgentState::LimitReached)
+        );
+
+        // The auto-continue form is the sharper case: its composer stays live
+        // and ANY keystroke cancels the parked wait, so misreading it as
+        // `InputNeeded` releases the #1444 inject gate into it.
+        let parked = concat!(
+            "Do you trust the files in this folder?\n",
+            "❯ 1. Yes, proceed\n",
+            "  2. No, exit\n",
+            "Usage limit reached · continuing automatically at 3:10pm · esc or type to cancel\n",
+        );
+        assert_eq!(
+            claude_state(parked.as_bytes()),
+            Some(AgentState::AwaitingReset)
+        );
     }
 
     #[test]

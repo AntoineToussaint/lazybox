@@ -49,6 +49,7 @@ use lazybox_core::{
 use lazybox_ipc::AgentUsage;
 use serde_json::{Map, Value};
 
+use super::ParsedBody;
 use super::context_parse;
 use super::usage_parse::PriceOverrides;
 use crate::context_tag::TagSource;
@@ -263,6 +264,17 @@ struct SessionState {
     /// A rewrite has actually gone out for this session (shadow mode never
     /// sets it — nothing on the wire changed, so there is nothing to
     /// attribute a cache regression to).
+    ///
+    /// Set in [`Compactor::rewrite`], the moment condensed bytes are handed
+    /// back — not in `record`, which only runs for a turn the provider
+    /// billed. The upstream has seen and cached that prefix either way, and
+    /// the kill switch judges the *next* response against the baseline: an
+    /// unbilled rewritten pass (a `count_tokens` preflight, a 429, a stream
+    /// that errors) that left this false would let a degraded share be
+    /// latched as a fresh baseline instead of counted as a degradation —
+    /// disarming the guard on a session compaction is actively rewriting.
+    /// `Pending::rewrote` is a different question, kept separate: whether
+    /// *this* turn's saving is realized or projected.
     rewrote: bool,
     /// The last cache-read share seen *before* the first rewrite. Without
     /// one there is no baseline to judge against, so the kill switch stays
@@ -270,31 +282,6 @@ struct SessionState {
     baseline_share: Option<f64>,
     degraded_turns: u32,
     regressions: u64,
-}
-
-/// A request body and its parse, produced together.
-///
-/// The proxy parses each body once and hands the tree to both passes
-/// (#1623). Taking the bytes and the tree as two arguments would let a
-/// caller supply a tree that did not come from those bytes, and compaction
-/// forwards a *re-serialization of the tree* — so a mismatch would send the
-/// upstream a conversation the agent never wrote, with no error path. The
-/// only way to build one is [`ParsedBody::new`], from the bytes.
-pub struct ParsedBody {
-    bytes: Bytes,
-    value: Option<Value>,
-}
-
-impl ParsedBody {
-    pub fn new(bytes: Bytes) -> Self {
-        let value = serde_json::from_slice(&bytes).ok();
-        Self { bytes, value }
-    }
-
-    /// The parsed tree, for a pass that only reads it.
-    pub fn value(&self) -> Option<&Value> {
-        self.value.as_ref()
-    }
 }
 
 /// The outcome of one inspection: the bytes to forward, and whether this
@@ -449,10 +436,7 @@ impl Compactor {
         priced: bool,
         request: ParsedBody,
     ) -> Rewritten {
-        let ParsedBody {
-            bytes: body,
-            value: parsed,
-        } = request;
+        let (body, parsed) = request.into_parts();
         // Read once per request and use that value throughout, so a config
         // edit landing mid-request cannot make this pass decide under one
         // policy and log under another.
@@ -520,10 +504,20 @@ impl Compactor {
             if skipped.is_empty() { "" } else { "; skipped " },
         );
 
+        // What actually goes on the wire. `plan.body` is `Some` exactly when
+        // something was condensed, so this is `Some` precisely when the
+        // upstream receives bytes the agent did not write — the fact the
+        // kill switch arms on, and the only one that does not wait for a
+        // bill (see `SessionState::rewrote`).
+        let rewritten = plan.body.filter(|_| rewriting);
+        if rewritten.is_some() {
+            self.mark_rewrote(session);
+        }
+
         Rewritten {
-            body: match plan.body {
-                Some(rewritten) if rewriting => Bytes::from(rewritten),
-                _ => body,
+            body: match rewritten {
+                Some(rewritten) => Bytes::from(rewritten),
+                None => body,
             },
             // Eligible either way: the held first turn is what the baseline
             // is measured on, and rewritten turns are what it is measured
@@ -543,9 +537,10 @@ impl Compactor {
     /// retried or aborted request contributes nothing: the blocks it would
     /// have claimed are still claimed by whichever attempt finished.
     ///
-    /// Ordering matters — this runs before [`Compactor::observe_usage`] for
-    /// the same response, so the turn that first rewrote is already marked
-    /// `rewrote` when the kill switch judges its cache share.
+    /// Arming the kill switch is *not* part of this: `SessionState::rewrote`
+    /// is set in [`Compactor::rewrite`] when the bytes go out, so a request
+    /// that rewrote but was never billed — and so never reaches here — still
+    /// leaves the guard armed.
     pub fn commit(&self, session: &str, agent_id: &str, pending: Pending) {
         let saving = self.record(session, pending);
         if let Some(sink) = &self.saving
@@ -668,6 +663,15 @@ impl Compactor {
         })
     }
 
+    /// A rewrite has gone out on the wire for this session. Set at
+    /// inspection time, not at billing time — see `SessionState::rewrote`.
+    fn mark_rewrote(&self, session: &str) {
+        let mut sessions = self.sessions.lock().expect("compaction sessions");
+        if let Some(state) = entry(&mut sessions, session) {
+            state.rewrote = true;
+        }
+    }
+
     fn record(&self, session: &str, pending: Pending) -> Saving {
         let mut sessions = self.sessions.lock().expect("compaction sessions");
         let Some(state) = entry(&mut sessions, session) else {
@@ -687,7 +691,6 @@ impl Compactor {
         // been paid for again on every turn the blocks survive.
         state.saved_bytes += pending.saved_bytes as u64;
         state.saved_micros += pending.saved_micros.unwrap_or(0);
-        state.rewrote |= pending.rewrote;
         Saving {
             blocks,
             saved_bytes: pending.saved_bytes as u64,
@@ -1824,6 +1827,51 @@ mod tests {
     /// it had been taken, it becomes a dollar figure for a bill that never
     /// moved — and shadow is the shipped default, so that is the ordinary
     /// reading, not an edge case.
+    /// Two facts ride one pass and they are earned at different moments:
+    /// bytes reaching the wire, and the provider billing for them.
+    ///
+    /// The saving waits for the bill — that is what `commit` is for. Arming
+    /// the kill switch must not, because the upstream has cached the
+    /// condensed prefix either way. A `count_tokens` preflight, a 429, or a
+    /// stream that errors all forward rewritten bytes and never reach
+    /// `commit`; if those left `rewrote` false, the next degraded response
+    /// would be latched as a fresh *baseline* instead of counted as a
+    /// degradation, leaving the guard disarmed on a session compaction is
+    /// actively rewriting.
+    #[test]
+    fn an_unbilled_rewrite_still_arms_the_kill_switch() {
+        let (compactor, _notices, _savings) = compactor_with_notices();
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        // The held first turn: eligible, but forwarded verbatim.
+        let held = compactor.rewrite("ws", "claude", true, ParsedBody::new(body.clone()));
+        assert_eq!(held.body, body, "the baseline turn is held");
+        compactor.observe_usage("ws", "claude", &usage(100, 900), held.measured);
+        {
+            let mut sessions = compactor.sessions.lock().expect("compaction sessions");
+            let state = entry(&mut sessions, "ws").expect("tracked");
+            assert!(!state.rewrote, "a held turn changes nothing on the wire");
+        }
+
+        // A pass that rewrites and is never billed: no `commit`, ever.
+        let unbilled = compactor.rewrite("ws", "claude", true, ParsedBody::new(body.clone()));
+        assert!(
+            unbilled.body.len() < body.len(),
+            "the unbilled pass still rewrote"
+        );
+
+        let sessions = compactor.sessions.lock().expect("compaction sessions");
+        let state = sessions.get("ws").expect("tracked");
+        assert!(
+            state.rewrote,
+            "bytes on the wire arm the switch, billing or not"
+        );
+        assert_eq!(
+            state.saved_micros, 0,
+            "but the saving is still owed to a turn the provider charged for"
+        );
+    }
+
     #[test]
     fn a_shadow_saving_is_reported_as_projected() {
         let (compactor, savings) = shadow_compactor_reporting();

@@ -245,6 +245,41 @@ impl Default for Upstreams {
     }
 }
 
+/// A request body and its parse, produced together.
+///
+/// The proxy parses each body once and hands the tree to both passes
+/// (#1623). Taking the bytes and the tree as two arguments would let a
+/// caller supply a tree that did not come from those bytes, and compaction
+/// forwards a *re-serialization of the tree* — so a mismatch would send the
+/// upstream a conversation the agent never wrote, with no error path. The
+/// only way to build one is [`ParsedBody::new`], from the bytes.
+///
+/// It lives here rather than in the `compaction` module because both passes
+/// take it and the accounting pass is deliberately independent of whether
+/// the compactor fired — owning its input type would make that dependency
+/// real again.
+pub struct ParsedBody {
+    bytes: Bytes,
+    value: Option<serde_json::Value>,
+}
+
+impl ParsedBody {
+    pub fn new(bytes: Bytes) -> Self {
+        let value = serde_json::from_slice(&bytes).ok();
+        Self { bytes, value }
+    }
+
+    /// The parsed tree, for a pass that only reads it.
+    pub fn value(&self) -> Option<&serde_json::Value> {
+        self.value.as_ref()
+    }
+
+    /// The bytes and the tree, for the pass that consumes both.
+    pub(crate) fn into_parts(self) -> (Bytes, Option<serde_json::Value>) {
+        (self.bytes, self.value)
+    }
+}
+
 /// A resolved upstream: where to forward, and whether to meter count-only.
 struct Route<'a> {
     base: &'a str,
@@ -599,7 +634,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // metered agent makes. The bytes and their parse travel together so the
     // two cannot drift apart, and `measure` borrowing it while `rewrite`
     // consumes it makes the ordering above a compile error, not a comment.
-    let request = compaction::ParsedBody::new(body_bytes);
+    let request = ParsedBody::new(body_bytes);
     let measured = request
         .value()
         .and_then(|body| context_parse::measure(body, state.compactor.min_lines()));

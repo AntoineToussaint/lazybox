@@ -503,12 +503,25 @@ impl Compactor {
     /// In `shadow` the returned bytes are always the originals — the mode
     /// exists to prove the saving is real before taking it, and a shadow
     /// run that altered the wire would prove nothing.
-    pub fn rewrite(&self, session: &str, agent_id: &str, priced: bool, body: Bytes) -> Rewritten {
+    /// `parsed` must be the parse *of* `body`, and must not have been
+    /// mutated since: a rewrite is forwarded as a re-serialization of the
+    /// tree, so a tree from anywhere else would send the upstream a
+    /// conversation the agent never wrote. The proxy's `measure_then_compact`
+    /// is the one caller and produces the pair together.
+    pub fn rewrite(
+        &self,
+        session: &str,
+        agent_id: &str,
+        priced: bool,
+        body: Bytes,
+        parsed: Option<Value>,
+    ) -> Rewritten {
         // Read once per request and used throughout, so a config edit landing
         // mid-request cannot make this pass decide under one policy and log
         // under another. The session's canary opt-in is folded in here, so a
         // fleet in `shadow` still promotes one workspace to `on`.
         let policy = self.policy_for(session);
+
         if !policy.mode.evaluates() || body.is_empty() {
             return Rewritten::passed(body);
         }
@@ -523,7 +536,10 @@ impl Compactor {
         let Some(pass) = self.begin(session, policy.mode.rewrites()) else {
             return Rewritten::passed(body);
         };
-        let Some(plan) = plan(&body, &policy, &pass.tag) else {
+        let Some(parsed) = parsed else {
+            return Rewritten::passed(body);
+        };
+        let Some(plan) = plan(parsed, &policy, &pass.tag) else {
             return Rewritten::passed(body);
         };
         // Rewriting waits for a pre-rewrite cache reading (see `begin`).
@@ -852,10 +868,11 @@ fn cache_read_share(usage: &AgentUsage) -> Option<f64> {
 }
 
 /// Decide and rewrite in one mutable pass over the conversation. `None`
-/// means "not a shape with tool results in it" — including a body that
-/// isn't JSON at all.
-pub fn plan(body: &[u8], policy: &ContextHygiene, tag: &CondenseTag) -> Option<Plan> {
-    let mut value: Value = serde_json::from_slice(body).ok()?;
+/// means "not a shape with tool results in it".
+///
+/// Takes the tree by value because it mutates it in place and re-serializes
+/// it into [`Plan::body`].
+pub fn plan(mut value: Value, policy: &ContextHygiene, tag: &CondenseTag) -> Option<Plan> {
     let calls = tool_calls(&value);
     let model = value
         .get("model")
@@ -1256,9 +1273,20 @@ mod tests {
             .collect()
     }
 
+    /// The parse `rewrite` expects alongside these bytes.
+    fn parsed(body: &Bytes) -> Option<Value> {
+        serde_json::from_slice(body).ok()
+    }
+
     fn planned(value: &Value, mode: CompactionMode) -> Plan {
-        let bytes = serde_json::to_vec(value).expect("serialize");
-        plan(&bytes, &policy(mode), &tag()).expect("a body with tool results")
+        plan(value.clone(), &policy(mode), &tag()).expect("a body with tool results")
+    }
+
+    /// Re-plan over bytes a previous pass emitted, as the proxy would on the
+    /// next turn: the tree is parsed from those bytes, not shared with the
+    /// pass that wrote them.
+    fn replanned(body: &[u8], policy: &ContextHygiene, tag: &CondenseTag) -> Option<Plan> {
+        plan(serde_json::from_slice(body).expect("json"), policy, tag)
     }
 
     #[test]
@@ -1322,7 +1350,8 @@ mod tests {
         let once = planned(&anthropic_body(6), CompactionMode::On)
             .body
             .expect("rewritten");
-        let twice = plan(&once, &policy(CompactionMode::On), &tag()).expect("still has results");
+        let twice =
+            replanned(&once, &policy(CompactionMode::On), &tag()).expect("still has results");
         assert_eq!(twice.condensed, 0);
         assert!(twice.body.is_none(), "nothing to rewrite the second time");
         assert!(
@@ -1347,7 +1376,8 @@ mod tests {
             .body
             .expect("rewritten");
         let stranger = CondenseTag::new("a-different-daemon-run");
-        let again = plan(&once, &policy(CompactionMode::On), &stranger).expect("still has results");
+        let again =
+            replanned(&once, &policy(CompactionMode::On), &stranger).expect("still has results");
 
         assert_eq!(
             again.condensed, 0,
@@ -1378,7 +1408,9 @@ mod tests {
             Arc::new(|_, _| {}),
             tags(),
         );
-        let sent = compactor.rewrite("ws", "claude", true, body.clone()).body;
+        let sent = compactor
+            .rewrite("ws", "claude", true, body.clone(), parsed(&body))
+            .body;
         assert_eq!(sent, body, "shadow mode never alters bytes on the wire");
     }
 
@@ -1389,7 +1421,7 @@ mod tests {
     /// response is only ever accounted for when its own request already went
     /// through `begin`.
     fn seed_baseline(compactor: &Compactor, session: &str, body: &Bytes) {
-        let held = compactor.rewrite(session, "claude", true, body.clone());
+        let held = compactor.rewrite(session, "claude", true, body.clone(), parsed(body));
         assert_eq!(held.body, *body, "the first eligible turn is held");
         compactor.observe_usage(session, "claude", &usage(100, 900), true);
     }
@@ -1419,14 +1451,16 @@ mod tests {
             tags(),
         );
         assert_eq!(
-            compactor.rewrite("ws", "claude", true, body.clone()).body,
+            compactor
+                .rewrite("ws", "claude", true, body.clone(), parsed(&body))
+                .body,
             body,
             "no baseline yet, so the original goes upstream"
         );
         compactor.observe_usage("ws", "claude", &usage(100, 900), true);
         assert!(
             compactor
-                .rewrite("ws", "claude", true, body.clone())
+                .rewrite("ws", "claude", true, body.clone(), parsed(&body))
                 .body
                 .len()
                 < body.len(),
@@ -1444,7 +1478,7 @@ mod tests {
             tags(),
         );
         seed_baseline(&compactor, "ws", &body);
-        let done = compactor.rewrite("ws", "claude", true, body.clone());
+        let done = compactor.rewrite("ws", "claude", true, body.clone(), parsed(&body));
         assert!(
             done.body.len() < body.len(),
             "the rewritten body is smaller"
@@ -1529,15 +1563,19 @@ mod tests {
         );
         seed_baseline(&compactor, "ws", &body);
         seed_baseline(&compactor, "other-ws", &body);
-        let first = compactor.rewrite("ws", "claude", true, body.clone()).body;
-        let second = compactor.rewrite("ws", "claude", true, body.clone()).body;
+        let first = compactor
+            .rewrite("ws", "claude", true, body.clone(), parsed(&body))
+            .body;
+        let second = compactor
+            .rewrite("ws", "claude", true, body.clone(), parsed(&body))
+            .body;
         assert_eq!(
             first, second,
             "the same session renders the same bytes on every turn"
         );
 
         let other = compactor
-            .rewrite("other-ws", "claude", true, body.clone())
+            .rewrite("other-ws", "claude", true, body.clone(), parsed(&body))
             .body;
         assert_ne!(
             other, first,
@@ -1563,7 +1601,9 @@ mod tests {
                 source,
             );
             seed_baseline(&compactor, "ws", &body);
-            compactor.rewrite("ws", "claude", true, body.clone()).body
+            compactor
+                .rewrite("ws", "claude", true, body.clone(), parsed(&body))
+                .body
         };
 
         let before = sent_by(tags());
@@ -1612,7 +1652,7 @@ mod tests {
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
         // A tracked session: held on its first turn, but judged.
-        let tracked = compactor.rewrite("ws-tracked", "claude", true, body.clone());
+        let tracked = compactor.rewrite("ws-tracked", "claude", true, body.clone(), parsed(&body));
         assert_eq!(
             tracked.body, body,
             "the first turn is held for the baseline"
@@ -1627,7 +1667,8 @@ mod tests {
             assert_eq!(sessions.len(), MAX_SESSIONS, "the cap is full");
         }
 
-        let over_cap = compactor.rewrite("ws-over-cap", "claude", true, body.clone());
+        let over_cap =
+            compactor.rewrite("ws-over-cap", "claude", true, body.clone(), parsed(&body));
         assert_eq!(
             over_cap.body, body,
             "an untracked session's bytes are forwarded exactly as sent"
@@ -1666,7 +1707,7 @@ mod tests {
         );
 
         let bytes = Bytes::from(serde_json::to_vec(&body).expect("serialize"));
-        let planned = plan(&bytes, &policy, &tag()).expect("a conversation");
+        let planned = replanned(&bytes, &policy, &tag()).expect("a conversation");
         assert!(
             planned
                 .skipped
@@ -1680,7 +1721,7 @@ mod tests {
         // floor, so the skip above is caused by the empty parts and not by
         // some unrelated default.
         let untouched = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        let baseline = plan(&untouched, &policy, &tag()).expect("a conversation");
+        let baseline = replanned(&untouched, &policy, &tag()).expect("a conversation");
         assert!(
             !baseline
                 .skipped
@@ -1829,15 +1870,31 @@ mod tests {
         });
         assert_eq!(planned(&image, CompactionMode::On).condensed, 0);
 
-        // Not JSON at all, and JSON with no tool results.
-        assert!(plan(b"not json at all", &policy(CompactionMode::On), &tag()).is_none());
+        // JSON with no tool results.
         assert!(
-            plan(
+            replanned(
                 br#"{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}"#,
                 &policy(CompactionMode::On),
                 &tag()
             )
             .is_none()
+        );
+
+        // A body that is not JSON has no parse to plan over at all, so it
+        // crosses to the upstream exactly as the agent sent it.
+        let garbage = Bytes::from_static(b"not json at all");
+        let compactor = Compactor::new(
+            policy(CompactionMode::On),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        );
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        assert_eq!(
+            compactor
+                .rewrite("ws", "claude", true, garbage.clone(), None)
+                .body,
+            garbage
         );
     }
 
@@ -1904,7 +1961,7 @@ mod tests {
         let (compactor, savings) = shadow_compactor_reporting();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
-        let done = compactor.rewrite("ws", "claude", true, body.clone());
+        let done = compactor.rewrite("ws", "claude", true, body.clone(), parsed(&body));
         assert_eq!(done.body, body, "shadow forwards the originals");
         compactor.commit(
             "ws",
@@ -2026,7 +2083,7 @@ mod tests {
 
     /// Inspect and commit one body as a completed turn.
     fn turn(compactor: &Compactor, session: &str, body: &Bytes) {
-        let done = compactor.rewrite(session, "claude", true, body.clone());
+        let done = compactor.rewrite(session, "claude", true, body.clone(), parsed(body));
         if let Some(pending) = done.pending {
             compactor.commit(session, "claude", pending);
         }
@@ -2040,7 +2097,7 @@ mod tests {
     /// production cannot reach, and hides what the held turn does to the
     /// accounting.
     fn production_turn_priced(compactor: &Compactor, session: &str, body: &Bytes, priced: bool) {
-        let done = compactor.rewrite(session, "claude", priced, body.clone());
+        let done = compactor.rewrite(session, "claude", priced, body.clone(), parsed(body));
         let measured = done.measured;
         if let Some(pending) = done.pending {
             compactor.commit(session, "claude", pending);
@@ -2273,7 +2330,7 @@ mod tests {
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
         for _ in 0..3 {
-            let done = compactor.rewrite("ws", "claude", true, body.clone());
+            let done = compactor.rewrite("ws", "claude", true, body.clone(), parsed(&body));
             assert!(done.pending.is_some(), "still something to account for");
         }
         assert!(
@@ -2318,7 +2375,7 @@ mod tests {
         // marginal dollar rides its prompt tokens, which is why the cost
         // meter zeroes it too.
         let priceable = Bytes::from(serde_json::to_vec(&anthropic_body(12)).expect("serialize"));
-        let done = compactor.rewrite("ws2", "codex", false, priceable);
+        let done = compactor.rewrite("ws2", "codex", false, priceable.clone(), parsed(&priceable));
         compactor.commit("ws2", "codex", done.pending.expect("a plan to commit"));
 
         let savings = savings.lock().expect("lock");
@@ -2342,11 +2399,18 @@ mod tests {
         let (compactor, _, savings) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
         for index in 0..MAX_SESSIONS {
-            let done = compactor.rewrite(&format!("ws-{index}"), "claude", true, body.clone());
+            let done = compactor.rewrite(
+                &format!("ws-{index}"),
+                "claude",
+                true,
+                body.clone(),
+                parsed(&body),
+            );
             assert!(done.pending.is_some(), "session {index} is within the cap");
         }
 
-        let overflow = compactor.rewrite("ws-overflow", "claude", true, body.clone());
+        let overflow =
+            compactor.rewrite("ws-overflow", "claude", true, body.clone(), parsed(&body));
         assert_eq!(
             overflow.body, body,
             "an untrackable session's bytes go out untouched"
@@ -2408,7 +2472,7 @@ mod tests {
         seed_baseline(&compactor, "canary", &body);
         assert!(
             compactor
-                .rewrite("canary", "claude", true, body.clone())
+                .rewrite("canary", "claude", true, body.clone(), parsed(&body))
                 .body
                 .len()
                 < body.len(),
@@ -2418,7 +2482,7 @@ mod tests {
         // The fleet stays in shadow: it plans and logs, and sends originals.
         assert_eq!(
             compactor
-                .rewrite("fleet", "claude", true, body.clone())
+                .rewrite("fleet", "claude", true, body.clone(), parsed(&body))
                 .body,
             body,
             "every other session sends the originals",
@@ -2426,7 +2490,7 @@ mod tests {
         compactor.observe_usage("fleet", "claude", &usage(100, 900), true);
         assert_eq!(
             compactor
-                .rewrite("fleet", "claude", true, body.clone())
+                .rewrite("fleet", "claude", true, body.clone(), parsed(&body))
                 .body,
             body,
             "and stays in shadow on the turn after a baseline exists",
@@ -2452,7 +2516,7 @@ mod tests {
 
         // Held baseline turn, then a turn that really rewrites.
         seed_baseline(&compactor, "ws", &body);
-        let out = compactor.rewrite("ws", "claude", true, body.clone());
+        let out = compactor.rewrite("ws", "claude", true, body.clone(), parsed(&body));
         assert!(out.body.len() < body.len(), "this turn rewrote");
 
         // The user flips the canary off before the response lands.
@@ -2478,7 +2542,7 @@ mod tests {
             tags(),
         );
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        let out = compactor.rewrite("a", "claude", true, body.clone());
+        let out = compactor.rewrite("a", "claude", true, body.clone(), parsed(&body));
         assert_eq!(out.body, body, "an off policy inspects nothing");
         assert!(!out.measured);
     }
@@ -2489,7 +2553,7 @@ mod tests {
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
         seed_baseline(&compactor, "ws", &body);
-        let done = compactor.rewrite("ws", "claude", true, body.clone());
+        let done = compactor.rewrite("ws", "claude", true, body.clone(), parsed(&body));
         assert!(
             done.body.len() < body.len(),
             "the rewritten body is smaller"
@@ -2519,7 +2583,9 @@ mod tests {
         let (_, _, regressions) = compactor.stats("ws");
         assert_eq!(regressions, 1);
         assert_eq!(
-            compactor.rewrite("ws", "claude", true, body.clone()).body,
+            compactor
+                .rewrite("ws", "claude", true, body.clone(), parsed(&body))
+                .body,
             body,
             "a disabled session forwards the original body"
         );
@@ -2552,7 +2618,7 @@ mod tests {
         // Each turn is committed as its response completes (#1621) — the
         // accounting a rewrite claims only lands when the turn is billed.
         let complete = |session: &str, body: &Bytes| {
-            let done = compactor.rewrite(session, "claude", true, body.clone());
+            let done = compactor.rewrite(session, "claude", true, body.clone(), parsed(body));
             if let Some(pending) = done.pending.clone() {
                 compactor.commit(session, "claude", pending);
             }
@@ -2599,7 +2665,7 @@ mod tests {
         let (compactor, notices, _savings) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
         seed_baseline(&compactor, "ws", &body);
-        let done = compactor.rewrite("ws", "claude", true, body.clone());
+        let done = compactor.rewrite("ws", "claude", true, body.clone(), parsed(&body));
         assert!(
             done.body.len() < body.len(),
             "the rewritten body is smaller"
@@ -2613,7 +2679,7 @@ mod tests {
         assert!(notices.lock().expect("lock").is_empty());
         assert!(
             compactor
-                .rewrite("ws", "claude", true, body.clone())
+                .rewrite("ws", "claude", true, body.clone(), parsed(&body))
                 .body
                 .len()
                 < body.len(),
@@ -2628,7 +2694,11 @@ mod tests {
             ]}))
             .expect("serialize"),
         );
-        assert!(!compactor.rewrite("ws", "claude", true, small).measured);
+        assert!(
+            !compactor
+                .rewrite("ws", "claude", true, small.clone(), parsed(&small))
+                .measured
+        );
     }
 
     #[test]
@@ -2636,7 +2706,7 @@ mod tests {
         let (compactor, notices, _savings) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
         seed_baseline(&compactor, "ws", &body);
-        let done = compactor.rewrite("ws", "claude", true, body.clone());
+        let done = compactor.rewrite("ws", "claude", true, body.clone(), parsed(&body));
         assert!(
             done.body.len() < body.len(),
             "the rewritten body is smaller"
@@ -2653,7 +2723,7 @@ mod tests {
         assert!(notices.lock().expect("lock").is_empty());
         assert!(
             compactor
-                .rewrite("ws", "claude", true, body.clone())
+                .rewrite("ws", "claude", true, body.clone(), parsed(&body))
                 .body
                 .len()
                 < body.len(),
@@ -2685,7 +2755,7 @@ mod tests {
         seed_baseline(&compactor, "ws", &body);
         assert!(
             compactor
-                .rewrite("ws", "claude", true, body.clone())
+                .rewrite("ws", "claude", true, body.clone(), parsed(&body))
                 .body
                 .len()
                 < body.len(),
@@ -2695,7 +2765,9 @@ mod tests {
         // The user edits the config. No restart.
         *mode.lock().expect("mode") = CompactionMode::Off;
         assert_eq!(
-            compactor.rewrite("ws", "claude", true, body.clone()).body,
+            compactor
+                .rewrite("ws", "claude", true, body.clone(), parsed(&body))
+                .body,
             body,
             "off must stop the rewrite without waiting for a daemon restart"
         );
@@ -2711,7 +2783,9 @@ mod tests {
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
         let compactor = Compactor::disabled();
         assert_eq!(
-            compactor.rewrite("ws", "claude", true, body.clone()).body,
+            compactor
+                .rewrite("ws", "claude", true, body.clone(), parsed(&body))
+                .body,
             body
         );
         assert_eq!(compactor.stats("ws"), (0, 0.0, 0));

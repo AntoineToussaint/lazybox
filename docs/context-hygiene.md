@@ -287,12 +287,30 @@ lines, so it was skipped as `BelowLineFloor` — but `min_lines: 20` parses fine
 (`Config::parse` only refuses 0), and then the proxy condenses lazybox's own
 summary, which is the monotonicity rule this module exists to enforce.
 
-Recognition needs the marker to *lead*, too, because `is_condensed` matches it at
-the start of a block. So `read_intercept::deny_reason` opens the
-`<untrusted-content>` fence *after* the condensation header rather than around it
-— which is the honest framing anyway: the header is lazybox's own provenance
-line, and only the summary under it is copied file bytes. Both halves still go
-through `fence_safe`, since the header carries the read's path.
+The shared token is necessary and **not sufficient**, for a reason that is not
+lazybox's to change. A `permissionDecisionReason` does not reach the transcript
+verbatim: Claude Code re-frames a hook deny as `"{hook} hook error: {reason}"`,
+so the block the proxy reads back opens `PreToolUse:Read hook error: ` no matter
+what the hook rendered. `CondenseTag::marks` is therefore **line-anchored** — it
+asks whether any line of the block opens with the marker, not whether byte 0
+does. Position was never the control; the token is, and it is as unguessable on
+line two as on line one. What the relaxed anchor admits is text that quotes our
+own rendering, which is precisely the case it exists to catch.
+
+The alternative — hoisting the condensation header out of the
+`<untrusted-content>` fence so it lands at byte 0 — is wrong twice over. It does
+not work, because Claude's framing still precedes it. And it would be unsafe if
+it did: `CondenseKind::label` interpolates the read's path verbatim, a branch can
+carry a file whose *name* is a sentence, and a `permissionDecisionReason` is
+framed to the model as the permission system speaking. `fence_safe` guards the
+delimiter, not the content, so the fence has to wrap the condensation whole.
+
+One residual is permanent by construction. Denies already sitting in a transcript
+from before this landed carry the old per-daemon-run token, which no longer
+exists once that daemon exits — nothing can recognize them again, so at a low
+floor they are condensed a second time until the conversation ends. Recognizing
+them would mean honoring an *unkeyed* marker, which is the forgery hole the
+keying closed; re-condensing a stale block is the cheaper of the two.
 
 Derived means no per-session write on the request path and nothing to lose across
 a restart. Callers do not have to coordinate: the secret is seeded with a

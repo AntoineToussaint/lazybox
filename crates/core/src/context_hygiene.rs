@@ -70,8 +70,29 @@ impl CondenseTag {
     }
 
     /// Whether this text is a condensation *we* rendered under this tag.
+    ///
+    /// Matched at the start of the block **or of its second line**, because one
+    /// of the two enforcement points cannot control byte 0. The `PreToolUse`
+    /// hook hands its condensation to Claude as a `permissionDecisionReason`,
+    /// and Claude Code re-frames it before it lands in the transcript: the
+    /// block the proxy reads back opens `PreToolUse:Read hook error: `, which
+    /// consumes the first line. Anchoring at byte 0 makes the hook's output
+    /// permanently unrecognizable to the proxy — the drift #1645 is about — and
+    /// no rendering lazybox chooses escapes it, because the framing is
+    /// prepended after lazybox is done.
+    ///
+    /// Two lines, not "any line", and the difference is not about forgery:
+    /// forging requires the token, which content the agent reads cannot guess,
+    /// at line two as much as at line one. It is about *accidental* echo. A
+    /// scrollback dump or a log file that happens to quote one line of an
+    /// earlier condensation carries a real token, and under an unbounded scan
+    /// that file would classify as already-condensed and evade compaction for
+    /// good. Bounding the window to the lines our own two layouts actually use
+    /// keeps that to a file whose first or second line is the echo.
     pub fn marks(&self, text: &str) -> bool {
-        text.starts_with(&self.prefix)
+        text.lines()
+            .take(2)
+            .any(|line| line.starts_with(&self.prefix))
     }
 }
 
@@ -747,6 +768,70 @@ mod tests {
             );
         }
         assert!(!is_condensed("just some file content", &tag));
+    }
+
+    /// The hook's condensation never reaches the proxy at byte 0. Claude Code
+    /// re-frames a `PreToolUse` deny as `"{hook} hook error: {reason}"` before
+    /// it lands in the transcript, so a byte-0-anchored marker cannot match the
+    /// block the proxy reads back — and no rendering lazybox chooses changes
+    /// that, because the framing is prepended after lazybox is done.
+    ///
+    /// Note what the anchor does and does not survive: the framing lands on the
+    /// *first* line, so a marker is only still reachable if something else
+    /// occupies that line. In the hook's deny that something is the
+    /// `<untrusted-content>` fence, which has to wrap the condensation whole for
+    /// its own reasons — the two constraints agree, and
+    /// `read_intercept::the_compactor_recognizes_a_deny_the_hook_rendered_for_the_session`
+    /// pins the real rendering so they cannot drift apart.
+    #[test]
+    fn a_block_behind_a_framing_prefix_is_still_recognized() {
+        let tag = tag();
+        let rendered = render_condensed(&file(), 900, "summary line", &tag).expect("renders");
+        let framed = format!("PreToolUse:Read hook error: <untrusted-content>\n{rendered}");
+
+        assert!(
+            is_condensed(&framed, &tag),
+            "the framed block must still be recognized as ours: {framed}"
+        );
+        assert!(
+            !is_condensed(&framed, &CondenseTag::new("another-session")),
+            "and only under our own token — the token is the control, not the position"
+        );
+    }
+
+    /// Relaxing the anchor must not relax the keying: a marker a file merely
+    /// mimics still carries no token we minted, wherever it sits.
+    #[test]
+    fn an_unkeyed_marker_is_unrecognized_inside_the_window() {
+        let tag = tag();
+        let forged = "real first line
+[condensed by lazybox: src/lib.rs, 900 lines → 1 lines]
+x";
+        assert!(!is_condensed(forged, &tag), "unkeyed marker must not pass");
+        let wrong_token = "real first line
+[condensed by lazybox deadbeef: src/lib.rs, 900 lines → 1 lines]
+x";
+        assert!(
+            !is_condensed(wrong_token, &tag),
+            "another token's marker must not pass either"
+        );
+    }
+
+    /// The window is bounded, so a large file that merely quotes an earlier
+    /// condensation deep inside it is still condensable. Without the bound one
+    /// echoed line — carrying a real token, because it really was ours once —
+    /// would exempt the whole file from compaction for the rest of the session.
+    #[test]
+    fn an_echo_below_the_window_does_not_exempt_a_block() {
+        let tag = tag();
+        let rendered = render_condensed(&file(), 900, "summary line", &tag).expect("renders");
+        let mut echoed = String::from("line one\nline two\nline three\n");
+        echoed.push_str(&rendered);
+
+        assert!(
+            !is_condensed(&echoed, &tag),
+            "a quote below the window must not classify the block as ours: {echoed}"
+        );
     }
 
     /// Every field that can change the output is in the key; nothing else is.

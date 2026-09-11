@@ -1396,6 +1396,15 @@ fn all_events() -> Vec<Event> {
                 reason: "[condensed by lazybox: src/lib.rs, 900 lines \u{2192} 2 lines]".into(),
             },
         },
+        Event::AgentCompaction {
+            agent_id: "claude".into(),
+            session_key: Some(lazybox_core::SessionKey::from("github:o/r#1")),
+            blocks: 4,
+            saved_bytes: 18_422,
+            saved_cost_micros: Some(61_000),
+            regressions: 0,
+            rewrote: true,
+        },
     ]
 }
 
@@ -1620,6 +1629,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::EpicStatus { .. } => "EpicStatus",
         Event::EpicGone { .. } => "EpicGone",
         Event::ToolUseDecided { .. } => "ToolUseDecided",
+        Event::AgentCompaction { .. } => "AgentCompaction",
     }
 }
 
@@ -1636,7 +1646,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        105,
+        106,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

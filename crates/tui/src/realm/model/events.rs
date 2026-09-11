@@ -1338,6 +1338,9 @@ impl<T: TerminalAdapter> Model<T> {
                 // asked for it, on its own short-lived connection; it reaches the
                 // TUI only as bus traffic and has no UI.
                 | IpcEvent::ToolUseDecided { .. }
+                // The compaction saving (#1621) is accounting the daemon
+                // rolls up into the stats screen; it patches no workspace.
+                | IpcEvent::AgentCompaction { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2422,6 +2425,9 @@ impl<T: TerminalAdapter> Model<T> {
             // asked for it, on its own short-lived connection; it reaches the
             // TUI only as bus traffic and has no UI.
             | IpcEvent::ToolUseDecided { .. }
+            // Nor is the compaction saving (#1621) — it rides live agent
+            // traffic through the proxy, not a provider poll.
+            | IpcEvent::AgentCompaction { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -2766,6 +2772,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // asked for it, on its own short-lived connection; it reaches the
                 // TUI only as bus traffic and has no UI.
                 | IpcEvent::ToolUseDecided { .. }
+                | IpcEvent::AgentCompaction { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

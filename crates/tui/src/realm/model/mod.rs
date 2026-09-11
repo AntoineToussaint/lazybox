@@ -3898,7 +3898,8 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let picker = SnippetPicker::new(self.scoped_picker_rows(), initial_filter)
             .with_recent(self.recent_snippets.clone())
-            .with_insert_without_submit();
+            .with_insert_without_submit()
+            .with_delete();
         self.mount_modal(Id::SnippetPicker, picker);
     }
 
@@ -3920,7 +3921,9 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let picker = SnippetPicker::new(self.follow_up_picker_rows(keys), String::new())
             .with_title(format!(" Follow-up to ]{from} "))
-            .with_insert_without_submit();
+            .with_insert_without_submit()
+            .with_delete()
+            .restricted();
         self.mount_modal(Id::SnippetPicker, picker);
         self.leader_target = Some(terminal_id);
     }
@@ -4443,9 +4446,9 @@ impl<T: TerminalAdapter> Model<T> {
             lazybox_config::SnippetOrigin::Global => {
                 match lazybox_config::Snippets::delete_global_snippet(key) {
                     Ok(()) => {
-                        self.apply_snippets(lazybox_config::Snippets::load_for_launch_dir(
-                            std::env::current_dir().ok().as_deref(),
-                        ));
+                        if !self.reload_snippets_after_delete(key) {
+                            return;
+                        }
                         self.flash_info(format!(
                             "adopted built-in `{key}` (dropped your override)"
                         ));
@@ -4494,9 +4497,9 @@ impl<T: TerminalAdapter> Model<T> {
             lazybox_config::SnippetOrigin::Global => {
                 match lazybox_config::Snippets::delete_global_snippet(key) {
                     Ok(()) => {
-                        self.apply_snippets(lazybox_config::Snippets::load_for_launch_dir(
-                            std::env::current_dir().ok().as_deref(),
-                        ));
+                        if !self.reload_snippets_after_delete(key) {
+                            return;
+                        }
                         self.flash_info(if shadows_builtin {
                             format!("deleted your `{key}` — the built-in is back")
                         } else {
@@ -4518,14 +4521,45 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Re-mount the snippet picker with freshly-classified rows so a
-    /// keep-mine or adopt is reflected immediately (badge cleared, or the
-    /// adopted row now showing the built-in). No-op unless the picker is the
-    /// top modal.
+    /// A completed write and a successful reload are separate outcomes. Never
+    /// install fallback built-ins when another layer could not be read.
+    fn reload_snippets_after_delete(&mut self, key: &str) -> bool {
+        let result = std::env::current_dir()
+            .map_err(lazybox_config::SnippetsError::from)
+            .and_then(|dir| lazybox_config::Snippets::try_load_for_launch_dir(Some(&dir)));
+        match result {
+            Ok(snippets) => {
+                self.apply_snippets(snippets);
+                true
+            }
+            Err(e) => {
+                self.flash_error(format!(
+                    "deleted `{key}` on disk, but couldn't reload snippets: {e}; keeping the previous catalog"
+                ));
+                false
+            }
+        }
+    }
+
+    /// Refresh catalog rows in place: closing a modal clears its delivery target.
     fn refresh_open_snippet_picker(&mut self) {
+        use crate::realm::components::snippet_picker::SnippetPicker;
         if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
-            self.pop_modal();
-            self.mount_snippet_picker(String::new());
+            let rows = self
+                .app
+                .get_component(&Id::SnippetPicker)
+                .and_then(|component| component.as_any().downcast_ref::<SnippetPicker>())
+                .and_then(|picker| picker.restricted_keys())
+                .map(|keys| self.follow_up_picker_rows(keys))
+                .unwrap_or_else(|| self.scoped_picker_rows());
+            if let Some(picker) = self
+                .app
+                .get_component_mut(&Id::SnippetPicker)
+                .and_then(|component| component.as_any_mut().downcast_mut::<SnippetPicker>())
+            {
+                picker.refresh_rows(rows, self.recent_snippets.clone());
+            }
+            self.redraw = true;
         }
     }
 

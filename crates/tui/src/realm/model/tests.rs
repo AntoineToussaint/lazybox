@@ -30377,6 +30377,72 @@ mod follow_up_chain_tests {
         assert!(m.sidebar.focus_workspace_key(&key));
     }
 
+    #[test]
+    fn snippet_delete_preserves_catalog_on_error_and_delivery_target_on_success() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                // SAFETY: this test holds ENV_LOCK until after restoration.
+                unsafe {
+                    match &self.0 {
+                        Some(home) => std::env::set_var("LAZYBOX_HOME", home),
+                        None => std::env::remove_var("LAZYBOX_HOME"),
+                    }
+                }
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _restore = RestoreHome(std::env::var_os("LAZYBOX_HOME"));
+        // SAFETY: ENV_LOCK serializes LAZYBOX_HOME mutations in this binary.
+        unsafe { std::env::set_var("LAZYBOX_HOME", home.path()) };
+        let path = home.path().join("snippets.yaml");
+        std::fs::write(&path, CATALOG).unwrap();
+        let (mut m, _server) = model_with(vec![
+            agent(1, "local:a", vec![]),
+            agent(2, "local:b", vec![]),
+        ]);
+        m.mount_follow_up_picker("start", &["fixall".into(), "push".into()], TerminalId(2));
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+
+        // An unrelated invalid field must not delete anything or replace the
+        // previously loaded custom prompt with a built-in.
+        let invalid = format!("{CATALOG}  broken:\n    body: []\n");
+        std::fs::write(&path, &invalid).unwrap();
+        m.update(Msg::SnippetDelete("lonely".into()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        assert_eq!(m.snippets.get("fixall").unwrap().body, "fix it");
+        assert!(m.snippets.get("lonely").is_some());
+        assert!(notice(&m).contains("couldn't delete"));
+        // A failure after a completed write (for example a newly unreadable
+        // layer) is reported separately and also preserves the cached bodies.
+        assert!(!m.reload_snippets_after_delete("already-deleted"));
+        assert_eq!(m.snippets.get("fixall").unwrap().body, "fix it");
+        assert!(notice(&m).contains("couldn't reload snippets"));
+        m.status.notice = None;
+
+        std::fs::write(&path, CATALOG).unwrap();
+        m.update(Msg::SnippetDelete("lonely".into()));
+        assert!(m.snippets.get("lonely").is_none());
+        assert_eq!(m.picker_target_terminal(), Some(TerminalId(2)));
+        let commands =
+            m.handle_choice_picked(vec![crate::realm::ChoicePayload::Text("fixall".into())]);
+        assert!(
+            matches!(commands.as_slice(), [IpcCommand::DeliverSnippet { terminal_id: TerminalId(2), body, .. }] if body == "fix it")
+        );
+
+        m.update(Msg::SnippetDelete("fixall".into()));
+        assert_eq!(
+            m.snippets.get("fixall").unwrap().origin,
+            lazybox_config::SnippetOrigin::BuiltIn
+        );
+        assert!(notice(&m).contains("the built-in is back"));
+        let before = std::fs::read(&path).unwrap();
+        m.update(Msg::SnippetDelete("fixall".into()));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(notice(&m).contains("can't be deleted"));
+    }
+
     /// Press the real `]]n` chord and collect what reached the daemon.
     fn press_follow_up(
         m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
@@ -30623,6 +30689,34 @@ mod follow_up_chain_tests {
             "{}",
             notice(&m)
         );
+    }
+
+    #[test]
+    fn snippet_refresh_keeps_follow_up_scope_instead_of_active_provider_scope() {
+        let workspace = super::focus_mode_tests::workspace_with_agent("owner/repo#1");
+        let key = SessionKey::from(&workspace.key);
+        let (mut m, _server) = model_with(vec![
+            agent(1, key.as_str(), vec![]),
+            agent(2, "local:b", vec![]),
+        ]);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(workspace)));
+        m.mount_follow_up_picker("start", &["linonly".into(), "fixall".into()], TerminalId(2));
+        m.refresh_open_snippet_picker();
+        let picker = m.app.get_component_mut(&Id::SnippetPicker).unwrap();
+        let mut picked = None;
+        for c in "linonly".chars() {
+            picked = picker.on(&tuirealm::event::Event::Keyboard(RealmKey::new(
+                Key::Char(c),
+                RealmMods::NONE,
+            )));
+        }
+        assert_eq!(
+            picked,
+            Some(Msg::ChoicePicked(vec![crate::realm::ChoicePayload::Text(
+                "linonly".into()
+            )]))
+        );
+        assert_eq!(m.picker_target_terminal(), Some(TerminalId(2)));
     }
 
     /// Several targets open the ordinary snippet picker restricted to

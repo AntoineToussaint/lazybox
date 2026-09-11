@@ -127,6 +127,8 @@ pub struct SnippetPicker {
     /// `Shift-Enter` would be indistinguishable from `Enter` and the footer
     /// must not advertise it.
     insert_without_submit: bool,
+    allow_delete: bool,
+    restricted_keys: Option<Vec<String>>,
 }
 
 impl SnippetPicker {
@@ -146,6 +148,8 @@ impl SnippetPicker {
             title: None,
             offer_free_text: false,
             insert_without_submit: false,
+            allow_delete: false,
+            restricted_keys: None,
         };
         picker.refilter();
         picker
@@ -164,6 +168,51 @@ impl SnippetPicker {
     pub fn with_insert_without_submit(mut self) -> Self {
         self.insert_without_submit = true;
         self
+    }
+
+    /// Enable snippet management only for callers that own global snippets.
+    pub(crate) fn with_delete(mut self) -> Self {
+        self.allow_delete = true;
+        self
+    }
+
+    /// Keep a follow-up picker restricted to its original targets on refresh.
+    pub(crate) fn restricted(mut self) -> Self {
+        self.restricted_keys = Some(self.rows.iter().map(|r| r.key.clone()).collect());
+        self
+    }
+
+    pub(crate) fn restricted_keys(&self) -> Option<&[String]> {
+        self.restricted_keys.as_deref()
+    }
+
+    /// Update catalog data without closing the delivery flow or losing its UI state.
+    pub(crate) fn refresh_rows(&mut self, mut rows: Vec<PickerRow>, recent: Vec<String>) {
+        let selected = self.highlighted_key();
+        let old_cursor = self.cursor;
+        let old_scroll = self.list_scroll;
+        if let Some(keys) = &self.restricted_keys {
+            rows.retain(|r| keys.contains(&r.key));
+        }
+        self.rows = rows;
+        self.recent_rows = if self.restricted_keys.is_some() {
+            Vec::new()
+        } else {
+            resolve_recent(&self.rows, &recent)
+        };
+        self.refilter();
+        self.cursor = selected
+            .and_then(|key| {
+                self.visible_indices
+                    .iter()
+                    .position(|&i| self.rows[i].key == key)
+            })
+            .or_else(|| {
+                old_cursor
+                    .filter(|_| !self.visible_indices.is_empty())
+                    .map(|c| c.min(self.visible_indices.len() - 1))
+            });
+        self.list_scroll = old_scroll;
     }
 
     /// Offer the `Ctrl-F` "free text only" escape — Enter-equivalent
@@ -460,15 +509,8 @@ impl SnippetPicker {
             .is_some_and(|r| !r.badge.is_empty() && r.badge != "custom")
     }
 
-    /// Whether the highlighted row is user-defined — anything the user owns
-    /// in a snippets.yaml, i.e. a purely `custom` snippet OR an override of a
-    /// built-in. Drives the delete hint (#1678), which is broader than the
-    /// reconcile hints: those only make sense against a built-in, while
-    /// delete applies to every row that came from a file. A plain built-in
-    /// carries an empty badge and is correctly excluded — there is no file
-    /// entry to remove.
-    fn highlighted_is_user_defined(&self) -> bool {
-        self.highlighted_row().is_some_and(|r| !r.badge.is_empty())
+    fn highlighted_can_delete(&self) -> bool {
+        self.allow_delete && self.highlighted_row().is_some_and(|r| r.origin == "global")
     }
 }
 
@@ -566,9 +608,7 @@ impl FilterableList for SnippetPicker {
             // Delete the highlighted user-defined snippet (#1678). Ctrl-
             // modified like its siblings because a bare letter types into the
             // filter; `x` rather than `d`, which compare already owns.
-            Key::Char('x') if self.insert_without_submit => {
-                self.highlighted_key().map(Msg::SnippetDelete)
-            }
+            Key::Char('x') if self.allow_delete => self.highlighted_key().map(Msg::SnippetDelete),
             _ => None,
         }
     }
@@ -734,7 +774,7 @@ impl Component for SnippetPicker {
             ));
             help.push(Span::raw(" adopt  "));
         }
-        if self.insert_without_submit && self.highlighted_is_user_defined() {
+        if self.highlighted_can_delete() {
             help.push(Span::styled(
                 "Ctrl-X",
                 Style::default().fg(theme.accent).bold(),
@@ -1142,7 +1182,7 @@ mod tests {
         let ctrl_x = KeyEvent::new(Key::Char('x'), KeyModifiers::CONTROL);
 
         let mut picker = SnippetPicker::new(make_rows(), String::new());
-        picker.insert_without_submit = true;
+        picker.allow_delete = true;
         let key = picker.highlighted_key().expect("a highlighted row");
         assert_eq!(
             picker.on_key(&ctrl_x),
@@ -1159,6 +1199,52 @@ mod tests {
             reuse.on_key(&ctrl_x),
             None,
             "only the snippet picker owns delete",
+        );
+    }
+
+    #[test]
+    fn refresh_preserves_filter_selection_and_follow_up_scope() {
+        let mut picker = SnippetPicker::new(make_rows(), "r".into())
+            .with_title("Follow-up")
+            .restricted();
+        picker.on_key(&key(Key::Down));
+        let selected = picker.highlighted_key();
+        let mut rows = make_rows();
+        rows.push(PickerRow::new(
+            "zzz",
+            &snip("Review", "Extra", "body", SnippetOrigin::Global),
+        ));
+        picker.refresh_rows(rows, vec!["rev".into()]);
+        assert_eq!(picker.filter, "r");
+        assert_eq!(picker.highlighted_key(), selected);
+        assert_eq!(picker.title.as_deref(), Some("Follow-up"));
+        assert!(!picker.rows.iter().any(|r| r.key == "zzz"));
+        assert!(picker.recent_rows.is_empty());
+        picker.refresh_rows(Vec::new(), Vec::new());
+        assert_eq!(picker.highlighted_key(), None);
+        assert_eq!(picker.on_key(&key(Key::Enter)), None);
+    }
+
+    #[test]
+    fn delete_capability_uses_provenance_not_badge_or_insert_mode() {
+        for (origin, expected) in [
+            (SnippetOrigin::Global, true),
+            (SnippetOrigin::Repo, false),
+            (SnippetOrigin::BuiltIn, false),
+            (SnippetOrigin::Unknown, false),
+        ] {
+            let row = PickerRow::new("hello", &snip("", "", "body", origin));
+            let mut picker = SnippetPicker::new(vec![row], String::new()).with_delete();
+            assert_eq!(picker.highlighted_can_delete(), expected);
+            picker.rows[0].badge = "arbitrary display text".into();
+            assert_eq!(picker.highlighted_can_delete(), expected);
+        }
+        let mut picker =
+            SnippetPicker::new(make_rows(), String::new()).with_insert_without_submit();
+        assert!(!picker.highlighted_can_delete());
+        assert_eq!(
+            picker.on_key(&KeyEvent::new(Key::Char('x'), KeyModifiers::CONTROL)),
+            None
         );
     }
 

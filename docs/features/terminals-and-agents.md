@@ -599,12 +599,19 @@ Contracts to know:
   the asker: the tail of its output is captured as the answer with
   `source: "turn_end_capture"` and `status: "answered_by_capture"`. Lower
   fidelity, never a hang — the asker sees the source and can re-ask.
-- Ask chains are capped at **3 hops**, so an A→B→A loop is refused (with the
-  chain named) rather than run.
+- **Nested** ask chains — asking while you still owe an answer — are capped
+  at **3 hops**, refused with the chain named. Answering releases the depth,
+  so two agents that reply before asking back can trade questions freely;
+  the cap bounds recursion, not conversation.
+- A request nobody can answer does not linger: the daemon abandons it when
+  the target's session ends, or after 6 hours unanswered. That clears the
+  `?N` badge and frees the ask-depth it was holding — without it, an
+  injection dropped at a permission prompt would badge a workspace forever.
 - Visibility: the question lands on the target's activity feed as
   `asked by <workspace>: …`, the answer on the asker's as
   `replied by <workspace>: …`, and a row with an unanswered inbound request
-  carries a ` ?N ` badge in the sidebar's passive cluster.
+  carries a ` ⟲N ` replies-owed badge in the sidebar's passive cluster (not
+  `?`, which the state slot already spends on "this agent is asking *you*").
 
 ### How it works (brief)
 `mcp::start` binds a loopback port at daemon boot (reused across restarts,

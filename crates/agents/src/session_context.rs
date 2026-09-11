@@ -69,7 +69,7 @@ adopts it on the next spawn — do not switch back to `main` inside the worktree
 /// Claude session, listener up). Kept separate rather than baked into the base
 /// blurb because the emit hook fires for *every* Claude spawn (including
 /// ReadOnly "Ask lazybox" launches, which are not provisioned): a categorical
-/// "the MCP server is connected" there would advertise a dozen tools the session
+/// "the MCP server is connected" there would advertise tools the session
 /// cannot call and send the model chasing `/mcp` for tools that aren't there.
 /// The daemon gates this half behind the `--emit-mcp-context` marker, which it
 /// adds to the hook command only when the bus is wired for that terminal.

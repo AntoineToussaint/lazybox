@@ -119,7 +119,8 @@ back instead of scraping `read_session` and guessing when the target is done:
 
 **Request record** (kv value, JSON): `{ id, asker, target, text, created_at,
 depth, status, answers[] }`, where `status` ∈ `pending` / `answered` /
-`answered_by_capture` and each answer carries `{ text, answered_at, source }`.
+`answered_by_capture` / `abandoned`, and each answer carries
+`{ text, answered_at, source }`.
 Three properties are load-bearing:
 
 - **Never a hang.** When the target's agent state reaches `Done` after an
@@ -127,12 +128,23 @@ Three properties are load-bearing:
   output (~60 lines, ANSI-cleaned) is captured as the answer with
   `source: "turn_end_capture"`. Lower fidelity, always *something*; the
   asker sees the source and can re-ask.
-- **Bounded chains.** The envelope carries `depth = the caller's inbound
-  depth + 1`, refused past 3, so an A→B→A loop stops with the chain named
-  rather than filling both contexts with questions.
+- **Bounded nesting.** The envelope carries `depth = the caller's inbound
+  depth + 1`, refused past 3, so agents that keep deferring instead of
+  answering stop with the chain named rather than filling both contexts with
+  open questions. Answering releases the depth, so a reply-then-ask dialogue
+  is unbounded by design — the cap is on recursion, not on conversation.
+- **A terminating state machine.** `reply_request` and the turn-end capture
+  both need the target to take another turn, so neither can close a request
+  whose injection was dropped at a permission prompt or whose agent was
+  killed. Reclamation abandons those — on session teardown, and past a 6-hour
+  TTL — so a `Pending` row can never become immortal, badging its workspace
+  on every client connect and inflating that session's ask-depth for good.
+  Every row mutation is serialized by a process-wide lock and re-loaded
+  inside it, so the fallback capture can never overwrite a real reply that
+  landed while it was reading the target's scrollback.
 - **Visible to the operator.** The question lands on the target's activity
   feed (`asked by <workspace>: …`), the answer on the asker's; a workspace
-  with an unanswered inbound request carries a ` ?N ` sidebar badge, seeded
+  with an unanswered inbound request carries a ` ⟲N ` sidebar badge, seeded
   on connect by `Event::AgentRequestsOpen` and cleared when it is answered.
 
 Epic coordination (#1522) adds four more, so an agent answers "what's

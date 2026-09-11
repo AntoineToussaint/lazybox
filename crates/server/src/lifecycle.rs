@@ -397,7 +397,7 @@ pub fn parse_hook_correlation(args: &[String]) -> (Option<String>, Option<u64>) 
 /// also carried `--emit-mcp-context` — the marker the daemon adds solely for a
 /// session actually wired to the MCP bus (`SpawnFlags::mcp_wired`). A ReadOnly
 /// "Ask lazybox" launch is never provisioned, so it gets the base blurb but is
-/// not told about a dozen tools it cannot call.
+/// not told about tools it cannot call.
 fn session_context_to_emit(args: &[String], hook: &lazybox_ipc::HookEvent) -> Option<String> {
     let marked = args.iter().any(|arg| arg == "--emit-session-context");
     if hook.kind != lazybox_ipc::HookEventKind::SessionStart || !marked {

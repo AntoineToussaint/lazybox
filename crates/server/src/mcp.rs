@@ -141,6 +141,14 @@ pub struct McpRuntime {
     /// `apply_batch` silently overwrites the first. Held across the list +
     /// insert so seq allocation is atomic process-wide.
     notes_write: tokio::sync::Mutex<()>,
+    /// Serializes every read-modify-write of a request row, for the same
+    /// reason [`McpRuntime::notes_write`] exists: three independent writers
+    /// mutate a row (`reply_request`, the turn-end capture, and reclamation),
+    /// and a `get_kv` → mutate → `set_kv` between them silently drops one
+    /// side's edit. Held across the re-load and the write, so every mutation
+    /// is a compare-and-set against the row as it stands *now* rather than as
+    /// the caller last saw it.
+    requests_write: tokio::sync::Mutex<()>,
     /// In-flight `ask_session` waiters (#1653), so `reply_request` wakes the
     /// asker directly instead of having it poll the store.
     requests: RequestRegistry,
@@ -155,6 +163,11 @@ impl McpRuntime {
     /// The lock guarding note sequence allocation (see the field docs).
     fn notes_write(&self) -> &tokio::sync::Mutex<()> {
         &self.notes_write
+    }
+
+    /// The lock guarding request read-modify-write (see the field docs).
+    fn requests_write(&self) -> &tokio::sync::Mutex<()> {
+        &self.requests_write
     }
 
     /// The in-flight request waiters shared by `ask_session` and
@@ -413,6 +426,12 @@ pub(crate) enum RequestStatus {
     /// The target ended a turn without replying and the tail of its output
     /// was captured instead — an answer, at lower fidelity.
     AnsweredByCapture,
+    /// Nobody will ever answer this: the target's agent went away, or the
+    /// request outlived [`REQUEST_TTL_MS`] without the target ever taking a
+    /// turn (the injection was dropped at a permission prompt, say). A
+    /// terminal state, so the row stops badging its target, stops counting
+    /// toward the ask-depth budget, and becomes eligible for pruning.
+    Abandoned,
 }
 
 /// Where an answer came from. The asker sees this and can decide whether to
@@ -545,8 +564,19 @@ impl LazyboxMcp {
     pub fn new(config: ServerConfig) -> Self {
         Self {
             config,
-            tool_router: Self::tool_router(),
+            tool_router: Self::shared_tool_router(),
         }
+    }
+
+    /// The tool router, built once per process and cloned thereafter.
+    /// `tool_router()` generates a JSON schema per tool, and this type is
+    /// constructed far more often than there are MCP connections — the
+    /// turn-end capture builds one on every agent `Done` just to reach the
+    /// store helpers. Caching it is the same instinct as `#[tool_handler]`
+    /// pointing at the instance's router rather than rebuilding per dispatch.
+    fn shared_tool_router() -> ToolRouter<LazyboxMcp> {
+        static ROUTER: std::sync::OnceLock<ToolRouter<LazyboxMcp>> = std::sync::OnceLock::new();
+        ROUTER.get_or_init(Self::tool_router).clone()
     }
 
     /// The bearer token on the current request, if any. rmcp's streamable-HTTP
@@ -1284,7 +1314,7 @@ impl LazyboxMcp {
         // `async` asker reads the durable row.
         let waiter = wait.then(|| self.config.mcp.requests().subscribe(&request.id));
         self.save_request(&request).await?;
-        self.prune_requests().await;
+        self.reclaim_and_announce(now_ms).await;
 
         tracing::info!(
             from = %caller.as_str(),
@@ -1374,6 +1404,11 @@ impl LazyboxMcp {
                 None,
             ));
         }
+        // Everything below is a read-modify-write of one row. Take the
+        // mutation lock BEFORE the load so the row we edit is the row we
+        // write: a turn-end capture landing between the two would otherwise
+        // be erased by our stale copy, or erase ours by its own.
+        let _write_guard = self.config.mcp.requests_write().lock().await;
         let Some(mut request) = self.load_request(request_id).await else {
             return Err(McpError::invalid_request(
                 format!(
@@ -1399,6 +1434,7 @@ impl LazyboxMcp {
         request.answers.push(answer.clone());
         request.status = RequestStatus::Answered;
         self.save_request(&request).await?;
+        drop(_write_guard);
         self.config.mcp.requests().wake(&request.id, answer);
         let _ = self
             .config
@@ -1432,6 +1468,7 @@ impl LazyboxMcp {
     /// from "stuck at a prompt".
     async fn poll_request_payload(
         &self,
+        caller: &SessionKey,
         request_id: &str,
         now_ms: i64,
     ) -> Result<serde_json::Value, McpError> {
@@ -1441,6 +1478,15 @@ impl LazyboxMcp {
                 None,
             ));
         };
+        // Only the two sessions the exchange belongs to: the asker reads its
+        // answer, the target confirms its reply landed. A bystander holding a
+        // leaked id is not a party to the conversation.
+        if request.asker != caller.as_str() && request.target != caller.as_str() {
+            return Err(McpError::invalid_request(
+                format!("request {request_id:?} is not yours to read"),
+                None,
+            ));
+        }
         let target_state = api_gateway::agents_response(&self.config)
             .await
             .ok()
@@ -1469,29 +1515,92 @@ impl LazyboxMcp {
         let _ = crate::store_blocking(&self.config.store, move |store| store.delete_kv(&key)).await;
     }
 
-    /// Drop the oldest rows past [`REQUESTS_RETAINED`] so the kv stays
-    /// bounded. Open requests are never pruned — the badge and the depth
-    /// guard both read them — so a fleet that asks far more than it answers
-    /// grows until those are closed, which is the honest failure.
-    async fn prune_requests(&self) {
+    /// Close out requests nobody will ever answer, then drop the oldest
+    /// closed rows past [`REQUESTS_RETAINED`] so the kv stays bounded.
+    ///
+    /// Reclamation is what keeps a `Pending` row from being immortal. Only
+    /// two paths close one normally — `reply_request` and a successful
+    /// turn-end capture — and both need the target to take another turn. A
+    /// target that never does (its injection was dropped at a permission
+    /// prompt, its agent was killed, the daemon restarted past the `Done`)
+    /// would otherwise leave a row that badges its workspace forever, is
+    /// re-seeded on every client connect, and permanently inflates the
+    /// ask-depth of every question that session later asks. Ageing it to
+    /// `Abandoned` past [`REQUEST_TTL_MS`] — comfortably beyond the longest
+    /// possible wait — makes the state machine terminate.
+    ///
+    /// Returns the targets whose open count moved, so the caller can refresh
+    /// their badges.
+    async fn reclaim_requests(&self, now_ms: i64) -> Vec<String> {
+        let _write_guard = self.config.mcp.requests_write().lock().await;
         let requests = self.all_requests().await;
-        if requests.len() <= REQUESTS_RETAINED {
-            return;
+        // Age out first, then prune. A row abandoned in this pass is terminal
+        // by the time the prune looks at it, so it is eligible immediately.
+        let mut expire: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut abandoned: Vec<String> = Vec::new();
+        for request in &requests {
+            if request.status != RequestStatus::Pending
+                || now_ms.saturating_sub(request.created_at) <= REQUEST_TTL_MS
+            {
+                continue;
+            }
+            let mut aged = request.clone();
+            aged.status = RequestStatus::Abandoned;
+            let Ok(value) = serde_json::to_string(&aged) else {
+                continue;
+            };
+            expire.insert(request_key(&request.id), value);
+            abandoned.push(request.target.clone());
+            tracing::info!(
+                request = %request.id,
+                target = %request.target,
+                asker = %request.asker,
+                "mcp ask_session: request outlived its TTL unanswered — abandoning it"
+            );
         }
-        let mutations: Vec<StoreMutation> = requests[REQUESTS_RETAINED..]
-            .iter()
-            .filter(|r| r.status != RequestStatus::Pending)
-            .map(|r| StoreMutation::DeleteKv {
-                key: request_key(&r.id),
-            })
+        let mut delete: Vec<String> = Vec::new();
+        for request in requests.iter().skip(REQUESTS_RETAINED) {
+            let key = request_key(&request.id);
+            let terminal = request.status != RequestStatus::Pending || expire.contains_key(&key);
+            if terminal {
+                delete.push(key);
+            }
+        }
+        // A row both aged and pruned in one pass only needs the delete.
+        for key in &delete {
+            expire.remove(key);
+        }
+        let mutations: Vec<StoreMutation> = expire
+            .into_iter()
+            .map(|(key, value)| StoreMutation::SetKv { key, value })
+            .chain(
+                delete
+                    .into_iter()
+                    .map(|key| StoreMutation::DeleteKv { key }),
+            )
             .collect();
         if mutations.is_empty() {
-            return;
+            return Vec::new();
         }
-        let _ = crate::store_blocking(&self.config.store, move |store| {
+        if crate::store_blocking(&self.config.store, move |store| {
             store.apply_batch(&mutations)
         })
-        .await;
+        .await
+        .is_err()
+        {
+            return Vec::new();
+        }
+        abandoned.sort();
+        abandoned.dedup();
+        abandoned
+    }
+
+    /// Reclaim, then refresh the badge of every target a reclamation closed.
+    async fn reclaim_and_announce(&self, now_ms: i64) {
+        for target in self.reclaim_requests(now_ms).await {
+            self.announce_open_requests(&target).await;
+        }
     }
 
     #[tool(
@@ -1507,7 +1616,7 @@ impl LazyboxMcp {
     }
 
     #[tool(
-        description = "Ask a sibling session a question and get its answer back — the request/response half of the bus, where notify_session is fire-and-forget. The question (free `text`, or a catalog `snippet`) is injected wrapped in a <lazybox-request> envelope telling the target to answer with reply_request. mode=\"wait\" (default) blocks up to timeout_s (default 120, max 600 — your own MCP client's call timeout is the real ceiling) and returns the answer; mode=\"async\" returns a request_id immediately for poll_request. A wait that times out leaves the request open. Chains are capped at 3 hops, so an A→B→A loop is refused rather than run."
+        description = "Ask a sibling session a question and get its answer back — the request/response half of the bus, where notify_session is fire-and-forget. The question (free `text`, or a catalog `snippet`) is injected wrapped in a <lazybox-request> envelope telling the target to answer with reply_request. mode=\"wait\" (default) blocks up to timeout_s (default 120, max 600 — your own MCP client's call timeout is the real ceiling) and returns the answer; mode=\"async\" returns a request_id immediately for poll_request. A wait that times out leaves the request open. Nested asks — asking while you still owe an answer — are capped at 3 hops, so agents that defer to each other instead of answering are stopped."
     )]
     async fn ask_session(
         &self,
@@ -1536,17 +1645,18 @@ impl LazyboxMcp {
     }
 
     #[tool(
-        description = "Read the state of a request you made with ask_session: status (pending / answered / answered_by_capture), the answer when there is one, and how long it has been open. Also reports the target's live agent state, so a pending request against an `InputNeeded` target reads as \"it's stuck on a prompt\" rather than \"it's still thinking\"."
+        description = "Read the state of a request you made with ask_session: status (pending / answered / answered_by_capture / abandoned), the answer when there is one, and how long it has been open. Only the asker and the target may read a request. Also reports the target's live agent state, so a pending request against an `InputNeeded` target reads as \"it's stuck on a prompt\" rather than \"it's still thinking\"."
     )]
     async fn poll_request(
         &self,
         Parameters(args): Parameters<PollRequestArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let _ = self.caller(&ctx)?;
+        let caller = self.caller(&ctx)?;
         let now_ms = chrono::Utc::now().timestamp_millis();
         Ok(json_result(
-            self.poll_request_payload(&args.request_id, now_ms).await?,
+            self.poll_request_payload(&caller, &args.request_id, now_ms)
+                .await?,
         ))
     }
 
@@ -2418,6 +2528,42 @@ pub async fn deprovision_session(config: &ServerConfig, session_key: &SessionKey
     config.mcp.tokens().forget_session(session_key);
     let _ = std::fs::remove_file(mcp_config_path(session_key));
     persist_tokens(config).await;
+    // The agent that owed these answers is gone, so no turn-end capture can
+    // ever close them. Left `Pending` they would badge a dead session forever
+    // and keep inflating the ask-depth of anything that asked it (#1653).
+    abandon_requests_for(config, session_key).await;
+}
+
+/// Mark every request still open against `session_key` as `Abandoned` and
+/// refresh its badge. Called when the session's last agent terminal ends.
+pub(crate) async fn abandon_requests_for(config: &ServerConfig, session_key: &SessionKey) {
+    let handler = LazyboxMcp::new(config.clone());
+    let open = handler.open_requests_for(session_key.as_str()).await;
+    if open.is_empty() {
+        return;
+    }
+    {
+        let _write_guard = config.mcp.requests_write().lock().await;
+        for request in open {
+            // Re-check under the lock: a reply may have landed as the session
+            // was tearing down, and a real answer outranks abandonment.
+            let Some(mut fresh) = handler.load_request(&request.id).await else {
+                continue;
+            };
+            if fresh.status != RequestStatus::Pending {
+                continue;
+            }
+            fresh.status = RequestStatus::Abandoned;
+            let _ = handler.save_request(&fresh).await;
+            tracing::info!(
+                request = %fresh.id,
+                target = %fresh.target,
+                asker = %fresh.asker,
+                "mcp ask_session: target session ended without answering — abandoning its request"
+            );
+        }
+    }
+    handler.announce_open_requests(session_key.as_str()).await;
 }
 
 /// Directory holding per-session MCP config files. Each embeds a bearer token,
@@ -2524,9 +2670,20 @@ const REQUEST_KV_PREFIX: &str = "lazybox:request:";
 /// pruned. Requests are small; the cap exists so a long-lived daemon's kv
 /// doesn't grow one row per question ever asked.
 const REQUESTS_RETAINED: usize = 200;
-/// Deepest chain of nested asks. A→B→A→B is three hops; the fourth is
-/// refused, so a pair of agents that keep deferring to each other stop
-/// instead of filling both contexts with questions.
+/// How long a `Pending` request may sit unanswered before reclamation marks
+/// it `Abandoned`. Thirty-six times [`MAX_ASK_TIMEOUT_S`], so it can never
+/// close a request some asker is still blocked on; short enough that a badge
+/// left by a dropped injection clears within a working day.
+const REQUEST_TTL_MS: i64 = 6 * 60 * 60 * 1000;
+/// Deepest chain of **nested** asks — asks made while the asker itself owes
+/// an answer. A→B→A→B is three hops; the fourth is refused, so agents that
+/// keep deferring to each other instead of answering stop rather than filling
+/// both contexts with open questions.
+///
+/// This bounds nesting, not conversation: answering releases the depth, so
+/// two agents that each reply before asking back can trade questions
+/// indefinitely. That is deliberate — each such ask costs one turn and
+/// resolves, which is a dialogue, not the unbounded recursion this guards.
 const MAX_ASK_DEPTH: u32 = 3;
 /// Default and maximum `ask_session` wait, in seconds. The MCP client's own
 /// call timeout is the real ceiling — a longer wait here just returns
@@ -2649,12 +2806,22 @@ pub fn spawn_request_watcher(config: &ServerConfig) -> tokio::task::JoinHandle<(
                     state: lazybox_ipc::AgentState::Done,
                     ..
                 }) => {
-                    capture_turn_end_answer(
-                        &config,
-                        &session_key,
-                        chrono::Utc::now().timestamp_millis(),
-                    )
-                    .await;
+                    // Off the receive path: the capture does a store scan and
+                    // a backend scrollback read, and awaiting it here would
+                    // stall `recv` long enough for a busy fleet to lag this
+                    // subscriber — dropping the very `Done` events the
+                    // fallback exists to act on. Concurrent captures are safe:
+                    // each re-loads under the mutation lock and skips a row
+                    // that is no longer `Pending`.
+                    let config = config.clone();
+                    tokio::spawn(async move {
+                        capture_turn_end_answer(
+                            &config,
+                            &session_key,
+                            chrono::Utc::now().timestamp_millis(),
+                        )
+                        .await;
+                    });
                 }
                 Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -2682,15 +2849,19 @@ pub(crate) async fn capture_turn_end_answer(
     now_ms: i64,
 ) {
     let handler = LazyboxMcp::new(config.clone());
-    let open: Vec<AgentRequest> = handler
+    let candidates: Vec<String> = handler
         .open_requests_for(session_key.as_str())
         .await
         .into_iter()
         .filter(|request| request.created_at <= now_ms)
+        .map(|request| request.id)
         .collect();
-    if open.is_empty() {
+    if candidates.is_empty() {
         return;
     }
+    // Read the scrollback BEFORE taking the mutation lock: it is a backend
+    // round trip, and holding the lock across it would serialize every
+    // sibling's replies behind one slow snapshot.
     let Some(text) = handler
         .read_session_text(session_key.as_str(), Some(TURN_END_CAPTURE_LINES))
         .await
@@ -2699,17 +2870,9 @@ pub(crate) async fn capture_turn_end_answer(
     else {
         return;
     };
-    for mut request in open {
-        let answer = RequestAnswer {
-            text: text.clone(),
-            answered_at: now_ms,
-            source: AnswerSource::TurnEndCapture,
-        };
-        request.answers.push(answer.clone());
-        request.status = RequestStatus::AnsweredByCapture;
-        if handler.save_request(&request).await.is_err() {
-            continue;
-        }
+    for (request, answer) in
+        apply_captured_answers(config, &handler, candidates, &text, now_ms).await
+    {
         tracing::info!(
             request = %request.id,
             target = %request.target,
@@ -2729,6 +2892,48 @@ pub(crate) async fn capture_turn_end_answer(
             .await;
     }
     handler.announce_open_requests(session_key.as_str()).await;
+}
+
+/// Write the captured tail onto each still-open request in `candidates`.
+///
+/// Split from [`capture_turn_end_answer`] because the gap it guards is the
+/// gap between snapshotting the candidates and writing them — the caller
+/// reads the target's scrollback in between, and the target can answer for
+/// real in that window. Taking a stale snapshot as an argument is exactly the
+/// hazard, so the CAS lives here and is exercised directly by passing ids
+/// whose rows have since moved on.
+async fn apply_captured_answers(
+    config: &ServerConfig,
+    handler: &LazyboxMcp,
+    candidates: Vec<String>,
+    text: &str,
+    now_ms: i64,
+) -> Vec<(AgentRequest, RequestAnswer)> {
+    let mut captured = Vec::new();
+    let _write_guard = config.mcp.requests_write().lock().await;
+    for id in candidates {
+        // Re-load under the lock and re-check: the target may have called
+        // `reply_request` while the scrollback was being read, and a real
+        // answer must never be overwritten by the fallback for it.
+        let Some(mut request) = handler.load_request(&id).await else {
+            continue;
+        };
+        if request.status != RequestStatus::Pending {
+            continue;
+        }
+        let answer = RequestAnswer {
+            text: text.to_string(),
+            answered_at: now_ms,
+            source: AnswerSource::TurnEndCapture,
+        };
+        request.answers.push(answer.clone());
+        request.status = RequestStatus::AnsweredByCapture;
+        if handler.save_request(&request).await.is_err() {
+            continue;
+        }
+        captured.push((request, answer));
+    }
+    captured
 }
 
 /// Every workspace currently carrying an open request, with its count.
@@ -4462,7 +4667,7 @@ mod tests {
             .await
             .expect("reply");
         let polled = handler
-            .poll_request_payload(&id, 5_000)
+            .poll_request_payload(&asker, &id, 5_000)
             .await
             .expect("poll");
         assert_eq!(polled["status"], "answered");
@@ -4538,7 +4743,7 @@ mod tests {
             .expect("second reply");
         assert_eq!(second["answers"], 2);
         let polled = handler
-            .poll_request_payload(&id, 4_000)
+            .poll_request_payload(&asker, &id, 4_000)
             .await
             .expect("poll");
         assert_eq!(
@@ -4607,7 +4812,7 @@ mod tests {
             .record_agent_state(terminal_id, lazybox_ipc::AgentState::InputNeeded)
             .await;
         let polled = handler
-            .poll_request_payload(&id, 1_000)
+            .poll_request_payload(&asker, &id, 1_000)
             .await
             .expect("poll");
         assert_eq!(polled["status"], "pending");
@@ -4644,7 +4849,7 @@ mod tests {
         capture_turn_end_answer(&config, &target, 5_000).await;
 
         let polled = handler
-            .poll_request_payload(&id, 6_000)
+            .poll_request_payload(&asker, &id, 6_000)
             .await
             .expect("poll");
         assert_eq!(polled["status"], "answered_by_capture", "{polled}");
@@ -4656,6 +4861,275 @@ mod tests {
         assert!(
             handler.open_requests_for(target.as_str()).await.is_empty(),
             "the capture closes the request so the badge clears"
+        );
+    }
+
+    /// **The lost update (review finding 2).** The capture snapshots the open
+    /// set, reads the target's scrollback — a backend round trip — and only
+    /// then writes. A reply landing in that window must not be erased by the
+    /// stale snapshot. Reproduced exactly: snapshot the candidates while the
+    /// request is still open, let the real reply commit, then apply the
+    /// capture with that now-stale list.
+    #[tokio::test(start_paused = true)]
+    async fn turn_end_capture_never_overwrites_a_reply_that_raced_it() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let backend_key = live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9941)).await;
+        mock.emit(&backend_key, b"...scrollback noise...\n").await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        // The candidate list the capture holds across its scrollback read.
+        let stale: Vec<String> = handler
+            .open_requests_for(target.as_str())
+            .await
+            .into_iter()
+            .map(|request| request.id)
+            .collect();
+        assert_eq!(
+            stale,
+            vec![id.clone()],
+            "the request is open when snapshotted"
+        );
+
+        // The target answers for real, mid-scrollback-read.
+        handler
+            .reply_request_payload(&target, &id, "three tests left", 2_000)
+            .await
+            .expect("reply");
+
+        // The capture now writes its stale snapshot. Before the CAS this
+        // replaced the reply with scrollback.
+        let captured =
+            apply_captured_answers(&config, &handler, stale, "...scrollback noise...", 3_000).await;
+        assert!(
+            captured.is_empty(),
+            "a request that was answered while we read must not be captured"
+        );
+
+        let polled = handler
+            .poll_request_payload(&asker, &id, 4_000)
+            .await
+            .expect("poll");
+        assert_eq!(
+            polled["answer"], "three tests left",
+            "the considered reply must survive the fallback: {polled}"
+        );
+        assert_eq!(polled["status"], "answered");
+        assert_eq!(polled["source"], "reply_request");
+    }
+
+    /// Two replies racing must both land — the tool advertises that a second
+    /// reply appends a correction, and an unguarded read-modify-write drops
+    /// one of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_replies_both_append() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9951)).await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        let mut tasks = Vec::new();
+        for i in 0..8 {
+            let handler = handler.clone();
+            let target = target.clone();
+            let id = id.clone();
+            tasks.push(tokio::spawn(async move {
+                handler
+                    .reply_request_payload(&target, &id, &format!("answer {i}"), 2_000 + i)
+                    .await
+                    .expect("reply");
+            }));
+        }
+        for task in tasks {
+            task.await.expect("join");
+        }
+        let stored = handler.load_request(&id).await.expect("request row");
+        assert_eq!(
+            stored.answers.len(),
+            8,
+            "every concurrent reply must append — none silently overwritten"
+        );
+    }
+
+    /// **The orphan leak (review finding 1).** An injection dropped at a
+    /// permission prompt leaves a request no turn-end capture can ever close,
+    /// because the target never takes a turn. Reclamation must age it out, or
+    /// it badges the workspace forever and keeps inflating ask-depth.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswerable_request_is_reclaimed_past_its_ttl() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9961)).await;
+        handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        assert_eq!(handler.open_requests_for(target.as_str()).await.len(), 1);
+
+        // Well inside the TTL: still open, still badging — a slow target is
+        // not an abandoned one.
+        handler.reclaim_and_announce(1_000 + REQUEST_TTL_MS).await;
+        assert_eq!(
+            handler.open_requests_for(target.as_str()).await.len(),
+            1,
+            "reclamation must not close a request that is merely slow"
+        );
+
+        handler.reclaim_and_announce(1_001 + REQUEST_TTL_MS).await;
+        assert!(
+            handler.open_requests_for(target.as_str()).await.is_empty(),
+            "past the TTL the request must stop counting as open"
+        );
+        assert!(
+            open_request_counts(&config).await.is_empty(),
+            "and stop being re-seeded as a badge on every client connect"
+        );
+    }
+
+    /// The depth budget is released by reclamation too: three stacked orphans
+    /// must not permanently bar a session from ever asking again.
+    #[tokio::test(start_paused = true)]
+    async fn reclamation_frees_the_ask_depth_an_orphan_was_holding() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let a = SessionKey::from("github:acme/widget#1");
+        let b = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &a, lazybox_ipc::TerminalId(9971)).await;
+        live_agent(&config, &mock, &b, lazybox_ipc::TerminalId(9972)).await;
+
+        let mut from = a.clone();
+        let mut to = b.clone();
+        for _ in 1..=MAX_ASK_DEPTH {
+            handler
+                .ask_session_payload(&from, &ask(&to, "and you?", "async", None), 1_000)
+                .await
+                .expect("ask");
+            std::mem::swap(&mut from, &mut to);
+        }
+        assert!(
+            handler
+                .ask_session_payload(&from, &ask(&to, "again?", "async", None), 1_000)
+                .await
+                .is_err(),
+            "the depth guard holds while the chain is open"
+        );
+
+        handler.reclaim_and_announce(1_001 + REQUEST_TTL_MS).await;
+        assert!(
+            handler
+                .ask_session_payload(
+                    &from,
+                    &ask(&to, "again?", "async", None),
+                    2_000 + REQUEST_TTL_MS
+                )
+                .await
+                .is_ok(),
+            "once the abandoned chain is reclaimed the session can ask again"
+        );
+    }
+
+    /// A session whose agent ends can never answer, so teardown closes what it
+    /// owed rather than leaving a dead row badging it forever.
+    #[tokio::test(start_paused = true)]
+    async fn ending_a_session_abandons_the_requests_it_owed() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9981)).await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        abandon_requests_for(&config, &target).await;
+
+        assert!(
+            handler.open_requests_for(target.as_str()).await.is_empty(),
+            "a dead session owes nothing"
+        );
+        let polled = handler
+            .poll_request_payload(&asker, &id, 2_000)
+            .await
+            .expect("poll");
+        assert_eq!(
+            polled["status"], "abandoned",
+            "and the asker is told why it will never get an answer: {polled}"
+        );
+    }
+
+    /// A bystander holding a leaked id is not a party to the exchange.
+    #[tokio::test(start_paused = true)]
+    async fn poll_request_refuses_a_third_party() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let bystander = SessionKey::from("github:acme/widget#3");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9991)).await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        assert!(
+            handler
+                .poll_request_payload(&bystander, &id, 2_000)
+                .await
+                .is_err()
+        );
+        assert!(
+            handler
+                .poll_request_payload(&asker, &id, 2_000)
+                .await
+                .is_ok()
+        );
+        assert!(
+            handler
+                .poll_request_payload(&target, &id, 2_000)
+                .await
+                .is_ok(),
+            "the target may confirm its own reply landed"
         );
     }
 

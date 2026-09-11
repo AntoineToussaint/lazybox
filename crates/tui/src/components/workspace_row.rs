@@ -172,9 +172,9 @@ pub struct WorkspaceRowCtx<'a> {
     pub blocked_by: usize,
     /// Open inbound `ask_session` requests — questions a sibling agent has
     /// put to this session and it has not answered yet (#1653). Renders a
-    /// ` ?N ` badge in the passive cluster so a row that owes an answer is
-    /// legible without opening it; nothing when zero. Distinct from the
-    /// state-slot `?` pill, which is the agent asking its *operator*.
+    /// ` ⟲N ` badge in the passive cluster so a row that owes an answer is
+    /// legible without opening it; nothing when zero. Deliberately not `?`,
+    /// which the state slot already spends on the agent asking its *operator*.
     pub inbound_requests: usize,
     /// A declared `Blocked on:` reason exists on some task. Renders ` ⊗! `
     /// when there are no dependency blockers, else folds into the count
@@ -1265,11 +1265,16 @@ fn cell_blocked(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::from_span(Span::styled(label, style))
 }
 
-/// The ` ?N ` inbound-request badge (#1653): `N` sibling agents are waiting
-/// on an answer from this session's agent. `theme.accent`, not `error` — a
+/// The ` ⟲N ` replies-owed badge (#1653): `N` sibling agents are waiting on
+/// an answer from this session's agent. `theme.accent`, not `error` — a
 /// pending question is work owed, not something broken — and the count is
 /// what makes it actionable (two asks stacked up read differently from one).
 /// Packs into the shared passive cluster like `⇗k/N`.
+///
+/// Deliberately NOT `?`: the state slot already spends that glyph on
+/// `AgentState::InputNeeded`, where it means the agent is waiting on *you*.
+/// Here the agent owes *someone else*. One symbol on one row must not carry
+/// two subjects, so this takes the return arrow and leaves `?` alone.
 fn cell_inbound_request(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     if ctx.inbound_requests == 0 {
         return Cell::empty();
@@ -1281,7 +1286,7 @@ fn cell_inbound_request(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(ctx.theme.accent)
             .add_modifier(Modifier::BOLD)
     };
-    Cell::from_span(Span::styled(format!(" ?{} ", ctx.inbound_requests), style))
+    Cell::from_span(Span::styled(format!(" ⟲{} ", ctx.inbound_requests), style))
 }
 
 /// The merge-arm badge cluster (#813): `⚡` (lazybox client-side
@@ -3436,9 +3441,10 @@ mod tests {
         );
     }
 
-    /// A row that owes a sibling agent an answer carries ` ?N ` (#1653);
+    /// A row that owes a sibling agent an answer carries ` ⟲N ` (#1653);
     /// one that owes none carries nothing, so the badge is absence-by-
-    /// default like every other passive decoration.
+    /// default like every other passive decoration. The glyph must stay off
+    /// `?`, which the state slot spends on "this agent is asking *you*".
     #[test]
     fn cell_inbound_request_counts_open_asks() {
         let task = make_task("owner/repo#2", "child");
@@ -3451,7 +3457,12 @@ mod tests {
             "nobody is waiting on this session"
         );
         ctx.inbound_requests = 2;
-        assert_eq!(cell_inbound_request(&ctx).spans[0].content.as_ref(), " ?2 ");
+        let rendered = cell_inbound_request(&ctx).spans[0].content.to_string();
+        assert_eq!(rendered, " ⟲2 ");
+        assert!(
+            !rendered.contains('?'),
+            "the replies-owed badge must not reuse the state slot's `?`: {rendered}"
+        );
     }
 
     /// With neither a counted edge nor a declared reason, the badge slot

@@ -554,7 +554,7 @@ pub fn resolve_adopt(workspace: Option<&Workspace>) -> Intent {
 }
 
 /// Resolve `g m` (merge). Gates only on STRUCTURAL facts — the row has
-/// an open PR. Cached soft state (CI, review verdicts, mergeability,
+/// an open PR (including drafts, which the merge operation marks ready). Cached soft state (CI, review verdicts, mergeability,
 /// branch-protection) deliberately does NOT block (#1203): the cache
 /// goes stale — hours stale under a rate-limit backoff — and a
 /// pre-block on it refused merges GitHub would have accepted. GitHub
@@ -574,7 +574,9 @@ pub fn resolve_merge(workspace: Option<&Workspace>) -> Intent {
     };
     if !matches!(
         pr.state,
-        lazybox_core::TaskState::Open | lazybox_core::TaskState::InReview
+        lazybox_core::TaskState::Open
+            | lazybox_core::TaskState::InReview
+            | lazybox_core::TaskState::Draft
     ) {
         return Intent::NoOp;
     }
@@ -1811,6 +1813,17 @@ mod tests {
             None,
             "'isn't open' is structural, not an advisory"
         );
+    }
+
+    #[test]
+    fn draft_merge_is_available_and_resolves_to_merge() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
+        ws.pr.as_mut().unwrap().state = lazybox_core::TaskState::Draft;
+        assert!(matches!(resolve_merge(Some(&ws)), Intent::MergePr { .. }));
+        assert!(crate::action::availability(
+            crate::action::ActionKind::MergePr,
+            Some(&ws)
+        ));
     }
 
     #[test]

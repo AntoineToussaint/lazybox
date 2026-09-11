@@ -2311,10 +2311,10 @@ impl GhClient {
     /// underlying `AcquireError` Display already describes the
     /// situation.
     fn acquire_or_block(&self, op: &str) -> Result<(), GhError> {
-        let (resource, mut priority) = request_profile(op);
-        if self.notifications_state.lock().force_full_sweep {
-            priority = crate::rate_budget::RequestPriority::Interactive;
-        }
+        // Refresh changes what we discover, not its spending priority.
+        // Promoting a whole sweep (and concurrent background requests) to
+        // Interactive lets it consume the reserve intended for merge/reply.
+        let (resource, priority) = request_profile(op);
         if let Err(reason) = self.budget.lock().admit(resource, op, priority, 1) {
             tracing::warn!("{op} blocked by rate budget: {reason}");
             let retry_after_secs = reason.retry_after_secs(chrono::Utc::now());
@@ -7143,6 +7143,13 @@ impl lazybox_core::TaskProvider for GhClient {
                 "PR has no node_id (poll first)",
             ));
         };
+        // A confirmed merge includes making a draft ready. Await this
+        // prerequisite before merging; a failure must never race or fall
+        // through to the merge mutation. The existing mark-ready path
+        // reconciles an already-ready PR after a lost response/retry.
+        if pr.state == lazybox_core::TaskState::Draft {
+            lazybox_core::TaskProvider::mark_ready(self, workspace).await?;
+        }
         match self
             .merge_pr_in_repo(pr.repo.as_deref(), node_id, options)
             .await
@@ -8551,6 +8558,44 @@ mod tests {
             q.contains("-involves:test-user"),
             "watched query must negate the user's involvement: {q}"
         );
+    }
+
+    #[tokio::test]
+    async fn full_refresh_protects_action_reserve() {
+        let client = GhClient::stub_with_rate_limit_for_tests(
+            "test",
+            "fp",
+            2000,
+            5000,
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .expect("stub client");
+        client.force_full_sweep();
+        for op in [
+            "PR search",
+            "hot-target batch query",
+            "single-PR notification deep-fetch",
+        ] {
+            assert!(
+                matches!(
+                    client.acquire_or_block(op),
+                    Err(GhError::RateLimited {
+                        self_throttle: true,
+                        ..
+                    })
+                ),
+                "{op}"
+            );
+        }
+        for op in [
+            "single-PR interactive sync",
+            "pr merge-method query",
+            "mergePullRequest mutation",
+        ] {
+            client
+                .acquire_or_block(op)
+                .expect("merge must retain its reserve");
+        }
     }
 
     #[test]
@@ -10410,6 +10455,66 @@ mod tests {
             .merge_pr("PR_kwDO", None)
             .await
             .expect("merge success must not report a false failure");
+    }
+
+    #[tokio::test]
+    async fn draft_merge_marks_ready_before_merging_and_preserves_head_pin() {
+        use lazybox_core::{TaskProvider, Workspace};
+        const READY: &str = r#"{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_1","isDraft":false}}}}"#;
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH"}}}}"#;
+        const MERGED: &str =
+            r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_1","merged":true}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri =
+            spawn_recording_response_server(vec![READY, METHOD, MERGED], requests.clone()).await;
+        let client = make_client(&uri);
+        let mut task = task_without_node_id(TaskKind::Pr);
+        task.node_id = Some("PR_1".into());
+        task.state = lazybox_core::TaskState::Draft;
+        let ws = Workspace::from_task(task, chrono::Utc::now());
+        client
+            .merge(
+                &ws,
+                &lazybox_core::MergeOptions::head(Some("verified-head")),
+            )
+            .await
+            .expect("draft merge succeeds");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].contains("markPullRequestReadyForReview"));
+        assert!(requests[2].contains("mergePullRequest"));
+        assert!(requests[2].contains("verified-head"));
+    }
+
+    #[tokio::test]
+    async fn draft_merge_stops_when_mark_ready_fails() {
+        use lazybox_core::{TaskProvider, Workspace};
+        const REFUSED: &str = r#"{"errors":[{"message":"Cannot mark this pull request ready"}]}"#;
+        const NOT_FOUND: &str = r#"{"data":{"repository":null}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(vec![REFUSED, NOT_FOUND], requests.clone()).await;
+        let client = make_client(&uri);
+        let mut task = task_without_node_id(TaskKind::Pr);
+        task.node_id = Some("PR_1".into());
+        task.state = lazybox_core::TaskState::Draft;
+        let ws = Workspace::from_task(task, chrono::Utc::now());
+        let err = client
+            .merge(&ws, &lazybox_core::MergeOptions::default())
+            .await
+            .expect_err("ready failure stops merge");
+        assert!(
+            err.to_string()
+                .contains("Cannot mark this pull request ready")
+        );
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|r| !r.contains("mutation MergePullRequest")
+                    && !r.contains("mergePullRequest(input"))
+        );
     }
 
     /// Issue #469: a repo that disallows merge commits reports SQUASH

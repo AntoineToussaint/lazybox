@@ -147,7 +147,7 @@ Start from an unread GitHub event and carry it to completion:
 3. Press the GitHub leader `g`, then use `g r` for reviewers, `g a` for
    assignees, or `g l` for labels.
 4. Inspect CI, review, and conflict state in the workspace. Use `g g` to arm
-   lazybox's merge-on-green behavior or `g m` to merge an eligible PR now.
+   lazybox's merge-on-green behavior or `g m` to merge an eligible PR now. On a draft PR, `g m` asks to mark it ready for review before attempting the merge. GitHub checks and review requirements still apply.
    `g s` runs a targeted sync of just this workspace — cheap when you're waiting
    on one PR's CI. On a **repo-scoped** workspace (no single PR/issue), `g s`
    instead **discovers** the repo's open issues and PRs so you can pull them in

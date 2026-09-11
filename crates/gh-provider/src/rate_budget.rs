@@ -5,8 +5,8 @@
 //! both APIs. `RateBudget` models those facts in one lock shared by all
 //! `GhClient` clones. Scheduled work receives a sustainable per-tick
 //! allowance that protects a configurable reserve; interactive work is
-//! admitted against GitHub's real remaining capacity and the emergency
-//! floor only.
+//! admitted against GitHub's real remaining capacity, including the
+//! emergency buffer protected from scheduled work.
 
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -42,7 +42,7 @@ const LATENCY_SAMPLE_CAPACITY: usize = 1024;
 /// its whole allowance back-to-back trips it with thousands of primary
 /// points still unspent. The concurrency gate bounds in-flight
 /// requests; this bounds how fast new ones may launch.
-pub(crate) const DEFAULT_MIN_REQUEST_GAP: Duration = Duration::from_millis(200);
+pub(crate) const DEFAULT_MIN_REQUEST_GAP: Duration = Duration::from_millis(500);
 /// Ceiling on the adaptive gap so a hot token never stalls a request
 /// for longer than the poll cadence would tolerate.
 const MAX_REQUEST_GAP: Duration = Duration::from_secs(5);
@@ -831,7 +831,11 @@ impl RateBudget {
             && state.reset_at > wall_now
         {
             let emergency_floor = LOW_THRESHOLD.min(state.limit.div_ceil(50).max(1));
-            if state.remaining <= emergency_floor || state.remaining < forecast {
+            // The emergency buffer exists to serve user actions. Blocking
+            // those too stranded merges with 70 usable points until reset.
+            if (priority.is_scheduled() && state.remaining <= emergency_floor)
+                || state.remaining < forecast
+            {
                 return Err(AcquireError::RemoteLow {
                     remaining: state.remaining,
                     reset_at: state.reset_at,
@@ -1668,18 +1672,70 @@ mod tests {
     }
 
     #[test]
-    fn low_remote_blocks_even_with_local_tokens() {
+    fn exhausted_remote_blocks_even_with_local_tokens() {
         let mut budget = RateBudget::new(100, 60.0);
         budget.observe(remote(
             5000,
-            5,
+            0,
             Instant::now(),
             Utc::now() + chrono::Duration::seconds(60),
         ));
         assert!(matches!(
             budget.try_acquire(),
-            Err(AcquireError::RemoteLow { remaining: 5, .. })
+            Err(AcquireError::CircuitOpen { reason, .. })
+                if reason == "graphql primary budget exhausted"
         ));
+    }
+
+    #[test]
+    fn emergency_buffer_serves_actions_but_blocks_sync() {
+        for resource in [ApiResource::Graphql, ApiResource::rest("core")] {
+            let mut budget = RateBudget::new(100, 60.0);
+            let wall = Utc::now();
+            let mono = Instant::now();
+            budget.observe_primary(
+                resource.key(),
+                5000,
+                70,
+                4930,
+                wall + chrono::Duration::minutes(10),
+                mono,
+            );
+            assert!(matches!(
+                budget.admit_at(
+                    resource.clone(),
+                    "sync",
+                    RequestPriority::Recent,
+                    1,
+                    wall,
+                    mono
+                ),
+                Err(AcquireError::RemoteLow { .. })
+            ));
+            for op in ["pre-merge", "merge-method", "merge"] {
+                budget
+                    .admit_at(
+                        resource.clone(),
+                        op,
+                        RequestPriority::Interactive,
+                        1,
+                        wall,
+                        mono,
+                    )
+                    .expect("action can spend emergency buffer");
+            }
+            assert!(matches!(
+                budget.admit_at(
+                    resource,
+                    "too-expensive",
+                    RequestPriority::Interactive,
+                    71,
+                    wall,
+                    mono
+                ),
+                Err(AcquireError::RemoteLow { .. })
+            ));
+        }
     }
 
     #[test]

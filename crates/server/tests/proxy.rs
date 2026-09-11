@@ -859,10 +859,21 @@ async fn a_completed_turn_without_usage_reports_neither_cost_nor_saving() {
     );
 }
 
-/// Codex can stop reading as soon as response.completed arrives. Meter the
+/// Codex can stop reading as soon as any terminal response event arrives. Meter the
 /// finalized usage before forwarding that event, without waiting for HTTP EOF.
 #[tokio::test]
-async fn codex_completion_reports_usage_before_http_eof_and_only_once() {
+async fn codex_terminal_events_report_usage_before_http_eof_and_only_once() {
+    for kind in [
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+    ] {
+        assert_terminal_usage(kind, false).await;
+        assert_terminal_usage(kind, true).await;
+    }
+}
+
+async fn assert_terminal_usage(kind: &'static str, disconnect: bool) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (close_tx, close_rx) = tokio::sync::oneshot::channel::<()>();
@@ -871,10 +882,13 @@ async fn codex_completion_reports_usage_before_http_eof_and_only_once() {
         let mut request = [0; 4096];
         assert!(stream.read(&mut request).await.unwrap() > 0);
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
-        let event = concat!(
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{",
-            "\"input_tokens\":500,\"output_tokens\":25,",
-            "\"input_tokens_details\":{\"cached_tokens\":100}}}}\n\n"
+        let event = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "type": kind,
+                "response": {"usage": {"input_tokens": 500, "output_tokens": 25,
+                    "input_tokens_details": {"cached_tokens": 100}}}
+            })
         );
         let frame = format!("{:x}\r\n{event}\r\n", event.len());
         stream.write_all(frame.as_bytes()).await.unwrap();
@@ -914,8 +928,13 @@ async fn codex_completion_reports_usage_before_http_eof_and_only_once() {
         assert_eq!(reports[0].2.output_tokens, Some(25));
         assert_eq!(reports[0].2.cache_read_input_tokens, Some(100));
     }
-    close_tx.send(()).unwrap();
-    response.bytes().await.unwrap();
+    if disconnect {
+        drop(response);
+        close_tx.send(()).unwrap();
+    } else {
+        close_tx.send(()).unwrap();
+        response.bytes().await.unwrap();
+    }
     assert_eq!(
         captured.lock().unwrap().len(),
         1,

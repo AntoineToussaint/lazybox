@@ -91,6 +91,8 @@ pub struct UsageAccumulator {
     /// of the rate card. Used for traffic lazybox can't price — a ChatGPT
     /// subscription pays a flat fee, so its per-token cost is meaningless.
     count_only: bool,
+    /// The Responses API has finalized its usage, independently of HTTP EOF.
+    response_completed: bool,
 }
 
 /// A partial line longer than this without a newline is parsed and
@@ -139,6 +141,17 @@ impl UsageAccumulator {
             let line = std::mem::take(&mut self.residual);
             self.scan_line(&line);
         }
+        self.usage()
+    }
+
+    /// Final usage after a Responses API completion event, before HTTP EOF.
+    /// Callers publish this before forwarding the completion to clients that
+    /// stop reading there; they must suppress a second report at EOF.
+    pub fn completed_usage(&self) -> Option<AgentUsage> {
+        self.response_completed.then(|| self.usage()).flatten()
+    }
+
+    fn usage(&self) -> Option<AgentUsage> {
         if self.merged.is_empty() {
             return None;
         }
@@ -189,6 +202,13 @@ impl UsageAccumulator {
             return;
         };
         collect_usage(&value, &mut self.merged, &mut self.model);
+        if value.get("type").and_then(Value::as_str) == Some("response.completed")
+            && value
+                .pointer("/response/usage")
+                .is_some_and(Value::is_object)
+        {
+            self.response_completed = true;
+        }
     }
 }
 
@@ -317,6 +337,30 @@ mod tests {
         assert_eq!(u.input_tokens, Some(500));
         assert_eq!(u.output_tokens, Some(25));
         assert_eq!(u.cache_read_input_tokens, Some(100));
+    }
+
+    #[test]
+    fn responses_usage_is_final_only_after_the_complete_completion_line() {
+        let mut acc = UsageAccumulator::default();
+        acc.push(b"data: {\"type\":\"response.created\",\"response\":{\"usage\":{\"input_tokens\":5}}}\n\n");
+        assert!(acc.completed_usage().is_none());
+        acc.push(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":500,");
+        assert!(acc.completed_usage().is_none());
+        acc.push(b"\"output_tokens\":25}}}\n\n");
+        let usage = acc.completed_usage().expect("finalized usage");
+        assert_eq!(usage.input_tokens, Some(500));
+        assert_eq!(usage.output_tokens, Some(25));
+        let final_usage = acc.finish().expect("usage at EOF");
+        assert_eq!(final_usage.input_tokens, usage.input_tokens);
+        assert_eq!(final_usage.output_tokens, usage.output_tokens);
+    }
+
+    #[test]
+    fn completion_without_usage_does_not_finalize_an_earlier_usage_report() {
+        let mut acc = UsageAccumulator::default();
+        acc.push(b"data: {\"usage\":{\"input_tokens\":5}}\n\n");
+        acc.push(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":null}}\n\n");
+        assert!(acc.completed_usage().is_none());
     }
 
     #[test]

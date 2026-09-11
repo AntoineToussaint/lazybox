@@ -858,3 +858,67 @@ async fn a_completed_turn_without_usage_reports_neither_cost_nor_saving() {
         "and therefore no saving either — the two stay on one clock"
     );
 }
+
+/// Codex can stop reading as soon as response.completed arrives. Meter the
+/// finalized usage before forwarding that event, without waiting for HTTP EOF.
+#[tokio::test]
+async fn codex_completion_reports_usage_before_http_eof_and_only_once() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (close_tx, close_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).await.unwrap() > 0);
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+        let event = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{",
+            "\"input_tokens\":500,\"output_tokens\":25,",
+            "\"input_tokens_details\":{\"cached_tokens\":100}}}}\n\n"
+        );
+        let frame = format!("{:x}\r\n{event}\r\n", event.len());
+        stream.write_all(frame.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let _ = close_rx.await;
+        let _ = stream.write_all(b"0\r\n\r\n").await;
+    });
+    let (captured, sink) = recording_sink();
+    let port = start_proxy(format!("http://{addr}"), sink).await;
+    let mut response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/openai/codex/workspace/responses"
+        ))
+        .header("chatgpt-account-id", "test-account")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut received = Vec::new();
+        while !received.ends_with(b"\n\n") {
+            received.extend_from_slice(&response.chunk().await.unwrap().expect("completion event"));
+        }
+    })
+    .await
+    .expect("completion must arrive without HTTP EOF");
+    {
+        let reports = captured.lock().unwrap();
+        assert_eq!(
+            reports.len(),
+            1,
+            "completed usage must not wait for HTTP EOF"
+        );
+        assert_eq!(reports[0].0, "codex");
+        assert_eq!(reports[0].1, "workspace");
+        assert_eq!(reports[0].2.input_tokens, Some(500));
+        assert_eq!(reports[0].2.output_tokens, Some(25));
+        assert_eq!(reports[0].2.cache_read_input_tokens, Some(100));
+    }
+    close_tx.send(()).unwrap();
+    response.bytes().await.unwrap();
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        1,
+        "HTTP EOF must not report twice"
+    );
+}

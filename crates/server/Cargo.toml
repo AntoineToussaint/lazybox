@@ -86,5 +86,9 @@ required-features = ["desktop-contract"]
 name = "sync"
 harness = false
 
+[[bench]]
+name = "context_parse"
+harness = false
+
 [lints]
 workspace = true

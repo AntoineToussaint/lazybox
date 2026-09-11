@@ -1977,6 +1977,16 @@ pub(crate) async fn dispatch_action(
                     }
                 }
                 autofix::AttemptDecision::Proceed { attempt, max } => {
+                    if kind == AutoFixKind::CiFailure
+                        && !ci_failure_still_stands(gh, &repo, pr_number).await
+                    {
+                        tracing::info!(
+                            source = source_name,
+                            %session_key,
+                            "auto-fix: CI failure did not survive a per-run re-read — skipping"
+                        );
+                        return;
+                    }
                     match crate::spawn_handler::deliver_auto_fix_prompt(
                         config,
                         session_key.clone(),
@@ -2035,6 +2045,41 @@ pub(crate) async fn dispatch_action(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Re-read a queued CI failure against the per-check rollup before it
+/// costs an agent session.
+///
+/// The sweep that queued the fix reads GitHub's aggregate
+/// `statusCheckRollup.state`, which folds in the jobs of workflow runs
+/// that concurrency already superseded — a push immediately followed by
+/// a base change leaves a cancelled run whose dead jobs keep a fully
+/// green PR rolling up FAILURE indefinitely. The single-PR query
+/// carries the contexts that settle it, and `extract_ci_status` reads
+/// them per run (#1662). One ~85-unit fetch per would-be spawn, paid
+/// only by a candidate that cleared every other gate.
+///
+/// Re-running the whole shape guard (not just the CI field) also drops
+/// a fix the PR has since outgrown — merged, drafted, or now under
+/// review between the sweep and the dispatch.
+///
+/// Skips on an unreadable answer rather than spawning blind: the
+/// failure persists, so the next sweep re-queues it.
+async fn ci_failure_still_stands(gh: Option<&GhClient>, repo: &str, pr_number: u64) -> bool {
+    let Some(gh) = gh else {
+        return true;
+    };
+    let Some((owner, name)) = repo.split_once('/') else {
+        return true;
+    };
+    match gh.fetch_single_pr(owner, name, pr_number).await {
+        Ok(Some(task)) => lazybox_core::auto_fix_candidate(&task) == Some(AutoFixKind::CiFailure),
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!("auto-fix: re-read of {repo}#{pr_number} failed ({e}); skipping");
+            false
         }
     }
 }

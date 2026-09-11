@@ -1028,6 +1028,21 @@ impl<T: TerminalAdapter> Model<T> {
             self.sidebar.set_epic_snapshot(snapshot.clone());
             self.refresh_open_epic_modal(&key);
         }
+        // Open agent-to-agent requests (#1653): the daemon owns the count
+        // and pushes it here (seeded on connect, refreshed on every ask,
+        // reply, and turn-end capture). The sidebar keeps it for the row's
+        // `?N` badge.
+        if let IpcEvent::AgentRequestsOpen {
+            workspace_key,
+            open,
+        } = &event
+        {
+            self.sidebar.set_open_requests(
+                lazybox_core::SessionKey::from(workspace_key.as_str()),
+                *open,
+            );
+            self.redraw = true;
+        }
         if let IpcEvent::EpicGone { key } = &event {
             self.epic_snapshots.remove(key);
             self.sidebar.forget_epic(key);
@@ -1342,6 +1357,12 @@ impl<T: TerminalAdapter> Model<T> {
                 // The compaction saving (#1621) is accounting the daemon
                 // rolls up into the stats screen; it patches no workspace.
                 | IpcEvent::AgentCompaction { .. }
+                // The agent-to-agent request events (#1653) carry no workspace
+                // payload either: the question and the answer reach the feed as
+                // activity rows the daemon merges, and the open count is
+                // consumed earlier in this function.
+                | IpcEvent::AgentRequestReplied { .. }
+                | IpcEvent::AgentRequestsOpen { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2451,6 +2472,10 @@ impl<T: TerminalAdapter> Model<T> {
             // Nor is the compaction saving (#1621) — it rides live agent
             // traffic through the proxy, not a provider poll.
             | IpcEvent::AgentCompaction { .. }
+            // Nor are the agent-to-agent request events (#1653) — they ride
+            // the coordination bus, not a provider poll.
+            | IpcEvent::AgentRequestReplied { .. }
+            | IpcEvent::AgentRequestsOpen { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -2797,6 +2822,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // TUI only as bus traffic and has no UI.
                 | IpcEvent::ToolUseDecided { .. }
                 | IpcEvent::AgentCompaction { .. }
+                // The agent-to-agent request events (#1653) have no
+                // poll-indicator / mutation-failure semantics either.
+                | IpcEvent::AgentRequestReplied { .. }
+                | IpcEvent::AgentRequestsOpen { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

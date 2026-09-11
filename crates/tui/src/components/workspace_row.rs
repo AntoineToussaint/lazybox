@@ -170,6 +170,12 @@ pub struct WorkspaceRowCtx<'a> {
     /// does not resolve whether they are still open). Renders a ` ⊗N `
     /// badge in the passive cluster; nothing when zero.
     pub blocked_by: usize,
+    /// Open inbound `ask_session` requests — questions a sibling agent has
+    /// put to this session and it has not answered yet (#1653). Renders a
+    /// ` ⟲N ` badge in the passive cluster so a row that owes an answer is
+    /// legible without opening it; nothing when zero. Deliberately not `?`,
+    /// which the state slot already spends on the agent asking its *operator*.
+    pub inbound_requests: usize,
     /// A declared `Blocked on:` reason exists on some task. Renders ` ⊗! `
     /// when there are no dependency blockers, else folds into the count
     /// badge (the count already says "blocked"). The reason text itself is
@@ -1155,6 +1161,7 @@ fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         cell_remote(ctx),
         cell_stack(ctx),
         cell_blocked(ctx),
+        cell_inbound_request(ctx),
         cell_linked(ctx),
         cell_notes(ctx),
         cell_snippet(ctx),
@@ -1256,6 +1263,30 @@ fn cell_blocked(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .add_modifier(Modifier::BOLD)
     };
     Cell::from_span(Span::styled(label, style))
+}
+
+/// The ` ⟲N ` replies-owed badge (#1653): `N` sibling agents are waiting on
+/// an answer from this session's agent. `theme.accent`, not `error` — a
+/// pending question is work owed, not something broken — and the count is
+/// what makes it actionable (two asks stacked up read differently from one).
+/// Packs into the shared passive cluster like `⇗k/N`.
+///
+/// Deliberately NOT `?`: the state slot already spends that glyph on
+/// `AgentState::InputNeeded`, where it means the agent is waiting on *you*.
+/// Here the agent owes *someone else*. One symbol on one row must not carry
+/// two subjects, so this takes the return arrow and leaves `?` alone.
+fn cell_inbound_request(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if ctx.inbound_requests == 0 {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .fg(ctx.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(format!(" ⟲{} ", ctx.inbound_requests), style))
 }
 
 /// The merge-arm badge cluster (#813): `⚡` (lazybox client-side
@@ -1714,6 +1745,7 @@ mod tests {
             stack: None,
             blocked_by: 0,
             blocked_on: false,
+            inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,
@@ -2229,6 +2261,7 @@ mod tests {
             stack: None,
             blocked_by: 0,
             blocked_on: false,
+            inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,
@@ -2828,6 +2861,7 @@ mod tests {
             stack: None,
             blocked_by: 0,
             blocked_on: false,
+            inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,
@@ -3404,6 +3438,30 @@ mod tests {
             cell.spans[0].content.as_ref(),
             " ⊗! ",
             "a bare declared reason shows the sentinel, not a count"
+        );
+    }
+
+    /// A row that owes a sibling agent an answer carries ` ⟲N ` (#1653);
+    /// one that owes none carries nothing, so the badge is absence-by-
+    /// default like every other passive decoration. The glyph must stay off
+    /// `?`, which the state slot spends on "this agent is asking *you*".
+    #[test]
+    fn cell_inbound_request_counts_open_asks() {
+        let task = make_task("owner/repo#2", "child");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(
+            cell_inbound_request(&ctx).width(),
+            0,
+            "nobody is waiting on this session"
+        );
+        ctx.inbound_requests = 2;
+        let rendered = cell_inbound_request(&ctx).spans[0].content.to_string();
+        assert_eq!(rendered, " ⟲2 ");
+        assert!(
+            !rendered.contains('?'),
+            "the replies-owed badge must not reuse the state slot's `?`: {rendered}"
         );
     }
 
@@ -4360,6 +4418,7 @@ mod tests {
             stack: None,
             blocked_by: 0,
             blocked_on: false,
+            inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,

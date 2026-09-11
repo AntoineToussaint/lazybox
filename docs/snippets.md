@@ -439,6 +439,29 @@ The
 covers free-text mode, mixed agent/shell delivery, skips, retries, and
 per-workspace history.
 
+## Let an agent send a workflow
+
+Snippets are not only a keystroke. A Claude session lazybox wires to the
+coordination MCP bus can send one to a **sibling** session with the
+`send_snippet` tool, so an agent that wants a teammate to run `rev` or `dod`
+hands over the catalog key instead of pasting the body by hand:
+
+```
+send_snippet(workspace: "github:acme/widget#42", key: "rev")
+```
+
+The key resolves against the same layered catalog the picker reads — built-in,
+`~/.lazybox/snippets.yaml`, and the target repo's `.lazybox/snippets.yaml` —
+and delivery goes through the very path `]]s` uses. So the receiving
+workspace's Recent list, its `]N` badge, and the `SnippetDelivered` event all
+behave exactly as if a human had picked it; an unknown key is refused with the
+nearest names rather than silently doing nothing. An optional `vars` map fills
+`{{name}}` placeholders in the body. The sibling `ask_session` tool can send a
+snippet the same way when what you want back is an *answer*, not just a
+delivery.
+
+See [`mcp-coordination.md`](mcp-coordination.md) for the rest of the bus.
+
 ## Update or remove a workflow
 
 Ask Lazybox can replace a global key with a confirmed, hot-reloaded

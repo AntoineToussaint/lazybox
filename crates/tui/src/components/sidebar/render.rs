@@ -2022,6 +2022,9 @@ impl Sidebar {
                 // declared edges; it does not resolve whether they're open.
                 blocked_by: workspace.map_or(0, |w| w.hierarchy_blocked_by().count()),
                 blocked_on: workspace.is_some_and(|w| w.declared_blocker().is_some()),
+                // Questions a sibling agent has asked this session and it
+                // has not answered yet (#1653), pushed by the daemon.
+                inbound_requests: self.open_requests(key),
                 model_shorts: &self.model_shorts,
                 highlight_query,
                 // Focused rows are lifted out of their repo group, so name

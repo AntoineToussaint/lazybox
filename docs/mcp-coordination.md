@@ -93,8 +93,9 @@ MCP read is the pull half (new)* — together, a two-way coordination bus.
 ## 5. Tool surface
 
 The core six, namespaced `lazybox_*`. Identity is **implicit from the
-connection** (see §6), so no tool takes a "who am I" argument. (Epic
-coordination adds four more — see the second table below.)
+connection** (see §6), so no tool takes a "who am I" argument.
+(Request/response and epic coordination add four each — see the tables
+below.)
 
 | Tool | Purpose | Backed by |
 |---|---|---|
@@ -104,6 +105,47 @@ coordination adds four more — see the second table below.)
 | `lazybox_post_note(text, scope?, tags?)` | Publish to the blackboard. Default `scope` = your own session. | kv `lazybox:note:<scope>:<seq>` |
 | `lazybox_read_notes(scope?, tags?, since?)` | Read the blackboard (defaults to global + your scope). | `list_kv_prefix("lazybox:note:")` |
 | `lazybox_notify_session(workspace, text, submit?)` | Active push into another agent (the existing inject, as a tool). | `/v1/agents/inject` (settle-gated) |
+
+Request/response (#1653) adds the half the push side leaves open — a reply
+channel, so a Coordinator asking "what is left on #581?" gets a paragraph
+back instead of scraping `read_session` and guessing when the target is done:
+
+| Tool | Purpose | Backed by |
+|---|---|---|
+| `lazybox_send_snippet(workspace, key, vars?, submit?)` | Send a **catalog** snippet into a sibling (`rev`, `dod`, …) instead of pasting its body. `vars` fills `{{name}}` placeholders. | `Command::DeliverSnippet` — the same path `]]s` takes, so the target's MRU, `]N` cue, and `SnippetDelivered` all behave identically |
+| `lazybox_ask_session(workspace, text? \| snippet?, timeout_s?, mode?)` | Ask a sibling and get its answer. `wait` (default) blocks up to `timeout_s` (default 120 s, max 600 s); `async` returns a `request_id`. | the `notify_session` inject, wrapped in a `<lazybox-request>` envelope + kv `lazybox:request:<id>` |
+| `lazybox_reply_request(request_id, text)` | Answer what you were asked. Target-side — identity from the bearer, so a session cannot answer for someone else. Replying twice appends. | the request row + an in-process `watch` that wakes the waiter without polling |
+| `lazybox_poll_request(request_id)` | Status / answer / age, plus the target's live `AgentState`. | the request row + the agent roster |
+
+**Request record** (kv value, JSON): `{ id, asker, target, text, created_at,
+depth, status, answers[] }`, where `status` ∈ `pending` / `answered` /
+`answered_by_capture` / `abandoned`, and each answer carries
+`{ text, answered_at, source }`.
+Three properties are load-bearing:
+
+- **Never a hang.** When the target's agent state reaches `Done` after an
+  open request was created and no `reply_request` arrived, the tail of its
+  output (~60 lines, ANSI-cleaned) is captured as the answer with
+  `source: "turn_end_capture"`. Lower fidelity, always *something*; the
+  asker sees the source and can re-ask.
+- **Bounded nesting.** The envelope carries `depth = the caller's inbound
+  depth + 1`, refused past 3, so agents that keep deferring instead of
+  answering stop with the chain named rather than filling both contexts with
+  open questions. Answering releases the depth, so a reply-then-ask dialogue
+  is unbounded by design — the cap is on recursion, not on conversation.
+- **A terminating state machine.** `reply_request` and the turn-end capture
+  both need the target to take another turn, so neither can close a request
+  whose injection was dropped at a permission prompt or whose agent was
+  killed. Reclamation abandons those — on session teardown, and past a 6-hour
+  TTL — so a `Pending` row can never become immortal, badging its workspace
+  on every client connect and inflating that session's ask-depth for good.
+  Every row mutation is serialized by a process-wide lock and re-loaded
+  inside it, so the fallback capture can never overwrite a real reply that
+  landed while it was reading the target's scrollback.
+- **Visible to the operator.** The question lands on the target's activity
+  feed (`asked by <workspace>: …`), the answer on the asker's; a workspace
+  with an unanswered inbound request carries a ` ⟲N ` sidebar badge, seeded
+  on connect by `Event::AgentRequestsOpen` and cleared when it is answered.
 
 Epic coordination (#1522) adds four more, so an agent answers "what's
 blocked / what's next" from the daemon's *derived* status instead of
@@ -238,6 +280,12 @@ bearer, so an unauthenticated caller on the port gets nothing. Beyond that:
   could loop); a target with no live agent comes back as an error tool result.
   The optional `tags`-driven structuring of notes stays deferred until usage
   justifies it.
+- **Phase 3 — request/response: ✅ landed (#1653).** `ask_session` /
+  `reply_request` / `poll_request` give the push side a reply channel, and
+  `send_snippet` lets an agent address the snippet catalog instead of pasting
+  a body. Waiting is a per-daemon `RequestRegistry` of `watch` senders, so a
+  reply wakes the asker without polling the store; the durable row in the kv
+  is what an `async` asker and the `?N` badge read.
 
 The Phase 0 integration questions from §7a resolved in code: `rmcp`'s
 streamable-HTTP service wraps onto the **existing hyper stack** via

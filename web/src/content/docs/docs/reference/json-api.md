@@ -161,6 +161,14 @@ connection *is* the session, so no tool takes a "who am I" argument.
 | `read_session(workspace, tail?)` | The same snapshot as `/v1/agents/output` |
 | `post_note(text, scope?, tags?)` / `read_notes(scope?, tags?, since?)` | A kv-backed blackboard (`lazybox:note:*`), 50 notes per scope, 16 KB each |
 | `notify_session(workspace, text, submit?)` | The same settle-gated inject as `/v1/agents/inject`; reports a handoff, not a delivery |
+| `send_snippet(workspace, key, vars?, submit?)` | The same `DeliverSnippet` path as `]]s` — the target's Recent MRU and `]N` count move; `vars` fills `{{name}}` placeholders |
+| `ask_session(workspace, text? \| snippet?, timeout_s?, mode?)` | The inject above, wrapped in a `<lazybox-request>` envelope, plus a request row in the kv (`lazybox:request:*`). `wait` blocks up to `timeout_s` (default 120 s, max 600 s — your MCP client's call timeout is the real ceiling); `async` returns a `request_id` |
+| `reply_request(request_id, text)` | Answers a request; only the session it was asked of may. Wakes a waiting asker and emits `AgentRequestReplied` |
+| `poll_request(request_id)` | The request row plus the target's live agent state, so "pending" can be told from "parked at a prompt" |
+
+An unanswered request does not hang the asker: when the target ends a turn
+without replying, the tail of its output is captured as the answer with
+`source: "turn_end_capture"`. Ask chains are capped at three hops.
 
 Bearers are revoked when a session's last agent terminal ends and persist with
 the bound port across a daemon restart, so a tmux-surviving agent keeps

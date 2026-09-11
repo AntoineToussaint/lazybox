@@ -141,6 +141,17 @@ pub struct McpRuntime {
     /// `apply_batch` silently overwrites the first. Held across the list +
     /// insert so seq allocation is atomic process-wide.
     notes_write: tokio::sync::Mutex<()>,
+    /// Serializes every read-modify-write of a request row, for the same
+    /// reason [`McpRuntime::notes_write`] exists: three independent writers
+    /// mutate a row (`reply_request`, the turn-end capture, and reclamation),
+    /// and a `get_kv` → mutate → `set_kv` between them silently drops one
+    /// side's edit. Held across the re-load and the write, so every mutation
+    /// is a compare-and-set against the row as it stands *now* rather than as
+    /// the caller last saw it.
+    requests_write: tokio::sync::Mutex<()>,
+    /// In-flight `ask_session` waiters (#1653), so `reply_request` wakes the
+    /// asker directly instead of having it poll the store.
+    requests: RequestRegistry,
 }
 
 impl McpRuntime {
@@ -152,6 +163,17 @@ impl McpRuntime {
     /// The lock guarding note sequence allocation (see the field docs).
     fn notes_write(&self) -> &tokio::sync::Mutex<()> {
         &self.notes_write
+    }
+
+    /// The lock guarding request read-modify-write (see the field docs).
+    fn requests_write(&self) -> &tokio::sync::Mutex<()> {
+        &self.requests_write
+    }
+
+    /// The in-flight request waiters shared by `ask_session` and
+    /// `reply_request`.
+    pub fn requests(&self) -> &RequestRegistry {
+        &self.requests
     }
 
     /// Record the bound endpoint URL (called once by [`start`]).
@@ -248,6 +270,66 @@ fn default_notify_submit() -> bool {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SendSnippetArgs {
+    /// Workspace key of the target session (from `list_sessions`).
+    workspace: String,
+    /// Snippet shortcut key from the shared catalog — the same one `]]s`
+    /// takes (`rev`, `dod`, `fixall`, …).
+    key: String,
+    /// Values for `{{name}}` placeholders in the snippet body. A placeholder
+    /// with no matching entry is left as written.
+    #[serde(default)]
+    vars: std::collections::BTreeMap<String, String>,
+    /// Submit after pasting (`true`, the default) or leave it in the
+    /// target's composer for its operator to review first.
+    #[serde(default = "default_notify_submit")]
+    submit: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AskSessionArgs {
+    /// Workspace key of the session to ask (from `list_sessions`).
+    workspace: String,
+    /// The question. Either this or `snippet`, not both.
+    #[serde(default)]
+    text: Option<String>,
+    /// Ask by sending a catalog snippet instead of free text.
+    #[serde(default)]
+    snippet: Option<AskSnippetArgs>,
+    /// How long `mode: "wait"` blocks, in seconds (default 120, max 600).
+    /// Your own MCP client's call timeout is the real ceiling — a value
+    /// above it returns nothing usable.
+    #[serde(default)]
+    timeout_s: Option<u64>,
+    /// `wait` (default) blocks for the answer; `async` returns a
+    /// `request_id` immediately, to be read later with `poll_request`.
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+/// The catalog snippet an `ask_session` sends as its question.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AskSnippetArgs {
+    key: String,
+    #[serde(default)]
+    vars: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ReplyRequestArgs {
+    /// The `request_id` from the `<lazybox-request>` envelope you were sent.
+    request_id: String,
+    /// Your answer.
+    text: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct PollRequestArgs {
+    /// The `request_id` returned by `ask_session`.
+    request_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct EpicStatusArgs {
     /// Restrict to one epic by key. Omit to return every non-archived epic.
     #[serde(default)]
@@ -332,6 +414,125 @@ struct ReportBlockerArgs {
     kind: Option<String>,
 }
 
+// ── agent-to-agent request/response (#1653) ─────────────────────────────
+
+/// Whether an [`AgentRequest`] is still waiting on its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RequestStatus {
+    Pending,
+    /// The target called `reply_request`.
+    Answered,
+    /// The target ended a turn without replying and the tail of its output
+    /// was captured instead — an answer, at lower fidelity.
+    AnsweredByCapture,
+    /// Nobody will ever answer this: the target's agent went away, or the
+    /// request outlived [`REQUEST_TTL_MS`] without the target ever taking a
+    /// turn (the injection was dropped at a permission prompt, say). A
+    /// terminal state, so the row stops badging its target, stops counting
+    /// toward the ask-depth budget, and becomes eligible for pruning.
+    Abandoned,
+}
+
+/// Where an answer came from. The asker sees this and can decide whether to
+/// trust it or re-ask: a `turn_end_capture` is scrollback, not a considered
+/// reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AnswerSource {
+    ReplyRequest,
+    TurnEndCapture,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RequestAnswer {
+    pub(crate) text: String,
+    pub(crate) answered_at: i64,
+    pub(crate) source: AnswerSource,
+}
+
+/// One agent-to-agent question, stored as JSON in the kv under
+/// `lazybox:request:<id>`. Persisted rather than held in memory because the
+/// asker may poll it from a later tool call (or a later process), and the
+/// depth guard reads the open set to reconstruct the chain.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct AgentRequest {
+    pub(crate) id: String,
+    /// Session key of the asking agent.
+    pub(crate) asker: String,
+    /// Session key of the agent being asked.
+    pub(crate) target: String,
+    pub(crate) text: String,
+    pub(crate) created_at: i64,
+    /// Hop count of this ask: 1 for a question from a session nobody is
+    /// currently asking, +1 for each nested ask. Bounded by
+    /// [`MAX_ASK_DEPTH`] so an A→B→A loop terminates.
+    pub(crate) depth: u32,
+    pub(crate) status: RequestStatus,
+    /// Every answer, oldest first — a second `reply_request` appends rather
+    /// than overwriting, so an agent that corrects itself does not erase
+    /// what the asker may already have read.
+    #[serde(default)]
+    pub(crate) answers: Vec<RequestAnswer>,
+}
+
+impl AgentRequest {
+    fn latest_answer(&self) -> Option<&RequestAnswer> {
+        self.answers.last()
+    }
+}
+
+/// Wakes a waiting `ask_session` the moment its answer lands, without
+/// polling the store. One `watch` channel per in-flight request, created by
+/// the waiter and fired by whichever path answers (`reply_request` or the
+/// turn-end capture). A request with no live waiter has no entry — the
+/// answer is still persisted, so an `async` asker reads it with
+/// `poll_request`.
+#[derive(Debug, Default)]
+pub struct RequestRegistry {
+    waiters: RwLock<HashMap<String, tokio::sync::watch::Sender<Option<RequestAnswer>>>>,
+}
+
+impl RequestRegistry {
+    /// Subscribe to `id`'s answer, creating the channel if this is the first
+    /// waiter. Called BEFORE the question is injected so an immediate reply
+    /// cannot land in the gap between injecting and waiting.
+    fn subscribe(&self, id: &str) -> tokio::sync::watch::Receiver<Option<RequestAnswer>> {
+        let mut waiters = self.waiters.write();
+        match waiters.get(id) {
+            Some(tx) => tx.subscribe(),
+            None => {
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                waiters.insert(id.to_string(), tx);
+                rx
+            }
+        }
+    }
+
+    /// Hand `answer` to whoever is waiting on `id`. A no-op when nobody is
+    /// (an `async` ask, or a `wait` that already timed out) — the durable
+    /// row is the answer's real home.
+    fn wake(&self, id: &str, answer: RequestAnswer) {
+        if let Some(tx) = self.waiters.read().get(id) {
+            tx.send_replace(Some(answer));
+        }
+    }
+
+    /// Drop `id`'s channel once its waiter is done with it.
+    fn forget(&self, id: &str) {
+        self.waiters.write().remove(id);
+    }
+
+    /// Live waiter count — for diagnostics/tests.
+    pub fn len(&self) -> usize {
+        self.waiters.read().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.waiters.read().is_empty()
+    }
+}
+
 /// One blackboard note, stored as a JSON string in the kv under
 /// `lazybox:note:<scope>:<seq>`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -363,8 +564,19 @@ impl LazyboxMcp {
     pub fn new(config: ServerConfig) -> Self {
         Self {
             config,
-            tool_router: Self::tool_router(),
+            tool_router: Self::shared_tool_router(),
         }
+    }
+
+    /// The tool router, built once per process and cloned thereafter.
+    /// `tool_router()` generates a JSON schema per tool, and this type is
+    /// constructed far more often than there are MCP connections — the
+    /// turn-end capture builds one on every agent `Done` just to reach the
+    /// store helpers. Caching it is the same instinct as `#[tool_handler]`
+    /// pointing at the instance's router rather than rebuilding per dispatch.
+    fn shared_tool_router() -> ToolRouter<LazyboxMcp> {
+        static ROUTER: std::sync::OnceLock<ToolRouter<LazyboxMcp>> = std::sync::OnceLock::new();
+        ROUTER.get_or_init(Self::tool_router).clone()
     }
 
     /// The bearer token on the current request, if any. rmcp's streamable-HTTP
@@ -768,6 +980,684 @@ impl LazyboxMcp {
         let caller = self.caller(&ctx)?;
         self.notify_session_payload(&caller, &args.workspace, &args.text, args.submit)
             .await
+    }
+
+    /// Display name of a workspace, for the `from=` attribute and the
+    /// activity rows. Falls back to the session key when the row is gone or
+    /// carries no name — an unnamed asker still has to be identifiable.
+    fn workspace_label(&self, key: &SessionKey) -> String {
+        self.load_workspace(&lazybox_core::WorkspaceKey::new(key.as_str()))
+            .map(|ws| ws.name)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| key.as_str().to_string())
+    }
+
+    async fn load_request(&self, id: &str) -> Option<AgentRequest> {
+        let key = request_key(id);
+        let raw = crate::store_blocking(&self.config.store, move |store| store.get_kv(&key))
+            .await
+            .ok()??;
+        serde_json::from_str(&raw).ok()
+    }
+
+    async fn save_request(&self, request: &AgentRequest) -> Result<(), McpError> {
+        let key = request_key(&request.id);
+        let value = serde_json::to_string(request)
+            .map_err(|error| McpError::internal_error(format!("encode request: {error}"), None))?;
+        crate::store_blocking(&self.config.store, move |store| store.set_kv(&key, &value))
+            .await
+            .map_err(|error| McpError::internal_error(format!("write request: {error}"), None))
+    }
+
+    /// Every stored request, newest first. Undecodable rows are skipped, like
+    /// the note reader.
+    async fn all_requests(&self) -> Vec<AgentRequest> {
+        let rows = crate::store_blocking(&self.config.store, |store| {
+            store.list_kv_prefix(REQUEST_KV_PREFIX)
+        })
+        .await
+        .unwrap_or_default();
+        let mut requests: Vec<AgentRequest> = rows
+            .into_iter()
+            .filter_map(|(_, value)| serde_json::from_str(&value).ok())
+            .collect();
+        requests.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+        requests
+    }
+
+    /// Open requests waiting on `target`, newest first.
+    async fn open_requests_for(&self, target: &str) -> Vec<AgentRequest> {
+        self.all_requests()
+            .await
+            .into_iter()
+            .filter(|r| r.status == RequestStatus::Pending && r.target == target)
+            .collect()
+    }
+
+    /// Announce how many requests are still open against `target` so the
+    /// sidebar's `?N` badge tracks the truth. Sent on every change — an ask,
+    /// a reply, a capture — and `0` clears the badge.
+    async fn announce_open_requests(&self, target: &str) {
+        let open = self.open_requests_for(target).await.len();
+        let _ = self.config.bus.send(lazybox_ipc::Event::AgentRequestsOpen {
+            workspace_key: lazybox_core::WorkspaceKey::new(target),
+            open,
+        });
+    }
+
+    /// Land one `StatusChange` row on a workspace's activity feed, through
+    /// the same race-safe mutation the epic resolver uses so read marks and
+    /// the content dedupe are honored and the row re-broadcasts.
+    async fn push_status_row(&self, workspace: &str, body: String, at: i64) {
+        let created_at =
+            chrono::DateTime::from_timestamp_millis(at).unwrap_or_else(chrono::Utc::now);
+        let activity = vec![lazybox_core::Activity {
+            author: "lazybox".to_string(),
+            body,
+            created_at,
+            kind: lazybox_core::ActivityKind::StatusChange,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        }];
+        crate::polling::apply_and_commit(
+            &self.config,
+            &lazybox_core::WorkspaceKey::new(workspace),
+            |ws| ws.merge_activity(&activity),
+        )
+        .await;
+    }
+
+    /// Resolve a catalog key against the same layered library the picker
+    /// reads — built-in, `~/.lazybox/snippets.yaml`, and the target repo's
+    /// `.lazybox/snippets.yaml` — and substitute `vars`. Returns
+    /// `(category, body)`. An unknown key is refused with the closest three
+    /// names, since a tool caller cannot browse the picker.
+    fn resolve_snippet(
+        &self,
+        target: &SessionKey,
+        key: &str,
+        vars: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(String, String), McpError> {
+        let launch_dir = self
+            .load_workspace(&lazybox_core::WorkspaceKey::new(target.as_str()))
+            .and_then(|ws| snippet_launch_dir(&ws));
+        let catalog = lazybox_config::Snippets::load_for_launch_dir(launch_dir.as_deref());
+        let Some(snippet) = catalog.get(key) else {
+            let names: Vec<&str> = catalog.all().map(|(k, _)| k).collect();
+            let nearest = nearest_keys(key, &names, 3);
+            return Err(McpError::invalid_request(
+                if nearest.is_empty() {
+                    format!("unknown snippet key {key:?}")
+                } else {
+                    format!(
+                        "unknown snippet key {key:?} — did you mean {}?",
+                        nearest.join(", ")
+                    )
+                },
+                None,
+            ));
+        };
+        let body = apply_snippet_vars(&snippet.dispatch_body(), vars);
+        if body.trim().is_empty() {
+            return Err(McpError::invalid_request(
+                format!("snippet {key:?} has an empty body"),
+                None,
+            ));
+        }
+        if body.len() > MAX_NOTIFY_BYTES {
+            return Err(McpError::invalid_request(
+                format!("snippet {key:?} exceeds {MAX_NOTIFY_BYTES} bytes once `vars` are applied"),
+                None,
+            ));
+        }
+        Ok((snippet.category.clone(), body))
+    }
+
+    /// Send a catalog snippet into a sibling's agent through the very
+    /// `DeliverSnippet` path `]]s` uses, so the target's MRU, its `]N` count,
+    /// and `Event::SnippetDelivered` all behave as if a human had picked it.
+    async fn send_snippet_payload(
+        &self,
+        caller: &SessionKey,
+        args: &SendSnippetArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let target = SessionKey::from(args.workspace.as_str());
+        if &target == caller {
+            return Err(McpError::invalid_request(
+                "cannot send a snippet to your own session — pass a sibling workspace from list_sessions",
+                None,
+            ));
+        }
+        let key = args.key.trim();
+        if key.is_empty() {
+            return Err(McpError::invalid_request("snippet key is empty", None));
+        }
+        let (category, body) = self.resolve_snippet(&target, key, &args.vars)?;
+        let Some(terminal_id) = self.config.terminal.running_agent_terminal(&target).await else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "no running agent in workspace {}",
+                args.workspace
+            ))]));
+        };
+        tracing::info!(
+            from = %caller.as_str(),
+            to = %args.workspace,
+            snippet = key,
+            submit = args.submit,
+            "mcp send_snippet: delivering a catalog snippet to a sibling agent"
+        );
+        let delivered = crate::spawn_handler::handle_deliver_snippet(
+            &self.config,
+            terminal_id,
+            key.to_string(),
+            category,
+            body,
+            args.submit,
+        );
+        match tokio::time::timeout(NOTIFY_TIMEOUT, delivered).await {
+            Ok(()) => Ok(json_result(serde_json::json!({
+                "handed_off": true,
+                "workspace": args.workspace,
+                "snippet": key,
+                "submit_requested": args.submit,
+                "delivery_confirmed": false,
+                "note": "Delivered through the same settle-gated path as `]]s` — the target's Recent and `]N` count now include it. Not a confirmation it was read or run; verify with read_session when delivery matters.",
+            }))),
+            Err(_) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                "snippet delivery timed out acquiring the target agent terminal".to_string(),
+            )])),
+        }
+    }
+
+    /// The hop count an ask from `caller` would carry: one more than the
+    /// deepest request currently open against the caller itself. A session
+    /// nobody is asking starts at 1.
+    async fn inbound_depth(&self, caller: &SessionKey) -> u32 {
+        self.open_requests_for(caller.as_str())
+            .await
+            .iter()
+            .map(|r| r.depth)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The chain of asks that led here, oldest first, rendered for the
+    /// depth-guard refusal so the caller can see the loop it is in.
+    async fn ask_chain(&self, caller: &SessionKey, target: &str) -> Vec<String> {
+        let open = self.all_requests().await;
+        let mut hops: Vec<String> = vec![
+            self.workspace_label(caller),
+            self.workspace_label(&SessionKey::from(target)),
+        ];
+        let mut current = caller.as_str().to_string();
+        // Walk back up the open requests, deepest first. Bounded by the
+        // depth guard itself, so the loop cannot run away on a cycle.
+        for _ in 0..MAX_ASK_DEPTH {
+            let Some(request) = open
+                .iter()
+                .filter(|r| r.status == RequestStatus::Pending && r.target == current)
+                .max_by_key(|r| r.depth)
+            else {
+                break;
+            };
+            hops.insert(
+                0,
+                self.workspace_label(&SessionKey::from(request.asker.as_str())),
+            );
+            current = request.asker.clone();
+        }
+        hops
+    }
+
+    /// Ask a sibling a question and, in `wait` mode, block for its answer.
+    ///
+    /// `now_ms` is the write-time clock, threaded in so the helper is
+    /// deterministic under test.
+    async fn ask_session_payload(
+        &self,
+        caller: &SessionKey,
+        args: &AskSessionArgs,
+        now_ms: i64,
+    ) -> Result<CallToolResult, McpError> {
+        let target = SessionKey::from(args.workspace.as_str());
+        if &target == caller {
+            return Err(McpError::invalid_request(
+                "cannot ask your own session — pass a sibling workspace from list_sessions",
+                None,
+            ));
+        }
+        let question = match (
+            args.text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty()),
+            args.snippet.as_ref(),
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(McpError::invalid_request(
+                    "pass `text` OR `snippet`, not both",
+                    None,
+                ));
+            }
+            (Some(text), None) => text.to_string(),
+            (None, Some(snippet)) => {
+                self.resolve_snippet(&target, snippet.key.trim(), &snippet.vars)?
+                    .1
+            }
+            (None, None) => {
+                return Err(McpError::invalid_request(
+                    "nothing to ask — pass `text` or `snippet`",
+                    None,
+                ));
+            }
+        };
+        if question.len() > MAX_NOTIFY_BYTES {
+            return Err(McpError::invalid_request(
+                format!("question exceeds {MAX_NOTIFY_BYTES} bytes (ask something distilled)"),
+                None,
+            ));
+        }
+        let wait = match args.mode.as_deref().map(str::trim).unwrap_or("wait") {
+            "wait" => true,
+            "async" => false,
+            other => {
+                return Err(McpError::invalid_request(
+                    format!("unknown mode {other:?} — pass \"wait\" or \"async\""),
+                    None,
+                ));
+            }
+        };
+        let depth = self.inbound_depth(caller).await + 1;
+        if depth > MAX_ASK_DEPTH {
+            let chain = self.ask_chain(caller, target.as_str()).await;
+            return Err(McpError::invalid_request(
+                format!(
+                    "ask depth {depth} exceeds the limit of {MAX_ASK_DEPTH} — this chain is looping: {}. Answer what you were asked instead of asking onward.",
+                    chain.join(" → ")
+                ),
+                None,
+            ));
+        }
+        let Some(terminal_id) = self.config.terminal.running_agent_terminal(&target).await else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "no running agent in workspace {}",
+                args.workspace
+            ))]));
+        };
+        // One deadline covers registering the injection AND waiting for the
+        // answer, so `timeout_s` is the whole call's budget rather than a
+        // per-step one a slow composer could double.
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(
+                args.timeout_s
+                    .unwrap_or(DEFAULT_ASK_TIMEOUT_S)
+                    .clamp(1, MAX_ASK_TIMEOUT_S),
+            );
+
+        let request = AgentRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            asker: caller.as_str().to_string(),
+            target: target.as_str().to_string(),
+            text: question.clone(),
+            created_at: now_ms,
+            depth,
+            status: RequestStatus::Pending,
+            answers: Vec::new(),
+        };
+        // Subscribe before the row is even visible: the moment it lands, a
+        // target reading it can answer, and a reply that arrives before the
+        // channel exists would be lost to a `wait` that then times out on an
+        // already-answered question. Only a `wait` needs a channel — an
+        // `async` asker reads the durable row.
+        let waiter = wait.then(|| self.config.mcp.requests().subscribe(&request.id));
+        self.save_request(&request).await?;
+        self.reclaim_and_announce(now_ms).await;
+
+        tracing::info!(
+            from = %caller.as_str(),
+            to = %args.workspace,
+            request = %request.id,
+            depth,
+            wait,
+            "mcp ask_session: asking a sibling agent"
+        );
+        let envelope = request_envelope(&request.id, &self.workspace_label(caller), &question);
+        let injected = crate::spawn_handler::handle_inject_prompt(
+            &self.config,
+            terminal_id,
+            &envelope,
+            None,
+            true,
+        );
+        if tokio::time::timeout_at(deadline, injected).await.is_err() {
+            // Never delivered, so the request is not open — drop it rather
+            // than leave the target badged with a question it never saw.
+            self.delete_request(&request.id).await;
+            self.config.mcp.requests().forget(&request.id);
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "ask timed out acquiring the target agent terminal".to_string(),
+            )]));
+        }
+        self.push_status_row(
+            target.as_str(),
+            format!(
+                "asked by {}: {}",
+                self.workspace_label(caller),
+                first_line(&question)
+            ),
+            now_ms,
+        )
+        .await;
+        self.announce_open_requests(target.as_str()).await;
+
+        // `async`: no channel was taken, so there is nothing to wait on.
+        let Some(mut waiter) = waiter else {
+            return Ok(json_result(serde_json::json!({
+                "request_id": request.id,
+                "status": "pending",
+                "target": target.as_str(),
+                "hint": "read the answer with poll_request",
+            })));
+        };
+        let answered = tokio::time::timeout_at(deadline, waiter.changed()).await;
+        let answer = answered
+            .ok()
+            .and_then(|_| waiter.borrow_and_update().clone());
+        self.config.mcp.requests().forget(&request.id);
+        match answer {
+            Some(answer) => Ok(json_result(serde_json::json!({
+                "request_id": request.id,
+                "status": "answered",
+                "answer": answer.text,
+                "answered_at": answer.answered_at,
+                "source": answer.source,
+                "target": target.as_str(),
+            }))),
+            None => Ok(json_result(serde_json::json!({
+                "request_id": request.id,
+                "status": "pending",
+                "target": target.as_str(),
+                "hint": "poll with poll_request or re-ask — the request stays open",
+            }))),
+        }
+    }
+
+    /// Answer a question this session was asked. Target-side: identity comes
+    /// from the bearer, so a session cannot answer for someone else.
+    async fn reply_request_payload(
+        &self,
+        caller: &SessionKey,
+        request_id: &str,
+        text: &str,
+        now_ms: i64,
+    ) -> Result<serde_json::Value, McpError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(McpError::invalid_request("reply text is empty", None));
+        }
+        if text.len() > MAX_NOTIFY_BYTES {
+            return Err(McpError::invalid_request(
+                format!("reply exceeds {MAX_NOTIFY_BYTES} bytes (answer, don't paste output)"),
+                None,
+            ));
+        }
+        // Everything below is a read-modify-write of one row. Take the
+        // mutation lock BEFORE the load so the row we edit is the row we
+        // write: a turn-end capture landing between the two would otherwise
+        // be erased by our stale copy, or erase ours by its own.
+        let _write_guard = self.config.mcp.requests_write().lock().await;
+        let Some(mut request) = self.load_request(request_id).await else {
+            return Err(McpError::invalid_request(
+                format!(
+                    "no request {request_id:?} — check the id in the <lazybox-request> envelope"
+                ),
+                None,
+            ));
+        };
+        if request.target != caller.as_str() {
+            return Err(McpError::invalid_request(
+                format!(
+                    "request {request_id:?} was asked of {}, not you — a session can only answer what it was asked",
+                    request.target
+                ),
+                None,
+            ));
+        }
+        let answer = RequestAnswer {
+            text: text.to_string(),
+            answered_at: now_ms,
+            source: AnswerSource::ReplyRequest,
+        };
+        request.answers.push(answer.clone());
+        request.status = RequestStatus::Answered;
+        self.save_request(&request).await?;
+        drop(_write_guard);
+        self.config.mcp.requests().wake(&request.id, answer);
+        let _ = self
+            .config
+            .bus
+            .send(lazybox_ipc::Event::AgentRequestReplied {
+                request_id: request.id.clone(),
+                asker: lazybox_core::WorkspaceKey::new(request.asker.as_str()),
+                target: lazybox_core::WorkspaceKey::new(request.target.as_str()),
+            });
+        self.push_status_row(
+            &request.asker,
+            format!(
+                "replied by {}: {}",
+                self.workspace_label(caller),
+                first_line(text)
+            ),
+            now_ms,
+        )
+        .await;
+        self.announce_open_requests(&request.target).await;
+        Ok(serde_json::json!({
+            "request_id": request.id,
+            "asker": request.asker,
+            "answers": request.answers.len(),
+            "delivered": true,
+        }))
+    }
+
+    /// Read a request's current state. Carries the target's live
+    /// [`AgentState`](lazybox_ipc::AgentState) so "pending" can be told apart
+    /// from "stuck at a prompt".
+    async fn poll_request_payload(
+        &self,
+        caller: &SessionKey,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<serde_json::Value, McpError> {
+        let Some(request) = self.load_request(request_id).await else {
+            return Err(McpError::invalid_request(
+                format!("no request {request_id:?}"),
+                None,
+            ));
+        };
+        // Only the two sessions the exchange belongs to: the asker reads its
+        // answer, the target confirms its reply landed. A bystander holding a
+        // leaked id is not a party to the conversation.
+        if request.asker != caller.as_str() && request.target != caller.as_str() {
+            return Err(McpError::invalid_request(
+                format!("request {request_id:?} is not yours to read"),
+                None,
+            ));
+        }
+        let target_state = api_gateway::agents_response(&self.config)
+            .await
+            .ok()
+            .and_then(|resp| {
+                resp.agents
+                    .into_iter()
+                    .find(|agent| agent.workspace_key == request.target)
+                    .and_then(|agent| agent.state)
+            });
+        let answer = request.latest_answer();
+        Ok(serde_json::json!({
+            "request_id": request.id,
+            "status": request.status,
+            "answer": answer.map(|a| a.text.clone()),
+            "source": answer.map(|a| a.source),
+            "answered_at": answer.map(|a| a.answered_at),
+            "asker": request.asker,
+            "target": request.target,
+            "target_state": target_state,
+            "age_s": (now_ms - request.created_at).max(0) / 1_000,
+        }))
+    }
+
+    async fn delete_request(&self, id: &str) {
+        let key = request_key(id);
+        let _ = crate::store_blocking(&self.config.store, move |store| store.delete_kv(&key)).await;
+    }
+
+    /// Close out requests nobody will ever answer, then drop the oldest
+    /// closed rows past [`REQUESTS_RETAINED`] so the kv stays bounded.
+    ///
+    /// Reclamation is what keeps a `Pending` row from being immortal. Only
+    /// two paths close one normally — `reply_request` and a successful
+    /// turn-end capture — and both need the target to take another turn. A
+    /// target that never does (its injection was dropped at a permission
+    /// prompt, its agent was killed, the daemon restarted past the `Done`)
+    /// would otherwise leave a row that badges its workspace forever, is
+    /// re-seeded on every client connect, and permanently inflates the
+    /// ask-depth of every question that session later asks. Ageing it to
+    /// `Abandoned` past [`REQUEST_TTL_MS`] — comfortably beyond the longest
+    /// possible wait — makes the state machine terminate.
+    ///
+    /// Returns the targets whose open count moved, so the caller can refresh
+    /// their badges.
+    async fn reclaim_requests(&self, now_ms: i64) -> Vec<String> {
+        let _write_guard = self.config.mcp.requests_write().lock().await;
+        let requests = self.all_requests().await;
+        // Age out first, then prune. A row abandoned in this pass is terminal
+        // by the time the prune looks at it, so it is eligible immediately.
+        let mut expire: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut abandoned: Vec<String> = Vec::new();
+        for request in &requests {
+            if request.status != RequestStatus::Pending
+                || now_ms.saturating_sub(request.created_at) <= REQUEST_TTL_MS
+            {
+                continue;
+            }
+            let mut aged = request.clone();
+            aged.status = RequestStatus::Abandoned;
+            let Ok(value) = serde_json::to_string(&aged) else {
+                continue;
+            };
+            expire.insert(request_key(&request.id), value);
+            abandoned.push(request.target.clone());
+            tracing::info!(
+                request = %request.id,
+                target = %request.target,
+                asker = %request.asker,
+                "mcp ask_session: request outlived its TTL unanswered — abandoning it"
+            );
+        }
+        let mut delete: Vec<String> = Vec::new();
+        for request in requests.iter().skip(REQUESTS_RETAINED) {
+            let key = request_key(&request.id);
+            let terminal = request.status != RequestStatus::Pending || expire.contains_key(&key);
+            if terminal {
+                delete.push(key);
+            }
+        }
+        // A row both aged and pruned in one pass only needs the delete.
+        for key in &delete {
+            expire.remove(key);
+        }
+        let mutations: Vec<StoreMutation> = expire
+            .into_iter()
+            .map(|(key, value)| StoreMutation::SetKv { key, value })
+            .chain(
+                delete
+                    .into_iter()
+                    .map(|key| StoreMutation::DeleteKv { key }),
+            )
+            .collect();
+        if mutations.is_empty() {
+            return Vec::new();
+        }
+        if crate::store_blocking(&self.config.store, move |store| {
+            store.apply_batch(&mutations)
+        })
+        .await
+        .is_err()
+        {
+            return Vec::new();
+        }
+        abandoned.sort();
+        abandoned.dedup();
+        abandoned
+    }
+
+    /// Reclaim, then refresh the badge of every target a reclamation closed.
+    async fn reclaim_and_announce(&self, now_ms: i64) {
+        for target in self.reclaim_requests(now_ms).await {
+            self.announce_open_requests(&target).await;
+        }
+    }
+
+    #[tool(
+        description = "Send a snippet from the shared catalog (the same library `]]s` reads — built-in + ~/.lazybox/snippets.yaml + the target repo's .lazybox/snippets.yaml) into a sibling's agent by workspace key. Use it to hand a sibling a standard workflow (`rev`, `dod`, `fixall`) instead of pasting the prompt by hand: it goes through the same settle-gated delivery a human `]]s` uses, so the target's Recent list and `]N` count include it. `vars` fills `{{name}}` placeholders in the body. An unknown key is refused with the nearest names. Returns a handoff, not a confirmation it was read."
+    )]
+    async fn send_snippet(
+        &self,
+        Parameters(args): Parameters<SendSnippetArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        self.send_snippet_payload(&caller, &args).await
+    }
+
+    #[tool(
+        description = "Ask a sibling session a question and get its answer back — the request/response half of the bus, where notify_session is fire-and-forget. The question (free `text`, or a catalog `snippet`) is injected wrapped in a <lazybox-request> envelope telling the target to answer with reply_request. mode=\"wait\" (default) blocks up to timeout_s (default 120, max 600 — your own MCP client's call timeout is the real ceiling) and returns the answer; mode=\"async\" returns a request_id immediately for poll_request. A wait that times out leaves the request open. Nested asks — asking while you still owe an answer — are capped at 3 hops, so agents that defer to each other instead of answering are stopped."
+    )]
+    async fn ask_session(
+        &self,
+        Parameters(args): Parameters<AskSessionArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.ask_session_payload(&caller, &args, now_ms).await
+    }
+
+    #[tool(
+        description = "Answer a question a sibling asked you with ask_session. Pass the `request_id` from the <lazybox-request> envelope you were sent and your answer; the waiting asker is woken immediately. Only the session the question was asked of may answer it. Replying twice appends a correction and wakes the asker again. Answer before moving on — an unanswered request falls back to a low-fidelity capture of your scrollback."
+    )]
+    async fn reply_request(
+        &self,
+        Parameters(args): Parameters<ReplyRequestArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        Ok(json_result(
+            self.reply_request_payload(&caller, &args.request_id, &args.text, now_ms)
+                .await?,
+        ))
+    }
+
+    #[tool(
+        description = "Read the state of a request you made with ask_session: status (pending / answered / answered_by_capture / abandoned), the answer when there is one, and how long it has been open. Only the asker and the target may read a request. Also reports the target's live agent state, so a pending request against an `InputNeeded` target reads as \"it's stuck on a prompt\" rather than \"it's still thinking\"."
+    )]
+    async fn poll_request(
+        &self,
+        Parameters(args): Parameters<PollRequestArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        Ok(json_result(
+            self.poll_request_payload(&caller, &args.request_id, now_ms)
+                .await?,
+        ))
     }
 
     /// Freshly-resolved snapshots for every non-archived epic, optionally
@@ -1383,7 +2273,11 @@ impl ServerHandler for LazyboxMcp {
                  distilled context to the shared blackboard with post_note and \
                  pull it — across repos, persistently — with read_notes. To \
                  actively poke another session, push an instruction into it with \
-                 notify_session. For cross-repo epics: epic_status is the live \
+                 notify_session. When you need an ANSWER rather than a \
+                 handoff, ask_session sends a question (or a catalog snippet \
+                 via send_snippet) to a sibling and returns its reply; if you \
+                 receive a <lazybox-request>, answer it with reply_request \
+                 before moving on. For cross-repo epics: epic_status is the live \
                  plan of record (each member's derived status, blockers, and the \
                  ready/blocked rollup) and epic_ready is the ranked queue of \
                  what's workable now — answer epic questions from these rather \
@@ -1634,6 +2528,42 @@ pub async fn deprovision_session(config: &ServerConfig, session_key: &SessionKey
     config.mcp.tokens().forget_session(session_key);
     let _ = std::fs::remove_file(mcp_config_path(session_key));
     persist_tokens(config).await;
+    // The agent that owed these answers is gone, so no turn-end capture can
+    // ever close them. Left `Pending` they would badge a dead session forever
+    // and keep inflating the ask-depth of anything that asked it (#1653).
+    abandon_requests_for(config, session_key).await;
+}
+
+/// Mark every request still open against `session_key` as `Abandoned` and
+/// refresh its badge. Called when the session's last agent terminal ends.
+pub(crate) async fn abandon_requests_for(config: &ServerConfig, session_key: &SessionKey) {
+    let handler = LazyboxMcp::new(config.clone());
+    let open = handler.open_requests_for(session_key.as_str()).await;
+    if open.is_empty() {
+        return;
+    }
+    {
+        let _write_guard = config.mcp.requests_write().lock().await;
+        for request in open {
+            // Re-check under the lock: a reply may have landed as the session
+            // was tearing down, and a real answer outranks abandonment.
+            let Some(mut fresh) = handler.load_request(&request.id).await else {
+                continue;
+            };
+            if fresh.status != RequestStatus::Pending {
+                continue;
+            }
+            fresh.status = RequestStatus::Abandoned;
+            let _ = handler.save_request(&fresh).await;
+            tracing::info!(
+                request = %fresh.id,
+                target = %fresh.target,
+                asker = %fresh.asker,
+                "mcp ask_session: target session ended without answering — abandoning its request"
+            );
+        }
+    }
+    handler.announce_open_requests(session_key.as_str()).await;
 }
 
 /// Directory holding per-session MCP config files. Each embeds a bearer token,
@@ -1733,6 +2663,297 @@ const NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 6
 /// pasting megabytes into another session's PTY. The gateway's `/v1/agents/inject`
 /// is bounded too, by its command-frame size (`MAX_COMMAND_FRAME_BYTES`).
 const MAX_NOTIFY_BYTES: usize = MAX_NOTE_BYTES;
+
+/// kv prefix under which every agent-to-agent request lives (#1653).
+const REQUEST_KV_PREFIX: &str = "lazybox:request:";
+/// How many request rows are kept before the oldest ANSWERED ones are
+/// pruned. Requests are small; the cap exists so a long-lived daemon's kv
+/// doesn't grow one row per question ever asked.
+const REQUESTS_RETAINED: usize = 200;
+/// How long a `Pending` request may sit unanswered before reclamation marks
+/// it `Abandoned`. Thirty-six times [`MAX_ASK_TIMEOUT_S`], so it can never
+/// close a request some asker is still blocked on; short enough that a badge
+/// left by a dropped injection clears within a working day.
+const REQUEST_TTL_MS: i64 = 6 * 60 * 60 * 1000;
+/// Deepest chain of **nested** asks — asks made while the asker itself owes
+/// an answer. A→B→A→B is three hops; the fourth is refused, so agents that
+/// keep deferring to each other instead of answering stop rather than filling
+/// both contexts with open questions.
+///
+/// This bounds nesting, not conversation: answering releases the depth, so
+/// two agents that each reply before asking back can trade questions
+/// indefinitely. That is deliberate — each such ask costs one turn and
+/// resolves, which is a dialogue, not the unbounded recursion this guards.
+const MAX_ASK_DEPTH: u32 = 3;
+/// Default and maximum `ask_session` wait, in seconds. The MCP client's own
+/// call timeout is the real ceiling — a longer wait here just returns
+/// `pending` to a caller that already gave up.
+const DEFAULT_ASK_TIMEOUT_S: u64 = 120;
+const MAX_ASK_TIMEOUT_S: u64 = 600;
+/// Lines of the target's output captured as a fallback answer when it ends
+/// a turn without replying. Enough to carry a conclusion, short enough that
+/// it cannot dominate the asker's context.
+const TURN_END_CAPTURE_LINES: usize = 60;
+
+/// A request's kv key. The id is a uuid (hex + `-`), so sanitizing for the
+/// key can't collide two distinct ids.
+fn request_key(id: &str) -> String {
+    format!("{REQUEST_KV_PREFIX}{}", sanitize_key(id))
+}
+
+/// The text injected into the target: the question, fenced so the agent can
+/// tell it from its own operator's words, plus the one instruction that
+/// closes the loop.
+fn request_envelope(id: &str, from: &str, text: &str) -> String {
+    format!(
+        "<lazybox-request id=\"{id}\" from=\"{from}\">\n{text}\n</lazybox-request>\n\
+         When you have the answer, call `reply_request` with id \"{id}\" and your answer; \
+         keep working after that if you have more to do."
+    )
+}
+
+/// First non-empty line of `text`, bounded, for an activity row's teaser.
+fn first_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() <= ACTIVITY_TEASER_CHARS {
+        return line.to_string();
+    }
+    let head: String = line.chars().take(ACTIVITY_TEASER_CHARS).collect();
+    format!("{head}…")
+}
+
+/// Characters of a question/answer carried into the activity row. The feed
+/// is a pointer to the conversation, not a copy of it.
+const ACTIVITY_TEASER_CHARS: usize = 120;
+
+/// Replace `{{name}}` placeholders in a snippet body. A placeholder with no
+/// matching var is left as written — a half-substituted body reads as a bug
+/// to the receiving agent, which is better than silently dropping context it
+/// was told to expect.
+fn apply_snippet_vars(body: &str, vars: &std::collections::BTreeMap<String, String>) -> String {
+    let mut out = body.to_string();
+    for (name, value) in vars {
+        out = out.replace(&format!("{{{{{name}}}}}"), value);
+    }
+    out
+}
+
+/// The directory whose `.lazybox/snippets.yaml` layer applies to a target
+/// workspace: the first of its checkout candidates that actually carries
+/// one. `None` leaves the catalog at built-in + global, which is what the
+/// picker shows on a workspace without a repo library.
+fn snippet_launch_dir(workspace: &lazybox_core::Workspace) -> Option<std::path::PathBuf> {
+    [
+        workspace.linked_checkout.clone(),
+        workspace
+            .sessions
+            .first()
+            .map(|session| session.worktree_path.clone()),
+        crate::spawn_handler::main_worktree_path(workspace),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|dir| lazybox_config::Snippets::default_repo_path(dir).exists())
+}
+
+/// The `limit` catalog keys closest to `key` by edit distance, nearest
+/// first. What a picker's fuzzy match would have shown a human.
+fn nearest_keys(key: &str, candidates: &[&str], limit: usize) -> Vec<String> {
+    let mut scored: Vec<(usize, &str)> = candidates
+        .iter()
+        .map(|candidate| (edit_distance(key, candidate), *candidate))
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, candidate)| candidate.to_string())
+        .collect()
+}
+
+/// Levenshtein distance over chars, two rows wide.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, ac) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, bc) in b.iter().enumerate() {
+            let substitute = prev[j] + usize::from(ac != *bc);
+            curr[j + 1] = substitute.min(prev[j + 1] + 1).min(curr[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
+/// Subscribe the turn-end capture to the event bus. Like the other bus
+/// subscribers, subscribe here — before the task spawns — so an
+/// `AgentState` between this call and the first `recv` queues rather than
+/// vanishes.
+pub fn spawn_request_watcher(config: &ServerConfig) -> tokio::task::JoinHandle<()> {
+    let mut rx = config.bus.subscribe();
+    let config = config.clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(lazybox_ipc::Event::AgentState {
+                    session_key,
+                    state: lazybox_ipc::AgentState::Done,
+                    ..
+                }) => {
+                    // Off the receive path: the capture does a store scan and
+                    // a backend scrollback read, and awaiting it here would
+                    // stall `recv` long enough for a busy fleet to lag this
+                    // subscriber — dropping the very `Done` events the
+                    // fallback exists to act on. Concurrent captures are safe:
+                    // each re-loads under the mutation lock and skips a row
+                    // that is no longer `Pending`.
+                    let config = config.clone();
+                    tokio::spawn(async move {
+                        capture_turn_end_answer(
+                            &config,
+                            &session_key,
+                            chrono::Utc::now().timestamp_millis(),
+                        )
+                        .await;
+                    });
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// Close any request still open against `session_key` by capturing the tail
+/// of its agent's output as the answer.
+///
+/// The fidelity is low on purpose: it is scrollback, not a considered reply,
+/// and the asker is told so through `source: "turn_end_capture"`. The
+/// alternative — a target that simply never calls `reply_request` — is a
+/// waiting asker that learns nothing until its timeout.
+///
+/// Only requests created before this turn ended are captured. A `Done`
+/// racing an ask that has not yet reached the composer would otherwise
+/// answer a question the target never saw; the target is idle-`Done` when
+/// asked, so no further `Done` transition fires until the injected turn
+/// finishes, and the window is a few milliseconds wide.
+pub(crate) async fn capture_turn_end_answer(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    now_ms: i64,
+) {
+    let handler = LazyboxMcp::new(config.clone());
+    let candidates: Vec<String> = handler
+        .open_requests_for(session_key.as_str())
+        .await
+        .into_iter()
+        .filter(|request| request.created_at <= now_ms)
+        .map(|request| request.id)
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    // Read the scrollback BEFORE taking the mutation lock: it is a backend
+    // round trip, and holding the lock across it would serialize every
+    // sibling's replies behind one slow snapshot.
+    let Some(text) = handler
+        .read_session_text(session_key.as_str(), Some(TURN_END_CAPTURE_LINES))
+        .await
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+    else {
+        return;
+    };
+    for (request, answer) in
+        apply_captured_answers(config, &handler, candidates, &text, now_ms).await
+    {
+        tracing::info!(
+            request = %request.id,
+            target = %request.target,
+            asker = %request.asker,
+            "mcp ask_session: target ended its turn without replying — capturing its output tail"
+        );
+        config.mcp.requests().wake(&request.id, answer);
+        handler
+            .push_status_row(
+                &request.asker,
+                format!(
+                    "{} ended its turn without answering — captured its output tail",
+                    handler.workspace_label(session_key)
+                ),
+                now_ms,
+            )
+            .await;
+    }
+    handler.announce_open_requests(session_key.as_str()).await;
+}
+
+/// Write the captured tail onto each still-open request in `candidates`.
+///
+/// Split from [`capture_turn_end_answer`] because the gap it guards is the
+/// gap between snapshotting the candidates and writing them — the caller
+/// reads the target's scrollback in between, and the target can answer for
+/// real in that window. Taking a stale snapshot as an argument is exactly the
+/// hazard, so the CAS lives here and is exercised directly by passing ids
+/// whose rows have since moved on.
+async fn apply_captured_answers(
+    config: &ServerConfig,
+    handler: &LazyboxMcp,
+    candidates: Vec<String>,
+    text: &str,
+    now_ms: i64,
+) -> Vec<(AgentRequest, RequestAnswer)> {
+    let mut captured = Vec::new();
+    let _write_guard = config.mcp.requests_write().lock().await;
+    for id in candidates {
+        // Re-load under the lock and re-check: the target may have called
+        // `reply_request` while the scrollback was being read, and a real
+        // answer must never be overwritten by the fallback for it.
+        let Some(mut request) = handler.load_request(&id).await else {
+            continue;
+        };
+        if request.status != RequestStatus::Pending {
+            continue;
+        }
+        let answer = RequestAnswer {
+            text: text.to_string(),
+            answered_at: now_ms,
+            source: AnswerSource::TurnEndCapture,
+        };
+        request.answers.push(answer.clone());
+        request.status = RequestStatus::AnsweredByCapture;
+        if handler.save_request(&request).await.is_err() {
+            continue;
+        }
+        captured.push((request, answer));
+    }
+    captured
+}
+
+/// Every workspace currently carrying an open request, with its count.
+/// Replayed after the `Subscribe` snapshot so a connecting client seeds its
+/// `?N` badges instead of waiting for the next change.
+pub async fn open_request_counts(
+    config: &ServerConfig,
+) -> Vec<(lazybox_core::WorkspaceKey, usize)> {
+    let handler = LazyboxMcp::new(config.clone());
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for request in handler.all_requests().await {
+        if request.status == RequestStatus::Pending {
+            *counts.entry(request.target).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(target, open)| (lazybox_core::WorkspaceKey::new(target), open))
+        .collect()
+}
 
 /// kv prefix under which every blackboard note lives.
 const NOTE_KV_PREFIX: &str = "lazybox:note:";
@@ -3153,6 +4374,899 @@ mod tests {
         );
     }
 
+    // ── agent-to-agent request/response (#1653) ─────────────────────────
+
+    /// Register a live agent terminal for `session_key` on the mock backend,
+    /// with its workspace row saved, so the delivery paths have something to
+    /// inject into. Mirrors `spawn_handler`'s own test harness.
+    async fn live_agent(
+        config: &ServerConfig,
+        mock: &crate::backend::MockBackend,
+        session_key: &SessionKey,
+        terminal_id: lazybox_ipc::TerminalId,
+    ) -> String {
+        let workspace = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new(session_key.as_str()),
+            "main",
+            chrono::Utc::now(),
+        );
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: workspace.key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).expect("serialize")),
+            })
+            .expect("save workspace");
+        let backend_key = mock
+            .spawn(&["claude".into()], None, &[], session_key.as_str())
+            .await
+            .expect("spawn mock terminal");
+        config
+            .terminal
+            .register_terminal(
+                terminal_id,
+                backend_key.clone(),
+                session_key.clone(),
+                lazybox_ipc::TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        config
+            .terminal
+            .record_agent_state_generation(terminal_id, terminal_id.0)
+            .await;
+        config
+            .terminal
+            .record_agent_state(terminal_id, lazybox_ipc::AgentState::Done)
+            .await;
+        backend_key
+    }
+
+    #[test]
+    fn snippet_vars_substitute_and_leave_unknown_placeholders() {
+        let vars = std::collections::BTreeMap::from([
+            ("area".to_string(), "the lock order".to_string()),
+            ("unused".to_string(), "nope".to_string()),
+        ]);
+        assert_eq!(
+            apply_snippet_vars("Review {{area}} then {{missing}}", &vars),
+            "Review the lock order then {{missing}}",
+            "an unfilled placeholder stays visible rather than vanishing"
+        );
+    }
+
+    #[test]
+    fn nearest_keys_rank_by_edit_distance() {
+        let candidates = ["rev", "deepreview", "dod", "fixall", "push"];
+        assert_eq!(nearest_keys("rev", &candidates, 1), vec!["rev"]);
+        assert_eq!(nearest_keys("dud", &candidates, 1), vec!["dod"]);
+        assert_eq!(nearest_keys("fixal", &candidates, 1), vec!["fixall"]);
+        assert_eq!(nearest_keys("zzz", &candidates, 3).len(), 3);
+    }
+
+    #[test]
+    fn request_envelope_carries_the_id_and_the_reply_instruction() {
+        let envelope = request_envelope("abc", "Auth refactor", "what is left on #581?");
+        assert!(envelope.contains("<lazybox-request id=\"abc\" from=\"Auth refactor\">"));
+        assert!(envelope.contains("what is left on #581?"));
+        assert!(envelope.contains("</lazybox-request>"));
+        assert!(
+            envelope.contains("call `reply_request` with id \"abc\""),
+            "the target must be told how to close the loop: {envelope}"
+        );
+    }
+
+    /// A tool-sent snippet is indistinguishable from a human `]]s`: the same
+    /// `DeliverSnippet` path, so `Event::SnippetDelivered` fires and the
+    /// target's MRU / `]N` count move.
+    #[tokio::test(start_paused = true)]
+    async fn send_snippet_resolves_catalog_key_and_records_mru() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let terminal_id = lazybox_ipc::TerminalId(9101);
+        live_agent(&config, &mock, &target, terminal_id).await;
+        let mut events = config.bus.subscribe();
+
+        let result = handler
+            .send_snippet_payload(
+                &asker,
+                &SendSnippetArgs {
+                    workspace: target.as_str().to_string(),
+                    key: "rev".into(),
+                    vars: Default::default(),
+                    submit: true,
+                },
+            )
+            .await
+            .expect("send_snippet");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+
+        let delivered = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            loop {
+                match events.recv().await {
+                    Ok(lazybox_ipc::Event::SnippetDelivered { snippet_key, .. }) => {
+                        return snippet_key;
+                    }
+                    Ok(_) => {}
+                    Err(error) => panic!("bus closed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("the delivery is announced like any other");
+        assert_eq!(delivered, "rev");
+
+        let stored = handler
+            .load_workspace(&lazybox_core::WorkspaceKey::new(target.as_str()))
+            .expect("workspace row");
+        assert_eq!(stored.sent_snippets.total(), 1, "the `]N` count moved");
+        assert!(
+            stored.sent_snippets.recent().iter().any(|key| key == "rev"),
+            "the target's Recent list carries the snippet a sibling sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_snippet_unknown_key_names_nearest() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let error = handler
+            .resolve_snippet(
+                &SessionKey::from("github:acme/widget#2"),
+                "revv",
+                &Default::default(),
+            )
+            .expect_err("an unknown key is refused");
+        let message = error.to_string();
+        assert!(message.contains("revv"), "{message}");
+        assert!(
+            message.contains("rev"),
+            "the refusal must name the nearest keys — a tool caller cannot browse the picker: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_snippet_refuses_self_target() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let me = SessionKey::from("github:acme/widget#1");
+        assert!(
+            handler
+                .send_snippet_payload(
+                    &me,
+                    &SendSnippetArgs {
+                        workspace: me.as_str().to_string(),
+                        key: "rev".into(),
+                        vars: Default::default(),
+                        submit: true,
+                    },
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    fn ask(
+        workspace: &SessionKey,
+        text: &str,
+        mode: &str,
+        timeout_s: Option<u64>,
+    ) -> AskSessionArgs {
+        AskSessionArgs {
+            workspace: workspace.as_str().to_string(),
+            text: Some(text.to_string()),
+            snippet: None,
+            timeout_s,
+            mode: Some(mode.to_string()),
+        }
+    }
+
+    /// The round trip: A asks, B replies, A's blocked `wait` returns the
+    /// answer — woken by the registry, not by polling the store.
+    #[tokio::test(start_paused = true)]
+    async fn ask_session_wait_returns_reply() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9201)).await;
+
+        let replier = {
+            let handler = handler.clone();
+            let target = target.clone();
+            tokio::spawn(async move {
+                // Wait for the ask to persist its row, then answer it.
+                loop {
+                    if let Some(request) = handler.open_requests_for(target.as_str()).await.first()
+                    {
+                        return handler
+                            .reply_request_payload(&target, &request.id, "three tests left", 2_000)
+                            .await
+                            .expect("reply");
+                    }
+                    tokio::task::yield_now().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+        };
+
+        let result = handler
+            .ask_session_payload(
+                &asker,
+                &ask(&target, "what is left on #581?", "wait", None),
+                1_000,
+            )
+            .await
+            .expect("ask_session");
+        replier.await.expect("replier");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        assert_eq!(payload["status"], "answered", "{payload}");
+        assert_eq!(payload["answer"], "three tests left");
+        assert_eq!(payload["source"], "reply_request");
+    }
+
+    /// A reply that never comes leaves the request OPEN and the asker told
+    /// so — the one thing it must not do is claim an answer.
+    #[tokio::test(start_paused = true)]
+    async fn ask_session_times_out_to_pending() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9301)).await;
+
+        let result = handler
+            .ask_session_payload(
+                &asker,
+                &ask(&target, "still there?", "wait", Some(1)),
+                1_000,
+            )
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        assert_eq!(payload["status"], "pending", "{payload}");
+        assert!(
+            payload["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("poll_request"))
+        );
+        assert_eq!(
+            handler.open_requests_for(target.as_str()).await.len(),
+            1,
+            "a timed-out wait leaves the request open, not dropped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ask_session_async_returns_immediately() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9401)).await;
+
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        assert_eq!(payload["status"], "pending");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        handler
+            .reply_request_payload(&target, &id, "green", 2_000)
+            .await
+            .expect("reply");
+        let polled = handler
+            .poll_request_payload(&asker, &id, 5_000)
+            .await
+            .expect("poll");
+        assert_eq!(polled["status"], "answered");
+        assert_eq!(polled["answer"], "green");
+        assert_eq!(polled["age_s"], 4);
+    }
+
+    /// Identity comes from the bearer, so a session can only answer what it
+    /// was asked — otherwise any agent could put words in another's mouth.
+    #[tokio::test(start_paused = true)]
+    async fn reply_request_refuses_non_target() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let bystander = SessionKey::from("github:acme/widget#3");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9501)).await;
+
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        let error = handler
+            .reply_request_payload(&bystander, &id, "I'll take this one", 2_000)
+            .await
+            .expect_err("a bystander cannot answer");
+        assert!(error.to_string().contains(target.as_str()), "{error}");
+        assert!(
+            handler
+                .reply_request_payload(&target, &id, "mine", 2_000)
+                .await
+                .is_ok(),
+            "the real target still answers"
+        );
+    }
+
+    /// A second reply appends rather than overwriting, and re-wakes — an
+    /// agent that corrects itself must not erase what the asker already read.
+    #[tokio::test(start_paused = true)]
+    async fn reply_request_is_idempotent_and_appends() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9601)).await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        handler
+            .reply_request_payload(&target, &id, "first answer", 2_000)
+            .await
+            .expect("reply");
+        let second = handler
+            .reply_request_payload(&target, &id, "correction: two left", 3_000)
+            .await
+            .expect("second reply");
+        assert_eq!(second["answers"], 2);
+        let polled = handler
+            .poll_request_payload(&asker, &id, 4_000)
+            .await
+            .expect("poll");
+        assert_eq!(
+            polled["answer"], "correction: two left",
+            "the latest answer is what the asker reads"
+        );
+    }
+
+    /// A→B→A→B is the deepest chain; the fourth hop is refused with the
+    /// loop spelled out rather than run.
+    #[tokio::test(start_paused = true)]
+    async fn ask_depth_guard_stops_loops() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let a = SessionKey::from("github:acme/widget#1");
+        let b = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &a, lazybox_ipc::TerminalId(9701)).await;
+        live_agent(&config, &mock, &b, lazybox_ipc::TerminalId(9702)).await;
+
+        let mut from = a.clone();
+        let mut to = b.clone();
+        for hop in 1..=MAX_ASK_DEPTH {
+            let result = handler
+                .ask_session_payload(&from, &ask(&to, "and you?", "async", None), 1_000)
+                .await
+                .unwrap_or_else(|error| panic!("hop {hop} must be allowed: {error}"));
+            assert_ne!(result.is_error, Some(true), "hop {hop}: {result:?}");
+            std::mem::swap(&mut from, &mut to);
+        }
+        let error = handler
+            .ask_session_payload(&from, &ask(&to, "and you?", "async", None), 1_000)
+            .await
+            .expect_err("the fourth hop must be refused");
+        let message = error.to_string();
+        assert!(message.contains("looping"), "{message}");
+        assert!(
+            message.contains(" → "),
+            "the refusal must name the chain: {message}"
+        );
+    }
+
+    /// "Pending" alone cannot tell "thinking" from "parked at a prompt", so
+    /// the poll carries the target's live agent state.
+    #[tokio::test(start_paused = true)]
+    async fn poll_request_reports_target_state() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let terminal_id = lazybox_ipc::TerminalId(9801);
+        live_agent(&config, &mock, &target, terminal_id).await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        config
+            .terminal
+            .record_agent_state(terminal_id, lazybox_ipc::AgentState::InputNeeded)
+            .await;
+        let polled = handler
+            .poll_request_payload(&asker, &id, 1_000)
+            .await
+            .expect("poll");
+        assert_eq!(polled["status"], "pending");
+        assert_eq!(
+            polled["target_state"], "InputNeeded",
+            "a pending request against a parked target must read as stuck: {polled}"
+        );
+    }
+
+    /// The fallback: a target that ends its turn without replying still
+    /// yields something, flagged as the lower-fidelity capture it is.
+    #[tokio::test(start_paused = true)]
+    async fn turn_end_capture_answers_when_target_never_replies() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let terminal_id = lazybox_ipc::TerminalId(9901);
+        let backend_key = live_agent(&config, &mock, &target, terminal_id).await;
+        mock.emit(&backend_key, b"tests: 3 failing, then green\n")
+            .await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        capture_turn_end_answer(&config, &target, 5_000).await;
+
+        let polled = handler
+            .poll_request_payload(&asker, &id, 6_000)
+            .await
+            .expect("poll");
+        assert_eq!(polled["status"], "answered_by_capture", "{polled}");
+        assert_eq!(polled["source"], "turn_end_capture");
+        assert!(
+            polled["answer"].as_str().is_some_and(|a| !a.is_empty()),
+            "the capture must carry the target's output tail: {polled}"
+        );
+        assert!(
+            handler.open_requests_for(target.as_str()).await.is_empty(),
+            "the capture closes the request so the badge clears"
+        );
+    }
+
+    /// **The lost update (review finding 2).** The capture snapshots the open
+    /// set, reads the target's scrollback — a backend round trip — and only
+    /// then writes. A reply landing in that window must not be erased by the
+    /// stale snapshot. Reproduced exactly: snapshot the candidates while the
+    /// request is still open, let the real reply commit, then apply the
+    /// capture with that now-stale list.
+    #[tokio::test(start_paused = true)]
+    async fn turn_end_capture_never_overwrites_a_reply_that_raced_it() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let backend_key = live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9941)).await;
+        mock.emit(&backend_key, b"...scrollback noise...\n").await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        // The candidate list the capture holds across its scrollback read.
+        let stale: Vec<String> = handler
+            .open_requests_for(target.as_str())
+            .await
+            .into_iter()
+            .map(|request| request.id)
+            .collect();
+        assert_eq!(
+            stale,
+            vec![id.clone()],
+            "the request is open when snapshotted"
+        );
+
+        // The target answers for real, mid-scrollback-read.
+        handler
+            .reply_request_payload(&target, &id, "three tests left", 2_000)
+            .await
+            .expect("reply");
+
+        // The capture now writes its stale snapshot. Before the CAS this
+        // replaced the reply with scrollback.
+        let captured =
+            apply_captured_answers(&config, &handler, stale, "...scrollback noise...", 3_000).await;
+        assert!(
+            captured.is_empty(),
+            "a request that was answered while we read must not be captured"
+        );
+
+        let polled = handler
+            .poll_request_payload(&asker, &id, 4_000)
+            .await
+            .expect("poll");
+        assert_eq!(
+            polled["answer"], "three tests left",
+            "the considered reply must survive the fallback: {polled}"
+        );
+        assert_eq!(polled["status"], "answered");
+        assert_eq!(polled["source"], "reply_request");
+    }
+
+    /// Two replies racing must both land — the tool advertises that a second
+    /// reply appends a correction, and an unguarded read-modify-write drops
+    /// one of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_replies_both_append() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9951)).await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        let mut tasks = Vec::new();
+        for i in 0..8 {
+            let handler = handler.clone();
+            let target = target.clone();
+            let id = id.clone();
+            tasks.push(tokio::spawn(async move {
+                handler
+                    .reply_request_payload(&target, &id, &format!("answer {i}"), 2_000 + i)
+                    .await
+                    .expect("reply");
+            }));
+        }
+        for task in tasks {
+            task.await.expect("join");
+        }
+        let stored = handler.load_request(&id).await.expect("request row");
+        assert_eq!(
+            stored.answers.len(),
+            8,
+            "every concurrent reply must append — none silently overwritten"
+        );
+    }
+
+    /// **The orphan leak (review finding 1).** An injection dropped at a
+    /// permission prompt leaves a request no turn-end capture can ever close,
+    /// because the target never takes a turn. Reclamation must age it out, or
+    /// it badges the workspace forever and keeps inflating ask-depth.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswerable_request_is_reclaimed_past_its_ttl() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9961)).await;
+        handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        assert_eq!(handler.open_requests_for(target.as_str()).await.len(), 1);
+
+        // Well inside the TTL: still open, still badging — a slow target is
+        // not an abandoned one.
+        handler.reclaim_and_announce(1_000 + REQUEST_TTL_MS).await;
+        assert_eq!(
+            handler.open_requests_for(target.as_str()).await.len(),
+            1,
+            "reclamation must not close a request that is merely slow"
+        );
+
+        handler.reclaim_and_announce(1_001 + REQUEST_TTL_MS).await;
+        assert!(
+            handler.open_requests_for(target.as_str()).await.is_empty(),
+            "past the TTL the request must stop counting as open"
+        );
+        assert!(
+            open_request_counts(&config).await.is_empty(),
+            "and stop being re-seeded as a badge on every client connect"
+        );
+    }
+
+    /// The depth budget is released by reclamation too: three stacked orphans
+    /// must not permanently bar a session from ever asking again.
+    #[tokio::test(start_paused = true)]
+    async fn reclamation_frees_the_ask_depth_an_orphan_was_holding() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let a = SessionKey::from("github:acme/widget#1");
+        let b = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &a, lazybox_ipc::TerminalId(9971)).await;
+        live_agent(&config, &mock, &b, lazybox_ipc::TerminalId(9972)).await;
+
+        let mut from = a.clone();
+        let mut to = b.clone();
+        for _ in 1..=MAX_ASK_DEPTH {
+            handler
+                .ask_session_payload(&from, &ask(&to, "and you?", "async", None), 1_000)
+                .await
+                .expect("ask");
+            std::mem::swap(&mut from, &mut to);
+        }
+        assert!(
+            handler
+                .ask_session_payload(&from, &ask(&to, "again?", "async", None), 1_000)
+                .await
+                .is_err(),
+            "the depth guard holds while the chain is open"
+        );
+
+        handler.reclaim_and_announce(1_001 + REQUEST_TTL_MS).await;
+        assert!(
+            handler
+                .ask_session_payload(
+                    &from,
+                    &ask(&to, "again?", "async", None),
+                    2_000 + REQUEST_TTL_MS
+                )
+                .await
+                .is_ok(),
+            "once the abandoned chain is reclaimed the session can ask again"
+        );
+    }
+
+    /// A session whose agent ends can never answer, so teardown closes what it
+    /// owed rather than leaving a dead row badging it forever.
+    #[tokio::test(start_paused = true)]
+    async fn ending_a_session_abandons_the_requests_it_owed() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9981)).await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        abandon_requests_for(&config, &target).await;
+
+        assert!(
+            handler.open_requests_for(target.as_str()).await.is_empty(),
+            "a dead session owes nothing"
+        );
+        let polled = handler
+            .poll_request_payload(&asker, &id, 2_000)
+            .await
+            .expect("poll");
+        assert_eq!(
+            polled["status"], "abandoned",
+            "and the asker is told why it will never get an answer: {polled}"
+        );
+    }
+
+    /// A bystander holding a leaked id is not a party to the exchange.
+    #[tokio::test(start_paused = true)]
+    async fn poll_request_refuses_a_third_party() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let bystander = SessionKey::from("github:acme/widget#3");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9991)).await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        assert!(
+            handler
+                .poll_request_payload(&bystander, &id, 2_000)
+                .await
+                .is_err()
+        );
+        assert!(
+            handler
+                .poll_request_payload(&asker, &id, 2_000)
+                .await
+                .is_ok()
+        );
+        assert!(
+            handler
+                .poll_request_payload(&target, &id, 2_000)
+                .await
+                .is_ok(),
+            "the target may confirm its own reply landed"
+        );
+    }
+
+    /// The capture must not answer a question the target never saw.
+    #[tokio::test(start_paused = true)]
+    async fn turn_end_capture_ignores_a_request_made_after_the_turn_ended() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let backend_key = live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9911)).await;
+        // Real output to capture, so the assertion below is about the
+        // created_at guard and not about an empty snapshot.
+        mock.emit(&backend_key, b"unrelated earlier work\n").await;
+        handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 10_000)
+            .await
+            .expect("ask_session");
+
+        capture_turn_end_answer(&config, &target, 5_000).await;
+        assert_eq!(
+            handler.open_requests_for(target.as_str()).await.len(),
+            1,
+            "a turn that ended before the ask cannot have answered it"
+        );
+    }
+
+    /// The `?N` badge's carrier: the daemon announces the open count on
+    /// every move and seeds it on connect.
+    #[tokio::test(start_paused = true)]
+    async fn open_requests_are_announced_and_seeded() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9921)).await;
+        let mut events = config.bus.subscribe();
+
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        let mut opened = None;
+        while let Ok(event) = events.try_recv() {
+            if let lazybox_ipc::Event::AgentRequestsOpen {
+                workspace_key,
+                open,
+            } = event
+            {
+                opened = Some((workspace_key, open));
+            }
+        }
+        assert_eq!(
+            opened,
+            Some((lazybox_core::WorkspaceKey::new(target.as_str()), 1)),
+            "an ask badges the target"
+        );
+        assert_eq!(
+            open_request_counts(&config).await,
+            vec![(lazybox_core::WorkspaceKey::new(target.as_str()), 1)],
+            "and a client connecting now seeds the same count"
+        );
+
+        handler
+            .reply_request_payload(&target, &id, "green", 2_000)
+            .await
+            .expect("reply");
+        assert!(
+            open_request_counts(&config).await.is_empty(),
+            "answering clears the badge"
+        );
+    }
+
+    /// Both halves of the round trip land on the feed the operator reads:
+    /// the question on the target's, the answer on the asker's.
+    #[tokio::test(start_paused = true)]
+    async fn ask_and_reply_land_on_both_activity_feeds() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        live_agent(&config, &mock, &asker, lazybox_ipc::TerminalId(9931)).await;
+        live_agent(&config, &mock, &target, lazybox_ipc::TerminalId(9932)).await;
+
+        let result = handler
+            .ask_session_payload(
+                &asker,
+                &ask(&target, "what is left on #581?", "async", None),
+                1_000,
+            )
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        handler
+            .reply_request_payload(&target, &id, "three tests", 2_000)
+            .await
+            .expect("reply");
+
+        let row = |key: &SessionKey| {
+            handler
+                .load_workspace(&lazybox_core::WorkspaceKey::new(key.as_str()))
+                .expect("workspace row")
+                .activity
+                .iter()
+                .map(|a| a.body.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            row(&target)
+                .iter()
+                .any(|body| body.contains("asked by") && body.contains("what is left on #581?")),
+            "the target's feed records the question: {:?}",
+            row(&target)
+        );
+        assert!(
+            row(&asker)
+                .iter()
+                .any(|body| body.contains("replied by") && body.contains("three tests")),
+            "the asker's feed records the answer: {:?}",
+            row(&asker)
+        );
+    }
+
     #[tokio::test]
     async fn e2e_round_trip_over_rmcp_client() {
         use rmcp::ServiceExt;
@@ -3160,7 +5274,7 @@ mod tests {
         use rmcp::transport::StreamableHttpClientTransport;
         use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 
-        let config = ServerConfig::in_memory();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
         let addr = start(config.clone()).await.expect("mcp listener binds");
 
         // Register a bearer the way the spawn path does, then connect a real
@@ -3169,13 +5283,16 @@ mod tests {
         let token = "e2e-bearer";
         config.mcp.tokens().register(token, key.clone());
 
-        let mut client_config = StreamableHttpClientTransportConfig::default();
-        client_config.uri = format!("http://{addr}/").into();
-        // rmcp's reqwest client sends this via `bearer_auth`, which prepends
-        // "Bearer " itself — pass the raw token, not a full header value.
-        client_config.auth_header = Some(token.to_string());
-        let transport = StreamableHttpClientTransport::from_config(client_config);
-        let client = ().serve(transport).await.expect("client connects");
+        let connect = |token: String| {
+            let mut client_config = StreamableHttpClientTransportConfig::default();
+            client_config.uri = format!("http://{addr}/").into();
+            // rmcp's reqwest client sends this via `bearer_auth`, which
+            // prepends "Bearer " itself — pass the raw token, not a full
+            // header value.
+            client_config.auth_header = Some(token);
+            StreamableHttpClientTransport::from_config(client_config)
+        };
+        let client = ().serve(connect(token.to_string())).await.expect("client connects");
 
         // The bearer resolves to our session key.
         let who = client
@@ -3216,6 +5333,58 @@ mod tests {
             "{notified_text}"
         );
 
+        // The request/response round trip (#1653), end to end over the
+        // transport and across two sessions: A asks B, B answers, A reads
+        // the answer back. `async` mode so both halves are deterministic
+        // without racing a blocked call.
+        let peer = SessionKey::from("github:other/thing#7");
+        live_agent(&config, &mock, &peer, lazybox_ipc::TerminalId(9991)).await;
+        config
+            .mcp
+            .tokens()
+            .register("e2e-peer-bearer", peer.clone());
+        let peer_client =
+            ().serve(connect("e2e-peer-bearer".to_string()))
+                .await
+                .expect("peer client connects");
+
+        let mut ask_args = serde_json::Map::new();
+        ask_args.insert("workspace".into(), peer.as_str().into());
+        ask_args.insert("text".into(), "what is left on #581?".into());
+        ask_args.insert("mode".into(), "async".into());
+        let asked = client
+            .call_tool(CallToolRequestParams::new("ask_session").with_arguments(ask_args))
+            .await
+            .expect("ask_session");
+        assert_ne!(asked.is_error, Some(true), "{asked:?}");
+        let asked: serde_json::Value =
+            serde_json::from_str(&asked.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let request_id = asked["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        let mut reply_args = serde_json::Map::new();
+        reply_args.insert("request_id".into(), request_id.clone().into());
+        reply_args.insert("text".into(), "three tests left".into());
+        let replied = peer_client
+            .call_tool(CallToolRequestParams::new("reply_request").with_arguments(reply_args))
+            .await
+            .expect("reply_request");
+        assert_ne!(replied.is_error, Some(true), "{replied:?}");
+
+        let mut poll_args = serde_json::Map::new();
+        poll_args.insert("request_id".into(), request_id.into());
+        let polled = client
+            .call_tool(CallToolRequestParams::new("poll_request").with_arguments(poll_args))
+            .await
+            .expect("poll_request");
+        let polled_text = polled.content[0].as_text().expect("text").text.clone();
+        assert!(polled_text.contains("three tests left"), "{polled_text}");
+        assert!(polled_text.contains("\"answered\""), "{polled_text}");
+
+        peer_client.cancel().await.ok();
         client.cancel().await.ok();
     }
 

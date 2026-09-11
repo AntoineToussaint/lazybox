@@ -1318,6 +1318,9 @@ pub enum Msg {
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
+    /// `x` pressed in the snippets browser — export the snippet you are
+    /// reading as a portable `SKILL.md` (#1672). Carries the key.
+    ExportSnippetSkill(String),
     /// `Ctrl-D` on a snippet row — compare a user override against the
     /// current built-in body in a reader modal (#1312). Carries the key.
     SnippetCompare(String),
@@ -2981,6 +2984,7 @@ impl Model<AsyncCrosstermAdapter> {
         // (no polling has run yet) so nothing flickers in behind the
         // wizard. Subscribe is idempotent on the daemon side.
         let _ = model.client.send(IpcCommand::Subscribe);
+        model.flash_snippet_export_drift();
         model.flash_model_pin_warning(lazybox_tui_core::agents::claude_ambient_model().as_deref());
         model.set_focus_attr();
         Ok(model)
@@ -5213,6 +5217,77 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(warning) = config.pinned_model_warnings(ambient).into_iter().next() {
             self.flash_hint(warning);
         }
+    }
+
+    /// `x` in the snippets browser: write the snippet out as a portable
+    /// `SKILL.md` under `~/.claude/skills` (#1672).
+    ///
+    /// User-level, not repo-level, for the same reason `e` opens the
+    /// *global* snippets YAML: the browser is a client-wide catalog with
+    /// no workspace in hand, and writing into whichever checkout happened
+    /// to be under the cursor would leave an untracked file in someone's
+    /// working tree. `lazybox snippet export --to repo` is the deliberate
+    /// way to put one in a repo.
+    ///
+    /// A drifted or foreign file is refused rather than overwritten — the
+    /// notice says so, and `--force` lives on the CLI, where discarding
+    /// someone's edit is an explicit act.
+    pub(crate) fn export_snippet_as_skill(&mut self, key: &str) {
+        let Some(root) = user_skills_root() else {
+            self.flash_error("skill export needs $HOME to be set");
+            return;
+        };
+        self.export_snippet_into(key, &root);
+    }
+
+    /// Body of [`Self::export_snippet_as_skill`] against an explicit
+    /// skills root, so tests drive it with a temp dir instead of the
+    /// process-wide `$HOME`.
+    pub(crate) fn export_snippet_into(&mut self, key: &str, root: &std::path::Path) {
+        let Some(snippet) = self.snippets.get(key).cloned() else {
+            self.flash_error(format!("no snippet named {key}"));
+            return;
+        };
+        match lazybox_config::export_snippet_skill(root, key, &snippet, false) {
+            Ok(lazybox_config::ExportOutcome::Written(path)) => {
+                self.flash_info(format!("exported {key} → {}", path.display()));
+            }
+            Ok(lazybox_config::ExportOutcome::Unchanged(path)) => {
+                self.flash_info(format!("{key} already exported → {}", path.display()));
+            }
+            Err(e) => self.flash_error(format!("export {key}: {e}")),
+        }
+    }
+
+    /// Startup nudge: say when an exported skill has drifted from the
+    /// snippet it was generated from (#1672), so the generated copy never
+    /// quietly becomes a second, softer authority on a workflow. Scoped to
+    /// the user-level root the browser's `x` writes into; a repo-level
+    /// export is checked by `lazybox snippet export --check`, which belongs
+    /// in that repo's own CI rather than in every client's startup.
+    pub(crate) fn flash_snippet_export_drift(&mut self) {
+        let Some(root) = user_skills_root() else {
+            return;
+        };
+        self.flash_snippet_export_drift_in(&root);
+    }
+
+    /// Body of [`Self::flash_snippet_export_drift`] against an explicit
+    /// skills root — the same test seam as [`Self::export_snippet_into`].
+    pub(crate) fn flash_snippet_export_drift_in(&mut self, root: &std::path::Path) {
+        let drifted = lazybox_config::drifted_exports(root, &self.snippets);
+        let Some(first) = drifted.first() else {
+            return;
+        };
+        let more = match drifted.len() {
+            1 => String::new(),
+            n => format!(" (+{} more)", n - 1),
+        };
+        self.flash_hint(format!(
+            "exported skill {} is {}{more} — `lazybox snippet export --check`",
+            first.key,
+            first.state.label(),
+        ));
     }
 
     pub fn flash_info(&mut self, msg: impl Into<String>) {
@@ -7488,6 +7563,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.open_snippets_file();
             }
+            Msg::ExportSnippetSkill(key) => self.export_snippet_as_skill(&key),
             Msg::SnippetCompare(key) => self.compare_snippet_override(&key),
             Msg::SnippetKeepMine(key) => self.keep_mine_snippet_override(&key),
             Msg::SnippetAdopt(key) => self.adopt_builtin_snippet(&key),
@@ -7657,6 +7733,18 @@ fn home_dir() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
+}
+
+/// `~/.claude/skills` — the user-level root the browser's `x` export
+/// writes into and the startup drift check reads (#1672). `None` when
+/// `$HOME` is unset, which is the one case export can't resolve a home
+/// for.
+fn user_skills_root() -> Option<std::path::PathBuf> {
+    lazybox_config::skills_root(
+        lazybox_config::SkillTarget::User,
+        lazybox_config::SkillAgentDir::Claude,
+        None,
+    )
 }
 
 /// A default-model picker row, paired with the tier alias it pins

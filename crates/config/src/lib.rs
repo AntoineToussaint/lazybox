@@ -7,11 +7,13 @@ mod skills;
 mod snippets;
 
 pub use skills::{
-    Skill, SkillError, SkillScope, discover_skills, scaffold_skill, skill_md_path,
+    ExportOutcome, ExportState, ExportStatus, Skill, SkillAgentDir, SkillError, SkillScope,
+    SkillTarget, discover_skills, drifted_exports, export_snippet_skill, export_status,
+    exported_skill_path, render_snippet_skill, scaffold_skill, skill_md_path, skills_root,
     validate_skill_name,
 };
 pub use snippets::{
-    Snippet, SnippetOrigin, SnippetState, Snippets, SnippetsError, classify_snippet,
+    Snippet, SnippetOrigin, SnippetState, Snippets, SnippetsError, body_hash, classify_snippet,
     keep_mine_target,
 };
 

@@ -369,7 +369,7 @@ impl Rewritten {
 /// The epic's premise is that both enforcement points act on *the same*
 /// policy: "two enforcement points that disagree are worse than one." The hook
 /// resolves its policy live, per decision ([`crate::read_intercept`] calls
-/// [`live_policy`], which is cached behind a file stamp). A compactor holding a
+/// `live_policy`, which is cached behind a file stamp). A compactor holding a
 /// snapshot taken at `proxy::spawn` would therefore disagree with it for the
 /// whole life of the daemon after any config edit: flipping `mode` to `on`
 /// would start denying reads at the hook while the proxy still forwarded

@@ -257,7 +257,7 @@ impl Sidebar {
     /// chip row (row 1) since #1535, so it no longer backs a header-height
     /// reservation — there is only ever the cursor row to describe, and the
     /// render right-aligns whatever of it fits after the filter chips.
-    fn stats_row_spans(
+    pub(super) fn stats_row_spans(
         &self,
         inner_width: usize,
         theme: &crate::theme::Theme,
@@ -369,16 +369,16 @@ impl Sidebar {
         // spending the success hue here devalues it where it means a real
         // outcome. The GitHub / lazybox distinction the label exists for
         // lives in its wording, which is unchanged.
-        let styled = |text: String, color| vec![Span::styled(text, Style::default().fg(color))];
+        let styled = |text: String, style| vec![Span::styled(text, style)];
         let append_either = |dst: &mut Vec<Span<'static>>,
                              used: &mut usize,
                              full: String,
                              compact: String,
-                             color| {
+                             style| {
             let before = dst.len();
-            try_append(dst, used, budget, styled(full, color));
+            try_append(dst, used, budget, styled(full, style));
             if dst.len() == before {
-                try_append(dst, used, budget, styled(compact, color));
+                try_append(dst, used, budget, styled(compact, style));
             }
         };
         if let Some((full, compact, color)) = focused_merge {
@@ -387,7 +387,7 @@ impl Sidebar {
                 &mut used,
                 full.to_string(),
                 compact.to_string(),
-                color,
+                Style::default().fg(color),
             );
         }
         if let Some((full, compact)) = focused_auto_fix {
@@ -396,7 +396,7 @@ impl Sidebar {
                 &mut used,
                 full.to_string(),
                 compact.to_string(),
-                theme.warn,
+                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             );
         }
         stats_spans

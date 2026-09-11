@@ -4148,50 +4148,69 @@ mod broadcast_select_tests {
         );
     }
 
-    /// Render the header (row 2) at an arbitrary width.
-    /// Regression (#1692): the automation phrase is ambient configuration of
-    /// the row under the cursor, not state to act on, so it must stay
-    /// visually BELOW the attention counters that share this header. Bold
-    /// `success` green made an armed policy the loudest thing on screen —
-    /// and misused the palette twice: green reads "good news" for what is
-    /// merely a setting, and spending the success hue here devalues it where
-    /// it marks a real outcome.
+    /// Regression (#1692): merge configuration stays dim and unbolded.
+    /// Use explicit palettes so concurrent global theme changes cannot
+    /// change the expected style between rendering and assertion.
     #[test]
     fn focused_merge_automation_is_dim_not_bold_green() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        use ratatui::style::Modifier;
+        for theme in crate::theme::BUILT_IN_THEMES {
+            for github in [false, true] {
+                let mut sb = Sidebar::new(PaneId::new(1));
+                let mut armed = pr_ws("https://github.com/o/r/pull/1");
+                armed.auto_merge_on_green = true;
+                armed.pr.as_mut().expect("pr").auto_merge_enabled = github;
+                sb.workspaces.insert(SessionKey::from(&armed.key), armed);
+                sb.recompute_visible();
 
-        let mut sb = Sidebar::new(PaneId::new(1));
-        let mut armed = pr_ws("https://github.com/o/r/pull/1");
-        armed.auto_merge_on_green = true;
-        sb.workspaces.insert(SessionKey::from(&armed.key), armed);
-        sb.recompute_visible();
+                let labels = if github {
+                    [
+                        "AUTO-MERGE · GitHub, works offline",
+                        "◆ auto-merge (GitHub)",
+                    ]
+                } else {
+                    ["MERGE ON GREEN · lazybox only", "⚡ on-green (lazybox)"]
+                };
+                for label in labels {
+                    let spans = sb.stats_row_spans(visual_width(label), theme);
+                    assert_eq!(spans.len(), 1);
+                    assert_eq!(spans[0].content, label);
+                    assert_eq!(spans[0].style, Style::default().fg(theme.text_dim));
+                }
+            }
+        }
+    }
 
-        let backend = TestBackend::new(90, 12);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| sb.render(frame.area(), frame, true))
-            .expect("draw");
-        let buffer = terminal.backend().buffer();
-        let theme = crate::theme::current();
-
-        // Find the phrase on the chip row and inspect the cell under its
-        // first letter — styling, not text, is what this pins.
-        let row: String = (0..buffer.area.width)
-            .map(|x| buffer[(x, 1)].symbol())
-            .collect();
-        let at = row.find("MERGE ON GREEN").expect("the phrase renders");
-        let cell = &buffer[(at as u16, 1)];
-        assert_eq!(
-            cell.fg,
-            theme.text_dim,
-            "the phrase is dim, not success green",
-        );
-        assert!(
-            !cell.modifier.contains(Modifier::BOLD),
-            "the phrase is not bold",
-        );
+    /// Quieting merge configuration must preserve the auto-fix warning style.
+    #[test]
+    fn focused_auto_fix_keeps_bold_warning_style() {
+        for theme in crate::theme::BUILT_IN_THEMES {
+            for (ci, conflict, full, compact) in [
+                (true, false, "AUTO-FIX ON · CI FAIL", "FIX ci"),
+                (false, true, "AUTO-FIX ON · CONFLICT", "FIX conflict"),
+                (true, true, "AUTO-FIX ON · CI+CONFLICT", "FIX ci+conflict"),
+            ] {
+                let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+                let key = sb.selected_session_key().expect("workspace row").clone();
+                let workspace = sb.workspaces.get_mut(&key).expect("workspace");
+                for (kind, armed) in [
+                    (lazybox_core::AutoFixKind::CiFailure, ci),
+                    (lazybox_core::AutoFixKind::MergeConflict, conflict),
+                ] {
+                    if armed {
+                        workspace.policies.set(kind, lazybox_core::PolicyArm::Arm);
+                    }
+                }
+                for label in [full, compact] {
+                    let spans = sb.stats_row_spans(visual_width(label), theme);
+                    assert_eq!(spans.len(), 1);
+                    assert_eq!(spans[0].content, label);
+                    assert_eq!(
+                        spans[0].style,
+                        Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+                    );
+                }
+            }
+        }
     }
 
     fn header_at(sb: &mut Sidebar, width: u16) -> String {

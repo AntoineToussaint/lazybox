@@ -25,8 +25,11 @@ supply-chain record on published skills is poor. lazybox's `]]l` picker
 therefore shows what it can *see* and nothing more: the skill's scope,
 its path on disk, whether the folder bundles a `scripts/` directory
 (a `⚠ runs code` tag — a directory-exists test, not a scan), and a
-standing `not vetted by lazybox` note. Read the `SKILL.md` before you
-invoke one.
+standing `not vetted by lazybox` note. A skill whose frontmatter marks it
+as a lazybox export (#1672) says so too — as a claim, since the marker is
+frontmatter anyone can write, and alongside the standing note rather than
+in place of it; `lazybox snippet export --check` is what verifies it.
+Read the `SKILL.md` before you invoke one.
 
 Two details keep that disclosure honest rather than merely present. The
 tag **leads** the row instead of trailing the description, because the
@@ -137,12 +140,13 @@ truth, and it lives in the snippet body.**
   this decision exists to prevent.
 - **Export (#1672) is that "embed", made mechanical.** `lazybox snippet
   export rev` writes a `SKILL.md` whose body is the snippet's, byte for
-  byte, and records a hash of it; `--check` (and a startup notice) reports
-  an exported skill that has come apart from its snippet, whether because
-  the snippet moved or because the file was edited in place. Nothing is
-  ever read back from a skill into a snippet. So the portable copy is a
-  *build artifact* of the one authored standard, not a second voice on it —
-  and the #1145 tests keep guarding the single copy they always did.
+  byte, and records a byte-exact hash of it; `--check` (and a startup
+  notice) reports an exported skill that has come apart from its snippet,
+  whether because the snippet moved or because the file was edited in
+  place. Nothing is ever read back from a skill into a snippet. So the
+  portable copy is a *build artifact* of the one authored standard, not a
+  second voice on it — and the #1145 tests keep guarding the single copy
+  they always did.
 
 ## Recommendation and where this is headed
 
@@ -158,18 +162,16 @@ Bridging the two is scoped as follow-up work rather than built blind:
 - **Surface the focused agent's skills in lazybox** so a skill can be
   triggered *explicitly* from the `]]` leader, gaining the snippet
   picker's preview + Recent + `]N` UX for a capability the agent
-  otherwise only self-selects. *(Shipped: `]]l`, #797.)*
+  otherwise only self-selects.
 - **Let a snippet dispatch a skill**, keeping lazybox's picker / Recent
-  / broadcast UX while a real skill does the heavy lifting. *(Shipped:
-  `skill:`, #798.)*
+  / broadcast UX while a real skill does the heavy lifting.
 - **Let "Ask Lazybox" scaffold a skill** (not just a snippet) when a
-  request is genuinely multi-step or needs bundled code. *(Shipped:
-  #799.)*
+  request is genuinely multi-step or needs bundled code.
 - **Export a curated snippet as a skill**, so lazybox's vetted library is
   portable rather than lazybox-only — skills as an export format, not an
   import one. Notably *not* an install pipeline: lazybox publishes what it
   authored and vouches for, and does not become the delivery path for
-  skills it did not write. *(Shipped: `lazybox snippet export`, #1672.)*
+  skills it did not write. (Shipped as `lazybox snippet export`, #1672.)
 
 See the issues linked from
 [#793](https://github.com/AntoineToussaint/lazybox/issues/793) for the

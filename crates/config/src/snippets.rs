@@ -405,7 +405,7 @@ impl Snippet {
     /// `metadata.lazybox.version` (#1672), so drift is measured against
     /// the bytes the export actually carries.
     pub fn dispatch_hash(&self) -> String {
-        body_hash(&self.dispatch_body())
+        export_body_hash(&self.dispatch_body())
     }
 }
 
@@ -414,9 +414,29 @@ impl Snippet {
 /// FNV-1a/64 rendered as hex — deterministic across platforms and
 /// builds, unlike `std`'s `DefaultHasher`.
 pub fn body_hash(text: &str) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    fnv1a_hex(&text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Byte-exact hash of exported prompt text — the skill-export drift
+/// anchor (#1672), deliberately NOT [`body_hash`].
+///
+/// The whitespace-insensitivity that is right for #1312 (a re-indented
+/// YAML block is not a body divergence) is wrong here: an exported
+/// `SKILL.md` is prose a model reads, so reflowing one paragraph into
+/// three sections changes the prompt even though the words are
+/// identical. Under `body_hash` that edit left the export reporting "up
+/// to date" forever, which is precisely the silent divergence export
+/// exists to catch. Only trailing whitespace is normalized, since the
+/// file format itself appends a final newline the snippet body has no
+/// say over.
+pub fn export_body_hash(text: &str) -> String {
+    fnv1a_hex(text.trim_end())
+}
+
+/// FNV-1a/64 over `text`, rendered as hex.
+fn fnv1a_hex(text: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in normalized.as_bytes() {
+    for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }

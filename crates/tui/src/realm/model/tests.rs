@@ -3962,6 +3962,53 @@ snippets:
         let notice = m.status.notice.as_ref().expect("drift notice");
         assert!(notice.message.contains("rev"), "{notice:?}");
         assert!(notice.message.contains("stale"), "{notice:?}");
+
+        // The boot sequence raises this immediately before
+        // `flash_model_pin_warning`, which replaces it in the footer. As a
+        // Hint it was dropped there and never recorded, so the whole
+        // startup half of the guard was silent for anyone carrying a
+        // pinned-model warning. It must survive in the durable log.
+        m.flash_hint("pinned model warning stands in for the real one");
+        assert!(
+            m.status
+                .messages
+                .recent()
+                .any(|e| e.message.contains("exported skill rev")),
+            "a displaced drift notice must still reach the Shift-M log",
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Over `--connect` the agents run on the daemon host, so scanning
+    /// this machine's `~/.claude/skills` reports drift about files no
+    /// agent there reads. The check could not see the flag while it lived
+    /// in `Model::new` (`with_remote()` is applied after the constructor
+    /// returns), which is why it now runs from `run_loop`.
+    #[test]
+    fn the_startup_drift_check_stays_quiet_over_connect() {
+        let root = std::env::temp_dir().join(format!(
+            "lazybox-model-export-{}-remote",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut m = build_model();
+        m.apply_snippets(snippets_from_yaml(
+            "export-remote-before",
+            "snippets:\n  rev:\n    description: Review the diff\n    body: please review\n",
+        ));
+        m.export_snippet_into("rev", &root);
+        m.apply_snippets(snippets_from_yaml(
+            "export-remote-after",
+            "snippets:\n  rev:\n    description: Review the diff\n    body: review harder\n",
+        ));
+        m.status.notice = None;
+
+        m = m.with_remote();
+        m.flash_snippet_export_drift();
+        assert!(
+            m.status.notice.is_none(),
+            "a remote client must not report the local home's exports",
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

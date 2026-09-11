@@ -598,7 +598,16 @@ fn lazybox_export_meta(front: &SkillFrontmatter) -> Option<ExportMeta> {
 /// follows the closing fence. `None` when there is no complete
 /// frontmatter block.
 fn split_skill_md(contents: &str) -> Option<(String, String)> {
-    let rest = contents.strip_prefix("---\n")?;
+    // Both line endings, because the sibling `read_frontmatter` accepts
+    // both (its `trim_end` absorbs the `\r`): an LF-only opening fence
+    // here made a CRLF `SKILL.md` — a checkout under `eol=crlf`, or any
+    // editor configured that way — parse as no frontmatter at all, so it
+    // classified as `Foreign` and `drifted_exports` filtered it out of
+    // the sweep entirely. An export lazybox could no longer read is the
+    // last thing `--check` should report as clean.
+    let rest = contents
+        .strip_prefix("---\n")
+        .or_else(|| contents.strip_prefix("---\r\n"))?;
     let mut consumed = 0usize;
     for line in rest.split_inclusive('\n') {
         if line.trim_end() == "---" {
@@ -670,7 +679,7 @@ pub fn render_snippet_skill(key: &str, snippet: &crate::Snippet) -> Result<Strin
     if !category.is_empty() {
         lazybox.insert("category".into(), category.into());
     }
-    lazybox.insert("version".into(), crate::body_hash(&body).into());
+    lazybox.insert("version".into(), crate::export_body_hash(&body).into());
     let mut metadata = serde_yaml::Mapping::new();
     metadata.insert("lazybox".into(), serde_yaml::Value::Mapping(lazybox));
 
@@ -716,7 +725,7 @@ fn classify_export(contents: &str, key: &str, snippet: &crate::Snippet) -> Expor
     if meta.snippet != key {
         return ExportState::Foreign;
     }
-    if crate::body_hash(&body) != meta.version {
+    if crate::export_body_hash(&body) != meta.version {
         return ExportState::Edited;
     }
     if snippet.dispatch_hash() != meta.version {
@@ -1362,6 +1371,85 @@ mod export_tests {
 
         export_snippet_skill(&root, "rev", &rev, true).unwrap();
         assert_eq!(export_status(&root, "rev", &rev).state, ExportState::InSync);
+    }
+
+    /// The drift anchor must be byte-exact, not whitespace-normalized.
+    /// Reflowing a body into paragraphs is the commonest prompt edit
+    /// there is, and it changes prose a model reads — under the #1312
+    /// whitespace-insensitive `body_hash` the export reported "up to
+    /// date" forever, the exact silent divergence export exists to catch.
+    #[test]
+    fn reflowing_a_snippet_body_makes_the_export_stale() {
+        let root = tmp_root("reflow");
+        let flat = snippet("Pass 1: design. Pass 2: stress. Pass 3: blast radius.");
+        export_snippet_skill(&root, "rev", &flat, false).unwrap();
+        assert_eq!(
+            export_status(&root, "rev", &flat).state,
+            ExportState::InSync,
+        );
+
+        // Same words, new shape: whitespace-only, and still a real change
+        // to the exported prompt.
+        let reflowed = snippet("Pass 1: design.\n\nPass 2: stress.\n\nPass 3: blast radius.");
+        assert_eq!(
+            export_status(&root, "rev", &reflowed).state,
+            ExportState::Stale,
+            "a whitespace-only body change still changes the exported prompt",
+        );
+        export_snippet_skill(&root, "rev", &reflowed, false).unwrap();
+        assert_eq!(
+            export_status(&root, "rev", &reflowed).state,
+            ExportState::InSync,
+        );
+    }
+
+    /// The trailing newline the file format appends is the one whitespace
+    /// difference that is NOT drift — otherwise every export would report
+    /// itself edited the moment it was written.
+    #[test]
+    fn the_formats_trailing_newline_is_not_drift() {
+        let root = tmp_root("trailing");
+        let s = snippet("Review it.");
+        export_snippet_skill(&root, "rev", &s, false).unwrap();
+        let path = exported_skill_path(&root, "rev");
+
+        // An editor that strips the final newline, and one that adds
+        // several, both leave the body itself untouched.
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, written.trim_end()).unwrap();
+        assert_eq!(export_status(&root, "rev", &s).state, ExportState::InSync);
+        std::fs::write(&path, format!("{}\n\n\n", written.trim_end())).unwrap();
+        assert_eq!(export_status(&root, "rev", &s).state, ExportState::InSync);
+    }
+
+    /// A `SKILL.md` saved with CRLF endings still parses as the lazybox
+    /// export it is. It reads as `Edited` (the bytes really did change,
+    /// so a regenerate would discard someone's save) rather than
+    /// `Foreign`, which `drifted_exports` filtered out of the sweep —
+    /// leaving `--check` reporting "no drifted exports" for a file
+    /// lazybox could no longer read.
+    #[test]
+    fn a_crlf_export_is_still_recognized_and_reported() {
+        let root = tmp_root("crlf");
+        let s = snippet("Review it.");
+        export_snippet_skill(&root, "rev", &s, false).unwrap();
+        let path = exported_skill_path(&root, "rev");
+        let crlf = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace('\n', "\r\n");
+        std::fs::write(&path, crlf).unwrap();
+
+        assert_eq!(export_status(&root, "rev", &s).state, ExportState::Edited);
+        let yaml = root.join("snippets.yaml");
+        std::fs::write(
+            &yaml,
+            "snippets:\n  rev:\n    description: d\n    body: Review it.\n",
+        )
+        .unwrap();
+        let catalog = Snippets::load_from(&yaml, SnippetOrigin::Global).unwrap();
+        let drifted = drifted_exports(&root, &catalog);
+        assert_eq!(drifted.len(), 1, "the sweep must not go blind: {drifted:?}");
+        assert_eq!(drifted[0].state, ExportState::Edited);
     }
 
     /// A hand-authored skill that happens to share a snippet's key is

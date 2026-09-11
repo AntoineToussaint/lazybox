@@ -14,7 +14,7 @@
 //!   lazybox server api              foreground JSON HTTP API gateway
 //!   lazybox worktree list           report managed worktrees + disk totals
 //!   lazybox worktree gc             reclaim safe orphaned worktrees
-//!   lazybox snippet export <key>    write a snippet out as a portable SKILL.md
+//!   lazybox snippet export KEY      write a snippet out as a portable SKILL.md
 //!                                  (--to repo|user, --agent-dir claude|agents,
 //!                                  --force, --check)
 //!   lazybox workspace create --issue R  attach to a tracker record's workspace
@@ -756,6 +756,15 @@ fn snippet_export_subcommand(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!(
             "unknown flag {unknown:?}; usage: lazybox snippet export <key> [--to repo|user] \
              [--agent-dir claude|agents] [--force] [--check] [--cwd <path>]",
+        );
+    }
+    // `--check` returns before `force` is ever consulted, so accepting
+    // both silently dropped the one the user typed — the same failure the
+    // unknown-flag rejection above exists to prevent.
+    if check && force {
+        anyhow::bail!(
+            "--check and --force are mutually exclusive: --check reports drift without \
+             writing, --force regenerates over it",
         );
     }
     let key = args.first().cloned();
@@ -2985,6 +2994,7 @@ mod snippet_export_tests {
             args(&["no-such-snippet", "--cwd", &cwd]),
             args(&["--cwd", &cwd]),
             args(&["rev", "--fore", "--cwd", &cwd]),
+            args(&["rev", "--check", "--force", "--cwd", &cwd]),
         ] {
             assert!(
                 snippet_export_subcommand(&bad).is_err(),

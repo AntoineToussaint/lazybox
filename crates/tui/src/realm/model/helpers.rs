@@ -1581,6 +1581,13 @@ pub(super) fn run_loop_step<T: TerminalAdapter>(
 }
 
 fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
+    // Raised here, not in `Model::new`: the drift check reads the local
+    // `~/.claude/skills`, and `with_remote()` is applied by the caller
+    // *after* the constructor returns, so a check inside `new` could not
+    // see the flag and scanned this machine's home even for a client
+    // driving a daemon on another host. Every boot path funnels through
+    // `run_loop`, by which point every `with_*` builder has run.
+    model.flash_snippet_export_drift();
     let rt = LoopRuntime::acquire()?;
     let mut input_rx = spawn_input_reader()?;
     let mut input_open = true;

@@ -297,8 +297,9 @@ skill you can read in full before you trust it.
 ### The snippet stays the source
 
 The `SKILL.md` is **generated**, never hand-edited. Its frontmatter
-records a `version` hash of the exported body, and that hash is the
-anchor for both drift directions:
+records a `version` hash of the exported body — byte-exact, so reflowing
+a body into paragraphs counts as a change even though the words are the
+same — and that hash is the anchor for both drift directions:
 
 - **stale** — the snippet changed after the export. Re-export; the file
   is generated, so nothing is lost.

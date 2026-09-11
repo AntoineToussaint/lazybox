@@ -2984,7 +2984,6 @@ impl Model<AsyncCrosstermAdapter> {
         // (no polling has run yet) so nothing flickers in behind the
         // wizard. Subscribe is idempotent on the daemon side.
         let _ = model.client.send(IpcCommand::Subscribe);
-        model.flash_snippet_export_drift();
         model.flash_model_pin_warning(lazybox_tui_core::agents::claude_ambient_model().as_deref());
         model.set_focus_attr();
         Ok(model)
@@ -5266,6 +5265,13 @@ impl<T: TerminalAdapter> Model<T> {
     /// export is checked by `lazybox snippet export --check`, which belongs
     /// in that repo's own CI rather than in every client's startup.
     pub(crate) fn flash_snippet_export_drift(&mut self) {
+        // Over `--connect` the agents live on the daemon host, so this
+        // machine's `~/.claude/skills` is not where any of them read a
+        // skill from — the same reason `mount_skill_picker_for` refuses to
+        // scan locally when remote.
+        if self.remote {
+            return;
+        }
         let Some(root) = user_skills_root() else {
             return;
         };
@@ -5283,7 +5289,16 @@ impl<T: TerminalAdapter> Model<T> {
             1 => String::new(),
             n => format!(" (+{} more)", n - 1),
         };
-        self.flash_hint(format!(
+        // `flash_info`, not `flash_hint`: `flash` deliberately keeps Hints
+        // out of the `Shift-M` log as ephemeral nudges, and this notice is
+        // raised at boot right before `flash_model_pin_warning` — which
+        // replaces it in the footer. As a Hint it was therefore built,
+        // displaced microseconds later, and recorded nowhere, so the whole
+        // startup half of the drift guard silently did nothing for anyone
+        // carrying a pinned-model warning. A drifted export is a durable,
+        // actionable condition with a command attached, so it belongs in
+        // the durable log whichever notice wins the footer.
+        self.flash_info(format!(
             "exported skill {} is {}{more} — `lazybox snippet export --check`",
             first.key,
             first.state.label(),

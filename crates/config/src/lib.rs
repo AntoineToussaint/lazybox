@@ -14,7 +14,7 @@ pub use skills::{
 };
 pub use snippets::{
     Snippet, SnippetOrigin, SnippetState, Snippets, SnippetsError, body_hash, classify_snippet,
-    keep_mine_target,
+    export_body_hash, keep_mine_target,
 };
 
 use serde::{Deserialize, Serialize};

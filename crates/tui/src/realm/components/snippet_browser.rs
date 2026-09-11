@@ -75,6 +75,10 @@ pub struct SnippetBrowser {
     /// Width-dependent (wrapping moves every heading), so it is refreshed
     /// on each render rather than computed once.
     row_starts: Vec<(usize, String)>,
+    /// Total rendered body lines, recorded alongside `row_starts` so the
+    /// last row's extent — and whether the whole catalog fits on screen —
+    /// are known without re-wrapping.
+    body_lines_total: usize,
     /// Live terminal leader character, so examples follow a remap.
     escape_char: char,
 }
@@ -86,6 +90,7 @@ impl SnippetBrowser {
             scroll: 0,
             body_height: 0,
             row_starts: Vec::new(),
+            body_lines_total: 0,
             escape_char,
         }
     }
@@ -160,19 +165,42 @@ impl SnippetBrowser {
             }
         }
         self.row_starts = starts;
+        self.body_lines_total = lines.len();
         lines
     }
 
-    /// The snippet `x` acts on: the one whose block the viewport is
-    /// showing, i.e. the last heading at or above the scroll offset.
-    /// Scrolling *is* the selection here — the browser has no cursor, so
-    /// the target is what you are reading, and the hint names it.
+    /// The snippet `x` acts on. Scrolling *is* the selection here — the
+    /// browser has no cursor — so the target is the snippet the viewport
+    /// is actually showing, and the hint names it either way.
+    ///
+    /// Two rules, because neither alone is right. Owning the top visible
+    /// line is wrong once you scroll past a boundary: with a long snippet
+    /// above, one trailing line of it at the top made `x` target that
+    /// snippet while the next one filled the other nineteen rows. Owning
+    /// the most visible lines is wrong when the whole catalog fits on
+    /// screen and nothing has been scrolled at all — then it targets the
+    /// *longest* snippet rather than the one under the reader's eye. So:
+    /// unscrollable means the first row, otherwise the row occupying the
+    /// most of the viewport, ties going to the earlier row.
     fn visible_key(&self) -> Option<&str> {
-        self.row_starts
-            .iter()
-            .rev()
-            .find(|(start, _)| *start <= self.scroll as usize)
-            .map(|(_, key)| key.as_str())
+        if self.body_lines_total <= self.body_height.max(1) as usize {
+            return self.row_starts.first().map(|(_, key)| key.as_str());
+        }
+        let top = self.scroll as usize;
+        let bottom = top + self.body_height.max(1) as usize;
+        let mut best: Option<(usize, &str)> = None;
+        for (i, (start, key)) in self.row_starts.iter().enumerate() {
+            let end = self
+                .row_starts
+                .get(i + 1)
+                .map(|(next, _)| *next)
+                .unwrap_or(self.body_lines_total);
+            let visible = end.min(bottom).saturating_sub((*start).max(top));
+            if best.is_none_or(|(most, _)| visible > most) {
+                best = Some((visible, key.as_str()));
+            }
+        }
+        best.map(|(_, key)| key)
     }
 }
 
@@ -338,6 +366,22 @@ mod tests {
             .join("\n")
     }
 
+    fn row_snippet(body: &str) -> Snippet {
+        Snippet {
+            description: "desc".into(),
+            category: String::new(),
+            body: body.into(),
+            skill: None,
+            provider: None,
+            next: Vec::new(),
+            origin: SnippetOrigin::BuiltIn,
+        }
+    }
+
+    fn state() -> lazybox_config::SnippetState {
+        lazybox_config::SnippetState::Builtin
+    }
+
     fn keyed(code: Key) -> Event<UserEvent> {
         Event::Keyboard(KeyEvent {
             code,
@@ -472,6 +516,49 @@ mod tests {
         assert_eq!(
             comp.on(&keyed(Key::Char('x'))),
             Some(Msg::ExportSnippetSkill("rev".into())),
+        );
+    }
+
+    /// One trailing line of a long snippet at the top of the viewport
+    /// used to make `x` target *that* snippet while the next one filled
+    /// the rest of the screen. The target is the snippet the viewport is
+    /// actually showing.
+    #[test]
+    fn x_targets_the_snippet_filling_the_viewport_not_the_one_scrolled_past() {
+        let rows = vec![
+            BrowserRow::new("pr", &row_snippet(&"line\n".repeat(20)), state()),
+            BrowserRow::new("rev", &row_snippet(&"line\n".repeat(20)), state()),
+        ];
+        let mut comp = SnippetBrowser::new(rows, ']');
+        let _ = render(&mut comp, 90, 10);
+        // `pr` spans 0..=20 (heading + 20 body lines), a blank at 21,
+        // `rev`'s heading at 22. Park the top line on `pr`'s last body
+        // line: one line of `pr` on screen, the rest `rev`.
+        let rev_start = comp.row_starts.last().map(|(s, _)| *s).expect("two rows");
+        comp.scroll = (rev_start - 2) as u16;
+        let out = render(&mut comp, 90, 10);
+        assert!(out.contains("x export rev as a skill"), "{out}");
+        assert_eq!(
+            comp.on(&keyed(Key::Char('x'))),
+            Some(Msg::ExportSnippetSkill("rev".into())),
+        );
+    }
+
+    /// …but when the whole catalog fits on screen there is nothing to
+    /// scroll and no "dominant" row worth inferring: the target is the
+    /// first one, not whichever body happens to be longest.
+    #[test]
+    fn x_targets_the_first_snippet_when_everything_fits_on_screen() {
+        let rows = vec![
+            BrowserRow::new("pr", &row_snippet("one line"), state()),
+            BrowserRow::new("rev", &row_snippet(&"line\n".repeat(5)), state()),
+        ];
+        let mut comp = SnippetBrowser::new(rows, ']');
+        let out = render(&mut comp, 90, 24);
+        assert!(out.contains("x export pr as a skill"), "{out}");
+        assert_eq!(
+            comp.on(&keyed(Key::Char('x'))),
+            Some(Msg::ExportSnippetSkill("pr".into())),
         );
     }
 

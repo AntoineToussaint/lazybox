@@ -265,8 +265,15 @@ async fn rejected_snippet_delivery_does_not_update_recent_history() {
     }
 }
 
+/// A repeat `Subscribe` is a REFRESH, not an error (#1694).
+///
+/// `Subscribe` is the only command that produces an `Event::Snapshot`, so it
+/// is the only way a client can ask for its view to be rebuilt — which the
+/// TUI does after finishing or cancelling setup, where the scope set just
+/// changed underneath it. Refusing it flashed a warning at a user who had
+/// done nothing wrong and could do nothing about it.
 #[tokio::test]
-async fn subscribe_is_admitted_only_once_per_connection() {
+async fn resubscribe_refreshes_the_snapshot_instead_of_refusing() {
     let (mut client, server) = channel::pair();
     tokio::spawn(async move {
         Server::new(ServerConfig::in_memory())
@@ -314,11 +321,23 @@ async fn subscribe_is_admitted_only_once_per_connection() {
     client
         .send(Command::Subscribe)
         .expect("duplicate reaches daemon");
-    assert!(matches!(
-        client.recv().await,
-        Some(Event::CommandRejected { command, message })
-            if command == "Subscribe" && message.contains("already subscribed")
-    ));
+    // The refresh is serviced: a fresh Snapshot arrives (ahead of the same
+    // post-subscribe pushes the first one produced), and no rejection does.
+    let mut saw_snapshot = false;
+    for _ in 0..8 {
+        match client.recv().await {
+            Some(Event::Snapshot { .. }) => {
+                saw_snapshot = true;
+                break;
+            }
+            Some(Event::CommandRejected { command, .. }) if command == "Subscribe" => {
+                panic!("a repeat Subscribe must refresh, not be refused");
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(saw_snapshot, "re-subscribing delivers a fresh snapshot");
 }
 #[tokio::test]
 async fn shutdown_closes_loop_cleanly() {

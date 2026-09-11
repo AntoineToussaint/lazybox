@@ -1185,13 +1185,23 @@ impl Server {
                 cmd = conn.rx.recv() => {
                     let Some(cmd) = cmd else { break };
                     if matches!(&cmd, lazybox_ipc::Command::Subscribe) {
-                        if subscribed {
-                            let _ = conn.tx.send(Event::CommandRejected {
-                                command: "Subscribe".into(),
-                                message: "this connection is already subscribed".into(),
-                            });
-                            continue;
-                        }
+                        // A repeat Subscribe is a REFRESH, not an error
+                        // (#1694). `Subscribe` is the only command that
+                        // produces an `Event::Snapshot`, so it is the only way
+                        // a client can ask for its view to be rebuilt — which
+                        // the TUI does after finishing or cancelling the setup
+                        // flow, where the scope set just changed underneath it.
+                        // Refusing it flashed `⚠ Subscribe was not accepted —
+                        // this connection is already subscribed` at a user who
+                        // had done nothing wrong and could do nothing about
+                        // it, while the snapshot they asked for arrived anyway
+                        // on the next poll — a warning about a non-problem.
+                        //
+                        // Servicing it is idempotent: the handler rebuilds the
+                        // snapshot from the store and sends it to this
+                        // connection only. The two flags below are already in
+                        // the state a repeat would set them to, so falling
+                        // through changes nothing but the delivered snapshot.
                         subscribed = true;
                         bus_suppressed = false;
                     }

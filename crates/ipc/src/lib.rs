@@ -3639,6 +3639,27 @@ pub enum Event {
         /// mode exists for — what flipping to `on` would actually buy.
         rewrote: bool,
     },
+    /// A target session answered an `ask_session` request with
+    /// `reply_request` (#1653). The asker's own tool call is woken by the
+    /// in-process request registry, not by this event; it exists so a
+    /// non-MCP consumer (the desktop/API stream, a log) can see the
+    /// agent-to-agent round trip complete. Appended last (bincode is
+    /// ordinal-sensitive).
+    AgentRequestReplied {
+        request_id: String,
+        asker: lazybox_core::WorkspaceKey,
+        target: lazybox_core::WorkspaceKey,
+    },
+    /// How many `ask_session` requests are still open against a workspace
+    /// (#1653). Broadcast whenever the count moves — an ask injected, a
+    /// reply landed, a turn-end capture closed one — and replayed after the
+    /// `Subscribe` snapshot for every workspace currently carrying one, so a
+    /// client seeds the `?N` sidebar badge on connect rather than waiting
+    /// for the next change. `open: 0` clears the badge. Appended last.
+    AgentRequestsOpen {
+        workspace_key: lazybox_core::WorkspaceKey,
+        open: usize,
+    },
 }
 
 /// Daemon resource posture for the Shift-D sync-status screen.

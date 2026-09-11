@@ -1999,6 +1999,17 @@ pub async fn dispatch_command(
                     delta: Vec::new(),
                 });
             }
+            // Open agent-to-agent requests (#1653): seed the `?N` badge for
+            // every workspace still owing an answer, so a client that
+            // connects mid-conversation sees them without waiting for the
+            // next ask or reply. Kept before AutoFixPolicyConfig so that
+            // stays the end-of-replay marker.
+            for (workspace_key, open) in crate::mcp::open_request_counts(config).await {
+                let _ = tx.send(Event::AgentRequestsOpen {
+                    workspace_key,
+                    open,
+                });
+            }
             // Keep the auto-fix policy as the last post-subscribe push so
             // existing consumers can use it as the end-of-replay marker.
             let _ = tx.send(Event::AutoFixPolicyConfig {

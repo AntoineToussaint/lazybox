@@ -72,6 +72,7 @@ impl ClientRuntime {
         crate::proxy::compaction::live_policy();
         tasks.push(crate::error_inbox::spawn(&config));
         tasks.push(crate::epics::spawn(&config));
+        tasks.push(crate::mcp::spawn_request_watcher(&config));
         tasks.push(crate::stats_accumulator::spawn(&config));
         tasks.push(crate::session_cost::spawn(&config));
         tasks.push(crate::box_liveness::spawn(&config));

@@ -547,13 +547,25 @@ implicit: the connection *is* the session, so no tool asks "who am I".
 | `post_note(text, scope?, tags?)` | Publish distilled context to the shared blackboard. Default scope = your own session; `global` reaches everyone. |
 | `read_notes(scope?, tags?, since?)` | Pull the blackboard, newest first. Default = `global` + your own scope. |
 | `notify_session(workspace, text, submit?)` | Push an instruction into a sibling's agent (the same settle-gated inject `x s` uses). |
+| `send_snippet(workspace, key, vars?, submit?)` | Send a **catalog** snippet (`rev`, `dod`, …) into a sibling's agent through the same delivery `]]s` uses — its Recent and `]N` count move too. |
+| `ask_session(workspace, text? \| snippet?, timeout_s?, mode?)` | Ask a sibling a question and get the answer back. `wait` (default) blocks; `async` returns a `request_id`. |
+| `reply_request(request_id, text)` | Answer a question you were asked. Only the session it was asked of may answer. |
+| `poll_request(request_id)` | Status / answer of a request you made, plus the target's live agent state. |
 
 The *notes blackboard* is the primary medium — persistent (kv-backed, it
 outlives the authoring session), low-noise, cross-repo by construction. The
 output tap is the escape hatch for "what is A doing right now", and
 `notify_session` is the push half, so pull + push together close the loop
-that `x s` / `Shift-B` (push-only, human-driven) leave open. Full design and
-trade-offs: [`../mcp-coordination.md`](../mcp-coordination.md).
+that `x s` / `Shift-B` (push-only, human-driven) leave open.
+
+`ask_session` (#1653) adds the **request/response** half: where
+`notify_session` reports a handoff and leaves the caller scraping
+`read_session` to guess when the target is done, an ask returns the target's
+own answer. The question is injected wrapped in a `<lazybox-request id=… from=…>`
+envelope telling the target to close the loop with `reply_request`; a
+Coordinator can ask a Worker "what is left on #581?" and print the reply in
+one turn. Full design and trade-offs:
+[`../mcp-coordination.md`](../mcp-coordination.md).
 
 ### How to use it
 Nothing to set up. Every Claude session lazybox *wires to the bus* is told
@@ -578,6 +590,21 @@ Contracts to know:
   destructive action.
 - Retention: 50 notes per scope (oldest pruned on post), 16 KB per note, and
   the same cap on a notification's text.
+- `ask_session` waits **bounded**: `timeout_s` defaults to 120 s and is
+  capped at 600 s, and your own MCP client's call timeout is the real
+  ceiling. A wait that times out returns `status: "pending"` with the
+  `request_id` — the request stays open, so `poll_request` still picks up a
+  late answer.
+- A target that ends its turn without calling `reply_request` does not hang
+  the asker: the tail of its output is captured as the answer with
+  `source: "turn_end_capture"` and `status: "answered_by_capture"`. Lower
+  fidelity, never a hang — the asker sees the source and can re-ask.
+- Ask chains are capped at **3 hops**, so an A→B→A loop is refused (with the
+  chain named) rather than run.
+- Visibility: the question lands on the target's activity feed as
+  `asked by <workspace>: …`, the answer on the asker's as
+  `replied by <workspace>: …`, and a row with an unanswered inbound request
+  carries a ` ?N ` badge in the sidebar's passive cluster.
 
 ### How it works (brief)
 `mcp::start` binds a loopback port at daemon boot (reused across restarts,
@@ -598,11 +625,14 @@ prompt-injected agent can reach, and per-session *authorization* is required
 before any multi-user or remote exposure (design doc §7b).
 
 ### Test checklist
-- [ ] A spawned Claude session's `/mcp` lists a `lazybox` server with six tools.
+- [ ] A spawned Claude session's `/mcp` lists a `lazybox` server with the
+      coordination tools.
 - [ ] `whoami` returns the spawning workspace's key; `list_sessions` shows siblings across repos.
 - [ ] `post_note` from one repo's session is visible to `read_notes` in another (default scope).
 - [ ] `notify_session` lands in the target's composer; a self-notify is rejected.
 - [ ] Ending the session's last agent terminal revokes its bearer (a stale token gets 401).
+- [ ] A Coordinator can `ask_session` a Worker and print the answer in one turn.
+- [ ] A Worker can `send_snippet(review)` to a sibling and the sibling's Recent shows it.
 
 ---
 

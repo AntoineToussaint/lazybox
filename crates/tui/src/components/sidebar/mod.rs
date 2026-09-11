@@ -224,6 +224,11 @@ pub struct Sidebar {
     /// builder for the `⇗` indicator and by the merge dispatch to warn
     /// before merging a child ahead of its still-open parent.
     stacks: HashMap<SessionKey, lazybox_core::StackPosition>,
+    /// Open inbound `ask_session` requests per workspace (#1653), fed by
+    /// `Event::AgentRequestsOpen` (seeded on connect, updated on every ask /
+    /// reply / capture). Drives the row's `?N` badge; a workspace with none
+    /// carries no entry.
+    open_requests: HashMap<SessionKey, usize>,
     /// Batched-recompute state for a daemon-event drain (#1030). While
     /// `defer_recompute` is set — the model brackets a whole drain batch
     /// with `begin_recompute_batch` / `flush_recompute` — the O(N log N)
@@ -651,6 +656,7 @@ impl Sidebar {
             ticket_tree: HashMap::new(),
             repo_summaries: BTreeMap::new(),
             stacks: HashMap::new(),
+            open_requests: HashMap::new(),
             defer_recompute: false,
             recompute_pending: false,
             #[cfg(test)]
@@ -3765,6 +3771,23 @@ impl Sidebar {
     pub fn set_epic_snapshot(&mut self, snapshot: lazybox_ipc::EpicSnapshot) {
         self.epics.insert(snapshot.key.clone(), snapshot);
         self.recompute_visible();
+    }
+
+    /// Record how many `ask_session` requests a workspace still owes an
+    /// answer to (#1653). Zero forgets the row rather than storing it — the
+    /// badge is absence-by-default, and a cleared count must not keep a
+    /// vanished workspace alive in the map.
+    pub fn set_open_requests(&mut self, key: SessionKey, open: usize) {
+        if open == 0 {
+            self.open_requests.remove(&key);
+        } else {
+            self.open_requests.insert(key, open);
+        }
+    }
+
+    /// Open inbound requests for one workspace; `0` when it owes none.
+    pub fn open_requests(&self, key: &SessionKey) -> usize {
+        self.open_requests.get(key).copied().unwrap_or(0)
     }
 
     /// Drop an epic that stopped being live, re-projecting so its members

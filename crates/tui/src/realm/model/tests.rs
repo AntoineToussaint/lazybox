@@ -11868,6 +11868,35 @@ mod merge_focus_follow_tests {
         });
     }
 
+    /// The `?N` badge's carrier (#1653): the daemon owns the open-request
+    /// count and pushes it, and `0` clears the row rather than pinning a
+    /// stale badge on a workspace that has answered.
+    #[test]
+    fn open_request_count_drives_the_row_badge() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        let session = SessionKey::from(&ws_key);
+        assert_eq!(m.sidebar.open_requests(&session), 0);
+
+        m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
+            workspace_key: ws_key.clone(),
+            open: 2,
+        });
+        assert_eq!(m.sidebar.open_requests(&session), 2);
+
+        m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
+            workspace_key: ws_key,
+            open: 0,
+        });
+        assert_eq!(
+            m.sidebar.open_requests(&session),
+            0,
+            "an answered workspace stops badging"
+        );
+    }
+
     /// `E A` arms auto-dispatch — but only behind a confirm that names the
     /// epic and the worker cap, because arming it is what authorizes lazybox
     /// to start agents unattended (#1525).

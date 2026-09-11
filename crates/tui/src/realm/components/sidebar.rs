@@ -688,6 +688,18 @@ impl Sidebar {
         self.inner.set_epic_snapshot(snapshot);
     }
 
+    /// See `Sidebar::set_open_requests` — how many `ask_session` requests a
+    /// workspace still owes an answer to (#1653).
+    pub fn set_open_requests(&mut self, key: lazybox_core::SessionKey, open: usize) {
+        self.inner.set_open_requests(key, open);
+    }
+
+    /// See `Sidebar::open_requests` — open inbound requests for one
+    /// workspace (#1653).
+    pub fn open_requests(&self, key: &lazybox_core::SessionKey) -> usize {
+        self.inner.open_requests(key)
+    }
+
     /// See `Sidebar::forget_epic` — drop an archived / deleted epic (#1517).
     pub fn forget_epic(&mut self, key: &str) {
         self.inner.forget_epic(key);

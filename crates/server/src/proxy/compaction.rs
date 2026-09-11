@@ -1577,15 +1577,27 @@ mod tests {
             texts[0].starts_with(tag().prefix()),
             "our marker, under our token, is the outermost one"
         );
+        // What protects us is the token, not where it sits: a marker under a
+        // token the attacker does not hold marks nothing, which is the property
+        // an attacker would have to break.
         assert!(
-            !is_condensed(&texts[0], &CondenseTag::new("deadbeef")),
-            "the forged token marks nothing"
+            !is_condensed(
+                &texts[0],
+                &TagSource::from_secret("fixture-secret").tag("other-ws")
+            ),
+            "another session's token must not match our rendering"
         );
         // The forged line itself survives as content, and that is the exact
         // boundary of what a keyed marker buys: provenance over our own
         // output, not sanitizing what a file says. Pinned here so a later
         // change cannot quietly claim the stronger guarantee.
         assert!(texts[0].contains("deadbeef"));
+        // And the consequence of the two-line anchor, stated rather than
+        // discovered: the forged line was the file's first, so our rendering
+        // carries it on line two and matches that literal token. Inert, because
+        // nothing in production ever checks a token it did not derive from
+        // `TagSource` — but a reader should not have to infer that.
+        assert!(is_condensed(&texts[0], &CondenseTag::new("deadbeef")));
     }
 
     #[test]

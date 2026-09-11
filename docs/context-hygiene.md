@@ -240,9 +240,10 @@ the hook is not re-condensed by the proxy.
 condense by keeping a block's head and tail, with no model call and no cache
 between them, so `cache_key` / `cache_kv_key` / `KV_PREFIX_CONDENSE`,
 `condense_model` and `condense_timeout_ms` are the contract #1608 fills in, not
-live code paths. Until then the two enforcement points do not share an entry
-and cannot recognize each other's markers — the saving floor described above is
-what keeps that from double-summarizing anything.
+live code paths. Until then the two enforcement points do not share an entry, so
+one recomputes what the other already summarized for the same file. They do
+recognize each other's markers (#1645), which is what keeps that from
+*double*-summarizing anything.
 
 The cache holds the **summary**, not the rendered block, because the rendered
 block carries a per-session tag (below) while the summary does not — which is
@@ -263,31 +264,53 @@ not part of the cache key. This closes the structural hole — lazybox no longer
 acts on forged markers — but it cannot stop a model from believing a
 plausible-looking line it reads in a file, which no marker scheme can.
 
-In the **proxy** the token is **derived, not drawn**
-(`crates/server/src/context_tag.rs`): one random secret per installation,
-persisted in the store, and `TagSource::tag(session)` a one-way function of it.
-The reason is that "constant within a session" is a stronger claim than it looks.
-The condensed text is never written back to the agent's transcript — the proxy
-rewrites bytes in flight, so every turn re-renders the block from the original,
-under the token. A token drawn per process would therefore re-render every
-already-condensed block differently on the first turn after a daemon restart,
-invalidating exactly the prompt-cache prefix compaction exists to protect.
+The token is **derived, not drawn** (`crates/server/src/context_tag.rs`): one
+random secret per installation, persisted in the store, and
+`TagSource::tag(session)` a one-way function of it. The reason is that "constant
+within a session" is a stronger claim than it looks. In the proxy the condensed
+text is never written back to the agent's transcript — it rewrites bytes in
+flight, so every turn re-renders the block from the original, under the token. A
+token drawn per process would therefore re-render every already-condensed block
+differently on the first turn after a daemon restart, invalidating exactly the
+prompt-cache prefix compaction exists to protect.
 
-The **hook** does not share that token. It renders under
-`ServerConfig::condense_tag`, random per daemon run and not persisted (#1610).
-That is sound for byte stability, and for the opposite reason: hook output is
-*durable* — it is written into the transcript once and re-sent verbatim on later
-turns, so it is stable as stored bytes and never re-rendered, which is precisely
-what the proxy cannot rely on.
+Both enforcement points mint from **one** source (#1645), reached through
+`ServerConfig::condense_tags` and loaded once per daemon run. The hook does not
+need the stability guarantee for itself — its output is *durable*, written into
+the transcript once and re-sent verbatim on later turns, so it is stable as
+stored bytes and never re-rendered. What it needs the shared token for is
+**recognition across the enforcement points**: the block it condensed arrives in
+the proxy's next request body, and under a token of its own `is_condensed(text,
+&proxy_tag)` would be false and the proxy would see an ordinary tool result. At
+the shipped `min_lines: 350` nothing followed from that — a summary is tens of
+lines, so it was skipped as `BelowLineFloor` — but `min_lines: 20` parses fine
+(`Config::parse` only refuses 0), and then the proxy condenses lazybox's own
+summary, which is the monotonicity rule this module exists to enforce.
 
-What the two tokens do cost is **recognition across the enforcement points**. A
-block the hook condensed arrives in the proxy's next request body carrying the
-hook's token, so `is_condensed(text, &proxy_tag)` is false and the proxy sees an
-ordinary tool result. At the shipped `min_lines: 350` nothing follows from that —
-a summary is tens of lines, so it is skipped as `BelowLineFloor`. Lower the floor
-(`min_lines: 20` parses fine) and the proxy will condense lazybox's own summary,
-which is the monotonicity rule this module exists to enforce. Unifying the two is
-tracked separately; it needs the hook side's agreement, not a third token.
+The shared token is necessary and **not sufficient**, for a reason that is not
+lazybox's to change. A `permissionDecisionReason` does not reach the transcript
+verbatim: Claude Code re-frames a hook deny as `"{hook} hook error: {reason}"`,
+so the block the proxy reads back opens `PreToolUse:Read hook error: ` no matter
+what the hook rendered. `CondenseTag::marks` is therefore **line-anchored** — it
+asks whether any line of the block opens with the marker, not whether byte 0
+does. Position was never the control; the token is, and it is as unguessable on
+line two as on line one. What the relaxed anchor admits is text that quotes our
+own rendering, which is precisely the case it exists to catch.
+
+The alternative — hoisting the condensation header out of the
+`<untrusted-content>` fence so it lands at byte 0 — is wrong twice over. It does
+not work, because Claude's framing still precedes it. And it would be unsafe if
+it did: `CondenseKind::label` interpolates the read's path verbatim, a branch can
+carry a file whose *name* is a sentence, and a `permissionDecisionReason` is
+framed to the model as the permission system speaking. `fence_safe` guards the
+delimiter, not the content, so the fence has to wrap the condensation whole.
+
+One residual is permanent by construction. Denies already sitting in a transcript
+from before this landed carry the old per-daemon-run token, which no longer
+exists once that daemon exits — nothing can recognize them again, so at a low
+floor they are condensed a second time until the conversation ends. Recognizing
+them would mean honoring an *unkeyed* marker, which is the forgery hole the
+keying closed; re-condensing a stale block is the cheaper of the two.
 
 Derived means no per-session write on the request path and nothing to lose across
 a restart. Callers do not have to coordinate: the secret is seeded with a

@@ -39,11 +39,29 @@
 //! rotating re-renders every condensed block at once, which needs the
 //! cache-cost accounting #1621 owns.
 
+use std::time::Duration;
+
 use lazybox_core::CondenseTag;
 use sha2::{Digest, Sha256};
 
 /// kv key holding the installation's condensation secret.
 const SECRET_KV_KEY: &str = "context-hygiene:secret";
+
+/// Backoff between seed attempts, and so how many are made.
+///
+/// The documented failure here is `SQLITE_BUSY` — a second process on the same
+/// file — which clears in milliseconds. Giving up on the first one costs far
+/// more than it looks: the derived source is latched for the whole daemon run
+/// (`ServerConfig::condense_tags`), so a single unlucky read leaves every block
+/// this daemon condenses re-rendering after the next restart, for every
+/// session. Retrying *here* is the one place it is free, because no token has
+/// been handed out yet — retrying later would change a token already in use,
+/// which is the cache collapse this module exists to prevent.
+///
+/// The ceiling is 35 ms of sleeping on the failure path and none on the success
+/// path, which stays inside the hook's 200 ms decision deadline
+/// (`lifecycle::DECISION_TIMEOUT`) alongside the lookups that precede it.
+const SEED_RETRY_BACKOFF: &[Duration] = &[Duration::from_millis(10), Duration::from_millis(25)];
 
 /// Derives each session's [`CondenseTag`] from one persisted secret.
 #[derive(Debug, Clone)]
@@ -62,11 +80,25 @@ impl TagSource {
     /// computation on the request path.
     pub async fn load(config: &crate::ServerConfig) -> Self {
         let candidate = uuid::Uuid::new_v4().simple().to_string();
-        let proposed = candidate.clone();
-        let seeded = crate::store_blocking(&config.store, move |store| {
-            store.set_kv_if_absent(SECRET_KV_KEY, &proposed)
-        })
-        .await;
+        let mut attempt = 0;
+        let seeded = loop {
+            let proposed = candidate.clone();
+            let result = crate::store_blocking(&config.store, move |store| {
+                store.set_kv_if_absent(SECRET_KV_KEY, &proposed)
+            })
+            .await;
+            let Err(error) = result else {
+                break result;
+            };
+            let Some(backoff) = SEED_RETRY_BACKOFF.get(attempt) else {
+                break Err(error);
+            };
+            tracing::debug!(
+                "context hygiene: seeding the condensation secret failed ({error}); retrying"
+            );
+            tokio::time::sleep(*backoff).await;
+            attempt += 1;
+        };
 
         match seeded {
             Ok(secret) if !secret.trim().is_empty() => Self::from_secret(secret.trim()),
@@ -270,6 +302,129 @@ mod tests {
         fn set_kv(&self, key: &str, value: &str) -> Result<(), lazybox_store::StoreError> {
             self.inner.set_kv(key, value)
         }
+    }
+
+    /// A store whose reads fail a bounded number of times and then recover —
+    /// the shape a `SQLITE_BUSY` from a second process on the same file takes.
+    struct FlakyStore {
+        inner: lazybox_store::MemoryStore,
+        failures_left: std::sync::Mutex<usize>,
+    }
+
+    impl FlakyStore {
+        fn failing(times: usize) -> Self {
+            Self {
+                inner: lazybox_store::MemoryStore::default(),
+                failures_left: std::sync::Mutex::new(times),
+            }
+        }
+
+        fn take_failure(&self) -> bool {
+            let mut left = self.failures_left.lock().expect("failures");
+            if *left == 0 {
+                return false;
+            }
+            *left -= 1;
+            true
+        }
+    }
+
+    impl lazybox_store::Store for FlakyStore {
+        fn set_kv_if_absent(
+            &self,
+            key: &str,
+            value: &str,
+        ) -> Result<String, lazybox_store::StoreError> {
+            if self.take_failure() {
+                return Err(lazybox_store::StoreError::Backend(
+                    "database is locked".to_string(),
+                ));
+            }
+            self.inner.set_kv_if_absent(key, value)
+        }
+
+        fn get_kv(&self, key: &str) -> Result<Option<String>, lazybox_store::StoreError> {
+            self.inner.get_kv(key)
+        }
+
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), lazybox_store::StoreError> {
+            self.inner.set_kv(key, value)
+        }
+    }
+
+    /// A transient lock must not cost the installation its persisted secret.
+    /// The source is latched for the whole daemon run, so giving up on the
+    /// first `SQLITE_BUSY` would leave every block this daemon condenses
+    /// re-rendering after the next restart — retrying before any token has
+    /// been derived is what makes that recoverable.
+    #[tokio::test]
+    async fn a_transient_store_lock_does_not_cost_the_persisted_secret() {
+        let store = std::sync::Arc::new(FlakyStore::failing(SEED_RETRY_BACKOFF.len()));
+        store
+            .inner
+            .set_kv(SECRET_KV_KEY, "the-installation-secret")
+            .expect("seed the existing secret");
+        let config = crate::ServerConfig::with_store(
+            store.clone() as std::sync::Arc<dyn lazybox_store::Store>
+        );
+
+        let source = TagSource::load(&config).await;
+
+        assert_eq!(
+            source.tag("ws").prefix(),
+            TagSource::from_secret("the-installation-secret")
+                .tag("ws")
+                .prefix(),
+            "the retry must reach the secret that was there all along"
+        );
+    }
+
+    /// And the retries are bounded: a store that never recovers still yields an
+    /// ephemeral secret rather than hanging the hook's decision deadline.
+    #[tokio::test]
+    async fn a_store_that_never_recovers_still_returns_an_ephemeral_secret() {
+        let store = std::sync::Arc::new(FlakyStore::failing(usize::MAX));
+        store
+            .inner
+            .set_kv(SECRET_KV_KEY, "the-installation-secret")
+            .expect("seed the existing secret");
+        let config = crate::ServerConfig::with_store(
+            store.clone() as std::sync::Arc<dyn lazybox_store::Store>
+        );
+
+        let source = TagSource::load(&config).await;
+
+        assert_ne!(
+            source.tag("ws").prefix(),
+            TagSource::from_secret("the-installation-secret")
+                .tag("ws")
+                .prefix(),
+            "an unreadable store must not claim it read the secret"
+        );
+        assert_eq!(
+            store.inner.get_kv(SECRET_KV_KEY).expect("read back"),
+            Some("the-installation-secret".to_string()),
+            "and must never be written over"
+        );
+    }
+
+    /// The sharing #1645 needs is not the persistence. A daemon whose store
+    /// cannot be read runs on an *ephemeral* secret, so two loads of it would
+    /// mint different tokens for one session — and the proxy would stop
+    /// recognizing what the hook condensed, the failure the shipped default's
+    /// line floor merely hid. Both enforcement points therefore reach the one
+    /// source the config holds rather than loading their own.
+    #[tokio::test]
+    async fn every_caller_shares_one_source_even_on_an_ephemeral_secret() {
+        let config =
+            crate::ServerConfig::with_store(std::sync::Arc::new(UnreadableStore::default()));
+        let also = config.clone();
+        let (proxy, hook) = tokio::join!(config.condense_tags(), also.condense_tags());
+        assert_eq!(
+            proxy.tag("ws").prefix(),
+            hook.tag("ws").prefix(),
+            "the hook and the proxy must condense under one token"
+        );
     }
 
     /// The destructive case. A failed read is not an absent key: writing a

@@ -3882,18 +3882,31 @@ impl TerminalStack {
         }
 
         // An exited agent pane (#356) is frozen — its PTY is gone, so
-        // typing can't reach a process. Intercept the restart affordance
-        // (`r` / Enter) and swallow every other printable key instead of
+        // typing can't reach a process. Intercept the pane's two
+        // affordances and swallow every other printable key instead of
         // pretending to feed a dead terminal. Scrollback (handled above)
-        // still works so the last output stays inspectable, and `]]x` to
-        // close rides the app-level leader, not this path.
+        // still works so the last output stays inspectable.
+        //
+        // BOTH are bare keys (#1722). The `]]` leader exists for exactly one
+        // reason — in a live terminal every key forwards to the PTY, so
+        // lazybox needs an escape prefix to claim one — and a dead pane has
+        // no PTY to protect the keystroke from. Requiring `]]x` to close
+        // while `r` restarted bare put a three-key chord next to a one-key
+        // action in the same footer, for the same pane, at the same moment.
+        // `]]x` keeps working: this removes the requirement, not the binding.
         if let Some(id) = self
             .focused_terminal_id()
             .or_else(|| self.active_terminal_id())
             && self.terminals.get(&id).is_some_and(|s| s.exited.is_some())
         {
-            if matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
-                self.restart_exited(id, cmds);
+            match key.code {
+                KeyCode::Char('r') | KeyCode::Enter => self.restart_exited(id, cmds),
+                // Routed through the SAME handler `]]x` uses, so bare `x` is
+                // identical by construction — including the auth-recovery
+                // close and the splits-tree collapse — rather than a second
+                // close path that can drift from it.
+                KeyCode::Char('x') | KeyCode::Char('q') => self.close_focused_tile(cmds),
+                _ => {}
             }
             return PaneOutcome::Consumed;
         }
@@ -5637,7 +5650,7 @@ impl TerminalStack {
         } else {
             "exited"
         };
-        let text = format!("⚠ agent {verb} ({status}) — r restart · ]]x close");
+        let text = format!("⚠ agent {verb} ({status}) — r restart · x close");
         let width = grid.width as usize;
         // Pad (or truncate) to the full row so the fill spans it.
         let display: String = if text.chars().count() > width {
@@ -12421,15 +12434,48 @@ mod agent_crash_tests {
             last_output: None,
         });
 
-        // A printable key that isn't the restart affordance is swallowed
-        // rather than written into the gone PTY.
+        // A printable key that is neither of the pane's two affordances is
+        // swallowed rather than written into the gone PTY.
+        let mut cmds = Vec::new();
+        let outcome = stack.handle_key(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+        assert!(matches!(outcome, PaneOutcome::Consumed));
+        assert!(cmds.is_empty(), "no Write reaches a dead terminal");
+    }
+
+    /// Regression (#1722): on an exited pane, closing is a BARE `x` — like
+    /// restart's bare `r`, which this arm already accepted. The `]]` leader
+    /// exists only because a live terminal forwards every key to the PTY, and
+    /// a dead pane has no PTY to protect the keystroke from; requiring the
+    /// chord there put a three-key action next to a one-key one in the same
+    /// footer, for the same pane.
+    #[test]
+    fn bare_x_closes_an_exited_pane() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+            last_output: None,
+        });
+
         let mut cmds = Vec::new();
         let outcome = stack.handle_key(
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
             &mut cmds,
         );
         assert!(matches!(outcome, PaneOutcome::Consumed));
-        assert!(cmds.is_empty(), "no Write reaches a dead terminal");
+        assert!(
+            !stack.terminals.contains_key(&TerminalId(1)) || stack.closing.contains(&TerminalId(1)),
+            "bare x closes the dead pane instead of being swallowed",
+        );
+        // And it must never be a PTY write — that is what the leader protected.
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Command::Write { .. })),
+            "closing is not a keystroke into a dead terminal: {cmds:?}",
+        );
     }
 
     #[test]

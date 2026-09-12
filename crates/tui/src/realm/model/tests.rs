@@ -178,13 +178,22 @@ mod agent_auth_recovery_tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(screen.contains("Claude Code authentication is no longer valid"));
+        // #1721: the copy must name the blast radius, not deny it. Signing in
+        // mints a new credential and invalidates the one the other sessions
+        // hold, so the old "won't be signed out" was the opposite of the
+        // truth — asserted negatively here so it can never come back.
         assert!(
-            screen.contains("shared machine-wide Claude Code login in place")
+            screen.contains("signs in to Claude Code machine-wide")
                 && screen.contains("2 other running Claude Code sessions")
-                && screen.contains("won't be signed out"),
+                && screen.contains("holding the token this replaces")
+                && screen.contains("restarted automatically"),
             "{screen}"
         );
-        assert!(screen.contains("Sign in and continue"));
+        assert!(
+            !screen.contains("won't be signed out"),
+            "the modal must not promise other sessions survive: {screen}"
+        );
+        assert!(screen.contains("Sign in again and continue"));
         assert!(matches!(
             model.handle_confirmed(true).as_slice(),
             [Command::ReauthenticateAgent {
@@ -220,8 +229,12 @@ mod agent_auth_recovery_tests {
             "the prompt must not promise a switch lazybox cannot perform: {screen}"
         );
         assert!(screen.contains("Sign in again and continue"), "{screen}");
+        // #1721: "refreshes … in place" understated what a sign-in does. With
+        // no other session running there is no blast radius to name, so the
+        // copy simply states the scope.
         assert!(
-            screen.contains("refreshes the machine-wide Codex login in place"),
+            screen.contains("signs in to Codex machine-wide")
+                && screen.contains("No other session of it is running"),
             "{screen}"
         );
         // ...and it must say how to actually change accounts.
@@ -259,8 +272,15 @@ mod agent_auth_recovery_tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(screen.contains("Claude Code sign-in did not complete"));
-        assert!(screen.contains("conversation is still saved"));
-        assert!(screen.contains("Retry"));
+        assert!(screen.contains("the conversation is saved"));
+        assert!(screen.contains("Retry sign-in?"));
+        // #1721: ONE affordance. The body used to print "[Enter] Retry [Esc]
+        // Cancel" while the Confirm chrome rendered "[Y]es [N]o" underneath
+        // it, so the modal told the user two different things at once.
+        assert!(
+            !screen.contains("[Enter] Retry"),
+            "the body must not print its own key legend beside Confirm's: {screen}"
+        );
         assert!(matches!(
             model.handle_confirmed(true).as_slice(),
             [Command::ReauthenticateAgent {
@@ -5052,6 +5072,69 @@ snippets:
             restarted_after,
             vec![1],
             "a recovered session drops out of the auth-failed set: {after:?}",
+        );
+    }
+
+    /// Regression (#1721): a successful sign-in restarts every OTHER session
+    /// of that agent, automatically.
+    ///
+    /// The provider login is machine-wide — it mints a new credential and
+    /// invalidates the one every other running session holds in memory. Left
+    /// alone, each fails its next turn and raises its own re-auth prompt, and
+    /// accepting any of those signs in AGAIN, re-breaking the panes just
+    /// recovered. That loop never converges, so the sweep has to be automatic.
+    #[test]
+    fn successful_reauth_restarts_the_rest_of_the_agent_fleet() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_ipc::TerminalId;
+        let codex = || Some(lazybox_ipc::TerminalKind::Agent("codex".into()));
+        let claude = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (client, mut server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        m.handle_daemon_event(empty_snapshot());
+        for (i, kind) in [codex(), codex(), codex(), claude()].iter().enumerate() {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(i as u64 + 1),
+                session_key: SessionKey::from(format!("o/r#{}", i + 1).as_str()),
+                kind: kind.clone().expect("agent kind"),
+                no_permission: false,
+                on_main: false,
+                agent_state: None,
+            });
+        }
+        while server.rx.try_recv().is_ok() {} // drain subscribe/snapshot effects
+
+        assert_eq!(
+            m.sidebar.agent_id_for_terminal(TerminalId(1)).as_deref(),
+            Some("codex"),
+            "precondition: the recovered terminal resolves to its agent"
+        );
+        assert_eq!(
+            m.sidebar.agent_terminals_except("codex", TerminalId(1)),
+            vec![TerminalId(2), TerminalId(3)],
+            "precondition: the other codex terminals are discoverable"
+        );
+        m.handle_daemon_event(IpcEvent::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(1),
+            display_name: "Codex".into(),
+            success: true,
+            error: None,
+        });
+
+        let mut restarted: Vec<u64> = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let IpcCommand::RestartAgentAndContinue { terminal_id } = cmd {
+                restarted.push(terminal_id.0);
+            }
+        }
+        restarted.sort();
+        assert_eq!(
+            restarted,
+            vec![2, 3],
+            "the other two codex sessions restart; the one that signed in does not, \
+             and a claude session sharing no credential is untouched",
         );
     }
 

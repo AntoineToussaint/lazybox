@@ -5107,6 +5107,39 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// After a successful provider sign-in, restart every OTHER live session
+    /// of the same agent so it picks up the credential now on disk (#1721).
+    /// Returns how many were restarted.
+    ///
+    /// The provider's login is machine-wide: it mints a new credential and
+    /// invalidates the one every other running session is holding *in
+    /// memory* — and a running process never re-reads the file. Without this
+    /// sweep each of those sessions fails its next turn and raises its own
+    /// re-auth prompt, and accepting any of them signs in again, invalidating
+    /// the sessions just recovered. Recovery has to be fleet-wide because the
+    /// damage is.
+    ///
+    /// This issues restarts, never logins, so it cannot itself cascade: a
+    /// restart re-reads the credential, it does not mint one.
+    pub(crate) fn restart_agent_fleet_after_reauth(
+        &mut self,
+        recovered: lazybox_ipc::TerminalId,
+    ) -> usize {
+        let Some(agent_id) = self.sidebar.agent_id_for_terminal(recovered) else {
+            return 0;
+        };
+        let targets = self.sidebar.agent_terminals_except(&agent_id, recovered);
+        for terminal_id in &targets {
+            // Each restarted pane is healthy again, so it must not linger in
+            // the auth-failed set and be restarted a second time by `a R`.
+            self.auth_failed_terminals.remove(terminal_id);
+            self.send_cmd(IpcCommand::RestartAgentAndContinue {
+                terminal_id: *terminal_id,
+            });
+        }
+        targets.len()
+    }
+
     fn send_cmd(&self, cmd: IpcCommand) {
         self.try_send_cmd(cmd);
     }

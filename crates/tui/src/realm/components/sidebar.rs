@@ -867,6 +867,20 @@ impl Sidebar {
         self.inner.limit_reached_terminals()
     }
 
+    /// See `Sidebar::terminal_agent_id`.
+    pub fn agent_id_for_terminal(&self, terminal_id: lazybox_ipc::TerminalId) -> Option<String> {
+        self.inner.terminal_agent_id(terminal_id)
+    }
+
+    /// See `Sidebar::agent_terminals_except`.
+    pub fn agent_terminals_except(
+        &self,
+        agent_id: &str,
+        except: lazybox_ipc::TerminalId,
+    ) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.agent_terminals_except(agent_id, except)
+    }
+
     /// See `Sidebar::running_terminal_ids`.
     pub fn running_terminal_ids(&self) -> std::collections::HashSet<lazybox_ipc::TerminalId> {
         self.inner.running_terminal_ids()

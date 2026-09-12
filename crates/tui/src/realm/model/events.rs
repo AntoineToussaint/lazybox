@@ -2284,7 +2284,29 @@ impl<T: TerminalAdapter> Model<T> {
                     // recovery ran in leave the set, so a healed session is
                     // never restarted out from under the user.
                     self.auth_failed_terminals.remove(recovery_terminal_id);
-                    self.flash_info(format!("{display_name} conversation resumed"));
+                    // Own the blast radius (#1721). A provider sign-in is
+                    // machine-wide: it mints a new credential and invalidates
+                    // what every OTHER running session of this agent is
+                    // holding. Left alone they each fail their next turn, the
+                    // user meets N separate re-auth prompts, and accepting any
+                    // of them signs in AGAIN — re-breaking the panes just
+                    // recovered. That loop never converges, which is why the
+                    // fan-out belongs here rather than in the user's hands:
+                    // one sign-in, one automatic sweep.
+                    //
+                    // Restart, never re-login. `RestartAgentAndContinue`
+                    // respawns the same conversation (`--resume` / `codex
+                    // resume <id>`) against the credential now on disk, so it
+                    // touches no credential and cannot cascade.
+                    let restarted = self.restart_agent_fleet_after_reauth(*recovery_terminal_id);
+                    if restarted > 0 {
+                        let plural = if restarted == 1 { "" } else { "s" };
+                        self.flash_info(format!(
+                            "{display_name} signed in — restarting {restarted} other session{plural} on the new login"
+                        ));
+                    } else {
+                        self.flash_info(format!("{display_name} conversation resumed"));
+                    }
                     self.set_focus(PaneFocus::Terminals);
                 } else {
                     self.queue_agent_auth_prompt(super::AgentAuthPrompt {

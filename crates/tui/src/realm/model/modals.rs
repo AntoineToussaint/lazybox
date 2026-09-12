@@ -2578,31 +2578,41 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let copy = if prompt.retry {
             format!(
-                "{} sign-in did not complete.\n\n{}\n\nThe conversation is still saved and can be resumed.\n\n[Enter] Retry    [Esc] Cancel",
+                "{} sign-in did not complete.\n\n{}\n\nThis pane is gone, but the conversation is saved — retrying resumes it.\n\nRetry sign-in?",
                 prompt.display_name,
                 prompt.error.as_deref().unwrap_or("Provider login failed.")
             )
         } else {
+            // Signing in again MINTS A NEW CREDENTIAL: the provider invalidates
+            // what the previous sign-in issued, which is the token every other
+            // running session of this agent is holding in memory. The old copy
+            // promised the opposite ("it won't sign out any other session") at
+            // the exact moment the user was deciding whether to proceed
+            // (#1721). Name the blast radius, with the count lazybox already
+            // knows, and say what happens next — those sessions are restarted
+            // automatically once the sign-in lands.
             let affected = if prompt.other_session_count == 0 {
                 format!(
-                    "This refreshes the machine-wide {} login in place — it won't sign out any other session.",
+                    "This signs in to {} machine-wide. No other session of it is running.",
                     prompt.display_name
                 )
             } else {
                 format!(
-                    "This refreshes the shared machine-wide {} login in place — your {} other running {} session{} won't be signed out.",
+                    "This signs in to {} machine-wide. Your {} other running {} session{} {} holding the token this replaces, so {} restarted automatically — conversations intact.",
                     prompt.display_name,
                     prompt.other_session_count,
                     prompt.display_name,
+                    if prompt.other_session_count == 1 { "" } else { "s" },
+                    if prompt.other_session_count == 1 { "is" } else { "are" },
                     if prompt.other_session_count == 1 {
-                        ""
+                        "it will be"
                     } else {
-                        "s"
+                        "they will be"
                     }
                 )
             };
             format!(
-                "{} authentication is no longer valid.\n\nSign in again and continue this conversation?\n\n{affected}\n\nTo sign in as a different account, run `{} logout` yourself first — lazybox won't, because it would sign out every session sharing this login.\n\n[Enter] Sign in and continue    [Esc] Not now",
+                "{} authentication is no longer valid.\n\n{affected}\n\nTo sign in as a different account, run `{} logout` yourself first — lazybox won't, because it would sign out every session sharing this login.\n\nSign in again and continue this conversation?",
                 prompt.display_name,
                 prompt.display_name.to_lowercase()
             )

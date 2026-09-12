@@ -935,7 +935,7 @@ impl Sidebar {
     }
 
     /// The agent id running in a terminal, if it is an agent terminal.
-    fn terminal_agent_id(&self, terminal_id: TerminalId) -> Option<String> {
+    pub(crate) fn terminal_agent_id(&self, terminal_id: TerminalId) -> Option<String> {
         match self.running_terminals.get(&terminal_id) {
             Some((_, TerminalKind::Agent(id))) => Some(id.clone()),
             _ => None,
@@ -2236,6 +2236,30 @@ impl Sidebar {
     /// the plain resume (`Shift-K`, a settle-gated `continue` into each) and
     /// the restart with fresh credentials (`a R`, stop + `--resume`) apply
     /// to. Sorted like [`Self::limit_reached_terminals`].
+    /// Every live terminal running the named agent, except `except`.
+    ///
+    /// The re-auth fan-out (#1721): a provider sign-in is machine-wide, so
+    /// the credential every OTHER session of that agent is holding has just
+    /// been invalidated. Those sessions are the blast radius, and restarting
+    /// them is the recovery.
+    pub fn agent_terminals_except(
+        &self,
+        agent_id: &str,
+        except: TerminalId,
+    ) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self
+            .running_terminals
+            .iter()
+            .filter(|(id, (_, kind))| {
+                id.0 != except.0
+                    && matches!(kind, TerminalKind::Agent(running) if running == agent_id)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
     /// Every terminal the daemon currently reports as live. Used to prune a
     /// standing set (auth-failed terminals, #1719) against reality before
     /// issuing a kill+respawn, so an entry for a pane that has since exited

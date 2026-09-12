@@ -4000,17 +4000,22 @@ impl TerminalStack {
                 .terminals
                 .get(&id)
                 .is_some_and(|s| s.auth_recovery_id.is_some());
-            if matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
+            // Ctrl/Alt belong to the inner program's vocabulary, never to
+            // a lazybox affordance — and BOTH arms of this banner have to
+            // read that rule the same way (#1726 review, finding 5).
+            // Leaving it on the close arm alone made `Ctrl-r` a restart
+            // nobody asked for, which is worst on a re-auth pane: there
+            // `restart_exited` re-runs a MACHINE-WIDE login that
+            // invalidates the token every other live session of that agent
+            // is holding. Terminals disagree on whether a shifted letter
+            // also reports SHIFT, so the uppercase code is the signal for
+            // the close key and only Ctrl/Alt disqualify it.
+            let plain = !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+            if plain && matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
                 self.restart_exited(id, cmds);
-            } else if !recovery
-                && matches!(key.code, KeyCode::Char('X'))
-                && !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-            {
-                // Terminals disagree on whether a shifted letter also
-                // reports SHIFT, so the uppercase code is the signal and
-                // only Ctrl/Alt disqualify it.
+            } else if !recovery && plain && matches!(key.code, KeyCode::Char('X')) {
                 self.close_focused_tile(cmds);
                 self.swallow_repeats = true;
             }
@@ -12690,6 +12695,67 @@ mod agent_crash_tests {
             stack.handle_key(KeyEvent::new(KeyCode::Char('X'), mods), &mut cmds);
             assert!(stack.terminals.contains_key(&TerminalId(1)));
         }
+    }
+
+    /// The same rule on the OTHER arm (#1726 review, finding 5): the
+    /// restart affordance read `key.code` alone, so `Ctrl-r` / `Alt-r`
+    /// resumed an agent nobody asked to resume. Both arms of one banner
+    /// now reject Ctrl/Alt identically.
+    #[test]
+    fn ctrl_or_alt_r_does_not_restart_an_exited_pane() {
+        for mods in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            for code in [KeyCode::Char('r'), KeyCode::Enter] {
+                let sk = SessionKey::new("github:o/r#1");
+                let mut stack = exited_stack(&sk);
+                let mut cmds = Vec::new();
+                let outcome = stack.handle_key(KeyEvent::new(code, mods), &mut cmds);
+                assert!(matches!(outcome, PaneOutcome::Consumed));
+                assert!(
+                    cmds.is_empty(),
+                    "{code:?}+{mods:?} must not resume the agent; cmds: {cmds:?}",
+                );
+            }
+        }
+    }
+
+    /// Worst case for the arm above: on a failed-re-auth pane
+    /// `restart_exited` issues `ReauthenticateAgent`, a MACHINE-WIDE
+    /// login that invalidates the token every other live session of that
+    /// agent holds. `Ctrl-r` must not be able to trigger that.
+    #[test]
+    fn ctrl_r_does_not_relaunch_a_machine_wide_login() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        });
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            display_name: "Claude Code".into(),
+            success: false,
+            error: Some("login failed".into()),
+        });
+
+        let mut cmds = Vec::new();
+        stack.handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            &mut cmds,
+        );
+
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::ReauthenticateAgent { .. })),
+            "Ctrl-r must not re-run the provider login; cmds: {cmds:?}",
+        );
     }
 
     /// The headline regression (#1726 review, finding 1): a frozen pane

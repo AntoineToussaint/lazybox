@@ -3881,12 +3881,7 @@ impl TerminalStack {
             }
         }
 
-        // An exited agent pane (#356) is frozen — its PTY is gone, so
-        // typing can't reach a process. Intercept the restart affordance
-        // (`r` / Enter) and swallow every other printable key instead of
-        // pretending to feed a dead terminal. Scrollback (handled above)
-        // still works so the last output stays inspectable, and `]]x` to
-        // close rides the app-level leader, not this path.
+        // The PTY is gone; keep scrollback inspectable and handle local actions.
         if let Some(id) = self
             .focused_terminal_id()
             .or_else(|| self.active_terminal_id())
@@ -3894,6 +3889,8 @@ impl TerminalStack {
         {
             if matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
                 self.restart_exited(id, cmds);
+            } else if key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('x' | 'q')) {
+                self.close_focused_tile(cmds);
             }
             return PaneOutcome::Consumed;
         }
@@ -5637,7 +5634,7 @@ impl TerminalStack {
         } else {
             "exited"
         };
-        let text = format!("⚠ agent {verb} ({status}) — r restart · ]]x close");
+        let text = format!("⚠ agent {verb} ({status}) — r restart · x close");
         let width = grid.width as usize;
         // Pad (or truncate) to the full row so the fill spans it.
         let display: String = if text.chars().count() > width {
@@ -12412,6 +12409,51 @@ mod agent_crash_tests {
     }
 
     #[test]
+    fn bare_close_keys_remove_exited_panes() {
+        for key in ['x', 'q'] {
+            let sk = SessionKey::new("github:o/r#1");
+            let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+            stack.on_event(&Event::TerminalExited {
+                terminal_id: TerminalId(1),
+                exit_code: Some(1),
+                last_output: None,
+            });
+
+            let mut cmds = Vec::new();
+            let outcome = stack.handle_key(
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                &mut cmds,
+            );
+
+            assert!(matches!(outcome, PaneOutcome::Consumed));
+            assert!(!stack.terminals.contains_key(&TerminalId(1)));
+            assert!(cmds.is_empty());
+        }
+    }
+
+    #[test]
+    fn bare_close_keys_reach_live_ptys() {
+        for key in ['x', 'q'] {
+            let sk = SessionKey::new("github:o/r#1");
+            let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+            let mut cmds = Vec::new();
+            let outcome = stack.handle_key(
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                &mut cmds,
+            );
+
+            assert!(matches!(outcome, PaneOutcome::Consumed));
+            assert!(stack.terminals.contains_key(&TerminalId(1)));
+            assert!(cmds.iter().any(|cmd| matches!(
+                cmd,
+                Command::Write { terminal_id: TerminalId(1), bytes, .. }
+                    if bytes == &[key as u8]
+            )));
+            assert!(!cmds.iter().any(|cmd| matches!(cmd, Command::Close { .. })));
+        }
+    }
+
+    #[test]
     fn keys_do_not_reach_a_dead_pty() {
         let sk = SessionKey::new("github:o/r#1");
         let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
@@ -12421,11 +12463,11 @@ mod agent_crash_tests {
             last_output: None,
         });
 
-        // A printable key that isn't the restart affordance is swallowed
+        // A printable key that isn't a local action is swallowed
         // rather than written into the gone PTY.
         let mut cmds = Vec::new();
         let outcome = stack.handle_key(
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
             &mut cmds,
         );
         assert!(matches!(outcome, PaneOutcome::Consumed));
@@ -12621,8 +12663,8 @@ mod agent_crash_tests {
             "banner shows the exit code:\n{screen}",
         );
         assert!(
-            screen.contains("restart"),
-            "banner offers a restart:\n{screen}",
+            screen.contains("r restart · x close"),
+            "banner offers bare restart and close keys:\n{screen}",
         );
     }
 

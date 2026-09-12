@@ -3881,15 +3881,33 @@ impl TerminalStack {
             }
         }
 
-        // The PTY is gone; keep scrollback inspectable and handle local actions.
+        // An exited agent pane (#356) is frozen — its PTY is gone, so
+        // typing can't reach a process. Intercept the restart affordance
+        // (`r` / Enter) and the bare close keys, and swallow every other
+        // printable key instead of pretending to feed a dead terminal.
+        // Scrollback (handled above) still works so the last output stays
+        // inspectable, and `]]x` to close still rides the app-level leader.
+        //
+        // `exited` is NOT the claim "the process is gone". A failed
+        // re-auth sets the very same field as a banner marker while the
+        // agent is still RUNNING — see `bare_close_is_safe`. Neither arm
+        // fires under Ctrl/Alt: `Ctrl-r` is not a request to restart, and
+        // reading the same modifier rule on both arms is what keeps the
+        // two affordances on this banner behaving alike.
         if let Some(id) = self
             .focused_terminal_id()
             .or_else(|| self.active_terminal_id())
             && self.terminals.get(&id).is_some_and(|s| s.exited.is_some())
         {
-            if matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
+            let plain = !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+            if plain && matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
                 self.restart_exited(id, cmds);
-            } else if key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('x' | 'q')) {
+            } else if key.modifiers.is_empty()
+                && matches!(key.code, KeyCode::Char('x' | 'q'))
+                && self.bare_close_is_safe(id)
+            {
                 self.close_focused_tile(cmds);
             }
             return PaneOutcome::Consumed;
@@ -5155,6 +5173,32 @@ impl TerminalStack {
         self.collapsed = false;
     }
 
+    /// Whether an exited pane may be torn down by a BARE keystroke.
+    ///
+    /// [`TerminalSlot::exited`] is set from two very different facts, and
+    /// only one of them means "nothing is left to destroy":
+    ///
+    /// * a real `TerminalExited` — the PTY is gone, the daemon has already
+    ///   run `finish_teardown`, and the frozen pane is pure client state;
+    /// * a failed re-auth (`Event::AgentAuthFinished { success: false }`)
+    ///   — set purely so this pane paints the banner. The daemon skips
+    ///   teardown entirely while a terminal is `authenticating`, and the
+    ///   refusals that produce it (another login already running for this
+    ///   provider; an agent with no interactive auth; "sign-in did not
+    ///   complete — please sign in again") never touch the process. The
+    ///   agent is alive, mid-conversation, and `r` there is a *retry*.
+    ///
+    /// `auth_recovery_id` is what separates them. Closing the live one
+    /// kills a running agent, cannot be undone, and is not confirmed —
+    /// so it keeps the deliberate `]]x` chord it has always required.
+    /// The banner agrees: [`Self::render_exit_banner`] advertises the
+    /// chord rather than the bare key for exactly these panes.
+    fn bare_close_is_safe(&self, id: TerminalId) -> bool {
+        self.terminals
+            .get(&id)
+            .is_some_and(|slot| slot.auth_recovery_id.is_none())
+    }
+
     /// Resume the agent behind an exited pane while leaving the frozen pane
     /// in place until the daemon publishes its exact replacement.
     fn restart_exited(&mut self, terminal_id: TerminalId, cmds: &mut Vec<Command>) {
@@ -5601,7 +5645,7 @@ impl TerminalStack {
             // An exited agent pane overlays a restart banner on its last
             // row, leaving the frozen screen visible above it (#356).
             if let Some(exit) = &slot.exited {
-                Self::render_exit_banner(frame, grid, exit);
+                Self::render_exit_banner(frame, grid, exit, slot.auth_recovery_id.is_none());
             }
         }
     }
@@ -5620,7 +5664,7 @@ impl TerminalStack {
     /// so an immediate `code 0` isn't mistaken for success, and the
     /// captured tail of its output is painted just above the banner so
     /// the pane shows *why* instead of a blank black screen.
-    fn render_exit_banner(frame: &mut Frame, grid: Rect, exit: &TerminalExit) {
+    fn render_exit_banner(frame: &mut Frame, grid: Rect, exit: &TerminalExit, bare_close: bool) {
         if grid.width == 0 || grid.height == 0 {
             return;
         }
@@ -5634,7 +5678,11 @@ impl TerminalStack {
         } else {
             "exited"
         };
-        let text = format!("⚠ agent {verb} ({status}) — r restart · x close");
+        // A pane whose agent is still alive behind a failed re-auth
+        // refuses the bare close key, so it must not offer one — naming a
+        // key that does nothing is the bug this banner was fixed for.
+        let close = if bare_close { "x close" } else { "]]x close" };
+        let text = format!("⚠ agent {verb} ({status}) — r restart · {close}");
         let width = grid.width as usize;
         // Pad (or truncate) to the full row so the fill spans it.
         let display: String = if text.chars().count() > width {
@@ -12408,6 +12456,169 @@ mod agent_crash_tests {
         assert!(stack.terminals.contains_key(&TerminalId(2)));
     }
 
+    /// A failed re-auth marks the slot `exited` purely to paint the
+    /// banner — the daemon skips teardown while a terminal is
+    /// `authenticating`, so the agent is still running and resumable.
+    /// A bare keystroke must not kill it (#1726 review, finding 1).
+    #[test]
+    fn a_bare_close_key_spares_a_live_agent_behind_a_failed_reauth() {
+        for key in ['x', 'q'] {
+            let sk = SessionKey::new("github:o/r#1");
+            let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+            stack.on_event(&Event::TerminalReplaced {
+                old_terminal_id: TerminalId(1),
+                terminal_id: TerminalId(2),
+                session_key: sk,
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                authenticating: true,
+            });
+            // The daemon refused the re-auth without touching the agent
+            // process ("another authentication flow is already running
+            // for this provider").
+            stack.on_event(&Event::AgentAuthFinished {
+                recovery_terminal_id: TerminalId(1),
+                terminal_id: TerminalId(2),
+                display_name: "Claude Code".into(),
+                success: false,
+                error: Some("another authentication flow is already running".into()),
+            });
+
+            let mut cmds = Vec::new();
+            let outcome = stack.handle_key(
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                &mut cmds,
+            );
+
+            assert!(
+                matches!(outcome, PaneOutcome::Consumed),
+                "`{key}` is swallowed"
+            );
+            assert!(
+                stack.terminals.contains_key(&TerminalId(2)),
+                "`{key}` must not drop the live agent's slot",
+            );
+            assert!(
+                !cmds.iter().any(|cmd| matches!(cmd, Command::Close { .. })),
+                "`{key}` must not kill a live agent PTY; cmds: {cmds:?}",
+            );
+        }
+    }
+
+    /// The escape hatch survives: the deliberate `]]x` chord still closes
+    /// the same pane, so the guard removed a bare-key foot-gun, not the
+    /// ability to get rid of a stuck re-auth pane.
+    #[test]
+    fn the_leader_chord_still_closes_a_failed_reauth_pane() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        });
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            display_name: "Claude Code".into(),
+            success: false,
+            error: Some("login failed".into()),
+        });
+
+        let mut cmds = Vec::new();
+        stack.close_focused_tile(&mut cmds);
+
+        assert!(
+            cmds.iter().any(|cmd| matches!(
+                cmd,
+                Command::Close {
+                    terminal_id: TerminalId(2),
+                    ..
+                }
+            )),
+            "`]]x` still tears the pane down daemon-side; cmds: {cmds:?}",
+        );
+    }
+
+    /// `r` is the re-auth RETRY on such a pane and must keep working —
+    /// the guard is about the destructive arm only.
+    #[test]
+    fn restart_still_retries_a_failed_reauth_pane() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        });
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            display_name: "Claude Code".into(),
+            success: false,
+            error: Some("login failed".into()),
+        });
+
+        let mut cmds = Vec::new();
+        let outcome = stack.handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+
+        assert!(matches!(outcome, PaneOutcome::Consumed));
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::ReauthenticateAgent {
+                terminal_id: TerminalId(1),
+            }]
+        ));
+    }
+
+    /// Neither affordance fires under Ctrl/Alt (#1726 review, finding 5):
+    /// `Ctrl-r` is not a request to restart a crashed agent.
+    #[test]
+    fn modified_keys_do_not_drive_the_exited_pane_affordances() {
+        for (code, mods) in [
+            (KeyCode::Char('r'), KeyModifiers::CONTROL),
+            (KeyCode::Char('r'), KeyModifiers::ALT),
+            (KeyCode::Char('x'), KeyModifiers::CONTROL),
+            (KeyCode::Char('q'), KeyModifiers::ALT),
+        ] {
+            let sk = SessionKey::new("github:o/r#1");
+            let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+            stack.on_event(&Event::TerminalExited {
+                terminal_id: TerminalId(1),
+                exit_code: Some(1),
+                last_output: None,
+            });
+
+            let mut cmds = Vec::new();
+            let outcome = stack.handle_key(KeyEvent::new(code, mods), &mut cmds);
+
+            assert!(matches!(outcome, PaneOutcome::Consumed));
+            assert!(
+                stack.terminals.contains_key(&TerminalId(1)),
+                "{code:?}+{mods:?} must not close the pane",
+            );
+            assert!(
+                cmds.is_empty(),
+                "{code:?}+{mods:?} must not restart either; cmds: {cmds:?}",
+            );
+        }
+    }
+
     #[test]
     fn bare_close_keys_remove_exited_panes() {
         for key in ['x', 'q'] {
@@ -12636,6 +12847,46 @@ mod agent_crash_tests {
         assert_eq!(auth.last_seq, 1);
         assert_eq!(auth.recent, b"provider login");
         assert!(!auth.sync.is_desynced());
+    }
+
+    /// The banner must never name a key the pane refuses: a live agent
+    /// behind a failed re-auth points at the `]]x` chord, not bare `x`.
+    #[test]
+    fn failed_reauth_banner_points_at_the_leader_chord() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        });
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            display_name: "Claude Code".into(),
+            success: false,
+            error: Some("login failed".into()),
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| stack.render(Rect::new(0, 0, 80, 24), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let screen: String = (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            screen.contains("r restart · ]]x close"),
+            "a live re-auth pane advertises the chord, not the bare key:\n{screen}",
+        );
     }
 
     #[test]

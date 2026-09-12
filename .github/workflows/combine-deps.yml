@@ -1,0 +1,58 @@
+# Folds every open Dependabot pull request into a single one.
+#
+# Dependabot groups within an ecosystem but never across them (see the comment
+# in .github/dependabot.yml), so its best case is one pull request per
+# ecosystem. This runs after its weekly pass and combines whatever is open.
+#
+# REQUIRES the DEPS_COMBINE_TOKEN secret — a PAT (or GitHub App token) with
+# `repo` scope. The built-in GITHUB_TOKEN is not usable here for two separate
+# reasons: this organisation has "Allow GitHub Actions to create and approve
+# pull requests" turned off, so it cannot open the combined pull request at
+# all; and even with that enabled, a branch pushed or a pull request opened by
+# GITHUB_TOKEN does not trigger workflow runs, so the combined pull request
+# would sit with no CI and never go green. An organisation-level secret covers
+# every repository at once.
+name: combine-deps
+
+on:
+  schedule:
+    # Mondays, a few hours after Dependabot's weekly pass has opened its pull
+    # requests. Off the hour: :00 is the busiest minute on the shared runners.
+    - cron: '23 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: combine-deps
+  cancel-in-progress: false
+
+jobs:
+  combine:
+    name: Combine open Dependabot pull requests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The secrets context is not available to `if:`, so this is checked in the
+      # step body rather than as a condition.
+      - name: Require a token that can open a pull request and trigger CI
+        env:
+          COMBINE_TOKEN: ${{ secrets.DEPS_COMBINE_TOKEN }}
+        run: |
+          if [ -z "$COMBINE_TOKEN" ]; then
+            echo "::error::DEPS_COMBINE_TOKEN is not set. Add it as an organisation secret (a PAT with 'repo' scope)."
+            echo "GITHUB_TOKEN cannot be used here: Actions is not permitted to create pull requests in"
+            echo "this organisation, and a pull request it opens does not trigger CI, so the combined"
+            echo "pull request would never go green."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.DEPS_COMBINE_TOKEN }}
+      - name: Combine
+        env:
+          GH_TOKEN: ${{ secrets.DEPS_COMBINE_TOKEN }}
+        run: bash .github/scripts/combine-deps.sh

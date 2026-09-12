@@ -817,10 +817,11 @@ async fn run_reauthentication(
     // told the machine-wide login needs signing in again rather than
     // discovering it one failing pane at a time.
     //
-    // The common case — an already-valid login the user re-triggered — is
-    // protected because `login` exiting 0 is not trusted on its own: the
-    // status gate below confirms the credential really is valid before the
-    // conversation is resumed.
+    // A re-auth the user re-triggered on an already-valid login is safe to
+    // run: `login` is the provider's own interactive command and re-running
+    // it against a good credential is idempotent. What is NOT safe is
+    // trusting its exit code — see the credential fingerprint taken below
+    // and re-read after it exits (#1718).
     let previous_failure = config
         .agent_recovery
         .take_failure(recovery_terminal_id)
@@ -876,6 +877,12 @@ async fn run_reauthentication(
         .agent_recovery
         .set_phase(recovery_terminal_id, AgentAuthPhase::LoginInteractive)
         .await;
+    // Fingerprint the credential BEFORE `login` touches it. A sign-in that
+    // actually took rewrites the file; one that no-oped on the credential
+    // already there leaves it byte-identical (#1718). This is a file read,
+    // not a probe: it spawns nothing, so it cannot gate, delay, or race the
+    // interactive login that follows.
+    let credential_before = credential_state(&config, &context.agent_id).await;
     let login_key = match config
         .backend
         .spawn(&commands.login, Some(&context.cwd), AUTH_ENV, "agent-auth")
@@ -1072,9 +1079,41 @@ async fn run_reauthentication(
     // credential still present and can exit 0 without actually
     // re-authenticating (e.g. reporting an already-present but expired
     // session). Trusting that exit code alone would resume straight back into
-    // the same failed session and re-arm the auth loop, so confirm the
-    // credential is genuinely valid with the provider's own status command
-    // before resuming.
+    // the same failed session and re-arm the auth loop.
+    //
+    // Two independent checks stand between that exit code and the resume,
+    // because neither one can do the other's job:
+    //
+    // 1. The credential fingerprint (here). A sign-in that took REWRITES the
+    //    credential file; a `login` that no-oped on the one already on disk
+    //    leaves it byte-identical. This is the only check that can see a
+    //    credential the server has invalidated — #1718's actual failure,
+    //    where `codex login status` cheerfully reports
+    //    `Logged in using ChatGPT` about a token the server already rejected,
+    //    because that command only ever inspects local disk.
+    // 2. The status probe (below). It catches the opposite case — a `login`
+    //    that exited 0 having CLEARED the credential — which the fingerprint
+    //    reads as "changed" and would wave through.
+    //
+    // Order matters: an unchanged credential is conclusive, so it short-
+    // circuits before a probe that cannot add anything gets spawned.
+    let credential_after = credential_state(&config, &latest_context.agent_id).await;
+    if credential_before.is_unchanged_from(credential_after) {
+        finish_failure(
+            &config,
+            recovery_terminal_id,
+            auth_terminal_id,
+            &display_name,
+            format!(
+                "sign-in did not take — {display_name}'s stored credential is unchanged, so \
+                 resuming would hit the same failure. If the account was signed out or \
+                 switched elsewhere, sign out of {display_name} outside lazybox and retry."
+            ),
+            Some(login_key),
+        )
+        .await;
+        return;
+    }
     let authenticated = verify_authenticated(
         &config,
         recovery_terminal_id,
@@ -1184,9 +1223,107 @@ fn cancelled_login_error(authenticated: bool, display_name: &str) -> String {
     )
 }
 
-/// Confirm the agent's login is actually valid before resuming, by running
-/// the provider's own status command. Returns `true` (resume) unless the
-/// probe reports, unambiguously, that the agent is signed out.
+/// What the provider's credential looked like at one instant.
+///
+/// `Absent` and `Unobservable` are kept apart because they are different
+/// observations — "there is no credential" versus "we could not look" — and
+/// conflating them is how a check like this goes wrong. Only one of the
+/// three is acted on here; see [`CredentialState::is_unchanged_from`] for
+/// which, and why the other two are left to the status probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialState {
+    /// lazybox does not know where this agent keeps its credential, or could
+    /// not read the file (permissions, a race with the provider's own
+    /// rewrite). NOT evidence — never compared.
+    Unobservable,
+    /// The credential file is known and is not there.
+    Absent,
+    /// Content hash of the credential file. Only ever compared for equality;
+    /// the bytes are dropped immediately and never logged.
+    Present(u64),
+}
+
+impl CredentialState {
+    /// True when a credential was **present and identical** on both sides of
+    /// the interactive `login` — the one state the status probe is blind to,
+    /// because a credential the server invalidated still reads as a perfectly
+    /// good credential on disk (#1718).
+    ///
+    /// `Unobservable` is never "unchanged": absence of evidence is not
+    /// evidence. `Absent` → `Absent` genuinely is a login that changed
+    /// nothing, but it is deliberately left to the status probe rather than
+    /// short-circuited here — a missing credential is exactly what the
+    /// signed-out marker detects, it reaches the same refusal, and it gets
+    /// there with the more accurate message ("still logged out" rather than
+    /// "unchanged").
+    fn is_unchanged_from(self, after: CredentialState) -> bool {
+        matches!(
+            (self, after),
+            (CredentialState::Present(before), CredentialState::Present(after)) if before == after
+        )
+    }
+}
+
+/// The credential file the provider's `login` rewrites on a successful
+/// sign-in, when lazybox knows where it is.
+///
+/// Only Codex is mapped: its credential is a single JSON file under the
+/// shared home #1656 consolidated onto, which is exactly what makes the
+/// no-op detectable. Claude stores its OAuth credential in the macOS
+/// Keychain on the platform lazybox is developed against, so there is no
+/// file whose bytes answer the question — it stays `None` and keeps the
+/// marker gate as its only check, which is the behaviour it has always had.
+fn credential_file(config: &ServerConfig, agent_id: &str) -> Option<PathBuf> {
+    match agent_id {
+        "codex" => Some(
+            config
+                .credential_home_override
+                .clone()
+                .or_else(crate::codex_home_migration::shared_codex_home)?
+                .join("auth.json"),
+        ),
+        _ => None,
+    }
+}
+
+/// Fingerprint the agent's credential so a `login` that rewrote it can be
+/// told apart from one that no-oped on it (#1718).
+async fn credential_state(config: &ServerConfig, agent_id: &str) -> CredentialState {
+    use std::hash::{Hash, Hasher};
+
+    let Some(path) = credential_file(config, agent_id) else {
+        return CredentialState::Unobservable;
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            drop(bytes);
+            CredentialState::Present(hasher.finish())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => CredentialState::Absent,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not read the provider credential to check the sign-in took; \
+                 falling through to the status probe"
+            );
+            CredentialState::Unobservable
+        }
+    }
+}
+
+/// Check the provider's local login state after interactive login.
+/// Returns `true` (resume) unless the probe reports, unambiguously, that the
+/// agent is signed out.
+///
+/// LOCAL state only. `codex login status` reads the credential file, so it
+/// answers "is there a credential" and never "does the server still accept
+/// it" — it prints `Logged in using ChatGPT` about a token that was
+/// invalidated by a sign-out elsewhere (#1718). Catching that is
+/// [`CredentialState`]'s job, checked before this is called; what this adds
+/// is the case the fingerprint cannot see, a `login` that exited 0 having
+/// cleared the credential.
 ///
 /// Deliberately fails OPEN, and the exit code alone is NOT an unambiguous
 /// signal. A probe that cannot answer — an empty status command, a spawn
@@ -1408,7 +1545,39 @@ mod tests {
     use super::*;
     use crate::backend::SessionBackend;
 
+    /// As [`recovery_fixture_undetected`], plus the auth requirement a
+    /// detected failure would have recorded.
     async fn recovery_fixture(
+        agent_id: &str,
+        provider_session_id: Option<&str>,
+    ) -> (ServerConfig, crate::backend::MockBackend, TerminalId) {
+        let (config, mock, terminal_id) =
+            recovery_fixture_undetected(agent_id, provider_session_id).await;
+        assert!(
+            config
+                .agent_recovery
+                .require(
+                    terminal_id,
+                    agent_id.into(),
+                    agent_display_name(&config, agent_id),
+                    format!(
+                        "{} authentication is no longer valid.",
+                        agent_display_name(&config, agent_id)
+                    ),
+                    0,
+                )
+                .await
+        );
+        (config, mock, terminal_id)
+    }
+
+    /// A recoverable agent pane that has NOT yet reported an auth failure.
+    ///
+    /// `require` is idempotent-by-refusal (a second call returns `false` and
+    /// emits nothing), so a test that wants to drive `detect_required` itself
+    /// — and observe the `AgentAuthRequired` it emits — needs the requirement
+    /// absent rather than deleted out of the registry's private map afterwards.
+    async fn recovery_fixture_undetected(
         agent_id: &str,
         provider_session_id: Option<&str>,
     ) -> (ServerConfig, crate::backend::MockBackend, TerminalId) {
@@ -1454,21 +1623,6 @@ mod tests {
                 composing_buffer: Some("keep this draft".into()),
             })
             .await;
-        assert!(
-            config
-                .agent_recovery
-                .require(
-                    terminal_id,
-                    agent_id.into(),
-                    agent_display_name(&config, agent_id),
-                    format!(
-                        "{} authentication is no longer valid.",
-                        agent_display_name(&config, agent_id)
-                    ),
-                    0,
-                )
-                .await
-        );
         crate::spawn_handler::restore_terminal_conversation_state(
             &config,
             terminal_id,
@@ -1637,6 +1791,255 @@ mod tests {
             .expect("resumed terminal snapshot");
         assert_eq!(resumed.prompt_history[0].text, "keep this prompt");
         assert_eq!(resumed.composing_buffer.as_deref(), Some("keep this draft"));
+    }
+
+    /// The status probe's verdict comes from the provider's signed-out
+    /// MARKER — not from the exit code, and not from whether the output
+    /// names an account.
+    ///
+    /// The account-bearing row is the one #1718 turns on: `codex login
+    /// status` prints exactly this for a credential the server has already
+    /// invalidated, so the probe answers "authenticated" and always will.
+    /// Pinned so nobody ever "fixes" #1718 by teaching this probe to guess
+    /// from the account line — it reads local disk and cannot know what the
+    /// server thinks. [`CredentialState`] is what detects that case.
+    ///
+    /// The signed-out row is what gives the other two rows any content: the
+    /// probe deliberately fails OPEN, so a table of `true` expectations
+    /// alone would pass on no output at all, asserting the default rather
+    /// than the behaviour.
+    #[tokio::test]
+    async fn the_status_probe_verdict_is_the_marker_not_the_exit_code_or_the_account() {
+        for (output, code, expected) in [
+            ("Logged in using ChatGPT: user@example.com", 0, true),
+            ("error: unrecognized subcommand 'status'", 2, true),
+            ("Not logged in", 0, false),
+        ] {
+            let (config, mock) = ServerConfig::in_memory_with_mock();
+            let commands = config
+                .agents
+                .get("codex")
+                .expect("Codex adapter")
+                .auth_commands()
+                .expect("Codex auth commands");
+            let probe = verify_authenticated(
+                &config,
+                TerminalId(708),
+                &commands.status,
+                commands.signed_out_marker,
+                std::path::Path::new("/tmp"),
+                AUTH_ENV,
+            );
+            let finish_probe = async {
+                let argv: Vec<&str> = commands.status.iter().map(String::as_str).collect();
+                wait_for_argv(&mock, &argv).await;
+                mock.emit("mock-agent-auth-0", output.as_bytes()).await;
+                mock.finish("mock-agent-auth-0", code).await;
+            };
+            let (authenticated, ()) = tokio::join!(probe, finish_probe);
+            assert_eq!(authenticated, expected, "status output: {output}");
+        }
+    }
+
+    /// The interactive `login` runs on every adapter-detected auth failure —
+    /// it is never skipped, and never gated, behind a status probe that
+    /// reported "authenticated". #1718 was first diagnosed as exactly such a
+    /// pre-login gate; there is none, and this keeps it that way.
+    ///
+    /// Asserted on the ORDERED spawn list. `all_argv` walks a `HashMap`, so
+    /// sorting its result can only prove a *set* — never that one command ran
+    /// before another.
+    ///
+    /// Scope: `AuthFailure` carries one `&'static str` reason shared by all
+    /// three Codex shapes (`crates/agents/src/detect.rs`), so nothing
+    /// downstream of `detect_auth_failure` can see WHICH banner fired. This
+    /// test therefore pins detection → event → login, not the refresh-
+    /// rejection wording; that wording is pinned in
+    /// `crates/agents/tests/agents.rs`.
+    #[tokio::test]
+    async fn an_adapter_detected_failure_runs_login_before_any_status_probe() {
+        let (config, mock, terminal_id) =
+            recovery_fixture_undetected("codex", Some("conversation-708")).await;
+        let commands = config
+            .agents
+            .get("codex")
+            .expect("Codex adapter")
+            .auth_commands()
+            .expect("Codex auth commands");
+        let failure = config.agents.get("codex").expect("Codex adapter")
+            .detect_auth_failure(b"Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.")
+            .expect("refresh rejection is an auth failure");
+        let mut events = config.bus.subscribe();
+        detect_required(&config, terminal_id, failure.reason).await;
+        let required = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let event = events.recv().await.expect("event bus");
+                if matches!(event, Event::AgentAuthRequired { .. }) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("AgentAuthRequired deadline");
+        assert!(matches!(
+            required,
+            Event::AgentAuthRequired { terminal_id: id, ref reason, .. }
+                if id == terminal_id && reason == failure.reason
+        ));
+
+        start_reauthentication(&config, terminal_id, None).await;
+        let login_argv: Vec<&str> = commands.login.iter().map(String::as_str).collect();
+        wait_for_argv(&mock, &login_argv).await;
+        let spawned = mock.argv_in_spawn_order().await;
+        let login_at = spawned
+            .iter()
+            .position(|argv| argv[..] == commands.login[..])
+            .expect("the interactive login was spawned");
+        assert!(
+            spawned[..login_at]
+                .iter()
+                .all(|argv| argv[..] != commands.status[..]),
+            "a status probe ran before the interactive login: {spawned:?}"
+        );
+    }
+
+    /// #1718: a `login` that exits 0 without rewriting the credential must
+    /// NOT resume.
+    ///
+    /// This is the reported failure. The user's Codex token was invalidated
+    /// server-side (signed out elsewhere), so `codex login` finds a
+    /// well-formed credential already on disk, no-ops on it and exits 0 —
+    /// and `codex login status` reports `Logged in using ChatGPT` about that
+    /// same dead token, because it only ever reads local disk. Resuming on
+    /// that verdict lands straight back in the rejected refresh and re-arms
+    /// the auth loop, which is what "re-login is a no-op" looked like.
+    ///
+    /// The credential bytes are the one local signal that distinguishes the
+    /// two: a sign-in that took rewrites them. Unchanged bytes are
+    /// conclusive, so the status probe is never even spawned.
+    #[tokio::test]
+    async fn a_login_that_leaves_the_credential_unchanged_does_not_resume() {
+        let home = tempfile::tempdir().expect("credential home");
+        std::fs::write(home.path().join("auth.json"), b"{\"tokens\":\"stale\"}")
+            .expect("seed credential");
+        let (mut config, mock, terminal_id) =
+            recovery_fixture("codex", Some("conversation-708")).await;
+        config.credential_home_override = Some(home.path().to_path_buf());
+        let mut events = config.bus.subscribe();
+
+        start_reauthentication(&config, terminal_id, None).await;
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        // `codex login` exits 0 having touched nothing — the no-op.
+        mock.finish(&login_key, 0).await;
+
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.expect("event bus");
+                if let Event::AgentAuthFinished { success, error, .. } = event {
+                    return (success, error);
+                }
+            }
+        })
+        .await
+        .expect("AgentAuthFinished deadline");
+        assert!(!finished.0, "an unchanged credential must not resume");
+        let error = finished.1.expect("a refusal names why");
+        assert!(
+            error.contains("credential is unchanged"),
+            "refusal must name the unchanged credential, got: {error}"
+        );
+
+        let spawned = mock.argv_in_spawn_order().await;
+        assert!(
+            !spawned
+                .iter()
+                .any(|argv| argv.iter().any(|word| word == "resume")),
+            "the dead session must not be resumed: {spawned:?}"
+        );
+        assert!(
+            !spawned
+                .iter()
+                .any(|argv| argv[..] == ["codex", "login", "status"][..]),
+            "an unchanged credential is conclusive — no probe needed: {spawned:?}"
+        );
+    }
+
+    /// The other half of #1718's gate: a sign-in that genuinely took rewrites
+    /// the credential, and that must resume.
+    ///
+    /// Without this the "unchanged credential" refusal would be free to
+    /// harden into a blanket refusal, stranding every conversation behind a
+    /// login the user actually completed — the exact failure the status
+    /// probe's fail-open design exists to avoid.
+    #[tokio::test]
+    async fn a_login_that_rewrites_the_credential_resumes() {
+        let home = tempfile::tempdir().expect("credential home");
+        let credential = home.path().join("auth.json");
+        std::fs::write(&credential, b"{\"tokens\":\"stale\"}").expect("seed credential");
+        let (mut config, mock, terminal_id) =
+            recovery_fixture("codex", Some("conversation-708")).await;
+        config.credential_home_override = Some(home.path().to_path_buf());
+
+        start_reauthentication(&config, terminal_id, None).await;
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        // What a real sign-in does while the login process is running.
+        std::fs::write(&credential, b"{\"tokens\":\"fresh\"}").expect("rewrite credential");
+        mock.finish(&login_key, 0).await;
+
+        wait_for_argv(&mock, &["codex", "login", "status"]).await;
+        mock.emit(
+            "mock-agent-auth-2",
+            b"Logged in using ChatGPT: user@example.com",
+        )
+        .await;
+        mock.finish("mock-agent-auth-2", 0).await;
+        wait_for_argv(&mock, &["codex", "resume", "conversation-708"]).await;
+    }
+
+    /// An agent whose credential lazybox cannot see keeps the behaviour it
+    /// has always had: the status probe is the only gate.
+    ///
+    /// Absence of evidence must never read as evidence of a no-op. Claude
+    /// stores its OAuth credential outside a file lazybox knows about, so
+    /// `credential_state` reports `Unobservable` on both sides — and an
+    /// `Unobservable == Unobservable` comparison, if it ever blocked, would
+    /// strand every Claude re-auth on this machine.
+    #[tokio::test]
+    async fn an_agent_with_no_observable_credential_still_resumes() {
+        assert_eq!(
+            credential_file(&ServerConfig::in_memory(), "claude"),
+            None,
+            "this test is meaningless if Claude's credential becomes observable"
+        );
+        let (config, mock, terminal_id) =
+            recovery_fixture("claude", Some("conversation-708")).await;
+
+        start_reauthentication(&config, terminal_id, None).await;
+        wait_for_argv(&mock, &["claude", "auth", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        mock.finish(&login_key, 0).await;
+        wait_for_argv(&mock, &["claude", "auth", "status"]).await;
+        mock.emit("mock-agent-auth-2", br#"{"loggedIn": true}"#)
+            .await;
+        mock.finish("mock-agent-auth-2", 0).await;
+        wait_for_argv(&mock, &["claude", "--resume", "conversation-708"]).await;
     }
 
     #[tokio::test]

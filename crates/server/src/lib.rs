@@ -452,6 +452,12 @@ pub struct ServerConfig {
     pub device_registry: Arc<lazybox_identity::DeviceRegistry>,
     /// Cross-tick provider state, caches, and wake coordination.
     pub poll: PollState,
+    /// Overrides the directory [`agent_auth`] reads an agent's credential
+    /// file from when it checks whether an interactive `login` actually
+    /// rewrote it (#1718). `None` — production — resolves the agent's real
+    /// home. Tests point it at a temp dir so the check is exercised without
+    /// reading, or depending on, the developer's own `~/.codex/auth.json`.
+    pub(crate) credential_home_override: Option<std::path::PathBuf>,
     /// Enable GitHub fleet-claim mutations. Production configs turn this on;
     /// in-memory/test configs leave it off so a unit-test agent spawn can
     /// never reach the developer's real GitHub account.
@@ -700,6 +706,7 @@ impl ServerConfig {
             default_principal_id: lazybox_ipc::PrincipalId::local(),
             device_registry: Arc::new(lazybox_identity::DeviceRegistry::ephemeral()),
             poll: PollState::default(),
+            credential_home_override: None,
             working_claims_enabled: false,
             working_claim_owner_id: "00000000000000000000000000000000".into(),
             working_claim_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -897,10 +904,12 @@ impl ServerConfig {
     /// for unit tests — see `in_memory_with_mock` when the test
     /// needs to drive the backend (inject output, finish a session).
     pub fn in_memory() -> Self {
-        Self::with_store_and_backend(
+        let mut config = Self::with_store_and_backend(
             Arc::new(MemoryStore::new()),
             Arc::new(backend::MockBackend::new()),
-        )
+        );
+        config.credential_home_override = Some(isolated_test_credential_home());
+        config
     }
 
     /// Like `in_memory`, but also returns the typed `MockBackend`
@@ -908,10 +917,27 @@ impl ServerConfig {
     /// etc. against the same backend the daemon is using.
     pub fn in_memory_with_mock() -> (Self, backend::MockBackend) {
         let mock = backend::MockBackend::new();
-        let config =
+        let mut config =
             Self::with_store_and_backend(Arc::new(MemoryStore::new()), Arc::new(mock.clone()));
+        config.credential_home_override = Some(isolated_test_credential_home());
         (config, mock)
     }
+}
+
+/// A credential home for in-memory configs that is guaranteed not to exist.
+///
+/// Without it `credential_home_override: None` would send the re-auth flow's
+/// sign-in check at the *developer's own* `~/.codex/auth.json` (#1718) — it
+/// would read a real credential, and the check's verdict would depend on
+/// whether the machine running the tests happens to have Codex installed.
+/// Same reasoning as `working_claims_enabled: false`: a unit test must never
+/// reach the developer's real provider state. Nothing is created here; a test
+/// that exercises the check points the override at its own temp dir.
+fn isolated_test_credential_home() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "lazybox-tests-no-credential-home-{}",
+        std::process::id()
+    ))
 }
 
 /// Build the agent registry the daemon spawns from: the built-ins plus

@@ -289,6 +289,30 @@ impl MockBackend {
         map.values().map(|s| s.argv.clone()).collect()
     }
 
+    /// Every session's argv **in spawn order**.
+    ///
+    /// [`MockBackend::all_argv`] walks a `HashMap`, so its order is whatever
+    /// the hasher produced — a test asserting that one command ran *before*
+    /// another cannot get that from it, and sorting the result only hides
+    /// the fact (#1718 review). `spawn` stamps each key with a monotonic
+    /// counter (`mock-<hint>-<n>`); this recovers the order from it.
+    pub async fn argv_in_spawn_order(&self) -> Vec<Vec<String>> {
+        let map = self.inner.sessions.lock().await;
+        let mut ordered: Vec<(u64, Vec<String>)> = map
+            .iter()
+            .map(|(key, session)| {
+                let counter = key
+                    .rsplit('-')
+                    .next()
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .expect("mock backend keys end in their spawn counter");
+                (counter, session.argv.clone())
+            })
+            .collect();
+        ordered.sort_by_key(|(counter, _)| *counter);
+        ordered.into_iter().map(|(_, argv)| argv).collect()
+    }
+
     /// Environment passed to `spawn()` for this session.
     pub async fn env_for(&self, key: &str) -> Option<Vec<(String, String)>> {
         let map = self.inner.sessions.lock().await;

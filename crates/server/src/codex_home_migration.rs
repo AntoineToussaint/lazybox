@@ -77,7 +77,7 @@ pub(crate) fn migrate_legacy_codex_homes() {
 /// otherwise resolve against the daemon's working directory and write a
 /// stray `.codex/` tree somewhere the user will never find it, while Codex
 /// itself resolves the same relative path against the worktree it runs in.
-fn shared_codex_home() -> Option<PathBuf> {
+pub(crate) fn shared_codex_home() -> Option<PathBuf> {
     let dir = match std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
         Some(codex_home) => PathBuf::from(codex_home),
         None => {

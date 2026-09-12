@@ -224,6 +224,13 @@ async fn run<F, P, PFut, R, RFut, A, AFut>(
                 ..
             }) => {
                 if enabled() {
+                    // Codex's individual cap has no Wait chooser to accept.
+                    if matches!(
+                        config.terminal.terminal_meta_for(terminal_id).await,
+                        Some((_, lazybox_ipc::TerminalKind::Agent(id))) if id == "codex"
+                    ) {
+                        continue;
+                    }
                     press(config.clone(), terminal_id).await;
                     // Only track a wait we actually pressed, so the resume
                     // can't fire for a block the user is handling manually.
@@ -369,6 +376,35 @@ mod tests {
             vec![TerminalId(2), TerminalId(4)],
             "only the two LimitReached transitions press Wait",
         );
+    }
+
+    #[tokio::test]
+    async fn codex_limit_never_presses_wait_or_schedules_a_resume() {
+        let config = ServerConfig::in_memory();
+        config
+            .terminal
+            .entries
+            .lock()
+            .await
+            .entry(TerminalId(7))
+            .or_default()
+            .meta = Some((
+            "ws:1".into(),
+            lazybox_ipc::TerminalKind::Agent("codex".into()),
+        ));
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(limit_event(7)).unwrap();
+        tx.send(state_event(7, AgentState::Idle)).unwrap();
+        drop(tx);
+        run(
+            rx,
+            config,
+            || true,
+            |_cfg, _tid| async { panic!("Codex has no Wait chooser") },
+            |_cfg, _tid| async { panic!("no auto-Wait resume was scheduled") },
+            no_auth,
+        )
+        .await;
     }
 
     /// With the flag off, a `LimitReached` transition presses nothing —

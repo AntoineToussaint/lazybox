@@ -1100,7 +1100,7 @@ impl LazyboxMcp {
                 None,
             ));
         };
-        let body = apply_snippet_vars(&snippet.dispatch_body(), vars);
+        let body = apply_snippet_vars(&snippet.delivery_body(), vars);
         if body.trim().is_empty() {
             return Err(McpError::invalid_request(
                 format!("snippet {key:?} has an empty body"),

@@ -1,25 +1,50 @@
+# Dependency updates for every ecosystem this repository ships.
+#
+# Each ecosystem is ONE catch-all group with open-pull-requests-limit 1, so a
+# week yields at most one pull request per ecosystem instead of one per
+# dependency. Dependabot cannot group ACROSS ecosystems, so the entries below
+# are the floor on what Dependabot itself opens; .github/workflows/combine-
+# deps.yml runs afterwards and folds whatever is open into a single pull
+# request.
+#
+# The groups deliberately carry NO `update-types:` filter. That filter only
+# recognises semver update types, so a Docker base image pinned by digest
+# matches none of them and falls OUT of the group into its own ungrouped pull
+# request, one per directory. Omitting the filter makes `patterns: "*"` mean
+# what it says: everything, digests included. For the same reason majors are
+# not split into a second group — that is a guaranteed extra pull request.
+#
+# Security updates keep their own group where one is defined: `applies-to`
+# separates them from version updates and they are not capped by
+# open-pull-requests-limit, because an urgent fix should not queue behind
+# routine work.
 version: 2
+
 updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
     groups:
-      rust-dependencies:
-        patterns: ["*"]
-
+      cargo:
+        patterns:
+          - '*'
   - package-ecosystem: npm
     directory: /web
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
     groups:
-      web-dependencies:
-        patterns: ["*"]
-
+      npm:
+        patterns:
+          - '*'
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
     groups:
       github-actions:
-        patterns: ["*"]
+        patterns:
+          - '*'

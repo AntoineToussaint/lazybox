@@ -500,7 +500,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// call this — the daemon dedupes its emits, so a prompt that
     /// arrives while another modal is up and never gets re-surfaced
     /// here is invisible forever.
-    fn drain_queued_daemon_prompts(&mut self) {
+    pub(super) fn drain_queued_daemon_prompts(&mut self) {
         self.maybe_mount_next_auth_prompt();
         self.maybe_mount_next_removal_prompt();
         self.maybe_mount_next_merge_prompt();

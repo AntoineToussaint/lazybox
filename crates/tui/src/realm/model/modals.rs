@@ -2578,19 +2578,27 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let copy = if prompt.retry {
             format!(
-                "{} sign-in did not complete.\n\n{}\n\nThe conversation is still saved and can be resumed.\n\n[Enter] Retry    [Esc] Cancel",
+                "{} sign-in did not complete.\n\n{}\n\nThe conversation is still saved. Retry sign-in and resume it?",
                 prompt.display_name,
                 prompt.error.as_deref().unwrap_or("Provider login failed.")
             )
         } else {
             let affected = if prompt.other_session_count == 0 {
                 format!(
-                    "This refreshes the machine-wide {} login in place — it won't sign out any other session.",
+                    "Signing in again replaces the machine-wide {} login. No other sessions of this agent are running in lazybox.",
                     prompt.display_name
                 )
             } else {
+                // Says what lazybox knows and what it will actually do —
+                // never a headcount it promises to act on. The number here is
+                // measured when the failure is detected; the sweep runs after
+                // an interactive login that can take minutes, by which time
+                // the fleet may have spawned more sessions (auto-fix, an
+                // armed epic). Promising to restart "your 2 sessions" and
+                // then stopping nine is consent the user never gave, so the
+                // count describes the present and the promise is a policy.
                 format!(
-                    "This refreshes the shared machine-wide {} login in place — your {} other running {} session{} won't be signed out.",
+                    "Signing in again replaces the shared {} login. A running agent never re-reads it, so the old login stays live in your {} other running {} session{}. When sign-in succeeds lazybox restarts the idle ones onto the new login; any session that is mid-task is left running untouched, and will prompt you itself if its login has stopped working.",
                     prompt.display_name,
                     prompt.other_session_count,
                     prompt.display_name,
@@ -2602,7 +2610,7 @@ impl<T: TerminalAdapter> Model<T> {
                 )
             };
             format!(
-                "{} authentication is no longer valid.\n\nSign in again and continue this conversation?\n\n{affected}\n\nTo sign in as a different account, run `{} logout` yourself first — lazybox won't, because it would sign out every session sharing this login.\n\n[Enter] Sign in and continue    [Esc] Not now",
+                "{} authentication is no longer valid.\n\nSign in again and continue this conversation?\n\n{affected}\n\nTo sign in as a different account, run `{} logout` yourself first — lazybox won't run logout for you.",
                 prompt.display_name,
                 prompt.display_name.to_lowercase()
             )

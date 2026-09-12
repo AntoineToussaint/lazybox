@@ -2282,6 +2282,22 @@ impl<T: TerminalAdapter> Model<T> {
                     error: None,
                 });
             }
+            IpcEvent::TerminalReplaced {
+                old_terminal_id,
+                authenticating: false,
+                ..
+            } => {
+                self.auth_failed_terminals.remove(old_terminal_id);
+                self.auth_prompt_queue
+                    .retain(|prompt| prompt.terminal_id != *old_terminal_id);
+                if self.top_modal() == Some(&Id::AgentAuth)
+                    && matches!(self.modal_flow, Some(ModalFlow::AgentAuth { terminal_id, .. }) if terminal_id == *old_terminal_id)
+                {
+                    self.pop_modal();
+                    self.modal_flow = None;
+                    self.drain_queued_daemon_prompts();
+                }
+            }
             IpcEvent::AgentAuthProgress { phase, .. } => {
                 let message = match phase {
                     lazybox_ipc::AgentAuthPhase::LoginInteractive => {

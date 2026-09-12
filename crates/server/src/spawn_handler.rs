@@ -22306,6 +22306,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn codex_individual_limit_broadcasts_reset_and_survives_repaints() {
+        use lazybox_ipc::AgentState::LimitReached;
+        let agent = lazybox_agents::registry()
+            .get("codex")
+            .expect("codex agent is a built-in");
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+        let mut raw = p.bus.subscribe();
+        let banner = include_bytes!("../../agents/tests/fixtures/codex_usage_limit.txt");
+
+        assert_eq!(p.feed(banner).await, vec![LimitReached]);
+        let hint = std::iter::from_fn(|| raw.try_recv().ok()).find_map(|ev| match ev {
+            Event::AgentUsageLimit { reset_hint, .. } => Some(reset_hint),
+            _ => None,
+        });
+        assert_eq!(hint.as_deref(), Some("sep 16, 2026 at 2:14pm"));
+
+        p.feed("› Summarize recent commits\ngpt-5.5 xhigh · /repo\n".as_bytes())
+            .await;
+        p.quiet().await;
+        assert_eq!(p.state().await, Some(LimitReached));
+    }
+
     /// #225: an agent whose resting screen classifies as nothing at all (a
     /// pattern-less `GenericCli`, whose detector returns `None`) must still
     /// settle a finished turn to `Done` instead of spinning forever. The

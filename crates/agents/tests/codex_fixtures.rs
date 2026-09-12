@@ -422,3 +422,64 @@ fn codex_fixtures_contain_real_ansi_escapes() {
         );
     }
 }
+
+#[test]
+fn codex_individual_limit_blocks_without_a_chooser() {
+    use lazybox_agents::AgentObservation;
+    use lazybox_agents::detect::parse_usage_limit_reset;
+
+    let banner = include_bytes!("fixtures/codex_usage_limit.txt");
+    let expected = Some(AgentState::LimitReached);
+    assert_eq!(codex_state(banner), expected);
+    assert_eq!(codex_state_chunked(banner, 0), expected);
+    assert_eq!(
+        parse_usage_limit_reset(banner).as_deref(),
+        Some("sep 16, 2026 at 2:14pm"),
+    );
+    assert!(!codex_ready_for_prompt(banner));
+    assert!(codex_credit_exhausted_hint(banner).is_none());
+
+    for mark in [0, 20, 85] {
+        assert_eq!(
+            codex_blocked_in_current_chunk(banner, mark),
+            Some(AgentObservation::from_state(AgentState::LimitReached)),
+        );
+    }
+
+    let mut buf = banner.to_vec();
+    let mark = buf.len();
+    buf.extend_from_slice("› Summarize recent commits\ngpt-5.5 xhigh · /repo\n".as_bytes());
+    assert_eq!(codex_state(&buf), expected);
+    assert!(!codex_ready_for_prompt_chunked(&buf, mark));
+    assert_eq!(codex_blocked_in_current_chunk(&buf, mark), None);
+
+    let mark = buf.len();
+    buf.extend_from_slice("• Working (3s · esc to interrupt)\n".as_bytes());
+    assert_eq!(codex_state(&buf), Some(AgentState::Working));
+    assert_eq!(codex_state_chunked(&buf, mark), Some(AgentState::Working));
+}
+
+#[test]
+fn codex_individual_limit_requires_corroborating_provider_copy() {
+    for prose in [
+        "You've hit your usage limit.",
+        "Visit https://chatgpt.com/codex/settings/usage to purchase more credits.",
+    ] {
+        assert_eq!(codex_state(prose.as_bytes()), Some(AgentState::Idle));
+        assert_eq!(codex_blocked_in_current_chunk(prose.as_bytes(), 0), None);
+    }
+}
+
+#[test]
+fn codex_usage_limit_reset_survives_cursor_positioned_spaces() {
+    let banner = include_str!("fixtures/codex_usage_limit.txt");
+    let positioned = banner.replace(' ', "\x1b[1C");
+    assert_eq!(
+        codex_state(positioned.as_bytes()),
+        Some(AgentState::LimitReached)
+    );
+    assert_eq!(
+        lazybox_agents::detect::parse_usage_limit_reset(positioned.as_bytes()).as_deref(),
+        Some("sep 16, 2026 at 2:14pm"),
+    );
+}

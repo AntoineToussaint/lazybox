@@ -2176,7 +2176,10 @@ snippets:
                 "built-in `{key}` baked the contract into its authored body — it belongs \
                  in `delivery_body` so exports and role preambles don't carry it",
             );
-            assert!(!snippet.dispatch_body().contains("OUTPUT CONTRACT"), "{key}");
+            assert!(
+                !snippet.dispatch_body().contains("OUTPUT CONTRACT"),
+                "{key}"
+            );
             assert!(!snippet.body.contains(['🟢', '🟡', '🔴', '❓']), "{key}");
 
             let delivered = snippet.delivery_body();
@@ -2195,7 +2198,12 @@ snippets:
     fn no_builtin_body_competes_with_the_output_contract() {
         for (key, snippet) in Snippets::builtin().all() {
             let lower = snippet.body.to_lowercase();
-            for phrase in ["close with", "finish with", "end with a", "print a one-line"] {
+            for phrase in [
+                "close with",
+                "finish with",
+                "end with a",
+                "print a one-line",
+            ] {
                 assert!(
                     !lower.contains(phrase),
                     "built-in `{key}` body says {phrase:?} — the output contract already \
@@ -2238,13 +2246,9 @@ snippets:
     #[test]
     fn need_context_routes_into_report_blocker() {
         assert!(OUTPUT_CONTRACT.contains("report_blocker"));
-        let contract = Snippets::builtin()
-            .get("rev")
-            .expect("rev")
-            .delivery_body();
+        let contract = Snippets::builtin().get("rev").expect("rev").delivery_body();
         assert!(contract.contains("`report_blocker`"));
     }
-
 
     /// #1697 named `ready` / `doc` / `bench` as under-specified — each
     /// asked for an outcome without naming how to observe it.
@@ -2281,7 +2285,10 @@ snippets:
         let merged = Snippets::merged(Snippets::builtin(), user);
         for key in ["rev", "custom"] {
             let snippet = merged.get(key).expect(key);
-            assert!(!snippet.delivery_body().contains("OUTPUT CONTRACT"), "{key}");
+            assert!(
+                !snippet.delivery_body().contains("OUTPUT CONTRACT"),
+                "{key}"
+            );
         }
         assert_eq!(merged.get("rev").expect("override").body, "My review");
         assert_eq!(merged.get("custom").expect("custom").body, "My task");

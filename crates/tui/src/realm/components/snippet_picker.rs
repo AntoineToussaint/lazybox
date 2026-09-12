@@ -398,6 +398,12 @@ impl SnippetPicker {
     /// Render the right preview pane: the highlighted snippet's title,
     /// category + origin + tag, any disclosure notice, and the full
     /// wrapped body — so the user sees exactly what auto-submit will send.
+    ///
+    /// "Exactly" is per-snippet. Built-ins are delivered with a shared
+    /// output contract appended (#1697, `Snippet::delivery_body`); it is
+    /// identical for all of them and documented once in `docs/snippets.md`,
+    /// so previewing it here would cost ~19 lines per row to tell the user
+    /// nothing that distinguishes this snippet from the next.
     fn render_preview(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let Some(c) = self.cursor else {
             frame.render_widget(

@@ -2246,6 +2246,13 @@ impl<T: TerminalAdapter> Model<T> {
                 other_session_count,
                 ..
             } => {
+                // Standing record, separate from the prompt queue below, which
+                // is drained as soon as its modal mounts (#1719). `a R` needs
+                // to find these later — an agent whose token died is stuck in
+                // exactly the way a rate-limited one is: the process read its
+                // credential at startup and never re-reads it, so only a
+                // stop-respawn-continue frees it.
+                self.auth_failed_terminals.insert(*terminal_id);
                 self.queue_agent_auth_prompt(super::AgentAuthPrompt {
                     terminal_id: *terminal_id,
                     display_name: display_name.clone(),
@@ -2273,6 +2280,10 @@ impl<T: TerminalAdapter> Model<T> {
                 error,
             } => {
                 if *success {
+                    // Recovered: both the terminal that failed and the one the
+                    // recovery ran in leave the set, so a healed session is
+                    // never restarted out from under the user.
+                    self.auth_failed_terminals.remove(recovery_terminal_id);
                     self.flash_info(format!("{display_name} conversation resumed"));
                     self.set_focus(PaneFocus::Terminals);
                 } else {

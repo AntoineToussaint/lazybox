@@ -2102,6 +2102,17 @@ pub struct Model<T: TerminalAdapter> {
     /// arrive while another modal is open, so they wait here until the
     /// current interaction completes.
     auth_prompt_queue: std::collections::VecDeque<AgentAuthPrompt>,
+    /// Terminals whose agent reported an authentication failure and have not
+    /// recovered since (#1719).
+    ///
+    /// Durable, unlike `auth_prompt_queue`, which is drained the moment its
+    /// modal mounts. `a R` needs a standing set: after an external account
+    /// switch every affected session is stuck holding a token its process
+    /// read at startup and will never re-read, and the fix — stop, respawn
+    /// the same conversation, continue — is exactly what that action already
+    /// does for a rate-limited agent. Without this set the one action that
+    /// unsticks them can't see them.
+    auth_failed_terminals: std::collections::HashSet<lazybox_ipc::TerminalId>,
     /// Async half of `x f` after the role picker resolves. Correlated to
     /// one structured run by `request_id`, then retained while the source
     /// PTY closes and the fresh target spawns.
@@ -2825,6 +2836,7 @@ impl<T: TerminalAdapter> Model<T> {
             modal_flow: None,
             pending_hopper_action: None,
             auth_prompt_queue: std::collections::VecDeque::new(),
+            auth_failed_terminals: std::collections::HashSet::new(),
             conversion: None,
             last_reply_body: None,
             awaiting_repo_labels: None,

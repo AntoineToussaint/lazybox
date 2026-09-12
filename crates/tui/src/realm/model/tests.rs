@@ -4980,6 +4980,81 @@ snippets:
         );
     }
 
+    /// Regression (#1719): `a R` also restarts an agent whose *credential*
+    /// died, not just one that hit a usage limit.
+    ///
+    /// They are the same problem: the process read a token at startup, it was
+    /// invalidated underneath it (an account switch, a sign-out elsewhere),
+    /// and a running process never re-reads one — so `continue` loops on the
+    /// same rejection forever. The daemon's stop → resume-same-conversation →
+    /// continue is the fix for both, and it used to refuse to look at the
+    /// auth-failed ones.
+    #[test]
+    fn restart_rate_limited_also_takes_auth_failed_agents() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("codex".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent(), agent()]);
+        // 1 is rate-limited; 2 and 3 are healthy as far as AgentState goes —
+        // an auth failure is invisible to the lifecycle state, which is
+        // exactly why it needed its own signal.
+        for (i, state) in [AgentState::LimitReached, AgentState::Done, AgentState::Done]
+            .into_iter()
+            .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+        m.handle_daemon_event(IpcEvent::AgentAuthRequired {
+            terminal_id: TerminalId(2),
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            reason: "Codex authentication is no longer valid.".into(),
+            other_session_count: 0,
+        });
+
+        let cmds = m.dispatch_action(&Action::RestartRateLimited);
+        let mut restarted: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::RestartAgentAndContinue { terminal_id } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        restarted.sort();
+        assert_eq!(
+            restarted,
+            vec![1, 2],
+            "the limited agent AND the signed-out one restart; the healthy one doesn't: {cmds:?}",
+        );
+
+        // Recovering clears the standing record, so a healed session is never
+        // restarted out from under the user on the next press.
+        m.handle_daemon_event(IpcEvent::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(2),
+            terminal_id: TerminalId(2),
+            display_name: "Codex".into(),
+            success: true,
+            error: None,
+        });
+        let after = m.dispatch_action(&Action::RestartRateLimited);
+        let restarted_after: Vec<u64> = after
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::RestartAgentAndContinue { terminal_id } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            restarted_after,
+            vec![1],
+            "a recovered session drops out of the auth-failed set: {after:?}",
+        );
+    }
+
     /// With nothing limited, `a R` restarts nothing and says so.
     #[test]
     fn restart_rate_limited_with_no_targets_is_a_no_op_hint() {

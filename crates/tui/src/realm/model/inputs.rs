@@ -331,9 +331,31 @@ impl<T: TerminalAdapter> Model<T> {
     /// only cancel the wait, but a respawn on the new account gets them
     /// working now instead of at the reset.
     pub(super) fn restart_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
-        let terminals = self.sidebar.limited_terminals();
+        // Auth-failed agents join the rate-limited ones (#1719). They are the
+        // same problem wearing a different banner: the process read a
+        // credential at startup, that credential died underneath it (an
+        // account switch, a sign-out elsewhere), and a running process never
+        // re-reads one — so typing `continue` loops on the same rejection
+        // forever while the ONE action that frees it refused to look at them.
+        // The daemon side is already agent-agnostic and already resumes the
+        // same conversation (`--resume` for Claude, `codex resume <id>` for
+        // Codex), so nothing is lost by restarting: only the process is
+        // replaced, not the thread.
+        //
+        // Pruned against live terminals so a stale entry for a pane that has
+        // since exited can't issue a kill+respawn against a dead id.
+        let live = self.sidebar.running_terminal_ids();
+        let mut terminals = self.sidebar.limited_terminals();
+        let extra: Vec<_> = self
+            .auth_failed_terminals
+            .iter()
+            .copied()
+            .filter(|id| live.contains(id) && !terminals.contains(id))
+            .collect();
+        terminals.extend(extra);
+        terminals.sort_by_key(|id| id.0);
         if terminals.is_empty() {
-            self.flash_hint("no rate-limited agents to restart");
+            self.flash_hint("no rate-limited or signed-out agents to restart");
             return Vec::new();
         }
         let cmds: Vec<IpcCommand> = terminals

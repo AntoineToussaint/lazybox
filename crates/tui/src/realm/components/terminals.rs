@@ -213,6 +213,17 @@ impl Terminals {
         self.inner.requeue_resync_requests(requests);
     }
 
+    /// Terminals an event-time decision left for the daemon to tear down.
+    pub fn drain_pending_closes(&mut self) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.drain_pending_closes()
+    }
+
+    /// Restore close debt the bounded command channel rejected, so a
+    /// dropped send cannot strand a daemon-side terminal with no slot.
+    pub fn requeue_pending_closes(&mut self, ids: Vec<lazybox_ipc::TerminalId>) {
+        self.inner.requeue_pending_closes(ids);
+    }
+
     /// Tick-driven retry for desynced slots whose resync came back
     /// unavailable (#1254): re-arms due requests on a bounded backoff.
     pub fn tick_resync_retries(&mut self, now: std::time::Instant) {

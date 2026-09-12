@@ -636,6 +636,7 @@ pub(super) fn drain_daemon_events<T: TerminalAdapter>(
     // removed from the TerminalOutput short-circuit, so the
     // MAX_RESYNC_REQUESTS_PER_BATCH chunking actually engages.
     model.flush_pending_terminal_resyncs();
+    model.flush_pending_terminal_closes();
     model.event_backlog.observe_resyncs(resyncs);
     // Whatever is still queued after this drain is the backlog the
     // consumer hasn't caught up on — feed it to the monitor.
@@ -1886,6 +1887,9 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
             }
             let realm_key = crossterm_to_realm(key);
             if model.modal_stack.is_empty() {
+                // Carry the Press/Repeat distinction across the realm-key
+                // conversion, which drops it — see `Model::key_kind`.
+                model.set_key_kind(key.kind);
                 model.handle_pane_key(realm_key);
             } else {
                 // Hand the key to the listener channel and return

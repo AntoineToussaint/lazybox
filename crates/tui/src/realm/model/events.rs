@@ -55,6 +55,27 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Ship the daemon-side teardowns an event-time decision queued.
+    /// `TerminalStack::on_event` has no command sink, so the abandoned-
+    /// restart path (#1726 review, finding 2) parks the successor's id
+    /// and this drains it. Runs wherever the resync flush runs, so the
+    /// close goes out on the same pass that observed the replacement.
+    pub(super) fn flush_pending_terminal_closes(&mut self) {
+        let ids = self.terminals.drain_pending_closes();
+        if ids.is_empty() {
+            return;
+        }
+        for (sent, id) in ids.iter().enumerate() {
+            if !self.try_send_cmd(IpcCommand::Close {
+                terminal_id: *id,
+                client_request_id: None,
+            }) {
+                self.terminals.requeue_pending_closes(ids[sent..].to_vec());
+                return;
+            }
+        }
+    }
+
     /// Tick-driven resync retry (#1254 finding 2): re-arm any desynced
     /// terminal whose `TerminalResyncUnavailable` backoff has elapsed and
     /// flush the resulting requests. Runs every loop iteration so a
@@ -2304,6 +2325,7 @@ impl<T: TerminalAdapter> Model<T> {
             _ => {}
         }
         self.flush_pending_terminal_resyncs();
+        self.flush_pending_terminal_closes();
         if matches!(&event, IpcEvent::TerminalResyncUnavailable { .. }) {
             self.flash(
                 "terminal output paused — authoritative replay unavailable; retrying",

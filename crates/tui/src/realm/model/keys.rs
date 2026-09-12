@@ -68,6 +68,14 @@ impl<T: TerminalAdapter> Model<T> {
         .collect()
     }
 
+    /// Record the crossterm kind of the key about to be dispatched.
+    /// Called by `dispatch_event` immediately before `handle_pane_key`;
+    /// see [`Model::key_kind`] for why the realm conversion can't carry
+    /// it. Left at `Press` for synthesized keys.
+    pub(super) fn set_key_kind(&mut self, kind: crossterm::event::KeyEventKind) {
+        self.key_kind = kind;
+    }
+
     /// Top-level key handler when no modal is active. Routes Tab,
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
@@ -748,7 +756,14 @@ impl<T: TerminalAdapter> Model<T> {
 
         // We have a typed key already; skip the synthetic Event
         // round-trip and call the pane wrappers' direct entry points.
-        let ct = realm_key_to_crossterm(&key);
+        let mut ct = realm_key_to_crossterm(&key);
+        // Restore the Press/Repeat kind the realm conversion dropped, so
+        // the panes can tell a held key's autorepeat from a fresh press
+        // (#1726 review, finding 4). Catalog resolution ignores `kind`
+        // (`key_event_to_stroke` reads code + modifiers only) and so does
+        // `key_to_bytes`, so a Repeat still reaches a live PTY exactly as
+        // before — only the exited-pane arm looks at it.
+        ct.kind = self.key_kind;
         let mut cmds: Vec<IpcCommand> = Vec::new();
 
         // Catalog lookup first. A single keystroke that matches a
@@ -3319,6 +3334,11 @@ pub(super) const PANE_NATIVE_KINDS: &[(lazybox_tui_core::action::ActionKind, &st
         (
             K::TerminalScroll,
             "TerminalStack::handle_key's Shift-PgUp/PgDn/Home/End arms (components/terminal_stack.rs)",
+            false,
+        ),
+        (
+            K::CloseExitedPane,
+            "TerminalStack::handle_key's exited-pane `Shift-X` arm (components/terminal_stack.rs)",
             false,
         ),
         (

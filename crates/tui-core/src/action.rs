@@ -710,6 +710,7 @@ pub enum ActionKind {
     ResizeSplitter,
     // Terminal
     TerminalScroll,
+    CloseExitedPane,
     LeaveTerminal,
 }
 
@@ -856,6 +857,7 @@ impl ActionKind {
         Self::UndoMarkRead,
         // Terminal
         Self::TerminalScroll,
+        Self::CloseExitedPane,
         Self::LeaveTerminal,
     ];
 }
@@ -1939,6 +1941,13 @@ impl ActionDef {
                 describe: "Scroll the terminal's scrollback buffer. Shift-Home / Shift-End jump to the top / bottom; the mouse wheel scrolls too.",
                 section: Section::Terminal,
             },
+            ActionKind::CloseExitedPane => &Self {
+                kind: ActionKind::CloseExitedPane,
+                default_keys: "Shift-X",
+                label: "close exited pane",
+                describe: "Close an agent pane whose process has exited, from the pane itself — no `]]` leader needed, since a frozen pane has no PTY to protect the keystroke from. Shifted because the pane still paints the agent's last screen: a bare letter would discard the crash output mid-word (`exit` ends on an `x`), and closing cannot be undone. `r` or Enter restarts instead; `]]x` still closes.",
+                section: Section::Terminal,
+            },
             ActionKind::LeaveTerminal => &Self {
                 kind: ActionKind::LeaveTerminal,
                 default_keys: "]]q",
@@ -2557,6 +2566,7 @@ impl ActionKind {
             ActionKind::Quit => "quit",
             ActionKind::ResizeSplitter => "resize_splitter",
             ActionKind::TerminalScroll => "terminal_scroll",
+            ActionKind::CloseExitedPane => "close_exited_pane",
             ActionKind::LeaveTerminal => "leave_terminal",
         }
     }
@@ -3620,6 +3630,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::Quit
         | ActionKind::ResizeSplitter
         | ActionKind::TerminalScroll
+        | ActionKind::CloseExitedPane
         | ActionKind::LeaveTerminal => true,
     }
 }

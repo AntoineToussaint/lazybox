@@ -1525,7 +1525,7 @@ impl<T: TerminalAdapter> Model<T> {
                 Some(snippet) => targets.push((
                     key.clone(),
                     snippet.category.clone(),
-                    snippet.dispatch_body(),
+                    snippet.delivery_body(),
                 )),
             }
         }

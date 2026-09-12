@@ -817,10 +817,8 @@ async fn run_reauthentication(
     // told the machine-wide login needs signing in again rather than
     // discovering it one failing pane at a time.
     //
-    // The common case — an already-valid login the user re-triggered — is
-    // protected because `login` exiting 0 is not trusted on its own: the
-    // status gate below confirms the credential really is valid before the
-    // conversation is resumed.
+    // A local credential can outlive its server-side validity. Always run
+    // login after an observed auth failure; a status probe cannot overrule it.
     let previous_failure = config
         .agent_recovery
         .take_failure(recovery_terminal_id)
@@ -1073,8 +1071,8 @@ async fn run_reauthentication(
     // re-authenticating (e.g. reporting an already-present but expired
     // session). Trusting that exit code alone would resume straight back into
     // the same failed session and re-arm the auth loop, so confirm the
-    // credential is genuinely valid with the provider's own status command
-    // before resuming.
+    // provider no longer reports being signed out before resuming. The
+    // status command cannot establish server-side credential validity.
     let authenticated = verify_authenticated(
         &config,
         recovery_terminal_id,
@@ -1184,9 +1182,9 @@ fn cancelled_login_error(authenticated: bool, display_name: &str) -> String {
     )
 }
 
-/// Confirm the agent's login is actually valid before resuming, by running
-/// the provider's own status command. Returns `true` (resume) unless the
-/// probe reports, unambiguously, that the agent is signed out.
+/// Check the provider's local login state after interactive login.
+/// Returns `true` (resume) unless the probe reports, unambiguously, that the
+/// agent is signed out.
 ///
 /// Deliberately fails OPEN, and the exit code alone is NOT an unambiguous
 /// signal. A probe that cannot answer — an empty status command, a spawn
@@ -1637,6 +1635,76 @@ mod tests {
             .expect("resumed terminal snapshot");
         assert_eq!(resumed.prompt_history[0].text, "keep this prompt");
         assert_eq!(resumed.composing_buffer.as_deref(), Some("keep this draft"));
+    }
+
+    #[tokio::test]
+    async fn codex_local_status_allows_resume_without_an_auth_failure() {
+        for (output, code) in [
+            ("Logged in using ChatGPT: user@example.com", 0),
+            ("error: unrecognized subcommand 'status'", 2),
+        ] {
+            let (config, mock) = ServerConfig::in_memory_with_mock();
+            let commands = config
+                .agents
+                .get("codex")
+                .expect("Codex adapter")
+                .auth_commands()
+                .expect("Codex auth commands");
+            let probe = verify_authenticated(
+                &config,
+                TerminalId(708),
+                &commands.status,
+                commands.signed_out_marker,
+                std::path::Path::new("/tmp"),
+                AUTH_ENV,
+            );
+            let finish_probe = async {
+                wait_for_argv(&mock, &["codex", "login", "status"]).await;
+                mock.emit("mock-agent-auth-0", output.as_bytes()).await;
+                mock.finish("mock-agent-auth-0", code).await;
+            };
+            let (authenticated, ()) = tokio::join!(probe, finish_probe);
+            assert!(authenticated, "local status: {output}");
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_refresh_rejection_runs_login_before_checking_local_status() {
+        let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
+        config
+            .agent_recovery
+            .requirements
+            .lock()
+            .await
+            .remove(&terminal_id);
+        let failure = config.agents.get("codex").expect("Codex adapter")
+            .detect_auth_failure(b"Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.")
+            .expect("refresh rejection");
+        let mut events = config.bus.subscribe();
+        detect_required(&config, terminal_id, failure.reason).await;
+        assert!(matches!(events.recv().await.expect("auth required event"),
+            Event::AgentAuthRequired { terminal_id: id, .. } if id == terminal_id));
+
+        start_reauthentication(&config, terminal_id, None).await;
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        let mut commands = mock.all_argv().await;
+        commands.sort();
+        assert_eq!(commands, vec![vec!["codex"], vec!["codex", "login"]]);
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        mock.finish(&login_key, 0).await;
+        wait_for_argv(&mock, &["codex", "login", "status"]).await;
+        mock.emit(
+            "mock-agent-auth-2",
+            b"Logged in using ChatGPT: user@example.com",
+        )
+        .await;
+        mock.finish("mock-agent-auth-2", 0).await;
+        wait_for_argv(&mock, &["codex", "resume", "conversation-708"]).await;
     }
 
     #[tokio::test]

@@ -20818,6 +20818,125 @@ mod terminal_section_dispatch_tests {
         )
     }
 
+    /// A model focused on one agent terminal, with the workspace behind
+    /// it seeded in the sidebar. Unlike `model_in_live_terminal` this
+    /// survives `handle_pane_key`'s trailing `sync_panes`, which projects
+    /// the sidebar selection onto the stack and would otherwise clear the
+    /// active session (and with it `active_terminal_id`) after the first
+    /// key. Tests that press more than one key need this one.
+    fn model_with_seeded_agent_terminal() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let ws_key = lazybox_core::WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(7),
+            session_key,
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(7)));
+        m
+    }
+
+    /// The same model with its agent crashed — the frozen `#356` pane.
+    fn model_in_exited_terminal() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let mut m = model_with_seeded_agent_terminal();
+        m.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: Some(1),
+            last_output: None,
+        });
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(7)));
+        m
+    }
+
+    fn close_key() -> RealmKey {
+        RealmKey::new(Key::Char('X'), RealmMods::SHIFT)
+    }
+
+    /// The `close_exited_pane` catalog row exists for `?` help and the
+    /// `PANE_NATIVE_KINDS` audit only — it has no `Action`, so the
+    /// dispatcher must neither fire it nor arm a leader. If it ever
+    /// gained one, the key typed at a LIVE agent would be swallowed by a
+    /// which-key popup instead of reaching the PTY.
+    #[test]
+    fn the_close_exited_pane_row_never_intercepts_its_key_in_a_live_terminal() {
+        let mut m = model_with_seeded_agent_terminal();
+        m.dispatch_key(close_key());
+        assert!(
+            !m.terminal_leader_armed && !m.leader.is_armed(),
+            "a documentation-only catalog row must not arm a leader",
+        );
+        m.dispatch_key(close_key());
+        assert_eq!(
+            m.terminals.active_terminal_id(),
+            Some(TerminalId(7)),
+            "the close key in a LIVE terminal is a character, not a close",
+        );
+    }
+
+    /// End-to-end through the real dispatcher: the deliberate,
+    /// modifier-bearing key closes a frozen pane (#1726 review,
+    /// finding 1).
+    #[test]
+    fn exited_pane_closes_on_the_close_key_through_the_dispatcher() {
+        let mut m = model_in_exited_terminal();
+        m.dispatch_key(close_key());
+        assert_eq!(
+            m.terminals.active_terminal_id(),
+            None,
+            "the close key reaches the pane with no `]]` leader",
+        );
+    }
+
+    /// The lowercase letter must NOT: `x` is the workspace leader (and
+    /// `x x` is Archive), so it stays a character the PTY would have got.
+    #[test]
+    fn a_bare_lowercase_x_never_closes_an_exited_pane_through_the_dispatcher() {
+        let mut m = model_in_exited_terminal();
+        for _ in 0..4 {
+            m.dispatch_key(RealmKey::new(Key::Char('x'), RealmMods::NONE));
+        }
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(7)));
+    }
+
+    /// The `key_kind` plumbing (#1726 review, finding 4):
+    /// `crossterm_to_realm` drops Press/Repeat, so without `set_key_kind`
+    /// the pane could not tell the tail of a held close key from fresh
+    /// input — and would type it into the terminal that inherits focus.
+    #[test]
+    fn a_held_close_key_stops_at_the_pane_it_closed() {
+        let mut m = model_in_exited_terminal();
+        m.set_key_kind(crossterm::event::KeyEventKind::Press);
+        m.dispatch_key(close_key());
+        assert_eq!(m.terminals.active_terminal_id(), None);
+
+        // The rest of the same hold must not become input anywhere.
+        m.set_key_kind(crossterm::event::KeyEventKind::Repeat);
+        for _ in 0..6 {
+            m.dispatch_key(close_key());
+        }
+        assert_eq!(m.terminals.active_terminal_id(), None);
+    }
+
     /// The leave chord is the escape char doubled — that's what the
     /// dispatcher matches. A baked-in `leave_terminal: Esc` override does
     /// NOT leave: the catalog chord is never consulted under terminal
@@ -20892,6 +21011,12 @@ mod terminal_section_dispatch_tests {
                 ActionKind::LeaveTerminal => {}
                 // Exercised by `terminal_scroll_chord_stays_in_the_pane`.
                 ActionKind::TerminalScroll => {}
+                // Exercised by
+                // `exited_pane_closes_on_the_close_key_through_the_dispatcher`
+                // (and its live-terminal / autorepeat siblings). Fires
+                // only on an EXITED pane, so the live-terminal models the
+                // other arms use deliberately do not close.
+                ActionKind::CloseExitedPane => {}
                 other => panic!(
                     "Section::Terminal action {other:?} has no dispatch round-trip test (#188)",
                 ),

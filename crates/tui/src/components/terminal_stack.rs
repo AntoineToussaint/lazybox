@@ -715,6 +715,24 @@ pub struct TerminalStack {
     /// Terminal ids whose authoritative debt is ready for wire admission.
     /// The sequence watermark itself lives only in `TerminalSlot::sync`.
     pending_resync_requests: Vec<TerminalId>,
+    /// Terminals the daemon must tear down, waiting for the model to
+    /// ship a `Command::Close`. Populated from `on_event`, which has no
+    /// `cmds` sink of its own — same shape as `pending_resync_requests`.
+    /// Today's only producer is the abandoned-restart path below.
+    pending_closes: Vec<TerminalId>,
+    /// Exited panes the user closed while their `r` restart was still in
+    /// flight (#1726 review, finding 2). Keyed by the OLD terminal id, so
+    /// when the daemon's `TerminalReplaced` finally names its successor we
+    /// know the user already asked for this pane to go and close the
+    /// replacement instead of installing it as a fresh agent.
+    abandoned_resumes: HashSet<TerminalId>,
+    /// Set the moment an exited pane is closed from its own key arm, and
+    /// cleared by the next fresh `Press`. Closing hands focus to a live
+    /// sibling, so without this the *tail of the same physical gesture* —
+    /// a held key's autorepeat — lands in that agent's composer (#1726
+    /// review, finding 4). Only repeats are swallowed; a real second
+    /// keystroke goes through.
+    swallow_repeats: bool,
     /// Click targets for the tab strip, populated each render. Each
     /// entry is `(tab_idx, (start_col, end_col_exclusive), row)`.
     /// `handle_tab_click(col, row)` scans this on mouse-down to map
@@ -1143,6 +1161,15 @@ struct TerminalSlot {
     /// offered — a crashing agent (#356) must not take the workspace
     /// down with it. `None` for a live terminal.
     exited: Option<TerminalExit>,
+    /// Set while a `r` restart of this exited pane is in flight — the
+    /// `Command::ResumeAgent` has gone out but the daemon has not yet
+    /// published the replacement terminal. An exited slot is normally
+    /// inert (nothing lives daemon-side, so closing it is a purely
+    /// client-side `drop_slot`); during this window that assumption is
+    /// FALSE — the daemon is mid-spawn — so a close has to record its
+    /// intent for the arriving replacement instead of dropping the slot
+    /// and letting the resume land unopposed as a fresh agent.
+    resume_in_flight: bool,
     /// The provider login process temporarily occupying this pane.
     /// Its successful replacement must inherit this slot's tile,
     /// history, and draft rather than landing as a new terminal.
@@ -1642,6 +1669,9 @@ impl TerminalStack {
             stashed_splits_tree: None,
             pending_resizes: Vec::new(),
             pending_resync_requests: Vec::new(),
+            pending_closes: Vec::new(),
+            abandoned_resumes: HashSet::new(),
+            swallow_repeats: false,
             tab_strip_hits: Vec::new(),
             tile_hits: Vec::new(),
             last_focused: HashMap::new(),
@@ -1692,6 +1722,26 @@ impl TerminalStack {
     /// surfacing as "the terminal looks frozen."
     pub fn drain_pending_resizes(&mut self) -> Vec<(TerminalId, u16, u16)> {
         std::mem::take(&mut self.pending_resizes)
+    }
+
+    /// Drain terminals the daemon must tear down. `on_event` has no
+    /// command sink, so an event-time decision to close a terminal —
+    /// today only the abandoned-restart replacement (#1726 review,
+    /// finding 2) — queues here and the model ships the `Command::Close`
+    /// on its next pass, exactly as it does for resync requests.
+    pub fn drain_pending_closes(&mut self) -> Vec<TerminalId> {
+        std::mem::take(&mut self.pending_closes)
+    }
+
+    /// Re-queue closes the model could not admit to the wire this pass
+    /// (a full command channel), so a dropped send cannot strand a
+    /// daemon-side terminal with no client slot.
+    pub fn requeue_pending_closes(&mut self, ids: Vec<TerminalId>) {
+        for id in ids {
+            if !self.pending_closes.contains(&id) {
+                self.pending_closes.push(id);
+            }
+        }
     }
 
     /// Drain sequence-gap recovery requests for the model's IPC client.
@@ -3626,6 +3676,7 @@ impl TerminalStack {
             pending_feed: Vec::new(),
             pending_sizes: Vec::new(),
             exited: None,
+            resume_in_flight: false,
             authenticating: false,
             auth_recovery_id: None,
             spawned_at: std::time::Instant::now(),
@@ -3881,19 +3932,87 @@ impl TerminalStack {
             }
         }
 
+        // The tail of a gesture that already closed a pane must not type
+        // into the live sibling that inherited focus (#1726 review,
+        // finding 4). Only autorepeat is swallowed; the next real press
+        // clears the guard and is handled normally.
+        if self.swallow_repeats {
+            if key.kind == crossterm::event::KeyEventKind::Press {
+                self.swallow_repeats = false;
+            } else {
+                return PaneOutcome::Consumed;
+            }
+        }
+
         // An exited agent pane (#356) is frozen — its PTY is gone, so
-        // typing can't reach a process. Intercept the restart affordance
-        // (`r` / Enter) and swallow every other printable key instead of
-        // pretending to feed a dead terminal. Scrollback (handled above)
-        // still works so the last output stays inspectable, and `]]x` to
-        // close rides the app-level leader, not this path.
+        // typing can't reach a process. Scrollback (handled above) still
+        // works so the last output stays inspectable, and the pane owns
+        // the two local affordances the banner advertises: `r` / Enter to
+        // restart, `Shift-X` to close. Every OTHER printable key is
+        // swallowed rather than fed to a dead terminal. `]]x` still closes
+        // too — it rides the app-level leader, not this path.
+        //
+        // Why the close key carries Shift (#1726 review, finding 1): a
+        // frozen pane paints the agent's real last screen with a one-row
+        // banner over it, so it is indistinguishable from a live terminal
+        // to a user who hasn't read that row — and they are still typing.
+        // Closing is unrecoverable — `drop_slot` takes
+        // `exited.last_output` and `last_frame` with it, and the daemon
+        // dropped its own entry at exit — so the keystroke must be one
+        // ordinary typing cannot produce. A bare letter can't be: `exit`
+        // ends the pane on its `x`. Nor can a same-key double-press on a
+        // plain letter, the guard `q q` quit uses — English and shell
+        // words double letters (`add` fires `d d`). And a Confirm modal
+        // is no guard here either: `Confirm` defaults to Yes on Enter, and
+        // `exit⏎` supplies exactly that. A modifier is the one thing no
+        // shell reflex (`exit`, `quit`, `:q`, `clear`, `ls -l`) emits.
+        //
+        // `Shift-X` specifically: `x` alone is out because typing produces
+        // it, and `x x` is already `Archive` — two destructive actions one
+        // scope apart behind one chord, which
+        // `no_binding_is_rendered_in_both_halves` rejects outright. `q` is
+        // out because under the leader it means `]]q` exit-to-sidebar, and
+        // a slowly-typed `]]q` falls through to this path; one letter must
+        // not mean both "leave the pane" and "destroy it". `Shift-X` is
+        // bound nowhere (#304 retired the old `Shift-X` archive alias) and
+        // keeps the issue's point: no `]]` leader to reach a pane that has
+        // no PTY to protect the keystroke from.
         if let Some(id) = self
             .focused_terminal_id()
             .or_else(|| self.active_terminal_id())
             && self.terminals.get(&id).is_some_and(|s| s.exited.is_some())
         {
+            // `exited` does NOT always mean the process is gone. A failed
+            // provider re-auth sets it synthetically as a banner marker
+            // (`AgentAuthFinished { success: false }`) on a slot whose PTY
+            // is very much alive — the daemon's
+            // `start_reauthentication` emits that event and returns
+            // without touching the process, e.g. "this agent does not
+            // support interactive authentication" or "sign-in did not
+            // complete". Those panes are the re-auth RETRY state: `r`
+            // must keep working (it re-runs the login), but the close key
+            // must not, because `queue_terminal_teardown` would rightly
+            // send a real `Command::Close` and kill a live,
+            // mid-conversation agent. A single keystroke may not do that;
+            // the deliberate `]]x` chord still closes them, and the
+            // banner advertises that instead.
+            let recovery = self
+                .terminals
+                .get(&id)
+                .is_some_and(|s| s.auth_recovery_id.is_some());
             if matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
                 self.restart_exited(id, cmds);
+            } else if !recovery
+                && matches!(key.code, KeyCode::Char('X'))
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                // Terminals disagree on whether a shifted letter also
+                // reports SHIFT, so the uppercase code is the signal and
+                // only Ctrl/Alt disqualify it.
+                self.close_focused_tile(cmds);
+                self.swallow_repeats = true;
             }
             return PaneOutcome::Consumed;
         }
@@ -5013,6 +5132,25 @@ impl TerminalStack {
                     }
                 }
             }
+            // `remove_at` returns the empty (root) path when it collapses
+            // a TOP-LEVEL split, and the surviving root may itself be a
+            // split — so the assignment above can leave `focused` naming a
+            // non-leaf. Every consumer assumes a leaf:
+            // `focused_terminal_id` papers over it with a first-leaf
+            // fallback, `close_focused_tile` disagreed and silently
+            // no-oped, and `TileTree::neighbor` returns `None` for the
+            // empty path so `]]<arrow>` could not even move focus off it.
+            // Normalize at the one place the non-leaf path is born
+            // (#1726 review, finding 3).
+            if let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout
+                && subtree_at_path(tree, focused)
+                    .map(|n| !matches!(n, lazybox_core::TileTree::Leaf { .. }))
+                    .unwrap_or(true)
+                && let Some(first) = tree.leaves().first().copied()
+                && let Some(p) = tree.path_to(first)
+            {
+                *focused = p;
+            }
             // If the post-collapse tree is just a Leaf, drop back to
             // Tabs — keeping a Splits-with-single-leaf payload renders
             // fine but means the next spawn promotes us right back into
@@ -5039,6 +5177,20 @@ impl TerminalStack {
         model_label: Option<String>,
         authenticating: bool,
     ) {
+        // The user closed this pane while its `r` restart was still in
+        // flight (#1726 review, finding 2). Without this the resume lands
+        // as a brand-new agent pane they never asked for — running,
+        // billable, focus-stealing, and (because the slot it would have
+        // inherited from is gone) with an empty prompt history and draft.
+        // Queue the daemon-side teardown of the SUCCESSOR and install
+        // nothing; `drain_pending_closes` ships the `Command::Close`.
+        if self.abandoned_resumes.remove(&old_terminal_id) {
+            self.closing.insert(terminal_id);
+            if !self.pending_closes.contains(&terminal_id) {
+                self.pending_closes.push(terminal_id);
+            }
+            return;
+        }
         if !self.terminals.contains_key(&old_terminal_id)
             && let Some(slot) = self.terminals.get_mut(&terminal_id)
         {
@@ -5161,13 +5313,22 @@ impl TerminalStack {
     /// Resume the agent behind an exited pane while leaving the frozen pane
     /// in place until the daemon publishes its exact replacement.
     fn restart_exited(&mut self, terminal_id: TerminalId, cmds: &mut Vec<Command>) {
-        let Some(slot) = self.terminals.get(&terminal_id) else {
+        let Some(slot) = self.terminals.get_mut(&terminal_id) else {
             return;
         };
         if slot.exited.is_none() {
             return;
         }
-        if let Some(recovery_terminal_id) = slot.auth_recovery_id {
+        // From here until the daemon publishes the replacement, this pane
+        // is no longer inert: a spawn is running for it daemon-side. The
+        // flag is what stops a close in that window from dropping the slot
+        // and letting the resume land as a fresh, unasked-for agent
+        // (#1726 review, finding 2). It is never cleared in place — the
+        // slot itself is replaced or dropped — so a resume that fails and
+        // never arrives simply leaves a closable exited pane behind.
+        slot.resume_in_flight = true;
+        let recovery = slot.auth_recovery_id;
+        if let Some(recovery_terminal_id) = recovery {
             cmds.push(Command::ReauthenticateAgent {
                 terminal_id: recovery_terminal_id,
             });
@@ -5186,34 +5347,34 @@ impl TerminalStack {
         // surviving grid is what renders.
         self.zoomed = false;
         let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout else {
-            if let Some(id) = self.active_terminal_id() {
-                if self.terminals.get(&id).is_some_and(|s| s.exited.is_some()) {
-                    if self
-                        .terminals
-                        .get(&id)
-                        .is_some_and(|slot| slot.auth_recovery_id.is_some())
-                    {
-                        self.closing.insert(id);
-                        cmds.push(Command::Close {
-                            terminal_id: id,
-                            client_request_id: None,
-                        });
-                    } else {
-                        self.drop_slot(id);
-                    }
-                } else {
-                    // Tag as a user close so the returning
-                    // `TerminalExited` tears the pane down instead of
-                    // keeping it as an exited agent pane (#356).
-                    self.closing.insert(id);
-                    cmds.push(Command::Close {
-                        terminal_id: id,
-                        client_request_id: None,
-                    });
-                }
+            if let Some(id) = self.active_terminal_id()
+                && self.queue_terminal_teardown(id, cmds)
+            {
+                self.drop_slot(id);
             }
             return;
         };
+        // `focused` is not guaranteed to name a leaf. `TileTree::remove_at`
+        // returns the empty (root) path when it collapses a TOP-LEVEL
+        // split, and the surviving root may itself be a split — so after a
+        // sibling tile goes away `focused` can point at a split node. The
+        // guard that routes an exited pane's `Shift-X` here reads
+        // `focused_terminal_id()`, which papers over that with a first-leaf
+        // fallback; re-deriving the target from the raw path disagreed with
+        // it, `subtree_at_path` yielded `None`, `remove_at(&[])` returned
+        // `CannotRemoveRoot`, and the close was a silent no-op with no
+        // keyboard way out (#1726 review, finding 3). Resolve through the
+        // same fallback the guard used, so the two can never disagree —
+        // `drop_slot` normalizes at the source, this covers a non-leaf path
+        // restored from a persisted layout.
+        if subtree_at_path(tree, focused)
+            .map(|n| !matches!(n, lazybox_core::TileTree::Leaf { .. }))
+            .unwrap_or(true)
+            && let Some(first) = tree.leaves().first().copied()
+            && let Some(p) = tree.path_to(first)
+        {
+            *focused = p;
+        }
         // Capture the terminal that's about to disappear before we
         // mutate the tree — we'll close its PTY too.
         let target_id = subtree_at_path(tree, focused).and_then(|n| match n {
@@ -5240,31 +5401,67 @@ impl TerminalStack {
             }
             if let Some(id) = target_id {
                 let tid = TerminalId(id);
-                if self.terminals.get(&tid).is_some_and(|s| s.exited.is_some()) {
-                    if self
-                        .terminals
-                        .get(&tid)
-                        .is_some_and(|slot| slot.auth_recovery_id.is_some())
-                    {
-                        self.closing.insert(tid);
-                        cmds.push(Command::Close {
-                            terminal_id: tid,
-                            client_request_id: None,
-                        });
-                    } else {
-                        self.invalidate_visible();
-                        self.terminals.remove(&tid);
-                    }
-                } else {
-                    self.closing.insert(tid);
-                    cmds.push(Command::Close {
-                        terminal_id: tid,
-                        client_request_id: None,
-                    });
+                if self.queue_terminal_teardown(tid, cmds) {
+                    // The tree was already collapsed above, so only the
+                    // slot is left to drop (`drop_slot` would re-prune).
+                    self.invalidate_visible();
+                    self.terminals.remove(&tid);
                 }
             }
             self.persist_layout(cmds);
         }
+    }
+
+    /// Decide how one terminal is torn down as part of a tile/tab close,
+    /// and queue whatever the daemon has to do about it.
+    ///
+    /// Returns `true` when the caller must drop the client slot itself:
+    /// the terminal is inert, nothing lives daemon-side, so there is no
+    /// `Command::Close` to send and no returning event to wait for.
+    /// Returns `false` when a `Command::Close` has been queued — the
+    /// terminal is tagged in `closing` so the returning `TerminalExited`
+    /// tears the pane down instead of keeping it as an exited agent pane
+    /// (#356).
+    ///
+    /// The one case where "exited" does NOT mean inert is an exited pane
+    /// whose `r` restart is still in flight (#1726 review, finding 2):
+    /// the daemon is mid-spawn for it. Dropping the slot there let the
+    /// resume land as a brand-new agent pane the user had just asked to
+    /// close — built by `replace_terminal`'s fallback branch, so with an
+    /// empty prompt history and draft, and stealing focus on arrival.
+    /// Recording the intent against the OLD id lets that arrival be
+    /// closed instead of installed.
+    fn queue_terminal_teardown(&mut self, id: TerminalId, cmds: &mut Vec<Command>) -> bool {
+        // A tree leaf whose slot is already gone still gets the daemon
+        // close, as it did before this was factored out — the client has
+        // no evidence the PTY died, so the defensive teardown stands.
+        let inert = self
+            .terminals
+            .get(&id)
+            .is_some_and(|slot| slot.exited.is_some() && slot.auth_recovery_id.is_none());
+        // Record the abandoned restart whichever way this pane is torn
+        // down. For the inert pane it is the whole fix (no `Command::Close`
+        // goes out, so the daemon would otherwise complete the resume
+        // unopposed); for a re-auth pane a Close *is* sent, but the
+        // re-auth may already have a replacement in flight, and a
+        // replacement for a pane the user closed should be closed too.
+        // A record whose replacement never arrives costs one id.
+        if self
+            .terminals
+            .get(&id)
+            .is_some_and(|slot| slot.resume_in_flight)
+        {
+            self.abandoned_resumes.insert(id);
+        }
+        if inert {
+            return true;
+        }
+        self.closing.insert(id);
+        cmds.push(Command::Close {
+            terminal_id: id,
+            client_request_id: None,
+        });
+        false
     }
 
     /// Convert the active session between Tabs and Splits, in place
@@ -5604,7 +5801,7 @@ impl TerminalStack {
             // An exited agent pane overlays a restart banner on its last
             // row, leaving the frozen screen visible above it (#356).
             if let Some(exit) = &slot.exited {
-                Self::render_exit_banner(frame, grid, exit);
+                Self::render_exit_banner(frame, grid, exit, slot.auth_recovery_id.is_some());
             }
         }
     }
@@ -5623,7 +5820,7 @@ impl TerminalStack {
     /// so an immediate `code 0` isn't mistaken for success, and the
     /// captured tail of its output is painted just above the banner so
     /// the pane shows *why* instead of a blank black screen.
-    fn render_exit_banner(frame: &mut Frame, grid: Rect, exit: &TerminalExit) {
+    fn render_exit_banner(frame: &mut Frame, grid: Rect, exit: &TerminalExit, recovery: bool) {
         if grid.width == 0 || grid.height == 0 {
             return;
         }
@@ -5637,8 +5834,36 @@ impl TerminalStack {
         } else {
             "exited"
         };
-        let text = format!("⚠ agent {verb} ({status}) — r restart · ]]x close");
+        // The close hint is the load-bearing half: `Shift-X` is a
+        // hardcoded pane-native key that appears nowhere else on screen
+        // (the footer bar shows only the `]]` leader), so truncating it
+        // away leaves the affordance invisible (#1726 review, finding 9).
+        // Offer progressively shorter forms and let the widest that FITS
+        // win, instead of chopping the full one — a split or `Grid` focus
+        // pane is routinely under 47 cols.
+        // A failed-re-auth pane keeps a LIVE agent behind the banner, so
+        // its close is the deliberate `]]x` chord, not the single key —
+        // advertise what the pane actually accepts rather than a key it
+        // ignores.
+        let (hint, short_hint) = if recovery {
+            ("r sign in again · ]]x close", "r · ]]x")
+        } else {
+            ("r restart · X close", "r · X")
+        };
         let width = grid.width as usize;
+        let text = [
+            format!("⚠ agent {verb} ({status}) — {hint}"),
+            format!("⚠ {verb} ({status}) — {hint}"),
+            format!("⚠ {verb} — {hint}"),
+            format!("⚠ {verb} — {short_hint}"),
+            format!("⚠ {short_hint}"),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.chars().count() <= width)
+        // Every candidate is too wide for this pane — fall back to the
+        // full text truncated, so a sliver of a pane still says *why*
+        // the terminal stopped.
+        .unwrap_or_else(|| format!("⚠ agent {verb} ({status}) — {hint}"));
         // Pad (or truncate) to the full row so the fill spans it.
         let display: String = if text.chars().count() > width {
             text.chars().take(width).collect()
@@ -12226,6 +12451,31 @@ mod agent_crash_tests {
         stack
     }
 
+    /// A fresh crossterm key press — the kind the realm hands the pane
+    /// for a real keystroke (`KeyEvent::new` already defaults to `Press`;
+    /// spelled out here because the pane reads `kind`).
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The exited-pane close key. Terminals disagree on whether a shifted
+    /// letter also reports SHIFT, so exercise the modifier-bearing
+    /// spelling here and the bare uppercase code where both matter.
+    fn shift_x() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT)
+    }
+
+    /// One agent terminal, crashed and frozen on its last screen.
+    fn exited_stack(sk: &SessionKey) -> TerminalStack {
+        let mut stack = active_stack(1, sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+            last_output: None,
+        });
+        stack
+    }
+
     #[test]
     fn agent_crash_keeps_pane_and_records_exit() {
         let sk = SessionKey::new("github:o/r#1");
@@ -12412,6 +12662,485 @@ mod agent_crash_tests {
     }
 
     #[test]
+    fn the_close_key_removes_an_exited_pane_without_the_leader() {
+        // Both spellings a host terminal may send for a shifted letter.
+        for key in [shift_x(), press(KeyCode::Char('X'))] {
+            let sk = SessionKey::new("github:o/r#1");
+            let mut stack = exited_stack(&sk);
+
+            let mut cmds = Vec::new();
+            let outcome = stack.handle_key(key, &mut cmds);
+            assert!(matches!(outcome, PaneOutcome::Consumed));
+            assert!(!stack.terminals.contains_key(&TerminalId(1)));
+            assert!(
+                cmds.is_empty(),
+                "an inert exited pane needs no daemon close"
+            );
+        }
+    }
+
+    /// Ctrl/Alt do not stand in for Shift — those belong to the inner
+    /// program's vocabulary, not to a lazybox affordance.
+    #[test]
+    fn ctrl_or_alt_x_does_not_close_an_exited_pane() {
+        for mods in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let sk = SessionKey::new("github:o/r#1");
+            let mut stack = exited_stack(&sk);
+            let mut cmds = Vec::new();
+            stack.handle_key(KeyEvent::new(KeyCode::Char('X'), mods), &mut cmds);
+            assert!(stack.terminals.contains_key(&TerminalId(1)));
+        }
+    }
+
+    /// The headline regression (#1726 review, finding 1): a frozen pane
+    /// paints the agent's real last screen under a one-row banner, so a
+    /// user who hasn't read that row is still typing at what looks like a
+    /// live terminal. No shell reflex may destroy the crash evidence —
+    /// including the ones that sank the earlier candidate chords: `exit`
+    /// ends on an `x`, `add` doubles a `d` (so no same-key double-press on
+    /// a plain letter is safe either), and `exit` + Enter would answer a
+    /// Confirm modal, which defaults to Yes.
+    #[test]
+    fn typing_shell_reflexes_at_a_frozen_pane_keeps_it() {
+        for word in ["exit", "quit", ":q", "clear", "add", "cd ..", "ls -l", "xx"] {
+            let sk = SessionKey::new("github:o/r#1");
+            let mut stack = exited_stack(&sk);
+
+            let mut cmds = Vec::new();
+            for ch in word.chars() {
+                stack.handle_key(press(KeyCode::Char(ch)), &mut cmds);
+            }
+            stack.handle_key(press(KeyCode::Enter), &mut cmds);
+            assert!(
+                stack.terminals.contains_key(&TerminalId(1)),
+                "`{word}` typed at a dead pane must be swallowed, not destructive",
+            );
+            // No bytes reach the gone PTY. (A word containing `r`, or the
+            // trailing Enter, still hits the bare restart affordance and
+            // queues a `ResumeAgent` — pre-existing, and non-destructive:
+            // it resumes the same conversation rather than discarding it.)
+            assert!(
+                !cmds.iter().any(|cmd| matches!(cmd, Command::Write { .. })),
+                "`{word}` must not be written into the gone PTY",
+            );
+        }
+    }
+
+    /// `x x` is `Archive` and `q` is `]]q` exit-to-sidebar — neither may
+    /// double as "destroy this pane" (finding 5, and the chord clash
+    /// `no_binding_is_rendered_in_both_halves` catches).
+    #[test]
+    fn bare_x_and_q_never_close_an_exited_pane() {
+        for key in ['x', 'q'] {
+            let sk = SessionKey::new("github:o/r#1");
+            let mut stack = exited_stack(&sk);
+
+            let mut cmds = Vec::new();
+            for _ in 0..4 {
+                stack.handle_key(press(KeyCode::Char(key)), &mut cmds);
+            }
+            assert!(stack.terminals.contains_key(&TerminalId(1)));
+            assert!(cmds.is_empty());
+        }
+    }
+
+    /// Finding 4: closing hands focus to a live sibling, so the tail of
+    /// the same physical gesture — a held key's autorepeat — must not land
+    /// in that agent's composer.
+    #[test]
+    fn the_tail_of_a_held_close_key_does_not_type_into_the_live_sibling() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        stack.focus_terminal(TerminalId(1));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+            last_output: None,
+        });
+
+        let mut cmds = Vec::new();
+        stack.handle_key(shift_x(), &mut cmds);
+        assert!(!stack.terminals.contains_key(&TerminalId(1)));
+        for _ in 0..8 {
+            let mut repeat = shift_x();
+            repeat.kind = crossterm::event::KeyEventKind::Repeat;
+            stack.handle_key(repeat, &mut cmds);
+        }
+        assert!(
+            !cmds.iter().any(|cmd| matches!(cmd, Command::Write { .. })),
+            "autorepeat after the close must not reach the surviving PTY",
+        );
+
+        // A genuinely new press clears the guard and types normally.
+        stack.handle_key(press(KeyCode::Char('a')), &mut cmds);
+        assert!(cmds.iter().any(|cmd| matches!(
+            cmd,
+            Command::Write { terminal_id: TerminalId(2), bytes, .. } if bytes == b"a"
+        )));
+    }
+
+    #[test]
+    fn bare_close_keys_reach_live_ptys() {
+        for key in ['x', 'q', 'X'] {
+            let sk = SessionKey::new("github:o/r#1");
+            let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+            let mut cmds = Vec::new();
+            let outcome = stack.handle_key(press(KeyCode::Char(key)), &mut cmds);
+
+            assert!(matches!(outcome, PaneOutcome::Consumed));
+            assert!(stack.terminals.contains_key(&TerminalId(1)));
+            assert!(cmds.iter().any(|cmd| matches!(
+                cmd,
+                Command::Write { terminal_id: TerminalId(1), bytes, .. }
+                    if bytes == &[key as u8]
+            )));
+            assert!(!cmds.iter().any(|cmd| matches!(cmd, Command::Close { .. })));
+        }
+    }
+
+    /// Finding 2: `r restart · X close` sit one keystroke apart in the
+    /// banner, and `r` produces no visible change while the daemon
+    /// spawns. Closing in that window must not let the resume land as a
+    /// fresh agent the user just asked to close.
+    #[test]
+    fn closing_an_exited_pane_mid_restart_closes_the_replacement() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = exited_stack(&sk);
+
+        let mut cmds = Vec::new();
+        stack.handle_key(press(KeyCode::Char('r')), &mut cmds);
+        assert!(cmds.iter().any(|cmd| matches!(
+            cmd,
+            Command::ResumeAgent {
+                terminal_id: TerminalId(1)
+            }
+        )));
+
+        cmds.clear();
+        stack.handle_key(shift_x(), &mut cmds);
+        assert!(!stack.terminals.contains_key(&TerminalId(1)));
+
+        // The daemon, unaware, completes the resume it was already running.
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: false,
+        });
+
+        assert!(
+            !stack.terminals.contains_key(&TerminalId(2)),
+            "the abandoned restart must not reappear as a fresh agent pane",
+        );
+        assert_eq!(
+            stack.drain_pending_closes(),
+            vec![TerminalId(2)],
+            "and its daemon-side terminal must be torn down",
+        );
+    }
+
+    /// The same restart that is NOT abandoned still installs its
+    /// replacement — the intent is keyed to the old id and consumed once.
+    #[test]
+    fn a_completed_restart_still_installs_its_replacement() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = exited_stack(&sk);
+
+        let mut cmds = Vec::new();
+        stack.handle_key(press(KeyCode::Char('r')), &mut cmds);
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: false,
+        });
+
+        assert!(stack.terminals.contains_key(&TerminalId(2)));
+        assert!(stack.drain_pending_closes().is_empty());
+    }
+
+    /// Finding 3: `TileTree::remove_at` hands back the empty (root) path
+    /// when it collapses a top-level split, and the surviving root can be
+    /// a split — leaving `focused` on a non-leaf. `focused_terminal_id`
+    /// falls back to the first leaf, so the exited-pane guard fired while
+    /// `close_focused_tile` re-derived `None` and `remove_at(&[])`
+    /// refused: `Shift-X` (and `]]x`) were a silent no-op with no keyboard
+    /// way out.
+    #[test]
+    fn closing_works_when_a_collapse_left_focus_on_the_split_root() {
+        use lazybox_core::TileTree;
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        for id in [2u64, 3] {
+            stack.on_event(&Event::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(id),
+                session_key: sk.clone(),
+                kind: TerminalKind::Shell,
+                no_permission: false,
+                on_main: false,
+                agent_state: None,
+            });
+        }
+        // HSplit{ HSplit{1,2}, 3 } — terminal 3 sits at path [1], so its
+        // removal is the `path.len() == 1` collapse that returns [].
+        stack.layout = lazybox_core::SessionLayout::Splits {
+            tree: TileTree::HSplit {
+                left: Box::new(TileTree::HSplit {
+                    left: Box::new(TileTree::Leaf { terminal_id: 1 }),
+                    right: Box::new(TileTree::Leaf { terminal_id: 2 }),
+                    ratio: 50,
+                }),
+                right: Box::new(TileTree::Leaf { terminal_id: 3 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        };
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(3),
+            exit_code: Some(0),
+            last_output: None,
+        });
+
+        let lazybox_core::SessionLayout::Splits { focused, .. } = &stack.layout else {
+            panic!("still a split with two leaves");
+        };
+        assert_ne!(
+            focused.as_slice(),
+            &[] as &[u8],
+            "the collapse must not leave focus on the split root",
+        );
+
+        // Focus normalized onto a real leaf, so the pane the guard sees
+        // and the pane the close acts on are the same one.
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(1)));
+
+        // Agent 1 now crashes; the close keys must actually close it.
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+            last_output: None,
+        });
+        let mut cmds = Vec::new();
+        stack.handle_key(shift_x(), &mut cmds);
+        assert!(!stack.terminals.contains_key(&TerminalId(1)));
+    }
+
+    /// `close_focused_tile` also has to cope with a non-leaf `focused`
+    /// arriving from a *persisted* layout, which never passed through
+    /// `drop_slot`'s normalization.
+    #[test]
+    fn closing_resolves_a_restored_non_leaf_focus_path() {
+        use lazybox_core::TileTree;
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        stack.layout = lazybox_core::SessionLayout::Splits {
+            tree: TileTree::HSplit {
+                left: Box::new(TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            // The root — not a leaf.
+            focused: Vec::new(),
+        };
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+            last_output: None,
+        });
+
+        let mut cmds = Vec::new();
+        stack.handle_key(shift_x(), &mut cmds);
+        assert!(
+            !stack.terminals.contains_key(&TerminalId(1)),
+            "a non-leaf focus path must resolve, not silently no-op",
+        );
+    }
+
+    /// A tab close leaves the sibling alone, and the surviving live tab
+    /// keeps its PTY — `queue_terminal_teardown` must only act on the
+    /// terminal it was handed.
+    #[test]
+    fn closing_an_exited_tab_leaves_its_live_sibling() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        stack.focus_terminal(TerminalId(1));
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(1),
+            last_output: None,
+        });
+
+        let mut cmds = Vec::new();
+        stack.handle_key(shift_x(), &mut cmds);
+        assert!(!stack.terminals.contains_key(&TerminalId(1)));
+        assert!(stack.terminals.contains_key(&TerminalId(2)));
+        assert!(!cmds.iter().any(|cmd| matches!(cmd, Command::Close { .. })));
+    }
+
+    /// A failed provider re-auth marks the slot `exited` as a BANNER
+    /// state while the agent's PTY is still alive (the daemon's
+    /// `start_reauthentication` emits `AgentAuthFinished { success:
+    /// false }` and returns without touching the process). The single
+    /// close key must not kill that live, mid-conversation agent — `r`
+    /// still retries the sign-in, and the deliberate `]]x` chord still
+    /// closes.
+    #[test]
+    fn the_close_key_does_not_kill_a_live_agent_awaiting_re_auth() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(1),
+            display_name: "Codex".into(),
+            success: false,
+            error: Some("this agent does not support interactive authentication".into()),
+        });
+        assert!(
+            stack.terminals[&TerminalId(1)].exited.is_some(),
+            "the failure paints the exit banner",
+        );
+
+        let mut cmds = Vec::new();
+        stack.handle_key(shift_x(), &mut cmds);
+        assert!(
+            stack.terminals.contains_key(&TerminalId(1)),
+            "the pane — and the live agent behind it — must survive",
+        );
+        assert!(
+            !cmds.iter().any(|cmd| matches!(cmd, Command::Close { .. })),
+            "no Close may reach a PTY the daemon never tore down",
+        );
+
+        // `r` is the retry and must still fire.
+        stack.handle_key(press(KeyCode::Char('r')), &mut cmds);
+        assert!(cmds.iter().any(|cmd| matches!(
+            cmd,
+            Command::ReauthenticateAgent {
+                terminal_id: TerminalId(1)
+            }
+        )));
+
+        // The deliberate `]]x` chord still closes it, daemon and all.
+        cmds.clear();
+        stack.close_focused_tile(&mut cmds);
+        assert!(cmds.iter().any(|cmd| matches!(
+            cmd,
+            Command::Close {
+                terminal_id: TerminalId(1),
+                ..
+            }
+        )));
+        assert!(stack.closing.contains(&TerminalId(1)));
+    }
+
+    /// The same protection when the re-auth arrived the other way round:
+    /// a `TerminalReplaced { authenticating: true }` hands the pane a NEW
+    /// terminal id and the failure lands on that one, so the guard has to
+    /// read the focused slot's own `auth_recovery_id` rather than assume
+    /// the ids match.
+    #[test]
+    fn the_close_key_spares_a_replaced_pane_whose_re_auth_failed() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        });
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            display_name: "Codex".into(),
+            success: false,
+            error: Some("another authentication flow is already running".into()),
+        });
+
+        let mut cmds = Vec::new();
+        stack.handle_key(shift_x(), &mut cmds);
+        assert!(
+            stack.terminals.contains_key(&TerminalId(2)),
+            "the live agent behind the re-auth banner must survive",
+        );
+        assert!(
+            !cmds.iter().any(|cmd| matches!(cmd, Command::Close { .. })),
+            "no Close may reach a PTY the daemon never tore down",
+        );
+    }
+
+    /// …and the banner names the chord that pane actually accepts.
+    #[test]
+    fn a_re_auth_pane_banner_advertises_the_leader_close() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(1),
+            display_name: "Codex".into(),
+            success: false,
+            error: Some("sign-in did not complete".into()),
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| stack.render(Rect::new(0, 0, 80, 24), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let screen: String = (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("]]x close"),
+            "a live-agent re-auth pane must not advertise the single close key:\n{screen}",
+        );
+        assert!(
+            !screen.contains("X close"),
+            "…and not the one it ignores:\n{screen}"
+        );
+    }
+
+    #[test]
     fn keys_do_not_reach_a_dead_pty() {
         let sk = SessionKey::new("github:o/r#1");
         let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
@@ -12421,11 +13150,11 @@ mod agent_crash_tests {
             last_output: None,
         });
 
-        // A printable key that isn't the restart affordance is swallowed
+        // A printable key that isn't a local action is swallowed
         // rather than written into the gone PTY.
         let mut cmds = Vec::new();
         let outcome = stack.handle_key(
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
             &mut cmds,
         );
         assert!(matches!(outcome, PaneOutcome::Consumed));
@@ -12621,8 +13350,8 @@ mod agent_crash_tests {
             "banner shows the exit code:\n{screen}",
         );
         assert!(
-            screen.contains("restart"),
-            "banner offers a restart:\n{screen}",
+            screen.contains("r restart · X close"),
+            "banner offers the leader-free restart and close keys:\n{screen}",
         );
     }
 

@@ -119,6 +119,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | Key | Action | What it does |
 | --- | --- | --- |
 | `Shift-PgUp/Dn` | scroll | Scroll the terminal's scrollback buffer. |
+| `Shift-X` | close exited pane | Close an agent pane whose process has exited, from the pane itself — no `]]` leader needed, since a frozen pane has no PTY to protect the keystroke from. |
 | `]]q` | exit to sidebar | `]]` is a non-timed leader from the terminal: `]]q` exits to the sidebar, `]]s` opens snippets, `]]f` toggles focus. |
 
 ### The `]]` terminal leader

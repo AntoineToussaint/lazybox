@@ -1877,6 +1877,16 @@ pub struct Model<T: TerminalAdapter> {
     /// second `q` within `ui_defaults.quit_double_tap_window` quits.
     /// Any other key disarms via `q_latch.disarm()`.
     q_latch: crate::confirm_latch::DoubleTapLatch,
+    /// Kind of the crossterm key event currently being dispatched.
+    /// `crossterm_to_realm` erases it (tuirealm's `KeyEvent` carries only
+    /// code + modifiers), so without this no pane could tell a held key's
+    /// autorepeat from a fresh press — which is how a held `x` on an
+    /// exited pane both closed the pane and then typed into whichever
+    /// live sibling inherited focus (#1726 review, finding 4). Set by
+    /// `dispatch_event` right before `handle_pane_key`; `Press` for every
+    /// synthesized key (tests, injected chords), which is the correct
+    /// default for anything that isn't a real terminal autorepeat.
+    key_kind: crossterm::event::KeyEventKind,
     /// Leader-chord state (issues #126, #102). The first keystroke of a
     /// `Chord::Seq` (e.g. `g` for the github actions) arms it with that
     /// keystroke; the next key completes the sequence and fires its
@@ -2795,6 +2805,7 @@ impl<T: TerminalAdapter> Model<T> {
             setup: SetupCtx::new(),
             modal_event_tx,
             q_latch: crate::confirm_latch::DoubleTapLatch::new(),
+            key_kind: crossterm::event::KeyEventKind::Press,
             leader: crate::confirm_latch::LeaderLatch::new(),
             leader_highlight: None,
             leader_fallback: None,

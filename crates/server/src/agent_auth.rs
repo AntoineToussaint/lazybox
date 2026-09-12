@@ -100,6 +100,7 @@ struct RequiredAuth {
 #[derive(Clone, Default)]
 pub(crate) struct AgentRecoveryRegistry {
     contexts: Arc<Mutex<HashMap<TerminalId, AgentResumeContext>>>,
+    operations: Arc<Mutex<HashMap<TerminalId, Arc<Mutex<()>>>>>,
     flows: Arc<Mutex<HashMap<TerminalId, AuthFlow>>>,
     provider_flows: Arc<Mutex<HashMap<String, TerminalId>>>,
     failures: Arc<Mutex<HashMap<TerminalId, FailedAuth>>>,
@@ -107,6 +108,17 @@ pub(crate) struct AgentRecoveryRegistry {
 }
 
 impl AgentRecoveryRegistry {
+    async fn lock_operation(&self, terminal_id: TerminalId) -> tokio::sync::OwnedMutexGuard<()> {
+        let operation = self
+            .operations
+            .lock()
+            .await
+            .entry(terminal_id)
+            .or_default()
+            .clone();
+        operation.lock_owned().await
+    }
+
     pub(crate) async fn remember_spawn(&self, context: AgentResumeContext) {
         self.contexts
             .lock()
@@ -167,6 +179,7 @@ impl AgentRecoveryRegistry {
 
     pub(crate) async fn forget(&self, terminal_id: TerminalId) {
         self.contexts.lock().await.remove(&terminal_id);
+        self.operations.lock().await.remove(&terminal_id);
         self.failures.lock().await.remove(&terminal_id);
         self.requirements.lock().await.remove(&terminal_id);
     }
@@ -475,23 +488,9 @@ pub(crate) async fn detect_required(
     if config.agent_recovery.active(terminal_id).await {
         return;
     }
-    // Every agent shares one machine-wide login, so a re-auth always touches
-    // what the rest of the fleet reads. Count the other running sessions of
-    // this agent so the prompt can name what is riding on it.
-    let other_session_count = {
-        let entries = config.terminal.entries.lock().await;
-        entries
-            .iter()
-            .filter(|(id, entry)| {
-                **id != terminal_id
-                    && !entry.superseded
-                    && !entry.authenticating
-                    && entry.meta.as_ref().is_some_and(|(_, kind)| {
-                        matches!(kind, TerminalKind::Agent(agent_id) if agent_id == &context.agent_id)
-                    })
-            })
-            .count()
-    };
+    let other_session_count = other_agent_terminals(config, terminal_id, &context.agent_id)
+        .await
+        .len();
     let display_name = config
         .agents
         .get(&context.agent_id)
@@ -524,7 +523,33 @@ pub(crate) async fn resume_agent(
     config: &ServerConfig,
     terminal_id: TerminalId,
 ) -> Option<TerminalId> {
+    let _operation = config.agent_recovery.lock_operation(terminal_id).await;
     resume_agent_with_prompt(config, terminal_id, None).await
+}
+
+async fn other_agent_terminals(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    agent_id: &str,
+) -> Vec<TerminalId> {
+    config
+        .terminal
+        .entries
+        .lock()
+        .await
+        .iter()
+        .filter_map(|(id, entry)| {
+            (*id != terminal_id
+                && !entry.superseded
+                && !entry.authenticating
+                && !entry.finishing
+                && entry.backend_key.is_some()
+                && entry.meta.as_ref().is_some_and(
+                    |(_, kind)| matches!(kind, TerminalKind::Agent(id) if id == agent_id),
+                ))
+            .then_some(*id)
+        })
+        .collect()
 }
 
 /// Stop a usage-limit-blocked agent's process, respawn the same
@@ -540,6 +565,7 @@ pub(crate) async fn resume_agent(
 /// without launch metadata, or one mid re-authentication, is rejected
 /// rather than half-restarted.
 pub(crate) async fn restart_agent_and_continue(config: &ServerConfig, terminal_id: TerminalId) {
+    let _operation = config.agent_recovery.lock_operation(terminal_id).await;
     let reject = |message: String| Event::CommandRejected {
         command: "RestartAgentAndContinue".into(),
         message,
@@ -550,22 +576,8 @@ pub(crate) async fn restart_agent_and_continue(config: &ServerConfig, terminal_i
         ));
         return;
     };
-    // Bail if a re-auth flow is mid-flight for this terminal so a kill+respawn
-    // can't stomp an in-progress interactive login. We read `active()` but
-    // deliberately do NOT register ourselves as active. Two invariants make
-    // that safe, and both are load-bearing:
-    //   1. This runs fully inline on the per-terminal FIFO I/O lane
-    //      (`run_io_lane`, keyed by `terminal_id`) — no `tokio::spawn`, no lane
-    //      release — so a second command for THIS terminal (another restart, a
-    //      re-auth) queues behind this call and cannot interleave. The guard
-    //      only has to catch a re-auth *background task* started earlier, which
-    //      registered itself via `begin()` and outlives the lane hop.
-    //   2. We must not call `begin()` here: it claims a global lock keyed by
-    //      `agent_id`, so a concurrent bulk `a R` of two panes running the same
-    //      agent (each on its own terminal lane) would have all but the first
-    //      rejected. Registering would break the headline bulk-restart path.
-    // If either invariant changes (this path spawns, or the lane stops being
-    // per-terminal), two restarts could double-kill/double-spawn — revisit then.
+    // Automatic recovery runs outside the client I/O lane. Serialize it with
+    // manual restarts and the start of interactive authentication.
     if config.agent_recovery.active(terminal_id).await {
         let _ = config.bus.send(reject(
             "a re-authentication is already running for this agent".into(),
@@ -675,13 +687,12 @@ pub(crate) async fn start_reauthentication(
     terminal_id: TerminalId,
     output: Option<lazybox_ipc::EventSender>,
 ) {
+    let _operation = config.agent_recovery.lock_operation(terminal_id).await;
     let Some(context) = config.agent_recovery.context(terminal_id).await else {
-        let _ = config.bus.send(Event::AgentAuthFinished {
-            recovery_terminal_id: terminal_id,
-            terminal_id,
-            display_name: "Agent".into(),
-            success: false,
-            error: Some("this agent pane is no longer recoverable".into()),
+        let _ = config.bus.send(Event::CommandRejected {
+            command: "ReauthenticateAgent".into(),
+            message: "The agent pane has closed. Reopen the saved conversation from its workspace."
+                .into(),
         });
         return;
     };
@@ -1117,6 +1128,11 @@ async fn run_reauthentication(
         .await;
         return;
     }
+    let other_terminals =
+        other_agent_terminals(&config, recovery_terminal_id, &latest_context.agent_id).await;
+    for terminal_id in other_terminals {
+        restart_agent_and_continue(&config, terminal_id).await;
+    }
     config
         .agent_recovery
         .set_phase(recovery_terminal_id, AgentAuthPhase::Resuming)
@@ -1502,16 +1518,17 @@ mod tests {
         }
     }
 
-    async fn wait_for_argv(mock: &crate::backend::MockBackend, expected: &[&str]) -> Vec<String> {
-        // Agent spawns are wrapped in `nice -n <N>` (fleet-priority
-        // shading); strip the wrapper so assertions compare the agent's
-        // own argv.
-        fn strip_nice(argv: &[String]) -> &[String] {
-            match argv {
-                [first, flag, _n, rest @ ..] if first == "nice" && flag == "-n" => rest,
-                other => other,
-            }
+    // Agent spawns are wrapped in `nice -n <N>` (fleet-priority
+    // shading); strip the wrapper so assertions compare the agent's
+    // own argv.
+    fn strip_nice(argv: &[String]) -> &[String] {
+        match argv {
+            [first, flag, _n, rest @ ..] if first == "nice" && flag == "-n" => rest,
+            other => other,
         }
+    }
+
+    async fn wait_for_argv(mock: &crate::backend::MockBackend, expected: &[&str]) -> Vec<String> {
         for _ in 0..10_000 {
             let all = mock.all_argv().await;
             if let Some(argv) = all.into_iter().find(|argv| {
@@ -1708,7 +1725,181 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_reauthentication_shares_login_without_logging_other_workspaces_out() {
+    async fn successful_sign_in_restarts_other_sessions_only_after_verification() {
+        for outcome in ["success", "failed", "signed_out", "cancelled"] {
+            let (config, mock, terminal_id) = recovery_fixture("codex", Some("original")).await;
+            let mut peers = Vec::new();
+            for (id, agent_id) in [
+                (709, "codex"),
+                (710, "codex"),
+                (711, "claude"),
+                (712, "shell"),
+            ] {
+                let key = mock
+                    .spawn(
+                        &[agent_id.into()],
+                        Some(std::path::Path::new("/tmp")),
+                        &[],
+                        &format!("peer-{id}"),
+                    )
+                    .await
+                    .expect("spawn peer");
+                let mut context = config
+                    .agent_recovery
+                    .context(terminal_id)
+                    .await
+                    .expect("context");
+                context.terminal_id = TerminalId(id);
+                context.agent_id = agent_id.into();
+                context.session_key = SessionKey::new(format!("github:owner/repo#{id}"));
+                context.backend_key = Some(key.clone());
+                context.provider_session_id = Some(format!("conversation-{id}"));
+                config
+                    .terminal
+                    .register_terminal(
+                        TerminalId(id),
+                        key.clone(),
+                        context.session_key.clone(),
+                        if agent_id == "shell" {
+                            TerminalKind::Shell
+                        } else {
+                            TerminalKind::Agent(agent_id.into())
+                        },
+                    )
+                    .await;
+                crate::spawn_handler::restore_terminal_conversation_state(
+                    &config,
+                    TerminalId(id),
+                    &context.prompt_history,
+                    context.composing_buffer.as_deref(),
+                )
+                .await;
+                config.agent_recovery.remember_spawn(context).await;
+                peers.push((id, agent_id, key));
+            }
+            assert_eq!(
+                other_agent_terminals(&config, terminal_id, "codex")
+                    .await
+                    .len(),
+                2
+            );
+            start_reauthentication(&config, terminal_id, None).await;
+            wait_for_argv(&mock, &["codex", "login"]).await;
+            let auth_id = wait_for_replacement(&config, terminal_id).await;
+            let login_key = config
+                .terminal
+                .backend_key_for(auth_id)
+                .await
+                .expect("login");
+            for (_, _, key) in &peers {
+                assert!(mock.list().await.expect("live backends").contains(key));
+            }
+            if outcome == "cancelled" {
+                cancel_reauthentication(&config, terminal_id).await;
+            } else {
+                mock.finish(&login_key, if outcome == "failed" { 1 } else { 0 })
+                    .await;
+            }
+            if outcome != "failed" {
+                wait_for_argv(&mock, &["codex", "login", "status"]).await;
+                for (_, _, key) in &peers {
+                    assert!(mock.list().await.expect("live backends").contains(key));
+                }
+                let mut status_key = None;
+                for key in mock.list().await.expect("live backends") {
+                    if mock.argv_for(&key).await.as_deref()
+                        == Some(&["codex".into(), "login".into(), "status".into()])
+                    {
+                        status_key = Some(key);
+                    }
+                }
+                let status_key = status_key.expect("status process");
+                if outcome == "signed_out" {
+                    mock.emit(&status_key, b"Not logged in").await;
+                }
+                mock.finish(&status_key, 0).await;
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while config.agent_recovery.active(terminal_id).await {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("recovery completes");
+            let argv = mock.all_argv().await;
+            let snapshot = crate::spawn_handler::snapshot_terminals(&config).await;
+            for (id, agent_id, key) in peers {
+                let restarted = outcome == "success" && agent_id == "codex";
+                if restarted {
+                    let resumed = snapshot
+                        .iter()
+                        .find(|terminal| {
+                            terminal.session_key
+                                == SessionKey::new(format!("github:owner/repo#{id}"))
+                        })
+                        .expect("resumed peer");
+                    assert_eq!(resumed.prompt_history[0].text, "keep this prompt");
+                    assert_eq!(resumed.composing_buffer.as_deref(), Some("keep this draft"));
+                    assert!(config.spawn.inject_gate_holding(resumed.terminal_id));
+                }
+                assert_eq!(
+                    mock.released_keys().await.contains(&key),
+                    restarted,
+                    "{outcome}: {id}"
+                );
+                assert_eq!(
+                    argv.iter().any(|args| strip_nice(args).starts_with(&[
+                        "codex".into(),
+                        "resume".into(),
+                        format!("conversation-{id}")
+                    ])),
+                    restarted,
+                    "{outcome}: {id}"
+                );
+            }
+            assert_eq!(
+                argv.iter()
+                    .filter(|args| args.as_slice() == ["codex", "login"])
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_restarts_resume_a_conversation_once() {
+        let (config, mock, terminal_id) = recovery_fixture("codex", Some("original")).await;
+        tokio::join!(
+            restart_agent_and_continue(&config, terminal_id),
+            restart_agent_and_continue(&config, terminal_id),
+        );
+        assert_eq!(
+            mock.all_argv()
+                .await
+                .iter()
+                .filter(|args| strip_nice(args).starts_with(&[
+                    "codex".into(),
+                    "resume".into(),
+                    "original".into()
+                ]))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn reauthentication_of_a_closed_pane_does_not_offer_an_impossible_retry() {
+        let (config, _) = ServerConfig::in_memory_with_mock();
+        let mut events = config.bus.subscribe();
+        start_reauthentication(&config, TerminalId(999), None).await;
+        assert!(
+            matches!(events.try_recv(), Ok(Event::CommandRejected { command, message })
+            if command == "ReauthenticateAgent" && message.contains("Reopen the saved conversation"))
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_reauthentication_uses_shared_home_without_explicit_logout() {
         let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-777")).await;
         start_reauthentication(&config, terminal_id, None).await;
         wait_for_argv(&mock, &["codex", "login"]).await;

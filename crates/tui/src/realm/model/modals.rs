@@ -2578,19 +2578,19 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let copy = if prompt.retry {
             format!(
-                "{} sign-in did not complete.\n\n{}\n\nThe conversation is still saved and can be resumed.\n\n[Enter] Retry    [Esc] Cancel",
+                "{} sign-in did not complete.\n\n{}\n\nThe conversation is still saved. Retry sign-in and resume it?",
                 prompt.display_name,
                 prompt.error.as_deref().unwrap_or("Provider login failed.")
             )
         } else {
             let affected = if prompt.other_session_count == 0 {
                 format!(
-                    "This refreshes the machine-wide {} login in place — it won't sign out any other session.",
+                    "Signing in again replaces the machine-wide {} login. No other sessions of this agent are running in lazybox.",
                     prompt.display_name
                 )
             } else {
                 format!(
-                    "This refreshes the shared machine-wide {} login in place — your {} other running {} session{} won't be signed out.",
+                    "Signing in again replaces the shared {} login and invalidates the tokens used by your {} other running {} session{}. After sign-in succeeds, lazybox will restart them and continue their conversations automatically.",
                     prompt.display_name,
                     prompt.other_session_count,
                     prompt.display_name,
@@ -2602,7 +2602,7 @@ impl<T: TerminalAdapter> Model<T> {
                 )
             };
             format!(
-                "{} authentication is no longer valid.\n\nSign in again and continue this conversation?\n\n{affected}\n\nTo sign in as a different account, run `{} logout` yourself first — lazybox won't, because it would sign out every session sharing this login.\n\n[Enter] Sign in and continue    [Esc] Not now",
+                "{} authentication is no longer valid.\n\nSign in again and continue this conversation?\n\n{affected}\n\nTo sign in as a different account, run `{} logout` yourself first — lazybox won't run logout for you.",
                 prompt.display_name,
                 prompt.display_name.to_lowercase()
             )

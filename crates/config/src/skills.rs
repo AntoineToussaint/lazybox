@@ -1539,6 +1539,26 @@ mod export_tests {
         );
     }
 
+    /// An exported skill is *model-selectable mid-task*
+    /// (`docs/snippets-vs-skills.md`) — unlike a snippet, which is always
+    /// the whole turn. So the export carries the authored body and never
+    /// the output contract, whose "nothing after it" would truncate the
+    /// host turn a model invoked this skill from.
+    #[test]
+    fn an_exported_skill_carries_no_output_contract() {
+        let root = tmp_root("no-contract");
+        let catalog = crate::Snippets::builtin();
+        for key in ["rev", "commit", "triage"] {
+            let snippet = catalog.get(key).expect(key);
+            export_snippet_skill(&root, key, snippet, false).unwrap();
+            let written = std::fs::read_to_string(exported_skill_path(&root, key)).unwrap();
+            assert!(!written.contains("OUTPUT CONTRACT"), "{key}: {written}");
+            assert!(!written.contains("nothing after it"), "{key}: {written}");
+            // The authored instructions still make it across intact.
+            assert!(written.contains("The verdict names"), "{key}: {written}");
+        }
+    }
+
     /// A description-less snippet can't be model-selected, so the export
     /// refuses rather than writing a skill the agent can never pick.
     #[test]

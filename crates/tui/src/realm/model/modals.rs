@@ -2589,8 +2589,16 @@ impl<T: TerminalAdapter> Model<T> {
                     prompt.display_name
                 )
             } else {
+                // Says what lazybox knows and what it will actually do —
+                // never a headcount it promises to act on. The number here is
+                // measured when the failure is detected; the sweep runs after
+                // an interactive login that can take minutes, by which time
+                // the fleet may have spawned more sessions (auto-fix, an
+                // armed epic). Promising to restart "your 2 sessions" and
+                // then stopping nine is consent the user never gave, so the
+                // count describes the present and the promise is a policy.
                 format!(
-                    "Signing in again replaces the shared {} login and invalidates the tokens used by your {} other running {} session{}. After sign-in succeeds, lazybox will restart them and continue their conversations automatically.",
+                    "Signing in again replaces the shared {} login. A running agent never re-reads it, so the old login stays live in your {} other running {} session{}. When sign-in succeeds lazybox restarts the idle ones onto the new login; any session that is mid-task is left running untouched, and will prompt you itself if its login has stopped working.",
                     prompt.display_name,
                     prompt.other_session_count,
                     prompt.display_name,

@@ -177,9 +177,22 @@ mod agent_auth_recovery_tests {
         assert!(screen.contains("Claude Code authentication is no longer valid"));
         assert!(
             screen.contains("shared Claude Code login")
-                && screen.contains("2 other running Claude Code sessions")
-                && screen.contains("invalidates the tokens")
-                && screen.contains("restart them and continue their conversations automatically"),
+                && screen.contains("2 other running Claude Code sessions"),
+            "{screen}"
+        );
+        // The prompt describes lazybox's POLICY, never a headcount it
+        // promises to act on. `other_session_count` is measured when the
+        // failure is detected; the sweep runs after an interactive login
+        // that can take minutes, by which time auto-fix or an armed epic
+        // may have spawned more sessions. "we will restart your 2 sessions"
+        // followed by stopping nine is consent the user never gave.
+        assert!(
+            screen.contains("restarts the idle ones onto the new login")
+                && screen.contains("mid-task is left running untouched"),
+            "{screen}"
+        );
+        assert!(
+            !screen.contains("restart them and continue their conversations automatically"),
             "{screen}"
         );
         assert!(screen.contains("Sign in again and continue"));
@@ -241,7 +254,7 @@ mod agent_auth_recovery_tests {
             screen.contains("1 other running Codex session."),
             "{screen}"
         );
-        assert!(screen.contains("restart them"), "{screen}");
+        assert!(screen.contains("restarts the idle ones"), "{screen}");
     }
 
     #[test]

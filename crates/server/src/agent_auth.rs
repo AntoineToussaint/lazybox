@@ -108,14 +108,26 @@ pub(crate) struct AgentRecoveryRegistry {
 }
 
 impl AgentRecoveryRegistry {
+    /// Serialize the destructive per-terminal operations (resume, restart,
+    /// the start of a re-auth) against each other.
+    ///
+    /// The slot is deliberately NOT removed by `forget`. Removing a slot
+    /// somebody still holds silently voids the exclusion: the next caller
+    /// finds an empty entry, mints a *fresh* mutex and acquires it at once,
+    /// so two kill+respawn sequences run against one conversation — the very
+    /// double-kill/double-spawn this lock exists to prevent. Instead the map
+    /// is swept here: a live guard and a queued waiter each own their own
+    /// clone of the `Arc` (`Mutex::lock_owned` takes `self: Arc<Self>`), so
+    /// `strong_count == 1` means the map is the sole owner and the slot is
+    /// provably inert. That keeps the map bounded by the terminals actually
+    /// being operated on rather than by every terminal ever seen, without
+    /// ever dropping one out from under a holder.
     async fn lock_operation(&self, terminal_id: TerminalId) -> tokio::sync::OwnedMutexGuard<()> {
-        let operation = self
-            .operations
-            .lock()
-            .await
-            .entry(terminal_id)
-            .or_default()
-            .clone();
+        let operation = {
+            let mut operations = self.operations.lock().await;
+            operations.retain(|id, slot| *id == terminal_id || Arc::strong_count(slot) > 1);
+            operations.entry(terminal_id).or_default().clone()
+        };
         operation.lock_owned().await
     }
 
@@ -179,7 +191,9 @@ impl AgentRecoveryRegistry {
 
     pub(crate) async fn forget(&self, terminal_id: TerminalId) {
         self.contexts.lock().await.remove(&terminal_id);
-        self.operations.lock().await.remove(&terminal_id);
+        // `operations` is deliberately untouched — see `lock_operation`.
+        // `forget` runs from `handle_close` on the terminal's I/O lane,
+        // which can overlap an automatic restart holding that very slot.
         self.failures.lock().await.remove(&terminal_id);
         self.requirements.lock().await.remove(&terminal_id);
     }
@@ -527,6 +541,11 @@ pub(crate) async fn resume_agent(
     resume_agent_with_prompt(config, terminal_id, None).await
 }
 
+/// Every *other* live terminal running this agent. The auth prompt counts
+/// them (they all share the one machine-wide login) and the post-sign-in
+/// sweep uses the list to bound its candidates — what it then *does* with
+/// each one is decided per peer at the moment it acts, by
+/// [`peer_recovery_now`], never from this snapshot.
 async fn other_agent_terminals(
     config: &ServerConfig,
     terminal_id: TerminalId,
@@ -552,6 +571,86 @@ async fn other_agent_terminals(
         .collect()
 }
 
+/// Re-read a peer's eligibility and state at the instant it is about to be
+/// acted on, rather than trusting the sweep's opening snapshot.
+///
+/// The sweep is sequential and every swap costs a PTY spawn, so by the time
+/// peer five comes up, minutes may have passed. In that window an idle peer
+/// can be put back to work by something the user never watched happen —
+/// auto-fix, an `@lazybox` mention, an armed epic staffing a worker, a
+/// snippet broadcast, or simply the user typing into it. Acting on the stale
+/// reading would kill precisely the mid-flight turn this policy exists to
+/// protect. A peer that has since been closed, superseded or torn down is
+/// likewise no longer ours to touch.
+async fn peer_recovery_now(config: &ServerConfig, terminal_id: TerminalId) -> PeerRecovery {
+    let entries = config.terminal.entries.lock().await;
+    let Some(entry) = entries.get(&terminal_id) else {
+        return PeerRecovery::Skip;
+    };
+    if entry.superseded || entry.authenticating || entry.finishing || entry.backend_key.is_none() {
+        return PeerRecovery::Skip;
+    }
+    PeerRecovery::for_state(entry.agent_state)
+}
+
+/// What the post-sign-in sweep may do to one peer of the re-authenticated
+/// agent.
+///
+/// A re-auth replaces the shared machine-wide credential, and a running
+/// agent process never re-reads one (the rationale `a R` is built on) — so
+/// a peer still holds whatever it read at startup. lazybox cannot know
+/// whether that old credential still works, only that a stop → `--resume`
+/// would guarantee the peer is on the new one. That makes the swap worth
+/// doing where it is *free* and never worth doing where it costs work:
+///
+/// * At rest (`Idle` / `Done`) the swap is lossless — `--resume` restores
+///   the conversation and there is no turn to interrupt. Restart, but send
+///   no continuation: the agent had already finished and stopped, so
+///   nudging it would start a turn the user never asked for.
+/// * Blocked on the dead credential (`LimitReached` / `AwaitingReset`) the
+///   peer is stuck mid-work and the continuation prompt is exactly what
+///   frees it — this is the `a R` case.
+/// * Mid-flight (`Working`, `InputNeeded`, `CreditExhausted`) a kill
+///   destroys the in-flight turn: the streaming response, the running tool
+///   call, a half-applied multi-file edit, the pending permission question.
+///   `--resume` restores the provider-side conversation, NOT the turn that
+///   was in progress. Leave these alone. If the peer's credential really is
+///   dead it will fail its next call and raise its own auth prompt through
+///   `detect_required`, which is non-destructive.
+/// * Unknown (`None`, no state reading yet) is treated as mid-flight for
+///   the same reason: a pane that has never reported could be anywhere, and
+///   the self-announcing fallback above costs nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerRecovery {
+    /// Swap the process; the conversation was at rest, so say nothing.
+    Restart,
+    /// Swap the process and nudge it back to work.
+    RestartAndContinue,
+    /// Leave it running.
+    Skip,
+}
+
+impl PeerRecovery {
+    fn for_state(state: Option<lazybox_ipc::AgentState>) -> Self {
+        use lazybox_ipc::AgentState;
+        match state {
+            Some(AgentState::Idle | AgentState::Done) => Self::Restart,
+            Some(AgentState::LimitReached | AgentState::AwaitingReset) => Self::RestartAndContinue,
+            Some(
+                AgentState::Working
+                | AgentState::InputNeeded
+                | AgentState::CreditExhausted
+                | AgentState::Exited { .. },
+            )
+            | None => Self::Skip,
+        }
+    }
+
+    fn continuation(self) -> Option<String> {
+        matches!(self, Self::RestartAndContinue).then(crate::auto_wait::resume_prompt)
+    }
+}
+
 /// Stop a usage-limit-blocked agent's process, respawn the same
 /// conversation in its pane (`--resume`), and submit the continuation
 /// prompt once the fresh composer is ready — the "restart with fresh
@@ -565,24 +664,48 @@ async fn other_agent_terminals(
 /// without launch metadata, or one mid re-authentication, is rejected
 /// rather than half-restarted.
 pub(crate) async fn restart_agent_and_continue(config: &ServerConfig, terminal_id: TerminalId) {
+    if let Err(message) =
+        restart_agent_in_place(config, terminal_id, Some(crate::auto_wait::resume_prompt())).await
+    {
+        let _ = config.bus.send(Event::CommandRejected {
+            command: "RestartAgentAndContinue".into(),
+            message,
+        });
+    }
+}
+
+/// The stop → detach → `--resume` swap itself, with the outcome returned
+/// rather than broadcast so each caller can attribute a failure to the
+/// action the user actually took.
+///
+/// **This is destructive on every path that reaches the kill**, so a failure
+/// after that point leaves a pane with no process. It must never be
+/// discarded: the automatic post-sign-in sweep once dropped it and a peer
+/// whose respawn failed vanished while the flow still reported success.
+///
+/// Serialization: the client-command path runs on the per-terminal FIFO I/O
+/// lane (`run_io_lane`), but the automatic sweep does not — it runs on the
+/// re-auth flow's own task. `lock_operation` therefore carries the mutual
+/// exclusion that the lane used to provide *for the destructive operations*
+/// (resume / restart / the start of a re-auth), and `lock_terminal_io`
+/// covers the kill against concurrent writes to the same backend. What the
+/// lock does NOT cover is the rest of that terminal's lane traffic
+/// (`Write`, `Resize`, `InjectPrompt`, `DeliverSnippet`, `Close`): those can
+/// still interleave with an automatic sweep, which is why `forget` must not
+/// tear this terminal's lock slot down (see `lock_operation`) and why the
+/// recovery context is re-read below *after* the lock is taken rather than
+/// passed in by the caller.
+async fn restart_agent_in_place(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    continuation: Option<String>,
+) -> Result<(), String> {
     let _operation = config.agent_recovery.lock_operation(terminal_id).await;
-    let reject = |message: String| Event::CommandRejected {
-        command: "RestartAgentAndContinue".into(),
-        message,
-    };
     let Some(context) = config.agent_recovery.context(terminal_id).await else {
-        let _ = config.bus.send(reject(
-            "this agent pane has no resumable launch metadata".into(),
-        ));
-        return;
+        return Err("this agent pane has no resumable launch metadata".into());
     };
-    // Automatic recovery runs outside the client I/O lane. Serialize it with
-    // manual restarts and the start of interactive authentication.
     if config.agent_recovery.active(terminal_id).await {
-        let _ = config.bus.send(reject(
-            "a re-authentication is already running for this agent".into(),
-        ));
-        return;
+        return Err("a re-authentication is already running for this agent".into());
     }
     if let Some(backend_key) = context.backend_key.clone() {
         // Carry the conversation (history + any draft) across the swap
@@ -600,10 +723,7 @@ pub(crate) async fn restart_agent_and_continue(config: &ServerConfig, terminal_i
             config.backend.kill(&backend_key).await
         };
         if let Err(error) = killed {
-            let _ = config
-                .bus
-                .send(reject(format!("could not stop the agent: {error}")));
-            return;
+            return Err(format!("could not stop the agent: {error}"));
         }
         crate::spawn_handler::detach_killed_terminal(
             config,
@@ -617,9 +737,82 @@ pub(crate) async fn restart_agent_and_continue(config: &ServerConfig, terminal_i
     tracing::info!(
         ?terminal_id,
         agent = %context.agent_id,
-        "restart-rate-limited: respawning the agent to pick up fresh credentials"
+        "restart-agent: respawning the agent to pick up fresh credentials"
     );
-    resume_agent_with_prompt(config, terminal_id, Some(crate::auto_wait::resume_prompt())).await;
+    if resume_agent_with_prompt(config, terminal_id, continuation)
+        .await
+        .is_some()
+    {
+        return Ok(());
+    }
+    // Tell "the respawn failed" apart from "the pane was closed underneath
+    // us". `resume_agent_with_prompt` calls `forget` only on success, so a
+    // context that has vanished by now was removed by `handle_close` running
+    // on this terminal's I/O lane — which the automatic sweep does not share.
+    // The pane is gone because the user asked for it to be; reporting a
+    // recovery failure for it would be a lie.
+    if config.agent_recovery.context(terminal_id).await.is_none() {
+        tracing::info!(
+            ?terminal_id,
+            "restart-agent: the pane was closed during the restart"
+        );
+        return Ok(());
+    }
+    Err(
+        "the agent was stopped but could not be resumed — reopen the saved conversation \
+         from its workspace"
+            .to_string(),
+    )
+}
+
+/// Bring every other session of a freshly re-authenticated agent onto the
+/// new credential (#1721).
+///
+/// Runs *after* the user's own pane has resumed and after the flow has been
+/// released, so a slow peer respawn can neither delay the pane the user is
+/// watching nor keep holding the per-provider re-auth lock — a peer that
+/// wedged here used to make the agent un-re-authenticatable until the daemon
+/// was restarted.
+///
+/// `peers` is the candidate list snapshotted at verification time; what
+/// happens to each is decided from a fresh reading taken at its own turn
+/// (`peer_recovery_now`), and `restart_agent_in_place` re-reads the recovery
+/// context again under the terminal's own lock before anything destructive.
+async fn recover_peer_sessions(config: &ServerConfig, display_name: &str, peers: Vec<TerminalId>) {
+    let mut failures = Vec::new();
+    for terminal_id in peers {
+        let action = peer_recovery_now(config, terminal_id).await;
+        if action == PeerRecovery::Skip {
+            tracing::info!(
+                ?terminal_id,
+                "post-sign-in recovery: leaving a mid-flight or departed agent alone"
+            );
+            continue;
+        }
+        if let Err(error) = restart_agent_in_place(config, terminal_id, action.continuation()).await
+        {
+            tracing::warn!(?terminal_id, %error, "post-sign-in recovery: peer restart failed");
+            failures.push(error);
+        }
+    }
+    if failures.is_empty() {
+        return;
+    }
+    // Never silent: at this point those panes have been stopped and not
+    // brought back, while the sign-in itself reported success.
+    let count = failures.len();
+    let plural = if count == 1 { "" } else { "s" };
+    failures.sort();
+    failures.dedup();
+    let _ = config.bus.send(Event::CommandRejected {
+        command: "post-sign-in session recovery".into(),
+        message: format!(
+            "{display_name} sign-in succeeded, but {count} other {display_name} session{plural} \
+             could not be restarted onto the new login ({}). Reopen them from their workspace, \
+             or use `a R`.",
+            failures.join("; ")
+        ),
+    });
 }
 
 async fn resume_agent_with_prompt(
@@ -669,6 +862,17 @@ async fn resume_agent_with_prompt(
             provider_session_id: context.provider_session_id.clone(),
             no_permission_override: Some(context.no_permission),
             replace_terminal_id: Some(replaced_terminal_id),
+            // This spawn resumes ONE specific conversation into its own pane;
+            // it must never be collapsed onto a sibling. `handle_spawn`'s
+            // idle-singleton reuse matches on `session_key` + agent + checkout
+            // with a plain `find`, and a workspace may legitimately run several
+            // agents of the same kind (#1310). Without `force_new` the resume
+            // of the second such pane returns the FIRST one's terminal id —
+            // whereupon `forget` below erases this conversation's resume
+            // context for good and the continuation prompt is injected into
+            // somebody else's chat. The concurrent-race collapse and the
+            // issue→PR owner transfer are unaffected; only idle reuse is.
+            force_new: true,
             prompt_history: context.prompt_history.clone(),
             composing_buffer: context.composing_buffer.clone(),
             access: context.access,
@@ -1128,11 +1332,10 @@ async fn run_reauthentication(
         .await;
         return;
     }
-    let other_terminals =
+    // Snapshot the peers here — the credential is verified, and this pane's
+    // own resume below registers a fresh terminal that must not be swept.
+    let peers =
         other_agent_terminals(&config, recovery_terminal_id, &latest_context.agent_id).await;
-    for terminal_id in other_terminals {
-        restart_agent_and_continue(&config, terminal_id).await;
-    }
     config
         .agent_recovery
         .set_phase(recovery_terminal_id, AgentAuthPhase::Resuming)
@@ -1154,7 +1357,7 @@ async fn run_reauthentication(
         let _ = config.bus.send(Event::AgentAuthFinished {
             recovery_terminal_id,
             terminal_id: resumed_terminal_id,
-            display_name,
+            display_name: display_name.clone(),
             success: true,
             error: None,
         });
@@ -1171,6 +1374,11 @@ async fn run_reauthentication(
         return;
     }
     config.agent_recovery.finish(recovery_terminal_id).await;
+    // Peers come last, deliberately. The pane the user is watching is back
+    // and the per-provider re-auth lock is released before a single peer is
+    // touched, so a slow or wedged peer respawn delays nobody and cannot
+    // leave this agent permanently un-re-authenticatable.
+    recover_peer_sessions(&config, &display_name, peers).await;
 }
 
 /// Message for a re-auth cancelled *after* the interactive login had started,
@@ -1528,6 +1736,26 @@ mod tests {
         }
     }
 
+    /// Park until the post-sign-in sweep has *registered* the replacement
+    /// terminal for `github:owner/repo#{peer}` — i.e. the resume completed,
+    /// not merely that its argv was observed mid-spawn.
+    async fn wait_for_resumed_peer(config: &ServerConfig, peer: u64) {
+        let session_key = SessionKey::new(format!("github:owner/repo#{peer}"));
+        for _ in 0..10_000 {
+            if crate::spawn_handler::snapshot_terminals(config)
+                .await
+                .iter()
+                .any(|terminal| {
+                    terminal.session_key == session_key && terminal.terminal_id != TerminalId(peer)
+                })
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("peer {peer} was never resumed");
+    }
+
     async fn wait_for_argv(mock: &crate::backend::MockBackend, expected: &[&str]) -> Vec<String> {
         for _ in 0..10_000 {
             let all = mock.all_argv().await;
@@ -1724,16 +1952,32 @@ mod tests {
         wait_for_argv(&mock, &["codex", "resume", "conversation-708"]).await;
     }
 
+    /// The post-sign-in sweep (#1721) brings peers of the re-authenticated
+    /// agent onto the new login — but only the ones a kill cannot cost work,
+    /// and only once the credential is actually verified.
+    ///
+    /// The state axis is the load-bearing half. `restart_agent_in_place` is a
+    /// kill; `--resume` restores the provider-side conversation, never the
+    /// turn that was in flight. So a `Working` peer (streaming a response,
+    /// mid-tool-call, half-applied edit) is left strictly alone, and an
+    /// at-rest peer is swapped with NO continuation prompt — it had finished
+    /// and stopped, and "continue the work you were doing" would start a turn
+    /// nobody asked for. Only a peer blocked on the dead credential
+    /// (`LimitReached` / `AwaitingReset`) gets the nudge.
     #[tokio::test]
-    async fn successful_sign_in_restarts_other_sessions_only_after_verification() {
+    async fn successful_sign_in_restarts_only_at_rest_peers_after_verification() {
+        use lazybox_ipc::AgentState;
         for outcome in ["success", "failed", "signed_out", "cancelled"] {
             let (config, mock, terminal_id) = recovery_fixture("codex", Some("original")).await;
             let mut peers = Vec::new();
-            for (id, agent_id) in [
-                (709, "codex"),
-                (710, "codex"),
-                (711, "claude"),
-                (712, "shell"),
+            for (id, agent_id, state) in [
+                (709, "codex", Some(AgentState::Idle)),
+                (710, "codex", Some(AgentState::LimitReached)),
+                (713, "codex", Some(AgentState::Working)),
+                (714, "codex", Some(AgentState::InputNeeded)),
+                (715, "codex", None),
+                (711, "claude", Some(AgentState::Idle)),
+                (712, "shell", Some(AgentState::Idle)),
             ] {
                 let key = mock
                     .spawn(
@@ -1767,6 +2011,12 @@ mod tests {
                         },
                     )
                     .await;
+                if let Some(state) = state {
+                    config
+                        .terminal
+                        .record_agent_state(TerminalId(id), state)
+                        .await;
+                }
                 crate::spawn_handler::restore_terminal_conversation_state(
                     &config,
                     TerminalId(id),
@@ -1775,13 +2025,16 @@ mod tests {
                 )
                 .await;
                 config.agent_recovery.remember_spawn(context).await;
-                peers.push((id, agent_id, key));
+                peers.push((id, agent_id, state, key));
             }
+            // The *count* on the prompt is every session sharing the login,
+            // whatever state it is in — that is what the user is consenting
+            // about. Which of them the sweep touches is a separate decision.
             assert_eq!(
                 other_agent_terminals(&config, terminal_id, "codex")
                     .await
                     .len(),
-                2
+                5
             );
             start_reauthentication(&config, terminal_id, None).await;
             wait_for_argv(&mock, &["codex", "login"]).await;
@@ -1791,7 +2044,7 @@ mod tests {
                 .backend_key_for(auth_id)
                 .await
                 .expect("login");
-            for (_, _, key) in &peers {
+            for (_, _, _, key) in &peers {
                 assert!(mock.list().await.expect("live backends").contains(key));
             }
             if outcome == "cancelled" {
@@ -1802,7 +2055,7 @@ mod tests {
             }
             if outcome != "failed" {
                 wait_for_argv(&mock, &["codex", "login", "status"]).await;
-                for (_, _, key) in &peers {
+                for (_, _, _, key) in &peers {
                     assert!(mock.list().await.expect("live backends").contains(key));
                 }
                 let mut status_key = None;
@@ -1826,10 +2079,28 @@ mod tests {
             })
             .await
             .expect("recovery completes");
+            if outcome == "success" {
+                // The sweep runs after the flow is released and walks its
+                // peers in `HashMap` order, so wait for BOTH eligible ones.
+                // Wait on the *registry*, not on argv: the resume argv shows
+                // up inside `handle_spawn` when it launches the backend,
+                // several awaits before the replacement terminal is
+                // registered — snapshotting on the argv would race it. The
+                // skipped peers need no wait at all: nothing in the sweep
+                // will ever restart them, so their negative assertions hold
+                // at any point.
+                for peer in [709u64, 710] {
+                    wait_for_resumed_peer(&config, peer).await;
+                }
+            }
             let argv = mock.all_argv().await;
             let snapshot = crate::spawn_handler::snapshot_terminals(&config).await;
-            for (id, agent_id, key) in peers {
-                let restarted = outcome == "success" && agent_id == "codex";
+            for (id, agent_id, state, key) in peers {
+                let at_rest = matches!(
+                    state,
+                    Some(AgentState::Idle | AgentState::LimitReached | AgentState::AwaitingReset)
+                );
+                let restarted = outcome == "success" && agent_id == "codex" && at_rest;
                 if restarted {
                     let resumed = snapshot
                         .iter()
@@ -1840,7 +2111,15 @@ mod tests {
                         .expect("resumed peer");
                     assert_eq!(resumed.prompt_history[0].text, "keep this prompt");
                     assert_eq!(resumed.composing_buffer.as_deref(), Some("keep this draft"));
-                    assert!(config.spawn.inject_gate_holding(resumed.terminal_id));
+                    // Only the credential-blocked peer is nudged; the pane
+                    // that had come to rest is resumed silently. The spawn
+                    // injection gate holds exactly when a prompt is riding
+                    // the spawn.
+                    assert_eq!(
+                        config.spawn.inject_gate_holding(resumed.terminal_id),
+                        state == Some(AgentState::LimitReached),
+                        "{outcome}: {id} continuation prompt"
+                    );
                 }
                 assert_eq!(
                     mock.released_keys().await.contains(&key),
@@ -1856,6 +2135,14 @@ mod tests {
                     restarted,
                     "{outcome}: {id}"
                 );
+                if !restarted {
+                    // A skipped peer is not merely un-resumed — its process
+                    // must still be running.
+                    assert!(
+                        mock.list().await.expect("live backends").contains(&key),
+                        "{outcome}: {id} must still be live"
+                    );
+                }
             }
             assert_eq!(
                 argv.iter()
@@ -1864,6 +2151,184 @@ mod tests {
                 1
             );
         }
+    }
+
+    /// Resuming a conversation must never be collapsed onto a sibling agent.
+    ///
+    /// `handle_spawn` reuses an idle singleton matched on `session_key` +
+    /// agent + checkout, and a workspace may legitimately run several agents
+    /// of the same kind (#1310). With `force_new` unset, restarting the
+    /// second of two same-workspace panes returned the FIRST one's terminal
+    /// id — so the second pane was killed, its resume context erased by
+    /// `forget`, and its continuation prompt injected into the other
+    /// conversation. Both must come back as themselves.
+    #[tokio::test]
+    async fn restarting_two_agents_in_one_workspace_resumes_both_conversations() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let shared = SessionKey::new("github:owner/repo#shared");
+        for id in [700u16, 701] {
+            let key = mock
+                .spawn(
+                    &["codex".into()],
+                    Some(std::path::Path::new("/tmp")),
+                    &[],
+                    &format!("pane-{id}"),
+                )
+                .await
+                .expect("spawn pane");
+            config
+                .terminal
+                .register_terminal(
+                    TerminalId(id as u64),
+                    key.clone(),
+                    shared.clone(),
+                    TerminalKind::Agent("codex".into()),
+                )
+                .await;
+            config
+                .agent_recovery
+                .remember_spawn(AgentResumeContext {
+                    terminal_id: TerminalId(id as u64),
+                    session_key: shared.clone(),
+                    session_id: None,
+                    agent_id: "codex".into(),
+                    cwd: "/tmp".into(),
+                    backend_key: Some(key),
+                    on_main: false,
+                    model_alias: None,
+                    access: AgentRunAccess::Default,
+                    no_permission: false,
+                    provider_session_id: Some(format!("conversation-{id}")),
+                    prompt_history: Vec::new(),
+                    composing_buffer: None,
+                })
+                .await;
+        }
+        for id in [700u16, 701] {
+            restart_agent_in_place(&config, TerminalId(id as u64), None)
+                .await
+                .unwrap_or_else(|error| panic!("restart {id}: {error}"));
+        }
+        let argv = mock.all_argv().await;
+        for id in [700u16, 701] {
+            assert!(
+                argv.iter().any(|args| strip_nice(args).starts_with(&[
+                    "codex".into(),
+                    "resume".into(),
+                    format!("conversation-{id}")
+                ])),
+                "conversation-{id} was never resumed: {argv:?}"
+            );
+        }
+    }
+
+    /// A restart that gets past the kill and then fails to respawn leaves a
+    /// pane with no process. The outcome must reach the user: the automatic
+    /// sweep used to discard it entirely, so a peer could vanish while the
+    /// sign-in still reported success.
+    #[tokio::test]
+    async fn a_peer_that_cannot_be_respawned_is_reported_not_swallowed() {
+        let (config, mock, terminal_id) = recovery_fixture("codex", Some("original")).await;
+        let doomed = TerminalId(730);
+        let key = mock
+            .spawn(
+                &["codex".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "doomed",
+            )
+            .await
+            .expect("spawn peer");
+        config
+            .terminal
+            .register_terminal(
+                doomed,
+                key.clone(),
+                SessionKey::new("github:owner/repo#730"),
+                TerminalKind::Agent("codex".into()),
+            )
+            .await;
+        config
+            .terminal
+            .record_agent_state(doomed, lazybox_ipc::AgentState::Idle)
+            .await;
+        let mut context = config
+            .agent_recovery
+            .context(terminal_id)
+            .await
+            .expect("context");
+        context.terminal_id = doomed;
+        context.session_key = SessionKey::new("github:owner/repo#730");
+        context.backend_key = Some(key.clone());
+        // The spawn resolves the agent from the context, and this id is not
+        // registered — `handle_spawn` refuses AFTER the pane has been killed.
+        context.agent_id = "no-such-agent".into();
+        config.agent_recovery.remember_spawn(context).await;
+
+        let mut events = config.bus.subscribe();
+        recover_peer_sessions(&config, "Codex", vec![doomed]).await;
+
+        assert!(
+            mock.released_keys().await.contains(&key),
+            "the peer really was stopped"
+        );
+        let mut reported = None;
+        while let Ok(event) = events.try_recv() {
+            if let Event::CommandRejected { command, message } = event
+                && command == "post-sign-in session recovery"
+            {
+                reported = Some(message);
+            }
+        }
+        let message = reported.expect("a failed peer restart must be reported");
+        assert!(
+            message.contains("1 other Codex session") && message.contains("could not be restarted"),
+            "{message}"
+        );
+    }
+
+    /// `forget` must not tear down a lock slot somebody is holding.
+    ///
+    /// It runs from `handle_close` on the terminal's I/O lane, which can
+    /// overlap an automatic restart of the same terminal. Removing the entry
+    /// let the next caller mint a fresh mutex and acquire it immediately —
+    /// two kill+respawn sequences against one conversation.
+    #[tokio::test]
+    async fn forgetting_a_terminal_cannot_void_a_held_operation_lock() {
+        let registry = AgentRecoveryRegistry::default();
+        let held = registry.lock_operation(TerminalId(1)).await;
+        registry.forget(TerminalId(1)).await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                registry.lock_operation(TerminalId(1)),
+            )
+            .await
+            .is_err(),
+            "a second operation acquired the lock while the first still held it"
+        );
+        drop(held);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                registry.lock_operation(TerminalId(1)),
+            )
+            .await
+            .is_ok(),
+            "the lock never became available again"
+        );
+    }
+
+    /// Keeping slots past `forget` must not turn the map into a leak: an
+    /// inert slot (no holder, no waiter) is swept on the next lock.
+    #[tokio::test]
+    async fn inert_operation_slots_are_swept() {
+        let registry = AgentRecoveryRegistry::default();
+        for id in 0..50 {
+            drop(registry.lock_operation(TerminalId(id)).await);
+        }
+        let _held = registry.lock_operation(TerminalId(99)).await;
+        assert_eq!(registry.operations.lock().await.len(), 1);
     }
 
     #[tokio::test]

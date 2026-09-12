@@ -66,6 +66,26 @@ const BANNED_DISMISSALS: &[&str] = &[
     "left as an exercise",
 ];
 
+const OUTPUT_CONTRACT: &str = "OUTPUT CONTRACT (final ending only)
+Explore, use tools, and give full findings before this ending without a length or format limit.
+Close each snippet, including each step in a next chain, with a ten-second summary:
+exactly one STATUS line, one prose verdict sentence carrying the reason, and at most five
+short detail lines only if they change what the reader does next. Hard cap: 7 lines total.
+Use bullets only for genuinely enumerable findings, never for the verdict. No fences.
+Choose exactly one status; do not manufacture confidence:
+DONE — finished, nothing needed from you.
+ACTION NEEDED — you must do something; name the exact action. Known blockers take priority.
+NEED CONTEXT — blocked on information only you have; ask the one question.
+UNSURE — done, but low confidence; name exactly what to verify.
+Example ending:
+STATUS: UNSURE
+The fix passes locally, but timing under production load remains unverified.
+Verify latency with the production workload before deploying.
+Close with exactly this shape, at most 7 lines, and nothing after it:
+STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
+<verdict — one sentence, prose>
+<up to 5 short lines of actionable detail, optional>";
+
 /// Lock a stable sibling inode, not the YAML inode replaced by rename.
 /// Every application writer holds this across the entire read-modify-write.
 fn lock_snippets(path: &Path) -> Result<std::fs::File, SnippetsError> {
@@ -578,11 +598,8 @@ impl Snippets {
                      state that triggers the wrong result, a real failure and not a vague \
                      worry, with no shallow nit dressed up as a bug. Look only at the \
                      changed lines and the code they directly touch, not the whole file. \
-                     Then close with a completeness check — what you did not examine and \
-                     why skipping it is safe — and a summary a human can read in ten \
-                     seconds: a one-line verdict (🟢 ship / 🟡 fix these nits first / 🔴 \
-                     blockers, do not ship / ❓ need context) followed by the headline \
-                     findings as a tight, glanceable list. If a traced line is genuinely \
+                     Include a completeness check — what you did not examine and why \
+                     skipping it is safe. If a traced line is genuinely \
                      clean, say so plainly rather than inventing nits.",
                 ),
             ),
@@ -620,11 +637,9 @@ impl Snippets {
                      findings ranked by severity, each with a `file:line` anchor, \
                      separating \"will break\" (has a real failure scenario) from \"worth \
                      reconsidering\" (a design smell) — don't pad, a weak nit dressed as a \
-                     bug erodes trust. Then close with a completeness self-critique — what \
-                     you did not examine and why skipping it is safe — and a summary a \
-                     human can read in ten seconds: a one-line verdict (🟢 ship / 🟡 \
-                     reshape / 🔴 rethink), the single highest risk you'd keep watching, \
-                     and the headline findings as a glanceable list.",
+                     bug erodes trust. Include a completeness self-critique — what \
+                     you did not examine and why skipping it is safe — and name the \
+                     single highest risk you'd keep watching.",
                 ),
             ),
             (
@@ -661,9 +676,7 @@ impl Snippets {
                      to change in review. For each correctness item give the concrete input \
                      or state that breaks it, not a hunch, with a `file:line` anchor. Lead \
                      with the full detailed list, ordered so I can fix top-down before \
-                     pushing, then close with a human-readable summary: a one-line verdict \
-                     (🟢 ready to push / 🟡 fix these first / 🔴 not ready) and the \
-                     must-fix items at a glance. Call it ready only after you've genuinely \
+                     pushing. Call it ready only after you've genuinely \
                      tried and failed to find a problem — then say so.",
                 ),
             ),
@@ -691,9 +704,7 @@ impl Snippets {
                      concrete failure scenario — the input or state that produces the wrong \
                      result — with a `file:line` anchor, grouped by lens and ranked by \
                      severity; if a lens is genuinely clean, say so in one line rather than \
-                     padding the list. Then close with a human-readable summary: a one-line \
-                     verdict (🟢 ship / 🟡 fix first / 🔴 blockers / ❓ need context) and \
-                     the top blockers at a glance.",
+                     padding the list. Name the top blockers.",
                 ),
             ),
             (
@@ -712,10 +723,8 @@ impl Snippets {
                      not defenses; a safe-looking default can hide a footgun, so name what \
                      specifically makes each choice safe or don't accept it. Lead with the \
                      detailed design findings, each with a `file:line` anchor and the \
-                     reasoning, ordered by leverage. Then close with a human-readable \
-                     summary: a one-word verdict — ship, reshape, or rethink — the two or \
-                     three highest-leverage changes, and the one risk you'd keep watching. \
-                     If the design is sound, say so and name that risk.",
+                     reasoning, ordered by leverage. Name the two or three highest-leverage \
+                     changes and the one risk you'd keep watching. If the design is sound, say so and name that risk.",
                 ),
             ),
             (
@@ -737,10 +746,8 @@ impl Snippets {
                      `file:line`, the input scale at which it starts to hurt, and the \
                      concrete cost — measured or estimated, not hand-waved — ranked by \
                      impact, with a fix only where the win is real and the code stays \
-                     readable. Then close with a human-readable summary: a one-line verdict \
-                     (🟢 no hot-path impact / 🟡 minor / 🔴 regression) and the single \
-                     biggest cost at a glance. If the diff has no hot-path impact, say so \
-                     plainly instead of inventing concerns.",
+                     readable. Name the single biggest cost. If the diff has no hot-path \
+                     impact, say so plainly instead of inventing concerns.",
                 ),
             ),
             (
@@ -807,8 +814,8 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Open a PR (summary + test plan)",
-                    "Open a PR for the current branch with `gh`. Push first if the branch \
-                     isn't up to date, then write a concise, specific title and a body \
+                    "Open a PR for the current branch with `gh pr create`. Push first if \
+                     the branch isn't up to date, then write a concise, specific title and a body \
                      with a `## Summary` section (1-3 bullets on *why*, not a diff recap) \
                      and a `## Test plan` checklist of what you actually verified. Base \
                      all of it on the real commits and diff, not a guess — read them \
@@ -825,7 +832,9 @@ impl Snippets {
                      `gh pr ready`. First confirm it actually is ready: the diff is \
                      clean, tests and CI pass, and the description matches what changed. \
                      If anything's off, tell me what and stop instead of flipping it. When \
-                     you do flip it, print a one-line confirmation of the new state.",
+                     you do flip it, verify the PR URL and isDraft with `gh pr view \
+                     --json url,isDraft`; report the resulting state. If already ready, \
+                     report that without changing it.",
                 ),
             ),
             (
@@ -1135,52 +1144,23 @@ impl Snippets {
                     gh,
                     "GitHub",
                     "Create coordinated GitHub issues from a design",
-                    "Turn the design already in your context into the actual GitHub \
-                     issues needed across the repositories it touches — the deliverable \
-                     is created, cross-linked issues via `gh issue create`, not a list of \
-                     suggested titles or draft bodies. Bias toward execution: create the \
-                     issues. First read the complete design and supporting context and \
-                     pin down the intended outcome, the user or operator problem, the \
-                     important decisions, constraints, non-goals, rollout assumptions, and \
-                     open questions — preserve the reasoning behind the design, don't \
-                     reduce it to a disconnected checklist. Then inspect the relevant \
-                     repositories and their remotes, ownership boundaries, existing issue \
-                     conventions, labels, milestones, and current implementation, so repo \
-                     assignment is grounded in reality rather than inferred from names \
-                     alone. Before creating anything, search open *and* closed issues in \
-                     every candidate repository (`gh issue list`, `gh search issues`) and \
-                     reuse or reference what already exists — do not create duplicates. \
-                     Decompose the design by independently deliverable outcome and assign \
-                     each issue to the repository that owns that work, avoiding both one \
-                     vague umbrella issue and excessively granular file-by-file tasks. \
-                     Create each issue with `gh issue create` in its repository, giving it \
-                     enough context to stand alone: the problem and intent; the relevant \
-                     design context and why this piece belongs in that repository; the \
-                     proposed scope and concrete behavior; acceptance criteria and \
-                     verification expectations; constraints, edge cases, migration or \
-                     compatibility concerns, and non-goals; dependencies, ordering, \
-                     rollout implications, and links to sibling or parent issues; and the \
-                     unresolved questions that genuinely require a decision. For \
-                     cross-repository work establish a coordination structure — create an \
-                     umbrella or tracking issue only when it adds value, describe the \
-                     dependency graph and recommended sequence, and make every related \
-                     issue link back to the tracker and to its direct blockers or \
-                     dependents. After creation, revisit the issues to fill in their real \
-                     URLs and cross-links so the dependency graph is navigable from any \
-                     issue, not left as placeholder references. Apply labels, milestones, \
-                     or assignees only when the repository conventions make the correct \
-                     values clear — don't invent metadata or silently guess ownership. If \
-                     the target repositories or a consequential design decision can't be \
-                     determined safely from the available context, stop on that specific \
-                     ambiguity and ask one focused question rather than guessing. Finish \
-                     with a concise report grouped by repository: the issues created and \
-                     their URLs, existing issues reused, the dependency or rollout order, \
-                     and any ambiguity that prevented an issue from being created. \
-                     Work then happens in each issue's own lazybox workspace — never a \
-                     named workspace created beside one. Report the issue URLs and don't \
-                     assume their rows opened: whether lazybox surfaces an issue is the \
-                     operator's filter and scope configuration, not something you can \
-                     see from here.",
+                    "Turn the design in context into created, cross-linked GitHub issues with `gh issue \
+                     create`. Read the complete design and supporting context; preserve the intended \
+                     outcome, decisions, constraints, non-goals, rollout assumptions, and open questions. \
+                     Inspect repository remotes, ownership, conventions, and implementation before \
+                     assigning work. Search open and closed issues in every candidate repository and reuse \
+                     existing work; do not create duplicates. Slice by independently deliverable outcome. \
+                     Each issue must stand alone: problem and design reasoning, owning repository, scope \
+                     and concrete behavior, acceptance criteria and verification, edge cases and migration \
+                     concerns, dependencies and unresolved decisions. Create an umbrella or tracking issue \
+                     only when coordination needs it. Replace placeholder links with actual sibling, \
+                     parent, and blocker URLs after creation; state dependency and rollout order. Apply \
+                     metadata only when repository conventions establish the correct values. If \
+                     repositories or a consequential decision remain ambiguous, ask one focused question. \
+                     Report created and reused issue URLs grouped by repository and anything blocked. Work \
+                     happens in each issue's own lazybox workspace, never a named workspace beside it; \
+                     don't assume their rows opened, since visibility depends on the operator's filters \
+                     and scopes.",
                 ),
             ),
             (
@@ -1189,41 +1169,20 @@ impl Snippets {
                     gh,
                     "GitHub",
                     "Split the proposed work into a few self-contained issues with DOD",
-                    "Don't start coding yet. You've finished exploring and are about to \
-                     work on the proposal in your context — instead, carve it into a \
-                     small number of self-contained GitHub issues and stop there; \
-                     creating those issues with `gh issue create` is the deliverable, \
-                     not a diff. Prefer few, larger, independently-deliverable slices \
-                     over many granular tasks — aim for at most three or four issues, and \
-                     when in doubt merge two rather than split one. The reason is \
-                     conflict-minimization, not tidiness: several agents will pick these \
-                     up in parallel, so slice along file / module / ownership boundaries \
-                     that leave each issue touching a disjoint set of files, so two \
-                     issues rarely edit the same lines. Before creating anything, search \
-                     open *and* closed issues (`gh issue list`, `gh search issues`) and \
-                     reuse or reference what already exists rather than fragmenting a \
-                     tracked line of work. Make each issue stand alone so a cold agent \
-                     with none of this conversation can execute it: the problem and \
-                     intent; the scope and the explicit non-goals; the relevant context, \
-                     files, and constraints; and links to its sibling and blocker \
-                     issues. Give each issue an explicit Definition of Done as a \
-                     checklist — the acceptance criteria, the concrete verification \
-                     commands to run (build, test, lint), a regression test where the \
-                     change warrants one, and the docs, snapshot, or codegen updates \
-                     this repo's conventions require — so \"done\" is checkable, not \
-                     asserted. State the sequencing explicitly: the dependency order, \
-                     and which issues are safe to run concurrently versus which must be \
-                     serialized — the conflict map the operator needs to fan the work \
-                     out. On any consequential ambiguity — the slice boundaries, an \
-                     unclear scope, a decision that changes what gets built — stop and \
-                     ask one focused question rather than guessing. Finish with a \
-                     per-issue report: each created issue's URL, the existing issues \
-                     reused, and the concurrency-and-ordering plan. Work then happens \
-                     in each issue's own lazybox workspace — never a named workspace \
-                     created beside one. Report the issue URLs and don't assume their \
-                     rows opened: whether lazybox surfaces an issue is the operator's \
-                     filter and scope configuration, not something you can see from \
-                     here.",
+                    "Don't start coding yet. Carve the proposal in context into a few self-contained \
+                     GitHub issues using `gh issue create`; created issues are the deliverable. Aim for at \
+                     most three or four independently deliverable slices. For conflict-minimization, slice \
+                     along file, module, or ownership boundaries with disjoint file sets. Search open and \
+                     closed issues first and reuse existing work. Each issue must stand alone for an agent \
+                     without this conversation: problem, intent, scope, non-goals, relevant files and \
+                     constraints, and sibling and blocker links. Give each an explicit Definition of Done \
+                     checklist: acceptance criteria, actual build/test/lint commands, a regression test \
+                     where warranted, and required docs, snapshots, or codegen. State dependency order and \
+                     which issues can run concurrently versus which must be serialized. Ask one focused \
+                     question if a consequential scope or slice decision is unresolved. Report created and \
+                     reused issue URLs and the concurrency and ordering plan. Work happens in each issue's \
+                     own lazybox workspace, never a named workspace beside it; don't assume their rows \
+                     opened, since visibility depends on the operator's filters and scopes.",
                 ),
             ),
             (
@@ -1553,7 +1512,8 @@ impl Snippets {
                      about here, using the project's existing benchmarking setup if there \
                      is one. Make it representative and repeatable, run it, and record the \
                      current baseline numbers so future changes can be measured against \
-                     it. Close with a human-readable summary: what the benchmark measures \
+                     it. Record the workload size, command, environment, units, and variation \
+                     across repeated runs; keep setup outside the timed region. Close with a human-readable summary: what the benchmark measures \
                      and its baseline number.",
                 ),
             ),
@@ -1636,7 +1596,8 @@ impl Snippets {
                     "Document the public APIs I touched: what each does, its parameters \
                      and return, invariants and failure modes, and a short usage example \
                      where it earns its place. Match the surrounding doc style and \
-                     tooling exactly. Skip the trivial and self-evident — document the \
+                     tooling exactly. Check examples against the actual signatures and run \
+                     the documentation tests or build. Skip the trivial and self-evident — document the \
                      *why*, not the obvious *what*. Close with a human-readable summary of \
                      which APIs you documented.",
                 ),
@@ -1713,6 +1674,36 @@ impl Snippets {
                 ),
             ),
         ]);
+        for (key, snippet) in &mut by_key {
+            if matches!(key.as_str(), "pr" | "convert" | "release") {
+                snippet.body.push_str(
+                    " Create it ready for review by default; use --draft only when the user \
+                     explicitly requests a draft. Verify the requested state with gh pr view \
+                     --json url,isDraft and report the PR URL and state.",
+                );
+            }
+            let verdict = match snippet.category.as_str() {
+                "Review" | "Security" => {
+                    "The verdict names the remaining blocker count; use ACTION NEEDED when any blocker remains."
+                }
+                "Git & PR" => {
+                    "The verdict names the resulting branch, SHA, and whether it was pushed."
+                }
+                "Testing" | "Debugging" => {
+                    "The verdict names pass/fail counts or the root cause; distinguish checks not run from passes."
+                }
+                "GitHub" | "Linear" => {
+                    "The verdict names what was created or changed, with counts and issue/PR numbers; include the resulting URLs in the detail or preceding report."
+                }
+                _ => "",
+            };
+            if !verdict.is_empty() {
+                snippet.body.push('\n');
+                snippet.body.push_str(verdict);
+            }
+            snippet.body.push_str("\n\n");
+            snippet.body.push_str(OUTPUT_CONTRACT);
+        }
         // The pairings that are already pipelines in practice, so `]]n`
         // works before the user configures anything: a review is followed
         // by applying it (#838's stated purpose), a freshened branch by a
@@ -2104,6 +2095,95 @@ snippets:
         assert_eq!(s.get("bare").unwrap().category, "");
     }
 
+    #[test]
+    fn every_builtin_ends_with_one_output_contract() {
+        for (key, snippet) in Snippets::builtin().all() {
+            assert!(snippet.body.ends_with(OUTPUT_CONTRACT), "{key}");
+            assert_eq!(snippet.body.matches("OUTPUT CONTRACT").count(), 1, "{key}");
+            assert!(!snippet.body.contains(['🟢', '🟡', '🔴', '❓']), "{key}");
+            assert!(snippet.dispatch_body().ends_with(OUTPUT_CONTRACT), "{key}");
+        }
+        let example = OUTPUT_CONTRACT
+            .split("Example ending:\n")
+            .nth(1)
+            .expect("example")
+            .split("\nClose with")
+            .next()
+            .expect("ending");
+        assert!(example.lines().count() <= 7);
+        assert_eq!(
+            example
+                .lines()
+                .filter(|line| line.starts_with("STATUS:"))
+                .count(),
+            1
+        );
+        assert_eq!(example.lines().next(), Some("STATUS: UNSURE"));
+    }
+
+    #[test]
+    fn output_contract_carries_category_facts() {
+        let builtins = Snippets::builtin();
+        for (key, fact) in [
+            ("deepreview", "remaining blocker count"),
+            ("fixall", "remaining blocker count"),
+            ("sec", "remaining blocker count"),
+            ("commit", "branch, SHA, and whether it was pushed"),
+            ("bug", "pass/fail counts or the root cause"),
+            ("test", "pass/fail counts or the root cause"),
+            ("triage", "counts and issue/PR numbers"),
+            ("carve", "counts and issue/PR numbers"),
+        ] {
+            assert!(builtins.get(key).expect(key).body.contains(fact), "{key}");
+        }
+    }
+
+    #[test]
+    fn pr_creation_defaults_to_ready_for_review() {
+        let builtins = Snippets::builtin();
+        for key in ["pr", "convert", "release"] {
+            let body = &builtins.get(key).expect(key).body;
+            assert!(body.contains("ready for review by default"), "{key}");
+            assert!(
+                body.contains("--draft only when the user explicitly requests a draft"),
+                "{key}"
+            );
+            assert!(body.contains("--json url,isDraft"), "{key}");
+        }
+    }
+
+    #[test]
+    fn ready_docs_and_bench_require_observed_results() {
+        let builtins = Snippets::builtin();
+        for (key, checks) in [
+            ("ready", ["--json url,isDraft", "If already ready"]),
+            ("doc", ["actual signatures", "documentation tests or build"]),
+            (
+                "bench",
+                [
+                    "variation across repeated runs",
+                    "setup outside the timed region",
+                ],
+            ),
+        ] {
+            let body = &builtins.get(key).expect(key).body;
+            for check in checks {
+                assert!(body.contains(check), "{key}: {check}");
+            }
+        }
+    }
+
+    #[test]
+    fn user_bodies_and_overrides_do_not_get_output_contract() {
+        let yaml = "snippets:\n  rev:\n    body: My review\n  custom:\n    body: My task\n";
+        let path = write_tmp("output-contract-user", yaml);
+        let user = Snippets::load_from(&path, SnippetOrigin::Global).expect("load snippets");
+        let merged = Snippets::merged(Snippets::builtin(), user);
+        assert_eq!(merged.get("rev").expect("override").body, "My review");
+        assert_eq!(merged.get("custom").expect("custom").body, "My task");
+        assert_eq!(std::fs::read_to_string(path).expect("read snippets"), yaml);
+    }
+
     /// The built-in library is large and every entry is categorized —
     /// the picker relies on that to group.
     #[test]
@@ -2126,11 +2206,12 @@ snippets:
     #[test]
     fn builtin_bodies_are_substantial() {
         for (key, s) in Snippets::builtin().all() {
+            let task = s.body.split("\n\n").next().expect("task body");
             assert!(
-                s.body.len() >= 150,
+                task.len() >= 150,
                 "built-in `{key}` body is too thin ({} chars) — snippet bodies \
                  should encode real, structured instructions",
-                s.body.len(),
+                task.len(),
             );
         }
     }

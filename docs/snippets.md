@@ -501,7 +501,40 @@ they do too:
   instruction. Long enough to be specific, short enough to read at a
   glance in the preview pane.
 
-A body that follows the style, for reference — the built-in `rev`:
+Every built-in ends with the same output contract, added in memory by
+`Snippets::builtin()`. It constrains only the ending: exploration, tool use,
+and detailed findings before it remain unrestricted. Each `next:` step gets
+its own ending. User-defined bodies and overrides are used unchanged.
+
+The ending takes at most **7 lines**: exactly one `STATUS:` line, a one-sentence
+prose verdict explaining why, and up to five short detail lines only when they
+change what the reader does next. Nothing follows it. Bullets are reserved for
+enumerable findings, not the verdict. The four statuses are:
+
+- `DONE`: finished, nothing needed from you.
+- `ACTION NEEDED`: you must act; the ending names the exact action. Known blockers take priority.
+- `NEED CONTEXT`: blocked on information only you have; asks one question.
+- `UNSURE`: finished with low confidence; names what to verify.
+
+For example:
+
+```text
+STATUS: UNSURE
+The fix passes locally, but timing under production load remains unverified.
+Verify latency with the production workload before deploying.
+```
+
+Review and security verdicts name remaining blockers; Git & PR verdicts name
+the branch, SHA, and push state; testing/debugging verdicts give pass/fail
+counts or the root cause; tracker verdicts name changes with counts and record
+numbers. Long finding lists and issue URLs can appear before the ending.
+
+PR creation (`pr`, `convert`, `release`) defaults to **ready for review**.
+Agents use `--draft` only when the user explicitly requests a draft, then
+verify and report the actual PR state and URL. Ready for review does not
+bypass branch protection, required reviews, or CI.
+
+The complete built-in `rev` body, including its shared ending contract:
 
 ```yaml
 snippets:
@@ -510,30 +543,54 @@ snippets:
     category: Review
     body: |
       Review the current diff (`git diff` against the base branch) as a
-      rigorous, adversarial code review — assume there IS a bug and your
-      job is to find it, not to confirm the code is fine. Read adversarially
+      rigorous, adversarial code review — assume there IS a bug and your job
+      is to find it, not to confirm the code is fine. Read adversarially
       across every lens that applies: correctness (logic errors, off-by-one,
       missing error handling, broken edge cases), security (untrusted input
-      crossing a trust boundary), data loss, resource leaks, and
-      concurrency. Treat each changed line as guilty until you can trace why
-      it's safe, and treat a safe-looking default — an early return, a
-      fallback, a delete-on-missing — as a footgun to disprove, not a
-      comfort. In scope is everything the diff touches *and* everything that
-      breaks because of it; scope is not an escape hatch. A finding is
-      dismissed only by refuting it with a specific, falsifiable failure
-      scenario that proves it can't happen; "out of scope," "not worth
-      the complexity," "degrades gracefully," and "should be fine" are
-      banned as dismissals. Lead with the full detail — every finding ranked
-      by severity, each with a `file:line` anchor and the concrete input or
-      state that triggers the wrong result, a real failure and not a vague
-      worry, with no shallow nit dressed up as a bug. Look only at the
-      changed lines and the code they directly touch, not the whole file.
-      Then close with a completeness check — what you did not examine and
-      why skipping it is safe — and a summary a human can read in ten
-      seconds: a one-line verdict (🟢 ship / 🟡 fix these nits first / 🔴
-      blockers, do not ship / ❓ need context) followed by the headline
-      findings as a tight, glanceable list. If a traced line is genuinely
-      clean, say so plainly rather than inventing nits.
+      crossing a trust boundary), data loss, resource leaks, and concurrency.
+      Treat each changed line as guilty until you can trace why it's safe, and
+      treat a safe-looking default — an early return, a fallback, a delete-on-missing — as a footgun to disprove, not a comfort. In scope is
+      everything the diff touches *and* everything that breaks because of it;
+      scope is not an escape hatch. A finding is dismissed only by refuting it
+      with a specific, falsifiable failure scenario that proves it can't
+      happen; "out of scope," "not worth the complexity," "degrades
+      gracefully," and "should be fine" are banned as dismissals. Lead with
+      the full detail — every finding ranked by severity, each with a
+      `file:line` anchor and the concrete input or state that triggers the
+      wrong result, a real failure and not a vague worry, with no shallow nit
+      dressed up as a bug. Look only at the changed lines and the code they
+      directly touch, not the whole file. Include a completeness check — what
+      you did not examine and why skipping it is safe. If a traced line is
+      genuinely clean, say so plainly rather than inventing nits.
+      The verdict names the remaining blocker count; use ACTION NEEDED when
+      any blocker remains.
+
+      OUTPUT CONTRACT (final ending only)
+      Explore, use tools, and give full findings before this ending without a
+      length or format limit.
+      Close each snippet, including each step in a next chain, with a ten-second summary:
+      exactly one STATUS line, one prose verdict sentence carrying the reason,
+      and at most five
+      short detail lines only if they change what the reader does next. Hard
+      cap: 7 lines total.
+      Use bullets only for genuinely enumerable findings, never for the
+      verdict. No fences.
+      Choose exactly one status; do not manufacture confidence:
+      DONE — finished, nothing needed from you.
+      ACTION NEEDED — you must do something; name the exact action. Known
+      blockers take priority.
+      NEED CONTEXT — blocked on information only you have; ask the one
+      question.
+      UNSURE — done, but low confidence; name exactly what to verify.
+      Example ending:
+      STATUS: UNSURE
+      The fix passes locally, but timing under production load remains
+      unverified.
+      Verify latency with the production workload before deploying.
+      Close with exactly this shape, at most 7 lines, and nothing after it:
+      STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
+      <verdict — one sentence, prose>
+      <up to 5 short lines of actionable detail, optional>
 ```
 
 Review, fix, and security bodies go a step further — they are written to
@@ -565,6 +622,51 @@ patterns behind that house style, and
 [snippets-vs-skills.md](snippets-vs-skills.md) for why this strict prompt
 text lives in one place rather than being split between a snippet and a
 skill.
+
+### Output contract evaluation
+
+A fixed final-emission replay compared five snippets on Claude Code 2.1.269
+(default model) and Codex CLI 0.154.0 (gpt-6-astra), using built-ins before
+this change (`b9b139e7`) and after it. Each of the 20 fresh sessions received
+the same synthetic diff, replacing `return a / b` with `return a // b` in
+`divide.py`, plus the same completed-execution evidence for that snippet:
+
+| Snippet | Execution evidence | Expected status |
+| --- | --- | --- |
+| `deepreview` | One confirmed blocker: `divide(3, 2)` returns 1 instead of the documented 1.5; review complete, fix requires user action. | ACTION NEEDED |
+| `fixall` | Restored `/`, regression added, 4 tests and lint pass, committed `abc1234` on `fix/division` and pushed; no remaining findings. | DONE |
+| `bug` | Root cause confirmed; only the user knows whether integer or float behavior is intended; no edits. | NEED CONTEXT |
+| `commit` | Only staged `divide.py` committed as `abc1234` on `fix/division`; clean tree; push was not requested. | DONE |
+| `triage` | Issue #42 reproduced, repair/test plan posted; one issue updated, none created, no unknowns; no coding requested. | DONE |
+
+The replay instruction stated that execution was complete, prohibited more
+tool use, and asked for the closing response using only that evidence and
+the snippet. Claude ran with `-p --tools '' --no-session-persistence`;
+Codex used `exec --ignore-user-config --ephemeral --skip-git-repo-check
+--sandbox read-only` in separate temporary directories.
+
+Format scoring counted exactly one literal `STATUS:` line with an allowed
+value and 2–7 lines from there to the end, including blank lines. Status
+semantics were assessed separately against the expected disposition above;
+before the change, this was inferred from prose rather than requiring the
+new vocabulary.
+
+| Agent | Format before → after | Correct disposition before → after | After ending lines (table order) |
+| --- | --- | --- | --- |
+| Claude Code | 0/5 → 5/5 | 5/5 → 5/5 | 5, 2, 6, 4, 5 |
+| Codex | 0/5 → 5/5 | 5/5 → 5/5 | 6, 2, 4, 2, 6 |
+
+Two additional after-change `bug` replays supplied a completed fix and four
+passing tests, but low confidence because production inputs had not been
+validated. Both agents chose `UNSURE` and named production-input verification;
+the endings were four lines for Claude and three for Codex.
+
+This small replay supports improved ending consistency, not better task
+correctness. It does not exercise live tool execution or PR creation, and it
+is not a statistical benchmark. Category facts
+can still land in detail lines instead of the verdict; a prompt contract is
+not a runtime output validator. Full end-to-end before/after agent runs
+remain unverified.
 
 > **Not yet supported:** placeholder / variable interpolation in bodies
 > (e.g. injecting the selected file or a typed argument). Bodies are

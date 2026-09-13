@@ -4000,17 +4000,34 @@ impl TerminalStack {
                 .terminals
                 .get(&id)
                 .is_some_and(|s| s.auth_recovery_id.is_some());
-            if matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
+            // SHIFT is the only modifier either affordance tolerates, and
+            // both arms must read that the same way. `Shift-X` IS the
+            // close key, and terminals disagree about whether a shifted
+            // letter also reports SHIFT — so the uppercase code is the
+            // signal there and SHIFT itself cannot disqualify. Every
+            // other bit does: CONTROL/ALT belong to the inner program's
+            // vocabulary, and SUPER/HYPER/META reach us from any host
+            // speaking the kitty protocol that `HostMode::
+            // KeyboardEnhancement` asks for (crossterm reports those
+            // three only under `DISAMBIGUATE_ESCAPE_CODES`), where a
+            // browser-reflex `Cmd-r` would otherwise restart the agent.
+            // Subtracting SHIFT rather than listing the rejects keeps
+            // that closed if crossterm ever adds a bit.
+            let unmodified = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+            if unmodified && matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
                 self.restart_exited(id, cmds);
-            } else if !recovery
-                && matches!(key.code, KeyCode::Char('X'))
-                && !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-            {
-                // Terminals disagree on whether a shifted letter also
-                // reports SHIFT, so the uppercase code is the signal and
-                // only Ctrl/Alt disqualify it.
+                // One restart per physical press. Holding `r` autorepeats
+                // (lazybox asks for `REPORT_EVENT_TYPES`, so the Repeats
+                // really arrive) and the pane stays frozen until the
+                // daemon answers — which is exactly when a user mashes the
+                // key — so without this a held `r` queued one
+                // `ResumeAgent` per repeat, or one MACHINE-WIDE
+                // `ReauthenticateAgent` per repeat on a re-auth pane.
+                // Guarding on `restart_exited`'s `resume_in_flight` would
+                // be wrong: nothing ever clears it, so a resume that fails
+                // and never arrives would leave `r` dead on that pane.
+                self.swallow_repeats = true;
+            } else if !recovery && matches!(key.code, KeyCode::Char('X')) && unmodified {
                 self.close_focused_tile(cmds);
                 self.swallow_repeats = true;
             }
@@ -12690,6 +12707,217 @@ mod agent_crash_tests {
             stack.handle_key(KeyEvent::new(KeyCode::Char('X'), mods), &mut cmds);
             assert!(stack.terminals.contains_key(&TerminalId(1)));
         }
+    }
+
+    /// The same rule on the OTHER arm (#1726 review, finding 5): the
+    /// restart affordance read `key.code` alone, so `Ctrl-r` / `Alt-r`
+    /// resumed an agent nobody asked to resume. Both arms of one banner
+    /// now reject Ctrl/Alt identically.
+    #[test]
+    fn ctrl_or_alt_r_does_not_restart_an_exited_pane() {
+        for mods in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            for code in [KeyCode::Char('r'), KeyCode::Enter] {
+                let sk = SessionKey::new("github:o/r#1");
+                let mut stack = exited_stack(&sk);
+                let mut cmds = Vec::new();
+                let outcome = stack.handle_key(KeyEvent::new(code, mods), &mut cmds);
+                assert!(matches!(outcome, PaneOutcome::Consumed));
+                assert!(
+                    cmds.is_empty(),
+                    "{code:?}+{mods:?} must not resume the agent; cmds: {cmds:?}",
+                );
+            }
+        }
+    }
+
+    /// A HELD `r` must restart once, not once per autorepeat (#1740
+    /// review, finding 1). The pane deliberately stays frozen until the
+    /// daemon answers, so mashing the key is the natural response — and
+    /// `REPORT_EVENT_TYPES` (pushed by `HostMode::KeyboardEnhancement`)
+    /// means the `Repeat` events really arrive.
+    #[test]
+    fn holding_the_restart_key_resumes_once() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = exited_stack(&sk);
+
+        let mut cmds = Vec::new();
+        stack.handle_key(press(KeyCode::Char('r')), &mut cmds);
+        for _ in 0..8 {
+            let mut repeat = press(KeyCode::Char('r'));
+            repeat.kind = crossterm::event::KeyEventKind::Repeat;
+            stack.handle_key(repeat, &mut cmds);
+        }
+
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, Command::ResumeAgent { .. }))
+                .count(),
+            1,
+            "a held `r` is one restart, not one per repeat; cmds: {cmds:?}",
+        );
+    }
+
+    /// The same, where a duplicate costs the most: each repeat would have
+    /// been another MACHINE-WIDE provider login.
+    #[test]
+    fn holding_the_restart_key_runs_one_login_on_a_reauth_pane() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        });
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            display_name: "Claude Code".into(),
+            success: false,
+            error: Some("login failed".into()),
+        });
+
+        let mut cmds = Vec::new();
+        stack.handle_key(press(KeyCode::Char('r')), &mut cmds);
+        for _ in 0..8 {
+            let mut repeat = press(KeyCode::Char('r'));
+            repeat.kind = crossterm::event::KeyEventKind::Repeat;
+            stack.handle_key(repeat, &mut cmds);
+        }
+
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, Command::ReauthenticateAgent { .. }))
+                .count(),
+            1,
+            "a held `r` re-runs the machine-wide login once; cmds: {cmds:?}",
+        );
+    }
+
+    /// Swallowing autorepeat must not cost a DELIBERATE retry: a second
+    /// real press still restarts. `resume_in_flight` would have failed
+    /// this — nothing clears it, so a resume that never arrives would
+    /// leave `r` dead on the pane.
+    #[test]
+    fn a_second_deliberate_press_still_restarts() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = exited_stack(&sk);
+
+        let mut cmds = Vec::new();
+        stack.handle_key(press(KeyCode::Char('r')), &mut cmds);
+        let mut repeat = press(KeyCode::Char('r'));
+        repeat.kind = crossterm::event::KeyEventKind::Repeat;
+        stack.handle_key(repeat, &mut cmds);
+        // Key released, pressed again — the resume never arrived.
+        stack.handle_key(press(KeyCode::Char('r')), &mut cmds);
+
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, Command::ResumeAgent { .. }))
+                .count(),
+            2,
+            "a real second press retries; cmds: {cmds:?}",
+        );
+    }
+
+    /// SUPER / HYPER / META disqualify both affordances (#1740 review,
+    /// finding 2). crossterm reports those three only under
+    /// `DISAMBIGUATE_ESCAPE_CODES`, which `HostMode::KeyboardEnhancement`
+    /// pushes — so on a kitty-protocol host a browser-reflex `Cmd-r`
+    /// reaches this pane, and must do nothing.
+    #[test]
+    fn super_hyper_meta_drive_neither_exited_pane_affordance() {
+        for mods in [KeyModifiers::SUPER, KeyModifiers::HYPER, KeyModifiers::META] {
+            for code in [KeyCode::Char('r'), KeyCode::Enter, KeyCode::Char('X')] {
+                let sk = SessionKey::new("github:o/r#1");
+                let mut stack = exited_stack(&sk);
+                let mut cmds = Vec::new();
+                let outcome = stack.handle_key(KeyEvent::new(code, mods), &mut cmds);
+                assert!(matches!(outcome, PaneOutcome::Consumed));
+                assert!(
+                    stack.terminals.contains_key(&TerminalId(1)),
+                    "{code:?}+{mods:?} must not close the pane",
+                );
+                assert!(
+                    cmds.is_empty(),
+                    "{code:?}+{mods:?} must not restart either; cmds: {cmds:?}",
+                );
+            }
+        }
+    }
+
+    /// SHIFT is the one modifier that must NOT disqualify — it is how
+    /// many terminals report the `Shift-X` close key itself, and the
+    /// subtract-SHIFT predicate has to keep both arms working under it.
+    #[test]
+    fn shift_still_reaches_both_exited_pane_affordances() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = exited_stack(&sk);
+        let mut cmds = Vec::new();
+        stack.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            &mut cmds,
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::ResumeAgent { .. })),
+            "Shift-Enter still restarts; cmds: {cmds:?}",
+        );
+
+        let mut stack = exited_stack(&sk);
+        let mut cmds = Vec::new();
+        stack.handle_key(
+            KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT),
+            &mut cmds,
+        );
+        assert!(
+            !stack.terminals.contains_key(&TerminalId(1)),
+            "Shift-X still closes an inert exited pane",
+        );
+    }
+
+    /// Worst case for the arm above: on a failed-re-auth pane
+    /// `restart_exited` issues `ReauthenticateAgent`, a MACHINE-WIDE
+    /// login that invalidates the token every other live session of that
+    /// agent holds. `Ctrl-r` must not be able to trigger that.
+    #[test]
+    fn ctrl_r_does_not_relaunch_a_machine_wide_login() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        });
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            display_name: "Claude Code".into(),
+            success: false,
+            error: Some("login failed".into()),
+        });
+
+        let mut cmds = Vec::new();
+        stack.handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            &mut cmds,
+        );
+
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::ReauthenticateAgent { .. })),
+            "Ctrl-r must not re-run the provider login; cmds: {cmds:?}",
+        );
     }
 
     /// The headline regression (#1726 review, finding 1): a frozen pane

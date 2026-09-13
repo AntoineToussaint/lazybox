@@ -1504,6 +1504,26 @@ impl Snippets {
                 ),
             ),
             (
+                // Deliberately NOT `catch`: a built-in key must never be a
+                // strict prefix of another, or the exact-key auto-submit
+                // (`]]scatchup`) stops firing once two keys share the prefix.
+                "catchup".to_string(),
+                entry(
+                    "Review",
+                    "Catch up: what happened here, in a few lines",
+                    "Bring me up to speed on this session in AT MOST 6 lines. I have been \
+                     away and need to re-enter, not re-read: assume I remember the goal and \
+                     nothing since. Lead with where things stand in one sentence, then only \
+                     what changed my picture — what you did, what you learned that was \
+                     surprising, and what is now different about the plan. Skip the \
+                     narration of steps that went as expected; a step that worked is not \
+                     news. If you are blocked or need a decision from me, that is the FIRST \
+                     line, not the last. Name files and identifiers concretely rather than \
+                     describing them. No preamble, no restating the task back to me, and no \
+                     offer to continue — I can see the terminal.",
+                ),
+            ),
+            (
                 "explain".to_string(),
                 entry(
                     "Debugging",

@@ -460,14 +460,28 @@ mod tests {
         // line, but the long single-line body is forced to wrap.
         let width = 30u16;
         let lines = comp.body_lines(theme, width);
-        let body: Vec<String> = lines
+        let flat = |l: &Line<'static>| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        // The catalog note (#1697) is a document-level preamble, not a
+        // body row, so it is not indented. `row_starts` is where the
+        // first snippet begins, so slicing there drops the note by
+        // position instead of relaxing the indent rule below.
+        let first_row = comp.row_starts.first().expect("one row").0;
+        assert!(
+            lines[..first_row]
+                .iter()
+                .map(flat)
+                .collect::<String>()
+                .contains("shared ending contract"),
+            "the catalog note precedes the first snippet",
+        );
+        let body: Vec<String> = lines[first_row..]
             .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
+            .map(flat)
             .filter(|s| !s.starts_with("]]srev")) // drop the heading row
             .filter(|s| !s.trim().is_empty())
             .collect();

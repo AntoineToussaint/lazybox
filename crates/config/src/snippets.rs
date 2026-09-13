@@ -66,6 +66,28 @@ const BANNED_DISMISSALS: &[&str] = &[
     "left as an exercise",
 ];
 
+const OUTPUT_CONTRACT: &str = "OUTPUT CONTRACT (final ending only)
+Explore, use tools, and give full findings before this ending without a length or format limit.
+Close each snippet, including each step in a next chain, with a ten-second summary:
+exactly one STATUS line, one prose verdict sentence carrying the reason, and at most five
+short detail lines only if they change what the reader does next. Hard cap: 7 lines total.
+Use bullets only for genuinely enumerable findings, never for the verdict. No fences.
+Choose exactly one status; do not manufacture confidence:
+DONE — finished, nothing needed from you.
+ACTION NEEDED — you must do something; name the exact action. Known blockers take priority.
+NEED CONTEXT — blocked on information only you have; ask the one question. A status line is
+prose nobody polls, so if you have the lazybox `report_blocker` tool, call it with that same
+question — that is what puts the block on the epic readouts and the `E j` jump.
+UNSURE — done, but low confidence; name exactly what to verify.
+Example ending:
+STATUS: UNSURE
+The fix passes locally, but timing under production load remains unverified.
+Verify latency with the production workload before deploying.
+Close with exactly this shape, at most 7 lines, and nothing after it:
+STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
+<verdict — one sentence, prose>
+<up to 5 short lines of actionable detail, optional>";
+
 /// Lock a stable sibling inode, not the YAML inode replaced by rename.
 /// Every application writer holds this across the entire read-modify-write.
 fn lock_snippets(path: &Path) -> Result<std::fs::File, SnippetsError> {
@@ -384,7 +406,7 @@ impl Snippet {
         }
     }
 
-    /// The text actually delivered to the focused agent.
+    /// The snippet's authored prompt text, resolved.
     ///
     /// For a plain snippet this is just `body`. For a *skill-dispatching*
     /// snippet (`skill:` set, #798) it is an explicit instruction to invoke
@@ -393,6 +415,14 @@ impl Snippet {
     /// cleanly no matter how `body` is phrased (or if it is empty), and it
     /// flows through the same delivery path as any other body, so Recent,
     /// `]N`, and `Shift-B` broadcast track it unchanged.
+    ///
+    /// This is the *authored* text, NOT the bytes an agent receives — see
+    /// [`Snippet::delivery_body`] for those. The two differ by the output
+    /// contract (#1697), and the split is load-bearing: this half is what
+    /// gets embedded in something larger (a `SKILL.md` export, a Planner
+    /// role preamble) or shown as a catalog entry, where a trailer reading
+    /// "close with exactly this shape and nothing after it" would be a
+    /// lie — the snippet is not the whole turn there.
     pub fn dispatch_body(&self) -> String {
         match &self.skill {
             None => self.body.clone(),
@@ -405,6 +435,33 @@ impl Snippet {
                 }
             }
         }
+    }
+
+    /// The text actually delivered to an agent: [`Snippet::dispatch_body`]
+    /// plus the shared output contract (#1697).
+    ///
+    /// The contract is appended **here, at delivery**, rather than baked
+    /// into `body` by [`Snippets::builtin`]. It closes the turn — "nothing
+    /// after it" — so it is only true where the snippet *is* the turn:
+    /// `]]s`, `]]n`, `Shift-B` broadcast, and the `send_snippet` MCP tool.
+    /// Baking it into `body` leaked it into three places where that claim
+    /// is false and actively harmful: an exported `SKILL.md`, which a model
+    /// can invoke *mid-task* on its own (`docs/snippets-vs-skills.md`), so
+    /// the trailer would truncate the host turn; the Planner role preamble,
+    /// which folds two brief bodies in ahead of the real work prompt and so
+    /// carried two "nothing after it" trailers mid-prompt; and the `]`
+    /// catalog browser, which renders every body and so repeated one
+    /// constant 61 times.
+    ///
+    /// Built-ins only. A user-defined snippet — or a user override of a
+    /// built-in key — is delivered exactly as authored, because rewriting
+    /// someone's prompt is not ours to do.
+    pub fn delivery_body(&self) -> String {
+        let body = self.dispatch_body();
+        if self.origin != SnippetOrigin::BuiltIn {
+            return body;
+        }
+        format!("{body}\n\n{OUTPUT_CONTRACT}")
     }
 
     /// Stable content hash of the body, whitespace-normalized so
@@ -560,30 +617,30 @@ impl Snippets {
                     "Review",
                     "Review the current diff",
                     "Review the current diff (`git diff` against the base branch) as a \
-                     rigorous, adversarial code review — assume there IS a bug and your \
-                     job is to find it, not to confirm the code is fine. Read adversarially \
-                     across every lens that applies: correctness (logic errors, off-by-one, \
-                     missing error handling, broken edge cases), security (untrusted input \
-                     crossing a trust boundary), data loss, resource leaks, and \
-                     concurrency. Treat each changed line as guilty until you can trace why \
-                     it's safe, and treat a safe-looking default — an early return, a \
-                     fallback, a delete-on-missing — as a footgun to disprove, not a \
-                     comfort. In scope is everything the diff touches *and* everything that \
-                     breaks because of it; scope is not an escape hatch. A finding is \
-                     dismissed only by refuting it with a specific, falsifiable failure \
-                     scenario that proves it can't happen; \"out of scope,\" \"not worth \
-                     the complexity,\" \"degrades gracefully,\" and \"should be fine\" are \
-                     banned as dismissals. Lead with the full detail — every finding ranked \
-                     by severity, each with a `file:line` anchor and the concrete input or \
-                     state that triggers the wrong result, a real failure and not a vague \
-                     worry, with no shallow nit dressed up as a bug. Look only at the \
-                     changed lines and the code they directly touch, not the whole file. \
-                     Then close with a completeness check — what you did not examine and \
-                     why skipping it is safe — and a summary a human can read in ten \
-                     seconds: a one-line verdict (🟢 ship / 🟡 fix these nits first / 🔴 \
-                     blockers, do not ship / ❓ need context) followed by the headline \
-                     findings as a tight, glanceable list. If a traced line is genuinely \
-                     clean, say so plainly rather than inventing nits.",
+                     rigorous, adversarial code review — assume there IS a bug and \
+                     your job is to find it, not to confirm the code is fine. Read \
+                     adversarially across every lens that applies: correctness (logic \
+                     errors, off-by-one, missing error handling, broken edge cases), \
+                     security (untrusted input crossing a trust boundary), data loss, \
+                     resource leaks, and concurrency. Treat each changed line as \
+                     guilty until you can trace why it's safe, and treat a \
+                     safe-looking default — an early return, a fallback, a \
+                     delete-on-missing — as a footgun to disprove, not a comfort. In \
+                     scope is everything the diff touches *and* everything that breaks \
+                     because of it; scope is not an escape hatch. A finding is \
+                     dismissed only by refuting it with a specific, falsifiable \
+                     failure scenario that proves it can't happen; \"out of scope,\" \
+                     \"not worth the complexity,\" \"degrades gracefully,\" and \
+                     \"should be fine\" are banned as dismissals. Lead with the full \
+                     detail — every finding ranked by severity, each with a \
+                     `file:line` anchor and the concrete input or state that triggers \
+                     the wrong result, a real failure and not a vague worry, with no \
+                     shallow nit dressed up as a bug. Look only at the changed lines \
+                     and the code they directly touch, not the whole file. Include a \
+                     completeness check — what you did not examine and why skipping it \
+                     is safe. If a traced line is genuinely clean, say so plainly \
+                     rather than inventing nits. The verdict names how many blockers \
+                     remain.",
                 ),
             ),
             (
@@ -596,35 +653,36 @@ impl Snippets {
                     "Deep review: design, stress, blast radius (flagship)",
                     "Review the current diff (`git diff` against the base branch) as a \
                      skeptical senior engineer — deeper than surface bugs, in three \
-                     passes, starting from the premise that there IS a problem here worth \
-                     finding. Assume every finding is real until a specific, falsifiable \
-                     reason refutes it, and treat a safe-looking default as the thing to \
-                     disprove — \"it degrades safely to the old behavior\" is the exact \
-                     reasoning that ships silent data loss, not a reason to wave a risk \
-                     through. Pass 1, design: are the abstractions, boundaries, and \
-                     ownership right; does it fit the patterns already in this codebase; is \
-                     there a materially simpler shape that does the same job? Pass 2, \
-                     correctness under stress, across every lens (correctness, security, \
-                     performance, data loss, concurrency): trace the real code path and \
-                     enumerate the edge cases, error paths, and partial-failure or \
-                     bad-input scenarios that aren't handled — for each, give the concrete \
-                     input or state that produces the wrong result, not a vague worry. Pass \
-                     3, blast radius: what breaks elsewhere if this is wrong, and is it \
-                     reversible? In scope is everything the diff touches and everything that \
-                     breaks because of it; separately, flag anything the task didn't need — \
-                     opportunistic refactors, reformatting, drive-by renames, unrelated \
-                     edits — as sprawl, which is a finding, not a bonus. A finding is \
-                     skipped only by refuting it with a concrete failure scenario; \"out of \
-                     scope,\" \"not worth the complexity,\" \"for now,\" and \"as a \
-                     follow-up\" are banned as dismissals. Lead with the full detail: \
-                     findings ranked by severity, each with a `file:line` anchor, \
-                     separating \"will break\" (has a real failure scenario) from \"worth \
-                     reconsidering\" (a design smell) — don't pad, a weak nit dressed as a \
-                     bug erodes trust. Then close with a completeness self-critique — what \
-                     you did not examine and why skipping it is safe — and a summary a \
-                     human can read in ten seconds: a one-line verdict (🟢 ship / 🟡 \
-                     reshape / 🔴 rethink), the single highest risk you'd keep watching, \
-                     and the headline findings as a glanceable list.",
+                     passes, starting from the premise that there IS a problem here \
+                     worth finding. Assume every finding is real until a specific, \
+                     falsifiable reason refutes it, and treat a safe-looking default \
+                     as the thing to disprove — \"it degrades safely to the old \
+                     behavior\" is the exact reasoning that ships silent data loss, \
+                     not a reason to wave a risk through. Pass 1, design: are the \
+                     abstractions, boundaries, and ownership right; does it fit the \
+                     patterns already in this codebase; is there a materially simpler \
+                     shape that does the same job? Pass 2, correctness under stress, \
+                     across every lens (correctness, security, performance, data loss, \
+                     concurrency): trace the real code path and enumerate the edge \
+                     cases, error paths, and partial-failure or bad-input scenarios \
+                     that aren't handled — for each, give the concrete input or state \
+                     that produces the wrong result, not a vague worry. Pass 3, blast \
+                     radius: what breaks elsewhere if this is wrong, and is it \
+                     reversible? In scope is everything the diff touches and \
+                     everything that breaks because of it; separately, flag anything \
+                     the task didn't need — opportunistic refactors, reformatting, \
+                     drive-by renames, unrelated edits — as sprawl, which is a \
+                     finding, not a bonus. A finding is skipped only by refuting it \
+                     with a concrete failure scenario; \"out of scope,\" \"not worth \
+                     the complexity,\" \"for now,\" and \"as a follow-up\" are banned \
+                     as dismissals. Lead with the full detail: findings ranked by \
+                     severity, each with a `file:line` anchor, separating \"will \
+                     break\" (has a real failure scenario) from \"worth \
+                     reconsidering\" (a design smell) — don't pad, a weak nit dressed \
+                     as a bug erodes trust. Include a completeness self-critique — \
+                     what you did not examine and why skipping it is safe — and name \
+                     the single highest risk you'd keep watching. The verdict names \
+                     how many blockers remain.",
                 ),
             ),
             (
@@ -635,14 +693,14 @@ impl Snippets {
                     "Do a nitpick pass over the current diff: naming, comment quality, \
                      dead code, inconsistent style, and anything that would slow a \
                      reviewer down. Keep every suggestion small, mechanical, and \
-                     behavior-preserving, each with a `file:line` anchor. This is polish \
-                     only — if you spot an actual correctness or design problem, flag it \
-                     separately and loudly rather than downgrading it to a nit to keep the \
-                     pass tidy; a real bug filed as style is how it survives review. Lead \
-                     with the detailed list of nits in reading order, then close with a \
-                     short, human-readable summary: how many nits, whether any real issue \
-                     surfaced above the nit line, and whether the diff is ready once the \
-                     nits are addressed. If the diff is already clean, say so instead of \
+                     behavior-preserving, each with a `file:line` anchor. This is \
+                     polish only — if you spot an actual correctness or design \
+                     problem, flag it separately and loudly rather than downgrading it \
+                     to a nit to keep the pass tidy; a real bug filed as style is how \
+                     it survives review. Lead with the detailed list of nits in \
+                     reading order. The verdict names how many nits you found and \
+                     whether any real issue surfaced above the nit line; a nit is not \
+                     a blocker. If the diff is already clean, say so instead of \
                      inventing nits to look busy.",
                 ),
             ),
@@ -652,19 +710,19 @@ impl Snippets {
                     "Review",
                     "Self-review before pushing",
                     "Self-review this branch as a skeptical reviewer seeing it for the \
-                     first time — assume it's not ready until you've tried to break it, \
-                     not the reverse. Read the full diff against the base branch, then walk \
-                     it adversarially and call out anything that isn't obviously correct, \
-                     any missing or weak tests, any leftover debug code or stray TODOs, any \
-                     change that's out of scope for this branch's purpose (drive-by \
-                     refactors, reformatting, unrelated edits), and anything you'd be asked \
-                     to change in review. For each correctness item give the concrete input \
-                     or state that breaks it, not a hunch, with a `file:line` anchor. Lead \
-                     with the full detailed list, ordered so I can fix top-down before \
-                     pushing, then close with a human-readable summary: a one-line verdict \
-                     (🟢 ready to push / 🟡 fix these first / 🔴 not ready) and the \
-                     must-fix items at a glance. Call it ready only after you've genuinely \
-                     tried and failed to find a problem — then say so.",
+                     first time — assume it's not ready until you've tried to break \
+                     it, not the reverse. Read the full diff against the base branch, \
+                     then walk it adversarially and call out anything that isn't \
+                     obviously correct, any missing or weak tests, any leftover debug \
+                     code or stray TODOs, any change that's out of scope for this \
+                     branch's purpose (drive-by refactors, reformatting, unrelated \
+                     edits), and anything you'd be asked to change in review. For each \
+                     correctness item give the concrete input or state that breaks it, \
+                     not a hunch, with a `file:line` anchor. Lead with the full \
+                     detailed list, ordered so I can fix top-down before pushing. Call \
+                     it ready only after you've genuinely tried and failed to find a \
+                     problem — then say so. The verdict names how many must-fix items \
+                     remain before pushing.",
                 ),
             ),
             (
@@ -672,28 +730,28 @@ impl Snippets {
                 entry(
                     "Review",
                     "Full pre-ship review: correctness, design, security, perf, tests",
-                    "Give the current diff (`git diff` against the base branch) the full \
-                     pre-ship review, one lens at a time, reviewing adversarially — assume \
-                     there IS a bug, each finding is real until you refute it with a \
-                     concrete input that proves it can't happen, and a safe-looking default \
-                     is a claim to disprove, not a resting place. Correctness: logic \
-                     errors, off-by-one, unhandled errors and edge cases. Design: are the \
-                     boundaries and abstractions right, does it fit the surrounding code, \
-                     is there a simpler shape. Security: untrusted input crossing a trust \
-                     boundary, authz, injection, secret handling. Performance: \
-                     allocations or I/O added to a hot path, N+1s, accidental \
-                     quadratics. Tests: do they actually exercise the new behavior and \
-                     its failure paths. In scope is everything the diff touches and \
-                     everything that breaks because of it; scope is not an escape hatch, \
-                     and \"out of scope,\" \"not worth the complexity,\" and \"degrades \
-                     gracefully\" are banned as reasons to drop a finding. Lead with the \
-                     full detail: for each finding, trace the real code path and give a \
-                     concrete failure scenario — the input or state that produces the wrong \
-                     result — with a `file:line` anchor, grouped by lens and ranked by \
-                     severity; if a lens is genuinely clean, say so in one line rather than \
-                     padding the list. Then close with a human-readable summary: a one-line \
-                     verdict (🟢 ship / 🟡 fix first / 🔴 blockers / ❓ need context) and \
-                     the top blockers at a glance.",
+                    "Give the current diff (`git diff` against the base branch) the \
+                     full pre-ship review, one lens at a time, reviewing adversarially \
+                     — assume there IS a bug, each finding is real until you refute it \
+                     with a concrete input that proves it can't happen, and a \
+                     safe-looking default is a claim to disprove, not a resting place. \
+                     Correctness: logic errors, off-by-one, unhandled errors and edge \
+                     cases. Design: are the boundaries and abstractions right, does it \
+                     fit the surrounding code, is there a simpler shape. Security: \
+                     untrusted input crossing a trust boundary, authz, injection, \
+                     secret handling. Performance: allocations or I/O added to a hot \
+                     path, N+1s, accidental quadratics. Tests: do they actually \
+                     exercise the new behavior and its failure paths. In scope is \
+                     everything the diff touches and everything that breaks because of \
+                     it; scope is not an escape hatch, and \"out of scope,\" \"not \
+                     worth the complexity,\" and \"degrades gracefully\" are banned as \
+                     reasons to drop a finding. Lead with the full detail: for each \
+                     finding, trace the real code path and give a concrete failure \
+                     scenario — the input or state that produces the wrong result — \
+                     with a `file:line` anchor, grouped by lens and ranked by \
+                     severity; if a lens is genuinely clean, say so in one line rather \
+                     than padding the list. The verdict names how many blockers remain \
+                     and the most severe one.",
                 ),
             ),
             (
@@ -701,21 +759,22 @@ impl Snippets {
                 entry(
                     "Review",
                     "Design & architecture review (staff-engineer lens)",
-                    "Review this change the way a staff engineer would — past line-level \
-                     bugs, at the design. Does the change belong in this layer, or is it \
-                     in the wrong place? Are the module boundaries, data flow, and \
-                     ownership right, or does it add coupling that will bite later? Is \
-                     there a materially simpler shape that does the same job? What's the \
-                     blast radius, and the rollback story if it's wrong? Judge it against \
-                     the patterns already in this codebase, not an ideal in the abstract — \
-                     but \"it matches the existing pattern\" and \"it degrades safely\" are \
-                     not defenses; a safe-looking default can hide a footgun, so name what \
-                     specifically makes each choice safe or don't accept it. Lead with the \
-                     detailed design findings, each with a `file:line` anchor and the \
-                     reasoning, ordered by leverage. Then close with a human-readable \
-                     summary: a one-word verdict — ship, reshape, or rethink — the two or \
-                     three highest-leverage changes, and the one risk you'd keep watching. \
-                     If the design is sound, say so and name that risk.",
+                    "Review this change the way a staff engineer would — past \
+                     line-level bugs, at the design. Does the change belong in this \
+                     layer, or is it in the wrong place? Are the module boundaries, \
+                     data flow, and ownership right, or does it add coupling that will \
+                     bite later? Is there a materially simpler shape that does the \
+                     same job? What's the blast radius, and the rollback story if it's \
+                     wrong? Judge it against the patterns already in this codebase, \
+                     not an ideal in the abstract — but \"it matches the existing \
+                     pattern\" and \"it degrades safely\" are not defenses; a \
+                     safe-looking default can hide a footgun, so name what \
+                     specifically makes each choice safe or don't accept it. Lead with \
+                     the detailed design findings, each with a `file:line` anchor and \
+                     the reasoning, ordered by leverage. Name the two or three \
+                     highest-leverage changes and the one risk you'd keep watching. If \
+                     the design is sound, say so and name that risk. The verdict names \
+                     the highest-leverage change and the one risk you'd keep watching.",
                 ),
             ),
             (
@@ -726,21 +785,21 @@ impl Snippets {
                 entry(
                     "Review",
                     "Performance review of the diff",
-                    "Review the current diff for performance regressions, not micro-nits. \
-                     Walk the changed code on its hot path and look for allocations or \
-                     clones added inside a loop, N+1 queries or repeated I/O, an \
-                     accidental O(n²) from a nested scan, eager work that could be \
-                     deferred, and blocking calls or locks added to a latency-sensitive \
-                     path. Assume each added cost matters until the input scale proves it \
-                     doesn't — \"probably negligible\" is a claim you back with a number, \
-                     not a dismissal. Lead with the detailed findings: for each, the \
-                     `file:line`, the input scale at which it starts to hurt, and the \
-                     concrete cost — measured or estimated, not hand-waved — ranked by \
-                     impact, with a fix only where the win is real and the code stays \
-                     readable. Then close with a human-readable summary: a one-line verdict \
-                     (🟢 no hot-path impact / 🟡 minor / 🔴 regression) and the single \
-                     biggest cost at a glance. If the diff has no hot-path impact, say so \
-                     plainly instead of inventing concerns.",
+                    "Review the current diff for performance regressions, not \
+                     micro-nits. Walk the changed code on its hot path and look for \
+                     allocations or clones added inside a loop, N+1 queries or \
+                     repeated I/O, an accidental O(n²) from a nested scan, eager work \
+                     that could be deferred, and blocking calls or locks added to a \
+                     latency-sensitive path. Assume each added cost matters until the \
+                     input scale proves it doesn't — \"probably negligible\" is a \
+                     claim you back with a number, not a dismissal. Lead with the \
+                     detailed findings: for each, the `file:line`, the input scale at \
+                     which it starts to hurt, and the concrete cost — measured or \
+                     estimated, not hand-waved — ranked by impact, with a fix only \
+                     where the win is real and the code stays readable. If the diff \
+                     has no hot-path impact, say so plainly instead of inventing \
+                     concerns. The verdict names the single biggest cost, or that \
+                     there is no hot-path impact.",
                 ),
             ),
             (
@@ -748,35 +807,38 @@ impl Snippets {
                 entry(
                     "Review",
                     "Apply the review findings you just produced",
-                    "Take the findings from the review you just produced and *implement* \
-                     them — the deliverable is a clean, tested diff, not a list. \"Here are \
-                     the changes I would make\" is not an acceptable output; apply them. Go \
-                     in severity order, highest first, and for each finding fix the *real \
-                     cause* at the `file:line` it names, not the surface symptom. Default \
-                     to fixing: a finding stays unfixed only when you can refute it with a \
-                     specific, falsifiable reason — a concrete input or state that proves \
-                     it can't happen. \"Not worth the complexity,\" \"degrades gracefully,\" \
-                     \"out of scope,\" \"for now,\" and \"as a follow-up\" are banned as \
-                     reasons to skip — they're the reflex that ships bugs, and one such \
-                     \"the safe default is enough\" call silently deleted real user data. \
-                     Treat the safe-looking default as the thing to disprove, and when \
-                     you're unsure, fix it. Follow the scout rule: stay strictly in scope — \
-                     fix only the findings plus anything that breaks because of your fix, \
-                     and don't refactor, reformat, or clean up anything they didn't call \
-                     out; if you spot an unrelated problem, note it for later instead of \
-                     fixing it here. Whenever a fix changes behavior, add or adjust the \
-                     test that would have caught the original problem. When you're done, \
-                     re-run the build, tests, and linter to confirm the tree is green, then \
-                     commit with a clear message that says what was wrong and why the \
-                     change is the real fix, staging only the files you touched, and push \
-                     the branch. Committing AND pushing every fix is part of the \
-                     deliverable, not optional: a fix left uncommitted — or committed but \
-                     unpushed — is lost the moment the worktree is cleaned up, so never end \
-                     with changes stranded in the working tree. Lead with \
-                     the detail — each finding, what you changed, and why it's the real \
-                     cause, at its `file:line` — then close with a human-readable summary: \
-                     fixed (count plus a headline list), each finding you left with its \
-                     falsifiable reason, and anything you noticed that the review missed.",
+                    "Take the findings from the review you just produced and \
+                     *implement* them — the deliverable is a clean, tested diff, not a \
+                     list. \"Here are the changes I would make\" is not an acceptable \
+                     output; apply them. Go in severity order, highest first, and for \
+                     each finding fix the *real cause* at the `file:line` it names, \
+                     not the surface symptom. Default to fixing: a finding stays \
+                     unfixed only when you can refute it with a specific, falsifiable \
+                     reason — a concrete input or state that proves it can't happen. \
+                     \"Not worth the complexity,\" \"degrades gracefully,\" \"out of \
+                     scope,\" \"for now,\" and \"as a follow-up\" are banned as \
+                     reasons to skip — they're the reflex that ships bugs, and one \
+                     such \"the safe default is enough\" call silently deleted real \
+                     user data. Treat the safe-looking default as the thing to \
+                     disprove, and when you're unsure, fix it. Follow the scout rule: \
+                     stay strictly in scope — fix only the findings plus anything that \
+                     breaks because of your fix, and don't refactor, reformat, or \
+                     clean up anything they didn't call out; if you spot an unrelated \
+                     problem, note it for later instead of fixing it here. Whenever a \
+                     fix changes behavior, add or adjust the test that would have \
+                     caught the original problem. When you're done, re-run the build, \
+                     tests, and linter to confirm the tree is green, then commit with \
+                     a clear message that says what was wrong and why the change is \
+                     the real fix, staging only the files you touched, and push the \
+                     branch. Committing AND pushing every fix is part of the \
+                     deliverable, not optional: a fix left uncommitted — or committed \
+                     but unpushed — is lost the moment the worktree is cleaned up, so \
+                     never end with changes stranded in the working tree. Lead with \
+                     the detail — each finding, what you changed, and why it's the \
+                     real cause, at its `file:line`, each finding you left with its \
+                     falsifiable reason, and anything you noticed that the review \
+                     missed. The verdict names how many findings you fixed and how \
+                     many remain.",
                 ),
             ),
             (
@@ -785,20 +847,21 @@ impl Snippets {
                     "Review",
                     "Scout rule: flag and trim out-of-scope changes",
                     "Scope-check the current diff (`git diff` against the base branch) \
-                     against the one thing this change is meant to do — this is the scout \
-                     rule made explicit. Go hunk by hunk and flag every edit the task \
-                     didn't require — opportunistic refactors, drive-by renames, \
-                     reformatting, unrelated cleanups, speculative abstractions, leftover \
-                     debug code or stray TODOs — each with a `file:line` anchor and one \
-                     line on why it doesn't belong. Then trim them: revert the out-of-scope \
-                     hunks so the diff carries only what the task needs, and confirm the \
-                     build and tests still pass afterward. Keep anything that's genuinely \
-                     load-bearing even if it looks unrelated — say why you kept it rather \
-                     than reverting it blindly. Lead with the detailed hunk-by-hunk list \
-                     (flagged / trimmed / kept-with-reason), then close with a \
-                     human-readable summary: how many hunks you trimmed, what the diff is \
-                     now scoped to, and confirmation the tree is green. If the diff is \
-                     already tight, say so plainly instead of inventing trims.",
+                     against the one thing this change is meant to do — this is the \
+                     scout rule made explicit. Go hunk by hunk and flag every edit the \
+                     task didn't require — opportunistic refactors, drive-by renames, \
+                     reformatting, unrelated cleanups, speculative abstractions, \
+                     leftover debug code or stray TODOs — each with a `file:line` \
+                     anchor and one line on why it doesn't belong. Then trim them: \
+                     revert the out-of-scope hunks so the diff carries only what the \
+                     task needs, and confirm the build and tests still pass afterward. \
+                     Keep anything that's genuinely load-bearing even if it looks \
+                     unrelated — say why you kept it rather than reverting it blindly. \
+                     Lead with the detailed hunk-by-hunk list (flagged / trimmed / \
+                     kept-with-reason). The verdict names how many hunks you trimmed, \
+                     what the diff is now scoped to, and whether the tree is green. If \
+                     the diff is already tight, say so plainly instead of inventing \
+                     trims.",
                 ),
             ),
             // ── Git & PR ────────────────────────────────────────────
@@ -807,13 +870,14 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Open a PR (summary + test plan)",
-                    "Open a PR for the current branch with `gh`. Push first if the branch \
-                     isn't up to date, then write a concise, specific title and a body \
-                     with a `## Summary` section (1-3 bullets on *why*, not a diff recap) \
-                     and a `## Test plan` checklist of what you actually verified. Base \
-                     all of it on the real commits and diff, not a guess — read them \
-                     before you write a word. When it's open, print the PR URL and a \
-                     one-line, human-readable summary of what it ships.",
+                    "Open a PR for the current branch with `gh pr create`. Push first \
+                     if the branch isn't up to date, then write a concise, specific \
+                     title and a body with a `## Summary` section (1-3 bullets on \
+                     *why*, not a diff recap) and a `## Test plan` checklist of what \
+                     you actually verified. Base all of it on the real commits and \
+                     diff, not a guess — read them before you write a word. When it's \
+                     open, report the PR URL and what it ships. The verdict names the \
+                     branch, the PR number, and that the branch was pushed.",
                 ),
             ),
             (
@@ -821,11 +885,15 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Mark the PR ready for review",
-                    "Mark the current pull request as ready for review with \
-                     `gh pr ready`. First confirm it actually is ready: the diff is \
-                     clean, tests and CI pass, and the description matches what changed. \
-                     If anything's off, tell me what and stop instead of flipping it. When \
-                     you do flip it, print a one-line confirmation of the new state.",
+                    "Mark the current pull request as ready for review with `gh pr \
+                     ready`. First confirm it actually is ready: the diff is clean, \
+                     tests and CI pass, and the description matches what changed. If \
+                     anything's off, tell me what and stop instead of flipping it. \
+                     When you do flip it, verify the PR URL and isDraft with `gh pr \
+                     view --json url,isDraft`; report the resulting state. If already \
+                     ready, report that without changing it. The verdict names the PR \
+                     number and its resulting draft state; this snippet pushes \
+                     nothing.",
                 ),
             ),
             (
@@ -833,12 +901,13 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Commit staged changes with a good message",
-                    "Commit the staged changes only. Write an imperative subject \
-                     (<=50 chars) and, unless the change is trivial, a body explaining \
-                     the *why* rather than restating the *what*. Don't stage or commit \
+                    "Commit the staged changes only. Write an imperative subject (<=50 \
+                     chars) and, unless the change is trivial, a body explaining the \
+                     *why* rather than restating the *what*. Don't stage or commit \
                      unrelated edits — if the working tree has changes outside this \
-                     change, leave them alone and say so. When done, print the commit \
-                     subject and the list of files it captured.",
+                     change, leave them alone and say so. When done, report the commit \
+                     subject and the list of files it captured. The verdict names the \
+                     branch, the new commit SHA, and whether it was pushed.",
                 ),
             ),
             (
@@ -848,11 +917,12 @@ impl Snippets {
                     "Amend the last commit",
                     "Fold the current working changes into the previous commit with \
                      `git commit --amend`, keeping the existing message unless it no \
-                     longer describes the result. Only do this when the previous commit \
-                     hasn't landed on a shared branch (an unmerged PR branch is fine) — if \
-                     it has, stop and flag it rather than rewriting shared history. When \
-                     done, print the amended commit and confirm whether a force-with-lease \
-                     push is now needed.",
+                     longer describes the result. Only do this when the previous \
+                     commit hasn't landed on a shared branch (an unmerged PR branch is \
+                     fine) — if it has, stop and flag it rather than rewriting shared \
+                     history. When done, report the amended commit. The verdict names \
+                     the branch, the amended SHA, and whether a force-with-lease push \
+                     is now needed.",
                 ),
             ),
             (
@@ -861,17 +931,16 @@ impl Snippets {
                     "Git & PR",
                     "Rebase onto the latest main",
                     "Rebase this branch onto the latest `main` (or whatever base it \
-                     targets). Fetch just main first (`git fetch origin main`) — leaving \
-                     your branch's own remote-tracking ref untouched so the \
+                     targets). Fetch just main first (`git fetch origin main`) — \
+                     leaving your branch's own remote-tracking ref untouched so the \
                      `--force-with-lease` below still guards it — then rebase onto \
                      `origin/main`, replaying cleanly and resolving any conflicts \
                      conservatively: preserve the intent of both sides, never drop a \
                      change just to clear markers, and flag anything ambiguous for me. \
-                     When it's done, confirm the branch still builds and tests pass, then \
-                     push the rewritten history with `--force-with-lease` (never a bare \
-                     `--force`). Close with a human-readable summary: how many commits \
-                     replayed, what conflicted and how you resolved it, and the branch's \
-                     new state.",
+                     When it's done, confirm the branch still builds and tests pass, \
+                     then push the rewritten history with `--force-with-lease` (never \
+                     a bare `--force`). The verdict names the branch, how many commits \
+                     replayed, the resulting head SHA, and whether it was pushed.",
                 ),
             ),
             (
@@ -879,18 +948,18 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Update the branch from main (merge, no rewrite)",
-                    "Bring this branch up to date with the latest `main` by *merging*, not \
-                     rebasing — use this when the branch is already pushed or shared and \
-                     you'd rather not rewrite history. Fetch main first \
-                     (`git fetch origin main`), merge `origin/main` in, and resolve any \
-                     conflicts by honoring the intent of both sides (never drop a change \
-                     just to clear markers), flagging anything ambiguous for me. Confirm \
-                     the branch builds and tests pass afterward. Since this doesn't \
-                     rewrite history, a plain `git push` is enough — no force needed. If \
-                     you'd rather keep a linear history and the branch is unshared, rebase \
-                     onto `origin/main` instead of merging. Close with a short, \
-                     human-readable summary of what merged, what conflicted, and how you \
-                     resolved it.",
+                    "Bring this branch up to date with the latest `main` by *merging*, \
+                     not rebasing — use this when the branch is already pushed or \
+                     shared and you'd rather not rewrite history. Fetch main first \
+                     (`git fetch origin main`), merge `origin/main` in, and resolve \
+                     any conflicts by honoring the intent of both sides (never drop a \
+                     change just to clear markers), flagging anything ambiguous for \
+                     me. Confirm the branch builds and tests pass afterward. Since \
+                     this doesn't rewrite history, a plain `git push` is enough — no \
+                     force needed. If you'd rather keep a linear history and the \
+                     branch is unshared, rebase onto `origin/main` instead of merging. \
+                     The verdict names the branch, what merged, the resulting head \
+                     SHA, and whether it was pushed.",
                 ),
             ),
             (
@@ -900,15 +969,15 @@ impl Snippets {
                     "Resume an in-progress rebase through conflicts",
                     "A rebase is in progress and has stopped on a conflict. For each \
                      conflicted file, work out what both the replayed commit and the \
-                     upstream changes intended and keep a result that honors both — don't \
-                     blindly take one side just to clear the markers. Stage the resolved \
-                     files, run `git rebase --continue`, and repeat for each commit the \
-                     rebase stops on until it finishes. If it reaches a state you can't \
-                     safely resolve, run `git rebase --abort` and tell me rather than \
-                     forcing a bad merge. When it completes, confirm the tree builds and \
-                     tests pass, then push with `--force-with-lease`. Close with a \
-                     human-readable summary: which commits conflicted and how you resolved \
-                     each.",
+                     upstream changes intended and keep a result that honors both — \
+                     don't blindly take one side just to clear the markers. Stage the \
+                     resolved files, run `git rebase --continue`, and repeat for each \
+                     commit the rebase stops on until it finishes. If it reaches a \
+                     state you can't safely resolve, run `git rebase --abort` and tell \
+                     me rather than forcing a bad merge. When it completes, confirm \
+                     the tree builds and tests pass, then push with \
+                     `--force-with-lease`. The verdict names the branch, which commits \
+                     conflicted, the resulting head SHA, and whether it was pushed.",
                 ),
             ),
             (
@@ -921,8 +990,8 @@ impl Snippets {
                      chronology, and don't collapse genuinely independent changes into \
                      one. The final tree must be identical to the current one — verify \
                      with `git diff` before and after and show me it comes back empty. \
-                     Close with a human-readable summary of the new commit list and what \
-                     each one contains.",
+                     The verdict names the branch, the new commit list, the resulting \
+                     head SHA, and whether it was pushed.",
                 ),
             ),
             (
@@ -932,11 +1001,11 @@ impl Snippets {
                     "Resolve merge conflicts",
                     "Resolve the current merge conflicts. For each hunk, work out what \
                      both sides intended and keep a result that honors both, not just \
-                     whichever is easier to paste. Then confirm the merged result actually \
-                     builds and passes tests rather than just clearing the markers. Lead \
-                     with the per-file detail — which side you kept and why — then close \
-                     with a human-readable summary: how many files conflicted and \
-                     confirmation the tree is green.",
+                     whichever is easier to paste. Then confirm the merged result \
+                     actually builds and passes tests rather than just clearing the \
+                     markers. Lead with the per-file detail — which side you kept and \
+                     why. The verdict names how many files conflicted, the resulting \
+                     head SHA, and whether the tree is green.",
                 ),
             ),
             (
@@ -945,17 +1014,18 @@ impl Snippets {
                     "Git & PR",
                     "Make the PR mergeable: update from main, resolve, verify, push",
                     "The PR won't merge because the branch is behind `main` (GitHub \
-                     reports the required checks as \"expected\"). Bring it fully current: \
-                     update from the latest `main` — rebase for clean history, or merge \
-                     if the branch is shared or already pushed widely — and resolve every \
-                     conflict by understanding both sides, preserving the intent of each \
-                     change rather than blindly taking one side. After resolving, re-run \
-                     the build, tests, and linter to confirm the merge didn't break \
-                     anything, then push (`--force-with-lease` if you rebased) so CI \
-                     re-runs and the required status checks report against an up-to-date \
-                     head. Lead with the per-conflict detail — what conflicted and how you \
-                     resolved each — then close with a human-readable summary confirming \
-                     the branch is now mergeable.",
+                     reports the required checks as \"expected\"). Bring it fully \
+                     current: update from the latest `main` — rebase for clean \
+                     history, or merge if the branch is shared or already pushed \
+                     widely — and resolve every conflict by understanding both sides, \
+                     preserving the intent of each change rather than blindly taking \
+                     one side. After resolving, re-run the build, tests, and linter to \
+                     confirm the merge didn't break anything, then push \
+                     (`--force-with-lease` if you rebased) so CI re-runs and the \
+                     required status checks report against an up-to-date head. Lead \
+                     with the per-conflict detail — what conflicted and how you \
+                     resolved each. The verdict names the branch, the resulting head \
+                     SHA, whether it was pushed, and whether it is now mergeable.",
                 ),
             ),
             (
@@ -963,17 +1033,17 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Push the branch (force-with-lease after a rewrite)",
-                    "Push the current branch to its remote. If its history was rewritten — \
-                     after a rebase, amend, or squash — push with `--force-with-lease` so \
-                     you overwrite only your own commits and never clobber work someone \
-                     else pushed; never use a bare `--force`, and don't run a fresh \
-                     `git fetch` of this branch's own upstream right before the push or \
-                     the lease check can't protect you. Otherwise a plain `git push` (add \
-                     `-u` to set the upstream on the first push). If `--force-with-lease` \
-                     is rejected because the remote moved, stop and tell me what changed \
-                     rather than escalating to `--force`. Close with a one-line, \
-                     human-readable confirmation that the push landed and the branch is in \
-                     sync.",
+                    "Push the current branch to its remote. If its history was \
+                     rewritten — after a rebase, amend, or squash — push with \
+                     `--force-with-lease` so you overwrite only your own commits and \
+                     never clobber work someone else pushed; never use a bare \
+                     `--force`, and don't run a fresh `git fetch` of this branch's own \
+                     upstream right before the push or the lease check can't protect \
+                     you. Otherwise a plain `git push` (add `-u` to set the upstream \
+                     on the first push). If `--force-with-lease` is rejected because \
+                     the remote moved, stop and tell me what changed rather than \
+                     escalating to `--force`. The verdict names the branch, the pushed \
+                     SHA, and whether it is now in sync with the remote.",
                 ),
             ),
             (
@@ -981,23 +1051,27 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Write a HANDOFF doc so the next session resumes cold",
-                    "Write a HANDOFF document capturing the current state so another agent \
-                     — or a future you — can resume with zero context loss, and write it \
-                     *now*, before a usage limit or crash ends this session and takes the \
-                     context with it. Capture: what you were doing and why; what's done, \
-                     naming the commits and files; what's in progress and exactly where you \
-                     stopped; the next concrete steps, in order; any decisions or \
-                     assumptions you made; and the open questions or blockers. Ground every \
-                     line in the real state — run `git status` and `git branch --show-current` \
-                     and record the current branch, staged and uncommitted changes, and how \
-                     to verify the work (the build, test, and lint commands). Be specific and \
-                     actionable, not a vague recap: this document is the only thing the next \
-                     session will have. Open it with a short, human-readable summary — one \
-                     paragraph a cold reader can skim to know exactly where things stand — \
-                     then the full detail below. Write it to `HANDOFF.md` at the repo root, \
-                     but don't clobber an existing one — append a timestamped section if \
-                     it's already there — and leave it untracked rather than committing it; \
-                     if you can't write files, print the whole thing clearly instead.",
+                    "Write a HANDOFF document capturing the current state so another \
+                     agent — or a future you — can resume with zero context loss, and \
+                     write it *now*, before a usage limit or crash ends this session \
+                     and takes the context with it. Capture: what you were doing and \
+                     why; what's done, naming the commits and files; what's in \
+                     progress and exactly where you stopped; the next concrete steps, \
+                     in order; any decisions or assumptions you made; and the open \
+                     questions or blockers. Ground every line in the real state — run \
+                     `git status` and `git branch --show-current` and record the \
+                     current branch, staged and uncommitted changes, and how to verify \
+                     the work (the build, test, and lint commands). Be specific and \
+                     actionable, not a vague recap: this document is the only thing \
+                     the next session will have. Open it with a short, human-readable \
+                     summary — one paragraph a cold reader can skim to know exactly \
+                     where things stand — then the full detail below. Write it to \
+                     `HANDOFF.md` at the repo root, but don't clobber an existing one \
+                     — append a timestamped section if it's already there — and leave \
+                     it untracked rather than committing it; if you can't write files, \
+                     print the whole thing clearly instead. The verdict names the \
+                     branch it describes and where the handoff was written; this \
+                     snippet commits and pushes nothing.",
                 ),
             ),
             // ── GitHub ──────────────────────────────────────────────
@@ -1007,17 +1081,18 @@ impl Snippets {
                     gh,
                     "GitHub",
                     "Triage the issue into a plan",
-                    "Triage the GitHub issue this workspace is on. Read the body and every \
-                     comment with `gh issue view --comments`, restate the problem in one \
-                     line, and confirm it's real and still relevant. If it's a bug, \
-                     reproduce it — trace the actual code path rather than trusting the \
-                     report — then break the work into an ordered, checkable plan: the root \
-                     change, the tests that prove it, and any follow-ups worth splitting \
-                     out. Raise anything under-specified or out of scope as a question back \
-                     on the issue instead of guessing. Don't start coding yet — deliver the \
-                     plan first. Lead with the detail (restated problem, reproduction, the \
-                     ordered plan), then close with a human-readable summary: one line on \
-                     what it'll take and the single biggest unknown.",
+                    "Triage the GitHub issue this workspace is on. Read the body and \
+                     every comment with `gh issue view --comments`, restate the \
+                     problem in one line, and confirm it's real and still relevant. If \
+                     it's a bug, reproduce it — trace the actual code path rather than \
+                     trusting the report — then break the work into an ordered, \
+                     checkable plan: the root change, the tests that prove it, and any \
+                     follow-ups worth splitting out. Raise anything under-specified or \
+                     out of scope as a question back on the issue instead of guessing. \
+                     Don't start coding yet — deliver the plan first. Lead with the \
+                     detail (restated problem, reproduction, the ordered plan). The \
+                     verdict names the issue number, what it'll take, and the single \
+                     biggest unknown.",
                 ),
             ),
             (
@@ -1027,17 +1102,17 @@ impl Snippets {
                     "GitHub",
                     "Address the PR review comments",
                     "Address the unresolved review comments on this PR. Pull them with \
-                     `gh pr view --comments` plus the inline review threads, and for each \
-                     one either make the change the reviewer asked for or, if you disagree, \
-                     reply with the concrete reason rather than silently skipping it. Fix \
-                     the real cause, not just the flagged line, and add or adjust a test \
-                     whenever the change alters behavior. Re-run the relevant checks, push, \
-                     and post a short reply on each thread saying what you did so the \
-                     reviewer can resolve it. Don't mark anything resolved you didn't \
-                     actually handle. Lead with the per-comment detail — what each asked \
-                     and what you did — then close with a human-readable summary: how many \
-                     threads addressed, how many you pushed back on, and whether CI is \
-                     green.",
+                     `gh pr view --comments` plus the inline review threads, and for \
+                     each one either make the change the reviewer asked for or, if you \
+                     disagree, reply with the concrete reason rather than silently \
+                     skipping it. Fix the real cause, not just the flagged line, and \
+                     add or adjust a test whenever the change alters behavior. Re-run \
+                     the relevant checks, push, and post a short reply on each thread \
+                     saying what you did so the reviewer can resolve it. Don't mark \
+                     anything resolved you didn't actually handle. Lead with the \
+                     per-comment detail — what each asked and what you did. The \
+                     verdict names the PR number, how many threads you addressed, how \
+                     many you pushed back on, and whether CI is green.",
                 ),
             ),
             (
@@ -1046,13 +1121,13 @@ impl Snippets {
                     gh,
                     "GitHub",
                     "Link this PR and the issue it closes",
-                    "Wire this PR to the issue it resolves so they track as one. Confirm \
-                     which issue it closes, then make sure the PR body carries a \
-                     `Closes #N` line — edit it with `gh pr edit` if it's missing — so the \
-                     issue auto-closes on merge and GitHub shows the link. For an issue in \
-                     another repo use the full `Closes owner/repo#N` form. Cross-check that \
-                     no other open PR already claims the same issue. Close with a one-line, \
-                     human-readable confirmation of the linked pair.",
+                    "Wire this PR to the issue it resolves so they track as one. \
+                     Confirm which issue it closes, then make sure the PR body carries \
+                     a `Closes #N` line — edit it with `gh pr edit` if it's missing — \
+                     so the issue auto-closes on merge and GitHub shows the link. For \
+                     an issue in another repo use the full `Closes owner/repo#N` form. \
+                     Cross-check that no other open PR already claims the same issue. \
+                     The verdict names the linked issue and PR numbers.",
                 ),
             ),
             (
@@ -1063,14 +1138,15 @@ impl Snippets {
                     gh,
                     "GitHub",
                     "Summarize why CI is failing",
-                    "Summarize why CI is failing on this PR. List the failing checks with \
-                     `gh pr checks`, pull each failed job's log with `gh run view \
-                     --log-failed`, and for every distinct failure give the check name, the \
-                     real cause (not just the last red line), and the `file:line` or step \
-                     it points at. Separate genuine code failures from flakes and infra \
-                     errors. Don't fix anything yet; this is the diagnosis. Lead with the \
-                     per-failure detail, then close with a human-readable summary: the \
-                     shortest path back to green — which failures to fix first and why.",
+                    "Summarize why CI is failing on this PR. List the failing checks \
+                     with `gh pr checks`, pull each failed job's log with `gh run view \
+                     --log-failed`, and for every distinct failure give the check \
+                     name, the real cause (not just the last red line), and the \
+                     `file:line` or step it points at. Separate genuine code failures \
+                     from flakes and infra errors. Don't fix anything yet; this is the \
+                     diagnosis. Lead with the per-failure detail. The verdict names \
+                     how many checks are failing and which failure to fix first; this \
+                     snippet changes nothing, so say so rather than reporting work.",
                 ),
             ),
             (
@@ -1079,16 +1155,16 @@ impl Snippets {
                     gh,
                     "GitHub",
                     "Request or nudge reviewers",
-                    "Get this PR the review it needs. Check its state with `gh pr view` — is \
-                     it a draft, are checks green, does it already have reviewers? If it's \
-                     ready and unreviewed, request the right people with `gh pr edit \
-                     --add-reviewer`, preferring the code owners or recent authors of the \
-                     touched files. If review was already requested and has gone stale, \
-                     draft a short, specific nudge comment naming what changed since they \
-                     last looked and what you need from them. Don't nudge while CI is red or \
-                     the PR is still a draft — say so instead. Close with a one-line, \
-                     human-readable summary of what you did — whom you requested, or why \
-                     you held off.",
+                    "Get this PR the review it needs. Check its state with `gh pr \
+                     view` — is it a draft, are checks green, does it already have \
+                     reviewers? If it's ready and unreviewed, request the right people \
+                     with `gh pr edit --add-reviewer`, preferring the code owners or \
+                     recent authors of the touched files. If review was already \
+                     requested and has gone stale, draft a short, specific nudge \
+                     comment naming what changed since they last looked and what you \
+                     need from them. Don't nudge while CI is red or the PR is still a \
+                     draft — say so instead. The verdict names the PR number and whom \
+                     you requested, or why you held off.",
                 ),
             ),
             (
@@ -1097,16 +1173,17 @@ impl Snippets {
                     gh,
                     "GitHub",
                     "Cut a release PR",
-                    "Cut a release PR from the current state. Determine the next version \
-                     from the commits since the last tag (`git log <last-tag>..HEAD`) and \
-                     the project's versioning scheme, bump the version files, and assemble \
-                     a changelog grouped by feat / fix / chore with the notable \
-                     user-facing changes — not a raw commit dump. Confirm the build and \
-                     tests are green first, then open the PR with `gh pr create` targeting \
-                     the release base, titled for the version, with the changelog as the \
-                     body. Flag any breaking change prominently. Don't tag or publish — the \
-                     PR is the deliverable. Close with a human-readable summary: the \
-                     version, the headline changes, and any breaking change called out.",
+                    "Cut a release PR from the current state. Determine the next \
+                     version from the commits since the last tag (`git log \
+                     <last-tag>..HEAD`) and the project's versioning scheme, bump the \
+                     version files, and assemble a changelog grouped by feat / fix / \
+                     chore with the notable user-facing changes — not a raw commit \
+                     dump. Confirm the build and tests are green first, then open the \
+                     PR with `gh pr create` targeting the release base, titled for the \
+                     version, with the changelog as the body. Flag any breaking change \
+                     prominently. Don't tag or publish — the PR is the deliverable. \
+                     The verdict names the version, the PR number, and any breaking \
+                     change.",
                 ),
             ),
             (
@@ -1115,18 +1192,19 @@ impl Snippets {
                     gh,
                     "GitHub",
                     "Convert the issue into a PR",
-                    "Turn the GitHub issue this workspace is on into a PR. Read it with \
-                     `gh issue view --comments`, branch off the default base with a name \
-                     drawn from the issue, and implement the smallest change that fully \
-                     resolves it — root cause, not symptom — with tests for the new \
-                     behavior. Follow the scout rule: build only what the issue needs, and \
-                     if you notice unrelated problems note them separately rather than \
-                     folding them in. Run the project's checks until green, then open the \
-                     PR with `gh pr create`, its body starting with `Closes #N` so the \
-                     issue collapses into it. Keep it one logical change; if the issue is \
-                     really several, say so and scope this PR to the first. Lead with the \
-                     detail of what you built and why it resolves the issue, then close \
-                     with a human-readable summary and the PR URL.",
+                    "Turn the GitHub issue this workspace is on into a PR. Read it \
+                     with `gh issue view --comments`, branch off the default base with \
+                     a name drawn from the issue, and implement the smallest change \
+                     that fully resolves it — root cause, not symptom — with tests for \
+                     the new behavior. Follow the scout rule: build only what the \
+                     issue needs, and if you notice unrelated problems note them \
+                     separately rather than folding them in. Run the project's checks \
+                     until green, then open the PR with `gh pr create`, its body \
+                     starting with `Closes #N` so the issue collapses into it. Keep it \
+                     one logical change; if the issue is really several, say so and \
+                     scope this PR to the first. Lead with the detail of what you \
+                     built and why it resolves the issue, including the PR URL. The \
+                     verdict names the issue and PR numbers.",
                 ),
             ),
             (
@@ -1135,52 +1213,30 @@ impl Snippets {
                     gh,
                     "GitHub",
                     "Create coordinated GitHub issues from a design",
-                    "Turn the design already in your context into the actual GitHub \
-                     issues needed across the repositories it touches — the deliverable \
-                     is created, cross-linked issues via `gh issue create`, not a list of \
-                     suggested titles or draft bodies. Bias toward execution: create the \
-                     issues. First read the complete design and supporting context and \
-                     pin down the intended outcome, the user or operator problem, the \
-                     important decisions, constraints, non-goals, rollout assumptions, and \
-                     open questions — preserve the reasoning behind the design, don't \
-                     reduce it to a disconnected checklist. Then inspect the relevant \
-                     repositories and their remotes, ownership boundaries, existing issue \
-                     conventions, labels, milestones, and current implementation, so repo \
-                     assignment is grounded in reality rather than inferred from names \
-                     alone. Before creating anything, search open *and* closed issues in \
-                     every candidate repository (`gh issue list`, `gh search issues`) and \
-                     reuse or reference what already exists — do not create duplicates. \
-                     Decompose the design by independently deliverable outcome and assign \
-                     each issue to the repository that owns that work, avoiding both one \
-                     vague umbrella issue and excessively granular file-by-file tasks. \
-                     Create each issue with `gh issue create` in its repository, giving it \
-                     enough context to stand alone: the problem and intent; the relevant \
-                     design context and why this piece belongs in that repository; the \
-                     proposed scope and concrete behavior; acceptance criteria and \
-                     verification expectations; constraints, edge cases, migration or \
-                     compatibility concerns, and non-goals; dependencies, ordering, \
-                     rollout implications, and links to sibling or parent issues; and the \
-                     unresolved questions that genuinely require a decision. For \
-                     cross-repository work establish a coordination structure — create an \
-                     umbrella or tracking issue only when it adds value, describe the \
-                     dependency graph and recommended sequence, and make every related \
-                     issue link back to the tracker and to its direct blockers or \
-                     dependents. After creation, revisit the issues to fill in their real \
-                     URLs and cross-links so the dependency graph is navigable from any \
-                     issue, not left as placeholder references. Apply labels, milestones, \
-                     or assignees only when the repository conventions make the correct \
-                     values clear — don't invent metadata or silently guess ownership. If \
-                     the target repositories or a consequential design decision can't be \
-                     determined safely from the available context, stop on that specific \
-                     ambiguity and ask one focused question rather than guessing. Finish \
-                     with a concise report grouped by repository: the issues created and \
-                     their URLs, existing issues reused, the dependency or rollout order, \
-                     and any ambiguity that prevented an issue from being created. \
-                     Work then happens in each issue's own lazybox workspace — never a \
-                     named workspace created beside one. Report the issue URLs and don't \
-                     assume their rows opened: whether lazybox surfaces an issue is the \
-                     operator's filter and scope configuration, not something you can \
-                     see from here.",
+                    "Turn the design in context into created, cross-linked GitHub \
+                     issues with `gh issue create`. Read the complete design and \
+                     supporting context; preserve the intended outcome, decisions, \
+                     constraints, non-goals, rollout assumptions, and open questions. \
+                     Inspect repository remotes, ownership, conventions, and \
+                     implementation before assigning work. Search open and closed \
+                     issues in every candidate repository and reuse existing work; do \
+                     not create duplicates. Slice by independently deliverable \
+                     outcome. Each issue must stand alone: problem and design \
+                     reasoning, owning repository, scope and concrete behavior, \
+                     acceptance criteria and verification, edge cases and migration \
+                     concerns, dependencies and unresolved decisions. Create an \
+                     umbrella or tracking issue only when coordination needs it. \
+                     Replace placeholder links with actual sibling, parent, and \
+                     blocker URLs after creation; state dependency and rollout order. \
+                     Apply metadata only when repository conventions establish the \
+                     correct values. If repositories or a consequential decision \
+                     remain ambiguous, ask one focused question. Report created and \
+                     reused issue URLs grouped by repository and anything blocked. \
+                     Work happens in each issue's own lazybox workspace, never a named \
+                     workspace beside it; don't assume their rows opened, since \
+                     visibility depends on the operator's filters and scopes. The \
+                     verdict names how many issues you created and how many you \
+                     reused.",
                 ),
             ),
             (
@@ -1189,41 +1245,27 @@ impl Snippets {
                     gh,
                     "GitHub",
                     "Split the proposed work into a few self-contained issues with DOD",
-                    "Don't start coding yet. You've finished exploring and are about to \
-                     work on the proposal in your context — instead, carve it into a \
-                     small number of self-contained GitHub issues and stop there; \
-                     creating those issues with `gh issue create` is the deliverable, \
-                     not a diff. Prefer few, larger, independently-deliverable slices \
-                     over many granular tasks — aim for at most three or four issues, and \
-                     when in doubt merge two rather than split one. The reason is \
-                     conflict-minimization, not tidiness: several agents will pick these \
-                     up in parallel, so slice along file / module / ownership boundaries \
-                     that leave each issue touching a disjoint set of files, so two \
-                     issues rarely edit the same lines. Before creating anything, search \
-                     open *and* closed issues (`gh issue list`, `gh search issues`) and \
-                     reuse or reference what already exists rather than fragmenting a \
-                     tracked line of work. Make each issue stand alone so a cold agent \
-                     with none of this conversation can execute it: the problem and \
-                     intent; the scope and the explicit non-goals; the relevant context, \
-                     files, and constraints; and links to its sibling and blocker \
-                     issues. Give each issue an explicit Definition of Done as a \
-                     checklist — the acceptance criteria, the concrete verification \
-                     commands to run (build, test, lint), a regression test where the \
-                     change warrants one, and the docs, snapshot, or codegen updates \
-                     this repo's conventions require — so \"done\" is checkable, not \
-                     asserted. State the sequencing explicitly: the dependency order, \
-                     and which issues are safe to run concurrently versus which must be \
-                     serialized — the conflict map the operator needs to fan the work \
-                     out. On any consequential ambiguity — the slice boundaries, an \
-                     unclear scope, a decision that changes what gets built — stop and \
-                     ask one focused question rather than guessing. Finish with a \
-                     per-issue report: each created issue's URL, the existing issues \
-                     reused, and the concurrency-and-ordering plan. Work then happens \
-                     in each issue's own lazybox workspace — never a named workspace \
-                     created beside one. Report the issue URLs and don't assume their \
-                     rows opened: whether lazybox surfaces an issue is the operator's \
-                     filter and scope configuration, not something you can see from \
-                     here.",
+                    "Don't start coding yet. Carve the proposal in context into a few \
+                     self-contained GitHub issues using `gh issue create`; created \
+                     issues are the deliverable. Aim for at most three or four \
+                     independently deliverable slices. For conflict-minimization, \
+                     slice along file, module, or ownership boundaries with disjoint \
+                     file sets. Search open and closed issues first and reuse existing \
+                     work. Each issue must stand alone for an agent without this \
+                     conversation: problem, intent, scope, non-goals, relevant files \
+                     and constraints, and sibling and blocker links. Give each an \
+                     explicit Definition of Done checklist: acceptance criteria, \
+                     actual build/test/lint commands, a regression test where \
+                     warranted, and required docs, snapshots, or codegen. State \
+                     dependency order and which issues can run concurrently versus \
+                     which must be serialized. Ask one focused question if a \
+                     consequential scope or slice decision is unresolved. Report \
+                     created and reused issue URLs and the concurrency and ordering \
+                     plan. Work happens in each issue's own lazybox workspace, never a \
+                     named workspace beside it; don't assume their rows opened, since \
+                     visibility depends on the operator's filters and scopes. The \
+                     verdict names how many issues you created and how many you \
+                     reused.",
                 ),
             ),
             (
@@ -1240,13 +1282,13 @@ impl Snippets {
                      checklist carries: the acceptance criteria that define the change \
                      as complete; the concrete verification commands to run (build, \
                      test, lint) with their real invocations; a regression test where \
-                     the change warrants one; and the docs, snapshot, or codegen updates \
-                     this repo requires. Edit it onto the draft in place — `gh issue \
-                     edit` / `gh pr edit`, or into the body you're about to create — \
-                     don't just print it. Keep it tight and specific to the change at \
-                     hand; drop any line that doesn't apply rather than padding. Close \
-                     with a one-line, human-readable confirmation of what you stamped and \
-                     where.",
+                     the change warrants one; and the docs, snapshot, or codegen \
+                     updates this repo requires. Edit it onto the draft in place — `gh \
+                     issue edit` / `gh pr edit`, or into the body you're about to \
+                     create — don't just print it. Keep it tight and specific to the \
+                     change at hand; drop any line that doesn't apply rather than \
+                     padding. The verdict names how many issues you stamped and their \
+                     numbers.",
                 ),
             ),
             // ── Linear ──────────────────────────────────────────────
@@ -1256,13 +1298,14 @@ impl Snippets {
                     lin,
                     "Linear",
                     "Move the Linear issue to In Progress",
-                    "Move this workspace's Linear issue to In Progress to signal you've \
-                     started. Use the Linear tooling available to you (MCP, CLI, or API) to \
-                     set the workflow state — states are team-specific, so the started \
-                     state may be named differently; pick the one that fits. Confirm the \
-                     transition actually applied. If you can't reach Linear from here, say \
-                     so plainly instead of assuming it worked. Close with a one-line, \
-                     human-readable confirmation: the issue identifier and its new state.",
+                    "Move this workspace's Linear issue to In Progress to signal \
+                     you've started. Use the Linear tooling available to you (MCP, \
+                     CLI, or API) to set the workflow state — states are \
+                     team-specific, so the started state may be named differently; \
+                     pick the one that fits. Confirm the transition actually applied. \
+                     If you can't reach Linear from here, say so plainly instead of \
+                     assuming it worked. The verdict names the issue identifier and \
+                     its new state.",
                 ),
             ),
             (
@@ -1271,15 +1314,15 @@ impl Snippets {
                     lin,
                     "Linear",
                     "Move the Linear issue to Done",
-                    "Mark this workspace's Linear issue Done. First confirm the work is \
-                     actually complete — the change is merged or its PR is approved and \
-                     green, and the issue's acceptance criteria are met — then transition \
-                     it to the team's completed state via the Linear tooling available to \
-                     you (MCP, CLI, or API). Add a one-line closing comment linking the PR \
-                     that resolved it. If any acceptance criterion is unmet, don't close \
-                     it — tell me what's outstanding instead. Close with a one-line, \
-                     human-readable confirmation of the new state, or the list of what's \
-                     still outstanding.",
+                    "Mark this workspace's Linear issue Done. First confirm the work \
+                     is actually complete — the change is merged or its PR is approved \
+                     and green, and the issue's acceptance criteria are met — then \
+                     transition it to the team's completed state via the Linear \
+                     tooling available to you (MCP, CLI, or API). Add a one-line \
+                     closing comment linking the PR that resolved it. If any \
+                     acceptance criterion is unmet, don't close it — tell me what's \
+                     outstanding instead. The verdict names the issue identifier and \
+                     its new state, or what is still outstanding.",
                 ),
             ),
             (
@@ -1288,13 +1331,15 @@ impl Snippets {
                     lin,
                     "Linear",
                     "Comment a status update back to Linear",
-                    "Post a concise status update as a comment on this workspace's Linear \
-                     issue. Ground it in the real state of the branch and PR, not a guess. \
-                     Keep it to a few human-readable lines a teammate can skim — what's \
-                     done, what's in progress, and any blocker or decision you need — link \
-                     the PR if one exists, and post it with the Linear tooling available to \
-                     you (MCP, CLI, or API). Confirm the comment landed; if you can't reach \
-                     Linear, show me the update text instead.",
+                    "Post a concise status update as a comment on this workspace's \
+                     Linear issue. Ground it in the real state of the branch and PR, \
+                     not a guess. Keep it to a few human-readable lines a teammate can \
+                     skim — what's done, what's in progress, and any blocker or \
+                     decision you need — link the PR if one exists, and post it with \
+                     the Linear tooling available to you (MCP, CLI, or API). Confirm \
+                     the comment landed; if you can't reach Linear, show me the update \
+                     text instead. The verdict names the issue identifier and whether \
+                     the update posted; this snippet creates nothing.",
                 ),
             ),
             (
@@ -1303,15 +1348,15 @@ impl Snippets {
                     lin,
                     "Linear",
                     "Break the Linear issue into sub-issues",
-                    "Break this workspace's Linear issue into well-scoped sub-issues. Read \
-                     the parent with its comments, then decompose the work into \
+                    "Break this workspace's Linear issue into well-scoped sub-issues. \
+                     Read the parent with its comments, then decompose the work into \
                      independently shippable pieces — each with a clear title and a \
                      one-line deliverable — without slicing so thin that the overhead \
-                     outweighs the work. Create them as children of the parent under the \
-                     same team via the Linear tooling available to you, preserving the link \
-                     to the parent. If the issue is already small enough to do in one pass, \
-                     say so instead of splitting it. Close with a human-readable summary: \
-                     the sub-issue list with identifiers and one-line deliverables.",
+                     outweighs the work. Create them as children of the parent under \
+                     the same team via the Linear tooling available to you, preserving \
+                     the link to the parent. If the issue is already small enough to \
+                     do in one pass, say so instead of splitting it. The verdict names \
+                     how many sub-issues you created and their identifiers.",
                 ),
             ),
             (
@@ -1320,13 +1365,14 @@ impl Snippets {
                     lin,
                     "Linear",
                     "Link the PR to the Linear issue",
-                    "Connect this PR to its Linear issue so both sides cross-reference. Put \
-                     the issue identifier (e.g. `ENG-123`) in the PR title or body — \
-                     Linear's GitHub integration links them automatically from that magic \
-                     word — and confirm the link shows up on the Linear issue. If the \
-                     integration isn't wired up, instead add a comment on the issue with \
-                     the PR URL and a comment on the PR with the issue link. Close with a \
-                     one-line, human-readable confirmation of the linked pair.",
+                    "Connect this PR to its Linear issue so both sides \
+                     cross-reference. Put the issue identifier (e.g. `ENG-123`) in the \
+                     PR title or body — Linear's GitHub integration links them \
+                     automatically from that magic word — and confirm the link shows \
+                     up on the Linear issue. If the integration isn't wired up, \
+                     instead add a comment on the issue with the PR URL and a comment \
+                     on the PR with the issue link. The verdict names the linked issue \
+                     identifier and PR number.",
                 ),
             ),
             (
@@ -1335,17 +1381,18 @@ impl Snippets {
                     lin,
                     "Linear",
                     "Estimate and prioritize the Linear issue",
-                    "Estimate and prioritize this workspace's Linear issue. Read it fully \
-                     and assess the real scope against the surrounding code — trace what \
-                     actually has to change, don't guess from the title — then propose a \
-                     point estimate on the team's scale plus a priority, each with a \
-                     one-line justification. Call out the biggest uncertainty that could \
-                     blow the estimate. Set the fields via the Linear tooling available to \
-                     you if the values are clearly right, otherwise propose them for me to \
-                     confirm. Say so if the issue is too vague to estimate. Lead with the \
-                     detail (scope assessment, estimate, priority, justification), then \
-                     close with a human-readable summary: the estimate, the priority, and \
-                     the biggest risk to it.",
+                    "Estimate and prioritize this workspace's Linear issue. Read it \
+                     fully and assess the real scope against the surrounding code — \
+                     trace what actually has to change, don't guess from the title — \
+                     then propose a point estimate on the team's scale plus a \
+                     priority, each with a one-line justification. Call out the \
+                     biggest uncertainty that could blow the estimate. Set the fields \
+                     via the Linear tooling available to you if the values are clearly \
+                     right, otherwise propose them for me to confirm. Say so if the \
+                     issue is too vague to estimate. Lead with the detail (scope \
+                     assessment, estimate, priority, justification). The verdict names \
+                     the issue identifier, the estimate, the priority, and the biggest \
+                     risk to it.",
                 ),
             ),
             // ── Testing ─────────────────────────────────────────────
@@ -1354,15 +1401,16 @@ impl Snippets {
                 entry(
                     "Testing",
                     "Run the test suite and fix failures",
-                    "Run the project's test suite. If anything fails, fix the root cause \
-                     in the code — not the test, and not by loosening an assertion — then \
-                     re-run until green. \"The test is flaky\" or \"it's testing the wrong \
-                     thing\" is a claim you prove with a specific reason before you weaken \
-                     or delete it, never a quick way out of a real failure. If a test is \
-                     genuinely wrong, say so explicitly and explain before you touch it. \
-                     Lead with the per-failure detail — what failed, why, and what you \
-                     changed — then close with a human-readable summary: passed, fixed, and \
-                     still-failing counts at a glance.",
+                    "Run the project's test suite. If anything fails, fix the root \
+                     cause in the code — not the test, and not by loosening an \
+                     assertion — then re-run until green. \"The test is flaky\" or \
+                     \"it's testing the wrong thing\" is a claim you prove with a \
+                     specific reason before you weaken or delete it, never a quick way \
+                     out of a real failure. If a test is genuinely wrong, say so \
+                     explicitly and explain before you touch it. Lead with the \
+                     per-failure detail — what failed, why, and what you changed. The \
+                     verdict names passed, fixed, and still-failing counts, and says \
+                     which checks you did not run rather than implying they passed.",
                 ),
             ),
             (
@@ -1371,11 +1419,12 @@ impl Snippets {
                     "Testing",
                     "TDD: failing test first, then implement",
                     "Work test-first. Write a failing test that captures the desired \
-                     behavior, run it, and confirm it fails for the *right* reason (not a \
-                     typo or missing import). Then implement the minimal change to make \
-                     it pass, re-run to confirm green, and refactor with the test as your \
-                     guard. Show me the failing test before the implementation, then close \
-                     with a human-readable summary of the behavior it now locks in.",
+                     behavior, run it, and confirm it fails for the *right* reason \
+                     (not a typo or missing import). Then implement the minimal change \
+                     to make it pass, re-run to confirm green, and refactor with the \
+                     test as your guard. Show me the failing test before the \
+                     implementation. The verdict names the pass/fail counts and the \
+                     behavior the test now locks in.",
                 ),
             ),
             (
@@ -1384,12 +1433,12 @@ impl Snippets {
                     "Testing",
                     "Add tests for uncovered branches",
                     "Find the important untested branches in the code I just touched — \
-                     error paths, edge cases, and boundary conditions first, not just the \
-                     happy path. Add focused tests that would actually fail if the \
-                     behavior regressed, run them to confirm they pass, and tell me which \
-                     branches you deliberately left uncovered and why. Lead with the \
-                     per-branch detail, then close with a human-readable summary: branches \
-                     now covered versus deliberately skipped.",
+                     error paths, edge cases, and boundary conditions first, not just \
+                     the happy path. Add focused tests that would actually fail if the \
+                     behavior regressed, run them to confirm they pass, and tell me \
+                     which branches you deliberately left uncovered and why. Lead with \
+                     the per-branch detail. The verdict names the pass/fail counts and \
+                     how many branches are now covered versus deliberately skipped.",
                 ),
             ),
             (
@@ -1397,13 +1446,13 @@ impl Snippets {
                 entry(
                     "Testing",
                     "Write a failing test that reproduces the bug",
-                    "Write a minimal automated test that reproduces the bug I'm about to \
-                     describe. Trace the real code path first so the test exercises the \
-                     actual failure, then confirm it fails on the current code for the \
-                     same reason the bug occurs — that red test is the regression guard. \
-                     Don't fix the bug yet; just prove it with a failing test. Lead with \
-                     the failure output, then close with a human-readable summary: what the \
-                     test asserts and why its failure is exactly the bug.",
+                    "Write a minimal automated test that reproduces the bug I'm about \
+                     to describe. Trace the real code path first so the test exercises \
+                     the actual failure, then confirm it fails on the current code for \
+                     the same reason the bug occurs — that red test is the regression \
+                     guard. Don't fix the bug yet; just prove it with a failing test. \
+                     Lead with the failure output. The verdict names the pass/fail \
+                     counts and why the failure is exactly the bug.",
                 ),
             ),
             // ── Debugging ───────────────────────────────────────────
@@ -1412,17 +1461,18 @@ impl Snippets {
                 entry(
                     "Debugging",
                     "Root-cause the failure",
-                    "Investigate the failure I'm about to describe. Find the root cause \
-                     before proposing any fix — trace the actual code path and confirm \
-                     the mechanism, don't guess or pattern-match. A plausible-but-unconfirmed \
-                     cause is a hypothesis, not a diagnosis: prove it by making the bug \
-                     appear and vanish on command. Once you can explain \
-                     exactly why it happens, write a failing regression test, then fix \
-                     the underlying cause (never the symptom) and confirm the test goes \
-                     green — a fix you can't back with that red-then-green test isn't done. \
-                     Lead with the detail — the mechanism, the fix, and why it's the real \
-                     cause — then close with a human-readable summary a teammate could act \
-                     on in a single read.",
+                    "Investigate the failure I'm about to describe. Find the root \
+                     cause before proposing any fix — trace the actual code path and \
+                     confirm the mechanism, don't guess or pattern-match. A \
+                     plausible-but-unconfirmed cause is a hypothesis, not a diagnosis: \
+                     prove it by making the bug appear and vanish on command. Once you \
+                     can explain exactly why it happens, write a failing regression \
+                     test, then fix the underlying cause (never the symptom) and \
+                     confirm the test goes green — a fix you can't back with that \
+                     red-then-green test isn't done. Lead with the detail — the \
+                     mechanism, the fix, and why it's the real cause. The verdict \
+                     names the root cause in one sentence, plus the pass/fail counts \
+                     if you ran anything.",
                 ),
             ),
             (
@@ -1430,13 +1480,13 @@ impl Snippets {
                 entry(
                     "Debugging",
                     "git bisect to find the offending commit",
-                    "Use `git bisect` to find the commit that introduced the regression. \
-                     Establish a known-good and known-bad revision, script the check as a \
-                     one-liner where you can so the bisect runs automatically, and identify \
-                     the first bad commit. Reset the bisect state when you're done. Lead \
-                     with the detail — the commit's diff and how it caused the failure — \
-                     then close with a human-readable summary: the offending commit, what \
-                     it changed, and the fix direction it points to.",
+                    "Use `git bisect` to find the commit that introduced the \
+                     regression. Establish a known-good and known-bad revision, script \
+                     the check as a one-liner where you can so the bisect runs \
+                     automatically, and identify the first bad commit. Reset the \
+                     bisect state when you're done. Lead with the detail — the \
+                     commit's diff and how it caused the failure. The verdict names \
+                     the offending commit and the root cause it points at.",
                 ),
             ),
             (
@@ -1446,11 +1496,11 @@ impl Snippets {
                     "Add logging to narrow it down",
                     "Add targeted logging around the suspect code path to narrow where \
                      behavior diverges from expectation — log the inputs, the branch \
-                     taken, and the key values at each step, not everything. Run it and \
-                     read what it reveals. Keep the instrumentation easy to remove once \
-                     we've found it. Lead with the captured trace detail, then close with a \
-                     human-readable summary: where reality first diverged from expectation \
-                     and the next place to look.",
+                     taken, and the key values at each step, not everything. Run it \
+                     and read what it reveals. Keep the instrumentation easy to remove \
+                     once we've found it. Lead with the captured trace detail. The \
+                     verdict names the root cause — where reality first diverged from \
+                     expectation — and the next place to look.",
                 ),
             ),
             (
@@ -1459,12 +1509,12 @@ impl Snippets {
                     "Debugging",
                     "Explain this error / stack trace",
                     "Explain the error or stack trace I'm about to paste: what it \
-                     actually means, the most likely cause given *this* codebase (trace \
-                     it to the real line, don't speak in generalities), and the single \
-                     concrete next step to confirm and fix it. If more than one cause is \
-                     plausible, rank them and say how to tell them apart. Lead with the \
-                     detailed read of the trace, then close with a human-readable summary: \
-                     the most likely cause in one line and the next step to take.",
+                     actually means, the most likely cause given *this* codebase \
+                     (trace it to the real line, don't speak in generalities), and the \
+                     single concrete next step to confirm and fix it. If more than one \
+                     cause is plausible, rank them and say how to tell them apart. \
+                     Lead with the detailed read of the trace. The verdict names the \
+                     most likely root cause and the next step to take.",
                 ),
             ),
             // ── Refactor ────────────────────────────────────────────
@@ -1473,15 +1523,16 @@ impl Snippets {
                 entry(
                     "Refactor",
                     "Refactor for clarity, no behavior change",
-                    "Refactor the code I point you at for clarity and simplicity with no \
-                     behavior change. Keep the diff small and reviewable — one coherent \
-                     transformation, not a rewrite. Prove behavior is unchanged by \
-                     running the existing tests before and after; if coverage there is \
-                     thin, add a characterization test first. Follow the scout rule: don't \
-                     fix bugs or change APIs along the way — flag those separately instead \
-                     of folding them in. Lead with the detail of what you changed and why \
-                     it's behavior-preserving, then close with a human-readable summary and \
-                     confirmation the tests match before and after.",
+                    "Refactor the code I point you at for clarity and simplicity with \
+                     no behavior change. Keep the diff small and reviewable — one \
+                     coherent transformation, not a rewrite. Prove behavior is \
+                     unchanged by running the existing tests before and after; if \
+                     coverage there is thin, add a characterization test first. Follow \
+                     the scout rule: don't fix bugs or change APIs along the way — \
+                     flag those separately instead of folding them in. Lead with the \
+                     detail of what you changed and why it's behavior-preserving. The \
+                     verdict names what you restructured and whether the tests match \
+                     before and after.",
                 ),
             ),
             (
@@ -1491,11 +1542,11 @@ impl Snippets {
                     "Rename a symbol across the repo",
                     "Rename the symbol I specify consistently across the whole repo — \
                      code, tests, docs, and comments. Lean on the compiler or language \
-                     tooling to catch call sites rather than a blind find-replace, verify \
-                     nothing unrelated matched the same string, and confirm it still \
-                     builds and tests pass. No behavior change beyond the rename. Close \
-                     with a human-readable summary: how many call sites moved and \
-                     confirmation the tree is green.",
+                     tooling to catch call sites rather than a blind find-replace, \
+                     verify nothing unrelated matched the same string, and confirm it \
+                     still builds and tests pass. No behavior change beyond the \
+                     rename. The verdict names how many call sites moved and whether \
+                     the tree is green.",
                 ),
             ),
             (
@@ -1506,11 +1557,12 @@ impl Snippets {
                     "Extract the logic I point you at into a well-named function or \
                      module with a clear signature and no hidden coupling to its old \
                      context. Update every call site, keep behavior identical, and \
-                     confirm with the existing tests. Keep the diff reviewable — this is \
-                     a move, not a rewrite; follow the scout rule and flag any behavior \
-                     change you're tempted to make instead of quietly doing it. Lead with \
-                     the detail of the new boundary and the call sites moved, then close \
-                     with a human-readable summary and confirmation tests still pass.",
+                     confirm with the existing tests. Keep the diff reviewable — this \
+                     is a move, not a rewrite; follow the scout rule and flag any \
+                     behavior change you're tempted to make instead of quietly doing \
+                     it. Lead with the detail of the new boundary and the call sites \
+                     moved. The verdict names the new boundary and whether the tests \
+                     still pass.",
                 ),
             ),
             (
@@ -1519,13 +1571,13 @@ impl Snippets {
                     "Refactor",
                     "Remove duplication",
                     "Unify the near-duplicate logic I point you at behind a single \
-                     implementation — but only where it's genuinely the same concept, not \
-                     coincidentally similar code that will diverge later. Preserve \
-                     behavior exactly, update all call sites, and confirm with tests. If \
-                     some copies differ in ways that matter, say so and leave them alone. \
-                     Lead with the detail of what you unified and what you deliberately \
-                     kept separate, then close with a human-readable summary and \
-                     confirmation tests still pass.",
+                     implementation — but only where it's genuinely the same concept, \
+                     not coincidentally similar code that will diverge later. Preserve \
+                     behavior exactly, update all call sites, and confirm with tests. \
+                     If some copies differ in ways that matter, say so and leave them \
+                     alone. Lead with the detail of what you unified and what you \
+                     deliberately kept separate. The verdict names how many duplicates \
+                     you unified and whether the tests still pass.",
                 ),
             ),
             // ── Performance ─────────────────────────────────────────
@@ -1534,14 +1586,14 @@ impl Snippets {
                 entry(
                     "Performance",
                     "Profile and optimize the hot path",
-                    "Profile the hot path I describe and find where the time *actually* \
-                     goes — measure, don't assume. Optimize the biggest win first, \
-                     confirm the improvement with a before/after measurement, and stop \
-                     when the gains stop mattering. Don't trade correctness or \
-                     readability for micro-gains, and keep the existing tests green. Lead \
-                     with the detail — the profile, the change, and the before/after \
-                     numbers — then close with a human-readable summary: the speedup and \
-                     what's now the bottleneck.",
+                    "Profile the hot path I describe and find where the time \
+                     *actually* goes — measure, don't assume. Optimize the biggest win \
+                     first, confirm the improvement with a before/after measurement, \
+                     and stop when the gains stop mattering. Don't trade correctness \
+                     or readability for micro-gains, and keep the existing tests \
+                     green. Lead with the detail — the profile, the change, and the \
+                     before/after numbers. The verdict names the measured speedup and \
+                     what is now the bottleneck.",
                 ),
             ),
             (
@@ -1549,12 +1601,14 @@ impl Snippets {
                 entry(
                     "Performance",
                     "Add a benchmark",
-                    "Add a benchmark that captures the performance characteristic we care \
-                     about here, using the project's existing benchmarking setup if there \
-                     is one. Make it representative and repeatable, run it, and record the \
-                     current baseline numbers so future changes can be measured against \
-                     it. Close with a human-readable summary: what the benchmark measures \
-                     and its baseline number.",
+                    "Add a benchmark that captures the performance characteristic we \
+                     care about here, using the project's existing benchmarking setup \
+                     if there is one. Make it representative and repeatable, run it, \
+                     and record the current baseline numbers so future changes can be \
+                     measured against it. Record the workload size, command, \
+                     environment, units, and variation across repeated runs; keep \
+                     setup outside the timed region. The verdict names what the \
+                     benchmark measures and its baseline number.",
                 ),
             ),
             (
@@ -1562,13 +1616,13 @@ impl Snippets {
                 entry(
                     "Performance",
                     "Reduce allocations in the hot path",
-                    "Find avoidable allocations and copies in the hot path I point you at \
-                     — reuse buffers, borrow instead of clone, drop intermediate \
+                    "Find avoidable allocations and copies in the hot path I point you \
+                     at — reuse buffers, borrow instead of clone, drop intermediate \
                      collections — and remove them only where a measurement shows it \
                      helps and the code stays readable. Confirm the win with a \
                      before/after benchmark and keep the tests green. Lead with the \
-                     per-site detail (what allocated, the fix, the measured win), then \
-                     close with a human-readable summary of the total reduction.",
+                     per-site detail (what allocated, the fix, the measured win). The \
+                     verdict names the total measured reduction.",
                 ),
             ),
             // ── Security ────────────────────────────────────────────
@@ -1578,18 +1632,18 @@ impl Snippets {
                     "Security",
                     "Security review of the diff",
                     "Review the current diff for security issues: injection, missing \
-                     authz/authn checks, unsafe deserialization, path traversal, secret \
-                     handling, SSRF, and unchecked input crossing a trust boundary. Review \
-                     adversarially: assume there IS an exploitable hole, every input is \
-                     hostile, and every check is bypassable until you trace why it isn't, \
-                     and don't retire a finding as \"probably not exploitable,\" \"out of \
-                     scope,\" or \"degrades gracefully\" without the specific reason the \
-                     exploit fails. Lead with the full detail: for each finding the \
-                     `file:line`, the concrete exploit path — the literal input that \
-                     crosses the boundary — and the fix, ranked by exploitability. Then \
-                     close with a human-readable summary: a one-line verdict and the most \
-                     exploitable hole at a glance. If the diff introduces no \
-                     security-relevant change, say so rather than padding the list.",
+                     authz/authn checks, unsafe deserialization, path traversal, \
+                     secret handling, SSRF, and unchecked input crossing a trust \
+                     boundary. Review adversarially: assume there IS an exploitable \
+                     hole, every input is hostile, and every check is bypassable until \
+                     you trace why it isn't, and don't retire a finding as \"probably \
+                     not exploitable,\" \"out of scope,\" or \"degrades gracefully\" \
+                     without the specific reason the exploit fails. Lead with the full \
+                     detail: for each finding the `file:line`, the concrete exploit \
+                     path — the literal input that crosses the boundary — and the fix, \
+                     ranked by exploitability. The verdict names how many exploitable \
+                     holes remain and the most exploitable one. If the diff introduces \
+                     no security-relevant change, say so rather than padding the list.",
                 ),
             ),
             (
@@ -1598,14 +1652,14 @@ impl Snippets {
                     "Security",
                     "Audit and update dependencies",
                     "Audit the project's dependencies for known vulnerabilities and \
-                     unmaintained packages using the ecosystem's audit tool. Propose safe \
-                     upgrades, call out breaking changes from each changelog, and don't \
-                     bump anything without checking what changed. Don't dismiss an advisory \
-                     as \"not exploitable here\" unless you've traced that the vulnerable \
-                     path is genuinely unreachable — assume it's reachable until proven \
-                     dead. Lead with the per-advisory detail (severity, the fixed version, \
-                     breaking changes), then close with a human-readable summary: what to \
-                     upgrade first and why.",
+                     unmaintained packages using the ecosystem's audit tool. Propose \
+                     safe upgrades, call out breaking changes from each changelog, and \
+                     don't bump anything without checking what changed. Don't dismiss \
+                     an advisory as \"not exploitable here\" unless you've traced that \
+                     the vulnerable path is genuinely unreachable — assume it's \
+                     reachable until proven dead. Lead with the per-advisory detail \
+                     (severity, the fixed version, breaking changes). The verdict \
+                     names how many advisories remain and what to upgrade first.",
                 ),
             ),
             (
@@ -1618,13 +1672,13 @@ impl Snippets {
                     "Scan the diff — and recent history if relevant — for accidentally \
                      committed secrets: API keys, tokens, private keys, passwords, \
                      connection strings. For anything found, flag it clearly with \
-                     `file:line`, treat it as already compromised, and advise on rotation \
-                     and scrubbing it from history. Don't downgrade a match to \"probably a \
-                     test fixture or example key\" unless you've confirmed it isn't a live \
-                     credential — assume real until proven otherwise. Don't echo the full \
-                     secret value back. Lead with the per-hit detail, then close with a \
-                     human-readable summary: how many live-credential risks and the \
-                     rotation steps in order.",
+                     `file:line`, treat it as already compromised, and advise on \
+                     rotation and scrubbing it from history. Don't downgrade a match \
+                     to \"probably a test fixture or example key\" unless you've \
+                     confirmed it isn't a live credential — assume real until proven \
+                     otherwise. Don't echo the full secret value back. Lead with the \
+                     per-hit detail. The verdict names how many live-credential risks \
+                     remain and the first rotation step.",
                 ),
             ),
             // ── Docs ────────────────────────────────────────────────
@@ -1633,12 +1687,13 @@ impl Snippets {
                 entry(
                     "Docs",
                     "Document public APIs",
-                    "Document the public APIs I touched: what each does, its parameters \
-                     and return, invariants and failure modes, and a short usage example \
-                     where it earns its place. Match the surrounding doc style and \
-                     tooling exactly. Skip the trivial and self-evident — document the \
-                     *why*, not the obvious *what*. Close with a human-readable summary of \
-                     which APIs you documented.",
+                    "Document the public APIs I touched: what each does, its \
+                     parameters and return, invariants and failure modes, and a short \
+                     usage example where it earns its place. Match the surrounding doc \
+                     style and tooling exactly. Check examples against the actual \
+                     signatures and run the documentation tests or build. Skip the \
+                     trivial and self-evident — document the *why*, not the obvious \
+                     *what*. The verdict names which APIs you documented.",
                 ),
             ),
             (
@@ -1646,12 +1701,12 @@ impl Snippets {
                 entry(
                     "Docs",
                     "Update the README",
-                    "Update the README to reflect the change I just made — usage, flags, \
-                     examples, and anything now stale or wrong. Verify each command or \
-                     example actually works rather than assuming, keep it accurate and \
-                     concise, and don't rewrite sections that are still correct. Close with \
-                     a human-readable summary of what you updated and what you verified by \
-                     running it.",
+                    "Update the README to reflect the change I just made — usage, \
+                     flags, examples, and anything now stale or wrong. Verify each \
+                     command or example actually works rather than assuming, keep it \
+                     accurate and concise, and don't rewrite sections that are still \
+                     correct. The verdict names what you updated and what you verified \
+                     by running it.",
                 ),
             ),
             (
@@ -1659,13 +1714,14 @@ impl Snippets {
                 entry(
                     "Docs",
                     "Write an ADR for this decision",
-                    "Write a short Architecture Decision Record for the decision we just \
-                     made: the context and forces, the options considered with their \
-                     trade-offs, the decision, and its consequences (good and bad). \
-                     Follow any existing ADR format and numbering in the repo. Be honest \
-                     about what we're giving up, not just why we're right. Open it with a \
-                     human-readable one-line summary of the decision, then the full detail \
-                     below.",
+                    "Write a short Architecture Decision Record for the decision we \
+                     just made: the context and forces, the options considered with \
+                     their trade-offs, the decision, and its consequences (good and \
+                     bad). Follow any existing ADR format and numbering in the repo. \
+                     Be honest about what we're giving up, not just why we're right. \
+                     Open it with a one-line summary of the decision, then the full \
+                     detail below. The verdict names the ADR number and the decision \
+                     it records.",
                 ),
             ),
             // ── Chores ──────────────────────────────────────────────
@@ -1674,12 +1730,12 @@ impl Snippets {
                 entry(
                     "Chores",
                     "Fix lint and formatting",
-                    "Run the project's linter and formatter, then fix every warning and \
-                     formatting issue in the code I touched — address the underlying \
-                     cause, never suppress or `allow` it away without a clear reason. \
-                     Re-run to confirm clean, and follow the scout rule: don't drag \
-                     unrelated reformatting into the diff. Close with a human-readable \
-                     summary: how many warnings you fixed and confirmation the linter is \
+                    "Run the project's linter and formatter, then fix every warning \
+                     and formatting issue in the code I touched — address the \
+                     underlying cause, never suppress or `allow` it away without a \
+                     clear reason. Re-run to confirm clean, and follow the scout rule: \
+                     don't drag unrelated reformatting into the diff. The verdict \
+                     names how many warnings you fixed and whether the linter is \
                      clean.",
                 ),
             ),
@@ -1689,13 +1745,14 @@ impl Snippets {
                     "Chores",
                     "Diagnose and fix failing CI",
                     "CI is failing. Pull the failing job's logs (`gh run view \
-                     --log-failed`), find the real cause rather than the surface error, \
-                     and fix it locally. Don't write a failure off as a flake or \
-                     \"unrelated\" without re-running to prove it — a green-on-retry is \
-                     evidence, a guess is an excuse to skip the work. Re-run the equivalent \
-                     check here to confirm it passes before pushing. Lead with the detail \
-                     — what was actually broken and the fix — then close with a \
-                     human-readable summary confirming the check is green.",
+                     --log-failed`), find the real cause rather than the surface \
+                     error, and fix it locally. Don't write a failure off as a flake \
+                     or \"unrelated\" without re-running to prove it — a \
+                     green-on-retry is evidence, a guess is an excuse to skip the \
+                     work. Re-run the equivalent check here to confirm it passes \
+                     before pushing. Lead with the detail — what was actually broken \
+                     and the fix. The verdict names the check and whether it is now \
+                     green.",
                 ),
             ),
             (
@@ -1703,13 +1760,14 @@ impl Snippets {
                 entry(
                     "Chores",
                     "Remove dead code and unused deps",
-                    "Find and remove dead code, unused imports, and unused dependencies \
-                     in the area I point you at. Before deleting each one, verify it's \
-                     truly unreferenced — check for reflection, macros, feature gates, \
-                     and dynamic dispatch that a static search misses. Confirm it still \
-                     builds and tests pass, and keep the deletions in a reviewable diff. \
-                     Lead with the per-item detail (what you removed and how you confirmed \
-                     it's dead), then close with a human-readable summary of what was cut.",
+                    "Find and remove dead code, unused imports, and unused \
+                     dependencies in the area I point you at. Before deleting each \
+                     one, verify it's truly unreferenced — check for reflection, \
+                     macros, feature gates, and dynamic dispatch that a static search \
+                     misses. Confirm it still builds and tests pass, and keep the \
+                     deletions in a reviewable diff. Lead with the per-item detail \
+                     (what you removed and how you confirmed it's dead). The verdict \
+                     names how much was cut and whether the tree is green.",
                 ),
             ),
         ]);
@@ -2104,6 +2162,139 @@ snippets:
         assert_eq!(s.get("bare").unwrap().category, "");
     }
 
+    /// The contract rides *delivery*, never the authored body (#1697).
+    ///
+    /// Baking it into `body` leaked a turn-ending trailer into three
+    /// embed/preview surfaces where the snippet is not the whole turn —
+    /// see [`Snippet::delivery_body`]. Asserting on both halves is the
+    /// point: `body` must stay clean, `delivery_body` must carry it.
+    #[test]
+    fn the_output_contract_rides_delivery_not_the_authored_body() {
+        for (key, snippet) in Snippets::builtin().all() {
+            assert!(
+                !snippet.body.contains("OUTPUT CONTRACT"),
+                "built-in `{key}` baked the contract into its authored body — it belongs \
+                 in `delivery_body` so exports and role preambles don't carry it",
+            );
+            assert!(
+                !snippet.dispatch_body().contains("OUTPUT CONTRACT"),
+                "{key}"
+            );
+            assert!(!snippet.body.contains(['🟢', '🟡', '🔴', '❓']), "{key}");
+
+            let delivered = snippet.delivery_body();
+            assert!(delivered.ends_with(OUTPUT_CONTRACT), "{key}");
+            assert_eq!(delivered.matches("OUTPUT CONTRACT").count(), 1, "{key}");
+            assert!(delivered.starts_with(&snippet.dispatch_body()), "{key}");
+        }
+    }
+
+    /// The regression that shipped: 46 of 61 bodies still ended with their
+    /// own "close with a human-readable summary: …" while the appended
+    /// contract said "nothing after it". Two terminal instructions in one
+    /// prompt is exactly the cross-agent divergence #1697 exists to remove,
+    /// so no built-in may carry a second one.
+    #[test]
+    fn no_builtin_body_competes_with_the_output_contract() {
+        for (key, snippet) in Snippets::builtin().all() {
+            let lower = snippet.body.to_lowercase();
+            for phrase in [
+                "close with",
+                "finish with",
+                "end with a",
+                "print a one-line",
+            ] {
+                assert!(
+                    !lower.contains(phrase),
+                    "built-in `{key}` body says {phrase:?} — the output contract already \
+                     owns the ending; state what the verdict names instead",
+                );
+            }
+        }
+    }
+
+    /// A verdict fact must describe what *this* snippet produces. Keying
+    /// them off `category` told `ready` (which never pushes) to name a
+    /// pushed SHA and `whyci` (a read-only diagnosis) to name what it
+    /// created, so every built-in carries its own.
+    #[test]
+    fn every_builtin_states_what_its_verdict_names() {
+        for (key, snippet) in Snippets::builtin().all() {
+            assert!(
+                snippet.body.contains("The verdict names"),
+                "built-in `{key}` never says what its verdict names",
+            );
+        }
+        let b = Snippets::builtin();
+        let fact = |key: &str| b.get(key).expect(key).body.clone();
+        // Read-only snippets must not claim to have created or pushed.
+        assert!(fact("ready").contains("pushes nothing"));
+        assert!(fact("whyci").contains("changes nothing"));
+        assert!(fact("status").contains("creates nothing"));
+        assert!(fact("handoff").contains("commits and pushes nothing"));
+        // …and a polish pass must not report blockers.
+        assert!(fact("nit").contains("a nit is not a blocker"));
+        // Snippets that really do push say so.
+        assert!(fact("push").contains("the pushed SHA"));
+        assert!(fact("commit").contains("whether it was pushed"));
+    }
+
+    /// `NEED CONTEXT` is prose nobody polls. lazybox already owns a
+    /// machine channel for "a human must unblock this" — `report_blocker`,
+    /// which feeds `epic_status` and the `E j` jump — so the contract
+    /// routes the status into it rather than adding a fourth dead one.
+    #[test]
+    fn need_context_routes_into_report_blocker() {
+        assert!(OUTPUT_CONTRACT.contains("report_blocker"));
+        let contract = Snippets::builtin().get("rev").expect("rev").delivery_body();
+        assert!(contract.contains("`report_blocker`"));
+    }
+
+    /// #1697 named `ready` / `doc` / `bench` as under-specified — each
+    /// asked for an outcome without naming how to observe it.
+    #[test]
+    fn ready_docs_and_bench_require_observed_results() {
+        let builtins = Snippets::builtin();
+        for (key, checks) in [
+            ("ready", ["--json url,isDraft", "If already ready"]),
+            ("doc", ["actual signatures", "documentation tests or build"]),
+            (
+                "bench",
+                [
+                    "variation across repeated runs",
+                    "setup outside the timed region",
+                ],
+            ),
+        ] {
+            let body = &builtins.get(key).expect(key).body;
+            for check in checks {
+                assert!(body.contains(check), "{key}: {check}");
+            }
+        }
+    }
+
+    /// A user's own prompt is delivered as authored. The contract is
+    /// lazybox's house style for *its* built-ins, not a rewrite we impose
+    /// on someone's file — and an override shadows the built-in origin, so
+    /// it opts out with it.
+    #[test]
+    fn user_bodies_and_overrides_are_delivered_as_authored() {
+        let yaml = "snippets:\n  rev:\n    body: My review\n  custom:\n    body: My task\n";
+        let path = write_tmp("output-contract-user", yaml);
+        let user = Snippets::load_from(&path, SnippetOrigin::Global).expect("load snippets");
+        let merged = Snippets::merged(Snippets::builtin(), user);
+        for key in ["rev", "custom"] {
+            let snippet = merged.get(key).expect(key);
+            assert!(
+                !snippet.delivery_body().contains("OUTPUT CONTRACT"),
+                "{key}"
+            );
+        }
+        assert_eq!(merged.get("rev").expect("override").body, "My review");
+        assert_eq!(merged.get("custom").expect("custom").body, "My task");
+        assert_eq!(std::fs::read_to_string(path).expect("read snippets"), yaml);
+    }
+
     /// The built-in library is large and every entry is categorized —
     /// the picker relies on that to group.
     #[test]
@@ -2126,6 +2317,9 @@ snippets:
     #[test]
     fn builtin_bodies_are_substantial() {
         for (key, s) in Snippets::builtin().all() {
+            // `body`, never `delivery_body`: measuring the delivered text
+            // would count a shared constant toward each snippet's own
+            // floor, so a near-empty body would pass on boilerplate alone.
             assert!(
                 s.body.len() >= 150,
                 "built-in `{key}` body is too thin ({} chars) — snippet bodies \
@@ -3165,6 +3359,24 @@ snippets:
         );
         assert!(Snippets::builtin_body("designissues").is_some());
         assert!(Snippets::builtin_body("no-such-snippet").is_none());
+    }
+
+    /// A brief is folded into the Planner role preamble *ahead of* the
+    /// real work prompt (`prompts::role_preamble`), so it is not the end
+    /// of the turn. Baking the contract into `body` put two "close with
+    /// exactly this shape … and nothing after it" trailers mid-prompt,
+    /// each followed by more text, and blew the preamble's documented
+    /// ≤12-line budget. The briefs carry the task, never the ending.
+    #[test]
+    fn planner_briefs_carry_no_output_contract() {
+        let briefs: Vec<String> = ["carve", "designissues"]
+            .into_iter()
+            .filter_map(Snippets::builtin_body)
+            .collect();
+        assert_eq!(briefs.len(), 2);
+        let joined = briefs.join("\n\n");
+        assert!(!joined.contains("OUTPUT CONTRACT"), "{joined}");
+        assert!(!joined.contains("nothing after it"), "{joined}");
     }
 
     /// #1586: a tracker record is worked in the row it already has, and the

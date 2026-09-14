@@ -121,8 +121,23 @@ query($query: String!, $first: Int!, $after: String) {
         comments(last: 1) {
           totalCount
           nodes {
+            id
             author { login }
             createdAt
+            # `body` + `id` are what make a `@lazybox` mention written as a
+            # COMMENT reachable (#1757). `scan_issue` already loops
+            # `issue.comments.nodes` and checks each body — but this query
+            # selected only `author` + `createdAt`, and `GqlComment.body` is
+            # `#[serde(default)]`, so every comment deserialized with an EMPTY
+            # body and `contains_lazybox_mention("")` was false for all of
+            # them. The scanner ran and could never match, which is why the
+            # failure was silent: no error, no log line, just a documented
+            # trigger that never fired on a scoped install.
+            #
+            # Two scalar fields on the ONE comment already being fetched —
+            # this does not reinstate the `comments(15)` fan-out whose cost
+            # forced this selection down to `last: 1` in the first place.
+            body
           }
         }
         # Authoritative PR->issue link, kept eager for #559. Adds ~10

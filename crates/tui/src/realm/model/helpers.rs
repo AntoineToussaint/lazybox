@@ -2242,3 +2242,102 @@ mod collision_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod cursor_row_actions_resolve_from_every_pane {
+    //! `*` (star) and `v` (multi-select) act on the sidebar's cursor row
+    //! exactly like `m` / `z` / `w w` do, so they resolve wherever those
+    //! do — not only under literal sidebar focus (#1756). Driven through
+    //! `dispatch_event`, the real crossterm ingestion path, not
+    //! `dispatch_action`.
+    use super::{Model, PaneFocus, dispatch_event};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
+
+    fn model_with_activity_row() -> (TestModel, SessionKey) {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let mut ws = Workspace::empty(
+            WorkspaceKey::new("owner/repo#1"),
+            "main",
+            chrono::Utc::now(),
+        );
+        ws.activity.push(lazybox_core::Activity {
+            author: "alice".into(),
+            body: "ping".into(),
+            created_at: chrono::Utc::now(),
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            ws,
+        )));
+        m.sync_panes();
+        (m, key)
+    }
+
+    fn press(m: &mut TestModel, c: char) {
+        let mut key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        key.kind = KeyEventKind::Press;
+        dispatch_event(m, Event::Key(key));
+    }
+
+    fn focus(m: &mut TestModel, focus: PaneFocus) {
+        m.focus = focus;
+        m.set_focus_attr();
+    }
+
+    #[test]
+    fn v_toggles_the_cursor_workspace_under_every_key_focus() {
+        for pane in [PaneFocus::Sidebar, PaneFocus::Right, PaneFocus::Terminals] {
+            let (mut m, _key) = model_with_activity_row();
+            focus(&mut m, pane);
+            press(&mut m, 'v');
+            assert_eq!(
+                m.sidebar.broadcast_selected_count(),
+                1,
+                "v selects under {pane:?}"
+            );
+            press(&mut m, 'v');
+            assert_eq!(
+                m.sidebar.broadcast_selected_count(),
+                0,
+                "v un-selects under {pane:?}"
+            );
+            assert!(
+                m.right.selected_activity_indices().is_empty(),
+                "v is the workspace select, not the activity-row select, under {pane:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn star_toggles_the_cursor_workspace_under_every_key_focus() {
+        for pane in [PaneFocus::Sidebar, PaneFocus::Right, PaneFocus::Terminals] {
+            let (mut m, key) = model_with_activity_row();
+            focus(&mut m, pane);
+            press(&mut m, '*');
+            assert!(m.sidebar.is_focused(&key), "* stars under {pane:?}");
+            press(&mut m, '*');
+            assert!(!m.sidebar.is_focused(&key), "* unstars under {pane:?}");
+        }
+    }
+
+    #[test]
+    fn space_still_selects_the_activity_row_from_the_activity_pane() {
+        let (mut m, _key) = model_with_activity_row();
+        focus(&mut m, PaneFocus::Right);
+        press(&mut m, ' ');
+        assert_eq!(m.right.selected_activity_indices(), vec![0]);
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+    }
+}

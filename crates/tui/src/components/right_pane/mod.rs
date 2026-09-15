@@ -2294,14 +2294,13 @@ impl RightPane {
                 self.activity_cursor_bottom();
                 PaneOutcome::Consumed
             }
-            // `Space` (and the vim-style `v`) toggle the focused
-            // activity row into / out of the selection set. `Space`
-            // is the discoverable convention surfaced in the hint
-            // bar; `v` stays for muscle memory. `w` then consumes the
-            // set (or the cursor row when it's empty) and spawns the
-            // default agent with a pre-built "address these comments"
-            // prompt.
-            (KeyCode::Char(' '), KeyModifiers::NONE) | (KeyCode::Char('v'), KeyModifiers::NONE) => {
+            // `Space` toggles the focused activity row into / out of
+            // the selection set; `v` is the workspace multi-select and
+            // resolves through the catalog before the pane sees it. `w`
+            // then consumes the set (or the cursor row when it's empty)
+            // and spawns the default agent with a pre-built "address
+            // these comments" prompt.
+            (KeyCode::Char(' '), KeyModifiers::NONE) => {
                 if !workspace.activity.is_empty() {
                     let c = self.feed.cursor;
                     self.feed.toggle_select(c);

@@ -211,6 +211,71 @@ fn binaries_missing_a_sandbox(
     missing
 }
 
+/// The sandbox body is copied by hand into every test binary (a shared
+/// helper would be env-mutating production API), and "keep the copies in
+/// step" is prose nobody enforces: a fix to one `isolate_git` — a new key
+/// in the gitconfig, a second variable — would silently leave the others
+/// behind. Every copy must match the reference in
+/// `crates/server/tests/common/mod.rs`, modulo the indentation a
+/// `mod config_sandbox { … }` wrapper adds.
+#[test]
+fn every_copy_of_the_git_sandbox_matches_the_reference() {
+    let root = workspace_root();
+    let reference = git_sandbox_body(&read(&root.join("crates/server/tests/common/mod.rs")))
+        .expect("the reference copy defines isolate_git");
+    let mut drifted = Vec::new();
+    for file in rust_sources(&root.join("crates")) {
+        if file
+            .file_name()
+            .is_some_and(|name| name == "test_isolation.rs")
+        {
+            continue;
+        }
+        let body = read(&file);
+        if !body.contains("fn isolate_git(") {
+            continue;
+        }
+        match git_sandbox_body(&body) {
+            Some(copy) if copy == reference => {}
+            _ => drifted.push(
+                file.strip_prefix(&root)
+                    .unwrap_or(&file)
+                    .display()
+                    .to_string(),
+            ),
+        }
+    }
+    assert!(
+        drifted.is_empty(),
+        "these copies of `isolate_git` differ from crates/server/tests/common/mod.rs; \
+         apply the same edit to every copy:\n  {}",
+        drifted.join("\n  ")
+    );
+}
+
+/// The `isolate_git` function from its signature to the first closing
+/// brace at its own indent, with all whitespace removed: a copy nested in a
+/// `mod config_sandbox` sits four columns deeper, and rustfmt wraps its
+/// longer lines at different points, so only the token text can compare.
+fn git_sandbox_body(source: &str) -> Option<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("fn isolate_git("))?;
+    let indent = lines[start].len() - lines[start].trim_start().len();
+    let end = lines[start..]
+        .iter()
+        .position(|line| *line == format!("{}}}", " ".repeat(indent)))?
+        + start;
+    Some(
+        lines[start..=end]
+            .concat()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect(),
+    )
+}
+
 /// The scan only means something if it recognizes the sandboxes that exist:
 /// the reference copy it points people at has to pass its own check.
 #[test]

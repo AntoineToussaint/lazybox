@@ -215,8 +215,13 @@ pub fn cycle_next() -> &'static str {
 /// render on another thread rebuild, and a rebuild-count assertion fails
 /// with nothing in its own body to explain it (#1751). Every test that
 /// switches the theme holds this for its whole body, as does every test
-/// that asserts stability across renders; `theme_switching_tests_take_the_lock`
-/// scans for both.
+/// that asserts render-cache reuse; `theme_switching_tests_take_the_lock`
+/// scans for both. It does not cover a plain render on a sibling thread:
+/// a switcher must therefore also switch to a theme with the *same
+/// colors* (a derived copy, the already-current theme) or not switch at
+/// all — sample the other theme's colors through `pill_for_tag_in` and
+/// friends instead — because `Theme` is colors only, and a render can only
+/// observe a switch through them.
 #[cfg(test)]
 pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -451,9 +456,10 @@ mod tests {
     /// sibling thread, and the failure lands in that sibling — a
     /// rebuild-count or snapshot assertion with nothing in its own body to
     /// explain it. Scan the crate rather than trusting each new test to
-    /// remember: any test file that switches the active theme, mounts the
-    /// picker (which switches it to preview), or asserts on render-cache
-    /// reuse has to take the lock.
+    /// remember: any *test function* that switches the active theme,
+    /// mounts the picker (which switches it to preview), or asserts on
+    /// render-cache reuse has to take the lock — per function, since one
+    /// locked test in a 280-test file must not vouch for the other 279.
     #[test]
     fn theme_switching_tests_take_the_lock() {
         let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -485,16 +491,45 @@ mod tests {
                     None => continue,
                 }
             };
-            let touches_theme = markers.iter().any(|needle| test_code.contains(needle));
-            if touches_theme && !test_code.contains("theme::test_lock()") {
-                unguarded.push(file);
+            for function in test_functions(test_code) {
+                // This scan names the markers it looks for; it holds no lock.
+                if function.contains("fn theme_switching_tests_take_the_lock") {
+                    continue;
+                }
+                let touches_theme = markers.iter().any(|needle| function.contains(needle));
+                if touches_theme && !function.contains("theme::test_lock()") {
+                    let name = function
+                        .lines()
+                        .find_map(|line| line.trim().strip_prefix("fn ")?.split('(').next())
+                        .unwrap_or("<unnamed>");
+                    unguarded.push(format!("{}::{name}", file.display()));
+                }
             }
         }
         assert!(
             unguarded.is_empty(),
-            "these test files switch or depend on the active theme without \
-             holding `crate::theme::test_lock()`: {unguarded:?}"
+            "these tests switch or depend on the active theme without holding \
+             `crate::theme::test_lock()`: {unguarded:#?}"
         );
+    }
+
+    /// Split test code at each `#[test]` / `#[tokio::test…]` attribute: one
+    /// piece per test function, its body running up to the next attribute.
+    /// Helpers between tests attach to the test above them, which is the
+    /// conservative side — a helper that switches the theme is flagged with
+    /// the nearest test rather than vouched for by a lock elsewhere.
+    fn test_functions(test_code: &str) -> Vec<&str> {
+        let mut starts: Vec<usize> = test_code
+            .match_indices("#[test]")
+            .chain(test_code.match_indices("#[tokio::test"))
+            .map(|(at, _)| at)
+            .collect();
+        starts.sort_unstable();
+        starts
+            .iter()
+            .enumerate()
+            .map(|(i, &at)| &test_code[at..starts.get(i + 1).copied().unwrap_or(test_code.len())])
+            .collect()
     }
 
     fn rust_sources(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

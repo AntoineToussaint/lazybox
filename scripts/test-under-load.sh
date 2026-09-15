@@ -11,13 +11,16 @@
 #   scripts/test-under-load.sh                  # one run, 2 spinners per core
 #   scripts/test-under-load.sh --runs 10        # the #1751 acceptance bar
 #   scripts/test-under-load.sh --load-factor 0  # repeat runs, no spinners
-#   scripts/test-under-load.sh --profile ci -- -p lazybox-server
+#   scripts/test-under-load.sh --profile ci -- -p lazybox-server   # the 10s bound
 #   scripts/test-under-load.sh -- -E 'not test(known_red_on_main)'
 #
 # Anything after `--` is passed to the `cargo nextest run` invocations (the
 # whole workspace is compiled first regardless). Each run reports every
 # failure rather than stopping at the first: on a loaded box the set of
-# failures is the finding.
+# failures is the finding. The default profile is `loaded`
+# (`.config/nextest.toml`): a 30s runner ceiling, because the bug this lane
+# hunts is a fixed budget inside a test, which fails by assertion, and a
+# 10s kill would take out honest 6–8s subprocess work with it.
 # The spinners run at normal priority on purpose: `nice` would let the tests
 # win the scheduler, which is exactly the headroom a loaded box does not give.
 # On a shared dev box, prefer `--load-factor 0` while others are working.
@@ -25,7 +28,7 @@ set -euo pipefail
 
 runs=1
 factor=2
-profile=default
+profile=loaded
 
 usage() {
     sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'

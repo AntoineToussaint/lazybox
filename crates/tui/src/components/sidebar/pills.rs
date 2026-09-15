@@ -278,8 +278,18 @@ fn draft_blocker_pill(
 /// constructed `Task`.
 #[cfg(test)]
 pub(crate) fn pill_for_tag(tag: lazybox_core::StatusTag) -> Option<StatusPill> {
+    pill_for_tag_in(tag, crate::theme::current())
+}
+
+/// [`pill_for_tag`] against an explicit theme, so a test can sample what a
+/// glyph would look like under another palette without switching the
+/// process-global active theme under every render on a sibling thread.
+#[cfg(test)]
+pub(crate) fn pill_for_tag_in(
+    tag: lazybox_core::StatusTag,
+    theme: &crate::theme::Theme,
+) -> Option<StatusPill> {
     use lazybox_core::StatusTag::*;
-    let theme = crate::theme::current();
     match tag {
         Merged => Some(glyph_pill(G_MERGED, theme.text_dim)),
         Closed => Some(glyph_pill(G_CLOSED, theme.text_dim)),

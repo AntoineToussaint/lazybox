@@ -99,6 +99,21 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 slow-timeout = { period = "10s", terminate-after = 1 }
 failure-output = "immediate-final"
 
+# The loaded lane (`scripts/test-under-load.sh`, the merge queue's `loaded`
+# job): the whole suite under two busy-loop spinners per core, ~3× CPU
+# oversubscription on a 4-core runner. What that lane exists to catch is a
+# wall-clock bet *inside* a test — a fixed budget that only an idle box
+# meets — and those fail by their own assertion at any runner deadline. A
+# 10s runner kill would instead take out tests doing 6–8s of real
+# subprocess work (tmux reattach, real provisioning), which are not the
+# bug: measured 6.4–7.9s at load 25–80 on a 15-core box, so 3× more
+# oversubscribed they cross 10s. This period is the ceiling on honest work
+# under load, not a per-test budget; the per-test overrides above still
+# apply. `the_loaded_lane_runs_under_its_own_profile` pins the wiring.
+[profile.loaded]
+slow-timeout = { period = "30s", terminate-after = 1 }
+failure-output = "immediate-final"
+
 # Nightly lane: the full workspace including #[ignore]'d real-backend /
 # live-agent tests (`--run-ignored all` in the workflow). No retries —
 # a flaky real-path test is a signal, not noise to absorb.

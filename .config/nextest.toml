@@ -53,17 +53,26 @@ filter = 'test(/^continuously_ready_(codex_repaints_do_not_starve_the_working_wa
 slow-timeout = { period = "60s", terminate-after = 1 }
 
 [[profile.default.overrides]]
-# The idle-detector CPU fixtures (#1597) wait for a process tree to accrue a
-# whole second of CPU, which is a physical quantity, not a fixed sleep: on a
-# loaded runner the same second of CPU takes many seconds of wall clock. Each
-# fixture burns a measured quota and waits `CPU_QUOTA_TIMEOUT` (120s) for the
-# box to hand it out, then fails with the observation it made — a runner kill
-# would replace that with a bare "timed out", which is the diagnosis-free
-# failure these tests exist to end. The period must stay above the in-test
-# wait plus the `ps` ticks around it;
-# `nextest_budget_outlasts_the_cpu_quota_wait` pins the ordering.
-filter = 'binary(box_lifecycle) and test(/^behavior::a_(working_agent_|pid_missing_)/)'
+# The idle-detector behavior tests each run the real `lazybox-idle-stop.sh`
+# under bash, and every tick of it is a full `ps` of the host — on a loaded
+# box a three-tick test alone exceeded the 10s default (#1751). The CPU
+# fixtures (#1597) also wait for a process tree to accrue a whole second of
+# CPU, which is a physical quantity, not a fixed sleep: each burns a measured
+# quota and waits `CPU_QUOTA_TIMEOUT` (120s) for the box to hand it out, then
+# fails with the observation it made — a runner kill would replace that with
+# a bare "timed out", which is the diagnosis-free failure these tests exist
+# to end. The period must stay above the in-test wait plus the `ps` ticks
+# around it; `nextest_budget_outlasts_the_cpu_quota_wait` pins the ordering.
+filter = 'binary(box_lifecycle) and test(/^behavior::/)'
 slow-timeout = { period = "180s", terminate-after = 1 }
+
+[[profile.default.overrides]]
+# The snapshot-budget tests assemble forty 2 MiB replay rings — over the
+# 64 MiB socket frame cap on purpose — and bincode-encode the result in an
+# unoptimized build. That is real work sized by the condition under test,
+# and on a loaded box it ran past the 10s default (#1751).
+filter = 'package(lazybox-server) and test(/^snapshot_budget_tests::/)'
+slow-timeout = { period = "60s", terminate-after = 1 }
 
 [[profile.default.overrides]]
 # A merge and a spawn racing for one workspace, with the merge's store batch

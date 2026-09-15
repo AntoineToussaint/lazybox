@@ -824,34 +824,48 @@ pub fn roster_member_qualifier(member: &str) -> String {
 /// A merge or close bumps `updatedAt`, so dropping `is:open` is what lets
 /// a steady rotation observe state transitions without a separate global
 /// merged sweep, and the window keeps the steady-state page near-empty.
-pub fn repo_sweep_pr_query(member: &str, since: Option<DateTime<Utc>>) -> String {
-    let mut quals = Vec::with_capacity(5);
-    if since.is_none() {
-        quals.push("is:open".to_string());
-    }
-    quals.push("is:pr".to_string());
-    quals.push("archived:false".to_string());
-    quals.push(roster_member_qualifier(member));
-    if let Some(since) = since {
-        quals.push(updated_since_qualifier(since));
-    }
-    build_query(&quals)
+///
+/// `role` is the viewer-relationship qualifier the discovery filters
+/// resolve to (`author:USER`, `review-requested:USER`, …) — `None`
+/// sweeps the member's whole set.
+pub fn repo_sweep_pr_query(
+    member: &str,
+    role: Option<&str>,
+    since: Option<DateTime<Utc>>,
+) -> String {
+    build_query(&repo_sweep_qualifiers("is:pr", member, role, since))
 }
 
-/// Issue counterpart of [`repo_sweep_pr_query`]: same window semantics,
-/// `is:issue` instead of `is:pr`.
-pub fn repo_sweep_issue_query(member: &str, since: Option<DateTime<Utc>>) -> String {
-    let mut quals = Vec::with_capacity(5);
+/// Issue counterpart of [`repo_sweep_pr_query`]: same window and role
+/// semantics, `is:issue` instead of `is:pr`.
+pub fn repo_sweep_issue_query(
+    member: &str,
+    role: Option<&str>,
+    since: Option<DateTime<Utc>>,
+) -> String {
+    build_issues_query(&repo_sweep_qualifiers("is:issue", member, role, since))
+}
+
+fn repo_sweep_qualifiers(
+    kind: &str,
+    member: &str,
+    role: Option<&str>,
+    since: Option<DateTime<Utc>>,
+) -> Vec<String> {
+    let mut quals = Vec::with_capacity(6);
     if since.is_none() {
         quals.push("is:open".to_string());
     }
-    quals.push("is:issue".to_string());
+    quals.push(kind.to_string());
     quals.push("archived:false".to_string());
     quals.push(roster_member_qualifier(member));
+    if let Some(role) = role {
+        quals.push(role.to_string());
+    }
     if let Some(since) = since {
         quals.push(updated_since_qualifier(since));
     }
-    build_issues_query(&quals)
+    quals
 }
 
 /// Per-page size for the PR search. Was 100 (GraphQL's maximum)
@@ -4579,20 +4593,43 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(
-            repo_sweep_pr_query("acme/widgets", None),
+            repo_sweep_pr_query("acme/widgets", None, None),
             "is:open is:pr archived:false repo:acme/widgets"
         );
         assert_eq!(
-            repo_sweep_pr_query("acme/widgets", Some(since)),
+            repo_sweep_pr_query("acme/widgets", None, Some(since)),
             "is:pr archived:false repo:acme/widgets updated:>=2026-09-05T12:00:00+00:00"
         );
         assert_eq!(
-            repo_sweep_issue_query("acme", None),
+            repo_sweep_issue_query("acme", None, None),
             "is:open is:issue archived:false org:acme"
         );
         assert_eq!(
-            repo_sweep_issue_query("acme", Some(since)),
+            repo_sweep_issue_query("acme", None, Some(since)),
             "is:issue archived:false org:acme updated:>=2026-09-05T12:00:00+00:00"
+        );
+    }
+
+    /// A role qualifier rides the member query on both the exhaustive
+    /// and the windowed shape, so a discovery filter narrows the sweep
+    /// on the wire instead of only post-fetch.
+    #[test]
+    fn repo_sweep_queries_carry_the_role_qualifier() {
+        let since = DateTime::parse_from_rfc3339("2026-09-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            repo_sweep_pr_query("acme/widgets", Some("author:me"), None),
+            "is:open is:pr archived:false repo:acme/widgets author:me"
+        );
+        assert_eq!(
+            repo_sweep_pr_query("acme/widgets", Some("review-requested:me"), Some(since)),
+            "is:pr archived:false repo:acme/widgets review-requested:me \
+             updated:>=2026-09-05T12:00:00+00:00"
+        );
+        assert_eq!(
+            repo_sweep_issue_query("acme", Some("assignee:me"), None),
+            "is:open is:issue archived:false org:acme assignee:me"
         );
     }
 

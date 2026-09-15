@@ -1555,7 +1555,7 @@ impl GhSource {
         for spec in &specs {
             self.emit_progress(format!(
                 "repo query: {}",
-                lazybox_gh::repo_sweep_pr_query(&spec.member, spec.since)
+                self.client.repo_sweep_pr_query(&spec.member, spec.since)
             ));
         }
         let outcome = match self

@@ -1208,6 +1208,25 @@ fn humanize_rule(kind: &str, params: Option<&serde_json::Value>) -> Option<Strin
     }
 }
 
+/// The discovery filters' viewer-relationship qualifier when it names an
+/// exact role — the single-role shape the polling layer emits
+/// (`author:USER`, `review-requested:USER`, `assignee:USER`,
+/// `mentions:USER`). `involves:USER` (no role, or two or more) yields
+/// `None`: GitHub's `involves:` omits requested reviewers, so a member
+/// query scoped by it would drop a review request the post-fetch role
+/// filter would have kept, whereas the unscoped set is a superset that
+/// filter narrows correctly. Scope qualifiers (`repo:` / `org:`) never
+/// match — the member supplies its own.
+fn exact_role_qualifier(filters: &[String]) -> Option<&str> {
+    const EXACT_ROLES: [&str; 4] = ["author:", "review-requested:", "assignee:", "mentions:"];
+    let mut roles = filters
+        .iter()
+        .map(String::as_str)
+        .filter(|q| EXACT_ROLES.iter().any(|prefix| q.starts_with(prefix)));
+    let role = roles.next()?;
+    roles.next().is_none().then_some(role)
+}
+
 /// Search query for one watched repo's open-PR fan-out.
 ///
 /// The `-involves:USER` exclusion is the fix for issue #15. A watched
@@ -4683,6 +4702,51 @@ impl GhClient {
         Ok(tasks)
     }
 
+    /// The PR search `fetch_repo_sweep` issues for one roster member.
+    ///
+    /// Scoped to the discovery filters' exact role qualifier (see
+    /// `exact_role_qualifier`) so `pr.author` means "PRs I wrote" on
+    /// the repo-first path exactly as it does on the global sweep. A
+    /// watched repo — or an org member covering one — stays unscoped:
+    /// a watch exists to surface the PRs the viewer is *not* part of.
+    pub fn repo_sweep_pr_query(
+        &self,
+        member: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> String {
+        let watched = self.watch_repos.iter().any(|watch| {
+            watch == member
+                || watch
+                    .split_once('/')
+                    .is_some_and(|(owner, _)| owner == member)
+        });
+        let role = if watched {
+            None
+        } else {
+            exact_role_qualifier(&self.pr_filters)
+        };
+        graphql::repo_sweep_pr_query(member, role, since)
+    }
+
+    /// Issue counterpart of [`Self::repo_sweep_pr_query`]. The role
+    /// scope only applies when no `@lazybox` mention scan rides the
+    /// query: the scan reads every issue in the member so an allowed
+    /// login's mention on an issue the viewer didn't author still
+    /// spawns, and the display filter narrows the rows post-fetch.
+    pub fn repo_sweep_issue_query(
+        &self,
+        member: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        scan_mentions: bool,
+    ) -> String {
+        let role = if scan_mentions {
+            None
+        } else {
+            exact_role_qualifier(&self.issue_filters)
+        };
+        graphql::repo_sweep_issue_query(member, role, since)
+    }
+
     /// Repo-first discovery sweep: one PR query and one issue query per
     /// roster member, windowed per member on its persisted `updated:>=`
     /// floor. This replaces the user-centric `involves:USER` global
@@ -4718,7 +4782,7 @@ impl GhClient {
                     }
                     let open_fut = self.fetch_pr_single_query_capped(
                         "repo-sweep",
-                        graphql::repo_sweep_pr_query(&spec.member, spec.since),
+                        self.repo_sweep_pr_query(&spec.member, spec.since),
                         REPO_SWEEP_MAX_PAGES,
                     );
                     if spec.since.is_some() {
@@ -4735,7 +4799,7 @@ impl GhClient {
                     let recent_since = chrono::Utc::now() - chrono::Duration::days(7);
                     let recent_fut = self.fetch_pr_single_query_capped(
                         "repo-sweep",
-                        graphql::repo_sweep_pr_query(&spec.member, Some(recent_since)),
+                        self.repo_sweep_pr_query(&spec.member, Some(recent_since)),
                         REPO_SWEEP_MAX_PAGES,
                     );
                     let (open, recent) = tokio::join!(open_fut, recent_fut);
@@ -4753,7 +4817,11 @@ impl GhClient {
                     if want_issues {
                         self.fetch_issues_single_query(
                             "repo-sweep issues",
-                            graphql::repo_sweep_issue_query(&spec.member, spec.since),
+                            self.repo_sweep_issue_query(
+                                &spec.member,
+                                spec.since,
+                                !allowed_logins.is_empty(),
+                            ),
                             allowed_logins,
                             REPO_SWEEP_MAX_PAGES,
                         )
@@ -8011,6 +8079,111 @@ mod tests {
             round_robin_repo_query("o/watched", "me", true),
             "is:open is:pr repo:o/watched archived:false",
             "watched repos want ALL open PRs, involvement-scoped or not",
+        );
+    }
+
+    /// The polling layer emits one exact qualifier for a single enabled
+    /// role and `involves:` otherwise; only the exact shape may scope a
+    /// member query, and a scope qualifier never counts as a role.
+    #[test]
+    fn exact_role_qualifier_accepts_only_a_single_exact_role() {
+        let q = |quals: &[&str]| -> Vec<String> { quals.iter().map(|s| s.to_string()).collect() };
+        assert_eq!(exact_role_qualifier(&q(&["author:me"])), Some("author:me"));
+        assert_eq!(
+            exact_role_qualifier(&q(&["review-requested:me", "repo:o/r"])),
+            Some("review-requested:me")
+        );
+        assert_eq!(
+            exact_role_qualifier(&q(&["assignee:me"])),
+            Some("assignee:me")
+        );
+        assert_eq!(
+            exact_role_qualifier(&q(&["mentions:me"])),
+            Some("mentions:me")
+        );
+        assert_eq!(exact_role_qualifier(&q(&["involves:me"])), None);
+        assert_eq!(exact_role_qualifier(&q(&["involves:me", "org:acme"])), None);
+        assert_eq!(exact_role_qualifier(&q(&[])), None);
+        assert_eq!(
+            exact_role_qualifier(&q(&["author:me", "assignee:me"])),
+            None,
+            "two exact roles can't be OR'd on the wire (parens footgun); stay unscoped"
+        );
+    }
+
+    /// Regression (#1716): with scoped repos the repo-first sweep is the
+    /// only discovery pass, so `pr.author` must reach its per-member
+    /// query — otherwise the setting selects nothing on the wire.
+    #[tokio::test(flavor = "current_thread")]
+    async fn repo_sweep_pr_query_carries_the_configured_role() {
+        let client =
+            make_client("http://127.0.0.1:9").with_filters(vec!["author:test-user".into()], vec![]);
+        assert_eq!(
+            client.repo_sweep_pr_query("acme/widgets", None),
+            "is:open is:pr archived:false repo:acme/widgets author:test-user"
+        );
+        let since = chrono::DateTime::parse_from_rfc3339("2026-09-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            client.repo_sweep_pr_query("acme", Some(since)),
+            "is:pr archived:false org:acme author:test-user updated:>=2026-09-05T12:00:00+00:00"
+        );
+    }
+
+    /// `involves:` (the 2+-role / default shape) misses review requests,
+    /// so the member query stays unscoped and the post-fetch role filter
+    /// does the narrowing — as it always has on this path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn repo_sweep_pr_query_stays_unscoped_under_involves() {
+        let client = make_client("http://127.0.0.1:9")
+            .with_filters(vec!["involves:test-user".into()], vec![]);
+        assert_eq!(
+            client.repo_sweep_pr_query("acme/widgets", None),
+            "is:open is:pr archived:false repo:acme/widgets"
+        );
+        let bare = make_client("http://127.0.0.1:9");
+        assert_eq!(
+            bare.repo_sweep_pr_query("acme/widgets", None),
+            "is:open is:pr archived:false repo:acme/widgets"
+        );
+    }
+
+    /// A watched repo wants every open PR regardless of involvement, and
+    /// an org member that covers a watched child is swept in its place
+    /// (`repo_roster` drops the child), so both stay unscoped.
+    #[tokio::test(flavor = "current_thread")]
+    async fn repo_sweep_pr_query_leaves_watched_members_unscoped() {
+        let client = make_client("http://127.0.0.1:9")
+            .with_filters(vec!["author:test-user".into()], vec![])
+            .with_watch_repos(vec!["acme/widgets".into()]);
+        assert_eq!(
+            client.repo_sweep_pr_query("acme/widgets", None),
+            "is:open is:pr archived:false repo:acme/widgets"
+        );
+        assert_eq!(
+            client.repo_sweep_pr_query("acme", None),
+            "is:open is:pr archived:false org:acme"
+        );
+        assert_eq!(
+            client.repo_sweep_pr_query("other/repo", None),
+            "is:open is:pr archived:false repo:other/repo author:test-user"
+        );
+    }
+
+    /// The issue query carries the role only when no mention scan rides
+    /// it: the `@lazybox` scan must see every issue in the member.
+    #[tokio::test(flavor = "current_thread")]
+    async fn repo_sweep_issue_query_yields_to_the_mention_scan() {
+        let client =
+            make_client("http://127.0.0.1:9").with_filters(vec![], vec!["author:test-user".into()]);
+        assert_eq!(
+            client.repo_sweep_issue_query("acme/widgets", None, false),
+            "is:open is:issue archived:false repo:acme/widgets author:test-user"
+        );
+        assert_eq!(
+            client.repo_sweep_issue_query("acme/widgets", None, true),
+            "is:open is:issue archived:false repo:acme/widgets"
         );
     }
 

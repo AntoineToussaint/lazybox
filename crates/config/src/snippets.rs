@@ -1521,8 +1521,8 @@ impl Snippets {
                      line, not the last. Name files and identifiers concretely rather than \
                      describing them. No preamble, no restating the task back to me, and no \
                      offer to continue — I can see the terminal. This is an account of work \
-                     already done: it changes nothing. The verdict names where things stand \
-                     and the decision you need from me, if any.",
+                     already done: it changes nothing. The verdict names what changed since \
+                     I was last here.",
                 ),
             ),
             (

@@ -226,7 +226,7 @@ jobs:
         with:
           tool: cargo-nextest
       - name: Test under two spinners per core
-        run: scripts/test-under-load.sh --profile ci
+        run: scripts/test-under-load.sh --profile loaded --load-factor 2
 
   clippy:
     name: clippy

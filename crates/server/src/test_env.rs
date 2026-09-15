@@ -91,24 +91,52 @@ mod tests {
             "remove_var(\"LAZYBOX_HOME\"",
         ];
 
+        let unguarded = unguarded_test_code(&EXEMPT, &redirects);
+        assert!(
+            unguarded.is_empty(),
+            "these tests redirect HOME/LAZYBOX_HOME without taking \
+             `crate::test_env::lock()`: {unguarded:#?}"
+        );
+    }
+
+    /// Every piece of test code in this crate's `src/` that mentions one of
+    /// `needles` and does not itself mention `test_env::`, named by file and
+    /// test function. Per function, not per file: one locked test in a
+    /// 300-test module must not vouch for the rest (#1751). A file is split
+    /// at each `#[test]` / `#[tokio::test…]`; code before the first test —
+    /// guards, fixtures — is one more piece, so a `Drop` that restores the
+    /// variable is held to the rule too.
+    fn unguarded_test_code(exempt: &[&str], needles: &[&str]) -> Vec<String> {
         let mut unguarded = Vec::new();
         for file in rust_sources(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")) {
             let name = file.file_name().unwrap_or_default().to_string_lossy();
-            if EXEMPT.contains(&name.as_ref()) {
+            if exempt.contains(&name.as_ref()) {
                 continue;
             }
             let body = std::fs::read_to_string(&file).expect("read source");
-            if redirects.iter().any(|needle| body.contains(needle)) && !body.contains("test_env::")
-            {
-                unguarded.push(file);
+            let mut starts: Vec<usize> = body
+                .match_indices("#[test]")
+                .chain(body.match_indices("#[tokio::test"))
+                .map(|(at, _)| at)
+                .collect();
+            starts.sort_unstable();
+            let mut bounds = vec![0];
+            bounds.extend(starts);
+            bounds.push(body.len());
+            for window in bounds.windows(2) {
+                let piece = &body[window[0]..window[1]];
+                if needles.iter().any(|needle| piece.contains(needle))
+                    && !piece.contains("test_env::")
+                {
+                    let function = piece
+                        .lines()
+                        .find_map(|line| line.trim().strip_prefix("fn ")?.split('(').next())
+                        .unwrap_or("<before the first test>");
+                    unguarded.push(format!("{}::{function}", file.display()));
+                }
             }
         }
-
-        assert!(
-            unguarded.is_empty(),
-            "these files redirect HOME/LAZYBOX_HOME without taking \
-             `crate::test_env::lock()`: {unguarded:?}"
-        );
+        unguarded
     }
 
     /// The write-side scan above exempts `lib.rs` for its before-main ctor,
@@ -121,23 +149,11 @@ mod tests {
     #[test]
     fn every_env_read_in_this_crate_takes_the_lock() {
         let reads = ["var(\"LAZYBOX_HOME\")", "var_os(\"LAZYBOX_HOME\")"];
-
-        let mut unguarded = Vec::new();
-        for file in rust_sources(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")) {
-            let name = file.file_name().unwrap_or_default().to_string_lossy();
-            if name == "test_env.rs" {
-                continue;
-            }
-            let body = std::fs::read_to_string(&file).expect("read source");
-            if reads.iter().any(|needle| body.contains(needle)) && !body.contains("test_env::") {
-                unguarded.push(file);
-            }
-        }
-
+        let unguarded = unguarded_test_code(&["test_env.rs"], &reads);
         assert!(
             unguarded.is_empty(),
-            "these files read LAZYBOX_HOME without taking \
-             `crate::test_env::lock()`: {unguarded:?}"
+            "these tests read LAZYBOX_HOME without taking \
+             `crate::test_env::lock()`: {unguarded:#?}"
         );
     }
 

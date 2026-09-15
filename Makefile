@@ -159,8 +159,8 @@ test-ignored: ## Run #[ignore]'d real-backend integration tests on demand.
 	@PATH="$(PINNED_PATH)" cargo nextest run --workspace --run-ignored only
 
 RUNS ?= 1
-LOAD_FACTOR ?= 2
-test-loaded: ## Run the suite under deliberate CPU load (LOAD_FACTOR spinners per core, RUNS times) — the #1751 lane.
+LOAD_FACTOR ?= 0
+test-loaded: ## Run the suite RUNS times under the loaded profile; LOAD_FACTOR=2 adds spinners per core (0 by default — the dev box is shared, its own load is the fixture).
 	@PATH="$(PINNED_PATH)" ./scripts/test-under-load.sh --runs $(RUNS) --load-factor $(LOAD_FACTOR)
 
 lint: ## Run clippy with workspace lint config (vendored crates excluded).

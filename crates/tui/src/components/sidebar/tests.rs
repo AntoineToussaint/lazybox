@@ -530,7 +530,7 @@ mod status_pill_consistency_tests {
     //! arm is a compile error; adding a new arm without these
     //! tests catching it is the gap this module closes.
 
-    use super::super::{pill_for_tag, status_pill};
+    use super::super::{pill_for_tag, pill_for_tag_in, status_pill};
     use super::status_pill_tests::base_task;
     use lazybox_core::{CiStatus, ReviewStatus, StatusTag, TaskState};
 
@@ -821,23 +821,20 @@ mod status_pill_consistency_tests {
     #[test]
     fn status_glyph_colors_are_legible_on_the_light_theme() {
         use crate::theme;
-        let _theme = theme::test_lock();
-        let prev = theme::current().name;
-        assert!(
-            theme::set_by_name("Lazybox Light"),
-            "light theme must exist"
-        );
-        // Sample every tag's fg while the light theme is active, then
-        // restore immediately so the brief global switch can't bleed into a
-        // concurrently-rendering test (same pattern the theme module uses).
+        // Sampled against the light theme directly rather than by switching
+        // the process-global active theme: a switch, however brief, lands
+        // under every render on a sibling thread (#1751).
+        let light = theme::list()
+            .into_iter()
+            .find(|t| t.name == "Lazybox Light")
+            .expect("light theme must exist");
         let sampled: Vec<(StatusTag, ratatui::style::Color)> = ALL_TAGS
             .iter()
             .filter_map(|&tag| {
-                pill_for_tag(tag).map(|p| (tag, p.style.fg.expect("glyph has a fg")))
+                pill_for_tag_in(tag, light).map(|p| (tag, p.style.fg.expect("glyph has a fg")))
             })
             .collect();
-        let surface = theme::current().surface;
-        theme::set_by_name(prev);
+        let surface = light.surface;
 
         for (tag, fg) in sampled {
             let ratio = contrast_ratio(fg, surface);

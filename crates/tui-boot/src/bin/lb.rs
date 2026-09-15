@@ -96,12 +96,17 @@ mod config_sandbox {
     /// under test alike — at a sandbox global config, with no system config.
     /// Two things the developer's real config brings that a test must not:
     /// a signing setup that hangs on a locked agent, and git's own background
-    /// work. Since 2.29 `fetch` and `commit` (and `clone` since 2.45) fork a
-    /// *detached* `git maintenance run --auto` that outlives the command and
-    /// keeps repacking objects and holding `maintenance.lock` in the fixture
-    /// repo — a local `clone --bare` then fails mid-copy on a box loaded
-    /// enough for the two to overlap (#1751). Env is inherited, so the
+    /// work. `fetch` and `commit` (since 2.29) and, on current git, `clone`
+    /// fork a *detached* `git maintenance run --auto` that outlives the
+    /// command and keeps repacking objects and holding `maintenance.lock` in
+    /// the fixture repo — a local `clone --bare` then fails mid-copy on a box
+    /// loaded enough for the two to overlap (#1751). Env is inherited, so the
     /// sandbox reaches the git that production code runs under the test too.
+    ///
+    /// The value the variable held right after the write is recorded in
+    /// `GIT_SANDBOX`, so the guard test can prove the redirect landed at
+    /// process start without reading the live environment — a sibling test
+    /// may legitimately have swapped it under its own lock by then.
     fn isolate_git(sandbox: &std::path::Path) {
         let gitconfig = sandbox.join("gitconfig");
         let _ = std::fs::write(
@@ -115,7 +120,14 @@ mod config_sandbox {
             std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
         }
+        let _ =
+            GIT_SANDBOX.set(std::env::var_os("GIT_CONFIG_GLOBAL").map(std::path::PathBuf::from));
     }
+
+    /// `GIT_CONFIG_GLOBAL` as read back inside the ctor: `None` if the write
+    /// never landed, `Some(path)` otherwise.
+    static GIT_SANDBOX: std::sync::OnceLock<Option<std::path::PathBuf>> =
+        std::sync::OnceLock::new();
 
     #[ctor::ctor]
     unsafe fn redirect_config_home() {
@@ -137,19 +149,29 @@ mod config_sandbox {
         );
     }
 
-    /// Every git this binary spawns reads the sandbox config, not the
-    /// developer's: auto-maintenance is the setting a fixture cannot afford to
-    /// inherit, so it is the one asserted.
+    /// Every git this binary spawns started out reading the sandbox config,
+    /// not the developer's. Asserted from what the ctor recorded, never from
+    /// the live environment: a sibling test that pins its own gitconfig under
+    /// its own lock would otherwise decide this test's outcome by schedule.
+    /// Auto-maintenance is the setting a fixture cannot afford to inherit, so
+    /// it is the one checked in the file.
     #[test]
     fn git_in_this_binary_reads_the_sandbox_config() {
-        let out = std::process::Command::new("git")
-            .args(["config", "--global", "maintenance.auto"])
-            .output()
-            .expect("git runs");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "false",
-            "GIT_CONFIG_GLOBAL is not pointed at the sandbox gitconfig"
+        let gitconfig = GIT_SANDBOX
+            .get()
+            .expect("the ctor ran before this test")
+            .as_ref()
+            .expect("GIT_CONFIG_GLOBAL was unset right after the ctor wrote it");
+        assert!(
+            gitconfig.to_string_lossy().contains("-config-sandbox-"),
+            "GIT_CONFIG_GLOBAL was {} at process start, not the sandbox gitconfig",
+            gitconfig.display()
+        );
+        let body = std::fs::read_to_string(gitconfig)
+            .unwrap_or_else(|err| panic!("read {}: {err}", gitconfig.display()));
+        assert!(
+            body.contains("[maintenance]\n\tauto = false"),
+            "the sandbox gitconfig does not switch auto-maintenance off:\n{body}"
         );
     }
 }

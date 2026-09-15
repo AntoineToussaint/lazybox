@@ -535,6 +535,7 @@ mod scroll_does_not_rebuild_tests {
     /// must therefore rebuild the memoized buffer through `render`.
     #[test]
     fn activity_rev_tracks_content_not_clones() {
+        let _theme = crate::theme::test_lock();
         let mut pane = RightPane::new(PaneId::new(0));
         let ws = ws_with_n_activities(5);
         pane.set_workspace(Some(ws.clone()));

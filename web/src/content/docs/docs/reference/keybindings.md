@@ -66,6 +66,8 @@ Act on the focused workspace. Available from the sidebar **and** the activity pa
 | `Enter` | open | Focus the workspace's activity / terminal. |
 | `s` | shell | Open a shell in the workspace's worktree. |
 | `e` | editor | Open the worktree in the configured editor. |
+| `*` | focus | Star or unstar the cursor's workspace, lifting it into a ★ Focused section at the very top of the sidebar — a hand-picked shortlist of PRs/issues across repos, kept together above the repo groups. |
+| `v` | select | Toggle the focused workspace in/out of the multi-select set. |
 | `Shift-V` | visual select | Arm a vim-style visual sweep: j/k (and arrows) grow / shrink the multi-select range from the anchor, no Shift-arrow encoding needed. |
 | `m` | mark read | Mark every activity row on the focused workspace read. |
 | `z` | snooze | Snooze the workspace for ~4h (toggle). |
@@ -88,9 +90,7 @@ Manage the sidebar list itself — only while the sidebar has focus.
 | `#` | search all repos | Open the header search box — an incremental search across every repo group at once (unlike `/`, which is scoped to just the focused project). |
 | `Space` | collapse group | Collapse or expand the most local group at the cursor: a parent ticket's descendants, a Space, or a repo. |
 | `p` | pin group | Pin or unpin the cursor's repo group to the top of the sidebar. |
-| `*` | focus | Star or unstar the cursor's workspace, lifting it into a ★ Focused section at the very top of the sidebar — a hand-picked shortlist of PRs/issues across repos, kept together above the repo groups. |
 | `Right \| l` | focus right | Move focus one pane to the right — from the sidebar to the activity pane, or straight to the terminal when the activity pane is hidden. |
-| `v` | select | Toggle the focused workspace in/out of the multi-select set. |
 | `Shift-B` | broadcast | Send one free-text instruction — optionally seeded from a snippet — to every multi-selected workspace at once. |
 
 `j` / `k` (or arrows) move the cursor; `Esc` clears a `v` multi-selection. See [Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/) for the complete broadcast workflow: cross-repo selection, target recap, snippet and free-text compose, delivery, skips, and history.
@@ -107,7 +107,7 @@ Only while the activity (right) pane has focus.
 | `g` | top | Jump the activity cursor to the first row. |
 | `Shift-G` | bottom | Jump the activity cursor to the last row. |
 | `d` | description | Toggle the PR / issue description visibility. |
-| `Space` | select row | Toggle the focused activity row in/out of the multi-select set (also `v`). |
+| `Space` | select row | Toggle the focused activity row in/out of the multi-select set. |
 | `z` | undo mark-read | Re-unread the most recent auto-marked row. |
 
 `j` / `k` (or arrows) move the row cursor; `→`/`l` expand and `←`/`h` collapse the focused row; `w w` works on the selection.

@@ -15735,24 +15735,32 @@ mod chord_resolution_tests {
         );
     }
 
-    /// The broadcast pair resolves only under sidebar focus: `v`
-    /// toggles the multi-select and `Shift-B` opens the broadcast —
-    /// while the activity pane keeps its own pane-local `v` (row
-    /// multi-select), which must not be shadowed by a catalog entry.
+    /// `v` (multi-select) and `*` (star) act on the cursor row, so they
+    /// resolve from the activity pane exactly like the other Workspace
+    /// actions (#1756); the activity pane's row select is `Space`
+    /// alone. The broadcast itself stays a sidebar-only key.
     #[test]
-    fn broadcast_keys_resolve_only_under_sidebar_focus() {
+    fn cursor_row_keys_resolve_from_both_panes_but_broadcast_stays_sidebar_only() {
+        for focus in [PaneFocus::Sidebar, PaneFocus::Right] {
+            assert_eq!(
+                resolve("v", focus),
+                Some(ActionKind::SelectWorkspace),
+                "`v` is the workspace select under {focus:?}",
+            );
+            assert_eq!(
+                resolve("*", focus),
+                Some(ActionKind::ToggleFocusWorkspace),
+                "`*` stars the cursor workspace under {focus:?}",
+            );
+        }
         assert_eq!(
-            resolve("v", PaneFocus::Sidebar),
-            Some(ActionKind::SelectWorkspace),
+            resolve("Space", PaneFocus::Right),
+            Some(ActionKind::SelectRow),
+            "activity-pane row select stays pane-local on Space",
         );
         assert_eq!(
             resolve("Shift-B", PaneFocus::Sidebar),
             Some(ActionKind::BroadcastToSelected),
-        );
-        assert_eq!(
-            resolve("v", PaneFocus::Right),
-            None,
-            "activity-pane `v` stays pane-local",
         );
         assert_eq!(resolve("Shift-B", PaneFocus::Right), None);
     }

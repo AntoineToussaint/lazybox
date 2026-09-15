@@ -3298,7 +3298,7 @@ pub(super) const PANE_NATIVE_KINDS: &[(lazybox_tui_core::action::ActionKind, &st
         ),
         (
             K::SelectRow,
-            "RightPane::handle_key's Space/v arm (components/right_pane/mod.rs)",
+            "RightPane::handle_key's Space arm (components/right_pane/mod.rs)",
             false,
         ),
         (

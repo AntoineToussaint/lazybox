@@ -497,7 +497,9 @@ same-key double-tap `r r` (the leader stashes the shadowed direct
 action). `v` multi-selects the cursor
 workspace; `Shift-↑`/`Shift-↓` extend the selection from the cursor
 (spreadsheet-style contiguous sweep, #932) and `Shift-click` extends
-it to the clicked row (marks survive j/k; `Esc` clears). `V` arms a
+it to the clicked row (marks survive j/k; `Esc` clears). Both `v` and `*` are Workspace-section actions like `m`
+or `z`: they act on the cursor row and so resolve from the activity
+pane too, not only under sidebar focus (#1756). `V` arms a
 vim-style **visual-select** sweep (#1448) — an encoding-independent
 alternative to `Shift-↑/↓` for terminals that don't report Shift on
 arrows: while armed, plain `j`/`k` (and arrows) grow / shrink the
@@ -704,7 +706,7 @@ scope.
 
 **RightPane (Activity)**: `j/k` or arrows move the row cursor,
 `g/G` top/bottom, `→/l` expand row, `←/h` collapse row, `Enter`
-toggle the section, `Space`/`v` multi-select rows (`V` arms the same
+toggle the section, `Space` multi-selects rows (`V` arms the same
 vim-style visual sweep as the sidebar — `j`/`k` grow / shrink the row
 range from the anchor, `Esc` cancels; #1448), `w w` work on
 selection, `d` toggle the PR/issue description teaser (Collapsed ⇄

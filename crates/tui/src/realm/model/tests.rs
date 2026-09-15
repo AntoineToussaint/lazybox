@@ -22512,6 +22512,114 @@ mod worktree_progress_recovery_tests {
         assert!(matches!(spawn.kind, TerminalKind::Agent(ref id) if id == "claude"));
     }
 
+    /// A PR workspace whose head is `head`, as the sidebar would hold it.
+    /// Its key is whatever `from_task` derives — callers read it back
+    /// rather than guessing the sanitized form.
+    fn pr_workspace(head: &str) -> Workspace {
+        let task = lazybox_core::Task {
+            author: String::new(),
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: "acme/widget#42".into(),
+            },
+            title: "collision".into(),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/acme/widget/pull/42".into(),
+            repo: Some("acme/widget".into()),
+            branch: Some(head.into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: Some(lazybox_core::TaskKind::Pr),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+            blocked_by: vec![],
+            merge_after: vec![],
+            contracts: vec![],
+            blocked_on: None,
+        };
+        Workspace::from_task(task, Utc::now())
+    }
+
+    /// #1755 review: the collision body annotates the branch the PR
+    /// tracks, so the state the Model builds for a PR workspace carries
+    /// that workspace's PR head — on both the checklist route and the
+    /// no-checklist provider-error route.
+    #[test]
+    fn branch_collision_state_carries_the_workspaces_pr_head() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let ws = pr_workspace("feat/document-rpc-tools");
+        let session_key: lazybox_core::SessionKey = (&ws.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        let message = "worktree: checkout_at: worktree /tmp/wt is checked out on branch \
+                       'fix/document-qa-review', not the requested branch \
+                       'feat/document-rpc-tools' — refusing to reuse it";
+
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: session_key.clone(),
+            step: WorktreeStep::WorktreeAdd,
+            status: WorktreeStepStatus::Failed(message.into()),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        assert_eq!(
+            m.worktree_progress.as_ref().and_then(|s| s.pr_head()),
+            Some("feat/document-rpc-tools"),
+            "the checklist route names the PR head",
+        );
+
+        // The no-checklist route builds a fresh state from `last_spawn`.
+        m.force_dismiss_worktree_progress();
+        m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: None,
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: None,
+            initial_prompt: None,
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        });
+        while server.rx.try_recv().is_ok() {}
+        assert!(m.route_spawn_failure_to_recovery(message));
+        assert_eq!(
+            m.worktree_progress.as_ref().and_then(|s| s.pr_head()),
+            Some("feat/document-rpc-tools"),
+            "the provider-error route names the PR head too",
+        );
+    }
+
     /// #1572: `r` moves a live checkout into a `.bak-<n>` sibling and
     /// rebuilds from zero, so it asks first — and declining must leave the
     /// recovery modal standing. An earlier revision dismissed the

@@ -165,6 +165,10 @@ pub struct WorktreeProgressState {
     /// (issue #557). Drives the modal's per-class hint + retry
     /// affordance so a failed provision is never just "Esc dismiss".
     recovery: Option<WorktreeRecovery>,
+    /// The head branch of the workspace's PR, when it has one. Lets the
+    /// collision body say which of the two branches the PR tracks, so
+    /// "use the branch that's there" is a knowing choice.
+    pr_head: Option<String>,
     /// A step completed but degraded — the base-ref fetch failed and the
     /// worktree branched off a possibly-stale local ref (issue #320).
     /// Unlike a failure this doesn't freeze the checklist (provisioning
@@ -186,8 +190,19 @@ impl WorktreeProgressState {
             failed_step: None,
             error: None,
             recovery: None,
+            pr_head: None,
             warning: None,
         }
+    }
+
+    /// Record the workspace's PR head so a branch collision can name
+    /// which branch the PR tracks.
+    pub fn set_pr_head(&mut self, head: Option<String>) {
+        self.pr_head = head;
+    }
+
+    pub fn pr_head(&self) -> Option<&str> {
+        self.pr_head.as_deref()
     }
 
     /// A step failed — the modal should stay up showing the error
@@ -369,13 +384,16 @@ pub struct WorktreeProgress {
     /// names in hand the modal states the collision once, as a pair,
     /// instead of echoing the daemon's message.
     requested_branch: Option<String>,
+    /// Whether `requested_branch` is the PR's head — the branch the PR
+    /// keeps tracking whichever key is pressed.
+    requested_is_pr_head: bool,
     warning: Option<String>,
     spinner_idx: usize,
 }
 
 impl WorktreeProgress {
     pub fn from_state(state: &WorktreeProgressState) -> Self {
-        Self {
+        let mut this = Self {
             steps: state.steps(),
             clone_progress: state.clone_progress.clone(),
             error: state.error.clone(),
@@ -398,9 +416,13 @@ impl WorktreeProgress {
                 .is_some_and(|recovery| recovery.adopts_branch())
                 .then(|| state.error().and_then(WorktreeRecovery::requested_branch))
                 .flatten(),
+            requested_is_pr_head: false,
             warning: state.warning.clone(),
             spinner_idx: 0,
-        }
+        };
+        this.requested_is_pr_head =
+            this.requested_branch.is_some() && this.requested_branch.as_deref() == state.pr_head();
+        this
     }
 }
 
@@ -497,14 +519,24 @@ impl Component for WorktreeProgress {
                         Style::default().fg(theme.text_strong),
                     )));
                     lines.push(Line::raw(""));
-                    for (label, branch) in [("wanted", wanted), ("found", found)] {
-                        lines.push(Line::from(vec![
+                    for (label, branch, note) in [
+                        ("wanted", wanted, self.requested_is_pr_head),
+                        ("found", found, false),
+                    ] {
+                        let mut spans = vec![
                             Span::styled(
                                 format!("    {label:<8} "),
                                 Style::default().fg(theme.text_dim),
                             ),
                             Span::styled(branch.clone(), Style::default().fg(theme.text_strong)),
-                        ]));
+                        ];
+                        if note {
+                            spans.push(Span::styled(
+                                "  · the PR's head",
+                                Style::default().fg(theme.text_dim),
+                            ));
+                        }
+                        lines.push(Line::from(spans));
                     }
                 }
                 _ => {
@@ -1158,6 +1190,10 @@ mod tests {
         assert!(out.contains("wanted   issue-1-new"), "{out}");
         assert!(out.contains("found    issue-1-old"), "{out}");
         assert!(
+            !out.contains("the PR's head"),
+            "no PR head known, so no claim about one: {out}"
+        );
+        assert!(
             !out.contains("/tmp/wt"),
             "the path is never the question: {out}"
         );
@@ -1179,6 +1215,65 @@ mod tests {
             comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('r')))),
             Some(Msg::WorktreeRecreate)
         ));
+    }
+
+    /// When the requested branch is the PR's head, the body says so:
+    /// pressing `a` keeps the work on the found branch while the PR keeps
+    /// tracking the wanted one, and that trade should be visible.
+    #[test]
+    fn branch_mismatch_names_the_pr_head_when_known() {
+        let mut st = state();
+        st.set_pr_head(Some("feat/document-rpc-tools".into()));
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "worktree: checkout_at: worktree /tmp/wt is checked out on branch \
+                 'fix/document-qa-review', not the requested branch \
+                 'feat/document-rpc-tools' — refusing to reuse it"
+                    .into(),
+            ),
+        );
+        let out = render(&mut WorktreeProgress::from_state(&st), 80, 20);
+        assert!(
+            out.contains("wanted   feat/document-rpc-tools  · the PR's head"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("fix/document-qa-review  ·"),
+            "only the PR's branch is annotated: {out}"
+        );
+        // A PR head that is not the requested branch (a session's own
+        // recorded branch was asked for) earns no annotation.
+        st.set_pr_head(Some("some/other-head".into()));
+        let out = render(&mut WorktreeProgress::from_state(&st), 80, 20);
+        assert!(!out.contains("the PR's head"), "{out}");
+    }
+
+    /// The no-checklist route delivers the provision error wrapped in the
+    /// spawn's own sentence, so the chain sits mid-string. It must still
+    /// not reach the copy.
+    #[test]
+    fn wrapped_error_route_renders_without_the_source_chain() {
+        let mut st = state();
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "worktree: re-checkout of /tmp/wt failed — spawn aborted, retry once the \
+                 cause is fixed: worktree: checkout_at: branch 'feat' is already checked \
+                 out at /tmp/other — refusing to take it from another live worktree"
+                    .into(),
+            ),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldLive));
+        let out = render(&mut WorktreeProgress::from_state(&st), 90, 20);
+        assert!(!out.contains("worktree:"), "{out}");
+        assert!(!out.contains("checkout_at"), "{out}");
+        assert!(out.contains("re-checkout of /tmp/wt failed"), "{out}");
+        assert!(
+            flatten(&out).contains("(cd '/tmp/other' && git status && git switch --detach)"),
+            "the holder path still parses from the raw message: {out}"
+        );
     }
 
     /// Only a wrong-branch failure offers `a`: every other recoverable

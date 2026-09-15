@@ -1585,15 +1585,21 @@ pub async fn handle_adopt_worktree_branch(
             // A workspace with no session yet resolves its next spawn's
             // branch from the PR head, so rewriting the record alone would
             // send the spawn straight back into the same collision. The
-            // adopted checkout becomes the workspace's session instead.
-            adopt_drifted_branch(
+            // adopted checkout becomes the workspace's session instead —
+            // and because that record is what the spawn below relies on,
+            // a store failure here is a refusal, not a warning.
+            if let Err(reason) = adopt_drifted_branch(
                 config,
                 &workspace_key,
                 &target,
                 &actual,
                 Some(session_kind_from_terminal(&spawn.kind)),
             )
-            .await;
+            .await
+            {
+                refuse_adoption(config, reason);
+                return;
+            }
         }
         Err(reason) => {
             refuse_adoption(config, reason);
@@ -4759,7 +4765,9 @@ async fn provision_worktree(
     // is what gates the second — a branch-agnostic shell reuses a drifted
     // tree without rewriting the record it reuses.
     if adopt_drift && let lazybox_git_ops::BranchDrift::Drifted { actual } = &worktree.drift {
-        adopt_drifted_branch(config, &workspace.key, target, actual, None).await;
+        // Best-effort here: the checkout is already usable, and the next
+        // provision re-adopts the same branch.
+        let _ = adopt_drifted_branch(config, &workspace.key, target, actual, None).await;
     }
     Ok(worktree.branch)
 }
@@ -4768,19 +4776,21 @@ async fn provision_worktree(
 /// sits on (#1572). The mirror of the issue→PR reconciliation #787 does:
 /// there the upstream head is authoritative, here — a workspace whose
 /// expected branch is a name lazybox derived — the on-disk branch is.
-/// Best-effort: the checkout is already usable, so a store failure must
-/// not fail the spawn; the next provision re-adopts the same branch.
 ///
 /// `record_as` adds a session for `target` when none is recorded there,
 /// so a workspace that had no session before the adopt reuses this
 /// checkout on its next spawn instead of re-provisioning at the same path.
+/// The returned error names why the records could not be written; the
+/// caller decides whether that is fatal (an explicit `a`, whose spawn
+/// depends on the record) or not (the provision path, whose checkout is
+/// already usable and re-adopts next time).
 async fn adopt_drifted_branch(
     config: &ServerConfig,
     workspace_key: &WorkspaceKey,
     target: &std::path::Path,
     actual: &str,
     record_as: Option<SessionKind>,
-) {
+) -> Result<(), String> {
     let _guard = config.lock_workspace(workspace_key.as_str()).await;
     let mut workspace = match load_workspace(config, workspace_key) {
         Ok(workspace) => workspace,
@@ -4789,7 +4799,9 @@ async fn adopt_drifted_branch(
                 workspace = workspace_key.as_str(),
                 "could not reload the workspace to adopt its drifted branch: {error}",
             );
-            return;
+            return Err(format!(
+                "the workspace could not be reloaded to record the adopted branch: {error}"
+            ));
         }
     };
     let from = workspace.branch.clone();
@@ -4820,7 +4832,7 @@ async fn adopt_drifted_branch(
             workspace = workspace_key.as_str(),
             "could not persist the adopted branch: {error}",
         );
-        return;
+        return Err(format!("could not persist the adopted branch: {error}"));
     }
     if let Some(session) = created {
         let _ = config.bus.send(Event::SessionCreated(Box::new(session)));
@@ -4835,6 +4847,7 @@ async fn adopt_drifted_branch(
         title: "Branch adopted".to_string(),
         body: format!("adopted branch {actual} (the agent switched to it)"),
     });
+    Ok(())
 }
 
 async fn apply_worktree_setup(
@@ -21606,6 +21619,112 @@ mod tests {
         assert!(
             bak_siblings(wt.parent().unwrap()).is_empty(),
             "adopt moves nothing aside"
+        );
+    }
+
+    /// A store that accepts every write until `reject` is flipped, then
+    /// refuses them — a stand-in for SQLite failing under the adopt.
+    struct RejectingSaveStore {
+        inner: lazybox_store::MemoryStore,
+        reject: std::sync::atomic::AtomicBool,
+    }
+
+    impl RejectingSaveStore {
+        fn new() -> Self {
+            Self {
+                inner: lazybox_store::MemoryStore::new(),
+                reject: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl lazybox_store::Store for RejectingSaveStore {
+        fn apply_batch(
+            &self,
+            mutations: &[lazybox_store::StoreMutation],
+        ) -> Result<(), lazybox_store::StoreError> {
+            self.inner.apply_batch(mutations)
+        }
+
+        fn get_kv(&self, key: &str) -> Result<Option<String>, lazybox_store::StoreError> {
+            self.inner.get_kv(key)
+        }
+
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), lazybox_store::StoreError> {
+            if self.reject.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(lazybox_store::StoreError::Backend(
+                    "injected save failure".into(),
+                ));
+            }
+            self.inner.set_kv(key, value)
+        }
+
+        fn delete_kv(&self, key: &str) -> Result<(), lazybox_store::StoreError> {
+            self.inner.delete_kv(key)
+        }
+    }
+
+    /// The session record `a` writes is what the spawn after it relies
+    /// on, so a store failure there must refuse the adopt visibly rather
+    /// than warn and spawn anyway — which would re-run the same collision
+    /// and remount the same modal, the exact "a does nothing" of #1755.
+    #[tokio::test]
+    async fn adopt_command_refuses_when_the_record_cannot_be_persisted() {
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(RejectingSaveStore::new());
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store.clone(),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let (ws, wt) = session_less_pr_workspace_with_drifted_checkout(root.path(), &config).await;
+        let session_key = SessionKey::new(ws.key.as_str());
+        let mut events = config.bus.subscribe();
+        store
+            .reject
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        handle_adopt_worktree_branch(
+            &config,
+            lazybox_ipc::SpawnFallback {
+                session_key: session_key.clone(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            },
+            None,
+            false,
+        )
+        .await;
+
+        let mut refused = None;
+        let mut spawned = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                Event::ProviderError {
+                    source, message, ..
+                } if source == "spawn:adopt" => refused = Some(message),
+                Event::WorktreeProgress { .. } | Event::TerminalSpawned { .. } => spawned = true,
+                _ => {}
+            }
+        }
+        let refused = refused.expect("a failed record write refuses the adopt visibly");
+        assert!(
+            refused.contains("persist"),
+            "the refusal names the store failure: {refused}"
+        );
+        assert!(!spawned, "no spawn runs on a record that was never written");
+
+        let reloaded = load_workspace(&config, &ws.key).expect("reload");
+        assert!(reloaded.sessions.is_empty(), "nothing was recorded");
+        assert_eq!(reloaded.branch, "feat/document-rpc-tools");
+        assert_eq!(
+            head_branch(&wt),
+            "fix/document-qa-review",
+            "the checkout is untouched",
         );
     }
 

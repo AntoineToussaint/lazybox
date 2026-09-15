@@ -4180,28 +4180,33 @@ impl WorktreeRecovery {
         (!name.is_empty()).then(|| name.to_string())
     }
 
-    /// The message with its `thiserror` source-chain prefixes removed
-    /// (`worktree: checkout_at: <fact>` → `<fact>`). Each prefix is a
-    /// lowercase identifier and a colon — a variant or function name that
-    /// tells the user nothing — so they are stripped from the front until
-    /// the text stops looking like one. Parsers keep reading the raw
-    /// message; this is for what the user sees.
-    pub fn user_facing(message: &str) -> &str {
-        let mut rest = message;
-        loop {
-            let Some((head, tail)) = rest.split_once(": ") else {
-                return rest;
-            };
-            let identifier = !head.is_empty()
-                && head.starts_with(|c: char| c.is_ascii_lowercase())
-                && head
+    /// The message with its `thiserror` source-chain segments removed
+    /// (`worktree: checkout_at: <fact>` → `<fact>`). Each such segment is
+    /// a bare lowercase identifier between `: ` separators — a variant or
+    /// function name that tells the user nothing. They are dropped
+    /// wherever they sit, because the daemon also embeds one chain inside
+    /// another (`re-checkout of <path> failed …: worktree: checkout_at:
+    /// <fact>`). Parsers keep reading the raw message; this is for what
+    /// the user sees.
+    pub fn user_facing(message: &str) -> String {
+        let identifier = |segment: &str| {
+            !segment.is_empty()
+                && segment.starts_with(|c: char| c.is_ascii_lowercase())
+                && segment
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-            if !identifier {
-                return rest;
-            }
-            rest = tail;
-        }
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        };
+        // The last segment is the fact itself and is always kept, even
+        // when it happens to be one bare word (`boom`).
+        let segments: Vec<&str> = message.split(": ").collect();
+        let (chain, fact) = segments.split_at(segments.len() - 1);
+        chain
+            .iter()
+            .copied()
+            .filter(|segment| !identifier(segment))
+            .chain(fact.iter().copied())
+            .collect::<Vec<_>>()
+            .join(": ")
     }
 
     /// The worktree path a `BranchMismatch` message names (`worktree
@@ -4291,8 +4296,8 @@ impl WorktreeRecovery {
                  Preserve or remove it, then start again."
             }
             Self::BranchMismatch => {
-                "This worktree is on another branch — a adopts it, r preserves it aside \
-                 and starts fresh."
+                "This worktree is on another branch — a uses it, r moves it aside and \
+                 starts fresh."
             }
             Self::DirtyLeftover => {
                 "A leftover folder holds uncommitted work. Move it aside, then start again."
@@ -4366,8 +4371,8 @@ impl WorktreeRecovery {
             // once you can see which branch you would be adopting (#1572).
             Self::BranchMismatch => match Self::mismatch_branch(message) {
                 Some(branch) => format!(
-                    "This worktree is on another branch ({branch}) — a adopts it, \
-                     r preserves it aside and starts fresh."
+                    "This worktree is on another branch ({branch}) — a uses it, \
+                     r moves it aside and starts fresh."
                 ),
                 None => self.hint().to_string(),
             },
@@ -5177,11 +5182,11 @@ mod worktree_recovery_tests {
         );
     }
 
-    /// #1755: `thiserror` source-chain prefixes (`worktree: checkout_at:`)
+    /// #1755: `thiserror` source-chain segments (`worktree: checkout_at:`)
     /// are function names, not information. The user-facing text drops
-    /// every leading identifier-and-colon and keeps the first real clause
-    /// — including one that itself starts with a word followed by a
-    /// space, or with a capital.
+    /// every bare-identifier segment — leading or embedded, since the
+    /// daemon wraps one chain inside another — and keeps every clause
+    /// with real words in it, including one that starts with a capital.
     #[test]
     fn user_facing_strips_the_error_source_chain() {
         assert_eq!(
@@ -5194,15 +5199,32 @@ mod worktree_recovery_tests {
             WorktreeRecovery::user_facing("workspace: Linear team `OBI` has no repo mapping"),
             "Linear team `OBI` has no repo mapping",
         );
+        // The wrapped shape the no-checklist route delivers.
+        assert_eq!(
+            WorktreeRecovery::user_facing(
+                "worktree: re-checkout of /tmp/w failed — spawn aborted, retry once the \
+                 cause is fixed: worktree: checkout_at: branch 'feat' is already checked \
+                 out at /tmp/other — refusing to take it"
+            ),
+            "re-checkout of /tmp/w failed — spawn aborted, retry once the cause is \
+             fixed: branch 'feat' is already checked out at /tmp/other — refusing to take it",
+        );
         assert_eq!(
             WorktreeRecovery::user_facing("git command failed: fatal: not a repository"),
-            "git command failed: fatal: not a repository",
-            "a clause with spaces is the message, not a prefix",
+            "git command failed: not a repository",
+            "a clause with spaces is the message; a bare severity word is not",
+        );
+        assert_eq!(
+            WorktreeRecovery::user_facing("I/O error: No such file or directory (os error 2)"),
+            "I/O error: No such file or directory (os error 2)",
         );
         assert_eq!(
             WorktreeRecovery::user_facing("could not read from remote"),
             "could not read from remote",
         );
+        // A one-word fact is a fact, not a chain.
+        assert_eq!(WorktreeRecovery::user_facing("boom"), "boom");
+        assert_eq!(WorktreeRecovery::user_facing("worktree: boom"), "boom");
         assert_eq!(WorktreeRecovery::user_facing(""), "");
     }
 

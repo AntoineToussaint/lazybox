@@ -9734,10 +9734,12 @@ mod modal_input_responsiveness_tests {
     /// the picker and clears both stashes. The live-preview behavior
     /// (apply on highlight) is unit-tested on `Choice` itself; the
     /// persist-on-Enter path by the config round-trip test. This test
-    /// avoids asserting on the process-global active theme, which other
-    /// parallel tests legitimately mutate.
+    /// avoids asserting on the process-global active theme — but mounting
+    /// the picker previews the highlighted theme by switching it, so it
+    /// holds the theme lock like every other switcher.
     #[test]
     fn theme_picker_opens_from_t_and_cancels_clean() {
+        let _theme = crate::theme::test_lock();
         let mut m = build_model();
 
         assert!(m.top_modal().is_none(), "no modal before t");

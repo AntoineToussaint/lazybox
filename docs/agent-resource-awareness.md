@@ -69,6 +69,24 @@ the **full** gate suite (`cargo test --workspace`, `cargo clippy --workspace`,
 resource rules above govern *how hard* you compile, never *whether* the final
 validation happens.
 
+## A red run under load is a finding, not noise
+
+The suite is expected to be green on a saturated box: a test that only
+passes on an idle machine is a wall-clock bet or a race on process-global
+state, and either is a bug in the test (#1751). Reproduce the condition on
+demand rather than re-running until it goes green:
+
+```bash
+make test-loaded                      # one run under 2 spinners per core
+make test-loaded RUNS=10              # the acceptance bar from #1751
+make test-loaded LOAD_FACTOR=0 RUNS=5 # repeat runs only (kind to a shared box)
+```
+
+The merge queue runs the same script as its `loaded` lane. If a test is red
+there and green in isolation, fix the test's assumption — condition-based
+waiting instead of a fixed timeout, a lock or a per-binary sandbox instead
+of unguarded global state — not the budget.
+
 ## Coordinate, don't collide
 
 Multiple agents compiling the same workspace at the same instant thrash both

@@ -378,12 +378,6 @@ mod behavior {
     /// whole-second tree delta a tick must see to call the box busy.
     const AGENT_CPU_SECS: u64 = 1;
 
-    /// How long a spinner fixture is given to burn that delta. Generous
-    /// because the box these tests run on is routinely loaded — a full
-    /// `cargo test --workspace` competes with the spinner for cores, and a
-    /// backgrounded subshell gets the thinnest slice of all.
-    const CPU_DELTA_TIMEOUT: Duration = Duration::from_secs(30);
-
     /// Sampling interval while waiting. Each sample is a full `ps` of the box
     /// (~25 ms on a 1200-process host), so a tight loop would spend a quarter
     /// of a core bidding against the very fixture it is waiting for — on the
@@ -542,10 +536,11 @@ mod behavior {
     /// The tick window has to be a function of CPU burned, not wall clock: on a
     /// loaded box a fixed sleep elapses with the spinner descheduled, the tick
     /// reads a sub-threshold delta, and a test about the *tree walk* fails as
-    /// if the walk were broken.
+    /// if the walk were broken. The fixture owes a CPU quota, so the wait can
+    /// afford to sit out a starved box (`CPU_QUOTA_TIMEOUT`).
     fn wait_until_a_tick_reads_busy(root: u32, marker: &Path) -> TreeReading {
         let prev = detector_snapshot(marker);
-        let deadline = Instant::now() + CPU_DELTA_TIMEOUT;
+        let deadline = Instant::now() + CPU_QUOTA_TIMEOUT;
         loop {
             let reading = read_tree(root, &prev);
             if reading.reads_busy() || Instant::now() >= deadline {
@@ -557,21 +552,67 @@ mod behavior {
 
     /// How long the quota fixture's wait gives the box to hand out that CPU.
     ///
-    /// Far past `CPU_DELTA_TIMEOUT`, and affordable for the same reason the
+    /// Far past what an idle box needs, and affordable for the same reason the
     /// quota exists: the child stops burning the moment it owes nothing, so a
     /// starved box stretches this wait in wall clock without costing it any
     /// more CPU, and the wait returns the instant the delta lands — a healthy
     /// box pays none of it. #1640 reported a box handing the child under 3% of
     /// a core, where a single second of CPU takes ~35 seconds to accumulate;
-    /// the old 30-second bound was the half of that failure no measured burn
-    /// can fix on its own.
+    /// a 30-second bound was the half of that failure no measured burn can
+    /// fix on its own.
+    ///
+    /// `nextest_budget_outlasts_the_cpu_quota_wait` pins the runner's kill
+    /// deadline above this, so a starved box fails with the reading instead
+    /// of a bare `TIMED OUT`.
     const CPU_QUOTA_TIMEOUT: Duration = Duration::from_secs(120);
+
+    /// Wall clock the ticks around the quota wait need — each is a full `ps`
+    /// of a box that is, by construction, loaded.
+    const CPU_TICK_BUDGET: Duration = Duration::from_secs(30);
 
     /// How far past the wait the quota child stays alive once it has idled.
     /// A child that exits mid-wait takes the tree with it, and the wait then
     /// reports an empty tree — the one diagnosis more misleading than the zero
     /// delta this fixture exists to explain.
     const CPU_QUOTA_IDLE_BACKSTOP: Duration = Duration::from_secs(60);
+
+    /// Which process in a quota fixture's tree burns the quota.
+    #[derive(Clone, Copy)]
+    enum QuotaShape {
+        /// The token-carrying shell burns it itself — an agent mid-task.
+        Agent,
+        /// The shell forks a subshell to burn it and blocks in `wait` — an
+        /// agent blocked on a `cargo build`, accruing no CPU of its own.
+        Child,
+    }
+
+    /// A quota fixture and the go-signal that starts its burn.
+    ///
+    /// The burn is gated so a test can take the detector's baseline (tick 1)
+    /// *before* any CPU lands: a child that starts burning at spawn can spend
+    /// most of its quota before the snapshot, and with whole-second
+    /// truncation on both ends a child that burned 1.9s before the snapshot
+    /// and stops at 2.0s produces a delta of 0. Until released the child sits
+    /// in a `read` on its stdin, which costs it nothing.
+    struct CpuQuotaChild {
+        group: FixtureProcessGroup,
+        go: Option<std::process::ChildStdin>,
+    }
+
+    impl CpuQuotaChild {
+        fn pid(&self) -> u32 {
+            self.group.pid()
+        }
+
+        /// Start the burn. Dropping the fixture unreleased closes the pipe
+        /// instead, and the child treats EOF the same way — the process group
+        /// is killed right after either way.
+        fn release(&mut self) {
+            use std::io::Write;
+            let mut go = self.go.take().expect("a quota child is released once");
+            go.write_all(b"\n").expect("release the quota child");
+        }
+    }
 
     /// A fixture whose child burns a quota of *CPU it was actually handed*
     /// rather than a stretch of wall clock, then idles — still alive, so the
@@ -584,17 +625,21 @@ mod behavior {
     /// afford to sit out a starved box (#1640).
     ///
     /// `times` is a builtin and the redirect keeps it in-process, so the
-    /// numbers are the subshell's own — a command substitution would fork and
-    /// report the fork's (empty) accounting instead. The trailing `exit`
-    /// matters too: without it bash execs the idle `sleep` over the subshell,
-    /// leaving the CPU this fixture is all about riding on whether the
-    /// platform carries accounting across `execve`.
+    /// numbers are the burning shell's own — a command substitution would
+    /// fork and report the fork's (empty) accounting instead. The trailing
+    /// `exit` matters too: without it bash execs the idle `sleep` over the
+    /// shell, leaving the CPU this fixture is all about riding on whether the
+    /// platform carries accounting across `execve`. The gate is read by the
+    /// outer shell in both shapes: a backgrounded subshell has its stdin
+    /// redirected from `/dev/null` by bash, so a `read` inside it would
+    /// return at once.
     fn spawn_cpu_quota_child(
         bash: &Path,
         argv0: &str,
         quota: u64,
         progress: &Path,
-    ) -> FixtureProcessGroup {
+        shape: QuotaShape,
+    ) -> CpuQuotaChild {
         // 100ms of headroom: `times` prints its counters rounded, so a bare
         // `>= quota` can stand for a shade under the quota — and the child
         // stops burning at that point, leaving `ps` a second short forever.
@@ -605,30 +650,37 @@ mod behavior {
         // ~0.2 CPU-seconds per chunk on a current machine: short enough that
         // the quota is not overshot by much, long enough that re-reading the
         // accounting is not itself the workload.
-        let program = format!(
-            "( burned=0
-               while (( burned < {quota_ms} )); do
-                 for (( i = 0; i < 200000; i++ )); do :; done
-                 times > \"$LAZYBOX_FIXTURE_CPU\"
-                 read -r user sys < \"$LAZYBOX_FIXTURE_CPU\"
-                 burned=0
-                 for field in \"$user\" \"$sys\"; do
-                   minutes=${{field%%m*}}
-                   seconds=${{field#*m}}
-                   seconds=${{seconds%s}}
-                   burned=$(( burned + (minutes * 60 + ${{seconds%.*}}) * 1000 + 10#${{seconds#*.}} ))
-                 done
+        let burn = format!(
+            "burned=0
+             while (( burned < {quota_ms} )); do
+               for (( i = 0; i < 200000; i++ )); do :; done
+               times > \"$LAZYBOX_FIXTURE_CPU\"
+               read -r user sys < \"$LAZYBOX_FIXTURE_CPU\"
+               burned=0
+               for field in \"$user\" \"$sys\"; do
+                 minutes=${{field%%m*}}
+                 seconds=${{field#*m}}
+                 seconds=${{seconds%s}}
+                 burned=$(( burned + (minutes * 60 + ${{seconds%.*}}) * 1000 + 10#${{seconds#*.}} ))
                done
-               sleep {idle}
-               exit 0 ) & wait"
+             done
+             sleep {idle}
+             exit 0"
         );
+        let program = match shape {
+            QuotaShape::Agent => format!("read -r _ || :\n{burn}"),
+            QuotaShape::Child => format!("read -r _ || :\n( {burn} ) & wait"),
+        };
         let mut command = Command::new(bash);
         command
             .args(["-c", &program, argv0])
             .env("LAZYBOX_FIXTURE_CPU", progress)
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        FixtureProcessGroup::spawn(command)
+        let mut group = FixtureProcessGroup::spawn(command);
+        let go = group.child.stdin.take();
+        CpuQuotaChild { group, go }
     }
 
     /// What the quota child's own accounting says it managed to clock up. A
@@ -707,12 +759,14 @@ mod behavior {
         let Ok(bash) = which_bash() else { return };
         let dir = scratch("unsnapshotted_child");
         let progress = dir.join("child-cpu");
-        let agent = spawn_cpu_quota_child(
+        let mut agent = spawn_cpu_quota_child(
             &bash,
             "lazybox-test-unsnapshotted-child",
             AGENT_CPU_SECS,
             &progress,
+            QuotaShape::Child,
         );
+        agent.release();
 
         // A baseline that knows the shell but not the child it forked — what a
         // tick that ran before the fork leaves behind.
@@ -817,12 +871,51 @@ mod behavior {
         assert!(rendered.contains("0m0.400s 0m0.020s"), "{rendered}");
     }
 
+    /// The quota wait only produces a readable failure if it fires before
+    /// nextest kills the process: `terminate-after = 1` SIGKILLs, and a killed
+    /// test never unwinds, so whichever bound fires first decides whether the
+    /// failure carries the tree reading or reads `TIMED OUT`. The two budgets
+    /// are a matched pair; raising either alone trades the diagnosis away.
+    #[test]
+    fn nextest_budget_outlasts_the_cpu_quota_wait() {
+        let path = super::workspace_root().join(".config/nextest.toml");
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        let block = text
+            .split("[[profile.default.overrides]]")
+            .find(|block| block.contains("binary(box_lifecycle)"))
+            .expect("a nextest override pins the box_lifecycle CPU fixtures' budget");
+        assert!(
+            block.contains("terminate-after"),
+            "the override no longer terminates the test, so the ordering this \
+             guard pins would no longer describe how it fails",
+        );
+        let period = block
+            .lines()
+            .find_map(|line| {
+                let rest = line.trim().strip_prefix("slow-timeout")?;
+                let secs = rest.split_once("period = \"")?.1.split_once("s\"")?.0;
+                secs.parse::<u64>().ok().map(Duration::from_secs)
+            })
+            .expect("override declares a slow-timeout period in whole seconds");
+        assert!(
+            CPU_QUOTA_TIMEOUT + CPU_TICK_BUDGET < period,
+            "in-test bounds (wait {CPU_QUOTA_TIMEOUT:?} + ticks {CPU_TICK_BUDGET:?}) \
+             must complete before nextest's {period:?} kill, or a starved box \
+             dies by SIGKILL with no reading",
+        );
+    }
+
+    /// The agent itself owes a CPU quota, released only after tick 1 has
+    /// taken its baseline, so the whole quota lands inside the window the
+    /// second tick diffs — however slowly a loaded box hands it out (#1676).
     #[test]
     fn a_working_agent_is_not_reaped_mid_task() {
         let Ok(bash) = which_bash() else { return };
         let dir = scratch("busy_agent");
         let marker = dir.join("idle-since");
         let stopped = dir.join("STOPPED");
+        let progress = dir.join("agent-cpu");
         let stop_cmd = format!("touch {}", stopped.display());
         let token = agent_token("lazybox-test-working-agent");
         let cpu_secs = AGENT_CPU_SECS.to_string();
@@ -832,21 +925,15 @@ mod behavior {
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
-        // A bounded CPU spinner, its argv carrying the watched token. The
-        // deadline is a second backstop behind the process-group Drop guard:
-        // even a hard-aborted test can never leak an infinite hot loop. It has
-        // to outlast `CPU_DELTA_TIMEOUT` — a spinner that exits mid-wait can
-        // never reach the CPU the tick below needs.
-        let mut command = Command::new(&bash);
-        command
-            .args([
-                "-c",
-                "end=$((SECONDS+60)); while (( SECONDS < end )); do :; done",
-                token.as_str(),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let agent = FixtureProcessGroup::spawn(command);
+        // Its argv carries the watched token; it idles in the gate until
+        // tick 1 has snapshotted it.
+        let mut agent = spawn_cpu_quota_child(
+            &bash,
+            token.as_str(),
+            AGENT_CPU_SECS,
+            &progress,
+            QuotaShape::Agent,
+        );
 
         // Tick 1 sees a newly-observed process → active, clears the stale marker.
         fs::write(&marker, "1").expect("stale marker");
@@ -855,12 +942,14 @@ mod behavior {
         let cleared_1 = !marker.exists();
 
         // Tick 2 must keep it alive on the CPU *delta* (not newness): re-stale
-        // the marker, let the agent burn CPU, run again.
+        // the marker, let the agent burn its quota, run again.
+        agent.release();
         let reading = wait_until_a_tick_reads_busy(agent.pid(), &marker);
         fs::write(&marker, "1").expect("stale marker");
         run_idle(&bash, &marker, &env, None);
         let stopped_2 = stopped.exists();
         let cleared_2 = !marker.exists();
+        let burned = child_cpu_burned(&progress);
 
         // Teardown before assertions; Drop still runs on every earlier panic.
         drop(agent);
@@ -872,7 +961,8 @@ mod behavior {
         );
         assert!(
             reading.reads_busy(),
-            "no tick would have read this tree as busy within {CPU_DELTA_TIMEOUT:?}: {reading}"
+            "no tick would have read this tree as busy within {CPU_QUOTA_TIMEOUT:?}: \
+             {reading}; {burned}"
         );
         assert!(!stopped_1, "a live agent must not be stopped");
         assert!(
@@ -951,6 +1041,7 @@ mod behavior {
         let dir = scratch("busy_agent_child");
         let marker = dir.join("idle-since");
         let stopped = dir.join("STOPPED");
+        let progress = dir.join("child-cpu");
         let stop_cmd = format!("touch {}", stopped.display());
         let token = agent_token("lazybox-test-blocked-agent");
         let cpu_secs = AGENT_CPU_SECS.to_string();
@@ -960,19 +1051,16 @@ mod behavior {
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
-        // Agent (argv carries the watched token) waits while a bounded child
-        // spins. The shell itself accrues no CPU. A dedicated process group
-        // guarantees teardown reaches the child as well as the shell.
-        let mut command = Command::new(&bash);
-        command
-            .args([
-                "-c",
-                "( end=$((SECONDS+60)); while (( SECONDS < end )); do :; done ) & wait",
-                token.as_str(),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let agent = FixtureProcessGroup::spawn(command);
+        // Agent (argv carries the watched token) waits while its child owes
+        // the quota. The shell itself accrues no CPU. A dedicated process
+        // group guarantees teardown reaches the child as well as the shell.
+        let mut agent = spawn_cpu_quota_child(
+            &bash,
+            token.as_str(),
+            AGENT_CPU_SECS,
+            &progress,
+            QuotaShape::Child,
+        );
 
         // Tick 1: newly-seen tree → active, clears the stale marker.
         fs::write(&marker, "1").expect("stale marker");
@@ -982,11 +1070,13 @@ mod behavior {
 
         // Tick 2: the agent is idle but its child has burned CPU. The tree
         // delta must keep the box alive across a second consecutive tick.
+        agent.release();
         let reading = wait_until_a_tick_reads_busy(agent.pid(), &marker);
         fs::write(&marker, "1").expect("stale marker");
         run_idle(&bash, &marker, &env, None);
         let stopped_2 = stopped.exists();
         let cleared_2 = !marker.exists();
+        let burned = child_cpu_burned(&progress);
 
         drop(agent);
 
@@ -997,7 +1087,8 @@ mod behavior {
         );
         assert!(
             reading.reads_busy(),
-            "no tick would have read this tree as busy within {CPU_DELTA_TIMEOUT:?}: {reading}"
+            "no tick would have read this tree as busy within {CPU_QUOTA_TIMEOUT:?}: \
+             {reading}; {burned}"
         );
         assert!(!stopped_1, "a live agent tree must not be stopped");
         assert!(cleared_1, "a newly-seen agent tree clears the idle marker");

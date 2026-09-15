@@ -12,6 +12,8 @@
 //! reconstructed grid recovers a meaningful scrollback depth with the
 //! sized ring while the old screen-sized ring does not.
 
+mod common;
+
 use lazybox_server::pty::{REPLAY_RING_BYTES, ReplayRing};
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::screen::Selection;

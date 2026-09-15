@@ -19335,23 +19335,24 @@ mod tests {
             ),
         );
 
+        // The outcome, not the wall clock, is the evidence: a candidate stuck
+        // in `write` never exits, so the probe reaps it at the deadline and
+        // reports `Unanswered`; a drained one exits and is heard from, just
+        // with the wrong thing to say — `Incapable`. Timing the healthy path
+        // against a fixed bound only measured how loaded the box was. The
+        // deadline sits under the suite's 10s per-test ceiling so a real
+        // block still fails here, with the elapsed time, rather than as an
+        // opaque kill from the runner.
+        let deadline = Duration::from_secs(8);
         let started = std::time::Instant::now();
-        let outcome = probe_hook_helper_within(&noisy, Duration::from_secs(6));
+        let outcome = probe_hook_helper_within(&noisy, deadline);
         let elapsed = started.elapsed();
 
-        // Both bounds sit under the suite's 10s per-test ceiling: an undrained
-        // pipe stalls to the 6s deadline and trips this assertion, instead of
-        // the runner killing the test without a word.
-        assert!(
-            elapsed < Duration::from_secs(4),
-            "the probe blocked on a full stdout pipe for {elapsed:?}"
-        );
-        // It exited and was heard from, just with the wrong thing to say — a
-        // rejection, not a timeout.
         assert_eq!(
             outcome,
             HookProbe::Incapable,
-            "stdout that is not exactly the probe response is not an answer"
+            "the candidate flooded stdout and was still waited on until the \
+             {deadline:?} deadline ({elapsed:?}): the reader is not draining the pipe"
         );
     }
 

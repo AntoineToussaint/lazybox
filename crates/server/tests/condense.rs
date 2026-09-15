@@ -4,6 +4,8 @@
 //! returns those exact bytes — including after a daemon restart, which is
 //! the case the store-backed cache exists for.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

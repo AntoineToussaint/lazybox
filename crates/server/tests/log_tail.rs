@@ -16,6 +16,8 @@
 //! reach the subscriber as `TerminalOutput`, and that a second connection can
 //! find the window in the snapshot and tear it down.
 
+mod common;
+
 use lazybox_ipc::{Command, Event, TerminalId, TerminalKind, socket};
 use lazybox_server::ServerConfig;
 use lazybox_server::backend::RawPtyBackend;

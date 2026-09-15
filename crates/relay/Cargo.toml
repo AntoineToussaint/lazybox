@@ -30,6 +30,7 @@ tracing-subscriber = { workspace = true }
 uuid               = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+ctor = "1.0"
 # The broker's encrypted-path test wraps the brokered stream in the E2E
 # channel exactly as the box/client do; the deny-gate test drives the
 # entitlement seam. Both are test-only edges.

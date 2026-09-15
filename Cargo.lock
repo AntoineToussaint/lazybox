@@ -2053,6 +2053,7 @@ version = "0.1.15"
 dependencies = [
  "bincode",
  "bytes",
+ "ctor",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2192,6 +2193,7 @@ version = "0.1.15"
 dependencies = [
  "anyhow",
  "chrono",
+ "ctor",
  "hex",
  "lazybox-config",
  "lazybox-core",
@@ -2230,6 +2232,7 @@ name = "lazybox-tui-core"
 version = "0.1.15"
 dependencies = [
  "chrono",
+ "ctor",
  "lazybox-agents",
  "lazybox-config",
  "lazybox-core",

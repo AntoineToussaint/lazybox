@@ -821,6 +821,7 @@ mod status_pill_consistency_tests {
     #[test]
     fn status_glyph_colors_are_legible_on_the_light_theme() {
         use crate::theme;
+        let _theme = theme::test_lock();
         let prev = theme::current().name;
         assert!(
             theme::set_by_name("Lazybox Light"),

@@ -1,3 +1,5 @@
+mod common;
+
 use std::convert::Infallible;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;

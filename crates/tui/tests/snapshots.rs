@@ -13,6 +13,8 @@
 //! Accept with `a`, reject with `r`. Rejected changes fail CI —
 //! that's the point.
 
+mod common;
+
 use chrono::{Duration, TimeZone, Utc};
 use lazybox_core::{
     CiStatus, ReviewStatus, SessionKey, SessionKind, Task, TaskId, TaskRole, TaskState, Workspace,

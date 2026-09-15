@@ -18,6 +18,8 @@
 //!   `LAZYBOX_E2E_LIVE_AGENTS=1` plus `--run-ignored`, because they need
 //!   an installed, authenticated CLI and consume real tokens.
 
+mod common;
+
 use lazybox_ipc::{Command, Event, TerminalInputIntent, TerminalKind, channel};
 use lazybox_server::backend::SessionBackend;
 use lazybox_server::backend::TmuxBackend;

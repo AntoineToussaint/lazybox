@@ -158,6 +158,11 @@ test: ## Run all tests (cargo-nextest enforces a 10s per-test deadline).
 test-ignored: ## Run #[ignore]'d real-backend integration tests on demand.
 	@PATH="$(PINNED_PATH)" cargo nextest run --workspace --run-ignored only
 
+RUNS ?= 1
+LOAD_FACTOR ?= 2
+test-loaded: ## Run the suite under deliberate CPU load (LOAD_FACTOR spinners per core, RUNS times) — the #1751 lane.
+	@PATH="$(PINNED_PATH)" ./scripts/test-under-load.sh --runs $(RUNS) --load-factor $(LOAD_FACTOR)
+
 lint: ## Run clippy with workspace lint config (vendored crates excluded).
 	@PATH="$(PINNED_PATH)" cargo clippy --workspace --tests
 

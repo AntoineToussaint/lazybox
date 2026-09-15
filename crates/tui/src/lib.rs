@@ -49,14 +49,16 @@ pub use lazybox_tui_core::{
 pub use pane::{Binding, PaneId, PaneOutcome};
 pub use theme::Theme;
 
-// Test-only config sandbox for the lib unit-test binary. The identical
+// Test-only config sandbox for the lib unit-test binary. The same
 // redirect for the crate's *integration* binaries lives in
 // `tests/common/mod.rs`: it can't be shared from here because those
 // binaries link the non-`cfg(test)` library as an external crate, so the
 // only way to share the body would be a `pub` helper — which would put an
 // env-mutating function on the production API surface (#1539). Keeping a
 // `#[cfg(test)]` copy here confines that footgun to test code. The two
-// copies are deliberately kept identical; mirror any edit.
+// copies share the ctor; only this one carries the write proof below,
+// because an integration binary may pin a per-test home under its own
+// lock and a write from outside that lock would land in it.
 #[cfg(test)]
 mod config_sandbox {
     /// Point `LAZYBOX_HOME` at a throwaway dir so any `ui.*` persist lands

@@ -13,6 +13,8 @@
 //! client VT from its replay. The reconstructed grid must recover the
 //! prior run's scrollback, not an empty screen.
 
+mod common;
+
 use lazybox_server::backend::{RawPtyBackend, SessionBackend};
 use libghostty_vt::{Terminal, TerminalOptions};
 

@@ -82,6 +82,13 @@ impl OrphanReason {
 /// checkout without losing anything.
 pub const BUILD_DIR: &str = "target";
 
+/// Directory name of a repo's shared main checkout, `<base>/<scope>/_main`.
+/// Every workspace on the repo shares it, so no session owns it: the
+/// inspector never classes it as untracked or session-stopped debris. The
+/// leading underscore keeps it clear of every slug (`slugify` emits
+/// `[a-z0-9-]` only), which is what makes matching on the name safe.
+pub const SHARED_MAIN_DIR: &str = "_main";
+
 /// One row of the inspector report.
 #[derive(Debug, Clone)]
 pub struct WorktreeInspection {
@@ -421,8 +428,15 @@ impl WorktreeManager {
                 let key = canonical_or_self(&path);
                 seen_paths.insert(key.clone());
 
-                let inspection =
-                    inspect_one(self.git_runner(), &path, &key, &porcelain, &tracked_by_path).await;
+                let inspection = inspect_one(
+                    self.git_runner(),
+                    &path,
+                    &key,
+                    &porcelain,
+                    &tracked_by_path,
+                    true,
+                )
+                .await;
                 inspections.push(inspection);
             }
         }
@@ -451,6 +465,7 @@ impl WorktreeManager {
                     key,
                     &porcelain,
                     &tracked_by_path,
+                    true,
                 )
                 .await;
                 inspections.push(inspection);
@@ -473,6 +488,75 @@ impl WorktreeManager {
         }
 
         // Stable order — caller-friendly + deterministic for tests.
+        inspections.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(inspections)
+    }
+
+    /// [`Self::inspect_worktrees`] restricted to `paths` — the rows a
+    /// lifecycle decision about one workspace needs, without probing every
+    /// worktree on the box. The registry index (one `git worktree list` per
+    /// bare clone) is still built, so a registered path whose directory is
+    /// gone is reported prunable and an unregistered one is refused the
+    /// same way the full scan would. No disk walk: `size_bytes`,
+    /// `build_bytes`, and `last_modified` are zero / `None`, because the
+    /// callers hold locks that serialize provisioning and a multi-GB
+    /// `target/` walk under them stalls the fleet.
+    pub async fn inspect_paths(
+        &self,
+        paths: &[PathBuf],
+        tracked: &[TrackedSession],
+    ) -> Result<Vec<WorktreeInspection>, GitError> {
+        let bare_paths = discover_bare_clones(&self.base_dir().join("repos")).await;
+        let mut porcelain: HashMap<PathBuf, (PathBuf, PorcelainEntry)> = HashMap::new();
+        for bare in &bare_paths {
+            if let Ok(entries) = list_porcelain(self.git_runner(), bare).await {
+                for entry in entries {
+                    let key = canonical_or_self(&entry.path);
+                    porcelain.insert(key, (bare.clone(), entry));
+                }
+            }
+        }
+        let tracked_by_path: HashMap<PathBuf, &TrackedSession> = tracked
+            .iter()
+            .map(|t| (canonical_or_self(&t.worktree_path), t))
+            .collect();
+
+        let mut inspections: Vec<WorktreeInspection> = Vec::new();
+        let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for path in paths {
+            let key = canonical_or_self(path);
+            if !seen_paths.insert(key.clone()) {
+                continue;
+            }
+            if path.is_dir() {
+                inspections.push(
+                    inspect_one(
+                        self.git_runner(),
+                        path,
+                        &key,
+                        &porcelain,
+                        &tracked_by_path,
+                        false,
+                    )
+                    .await,
+                );
+            } else if let Some((bare, entry)) = porcelain.get(&key) {
+                inspections.push(WorktreeInspection {
+                    path: entry.path.clone(),
+                    bare_path: Some(bare.clone()),
+                    branch: entry.branch.clone(),
+                    session_id: None,
+                    reasons: vec![OrphanReason::Prunable],
+                    size_bytes: 0,
+                    build_bytes: 0,
+                    last_modified: None,
+                    has_uncommitted_changes: false,
+                    status_verified: false,
+                    has_unpushed_commits: false,
+                    is_safe_to_delete: true,
+                });
+            }
+        }
         inspections.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(inspections)
     }
@@ -639,19 +723,23 @@ impl WorktreeManager {
     /// Drop the build output ([`BUILD_DIR`]) of an inspected worktree
     /// while keeping its source tree, branch, and registration — for a
     /// checkout whose work has landed but which stays on disk. Returns
-    /// the bytes freed; `Ok(0)` when the guard declined or there was
-    /// nothing to drop.
+    /// the bytes freed (`Some(0)` when there was nothing to drop), or
+    /// `None` when `still_removable` declined under the lock.
     ///
     /// Refuses, under the per-repo lock and against fresh probes, unless
     /// the worktree is still registered, unlocked, has a clean status,
-    /// and git *ignores* the build dir — a tracked or untracked `target/`
-    /// is content, not output. Unpushed commits don't block it: they live
-    /// in the branch, not the build dir.
+    /// the build dir is a real directory (a symlink is the user's
+    /// redirect, not output), and git *ignores* it. A tracked or
+    /// unignored `target/` is content, not output — and git stops
+    /// treating a directory as ignored once it holds a tracked file, so a
+    /// force-added file inside an ignored `target/` refuses here too.
+    /// Unpushed commits don't block it: they live in the branch, not the
+    /// build dir.
     pub async fn reclaim_build_dir<F>(
         &self,
         inspection: &WorktreeInspection,
         still_removable: F,
-    ) -> Result<u64, GitError>
+    ) -> Result<Option<u64>, GitError>
     where
         F: FnOnce() -> bool + Send,
     {
@@ -668,14 +756,22 @@ impl WorktreeManager {
             return refuse("is not a managed checkout");
         }
         let build_dir = inspection.path.join(BUILD_DIR);
-        if !build_dir.is_dir() {
-            return Ok(0);
+        let Ok(build_meta) = std::fs::symlink_metadata(&build_dir) else {
+            return Ok(Some(0));
+        };
+        if build_meta.is_symlink() {
+            return refuse(&format!(
+                "has a symlinked {BUILD_DIR}/, which is a redirect"
+            ));
+        }
+        if !build_meta.is_dir() {
+            return Ok(Some(0));
         }
 
         let lock = crate::repo_lock(bare);
         let _guard = lock.lock(LockPriority::Background).await;
         if !still_removable() {
-            return Ok(0);
+            return Ok(None);
         }
         let path_key = canonical_or_self(&inspection.path);
         let entries = list_porcelain(self.git_runner(), bare).await?;
@@ -705,7 +801,7 @@ impl WorktreeManager {
 
         let freed = size_and_mtime(&build_dir).await.0;
         tokio::fs::remove_dir_all(&build_dir).await?;
-        Ok(freed)
+        Ok(Some(freed))
     }
 }
 
@@ -970,6 +1066,7 @@ async fn inspect_one(
     canon: &Path,
     porcelain: &HashMap<PathBuf, (PathBuf, PorcelainEntry)>,
     tracked_by_path: &HashMap<PathBuf, &TrackedSession>,
+    measure: bool,
 ) -> WorktreeInspection {
     let porcelain_entry = porcelain.get(canon);
     let bare_path = porcelain_entry.map(|(b, _)| b.clone());
@@ -987,10 +1084,15 @@ async fn inspect_one(
     if prunable {
         reasons.push(OrphanReason::Prunable);
     }
-    if tracked.is_none() {
-        reasons.push(OrphanReason::Untracked);
-    } else if tracked.is_some_and(|t| t.is_stopped) {
-        reasons.push(OrphanReason::SessionStopped);
+    // The shared main checkout is owned by no session, so "no session" and
+    // "session stopped" say nothing about it being debris.
+    let shared_main = path.file_name().is_some_and(|name| name == SHARED_MAIN_DIR);
+    if !shared_main {
+        if tracked.is_none() {
+            reasons.push(OrphanReason::Untracked);
+        } else if tracked.is_some_and(|t| t.is_stopped) {
+            reasons.push(OrphanReason::SessionStopped);
+        }
     }
 
     // Five independent probes per worktree: two ref lookups against
@@ -1020,7 +1122,13 @@ async fn inspect_one(
                 _ => false,
             }
         },
-        size_and_mtime(path),
+        async {
+            if measure {
+                size_and_mtime(path).await
+            } else {
+                (0, 0, None)
+            }
+        },
         // The two in-worktree probes, gated on the worktree's git dir
         // still being usable. A managed worktree whose bare clone was
         // deleted keeps a `.git` file pointing at a now-missing gitdir;
@@ -1779,7 +1887,8 @@ async fn size_and_mtime(root: &Path) -> (u64, u64, Option<SystemTime>) {
     let res = tokio::task::spawn_blocking(move || {
         let build_dir = root.join(BUILD_DIR);
         let (source, newest_source) = walk_sync(&root, Some(&build_dir));
-        let (build, newest_build) = if build_dir.is_dir() {
+        let real_build_dir = std::fs::symlink_metadata(&build_dir).is_ok_and(|m| m.is_dir());
+        let (build, newest_build) = if real_build_dir {
             walk_sync(&build_dir, None)
         } else {
             (0, None)

@@ -246,10 +246,11 @@ async fn gc(args: &[String]) -> anyhow::Result<()> {
     let mut build_freed = 0u64;
     for row in &builds {
         match mgr.reclaim_build_dir(row, || true).await {
-            Ok(bytes) => {
+            Ok(Some(bytes)) => {
                 dropped += 1;
                 build_freed += bytes;
             }
+            Ok(None) => {}
             Err(e) => println!("  ! {}: {e}", row.path.display()),
         }
     }
@@ -461,8 +462,11 @@ struct Tracked {
 
 /// Project every persisted session into the inspector's
 /// [`TrackedSession`] shape — the daemon-free twin of the server's
-/// `collect_tracked_sessions`. A session in `SessionRunState::Stopped`
-/// marks its worktree as an orphan candidate. Reads the production DB
+/// `collect_tracked_sessions`, minus its terminal registry: with no
+/// daemon there is no liveness to consult (a tmux-backed agent can
+/// outlive it), and the daemon never persists `SessionRunState::Stopped`,
+/// so from here every tracked session reads live and only untracked or
+/// branch-gone worktrees are orphan candidates. Reads the production DB
 /// best-effort: a missing / unreadable store yields an empty list, so
 /// every on-disk worktree is then treated as untracked (still guarded
 /// by the safety gate before any deletion).

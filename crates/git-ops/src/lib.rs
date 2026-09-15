@@ -15,8 +15,8 @@ use tokio::process::Command;
 mod inspect;
 pub use inspect::{
     BUILD_DIR, DiffFile, DiffHunk, DiffLine, DiffLineKind, DiscoveredCheckout, OrphanReason,
-    TrackedSession, WorktreeDiff, WorktreeInspection, describe_checkout_at, inspect_worktree_diff,
-    scan_external_checkouts, worktree_is_pristine,
+    SHARED_MAIN_DIR, TrackedSession, WorktreeDiff, WorktreeInspection, describe_checkout_at,
+    inspect_worktree_diff, scan_external_checkouts, worktree_is_pristine,
 };
 
 /// Which lane a per-repo lock acquisition belongs to.

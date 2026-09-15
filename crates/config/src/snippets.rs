@@ -1520,7 +1520,8 @@ impl Snippets {
                      news. If you are blocked or need a decision from me, that is the FIRST \
                      line, not the last. Name files and identifiers concretely rather than \
                      describing them. No preamble, no restating the task back to me, and no \
-                     offer to continue — I can see the terminal.",
+                     offer to continue — I can see the terminal. The verdict names where \
+                     things stand and the one decision, if any, you need from me.",
                 ),
             ),
             (

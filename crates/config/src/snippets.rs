@@ -1520,7 +1520,9 @@ impl Snippets {
                      news. If you are blocked or need a decision from me, that is the FIRST \
                      line, not the last. Name files and identifiers concretely rather than \
                      describing them. No preamble, no restating the task back to me, and no \
-                     offer to continue — I can see the terminal.",
+                     offer to continue — I can see the terminal. This is an account of work \
+                     already done: it changes nothing. The verdict names where things stand \
+                     and the decision you need from me, if any.",
                 ),
             ),
             (
@@ -2252,6 +2254,7 @@ snippets:
         assert!(fact("whyci").contains("changes nothing"));
         assert!(fact("status").contains("creates nothing"));
         assert!(fact("handoff").contains("commits and pushes nothing"));
+        assert!(fact("catchup").contains("changes nothing"));
         // …and a polish pass must not report blockers.
         assert!(fact("nit").contains("a nit is not a blocker"));
         // Snippets that really do push say so.

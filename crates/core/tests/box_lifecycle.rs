@@ -679,8 +679,17 @@ mod behavior {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut group = FixtureProcessGroup::spawn(command);
-        let go = group.child.stdin.take();
-        CpuQuotaChild { group, go }
+        // Without a pipe here the child reads EOF at once and burns from
+        // spawn — the zero-delta case the gate exists to rule out.
+        let go = group
+            .child
+            .stdin
+            .take()
+            .expect("the quota child's stdin is piped");
+        CpuQuotaChild {
+            group,
+            go: Some(go),
+        }
     }
 
     /// What the quota child's own accounting says it managed to clock up. A

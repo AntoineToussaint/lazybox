@@ -12,8 +12,12 @@
 #   scripts/test-under-load.sh --runs 10        # the #1751 acceptance bar
 #   scripts/test-under-load.sh --load-factor 0  # repeat runs, no spinners
 #   scripts/test-under-load.sh --profile ci -- -p lazybox-server
+#   scripts/test-under-load.sh -- -E 'not test(known_red_on_main)'
 #
-# Anything after `--` is passed to both `cargo nextest` invocations.
+# Anything after `--` is passed to the `cargo nextest run` invocations (the
+# whole workspace is compiled first regardless). Each run reports every
+# failure rather than stopping at the first: on a loaded box the set of
+# failures is the finding.
 # The spinners run at normal priority on purpose: `nice` would let the tests
 # win the scheduler, which is exactly the headroom a loaded box does not give.
 # On a shared dev box, prefer `--load-factor 0` while others are working.
@@ -41,7 +45,7 @@ done
 cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 spinners=$((cores * factor))
 
-cargo nextest run --workspace --profile "$profile" --no-run "$@"
+cargo nextest run --workspace --profile "$profile" --no-run
 
 pids=()
 cleanup() {
@@ -60,7 +64,7 @@ echo "test-under-load: $spinners spinners on $cores cores (load factor $factor),
 
 for ((run = 1; run <= runs; run++)); do
     echo "=== run $run/$runs · $(uptime | sed 's/.*load/load/')"
-    if ! cargo nextest run --workspace --profile "$profile" "$@"; then
+    if ! cargo nextest run --workspace --profile "$profile" --no-fail-fast "$@"; then
         echo "test-under-load: run $run/$runs FAILED" >&2
         exit 1
     fi

@@ -3,15 +3,17 @@
 //! `mod common;` in a `tests/*.rs` links in a before-main `#[ctor]` that
 //! points `LAZYBOX_HOME` at a throwaway dir, so nothing the binary runs
 //! can read or rewrite the developer's real `~/.lazybox/config.yaml`
-//! (#1539, #1751), plus a guard test that fails *this* binary if the
+//! (#1539, #1751), and points every git it spawns at a sandbox global
+//! config (#1751), plus a guard test that fails *this* binary if the
 //! redirect ever stops working. `crates/core/tests/test_isolation.rs`
 //! requires it in every integration binary of a crate that depends on
-//! `lazybox-config`.
+//! `lazybox-config` or spawns git.
 //!
 //! A copy rather than a shared helper: integration binaries link the
 //! non-`cfg(test)` library as an external crate, so sharing the body would
 //! put an env-mutating function on the production API surface. Keep the
-//! copies across the workspace identical.
+//! copies across the workspace in step; the git half is carried only by
+//! the crates that spawn git.
 //!
 //! One sandbox dir is shared by every test thread in the binary, so a test
 //! that needs a home of its own still pins one per test under a lock; the
@@ -35,6 +37,32 @@ fn install() {
     // thread — so nothing can race this env write.
     unsafe { std::env::set_var("LAZYBOX_HOME", &dir) };
     lazybox_config::Config::invalidate_cache();
+    isolate_git(&dir);
+}
+
+/// Point every git this binary spawns — fixture commands and the code
+/// under test alike — at a sandbox global config, with no system config.
+/// Two things the developer's real config brings that a test must not:
+/// a signing setup that hangs on a locked agent, and git's own background
+/// work. Since 2.29 `fetch` and `commit` (and `clone` since 2.45) fork a
+/// *detached* `git maintenance run --auto` that outlives the command and
+/// keeps repacking objects and holding `maintenance.lock` in the fixture
+/// repo — a local `clone --bare` then fails mid-copy on a box loaded
+/// enough for the two to overlap (#1751). Env is inherited, so the
+/// sandbox reaches the git that production code runs under the test too.
+fn isolate_git(sandbox: &std::path::Path) {
+    let gitconfig = sandbox.join("gitconfig");
+    let _ = std::fs::write(
+        &gitconfig,
+        "[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n\
+         [maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n",
+    );
+    // SAFETY: called from the before-main `#[ctor]` below, while the
+    // process is still single-threaded.
+    unsafe {
+        std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
+        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+    }
 }
 
 #[ctor::ctor]
@@ -54,5 +82,21 @@ fn config_path_resolves_to_a_sandbox_not_the_real_home() {
         lazybox_config::Config::default_path(),
         real,
         "LAZYBOX_HOME redirect is not active — this binary can reach the real config"
+    );
+}
+
+/// Every git this binary spawns reads the sandbox config, not the
+/// developer's: auto-maintenance is the setting a fixture cannot afford to
+/// inherit, so it is the one asserted.
+#[test]
+fn git_in_this_binary_reads_the_sandbox_config() {
+    let out = std::process::Command::new("git")
+        .args(["config", "--global", "maintenance.auto"])
+        .output()
+        .expect("git runs");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "false",
+        "GIT_CONFIG_GLOBAL is not pointed at the sandbox gitconfig"
     );
 }

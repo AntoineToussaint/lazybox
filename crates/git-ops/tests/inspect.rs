@@ -17,6 +17,8 @@
 //! inside `WorktreeManager` paths that are already bounded by the
 //! 30s per-call timeout in `lib.rs`. No additional wrapper required.
 
+mod common;
+
 use lazybox_git_ops::{
     OrphanReason, TrackedSession, WorktreeInspection, WorktreeManager, WorktreeReclaimBlocker,
     WorktreeReclaimOutcome,

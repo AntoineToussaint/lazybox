@@ -1969,6 +1969,7 @@ dependencies = [
 name = "lazybox-git-ops"
 version = "0.1.15"
 dependencies = [
+ "ctor",
  "lazybox-core",
  "libc",
  "tempfile",

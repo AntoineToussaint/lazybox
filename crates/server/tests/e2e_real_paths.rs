@@ -98,6 +98,7 @@ impl Drop for IsolatedConfigHome {
 fn git(cwd: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .current_dir(cwd)
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")

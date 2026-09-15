@@ -75,19 +75,75 @@ fn installs_sandbox(body: &str) -> bool {
     body.contains("#[ctor::ctor]") && body.contains("set_var(\"LAZYBOX_HOME\"")
 }
 
+/// Whether `manifest` is `lazybox-git-ops` or lists it under
+/// `[dependencies]` — the crates whose test binaries spawn real git, from
+/// fixtures and from the code under test.
+fn spawns_git(manifest: &str) -> bool {
+    manifest.contains("name = \"lazybox-git-ops\"") || {
+        let mut in_dependencies = false;
+        let mut found = false;
+        for line in manifest.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_dependencies = line == "[dependencies]";
+                continue;
+            }
+            if in_dependencies && line.starts_with("lazybox-git-ops") {
+                found = true;
+            }
+        }
+        found
+    }
+}
+
+fn installs_git_sandbox(body: &str) -> bool {
+    body.contains("#[ctor::ctor]") && body.contains("set_var(\"GIT_CONFIG_GLOBAL\"")
+}
+
 fn has_tests(body: &str) -> bool {
     body.contains("#[test]") || body.contains("#[tokio::test")
 }
 
 #[test]
 fn every_test_binary_that_can_reach_config_sandboxes_lazybox_home() {
+    let missing = binaries_missing_a_sandbox(depends_on_config, installs_sandbox, "LAZYBOX_HOME");
+    assert!(
+        missing.is_empty(),
+        "test binaries that can reach the real config without a sandbox:\n  {}",
+        missing.join("\n  ")
+    );
+}
+
+/// The git half of the same rule. Every git a test binary spawns inherits
+/// the process environment, so a before-main `GIT_CONFIG_GLOBAL` sandbox is
+/// what keeps fixture repos clear of the developer's signing setup and of
+/// git's detached auto-maintenance, whichever code path ran the command.
+#[test]
+fn every_test_binary_that_spawns_git_sandboxes_its_global_config() {
+    let missing = binaries_missing_a_sandbox(spawns_git, installs_git_sandbox, "GIT_CONFIG_GLOBAL");
+    assert!(
+        missing.is_empty(),
+        "test binaries that spawn git without a sandbox global config:\n  {}",
+        missing.join("\n  ")
+    );
+}
+
+/// Every test binary of every crate `applies` selects, checked for a
+/// `#[ctor]` that `installs` recognizes: the unit binary through its
+/// source tree, each `src/bin/*.rs` on its own, each `tests/*.rs` through
+/// `mod common;`.
+fn binaries_missing_a_sandbox(
+    applies: fn(&str) -> bool,
+    installs: fn(&str) -> bool,
+    variable: &str,
+) -> Vec<String> {
     let crates = workspace_root().join("crates");
     let mut missing = Vec::new();
 
     for entry in fs::read_dir(&crates).expect("read crates/").flatten() {
         let krate = entry.path();
         let manifest = krate.join("Cargo.toml");
-        if !manifest.is_file() || !depends_on_config(&read(&manifest)) {
+        if !manifest.is_file() || !applies(&read(&manifest)) {
             continue;
         }
         let name = krate.file_name().unwrap_or_default().to_string_lossy();
@@ -101,11 +157,9 @@ fn every_test_binary_that_can_reach_config_sandboxes_lazybox_home() {
             .filter(|path| !path.starts_with(&bin_dir))
             .collect();
         let bodies: Vec<String> = tree.iter().map(|path| read(path)).collect();
-        if bodies.iter().any(|body| has_tests(body))
-            && !bodies.iter().any(|body| installs_sandbox(body))
-        {
+        if bodies.iter().any(|body| has_tests(body)) && !bodies.iter().any(|body| installs(body)) {
             missing.push(format!(
-                "{name}: the unit-test binary has tests but no `#[ctor::ctor]` \
+                "{name}: the unit-test binary has tests but no `#[ctor::ctor]` {variable} \
                  sandbox under `src/` (see `config_sandbox` in crates/server/src/lib.rs)"
             ));
         }
@@ -113,9 +167,9 @@ fn every_test_binary_that_can_reach_config_sandboxes_lazybox_home() {
         // Each `src/bin/*.rs` is its own test binary.
         for bin in rust_sources(&bin_dir) {
             let body = read(&bin);
-            if has_tests(&body) && !installs_sandbox(&body) {
+            if has_tests(&body) && !installs(&body) {
                 missing.push(format!(
-                    "{name}: {} has tests but no `#[ctor::ctor]` sandbox",
+                    "{name}: {} has tests but no `#[ctor::ctor]` {variable} sandbox",
                     bin.strip_prefix(&krate).unwrap_or(&bin).display()
                 ));
             }
@@ -137,28 +191,24 @@ fn every_test_binary_that_can_reach_config_sandboxes_lazybox_home() {
         if integration.is_empty() {
             continue;
         }
-        if !common.is_file() || !installs_sandbox(&read(&common)) {
+        if !common.is_file() || !installs(&read(&common)) {
             missing.push(format!(
                 "{name}: tests/common/mod.rs must install the `#[ctor::ctor]` \
-                 LAZYBOX_HOME sandbox (see crates/server/tests/common/mod.rs)"
+                 {variable} sandbox (see crates/server/tests/common/mod.rs)"
             ));
         }
         for file in integration {
             if !read(&file).contains("mod common;") {
                 missing.push(format!(
-                    "{name}: {} lacks `mod common;`, so its binary can reach the \
-                     real ~/.lazybox",
+                    "{name}: {} lacks `mod common;`, so its binary runs without the \
+                     {variable} sandbox",
                     file.strip_prefix(&krate).unwrap_or(&file).display()
                 ));
             }
         }
     }
 
-    assert!(
-        missing.is_empty(),
-        "test binaries that can reach the real config without a sandbox:\n  {}",
-        missing.join("\n  ")
-    );
+    missing
 }
 
 /// The scan only means something if it recognizes the sandboxes that exist:
@@ -172,6 +222,11 @@ fn the_reference_sandbox_is_recognized() {
     assert!(installs_sandbox(&read(
         &root.join("crates/server/tests/common/mod.rs")
     )));
+    assert!(installs_git_sandbox(&read(
+        &root.join("crates/git-ops/tests/common/mod.rs")
+    )));
+    assert!(spawns_git(&read(&root.join("crates/server/Cargo.toml"))));
+    assert!(!spawns_git(&read(&root.join("crates/tui/Cargo.toml"))));
     assert!(depends_on_config(
         "[package]\nname = \"x\"\n[dependencies]\nlazybox-config = { workspace = true }\n"
     ));

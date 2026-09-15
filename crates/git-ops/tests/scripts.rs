@@ -3,6 +3,8 @@
 //! await that could hang, so no body-wrap timeout. The IO is bounded
 //! by `tempfile::TempDir` cleanup at end of scope.
 
+mod common;
+
 use lazybox_git_ops::{Script, ScriptBody, Worktree, WorktreeManager};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;

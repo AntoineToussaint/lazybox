@@ -11,6 +11,8 @@
 //! resume path: a pre-staged `.partial` (exactly what an interrupted
 //! attempt leaves behind) whose origin points at a local upstream.
 
+mod common;
+
 use lazybox_git_ops::{CheckoutPhase, WorktreeManager};
 use std::path::{Path, PathBuf};
 use std::process::Command;

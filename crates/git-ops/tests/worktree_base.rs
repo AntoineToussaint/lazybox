@@ -6,6 +6,8 @@
 //! (offline / auth) the call must still succeed against the local
 //! ref rather than blocking.
 
+mod common;
+
 use lazybox_git_ops::{CheckoutPhase, WorktreeManager};
 use std::path::{Path, PathBuf};
 use std::process::Command;

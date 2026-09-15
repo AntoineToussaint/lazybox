@@ -2332,6 +2332,47 @@ mod cursor_row_actions_resolve_from_every_pane {
         }
     }
 
+    /// A live PTY owns every keystroke: the two rows must reach it as
+    /// bytes and touch neither the selection set nor the focus set.
+    #[test]
+    fn a_live_terminal_receives_v_and_star_as_bytes() {
+        use lazybox_ipc::{Command, Event, TerminalId, TerminalKind};
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let ws = Workspace::empty(
+            WorkspaceKey::new("owner/repo#1"),
+            "main",
+            chrono::Utc::now(),
+        );
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(Event::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&key));
+        m.handle_daemon_event(Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        focus(&mut m, PaneFocus::Terminals);
+        while server.rx.try_recv().is_ok() {}
+
+        press(&mut m, 'v');
+        press(&mut m, '*');
+
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+        assert!(!m.sidebar.is_focused(&key));
+        let mut written = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let Command::Write { bytes, .. } = cmd {
+                written.extend(bytes);
+            }
+        }
+        assert_eq!(written, b"v*", "both keys go to the PTY untouched");
+    }
+
     #[test]
     fn space_still_selects_the_activity_row_from_the_activity_pane() {
         let (mut m, _key) = model_with_activity_row();

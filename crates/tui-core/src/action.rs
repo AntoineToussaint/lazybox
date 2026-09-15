@@ -1852,7 +1852,7 @@ impl ActionDef {
                 kind: ActionKind::SelectWorkspace,
                 default_keys: "v",
                 label: "select",
-                describe: "Toggle the focused workspace in/out of the multi-select set. While a selection is live, every normal Workspace action applies to all selected rows (N selected → the action fires N times). Shift-↑/↓ extend the selection from the cursor; Esc clears it.",
+                describe: "Toggle the focused workspace in/out of the multi-select set. While a selection is live, every normal Workspace action applies to all selected rows (N selected → the action fires N times). In the sidebar Shift-↑/↓ extend the selection from the cursor, and V then j/k sweeps it from the sidebar or the activity pane; Esc clears it.",
                 section: Section::Workspace,
             },
             ActionKind::BroadcastToSelected => &Self {

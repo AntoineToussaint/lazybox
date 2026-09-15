@@ -3918,8 +3918,8 @@ mod inspect_tests {
     /// Git invocations for the fixture repos, cut off from the developer's
     /// global and system config and from git's own background work.
     ///
-    /// `clone --bare` and `fetch` both hand off to a *detached*
-    /// `maintenance run --auto` (git ≥ 2.29; clone since 2.45), which holds
+    /// `fetch` (git ≥ 2.29) and, on current git, `clone --bare` hand off to
+    /// a *detached* `maintenance run --auto`, which holds
     /// `maintenance.lock` in the repo after the command that spawned it
     /// has returned. The fixture's next command against that repo then
     /// races a process the test never started — on a loaded box the race

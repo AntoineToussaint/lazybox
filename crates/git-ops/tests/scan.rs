@@ -6,6 +6,8 @@
 //! call runs under a fixture cwd bounded by the OS process, so no extra
 //! timeout wrapper is needed (mirrors `tests/inspect.rs`).
 
+mod common;
+
 use lazybox_git_ops::{DiscoveredCheckout, scan_external_checkouts};
 use std::path::Path;
 use tempfile::TempDir;

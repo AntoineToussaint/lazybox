@@ -11,7 +11,8 @@
 //! A copy rather than a shared helper: integration binaries link the
 //! non-`cfg(test)` library as an external crate, so sharing the body would
 //! put an env-mutating function on the production API surface. Keep the
-//! copies across the workspace identical.
+//! copies across the workspace in step; the git half is carried only by
+//! the crates that spawn git.
 //!
 //! One sandbox dir is shared by every test thread in the binary, so a test
 //! that needs a home of its own still pins one per test under a lock; the

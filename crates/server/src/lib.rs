@@ -65,11 +65,53 @@ mod config_sandbox {
         // spawns a thread — so nothing can race this env write.
         unsafe { std::env::set_var("LAZYBOX_HOME", &dir) };
         lazybox_config::Config::invalidate_cache();
+        isolate_git(&dir);
+    }
+    /// Point every git this binary spawns — fixture commands and the code
+    /// under test alike — at a sandbox global config, with no system config.
+    /// Two things the developer's real config brings that a test must not:
+    /// a signing setup that hangs on a locked agent, and git's own background
+    /// work. Since 2.29 `fetch` and `commit` (and `clone` since 2.45) fork a
+    /// *detached* `git maintenance run --auto` that outlives the command and
+    /// keeps repacking objects and holding `maintenance.lock` in the fixture
+    /// repo — a local `clone --bare` then fails mid-copy on a box loaded
+    /// enough for the two to overlap (#1751). Env is inherited, so the
+    /// sandbox reaches the git that production code runs under the test too.
+    fn isolate_git(sandbox: &std::path::Path) {
+        let gitconfig = sandbox.join("gitconfig");
+        let _ = std::fs::write(
+            &gitconfig,
+            "[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n\
+             [maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n",
+        );
+        // SAFETY: called from the before-main `#[ctor]` below, while the
+        // process is still single-threaded.
+        unsafe {
+            std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        }
     }
 
     #[ctor::ctor]
     unsafe fn redirect_config_home() {
         install();
+    }
+
+    /// Every git this binary spawns reads the sandbox config, not the
+    /// developer's: auto-maintenance is the setting a fixture cannot afford
+    /// to inherit, so it is the one asserted.
+    #[test]
+    fn git_in_this_binary_reads_the_sandbox_config() {
+        let _env = crate::test_env::lock();
+        let out = std::process::Command::new("git")
+            .args(["config", "--global", "maintenance.auto"])
+            .output()
+            .expect("git runs");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "false",
+            "GIT_CONFIG_GLOBAL is not pointed at the sandbox gitconfig"
+        );
     }
 
     /// The redirect must actually be in force: a `Config::load()` from this

@@ -199,7 +199,8 @@ mod tests {
 // test binary that can reach `lazybox-config`; `crates/core/tests/
 // test_isolation.rs` requires one per binary, and a shared helper would
 // put an env-mutating function on a production API surface. Keep the
-// copies identical.
+// copies in step; the git half is carried only by the crates that spawn
+// git.
 #[cfg(test)]
 mod config_sandbox {
     /// Point `LAZYBOX_HOME` at a throwaway dir so every `Config::load()` in

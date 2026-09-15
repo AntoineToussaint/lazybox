@@ -15,6 +15,8 @@
 //! This file holds a single test: it points `GIT_CONFIG_GLOBAL` at a
 //! synthetic global config for the whole process.
 
+mod common;
+
 use lazybox_git_ops::WorktreeManager;
 use std::path::Path;
 

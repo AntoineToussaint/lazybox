@@ -279,6 +279,11 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Whether a usage-limit block supports accepting a default Wait option.
+    fn supports_usage_limit_wait(&self) -> bool {
+        false
+    }
+
     /// Provider guidance carried by a detected credit chooser.
     fn credit_exhausted_hint(&self, recent_output: &[u8]) -> Option<String> {
         let _ = recent_output;
@@ -746,6 +751,9 @@ pub mod builtins {
             Some(StructuredAgentProtocol::ClaudeStreamJson)
         }
         fn supports_mcp_config(&self) -> bool {
+            true
+        }
+        fn supports_usage_limit_wait(&self) -> bool {
             true
         }
         fn pty_protocol(&self) -> PtyProtocol {

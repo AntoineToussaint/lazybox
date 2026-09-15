@@ -483,3 +483,87 @@ fn codex_usage_limit_reset_survives_cursor_positioned_spaces() {
         Some("sep 16, 2026 at 2:14pm"),
     );
 }
+
+#[test]
+fn codex_newer_chooser_owns_input_after_a_limit() {
+    let banner = include_str!("fixtures/codex_usage_limit.txt");
+    let modal = "Would you like to run the following command?\n› 1. Yes, proceed (y)\n  2. No (esc)\nPress enter to confirm or esc to cancel\n";
+    let screen = format!("{banner}{modal}");
+    for mark in [0, banner.len()] {
+        assert_eq!(
+            codex_state_chunked(screen.as_bytes(), mark),
+            Some(AgentState::InputNeeded)
+        );
+        assert_eq!(
+            codex_blocked_in_current_chunk(screen.as_bytes(), mark).map(|o| o.state()),
+            Some(AgentState::InputNeeded)
+        );
+        assert!(!codex_ready_for_prompt_chunked(screen.as_bytes(), mark));
+    }
+}
+
+#[test]
+fn codex_banner_in_prose_or_tool_output_is_not_a_limit() {
+    let banner = include_str!("fixtures/codex_usage_limit.txt");
+    let prose = banner.trim_start_matches("■ ");
+    for output in [
+        format!(
+            "The regression test uses this banner:\n```text\n{prose}```\nThis is fixture text.\n"
+        ),
+        format!("• Ran cat fixture.txt\n  └ {banner}"),
+        format!("The complete error cell was:\n```text\n{banner}```\n"),
+    ] {
+        let screen = format!("{output}› Ask a follow-up\ngpt-5.5 xhigh · /repo\n");
+        assert_eq!(
+            codex_state_chunked(screen.as_bytes(), 0),
+            Some(AgentState::Idle)
+        );
+        assert_eq!(codex_blocked_in_current_chunk(screen.as_bytes(), 0), None);
+        assert!(codex_ready_for_prompt_chunked(screen.as_bytes(), 0));
+    }
+}
+
+#[test]
+fn codex_recovery_repaint_agrees_with_readiness() {
+    let banner = include_str!("fixtures/codex_usage_limit.txt");
+    for footer in ["", "gpt-5.5 xhigh · /repo\n"] {
+        let screen = format!("{banner}• Working (3s · esc to interrupt)\n{footer}");
+        for mark in [0, banner.len()] {
+            assert_eq!(
+                codex_state_chunked(screen.as_bytes(), mark),
+                codex_state(screen.as_bytes())
+            );
+            assert_eq!(
+                codex_blocked_in_current_chunk(screen.as_bytes(), mark),
+                None
+            );
+            assert_eq!(
+                codex_ready_for_prompt_chunked(screen.as_bytes(), mark),
+                codex_state(screen.as_bytes()) == Some(AgentState::Idle)
+            );
+        }
+    }
+}
+
+#[test]
+fn usage_limit_wait_is_an_explicit_agent_capability() {
+    let agents = lazybox_agents::registry();
+    assert!(
+        agents
+            .get("claude")
+            .expect("built-in")
+            .supports_usage_limit_wait()
+    );
+    assert!(
+        !agents
+            .get("codex")
+            .expect("built-in")
+            .supports_usage_limit_wait()
+    );
+    assert!(
+        !agents
+            .get("cursor-agent")
+            .expect("built-in")
+            .supports_usage_limit_wait()
+    );
+}

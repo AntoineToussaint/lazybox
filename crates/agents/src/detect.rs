@@ -284,13 +284,17 @@ pub const CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES: &[&str] =
 pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
     let s = strip_ansi_lossy(recent_output);
     let compact = compact_lower(&s);
+    if let Some(pos) = codex_usage_limit_pos(&compact) {
+        let (_, after) = compact[pos..].rsplit_once("tryagainat")?;
+        let hint = reset_token(after)?;
+        return (hint.ends_with("am") || hint.ends_with("pm")).then_some(hint);
+    }
     // Only meaningful under a live limit banner — never mine a stray
     // "resets" out of ordinary scrollback. Matched against the space-free
     // buffer (patterns compacted the same way), so the cursor-positioned
     // banner still matches.
     last_compact_match_pos(&compact, CLAUDE_USAGE_LIMIT_PHRASES)
-        .or_else(|| last_compact_match_pos(&compact, CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES))
-        .or_else(|| codex_usage_limit_pos(&compact))?;
+        .or_else(|| last_compact_match_pos(&compact, CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES))?;
     // Prefer the banner's own `resets 3pm` countdown, but fall back to the
     // auto-continue form's `continuing automatically at 1:10pm` (same reset)
     // for a window holding only that line — the spend-limit line above it
@@ -306,7 +310,6 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
         "resets",
         "continuingautomaticallyat",
         "continuingautomaticallyin",
-        "tryagainat",
     ]
     .into_iter()
     .flat_map(|keyword| {
@@ -2102,7 +2105,7 @@ pub fn codex_ready_for_prompt_chunked(recent_output: &[u8], last_chunk_start: us
         && codex_footer_pos(&compact).is_some()
         && codex_prompt_pos(frame).is_none()
         && codex_credit_exhausted_pos(frame).is_none()
-        && !marker_at_least_as_recent(codex_usage_limit_pos(&compact), codex_working_pos(&compact))
+        && !codex_usage_limit_is_live(&compact)
         && !codex_bare_prompt_in_tail(&s)
     {
         return true;
@@ -2169,9 +2172,8 @@ fn codex_state_from(
         return AgentState::CreditExhausted;
     }
 
-    let limit_pos = codex_usage_limit_pos(compact);
     // A resting composer remains visible beneath a hard usage stop.
-    if marker_at_least_as_recent(limit_pos, work_against(limit_pos)) {
+    if codex_usage_limit_is_live(compact) {
         return AgentState::LimitReached;
     }
 
@@ -2316,10 +2318,40 @@ fn codex_credit_exhausted_pos(compact: &str) -> Option<usize> {
     Some(exhausted.min(wait))
 }
 
+fn codex_usage_limit_is_live(compact: &str) -> bool {
+    marker_at_least_as_recent(
+        codex_usage_limit_pos(compact),
+        codex_working_pos(compact).max(codex_prompt_pos(compact)),
+    )
+}
+
 fn codex_usage_limit_pos(compact: &str) -> Option<usize> {
-    let limit = last_compact_match_pos(compact, CODEX_USAGE_LIMIT_PHRASES)?;
-    last_compact_match_pos(&compact[limit..], CODEX_USAGE_LIMIT_TAIL_PHRASES)?;
-    Some(limit)
+    // Codex renders provider errors as a standalone square-prefixed cell;
+    // tool output has a gutter and ordinary assistant prose has no square.
+    let marker = "■you'vehityourusagelimit";
+    let mut fence = None;
+    let mut offset = 0;
+    let mut latest = None;
+    for line in compact.split_inclusive(['\n', '\r']) {
+        if let Some(marker) = ["```", "~~~"]
+            .into_iter()
+            .find(|marker| line.starts_with(marker))
+        {
+            if fence == Some(marker) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(marker);
+            }
+        } else if fence.is_none() && line.starts_with(marker) {
+            let tail = &compact[offset + marker.len()..];
+            let end = tail.find('■').unwrap_or(tail.len());
+            if last_compact_match_pos(&tail[..end], CODEX_USAGE_LIMIT_TAIL_PHRASES).is_some() {
+                latest = Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    latest
 }
 
 fn compact_match_touched(compact: &str, patterns: &[&str], mark: usize) -> bool {

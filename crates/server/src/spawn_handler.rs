@@ -926,6 +926,35 @@ struct StateFold<R> {
     committed: bool,
 }
 
+fn broadcast_usage_limit_hint(
+    entry: &mut TerminalEntry,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    id: TerminalId,
+    hint: impl FnOnce() -> Option<String>,
+) {
+    if !matches!(
+        entry.agent_state,
+        Some(lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset)
+    ) {
+        entry.usage_limit_reset_hint = None;
+        return;
+    }
+    if entry.finishing {
+        return;
+    }
+    if let Some((session_key, _)) = &entry.meta
+        && let Some(reset_hint) = hint()
+        && entry.usage_limit_reset_hint.as_ref() != Some(&reset_hint)
+    {
+        entry.usage_limit_reset_hint = Some(reset_hint.clone());
+        let _ = bus.send(Event::AgentUsageLimit {
+            session_key: session_key.clone(),
+            terminal_id: id,
+            reset_hint,
+        });
+    }
+}
+
 /// The single state-ownership boundary for an agent terminal.
 ///
 /// It folds one candidate under the terminal entry lock, persists the
@@ -968,6 +997,7 @@ async fn fold_and_broadcast_agent_state<R>(
     // `process-exit`). `source` says who; `reason` says why.
     reason: &'static str,
     prep: impl FnOnce(&mut TerminalEntry),
+    usage_limit_hint: impl FnOnce() -> Option<String>,
     fold: impl FnOnce(Option<lazybox_ipc::AgentState>, bool) -> (R, Option<lazybox_ipc::AgentState>),
 ) -> StateFold<R> {
     // Per-terminal transition order. Acquired before the registry mutex and
@@ -1010,6 +1040,19 @@ async fn fold_and_broadcast_agent_state<R>(
         (result, committed, previous)
     };
     let Some(state) = committed else {
+        if matches!(
+            previous,
+            Some(lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset)
+        ) {
+            let mut entries = terminals.lock_entries().await;
+            if let Some(entry) = entries.get_mut(&id)
+                && entry
+                    .agent_state_generation
+                    .is_none_or(|generation| generation == durability.generation)
+            {
+                broadcast_usage_limit_hint(entry, bus, id, usage_limit_hint);
+            }
+        }
         return StateFold {
             result,
             committed: false,
@@ -1073,6 +1116,7 @@ async fn fold_and_broadcast_agent_state<R>(
             terminal_id: id,
             state,
         });
+        broadcast_usage_limit_hint(entry, bus, id, usage_limit_hint);
     }
     if state == lazybox_ipc::AgentState::Done {
         durability.poll.wake(false);
@@ -1118,6 +1162,7 @@ async fn transition_and_broadcast_agent_state(
         source,
         reason,
         |_| {},
+        || None,
         |previous, terminal_live| {
             let candidate = candidate_for(previous);
             // `Exit` is allowed to use the captured key during teardown;
@@ -7577,6 +7622,7 @@ async fn commit_pty_reading(
                 }
             }
         },
+        || lazybox_agents::detect::parse_usage_limit_reset(detect_window),
         |current, terminal_live| {
             if !terminal_live {
                 return ((lazybox_agents::Outcome::Rejected, current), None);
@@ -7634,40 +7680,6 @@ async fn commit_pty_reading(
         lazybox_agents::Outcome::Committed(_)
         | lazybox_agents::Outcome::Unchanged
         | lazybox_agents::Outcome::Rejected => {}
-    }
-    // A fresh entry into the usage-limit block: mine the reset countdown
-    // from the same detect window and broadcast it as the proactive
-    // "time-to-reset" (#1012). Fires on each committed TRANSITION into a
-    // limit state (mirroring `detect_and_broadcast_model`'s
-    // broadcast-on-change). Emitted only when a hint parses — the block
-    // itself rode `Event::AgentState` above; clients fold this countdown in
-    // where the banner named one, and degrade to the bare block where it
-    // didn't.
-    // `AwaitingReset` counts too: the detector classifies Claude's
-    // auto-continue banner (`continuing automatically at 1:10pm`) straight
-    // to the calm state, and that banner's time is the reset the badge
-    // should show. Note this makes the auto-`Wait` path
-    // (`LimitReached → AwaitingReset`) broadcast twice per episode — once on
-    // each transition. That is harmless: both re-parse the same lingering
-    // banner and the client handler only stashes the hint (an idempotent
-    // set), and the second fire also recovers a hint the `LimitReached`
-    // reading couldn't yet parse. The pure auto-continue path commits
-    // `AwaitingReset` directly, so it fires exactly once.
-    if let lazybox_agents::Outcome::Committed(
-        lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset,
-    ) = outcome
-        && let Some(reset_hint) = lazybox_agents::detect::parse_usage_limit_reset(detect_window)
-    {
-        let session_key = terminals
-            .terminal_meta_for(id)
-            .await
-            .map(|(sk, _)| sk)
-            .unwrap_or_else(|| session_key.clone());
-        let _ = bus.send(Event::AgentUsageLimit {
-            session_key,
-            terminal_id: id,
-            reset_hint,
-        });
     }
     if let lazybox_agents::Outcome::Committed(lazybox_ipc::AgentState::CreditExhausted) = outcome
         && let Some(hint) = agent.credit_exhausted_hint(detect_window)
@@ -22327,6 +22339,93 @@ mod tests {
             .await;
         p.quiet().await;
         assert_eq!(p.state().await, Some(LimitReached));
+    }
+
+    #[tokio::test]
+    async fn codex_fragmented_reset_hint_is_published_once_when_complete() {
+        let banner = include_bytes!("../../agents/tests/fixtures/codex_usage_limit.txt");
+        for split in 1..banner.len() {
+            let agent = lazybox_agents::registry().get("codex").expect("built-in");
+            let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+            let mut raw = p.bus.subscribe();
+            p.feed(&banner[..split]).await;
+            p.feed(&banner[split..]).await;
+            p.quiet().await;
+            p.quiet().await;
+            let hints: Vec<_> = std::iter::from_fn(|| raw.try_recv().ok())
+                .filter_map(|event| match event {
+                    Event::AgentUsageLimit { reset_hint, .. } => Some(reset_hint),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(hints, vec!["sep 16, 2026 at 2:14pm"], "split at {split}");
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_hint_from_a_replaced_generation_is_not_published() {
+        let agent = lazybox_agents::registry().get("codex").expect("built-in");
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+        let banner = include_str!("../../agents/tests/fixtures/codex_usage_limit.txt");
+        let split = banner.find("\nto").expect("banner wraps after URL");
+        p.feed(&banner.as_bytes()[..split]).await;
+        p.terminals
+            .entries
+            .lock()
+            .await
+            .get_mut(&p.id)
+            .expect("live terminal")
+            .agent_state_generation = Some(p.durability.generation + 1);
+        let mut raw = p.bus.subscribe();
+        p.feed(&banner.as_bytes()[split..]).await;
+        p.quiet().await;
+        assert!(
+            !std::iter::from_fn(|| raw.try_recv().ok())
+                .any(|event| matches!(event, Event::AgentUsageLimit { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_hint_updates_within_a_block_and_reemits_after_recovery() {
+        let agent = lazybox_agents::registry().get("codex").expect("built-in");
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+        let mut raw = p.bus.subscribe();
+        let banner = include_str!("../../agents/tests/fixtures/codex_usage_limit.txt");
+        p.feed(banner.as_bytes()).await;
+        p.feed(banner.replace("2:14 PM", "3:14 PM").as_bytes())
+            .await;
+        p.feed("• Working (3s · esc to interrupt)\n".as_bytes())
+            .await;
+        p.quiet().await;
+        p.feed(banner.as_bytes()).await;
+        let hints: Vec<_> = std::iter::from_fn(|| raw.try_recv().ok())
+            .filter_map(|event| match event {
+                Event::AgentUsageLimit { reset_hint, .. } => Some(reset_hint),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hints,
+            vec![
+                "sep 16, 2026 at 2:14pm",
+                "sep 16, 2026 at 3:14pm",
+                "sep 16, 2026 at 2:14pm"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_newer_chooser_stays_protected_at_quiet_settle() {
+        let agent = lazybox_agents::registry().get("codex").expect("built-in");
+        let mut p = PumpDriver::with_agent(agent, Duration::ZERO, Duration::ZERO);
+        p.feed(include_bytes!(
+            "../../agents/tests/fixtures/codex_usage_limit.txt"
+        ))
+        .await;
+        p.feed("Would you like to run the following command?\n› 1. Yes, proceed (y)\nPress enter to confirm or esc to cancel\n".as_bytes()).await;
+        p.quiet().await;
+        assert_eq!(p.state().await, Some(lazybox_ipc::AgentState::InputNeeded));
+        assert!(inject_must_defer(&p.terminals, p.id).await);
     }
 
     /// #225: an agent whose resting screen classifies as nothing at all (a

@@ -134,6 +134,13 @@ fn mgr(fx: &Fixture) -> WorktreeManager {
 /// using the same flow here means the inspector tests exercise the
 /// shapes a production install will produce.
 async fn add_wt(fx: &Fixture, name: &str, branch: &str, upstream_branch: &str) -> PathBuf {
+    let wt = fx.base.path().join("worktrees").join(name);
+    add_wt_at(fx, wt, branch, upstream_branch).await
+}
+
+/// [`add_wt`] at an explicit path — the production layout is
+/// `<base>/<scope>/<slug>`, not `<base>/worktrees/<name>`.
+async fn add_wt_at(fx: &Fixture, wt: PathBuf, branch: &str, upstream_branch: &str) -> PathBuf {
     // Make sure the upstream actually has this branch — needed so
     // the fetch refspec resolves.
     let upstream_has = run_capture(
@@ -161,7 +168,6 @@ async fn add_wt(fx: &Fixture, name: &str, branch: &str, upstream_branch: &str) -
     )
     .await;
 
-    let wt = fx.base.path().join("worktrees").join(name);
     std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
     run(
         &fx.bare,
@@ -409,6 +415,7 @@ async fn content_bearing_ghost_without_bare_is_not_rm_rfed() {
         session_id: None,
         reasons: vec![OrphanReason::Untracked],
         size_bytes: 42,
+        build_bytes: 0,
         last_modified: None,
         has_uncommitted_changes: false,
         status_verified: false,
@@ -451,6 +458,7 @@ async fn empty_ghost_without_bare_is_still_cleaned() {
         session_id: None,
         reasons: vec![OrphanReason::Untracked],
         size_bytes: 0,
+        build_bytes: 0,
         last_modified: None,
         has_uncommitted_changes: false,
         status_verified: false,
@@ -481,6 +489,7 @@ async fn vanished_ghost_without_bare_is_a_clean_noop() {
         session_id: None,
         reasons: vec![OrphanReason::Untracked],
         size_bytes: 0,
+        build_bytes: 0,
         last_modified: None,
         has_uncommitted_changes: false,
         status_verified: false,
@@ -1053,4 +1062,209 @@ async fn live_worktree_with_relative_gitdir_is_probed() {
         rec.count_in(&wt, "status"),
         rec.count_in(&wt, "rev-list"),
     );
+}
+
+/// Rows carry the path git reports (canonical on macOS: `/private/var/…`
+/// for a `/var/…` tempdir), so match by canonical form.
+fn find_row<'a>(report: &'a [WorktreeInspection], wt: &Path) -> Option<&'a WorktreeInspection> {
+    let want = std::fs::canonicalize(wt).unwrap_or_else(|_| wt.to_path_buf());
+    report
+        .iter()
+        .find(|r| std::fs::canonicalize(&r.path).unwrap_or_else(|_| r.path.clone()) == want)
+}
+
+/// Production lays worktrees out as `<base>/<scope>/<slug>`, not under
+/// `<base>/worktrees/`. A checkout there must be reported as a live
+/// worktree with its real size — not as a 0B prunable ghost — or the
+/// report is blind to every real worktree (#1748).
+#[tokio::test]
+async fn production_layout_worktree_is_inspected_with_its_size() {
+    let fx = setup_fixture().await;
+    let wt = add_wt_at(
+        &fx,
+        fx.base.path().join("github-o-r").join("issue-1-fix"),
+        "issue-1-fix",
+        "main",
+    )
+    .await;
+    std::fs::create_dir_all(wt.join("target").join("debug")).unwrap();
+    std::fs::write(wt.join("target/debug/blob"), vec![0u8; 4096]).unwrap();
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = find_row(&report, &wt).expect("the production-layout worktree is reported");
+    assert!(
+        !row.reasons.contains(&OrphanReason::Prunable),
+        "a worktree still on disk is not prunable: {:?}",
+        row.reasons
+    );
+    assert!(row.reasons.contains(&OrphanReason::Untracked));
+    assert!(
+        row.size_bytes >= 4096,
+        "size counts the tree: {}",
+        row.size_bytes
+    );
+    assert_eq!(row.build_bytes, 4096, "target/ is measured separately");
+    assert!(row.status_verified);
+    assert_eq!(row.bare_path.as_deref(), Some(fx.bare.as_path()));
+    assert!(mgr(&fx).is_managed_worktree_path(&wt));
+}
+
+/// A checkout registered against a lazybox bare clone but living outside
+/// the managed base is the user's own; the inspector leaves it out
+/// rather than offering to reclaim it.
+#[tokio::test]
+async fn registered_checkout_outside_the_base_is_not_reported() {
+    let fx = setup_fixture().await;
+    let elsewhere = TempDir::new().unwrap();
+    let wt = add_wt_at(&fx, elsewhere.path().join("mine"), "mine", "main").await;
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    assert!(
+        find_row(&report, &wt).is_none(),
+        "external checkout must not be listed: {:?}",
+        report.iter().map(|r| &r.path).collect::<Vec<_>>()
+    );
+    assert!(!mgr(&fx).is_managed_worktree_path(&wt));
+    assert!(!mgr(&fx).is_managed_worktree_path(&fx.bare));
+}
+
+/// A production-layout worktree whose directory was removed by hand is
+/// still surfaced as prunable, so `gc` can clear the stale registration.
+#[tokio::test]
+async fn vanished_production_layout_worktree_is_prunable() {
+    let fx = setup_fixture().await;
+    let wt = add_wt_at(
+        &fx,
+        fx.base.path().join("github-o-r").join("gone"),
+        "gone",
+        "main",
+    )
+    .await;
+    // Canonicalize while it still exists: git reports the canonical form,
+    // and a vanished path can't be canonicalized after the fact.
+    let wt = std::fs::canonicalize(&wt).unwrap();
+    std::fs::remove_dir_all(&wt).unwrap();
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = find_row(&report, &wt).expect("vanished row");
+    assert_eq!(row.reasons, vec![OrphanReason::Prunable]);
+    assert_eq!(row.size_bytes, 0);
+    assert!(row.is_safe_to_delete);
+
+    mgr(&fx).delete_inspected(row, false).await.unwrap();
+    let after = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    assert!(find_row(&after, &wt).is_none(), "registration pruned");
+}
+
+async fn seed_ignored_target(wt: &Path, branch: &str) {
+    std::fs::write(wt.join(".gitignore"), "target/\n").unwrap();
+    run(wt, &["add", ".gitignore"]).await;
+    run(wt, &["commit", "-q", "-m", "ignore build output"]).await;
+    run(wt, &["push", "-q", "-u", "origin", branch]).await;
+    std::fs::create_dir_all(wt.join("target").join("debug")).unwrap();
+    std::fs::write(wt.join("target/debug/blob"), vec![0u8; 8192]).unwrap();
+}
+
+/// Dropping the build dir keeps the source, the branch, and the
+/// registration — only the ignored `target/` goes.
+#[tokio::test]
+async fn reclaim_build_dir_drops_only_the_ignored_target() {
+    let fx = setup_fixture().await;
+    let wt = add_wt_at(
+        &fx,
+        fx.base.path().join("github-o-r").join("landed"),
+        "landed",
+        "main",
+    )
+    .await;
+    seed_ignored_target(&wt, "landed").await;
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = find_row(&report, &wt).unwrap();
+    assert_eq!(row.build_bytes, 8192);
+
+    let freed = mgr(&fx).reclaim_build_dir(row, || true).await.unwrap();
+    assert_eq!(freed, 8192);
+    assert!(!wt.join("target").exists(), "target/ removed");
+    assert!(wt.join("README.md").exists(), "source kept");
+    assert!(wt.join(".git").exists(), "registration kept");
+    assert!(local_branch_exists(&fx, "landed").await, "branch kept");
+
+    let again = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = find_row(&again, &wt).unwrap();
+    assert_eq!(row.build_bytes, 0);
+    assert_eq!(
+        mgr(&fx).reclaim_build_dir(row, || true).await.unwrap(),
+        0,
+        "nothing left to drop"
+    );
+}
+
+/// Uncommitted work anywhere in the tree blocks the build-dir reclaim:
+/// the tree is being worked in, so nothing in it is touched.
+#[tokio::test]
+async fn reclaim_build_dir_refuses_a_dirty_worktree() {
+    let fx = setup_fixture().await;
+    let wt = add_wt_at(
+        &fx,
+        fx.base.path().join("github-o-r").join("dirty"),
+        "dirty",
+        "main",
+    )
+    .await;
+    seed_ignored_target(&wt, "dirty").await;
+    std::fs::write(wt.join("wip.txt"), "wip").unwrap();
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = find_row(&report, &wt).unwrap();
+    let err = mgr(&fx).reclaim_build_dir(row, || true).await.unwrap_err();
+    assert!(err.to_string().contains("uncommitted"), "{err}");
+    assert!(wt.join("target/debug/blob").exists(), "target/ preserved");
+}
+
+/// A `target/` git does not ignore is content, not build output.
+#[tokio::test]
+async fn reclaim_build_dir_refuses_an_unignored_target() {
+    let fx = setup_fixture().await;
+    let wt = add_wt_at(
+        &fx,
+        fx.base.path().join("github-o-r").join("tracked"),
+        "tracked",
+        "main",
+    )
+    .await;
+    std::fs::create_dir_all(wt.join("target")).unwrap();
+    std::fs::write(wt.join("target/data.txt"), "precious").unwrap();
+    run(&wt, &["add", "target"]).await;
+    run(&wt, &["commit", "-q", "-m", "tracked target"]).await;
+    run(&wt, &["push", "-q", "-u", "origin", "tracked"]).await;
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = find_row(&report, &wt).unwrap();
+    let err = mgr(&fx).reclaim_build_dir(row, || true).await.unwrap_err();
+    assert!(err.to_string().contains("does not ignore"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("target/data.txt")).unwrap(),
+        "precious"
+    );
+}
+
+/// The guard runs under the repo lock; a `false` declines without touching
+/// anything and reports zero bytes.
+#[tokio::test]
+async fn reclaim_build_dir_honors_the_guard() {
+    let fx = setup_fixture().await;
+    let wt = add_wt_at(
+        &fx,
+        fx.base.path().join("github-o-r").join("guarded"),
+        "guarded",
+        "main",
+    )
+    .await;
+    seed_ignored_target(&wt, "guarded").await;
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = find_row(&report, &wt).unwrap();
+    assert_eq!(mgr(&fx).reclaim_build_dir(row, || false).await.unwrap(), 0);
+    assert!(wt.join("target/debug/blob").exists());
 }

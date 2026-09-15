@@ -76,6 +76,12 @@ impl OrphanReason {
     }
 }
 
+/// The build-output directory a worktree may carry at its top level.
+/// A Rust `target/` is 99% of a worktree's footprint and is regenerated
+/// by the next build, so it is the one thing that can be dropped from a
+/// checkout without losing anything.
+pub const BUILD_DIR: &str = "target";
+
 /// One row of the inspector report.
 #[derive(Debug, Clone)]
 pub struct WorktreeInspection {
@@ -99,6 +105,10 @@ pub struct WorktreeInspection {
     /// Total bytes on disk (recursive). Best-effort — unreadable
     /// entries contribute 0.
     pub size_bytes: u64,
+    /// Bytes under the worktree's top-level [`BUILD_DIR`] — Rust build
+    /// output, which dwarfs the source it was built from and is never
+    /// precious. Included in `size_bytes`; `0` when there is none.
+    pub build_bytes: u64,
     /// Most-recent mtime of any file in the worktree, or the dir
     /// itself when the walk found nothing. `None` for vanished dirs
     /// (prunable entries).
@@ -342,8 +352,22 @@ impl WorktreeManager {
         Ok(WorktreeReclaimOutcome::Reclaimed)
     }
 
-    /// Scan the worktrees directory + every bare clone under
-    /// `base/repos/**/*.git` and report each worktree's health.
+    /// Whether `path` is a checkout lazybox provisioned: anywhere under
+    /// the manager's base dir except the bare-clone cache (`repos/`,
+    /// which also holds the agents' own `<bare>/.claude/worktrees/`).
+    /// Provisioning lays worktrees out as `<base>/<scope>/<slug>` (and
+    /// `<base>/<scope>/_main`, `<base>/<slug>` for scope-less rows), so
+    /// a fixed subdirectory can't name them; the base-minus-repos
+    /// boundary is what every reclaim path checks against.
+    pub fn is_managed_worktree_path(&self, path: &Path) -> bool {
+        let key = canonical_or_self(path);
+        key.starts_with(canonical_or_self(self.base_dir()))
+            && !key.starts_with(canonical_or_self(&self.base_dir().join("repos")))
+    }
+
+    /// Scan every bare clone under `base/repos/**/*.git` for the
+    /// worktrees registered against it, plus the legacy `base/worktrees/`
+    /// directory, and report each managed worktree's health.
     ///
     /// `tracked` is the set of sessions lazybox currently knows about
     /// — typically derived from `Store::list_workspaces`. Worktrees
@@ -376,10 +400,6 @@ impl WorktreeManager {
             }
         }
 
-        // 2. Walk on-disk dirs under `worktrees/`. Anything here that
-        //    isn't in `porcelain` is "ghost on disk" (git doesn't know
-        //    about it); anything in `porcelain` whose dir is gone is
-        //    "ghost in git metadata" — both cases get surfaced.
         let tracked_by_path: HashMap<PathBuf, &TrackedSession> = tracked
             .iter()
             .map(|t| (canonical_or_self(&t.worktree_path), t))
@@ -388,6 +408,9 @@ impl WorktreeManager {
         let mut inspections: Vec<WorktreeInspection> = Vec::new();
         let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
+        // 2. Walk on-disk dirs under the legacy `worktrees/` root. Anything
+        //    here that isn't in `porcelain` is "ghost on disk" (git doesn't
+        //    know about it) and only this walk can find it.
         if wt_root.exists() {
             let mut dir = tokio::fs::read_dir(&wt_root).await?;
             while let Some(entry) = dir.next_entry().await? {
@@ -404,12 +427,33 @@ impl WorktreeManager {
             }
         }
 
-        // Worktrees git knows about whose on-disk dir vanished — these
-        // never show up in the read_dir walk above. Surface them as
-        // prunable so the user (or the bulk action) can clear the
-        // bare clone's stale metadata.
-        for (key, (bare, entry)) in &porcelain {
+        // 3. Every registered worktree git knows about. A managed one
+        //    still on disk is inspected in place; one whose dir vanished
+        //    is "ghost in git metadata" and surfaced as prunable so the
+        //    user (or the bulk action) can clear the bare clone's stale
+        //    registration. A registered checkout outside the managed
+        //    base is the user's, not ours, and is left out entirely.
+        let mut registered: Vec<(&PathBuf, &(PathBuf, PorcelainEntry))> =
+            porcelain.iter().collect();
+        registered.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, (bare, entry)) in registered {
             if seen_paths.contains(key) {
+                continue;
+            }
+            if entry.path.is_dir() {
+                if !self.is_managed_worktree_path(key) {
+                    continue;
+                }
+                seen_paths.insert(key.clone());
+                let inspection = inspect_one(
+                    self.git_runner(),
+                    &entry.path,
+                    key,
+                    &porcelain,
+                    &tracked_by_path,
+                )
+                .await;
+                inspections.push(inspection);
                 continue;
             }
             inspections.push(WorktreeInspection {
@@ -419,6 +463,7 @@ impl WorktreeManager {
                 session_id: None,
                 reasons: vec![OrphanReason::Prunable],
                 size_bytes: 0,
+                build_bytes: 0,
                 last_modified: None,
                 has_uncommitted_changes: false,
                 status_verified: false,
@@ -589,6 +634,78 @@ impl WorktreeManager {
             delete_local_branch(self.git_runner(), bare, branch).await;
         }
         Ok(true)
+    }
+
+    /// Drop the build output ([`BUILD_DIR`]) of an inspected worktree
+    /// while keeping its source tree, branch, and registration — for a
+    /// checkout whose work has landed but which stays on disk. Returns
+    /// the bytes freed; `Ok(0)` when the guard declined or there was
+    /// nothing to drop.
+    ///
+    /// Refuses, under the per-repo lock and against fresh probes, unless
+    /// the worktree is still registered, unlocked, has a clean status,
+    /// and git *ignores* the build dir — a tracked or untracked `target/`
+    /// is content, not output. Unpushed commits don't block it: they live
+    /// in the branch, not the build dir.
+    pub async fn reclaim_build_dir<F>(
+        &self,
+        inspection: &WorktreeInspection,
+        still_removable: F,
+    ) -> Result<u64, GitError>
+    where
+        F: FnOnce() -> bool + Send,
+    {
+        let refuse = |why: &str| {
+            Err(GitError::Command(format!(
+                "worktree {} {why} — refusing to drop its {BUILD_DIR}/",
+                inspection.path.display()
+            )))
+        };
+        let Some(bare) = inspection.bare_path.as_ref() else {
+            return refuse("has no bare clone to verify against");
+        };
+        if !self.is_managed_worktree_path(&inspection.path) {
+            return refuse("is not a managed checkout");
+        }
+        let build_dir = inspection.path.join(BUILD_DIR);
+        if !build_dir.is_dir() {
+            return Ok(0);
+        }
+
+        let lock = crate::repo_lock(bare);
+        let _guard = lock.lock(LockPriority::Background).await;
+        if !still_removable() {
+            return Ok(0);
+        }
+        let path_key = canonical_or_self(&inspection.path);
+        let entries = list_porcelain(self.git_runner(), bare).await?;
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| canonical_or_self(&entry.path) == path_key)
+        else {
+            return refuse(&format!("is no longer registered with {}", bare.display()));
+        };
+        if entry.locked {
+            return refuse("is locked");
+        }
+        if uncommitted(self.git_runner(), &inspection.path).await != Some(false) {
+            return refuse("has uncommitted or unverifiable changes");
+        }
+        let ignored = self
+            .git_runner()
+            .run(
+                Some(&inspection.path),
+                &["check-ignore", "-q", "--", BUILD_DIR],
+                &[],
+            )
+            .await?;
+        if !ignored.status.success() {
+            return refuse(&format!("does not ignore {BUILD_DIR}/, so it is content"));
+        }
+
+        let freed = size_and_mtime(&build_dir).await.0;
+        tokio::fs::remove_dir_all(&build_dir).await?;
+        Ok(freed)
     }
 }
 
@@ -930,7 +1047,7 @@ async fn inspect_one(
             }
         },
     );
-    let (size_bytes, last_modified) = size_pair;
+    let (size_bytes, build_bytes, last_modified) = size_pair;
     let has_uncommitted_changes = uncommitted_state.unwrap_or(false);
 
     // Branch-existence reasons only fire when we knew the branch +
@@ -969,6 +1086,7 @@ async fn inspect_one(
         session_id,
         reasons,
         size_bytes,
+        build_bytes,
         last_modified,
         has_uncommitted_changes,
         status_verified: uncommitted_state.is_some(),
@@ -1653,17 +1771,37 @@ async fn branch_tip_on_remote(git: &dyn GitRunner, bare: &Path, branch: &str) ->
 /// Recursive `du`-style size + max mtime walk. Best-effort: any entry
 /// that errors (permission denied, symlink loop) contributes 0 bytes
 /// and is skipped for mtime.
-async fn size_and_mtime(root: &Path) -> (u64, Option<SystemTime>) {
+/// `(total bytes, bytes under the top-level build dir, newest mtime)`
+/// for the tree at `root`. The build dir is walked once, on its own,
+/// and the main walk skips it — one pass over the multi-GB part.
+async fn size_and_mtime(root: &Path) -> (u64, u64, Option<SystemTime>) {
     let root = root.to_path_buf();
-    let res = tokio::task::spawn_blocking(move || walk_sync(&root)).await;
-    res.unwrap_or((0, None))
+    let res = tokio::task::spawn_blocking(move || {
+        let build_dir = root.join(BUILD_DIR);
+        let (source, newest_source) = walk_sync(&root, Some(&build_dir));
+        let (build, newest_build) = if build_dir.is_dir() {
+            walk_sync(&build_dir, None)
+        } else {
+            (0, None)
+        };
+        let newest = match (newest_source, newest_build) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        (source.saturating_add(build), build, newest)
+    })
+    .await;
+    res.unwrap_or((0, 0, None))
 }
 
-fn walk_sync(root: &Path) -> (u64, Option<SystemTime>) {
+fn walk_sync(root: &Path, skip: Option<&Path>) -> (u64, Option<SystemTime>) {
     let mut total: u64 = 0;
     let mut newest: Option<SystemTime> = None;
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
+        if skip.is_some_and(|s| s == path) {
+            continue;
+        }
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
         };

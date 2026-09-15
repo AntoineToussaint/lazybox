@@ -10523,6 +10523,10 @@ mod tests {
         pages.push(Box::leak(pr_search_page(20, None).into_boxed_str()));
         let base_uri = spawn_sequenced_response_server(pages).await;
         let client = make_client(&base_uri);
+        // Twenty pages under the governor's 500ms request gap is 9.5s of
+        // pacing the assertion never looks at — the whole per-test budget
+        // on an idle box, and past it on a loaded one (#1751).
+        *client.budget.lock() = crate::rate_budget::RateBudget::unpaced();
 
         let error = client
             .fetch_pr_single_query("test-branch", "is:open is:pr repo:o/r".to_string())

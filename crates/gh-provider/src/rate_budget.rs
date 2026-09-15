@@ -546,6 +546,19 @@ impl RateBudget {
         Self::new(DEFAULT_CAPACITY, DEFAULT_REFILL_PER_MIN)
     }
 
+    /// A budget that admits requests back to back. For tests of the paths
+    /// *around* the governor — pagination, retry ladders, error shaping —
+    /// where the 500ms baseline gap between requests is wall clock the test
+    /// pays without asserting on it: twenty paced pages are 9.5s on an idle
+    /// box, which is the whole per-test budget.
+    #[cfg(test)]
+    pub(crate) fn unpaced() -> Self {
+        Self {
+            min_request_gap: Duration::ZERO,
+            ..Self::default_for_lazybox()
+        }
+    }
+
     pub fn set_background_share(&mut self, share: f64) {
         self.background_share = if share.is_finite() {
             share.clamp(0.05, 0.90)

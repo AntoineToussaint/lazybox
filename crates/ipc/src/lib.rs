@@ -4170,6 +4170,40 @@ impl WorktreeRecovery {
         (!name.is_empty()).then(|| name.to_string())
     }
 
+    /// The branch a `BranchMismatch` spawn asked for, parsed out of the
+    /// daemon's message (`… not the requested branch '<expected>'…`). With
+    /// [`Self::mismatch_branch`] it lets the modal state the collision as
+    /// the two names side by side.
+    pub fn requested_branch(message: &str) -> Option<String> {
+        let after = message.split_once("not the requested branch '")?.1;
+        let name = after.split_once('\'')?.0.trim();
+        (!name.is_empty()).then(|| name.to_string())
+    }
+
+    /// The message with its `thiserror` source-chain prefixes removed
+    /// (`worktree: checkout_at: <fact>` → `<fact>`). Each prefix is a
+    /// lowercase identifier and a colon — a variant or function name that
+    /// tells the user nothing — so they are stripped from the front until
+    /// the text stops looking like one. Parsers keep reading the raw
+    /// message; this is for what the user sees.
+    pub fn user_facing(message: &str) -> &str {
+        let mut rest = message;
+        loop {
+            let Some((head, tail)) = rest.split_once(": ") else {
+                return rest;
+            };
+            let identifier = !head.is_empty()
+                && head.starts_with(|c: char| c.is_ascii_lowercase())
+                && head
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if !identifier {
+                return rest;
+            }
+            rest = tail;
+        }
+    }
+
     /// The worktree path a `BranchMismatch` message names (`worktree
     /// <path> is checked out on branch …`), so the preserve-aside confirm
     /// can say which checkout it is about to move.
@@ -5119,6 +5153,57 @@ mod worktree_recovery_tests {
             WorktreeRecovery::df_conflict_branch(msg).as_deref(),
             Some("release/v0.2.102"),
         );
+    }
+
+    /// #1755: the modal states a collision as the two branch names side
+    /// by side, so the requested branch has to parse out of the same
+    /// message the actual one does.
+    #[test]
+    fn branch_mismatch_carries_the_requested_branch() {
+        let msg = "worktree: checkout_at: worktree /tmp/w is checked out on branch \
+             'fix/document-qa-review', not the requested branch 'feat/document-rpc-tools' \
+             — refusing to reuse it; preserve or switch that checkout, then retry";
+        assert_eq!(
+            WorktreeRecovery::requested_branch(msg).as_deref(),
+            Some("feat/document-rpc-tools"),
+        );
+        assert_eq!(
+            WorktreeRecovery::mismatch_branch(msg).as_deref(),
+            Some("fix/document-qa-review"),
+        );
+        assert_eq!(
+            WorktreeRecovery::requested_branch("branch 'feat' is already checked out at /tmp/w"),
+            None,
+        );
+    }
+
+    /// #1755: `thiserror` source-chain prefixes (`worktree: checkout_at:`)
+    /// are function names, not information. The user-facing text drops
+    /// every leading identifier-and-colon and keeps the first real clause
+    /// — including one that itself starts with a word followed by a
+    /// space, or with a capital.
+    #[test]
+    fn user_facing_strips_the_error_source_chain() {
+        assert_eq!(
+            WorktreeRecovery::user_facing(
+                "worktree: checkout_at: worktree /tmp/w is checked out on branch 'a'"
+            ),
+            "worktree /tmp/w is checked out on branch 'a'",
+        );
+        assert_eq!(
+            WorktreeRecovery::user_facing("workspace: Linear team `OBI` has no repo mapping"),
+            "Linear team `OBI` has no repo mapping",
+        );
+        assert_eq!(
+            WorktreeRecovery::user_facing("git command failed: fatal: not a repository"),
+            "git command failed: fatal: not a repository",
+            "a clause with spaces is the message, not a prefix",
+        );
+        assert_eq!(
+            WorktreeRecovery::user_facing("could not read from remote"),
+            "could not read from remote",
+        );
+        assert_eq!(WorktreeRecovery::user_facing(""), "");
     }
 
     /// #1572: the mismatch modal's `a adopt` needs the branch the checkout

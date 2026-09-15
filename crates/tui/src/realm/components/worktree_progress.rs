@@ -116,6 +116,9 @@ pub enum StepState {
     Done,
     /// Errored — cross; the modal stops auto-dismissing.
     Failed,
+    /// Never reached: a step before it failed, so it will not run. Drawn
+    /// without a bullet so it reads as dropped rather than queued.
+    Abandoned,
 }
 
 /// Accumulated provisioning progress for one spawn. Lives on the
@@ -328,7 +331,7 @@ impl WorktreeProgressState {
             let state = match self.failed_step {
                 Some(f) if idx == f => StepState::Failed,
                 Some(f) if idx < f => StepState::Done,
-                Some(_) => StepState::Pending,
+                Some(_) => StepState::Abandoned,
                 None if idx < self.shown => StepState::Done,
                 None if idx == self.shown => StepState::Active,
                 None => StepState::Pending,
@@ -362,6 +365,10 @@ pub struct WorktreeProgress {
     /// The branch the checkout actually sits on, when the failure is a
     /// `BranchMismatch` — `a` takes the workspace's records to it (#1572).
     adopt_branch: Option<String>,
+    /// The branch the spawn asked for on that same failure. With both
+    /// names in hand the modal states the collision once, as a pair,
+    /// instead of echoing the daemon's message.
+    requested_branch: Option<String>,
     warning: Option<String>,
     spinner_idx: usize,
 }
@@ -385,6 +392,11 @@ impl WorktreeProgress {
                 .recovery
                 .is_some_and(|recovery| recovery.adopts_branch())
                 .then(|| state.error().and_then(WorktreeRecovery::mismatch_branch))
+                .flatten(),
+            requested_branch: state
+                .recovery
+                .is_some_and(|recovery| recovery.adopts_branch())
+                .then(|| state.error().and_then(WorktreeRecovery::requested_branch))
                 .flatten(),
             warning: state.warning.clone(),
             spinner_idx: 0,
@@ -441,15 +453,20 @@ impl Component for WorktreeProgress {
                 ),
                 StepState::Done => ("✓".to_string(), Style::default().fg(theme.success)),
                 StepState::Failed => ("✗".to_string(), Style::default().fg(theme.error)),
+                StepState::Abandoned => (" ".to_string(), Style::default()),
             };
             let label_style = match state {
-                StepState::Pending => Style::default().fg(theme.text_dim),
+                StepState::Pending | StepState::Abandoned => Style::default().fg(theme.text_dim),
                 StepState::Failed => Style::default().fg(theme.error),
                 _ => Style::default().fg(theme.text_strong),
             };
+            let label = match state {
+                StepState::Failed => format!("{label} — stopped"),
+                _ => (*label).to_string(),
+            };
             lines.push(Line::from(vec![
                 Span::styled(format!("  {glyph}  "), glyph_style),
-                Span::styled((*label).to_string(), label_style),
+                Span::styled(label, label_style),
             ]));
             // Live transfer detail under the clone row while it spins —
             // bytes/percent for the one genuinely long step.
@@ -469,38 +486,64 @@ impl Component for WorktreeProgress {
         // plus its remediation can exceed the modal's height, and when
         // they flowed through one paragraph the last line — the only one
         // telling the user what keys do anything — was the one clipped.
-        let footer: &str = if let Some(err) = &self.error {
-            lines.push(Line::from(Span::styled(
-                format!("  {err}"),
-                Style::default().fg(theme.error),
-            )));
-            // Per-class recovery guidance (issue #557): every failure
-            // names a concrete next step.
-            let recovery = self.recovery.unwrap_or(WorktreeRecovery::Unknown);
-            lines.push(Line::from(Span::styled(
-                format!("  {}", recovery.remediation(err)),
-                Style::default().fg(theme.warn),
-            )));
+        let footer: Vec<&str> = if let Some(err) = &self.error {
+            match (&self.requested_branch, &self.adopt_branch) {
+                // A branch collision is one fact: name the two branches
+                // side by side and nothing else. The path is derivable
+                // and the daemon's sentence would only restate the pair.
+                (Some(wanted), Some(found)) => {
+                    lines.push(Line::from(Span::styled(
+                        "  That worktree is already on another branch.",
+                        Style::default().fg(theme.text_strong),
+                    )));
+                    lines.push(Line::raw(""));
+                    for (label, branch) in [("wanted", wanted), ("found", found)] {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("    {label:<8} "),
+                                Style::default().fg(theme.text_dim),
+                            ),
+                            Span::styled(branch.clone(), Style::default().fg(theme.text_strong)),
+                        ]));
+                    }
+                }
+                _ => {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", WorktreeRecovery::user_facing(err)),
+                        Style::default().fg(theme.error),
+                    )));
+                    // Per-class recovery guidance (issue #557): every
+                    // failure names a concrete next step.
+                    let recovery = self.recovery.unwrap_or(WorktreeRecovery::Unknown);
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", recovery.remediation(err)),
+                        Style::default().fg(theme.warn),
+                    )));
+                }
+            }
             // Every recoverable class offers a one-keypress path back to a
             // working state (issue #787): `r` retries the transient
             // classes and recreates the ones lazybox can safely rebuild
             // (preserve the conflicting checkout aside, re-provision); `g`
             // jumps to the live session holding a branch we can't take.
             if self.retryable {
-                "  r retry · Esc dismiss"
+                vec!["  r retry · Esc dismiss"]
             } else if self.adopt_branch.is_some() {
                 // The lossless recovery leads: the work is on the branch
                 // the checkout already sits on, so adopting it keeps it
-                // (#1572). `r` still preserves aside and rebuilds.
-                "  a adopt branch · r preserve & recreate · Esc dismiss"
+                // (#1572). `r` still moves it aside and rebuilds.
+                vec![
+                    "  a use the branch that's there",
+                    "  r move it aside and start fresh · Esc dismiss",
+                ]
             } else if self.recreatable {
-                "  r recreate · Esc dismiss"
+                vec!["  r recreate · Esc dismiss"]
             } else if self.jump {
-                "  g go to holder · Esc dismiss"
+                vec!["  g go to holder · Esc dismiss"]
             } else if self.picks_repo {
-                "  r pick repo · Esc dismiss"
+                vec!["  r pick repo · Esc dismiss"]
             } else {
-                "  Esc dismiss"
+                vec!["  Esc dismiss"]
             }
         } else if let Some(warn) = &self.warning {
             // Provisioning succeeded but degraded: show the stale-base
@@ -510,9 +553,9 @@ impl Component for WorktreeProgress {
                 format!("  ⚠ {warn}"),
                 Style::default().fg(theme.warn),
             )));
-            "  Esc dismiss"
+            vec!["  Esc dismiss"]
         } else {
-            "  Esc cancel"
+            vec!["  Esc cancel"]
         };
 
         let modal_w = 60u16.min(area.width.saturating_sub(4));
@@ -527,8 +570,9 @@ impl Component for WorktreeProgress {
                 wrapped_rows(&text, inner_w)
             })
             .sum();
-        // body + footer row + borders, capped at the screen.
-        let modal_h = (body_rows + 1 + 2).min(area.height);
+        // body + footer rows + borders, capped at the screen.
+        let footer_rows = u16::try_from(footer.len()).unwrap_or(u16::MAX);
+        let modal_h = (body_rows + footer_rows + 2).min(area.height);
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -541,9 +585,9 @@ impl Component for WorktreeProgress {
             .border_style(theme.modal_border());
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
-        // Reserve the last inner row for the footer no matter how much
+        // Reserve the last inner rows for the footer no matter how much
         // the body wraps; the body is what gets clipped, never the keys.
-        let footer_h = 1u16.min(inner.height);
+        let footer_h = footer_rows.min(inner.height);
         let body_area = Rect::new(
             inner.x,
             inner.y,
@@ -552,10 +596,11 @@ impl Component for WorktreeProgress {
         );
         let footer_area = Rect::new(inner.x, inner.y + body_area.height, inner.width, footer_h);
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(footer, theme.hint()))),
-            footer_area,
-        );
+        let footer_lines: Vec<Line> = footer
+            .into_iter()
+            .map(|hint| Line::from(Span::styled(hint, theme.hint())))
+            .collect();
+        frame.render_widget(Paragraph::new(footer_lines), footer_area);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -958,6 +1003,60 @@ mod tests {
         );
     }
 
+    /// #1755: a failed step means the ones after it will never run. They
+    /// render as abandoned — no bullet, dim — and the failed row says so,
+    /// instead of three hollow bullets that read as "still queued".
+    #[test]
+    fn failed_step_abandons_the_rest_of_the_checklist() {
+        let mut st = state();
+        st.apply(WorktreeStep::Fetch, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::Fetch,
+            WorktreeStepStatus::Failed("could not read from remote".into()),
+        );
+        let steps = st.steps();
+        assert_eq!(steps[Row::Prepare as usize].1, StepState::Failed);
+        for row in [Row::WorktreeAdd, Row::Setup, Row::Agent] {
+            assert_eq!(
+                steps[row as usize].1,
+                StepState::Abandoned,
+                "{row:?} never runs after a failure"
+            );
+        }
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 14);
+        assert!(out.contains("Preparing worktree — stopped"), "{out}");
+        assert!(
+            !out.contains('○'),
+            "nothing is pending after a failure: {out}"
+        );
+        assert!(out.contains("Creating worktree"), "{out}");
+        assert!(out.contains("Starting agent"), "{out}");
+    }
+
+    /// #1755: the daemon's message carries its `thiserror` source chain
+    /// (`worktree: checkout_at: …`); those are function names, not
+    /// information, and must not reach the rendered copy.
+    #[test]
+    fn rendered_copy_never_leaks_the_error_source_chain() {
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "worktree: checkout_at: branch 'feat' is already checked out at \
+                 /tmp/other — refusing to take it from another live worktree"
+                    .into(),
+            ),
+        );
+        let out = render(&mut WorktreeProgress::from_state(&st), 80, 20);
+        assert!(!out.contains("worktree:"), "{out}");
+        assert!(!out.contains("checkout_at"), "{out}");
+        assert!(
+            out.contains("branch 'feat' is already checked out"),
+            "the fact itself survives: {out}"
+        );
+    }
+
     /// A live branch holder needs a user decision before provisioning
     /// can succeed, so the modal points at the existing session without
     /// advertising or binding an impossible retry.
@@ -1041,14 +1140,32 @@ mod tests {
         let out = render(&mut WorktreeProgress::from_state(&st), 72, 20);
         assert!(out.contains('✗'), "{out}");
         // #1572: adopting the branch the checkout already sits on is the
-        // lossless recovery, so it leads — and the remediation names the
-        // branch you would be adopting.
-        assert!(out.contains("a adopt branch"), "adopt affordance: {out}");
+        // lossless recovery, so it leads.
         assert!(
-            out.contains("r preserve & recreate"),
+            out.contains("a use the branch that's there"),
+            "adopt affordance: {out}"
+        );
+        assert!(
+            out.contains("r move it aside and start fresh"),
             "recreate affordance: {out}"
         );
-        assert!(out.contains("issue-1-old"), "the branch is named: {out}");
+        // #1755: the collision is stated once, as the two branch names
+        // side by side — not the daemon's sentence and not the path.
+        assert!(
+            out.contains("That worktree is already on another branch."),
+            "{out}"
+        );
+        assert!(out.contains("wanted   issue-1-new"), "{out}");
+        assert!(out.contains("found    issue-1-old"), "{out}");
+        assert!(
+            !out.contains("/tmp/wt"),
+            "the path is never the question: {out}"
+        );
+        assert!(
+            !out.contains("refusing to reuse it"),
+            "the daemon sentence is not echoed: {out}"
+        );
+        assert!(!out.contains("checkout_at"), "{out}");
         assert!(
             !out.contains("r retry"),
             "must not advertise a bare retry: {out}"

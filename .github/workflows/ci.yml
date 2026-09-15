@@ -205,6 +205,29 @@ jobs:
       - name: Test with per-test timeout enforcement
         run: cargo nextest run --workspace --profile ci
 
+  loaded:
+    # The suite's flakes are load-shaped (#1751): a fixed wall-clock budget
+    # or a race on process-global state passes on an idle runner and fails on
+    # the dev box, where a dozen agents compile at once. This lane compiles
+    # the suite unloaded, then runs it under two busy-loop spinners per core
+    # (`scripts/test-under-load.sh`), so that class is caught by the gate
+    # instead of by whoever is working that day. Merge queue only, like the
+    # other expensive lanes: it is a second full run of the suite.
+    name: test under load (ubuntu-22.04)
+    needs: changes
+    if: github.event_name == 'merge_group' && needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/rust-build-env
+        with:
+          shared-key: linux
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Test under two spinners per core
+        run: scripts/test-under-load.sh --profile ci
+
   clippy:
     name: clippy
     needs: changes

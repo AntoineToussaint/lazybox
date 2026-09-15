@@ -4,6 +4,8 @@
 //! the remaining seams that previously let a release add a CLI command or
 //! config section while the website stayed silently stale.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

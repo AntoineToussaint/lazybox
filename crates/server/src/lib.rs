@@ -75,8 +75,14 @@ mod config_sandbox {
     /// The redirect must actually be in force: a `Config::load()` from this
     /// binary has to see the sandbox, not the developer's config. Proved
     /// hermetically — the real file is never read.
+    ///
+    /// The ctor's write is unlocked because it runs before any test thread
+    /// exists; this read is not, so it holds `test_env::lock()` like every
+    /// other reader — a `PinnedHome` on a sibling thread swaps the variable
+    /// out from under an unlocked read (#1737).
     #[test]
     fn config_load_resolves_to_the_sandbox_not_the_real_home() {
+        let _env = crate::test_env::lock();
         let home = std::env::var("LAZYBOX_HOME").expect("ctor set LAZYBOX_HOME");
         assert!(
             home.contains("lazybox-server-config-sandbox-"),

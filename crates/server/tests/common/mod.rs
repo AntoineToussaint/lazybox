@@ -1,4 +1,4 @@
-//! Shared scaffolding for `lazybox-tui`'s integration binaries.
+//! Shared scaffolding for `lazybox-server`'s integration binaries.
 //!
 //! `mod common;` in a `tests/*.rs` links in a before-main `#[ctor]` that
 //! points `LAZYBOX_HOME` at a throwaway dir, so nothing the binary runs
@@ -25,7 +25,7 @@ fn install() {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!(
-        "lazybox-tui-config-sandbox-{}-{}",
+        "lazybox-server-config-sandbox-{}-{}",
         std::process::id(),
         nanos
     ));

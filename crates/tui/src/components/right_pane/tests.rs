@@ -438,8 +438,12 @@ mod scroll_does_not_rebuild_tests {
         );
     }
 
+    /// Holds the theme lock: the cache key folds in the active theme's name,
+    /// so a sibling test switching themes mid-scroll would rebuild the
+    /// buffer for a reason this test cannot see.
     #[test]
     fn scrolling_reuses_the_cached_buffer() {
+        let _theme = crate::theme::test_lock();
         let mut pane = RightPane::new(PaneId::new(0));
         pane.set_workspace(Some(ws_with_n_activities(60)));
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -469,6 +473,7 @@ mod scroll_does_not_rebuild_tests {
 
     #[test]
     fn content_and_layout_changes_do_rebuild() {
+        let _theme = crate::theme::test_lock();
         let mut pane = RightPane::new(PaneId::new(0));
         pane.set_workspace(Some(ws_with_n_activities(60)));
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();

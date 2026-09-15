@@ -1,3 +1,5 @@
+mod common;
+
 // Originally pulled the module in via `#[path]` to test it without
 // the rest of the server crate. After the anyhow → thiserror
 // migration the module references `crate::ServerError` /

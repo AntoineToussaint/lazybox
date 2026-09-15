@@ -17,6 +17,8 @@
 //! `await` that could block; the rest of the body runs without
 //! an outer wall-clock cap. See `feedback_test_timeouts.md`.
 
+mod common;
+
 use chrono::Utc;
 use lazybox_core::{
     Activity, ActivityKind, CiStatus, ProviderConfig, ReviewStatus, Task, TaskId, TaskKind,
@@ -4502,6 +4504,11 @@ async fn cancelled_adopt_still_finishes_the_started_commit_and_projection() {
     assert_eq!(persisted_key, target_session_key.as_str());
 }
 
+/// How long `spawn_losing_to_merge_cannot_recreate_the_deleted_source` gives
+/// the merge and the losing spawn to both return once the merge's batch is
+/// released. Paired with the test's nextest override; see the assertion.
+const LOSING_SPAWN_LIVENESS: Duration = Duration::from_secs(30);
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn spawn_losing_to_merge_cannot_recreate_the_deleted_source() {
     use lazybox_core::{SessionKey, WorkspaceKey};
@@ -4548,7 +4555,14 @@ async fn spawn_losing_to_merge_cannot_recreate_the_deleted_source() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     release_tx.send(()).expect("release merge batch");
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // A liveness bound, not a performance one: what it guards against is a
+    // spawn that never observes the merge's deletion and hangs on the
+    // workspace lock. Both tasks do real work past the release — the merge
+    // commits and folds sessions, the spawn provisions before it loses —
+    // and on a loaded box that measured 2.1s against the 2s this used to
+    // allow (#1741). The nextest override for this test keeps the runner's
+    // kill above the bound so a hang fails here, by name.
+    tokio::time::timeout(LOSING_SPAWN_LIVENESS, async {
         merge.await.expect("merge task");
         spawn.await.expect("spawn task");
     })

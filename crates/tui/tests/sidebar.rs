@@ -16,6 +16,8 @@
 //! - Kill two-press confirmation.
 //! - Render output via ratatui's TestBackend.
 
+mod common;
+
 use chrono::{DateTime, Duration, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazybox_core::{

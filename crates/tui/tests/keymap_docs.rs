@@ -18,6 +18,8 @@
 //! The terminal `]]` menu is generated from the runtime command table,
 //! so dispatch, the which-key popup, and this page share one source.
 
+mod common;
+
 use lazybox_tui_core::action::{
     ActionDef, ActionKind, CatalogEntry, Chord, Guard, KeyStroke, Section, leader_group_label,
 };

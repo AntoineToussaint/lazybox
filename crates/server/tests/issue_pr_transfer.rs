@@ -19,6 +19,8 @@
 //!   (d) the session survives a daemon restart — `recover_sessions`
 //!       reattaches it to the PR workspace with scrollback intact.
 
+mod common;
+
 use lazybox_core::{SessionKind, Task, TaskId, Workspace, WorkspaceKey};
 use lazybox_ipc::{Command, Event, TerminalKind, channel};
 use lazybox_server::backend::SessionBackend;

@@ -3906,17 +3906,27 @@ mod inspect_tests {
         bare: PathBuf,
     }
 
+    /// Git invocations for the fixture repos, cut off from the developer's
+    /// global and system config and from git's own background work.
+    ///
+    /// `clone --bare` and `fetch` both hand off to a *detached*
+    /// `maintenance run --auto` (git ≥ 2.29; clone since 2.45), which holds
+    /// `maintenance.lock` in the repo after the command that spawned it
+    /// has returned. The fixture's next command against that repo then
+    /// races a process the test never started — on a loaded box the race
+    /// is lost often enough to read as a flaky `worktree add` (#1751).
+    fn git(cwd: &Path) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"]);
+        cmd
+    }
+
     async fn run(cwd: &Path, args: &[&str]) {
-        let out = tokio::process::Command::new("git")
-            .current_dir(cwd)
-            .arg("-c")
-            .arg("commit.gpgsign=false")
-            .arg("-c")
-            .arg("tag.gpgsign=false")
-            .args(args)
-            .output()
-            .await
-            .unwrap();
+        let out = git(cwd).args(args).output().await.unwrap();
         assert!(
             out.status.success(),
             "git {args:?} in {}: {}",
@@ -3970,10 +3980,10 @@ mod inspect_tests {
     /// produces a worktree shape identical to what the daemon creates
     /// at runtime.
     async fn add_wt(fx: &Fixture, name: &str, branch: &str) -> PathBuf {
-        let has_branch = std::process::Command::new("git")
-            .current_dir(&fx.upstream_path)
+        let has_branch = git(&fx.upstream_path)
             .args(["rev-parse", "--verify", "--quiet", branch])
             .status()
+            .await
             .unwrap()
             .success();
         if !has_branch {

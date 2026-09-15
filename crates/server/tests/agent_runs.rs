@@ -1,3 +1,5 @@
+mod common;
+
 use lazybox_agents::{Agent, SpawnCtx, StructuredAgentProtocol};
 use lazybox_ipc::{
     AgentInputMessage, AgentRunId, AgentRunRequestId, AgentRuntimeMode, Command, Event, channel,

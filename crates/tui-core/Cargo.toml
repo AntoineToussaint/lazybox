@@ -60,6 +60,7 @@ unicode-segmentation = { workspace = true }
 ts-rs      = { workspace = true, optional = true }
 
 [dev-dependencies]
+ctor = "1.0"
 tempfile = "3"
 tracing-subscriber = { workspace = true }
 

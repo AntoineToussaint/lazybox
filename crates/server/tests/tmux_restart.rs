@@ -10,6 +10,8 @@
 //! backend's minimum — the same gate `TmuxBackend::detect()` applies,
 //! so the test only runs where the backend would actually engage.
 
+mod common;
+
 use lazybox_core::{SessionKey, Workspace};
 use lazybox_ipc::{
     Command, Event, EventSender, TerminalId, TerminalKind, TerminalSnapshot, channel,

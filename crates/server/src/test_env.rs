@@ -80,7 +80,9 @@ mod tests {
         // `test_env.rs` is the lock. `lib.rs` redirects from a `#[ctor]` that
         // runs before `main` while the process is still single-threaded, so
         // there is no concurrent reader to race — the one case where skipping
-        // the lock is provably safe.
+        // the lock is provably safe. The exemption covers that write only:
+        // `every_env_read_in_this_crate_takes_the_lock` holds `lib.rs`'s
+        // tests to the same rule as everyone else.
         const EXEMPT: [&str; 2] = ["test_env.rs", "lib.rs"];
         let redirects = [
             "set_var(\"HOME\"",
@@ -105,6 +107,36 @@ mod tests {
         assert!(
             unguarded.is_empty(),
             "these files redirect HOME/LAZYBOX_HOME without taking \
+             `crate::test_env::lock()`: {unguarded:?}"
+        );
+    }
+
+    /// The write-side scan above exempts `lib.rs` for its before-main ctor,
+    /// and that exemption was file-scoped: the `#[test]` in the same file
+    /// read `LAZYBOX_HOME` unlocked and inherited it silently, so a sibling
+    /// `PinnedHome` could swap the variable out mid-read (#1737). A read
+    /// races a redirect exactly as a redirect races a read, so every file
+    /// that reads the variable takes the lock too — no exemption, since no
+    /// read runs before `main`.
+    #[test]
+    fn every_env_read_in_this_crate_takes_the_lock() {
+        let reads = ["var(\"LAZYBOX_HOME\")", "var_os(\"LAZYBOX_HOME\")"];
+
+        let mut unguarded = Vec::new();
+        for file in rust_sources(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")) {
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            if name == "test_env.rs" {
+                continue;
+            }
+            let body = std::fs::read_to_string(&file).expect("read source");
+            if reads.iter().any(|needle| body.contains(needle)) && !body.contains("test_env::") {
+                unguarded.push(file);
+            }
+        }
+
+        assert!(
+            unguarded.is_empty(),
+            "these files read LAZYBOX_HOME without taking \
              `crate::test_env::lock()`: {unguarded:?}"
         );
     }

@@ -12,6 +12,8 @@
 // blocking-call ban in clippy.toml targets the run loop.
 #![allow(clippy::disallowed_methods)]
 
+mod common;
+
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazybox_core::{

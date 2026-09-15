@@ -7,6 +7,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::process::{Command, Stdio};
 
 /// Run `lazybox hook-ingest <args>` with `LAZYBOX_HOME` pointed at `home`,

@@ -193,16 +193,36 @@ mod tests {
     // unix permissions. lazybox ships macOS + Linux only; the guard keeps
     // a non-unix build from failing to compile the test rather than
     // silently skipping a real gap.
+    ///
+    /// The child is cut off from the real environment on every path the
+    /// chain can take, not just the one under test (#1750): `GH_CONFIG_DIR`
+    /// points a `gh` that is somehow still the real one at an empty config
+    /// (it fails at once with "not logged in" instead of dialling the
+    /// host), and `LAZYBOX_HOME` keeps the OAuth fallback out of the
+    /// developer's token store. The child also checks that `gh` resolves to
+    /// the fake *before* resolving the chain, and the fake logs every
+    /// invocation, so a wrong binary or a hung fake fails by name rather
+    /// than as a 5s timeout against a host that does not exist.
     #[cfg(unix)]
     #[test]
     fn credential_chain_passes_configured_host_to_gh_auth_token() {
         const CHILD: &str = "LAZYBOX_CREDENTIAL_CHAIN_HOSTNAME_TEST_CHILD";
+        const FAKE_GH_DIR: &str = "LAZYBOX_CREDENTIAL_CHAIN_HOSTNAME_TEST_FAKE_DIR";
         if std::env::var_os(CHILD).is_none() {
             let dir = std::env::temp_dir()
                 .join(format!("lazybox-gh-hostname-test-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("create fake-gh dir");
             let fake_gh = dir.join("gh");
-            std::fs::write(&fake_gh, "#!/bin/sh\necho \"$@\"\n").expect("write fake gh");
+            let invocations = dir.join("invocations");
+            std::fs::write(
+                &fake_gh,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\necho \"$@\"\n",
+                    invocations.display()
+                ),
+            )
+            .expect("write fake gh");
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
@@ -223,16 +243,41 @@ mod tests {
                 "--nocapture",
             ])
             .env(CHILD, "1")
+            .env(FAKE_GH_DIR, &dir)
             .env("PATH", path)
+            .env("GH_CONFIG_DIR", &dir)
+            .env("LAZYBOX_HOME", &dir)
             .env_remove("LAZYBOX_GITHUB_TOKEN")
             .env_remove("GH_TOKEN")
             .env_remove("GITHUB_TOKEN")
             .status()
             .expect("spawn isolated hostname test");
+            let log = std::fs::read_to_string(&invocations)
+                .unwrap_or_else(|_| "<the fake gh was never invoked>".into());
             let _ = std::fs::remove_dir_all(&dir);
-            assert!(status.success(), "isolated hostname test failed");
+            assert!(
+                status.success(),
+                "isolated hostname test failed; fake gh invocations:\n{log}"
+            );
             return;
         }
+
+        // Resolve `gh` the way `Command::new("gh")` will, and refuse to go on
+        // unless it lands on the fake: a real `gh` here would turn the
+        // assertions below into a probe of the developer's machine.
+        let fake_dir = std::path::PathBuf::from(
+            std::env::var_os(FAKE_GH_DIR).expect("parent names the fake gh dir"),
+        );
+        let resolved = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .map(|entry| entry.join("gh"))
+            .find(|candidate| candidate.is_file());
+        assert_eq!(
+            resolved.as_deref(),
+            Some(fake_dir.join("gh").as_path()),
+            "`gh` on the child's PATH must resolve to the fake, not {resolved:?}"
+        );
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

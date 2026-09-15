@@ -1,3 +1,5 @@
+mod common;
+
 #[derive(Debug, Clone, Copy)]
 struct HourReplay {
     rest_requests: u32,

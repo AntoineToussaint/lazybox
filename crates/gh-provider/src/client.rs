@@ -1208,23 +1208,27 @@ fn humanize_rule(kind: &str, params: Option<&serde_json::Value>) -> Option<Strin
     }
 }
 
-/// The discovery filters' viewer-relationship qualifier when it names an
-/// exact role — the single-role shape the polling layer emits
-/// (`author:USER`, `review-requested:USER`, `assignee:USER`,
-/// `mentions:USER`). `involves:USER` (no role, or two or more) yields
-/// `None`: GitHub's `involves:` omits requested reviewers, so a member
-/// query scoped by it would drop a review request the post-fetch role
-/// filter would have kept, whereas the unscoped set is a superset that
-/// filter narrows correctly. Scope qualifiers (`repo:` / `org:`) never
-/// match — the member supplies its own.
-fn exact_role_qualifier(filters: &[String]) -> Option<&str> {
-    const EXACT_ROLES: [&str; 4] = ["author:", "review-requested:", "assignee:", "mentions:"];
+/// The one viewer-relationship term in the discovery filters, as the
+/// polling layer's `role_qualifier` emits it. Scope terms (`repo:` /
+/// `org:`) are not roles, and two roles can't be OR'd on the wire (the
+/// parens footgun), so anything but exactly one role yields `None`.
+fn sweep_role_qualifier(filters: &[String]) -> Option<(graphql::RoleQualifier, &str)> {
     let mut roles = filters
         .iter()
-        .map(String::as_str)
-        .filter(|q| EXACT_ROLES.iter().any(|prefix| q.starts_with(prefix)));
+        .filter_map(|q| graphql::RoleQualifier::parse(q).map(|role| (role, q.as_str())));
     let role = roles.next()?;
     roles.next().is_none().then_some(role)
+}
+
+/// Append `more` to `tasks`, skipping any task already present by key.
+fn merge_unseen(tasks: &mut Vec<Task>, more: Vec<Task>) {
+    let mut seen: std::collections::HashSet<String> =
+        tasks.iter().map(|t| t.id.key.clone()).collect();
+    for task in more {
+        if seen.insert(task.id.key.clone()) {
+            tasks.push(task);
+        }
+    }
 }
 
 /// Search query for one watched repo's open-PR fan-out.
@@ -1849,7 +1853,9 @@ impl GhClient {
             repo_base_points: reviewer_points
                 .saturating_add(merged_points)
                 .saturating_add(issue_points),
-            per_repo_points: budget.unit_forecast("round-robin-repo", 1),
+            per_repo_points: budget
+                .unit_forecast("round-robin-repo", 1)
+                .saturating_mul(self.repo_sweep_pr_queries_per_member()),
             per_repo_issue_points: if scan_issues {
                 budget.unit_forecast("repo-sweep issues", 1)
             } else {
@@ -4702,49 +4708,91 @@ impl GhClient {
         Ok(tasks)
     }
 
-    /// The PR search `fetch_repo_sweep` issues for one roster member.
-    ///
-    /// Scoped to the discovery filters' exact role qualifier (see
-    /// `exact_role_qualifier`) so `pr.author` means "PRs I wrote" on
-    /// the repo-first path exactly as it does on the global sweep. A
-    /// watched repo — or an org member covering one — stays unscoped:
-    /// a watch exists to surface the PRs the viewer is *not* part of.
+    /// A watched repo, or an org member covering one: a watch exists to
+    /// surface the PRs the viewer is *not* part of, so its queries stay
+    /// unscoped.
+    fn sweep_member_is_watched(&self, member: &str) -> bool {
+        self.watch_repos.iter().any(|watch| {
+            watch == member
+                || watch
+                    .split_once('/')
+                    .is_some_and(|(owner, _)| owner == member)
+        })
+    }
+
+    fn sweep_role(&self, member: &str) -> Option<(graphql::RoleQualifier, &str)> {
+        if self.sweep_member_is_watched(member) {
+            None
+        } else {
+            sweep_role_qualifier(&self.pr_filters)
+        }
+    }
+
+    /// The PR search `fetch_repo_sweep` issues for one roster member,
+    /// scoped to the discovery filters' role term so `pr.author` means
+    /// "PRs I wrote" here exactly as on the global sweep. The scope is
+    /// also what keeps a busy member inside `REPO_SWEEP_MAX_PAGES`:
+    /// unscoped, it pages out, fails the pass, never becomes
+    /// authoritative, and its stale rows are never retired.
     pub fn repo_sweep_pr_query(
         &self,
         member: &str,
         since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> String {
-        let watched = self.watch_repos.iter().any(|watch| {
-            watch == member
-                || watch
-                    .split_once('/')
-                    .is_some_and(|(owner, _)| owner == member)
-        });
-        let role = if watched {
-            None
-        } else {
-            exact_role_qualifier(&self.pr_filters)
-        };
-        graphql::repo_sweep_pr_query(member, role, since)
+        graphql::repo_sweep_pr_query(member, self.sweep_role(member).map(|(_, term)| term), since)
     }
 
-    /// Issue counterpart of [`Self::repo_sweep_pr_query`]. The role
-    /// scope only applies when no `@lazybox` mention scan rides the
-    /// query: the scan reads every issue in the member so an allowed
-    /// login's mention on an issue the viewer didn't author still
-    /// spawns, and the display filter narrows the rows post-fetch.
-    pub fn repo_sweep_issue_query(
+    /// The `review-requested:USER` companion of [`Self::repo_sweep_pr_query`]
+    /// whenever the primary is `involves:`, which GitHub defines without
+    /// requested reviewers — the same pairing the global sweep runs, so a
+    /// PR whose only tie to the viewer is a review request is fetched.
+    pub fn repo_sweep_reviewer_query(
         &self,
         member: &str,
         since: Option<chrono::DateTime<chrono::Utc>>,
-        scan_mentions: bool,
-    ) -> String {
-        let role = if scan_mentions {
-            None
-        } else {
-            exact_role_qualifier(&self.issue_filters)
+    ) -> Option<String> {
+        match self.sweep_role(member) {
+            Some((graphql::RoleQualifier::Involves, _)) => Some(graphql::repo_sweep_pr_query(
+                member,
+                Some(&graphql::RoleQualifier::ReviewRequested.for_user(&self.user)),
+                since,
+            )),
+            _ => None,
+        }
+    }
+
+    /// PR queries one roster member costs per pass, for the budget
+    /// forecast: the primary plus the reviewer companion under `involves:`.
+    fn repo_sweep_pr_queries_per_member(&self) -> u32 {
+        match sweep_role_qualifier(&self.pr_filters) {
+            Some((graphql::RoleQualifier::Involves, _)) => 2,
+            _ => 1,
+        }
+    }
+
+    async fn fetch_member_prs(
+        &self,
+        member: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<Task>, GhError> {
+        let primary = self.fetch_pr_single_query_capped(
+            "repo-sweep",
+            self.repo_sweep_pr_query(member, since),
+            REPO_SWEEP_MAX_PAGES,
+        );
+        let companion = async {
+            match self.repo_sweep_reviewer_query(member, since) {
+                Some(query) => {
+                    self.fetch_pr_single_query_capped("repo-sweep", query, REPO_SWEEP_MAX_PAGES)
+                        .await
+                }
+                None => Ok(Vec::new()),
+            }
         };
-        graphql::repo_sweep_issue_query(member, role, since)
+        let (primary, companion) = tokio::join!(primary, companion);
+        let mut tasks = primary?;
+        merge_unseen(&mut tasks, companion?);
+        Ok(tasks)
     }
 
     /// Repo-first discovery sweep: one PR query and one issue query per
@@ -4780,13 +4828,8 @@ impl GhClient {
                     if !want_prs {
                         return Ok(Vec::new());
                     }
-                    let open_fut = self.fetch_pr_single_query_capped(
-                        "repo-sweep",
-                        self.repo_sweep_pr_query(&spec.member, spec.since),
-                        REPO_SWEEP_MAX_PAGES,
-                    );
                     if spec.since.is_some() {
-                        return open_fut.await;
+                        return self.fetch_member_prs(&spec.member, spec.since).await;
                     }
                     // An unwindowed pass asks for the OPEN set, which is
                     // blind to a PR that merged or closed since the member
@@ -4797,31 +4840,19 @@ impl GhClient {
                     // recent activity so those land with their final state,
                     // the way the legacy 7-day merged sweep did.
                     let recent_since = chrono::Utc::now() - chrono::Duration::days(7);
-                    let recent_fut = self.fetch_pr_single_query_capped(
-                        "repo-sweep",
-                        self.repo_sweep_pr_query(&spec.member, Some(recent_since)),
-                        REPO_SWEEP_MAX_PAGES,
+                    let (open, recent) = tokio::join!(
+                        self.fetch_member_prs(&spec.member, None),
+                        self.fetch_member_prs(&spec.member, Some(recent_since)),
                     );
-                    let (open, recent) = tokio::join!(open_fut, recent_fut);
                     let mut tasks = open?;
-                    let mut seen: std::collections::HashSet<String> =
-                        tasks.iter().map(|t| t.id.key.clone()).collect();
-                    for task in recent? {
-                        if seen.insert(task.id.key.clone()) {
-                            tasks.push(task);
-                        }
-                    }
+                    merge_unseen(&mut tasks, recent?);
                     Ok(tasks)
                 };
                 let issue_fut = async {
                     if want_issues {
                         self.fetch_issues_single_query(
                             "repo-sweep issues",
-                            self.repo_sweep_issue_query(
-                                &spec.member,
-                                spec.since,
-                                !allowed_logins.is_empty(),
-                            ),
+                            graphql::repo_sweep_issue_query(&spec.member, spec.since),
                             allowed_logins,
                             REPO_SWEEP_MAX_PAGES,
                         )
@@ -8082,38 +8113,35 @@ mod tests {
         );
     }
 
-    /// The polling layer emits one exact qualifier for a single enabled
-    /// role and `involves:` otherwise; only the exact shape may scope a
-    /// member query, and a scope qualifier never counts as a role.
     #[test]
-    fn exact_role_qualifier_accepts_only_a_single_exact_role() {
+    fn sweep_role_qualifier_reads_the_single_role_term() {
+        use graphql::RoleQualifier as R;
         let q = |quals: &[&str]| -> Vec<String> { quals.iter().map(|s| s.to_string()).collect() };
-        assert_eq!(exact_role_qualifier(&q(&["author:me"])), Some("author:me"));
         assert_eq!(
-            exact_role_qualifier(&q(&["review-requested:me", "repo:o/r"])),
-            Some("review-requested:me")
+            sweep_role_qualifier(&q(&["author:me"])),
+            Some((R::Author, "author:me"))
         );
         assert_eq!(
-            exact_role_qualifier(&q(&["assignee:me"])),
-            Some("assignee:me")
+            sweep_role_qualifier(&q(&["review-requested:me", "repo:o/r"])),
+            Some((R::ReviewRequested, "review-requested:me")),
+            "a scope term is not a role"
         );
         assert_eq!(
-            exact_role_qualifier(&q(&["mentions:me"])),
-            Some("mentions:me")
+            sweep_role_qualifier(&q(&["involves:me", "org:acme"])),
+            Some((R::Involves, "involves:me"))
         );
-        assert_eq!(exact_role_qualifier(&q(&["involves:me"])), None);
-        assert_eq!(exact_role_qualifier(&q(&["involves:me", "org:acme"])), None);
-        assert_eq!(exact_role_qualifier(&q(&[])), None);
+        assert_eq!(sweep_role_qualifier(&q(&[])), None);
+        assert_eq!(sweep_role_qualifier(&q(&["repo:o/r"])), None);
         assert_eq!(
-            exact_role_qualifier(&q(&["author:me", "assignee:me"])),
+            sweep_role_qualifier(&q(&["author:me", "assignee:me"])),
             None,
-            "two exact roles can't be OR'd on the wire (parens footgun); stay unscoped"
+            "two roles can't be OR'd on the wire (parens footgun); stay unscoped"
         );
     }
 
     /// Regression (#1716): with scoped repos the repo-first sweep is the
-    /// only discovery pass, so `pr.author` must reach its per-member
-    /// query — otherwise the setting selects nothing on the wire.
+    /// only discovery pass, so a single role must reach its per-member
+    /// query — unscoped, the setting selects nothing on the wire.
     #[tokio::test(flavor = "current_thread")]
     async fn repo_sweep_pr_query_carries_the_configured_role() {
         let client =
@@ -8129,61 +8157,110 @@ mod tests {
             client.repo_sweep_pr_query("acme", Some(since)),
             "is:pr archived:false org:acme author:test-user updated:>=2026-09-05T12:00:00+00:00"
         );
+        assert_eq!(
+            client.repo_sweep_reviewer_query("acme/widgets", None),
+            None,
+            "an exact role needs no companion"
+        );
+        assert_eq!(client.repo_sweep_pr_queries_per_member(), 1);
     }
 
-    /// `involves:` (the 2+-role / default shape) misses review requests,
-    /// so the member query stays unscoped and the post-fetch role filter
-    /// does the narrowing — as it always has on this path.
+    /// The default (2+ roles) shape is `involves:`, which GitHub defines
+    /// without requested reviewers: the member query is scoped by it AND
+    /// paired with the `review-requested:` companion, as the global sweep
+    /// does. Left unscoped, a busy member pages out at
+    /// `REPO_SWEEP_MAX_PAGES` every pass and its stale rows are never
+    /// retired (#1716).
     #[tokio::test(flavor = "current_thread")]
-    async fn repo_sweep_pr_query_stays_unscoped_under_involves() {
+    async fn repo_sweep_involves_scopes_and_adds_the_reviewer_companion() {
         let client = make_client("http://127.0.0.1:9")
             .with_filters(vec!["involves:test-user".into()], vec![]);
         assert_eq!(
             client.repo_sweep_pr_query("acme/widgets", None),
-            "is:open is:pr archived:false repo:acme/widgets"
+            "is:open is:pr archived:false repo:acme/widgets involves:test-user"
         );
+        assert_eq!(
+            client
+                .repo_sweep_reviewer_query("acme/widgets", None)
+                .as_deref(),
+            Some("is:open is:pr archived:false repo:acme/widgets review-requested:test-user")
+        );
+        assert_eq!(client.repo_sweep_pr_queries_per_member(), 2);
         let bare = make_client("http://127.0.0.1:9");
         assert_eq!(
             bare.repo_sweep_pr_query("acme/widgets", None),
-            "is:open is:pr archived:false repo:acme/widgets"
+            "is:open is:pr archived:false repo:acme/widgets",
+            "no filters wired (tests only; the poller always wires one) → unscoped"
         );
+        assert_eq!(bare.repo_sweep_reviewer_query("acme/widgets", None), None);
     }
 
     /// A watched repo wants every open PR regardless of involvement, and
     /// an org member that covers a watched child is swept in its place
-    /// (`repo_roster` drops the child), so both stay unscoped.
+    /// (`repo_roster` drops the child), so both stay unscoped and need no
+    /// companion.
     #[tokio::test(flavor = "current_thread")]
     async fn repo_sweep_pr_query_leaves_watched_members_unscoped() {
         let client = make_client("http://127.0.0.1:9")
-            .with_filters(vec!["author:test-user".into()], vec![])
+            .with_filters(vec!["involves:test-user".into()], vec![])
             .with_watch_repos(vec!["acme/widgets".into()]);
-        assert_eq!(
-            client.repo_sweep_pr_query("acme/widgets", None),
-            "is:open is:pr archived:false repo:acme/widgets"
-        );
-        assert_eq!(
-            client.repo_sweep_pr_query("acme", None),
-            "is:open is:pr archived:false org:acme"
-        );
+        for member in ["acme/widgets", "acme"] {
+            assert!(
+                !client
+                    .repo_sweep_pr_query(member, None)
+                    .contains("involves:"),
+                "{member}"
+            );
+            assert_eq!(
+                client.repo_sweep_reviewer_query(member, None),
+                None,
+                "{member}"
+            );
+        }
         assert_eq!(
             client.repo_sweep_pr_query("other/repo", None),
-            "is:open is:pr archived:false repo:other/repo author:test-user"
+            "is:open is:pr archived:false repo:other/repo involves:test-user"
+        );
+        assert!(
+            client
+                .repo_sweep_reviewer_query("other/repo", None)
+                .is_some()
         );
     }
 
-    /// The issue query carries the role only when no mention scan rides
-    /// it: the `@lazybox` scan must see every issue in the member.
+    /// The scope must reach the wire, not just the builder: one windowed
+    /// member under `involves:` sends exactly the primary and the
+    /// reviewer companion, both addressed to the member.
     #[tokio::test(flavor = "current_thread")]
-    async fn repo_sweep_issue_query_yields_to_the_mention_scan() {
-        let client =
-            make_client("http://127.0.0.1:9").with_filters(vec![], vec!["author:test-user".into()]);
+    async fn fetch_repo_sweep_sends_the_scoped_queries_on_the_wire() {
+        const EMPTY: &str = r#"{"data":{"search":{"issueCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]},"rateLimit":{"cost":1,"limit":5000,"remaining":4999,"resetAt":"2026-05-28T13:00:00Z"}},"errors":null}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(vec![EMPTY], requests.clone()).await;
+        let client = make_client(&uri).with_filters(vec!["involves:test-user".into()], vec![]);
+        let specs = vec![RepoSweepSpec {
+            member: "acme/widgets".to_string(),
+            since: Some(chrono::Utc::now()),
+        }];
+        let outcome = client
+            .fetch_repo_sweep(&specs, true, false, &std::collections::BTreeSet::new())
+            .await
+            .expect("empty pages are a complete sweep");
+        assert_eq!(outcome.completed, vec!["acme/widgets".to_string()]);
+        let bodies = requests.lock().unwrap().clone();
         assert_eq!(
-            client.repo_sweep_issue_query("acme/widgets", None, false),
-            "is:open is:issue archived:false repo:acme/widgets author:test-user"
+            bodies.len(),
+            2,
+            "primary + reviewer companion, nothing else"
         );
-        assert_eq!(
-            client.repo_sweep_issue_query("acme/widgets", None, true),
-            "is:open is:issue archived:false repo:acme/widgets"
+        assert!(
+            bodies.iter().all(|b| b.contains("repo:acme/widgets")),
+            "every query addresses the member"
+        );
+        assert!(bodies.iter().any(|b| b.contains("involves:test-user")));
+        assert!(
+            bodies
+                .iter()
+                .any(|b| b.contains("review-requested:test-user"))
         );
     }
 

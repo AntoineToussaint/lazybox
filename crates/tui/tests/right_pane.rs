@@ -185,9 +185,9 @@ fn w_with_selected_comments_addresses_them() {
     ws.activity
         .push(activity("bob", "needs more tests", ActivityKind::Comment));
     rp.set_workspace(Some(ws));
-    // Toggle a selection on the first comment via `v`.
+    // Toggle a selection on the first comment via `Space`.
     rp.handle_key(
-        KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
         &mut Vec::new(),
     );
     let mut cmds: Vec<Command> = Vec::new();

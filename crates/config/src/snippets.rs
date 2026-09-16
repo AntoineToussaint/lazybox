@@ -1511,7 +1511,7 @@ impl Snippets {
                 entry(
                     "Review",
                     "Catch up: what happened here, in a few lines",
-                    "Bring me up to speed on this session in AT MOST 6 lines. I have been \
+                    "Bring me up to speed on this session in AT MOST 6 lines of briefing. I have been \
                      away and need to re-enter, not re-read: assume I remember the goal and \
                      nothing since. Lead with where things stand in one sentence, then only \
                      what changed my picture — what you did, what you learned that was \

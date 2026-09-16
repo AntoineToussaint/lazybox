@@ -14,6 +14,7 @@ extend-ignore-identifiers-re = [
 ]
 
 [default.extend-words]
+nd = "nd"  # English ordinal suffix in calendar-date parsing
 # `ratatui` is the Rust TUI crate — not a misspelling of
 # "ratatouille". Apply to lowercase + titlecase occurrences.
 ratatui = "ratatui"

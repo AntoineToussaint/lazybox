@@ -224,6 +224,16 @@ async fn run<F, P, PFut, R, RFut, A, AFut>(
                 ..
             }) => {
                 if enabled() {
+                    let supports_wait = match config.terminal.terminal_meta_for(terminal_id).await {
+                        Some((_, lazybox_ipc::TerminalKind::Agent(id))) => config
+                            .agents
+                            .get(&id)
+                            .is_some_and(|agent| agent.supports_usage_limit_wait()),
+                        _ => false,
+                    };
+                    if !supports_wait {
+                        continue;
+                    }
                     press(config.clone(), terminal_id).await;
                     // Only track a wait we actually pressed, so the resume
                     // can't fire for a block the user is handling manually.
@@ -317,6 +327,20 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    fn test_config() -> ServerConfig {
+        let config = ServerConfig::in_memory();
+        {
+            let mut entries = config.terminal.entries.try_lock().expect("fresh registry");
+            for id in 1..=10 {
+                entries.entry(TerminalId(id)).or_default().meta = Some((
+                    "ws:1".into(),
+                    lazybox_ipc::TerminalKind::Agent("claude".into()),
+                ));
+            }
+        }
+        config
+    }
+
     fn state_event(terminal: u64, state: AgentState) -> Event {
         Event::AgentState {
             session_key: "ws:1".into(),
@@ -343,7 +367,7 @@ mod tests {
     /// exited transition must not — and only while the flag is enabled.
     #[tokio::test]
     async fn presses_wait_only_for_limit_reached_when_enabled() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         tx.send(state_event(1, AgentState::Working)).unwrap();
         tx.send(limit_event(2)).unwrap();
@@ -371,11 +395,69 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn codex_limit_never_presses_wait_or_schedules_a_resume() {
+        let config = test_config();
+        config
+            .terminal
+            .entries
+            .lock()
+            .await
+            .entry(TerminalId(7))
+            .or_default()
+            .meta = Some((
+            "ws:1".into(),
+            lazybox_ipc::TerminalKind::Agent("codex".into()),
+        ));
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(limit_event(7)).unwrap();
+        tx.send(state_event(7, AgentState::Idle)).unwrap();
+        drop(tx);
+        run(
+            rx,
+            config,
+            || true,
+            |_cfg, _tid| async { panic!("Codex has no Wait chooser") },
+            |_cfg, _tid| async { panic!("no auto-Wait resume was scheduled") },
+            no_auth,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn missing_or_unknown_agent_never_accepts_wait() {
+        let config = test_config();
+        config
+            .terminal
+            .entries
+            .lock()
+            .await
+            .entry(TerminalId(1))
+            .or_default()
+            .meta = Some((
+            "ws:1".into(),
+            lazybox_ipc::TerminalKind::Agent("unknown".into()),
+        ));
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(limit_event(1)).unwrap();
+        tx.send(limit_event(99)).unwrap();
+        drop(tx);
+        run(
+            rx,
+            config,
+            || true,
+            |_cfg, _tid| async { panic!("no supported Wait capability") },
+            noop_resume,
+            no_auth,
+        )
+        .await;
+    }
+
     /// With the flag off, a `LimitReached` transition presses nothing —
     /// detection still surfaces the block, but the keystroke is opt-in.
     #[tokio::test]
     async fn disabled_flag_never_presses() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         tx.send(limit_event(1)).unwrap();
         drop(tx);
@@ -401,7 +483,7 @@ mod tests {
     /// continuation nudge injected — exactly once, for that terminal.
     #[tokio::test]
     async fn resumes_when_a_pressed_terminals_wait_clears_to_done() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         tx.send(limit_event(7)).unwrap();
         tx.send(state_event(7, AgentState::Done)).unwrap();
@@ -440,7 +522,7 @@ mod tests {
     /// interrupted work in its own headline case.
     #[tokio::test]
     async fn resumes_when_a_pressed_terminals_wait_clears_to_idle() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         tx.send(limit_event(7)).unwrap();
         tx.send(state_event(7, AgentState::Idle)).unwrap();
@@ -472,7 +554,7 @@ mod tests {
     /// without an accompanying `AgentState::Exited`.
     #[tokio::test]
     async fn terminal_exit_drops_tracking_without_resuming() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         tx.send(limit_event(3)).unwrap();
         tx.send(Event::TerminalExited {
@@ -511,7 +593,7 @@ mod tests {
     /// still live — so a later clear to `Done` still fires the nudge.
     #[tokio::test]
     async fn awaiting_reset_relabel_keeps_tracking_until_the_real_clear() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         tx.send(limit_event(9)).unwrap();
         tx.send(state_event(9, AgentState::AwaitingReset)).unwrap();
@@ -545,7 +627,7 @@ mod tests {
     /// plain finished turn) is never resumed either.
     #[tokio::test]
     async fn no_nudge_on_working_clear_or_untracked_done() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         // Pressed, then auto-resumed → Working: no nudge.
         tx.send(limit_event(1)).unwrap();
@@ -577,7 +659,7 @@ mod tests {
     /// resume — the flag is re-read live at both edges.
     #[tokio::test]
     async fn disabling_between_press_and_clear_cancels_resume() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         tx.send(limit_event(5)).unwrap();
         tx.send(state_event(5, AgentState::Done)).unwrap();
@@ -617,7 +699,7 @@ mod tests {
     /// the new id, never pasted into the logged-out screen.
     #[tokio::test]
     async fn holds_through_auth_detour_then_resumes_after_reauth() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         tx.send(limit_event(7)).unwrap();
         // Auth expired mid-wait: a login prompt, not a resting composer.
@@ -668,7 +750,7 @@ mod tests {
     /// replacement re-keys it, and the resumed `Idle` still resumes.
     #[tokio::test]
     async fn a_non_resting_reading_that_slips_past_auth_detection_is_held_not_dropped() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         tx.send(limit_event(7)).unwrap();
         // The auth scanner never fired (a phrasing/rendering it missed), so
@@ -715,7 +797,7 @@ mod tests {
     /// continuation is ever pasted into a login prompt.
     #[tokio::test]
     async fn does_not_resume_into_a_logged_out_screen() {
-        let config = ServerConfig::in_memory();
+        let config = test_config();
         let (tx, rx) = broadcast::channel(16);
         tx.send(limit_event(4)).unwrap();
         tx.send(state_event(4, AgentState::Idle)).unwrap();

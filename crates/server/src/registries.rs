@@ -285,6 +285,7 @@ pub(crate) struct TerminalEntry {
     turn: AgentTurn,
     pub input_needed_shape: Option<lazybox_agents::PromptShape>,
     pub composer_ready: bool,
+    pub usage_limit_reset_hint: Option<String>,
     pub credit_recovery: Option<CreditRecoveryRuntime>,
     pub reclassify_request: Option<Arc<Notify>>,
     pub activity: terminal_io::AgentTerminalActivity,

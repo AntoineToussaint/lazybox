@@ -63,6 +63,11 @@ pub const CODEX_CREDIT_EXHAUSTED_PHRASES: &[&str] = &[
     "you hit your spend cap set in your workspace",
 ];
 
+/// Individual usage caps stop the turn without a credit-recovery chooser.
+pub const CODEX_USAGE_LIMIT_PHRASES: &[&str] = &["you've hit your usage limit"];
+
+const CODEX_USAGE_LIMIT_TAIL_PHRASES: &[&str] = &["codex/settings/usage", "purchase more credits"];
+
 const CODEX_WAIT_FOR_CREDIT_PHRASES: &[&str] = &["wait for credit"];
 
 /// Standalone phrases that are unambiguously Claude blocking on user
@@ -248,11 +253,12 @@ pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
 pub const CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES: &[&str] =
     &["continuing automatically at", "continuing automatically in"];
 
-/// Best-effort extraction of the reset time Claude prints alongside a
+/// Best-effort extraction of the reset time Claude or Codex prints alongside a
 /// usage-limit block (`… resets 3pm`, `… resets at 3:00pm`, `… resets in
 /// 2h`) — the "time-to-reset" a proactive usage indicator surfaces
 /// (#1012). Returns a short, display-ready hint (`"3pm"`, `"3:00pm"`,
-/// `"2h"`) or `None` when the banner carries no parseable time.
+/// `"2h"`, `"sep 16, 2026 at 2:14pm"`) or `None` when the banner carries
+/// no parseable time. Codex names its reset with `try again at <date/time>`.
 ///
 /// Parsed from the compacted (space-free, lowercased) buffer, the only
 /// form that survives tmux's cursor-positioned repaint — the banner's
@@ -278,6 +284,11 @@ pub const CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES: &[&str] =
 pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
     let s = strip_ansi_lossy(recent_output);
     let compact = compact_lower(&s);
+    if let Some(pos) = codex_usage_limit_pos(&compact) {
+        let (_, after) = compact[pos..].rsplit_once("tryagainat")?;
+        let hint = reset_token(after)?;
+        return (hint.ends_with("am") || hint.ends_with("pm")).then_some(hint);
+    }
     // Only meaningful under a live limit banner — never mine a stray
     // "resets" out of ordinary scrollback. Matched against the space-free
     // buffer (patterns compacted the same way), so the cursor-positioned
@@ -287,7 +298,7 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
     // Prefer the banner's own `resets 3pm` countdown, but fall back to the
     // auto-continue form's `continuing automatically at 1:10pm` (same reset)
     // for a window holding only that line — the spend-limit line above it
-    // scrolled out. Across all three keywords, the MOST RECENT match that
+    // scrolled out. Across all reset keywords, the MOST RECENT match that
     // parses a time wins (max offset), so neither an older episode's stale
     // `resets` nor the chooser's token-less "Wait until it resets" line can
     // shadow the live banner's countdown. The specific `continuing
@@ -411,10 +422,25 @@ fn date_token(after: &str) -> Option<String> {
         return None;
     }
     let mut hint = format!("{month} {day}");
-    let rest = rest[day.len()..]
+    let mut rest = &rest[day.len()..];
+    for suffix in ["st", "nd", "rd", "th"] {
+        if let Some(tail) = rest.strip_prefix(suffix) {
+            rest = tail;
+            break;
+        }
+    }
+    if let Some(tail) = rest.strip_prefix(',')
+        && tail.len() >= 4
+        && tail.as_bytes()[..4].iter().all(u8::is_ascii_digit)
+    {
+        hint.push_str(", ");
+        hint.push_str(&tail[..4]);
+        rest = &tail[4..];
+    }
+    let rest = rest
         .strip_prefix("at")
-        .or_else(|| rest[day.len()..].strip_prefix("in"))
-        .unwrap_or(&rest[day.len()..]);
+        .or_else(|| rest.strip_prefix("in"))
+        .unwrap_or(rest);
     if let Some(time) = time_token(rest) {
         hint.push_str(" at ");
         hint.push_str(&time);
@@ -1845,7 +1871,7 @@ fn skip_string_terminated(bytes: &[u8], mut i: usize) -> usize {
 /// matching once fresh output arrives.
 const CODEX_PROMPT_TAIL_WINDOW: usize = 2 * 1024;
 
-/// Codex's three observable states, in one detector — the per-agent
+/// Codex's observable states, in one detector — the per-agent
 /// equivalent of [`claude_state`]. Codex renders INLINE (no alt-screen), so
 /// the daemon's append-only detect window ends with whatever Codex last
 /// repainted; recency is therefore the byte offset of each marker, exactly
@@ -1952,9 +1978,9 @@ fn codex_input_needed_in_current_chunk_from(
     bare_prompt_touched.then_some(PromptShape::Chooser)
 }
 
-/// Typed counterpart to [`codex_input_needed_in_current_chunk`]. Credit
-/// exhaustion wins over the generic chooser classification when the newest
-/// chunk completes either half of the provider screen.
+/// Typed counterpart to [`codex_input_needed_in_current_chunk`]. Usage and
+/// credit limits win over generic chooser classification when the newest
+/// chunk completes the provider banner.
 pub fn codex_blocked_in_current_chunk(
     recent_output: &[u8],
     last_chunk_start: usize,
@@ -1964,7 +1990,14 @@ pub fn codex_blocked_in_current_chunk(
     let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
 
     let footer_pos = codex_footer_pos(&compact);
-    if codex_state_from(&s, &compact, Some(compact_mark), footer_pos) == AgentState::CreditExhausted
+    let state = codex_state_from(&s, &compact, Some(compact_mark), footer_pos);
+    if state == AgentState::LimitReached
+        && (compact_match_touched(&compact, CODEX_USAGE_LIMIT_PHRASES, compact_mark)
+            || compact_match_touched(&compact, CODEX_USAGE_LIMIT_TAIL_PHRASES, compact_mark))
+    {
+        return Some(AgentObservation::from_state(AgentState::LimitReached));
+    }
+    if state == AgentState::CreditExhausted
         && (compact_match_touched(&compact, CODEX_CREDIT_EXHAUSTED_PHRASES, compact_mark)
             || compact_match_touched(&compact, CODEX_WAIT_FOR_CREDIT_PHRASES, compact_mark))
     {
@@ -2072,6 +2105,7 @@ pub fn codex_ready_for_prompt_chunked(recent_output: &[u8], last_chunk_start: us
         && codex_footer_pos(&compact).is_some()
         && codex_prompt_pos(frame).is_none()
         && codex_credit_exhausted_pos(frame).is_none()
+        && !codex_usage_limit_is_live(&compact)
         && !codex_bare_prompt_in_tail(&s)
     {
         return true;
@@ -2136,6 +2170,11 @@ fn codex_state_from(
 
     if marker_at_least_as_recent(credit_pos, footer_pos.max(work_against(credit_pos))) {
         return AgentState::CreditExhausted;
+    }
+
+    // A resting composer remains visible beneath a hard usage stop.
+    if codex_usage_limit_is_live(compact) {
+        return AgentState::LimitReached;
     }
 
     // A live approval / consent modal is the bottom-most marker — more recent
@@ -2277,6 +2316,42 @@ fn codex_credit_exhausted_pos(compact: &str) -> Option<usize> {
     let exhausted = last_compact_match_pos(compact, CODEX_CREDIT_EXHAUSTED_PHRASES)?;
     let wait = last_compact_match_pos(compact, CODEX_WAIT_FOR_CREDIT_PHRASES)?;
     Some(exhausted.min(wait))
+}
+
+fn codex_usage_limit_is_live(compact: &str) -> bool {
+    marker_at_least_as_recent(
+        codex_usage_limit_pos(compact),
+        codex_working_pos(compact).max(codex_prompt_pos(compact)),
+    )
+}
+
+fn codex_usage_limit_pos(compact: &str) -> Option<usize> {
+    // Codex renders provider errors as a standalone square-prefixed cell;
+    // tool output has a gutter and ordinary assistant prose has no square.
+    let marker = "■you'vehityourusagelimit";
+    let mut fence = None;
+    let mut offset = 0;
+    let mut latest = None;
+    for line in compact.split_inclusive(['\n', '\r']) {
+        if let Some(marker) = ["```", "~~~"]
+            .into_iter()
+            .find(|marker| line.starts_with(marker))
+        {
+            if fence == Some(marker) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(marker);
+            }
+        } else if fence.is_none() && line.starts_with(marker) {
+            let tail = &compact[offset + marker.len()..];
+            let end = tail.find('■').unwrap_or(tail.len());
+            if last_compact_match_pos(&tail[..end], CODEX_USAGE_LIMIT_TAIL_PHRASES).is_some() {
+                latest = Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    latest
 }
 
 fn compact_match_touched(compact: &str, patterns: &[&str], mark: usize) -> bool {

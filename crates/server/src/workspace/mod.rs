@@ -1578,23 +1578,63 @@ fn canonical_or_self(path: &std::path::Path) -> std::path::PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Whether `path` lives in the daemon-owned worktree namespace. Imported
-/// checkouts and on-main sessions point at user-owned repositories and must
-/// never enter the lifecycle reclaimer, even when an old record happens to
-/// persist their path.
-fn is_managed_worktree_path(config: &ServerConfig, path: &std::path::Path) -> bool {
-    canonical_or_self(path).starts_with(canonical_or_self(
-        &config.worktree_root_path().join("worktrees"),
-    ))
+/// The worktrees a lifecycle removal of `workspace` may reclaim: each
+/// session's path that exists, lives in the daemon-owned namespace
+/// (`<root>/<scope>/<slug>`, see `WorktreeManager::is_managed_worktree_path`),
+/// and isn't the repo's shared main checkout. Imported checkouts and on-main
+/// sessions in the user's own clone point outside the namespace and must
+/// never enter the reclaimer, even when an old record persists their path;
+/// `_main` is inside it but shared by every workspace on the repo, so no
+/// single workspace owns it.
+fn lifecycle_worktree_paths(
+    config: &ServerConfig,
+    workspace: &Workspace,
+) -> Vec<std::path::PathBuf> {
+    let mgr = config.worktree_manager();
+    let shared_main =
+        crate::spawn_handler::main_worktree_path_under(workspace, config.worktree_root_path())
+            .map(|path| canonical_or_self(&path));
+    let mut seen = std::collections::HashSet::new();
+    workspace
+        .sessions
+        .iter()
+        .map(|session| session.worktree_path.clone())
+        .filter(|path| {
+            path.exists()
+                && mgr.is_managed_worktree_path(path)
+                && shared_main.as_ref() != Some(&canonical_or_self(path))
+                && seen.insert(canonical_or_self(path))
+        })
+        .collect()
 }
 
 /// Snapshot every persisted session into the git inspector's source-agnostic
 /// shape. Workspace lifecycle owns this projection so cleanup, explicit
 /// removal, rescope, and diagnostics cannot drift onto different notions of
 /// which worktrees are still tracked.
+///
+/// A session is *stopped* when no terminal in the registry is bound to it —
+/// by session id, or by workspace key for terminals recovered after a daemon
+/// restart, whose session binding is never repopulated. The persisted
+/// `SessionRunState` is not the source: the daemon never writes `Stopped`, so
+/// keying on it left every real session "active" forever and the removal
+/// gate refusing every archive.
 pub(crate) async fn collect_tracked_sessions(
     config: &ServerConfig,
 ) -> Result<Vec<lazybox_git_ops::TrackedSession>, String> {
+    let live_sessions: HashSet<lazybox_core::SessionId> = config
+        .terminal
+        .session_bindings()
+        .await
+        .into_values()
+        .collect();
+    let live_keys: HashSet<String> = config
+        .terminal
+        .metadata_map()
+        .await
+        .into_values()
+        .map(|(session_key, _)| session_key.as_str().to_string())
+        .collect();
     let store = config.store.clone();
     let scan = tokio::task::spawn_blocking(move || -> Result<_, String> {
         let records = store
@@ -1607,12 +1647,15 @@ pub(crate) async fn collect_tracked_sessions(
                 .ok_or_else(|| format!("workspace {} has no persisted payload", record.key))?;
             let workspace = serde_json::from_str::<Workspace>(&json)
                 .map_err(|error| format!("decode workspace {}: {error}", record.key))?;
+            let workspace_live = live_keys.contains(workspace.key.as_str());
             for session in workspace.sessions {
                 let raw = session.id.to_string();
+                let is_stopped = matches!(session.state, lazybox_core::SessionRunState::Stopped)
+                    || (!workspace_live && !live_sessions.contains(&session.id));
                 tracked.push(lazybox_git_ops::TrackedSession {
                     session_id: raw.get(..8).unwrap_or(&raw).to_string(),
                     worktree_path: session.worktree_path,
-                    is_stopped: matches!(session.state, lazybox_core::SessionRunState::Stopped),
+                    is_stopped,
                 });
             }
         }
@@ -1654,12 +1697,7 @@ async fn inspect_workspace_risks(
     workspace: &Workspace,
     require_stopped: bool,
 ) -> Result<Vec<WorkspaceRemovalRisk>, String> {
-    let paths: Vec<std::path::PathBuf> = workspace
-        .sessions
-        .iter()
-        .map(|session| session.worktree_path.clone())
-        .filter(|path| path.exists() && is_managed_worktree_path(config, path))
-        .collect();
+    let paths = lifecycle_worktree_paths(config, workspace);
     if paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -1667,7 +1705,7 @@ async fn inspect_workspace_risks(
     let tracked = collect_tracked_sessions(config).await?;
     let inspections = config
         .worktree_manager()
-        .inspect_worktrees(&tracked)
+        .inspect_paths(&paths, &tracked)
         .await
         .map_err(|error| format!("could not inspect worktrees safely: {error}"))?;
     let by_path: std::collections::HashMap<_, _> = inspections
@@ -1853,6 +1891,7 @@ mod removal_classification_tests {
             session_id: Some("session".into()),
             reasons: Vec::new(),
             size_bytes: 0,
+            build_bytes: 0,
             last_modified: None,
             has_uncommitted_changes: false,
             status_verified: true,
@@ -1882,6 +1921,7 @@ mod removal_classification_tests {
             session_id: Some("session".into()),
             reasons: vec![lazybox_git_ops::OrphanReason::BranchDeletedUpstream],
             size_bytes: 0,
+            build_bytes: 0,
             last_modified: None,
             has_uncommitted_changes: false,
             status_verified: true,
@@ -1961,15 +2001,10 @@ async fn reclaim_workspace_worktrees(
     // teardown runs inside the poll/reconcile cycle the user is
     // watching sync (issue #1132).
     let mut reclaimed = Reclaimed::default();
-    let mut paths = Vec::new();
-    for session in &workspace.sessions {
-        let path = &session.worktree_path;
-        if !path.exists() || !is_managed_worktree_path(config, path) {
-            continue;
-        }
+    let paths = lifecycle_worktree_paths(config, workspace);
+    for path in &paths {
         reclaimed.bytes += dir_size(path).await;
         reclaimed.worktrees += 1;
-        paths.push(path.clone());
     }
 
     tombstone_legacy_remote_host(config, workspace);
@@ -2049,7 +2084,7 @@ fn spawn_worktree_removal(
                     return;
                 }
             };
-            let inspections = match mgr.inspect_worktrees(&tracked).await {
+            let inspections = match mgr.inspect_paths(&paths, &tracked).await {
                 Ok(inspections) => inspections,
                 Err(error) => {
                     tracing::warn!(
@@ -2091,12 +2126,46 @@ fn spawn_worktree_removal(
                     worktree = %path.display(),
                     "delete_workspace: worktree re-provisioned before removal — left in place",
                 ),
-                Err(error) => tracing::warn!(
-                    workspace = %key,
-                    worktree = %path.display(),
-                    %error,
-                    "delete_workspace: worktree no longer proved safe — preserving it",
-                ),
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %key,
+                        worktree = %path.display(),
+                        %error,
+                        "delete_workspace: worktree no longer proved safe — preserving it",
+                    );
+                    // The tree stays (a squash-merged PR reads as unpushed
+                    // to git; a stray edit is content), but its build output
+                    // is never precious. Same guard, same fresh probes: a
+                    // dirty tree keeps everything.
+                    let guard_config = config.clone();
+                    let guard_key = key.clone();
+                    let guard_path = path.clone();
+                    match mgr
+                        .reclaim_build_dir(row, move || {
+                            !worktree_path_is_reclaimed(&guard_config, &guard_key, &guard_path)
+                        })
+                        .await
+                    {
+                        Ok(None) => tracing::info!(
+                            workspace = %key,
+                            worktree = %path.display(),
+                            "delete_workspace: worktree re-provisioned before its build output was dropped — left in place",
+                        ),
+                        Ok(Some(0)) => {}
+                        Ok(Some(bytes)) => tracing::info!(
+                            workspace = %key,
+                            worktree = %path.display(),
+                            bytes,
+                            "delete_workspace: dropped the preserved worktree's build output",
+                        ),
+                        Err(error) => tracing::info!(
+                            workspace = %key,
+                            worktree = %path.display(),
+                            %error,
+                            "delete_workspace: build output kept with the worktree",
+                        ),
+                    }
+                }
             }
         }
     })
@@ -2161,6 +2230,23 @@ mod reclaim_worktree_tests {
         WorkspaceKey,
         std::path::PathBuf,
     ) {
+        managed_checkout_fixture_at(local_commit, "worktrees/o-r-release-guard", None).await
+    }
+
+    /// [`managed_checkout_fixture`] with the worktree at `<root>/<rel>` and
+    /// an optional project key (which gives the workspace a scope, and so
+    /// a shared `_main` path). Production provisions `<scope>/<slug>`, not
+    /// the legacy `worktrees/<name>`.
+    async fn managed_checkout_fixture_at(
+        local_commit: bool,
+        rel: &str,
+        project_key: Option<lazybox_core::ProjectKey>,
+    ) -> (
+        tempfile::TempDir,
+        ServerConfig,
+        WorkspaceKey,
+        std::path::PathBuf,
+    ) {
         let root = tempfile::tempdir().expect("worktree root");
         let upstream = root.path().join("upstream");
         std::fs::create_dir_all(&upstream).expect("upstream dir");
@@ -2184,7 +2270,7 @@ mod reclaim_worktree_tests {
             ],
         )
         .await;
-        let worktree = root.path().join("worktrees/o-r-release-guard");
+        let worktree = root.path().join(rel);
         std::fs::create_dir_all(worktree.parent().expect("worktree parent"))
             .expect("worktree parent dir");
         run_git(
@@ -2218,6 +2304,7 @@ mod reclaim_worktree_tests {
         );
         let key = WorkspaceKey::new("github:o/r#1166");
         let mut workspace = Workspace::empty(key.clone(), "release-guard", Utc::now());
+        workspace.project_key = project_key;
         let mut session = Session::new(
             key.clone(),
             SessionKind::Agent {
@@ -2454,6 +2541,187 @@ mod reclaim_worktree_tests {
             "workspace row removed"
         );
         assert!(!worktree.exists(), "managed worktree reclaimed");
+    }
+
+    /// The daemon never persists `SessionRunState::Stopped`; a real row's
+    /// session reads `Active` for its whole life. Stopped-ness comes from
+    /// the terminal registry, so a clean workspace with no live terminal
+    /// archives — keying on the persisted state refused every archive as
+    /// "checkout is still active".
+    #[tokio::test]
+    async fn workspace_delete_reclaims_when_the_session_is_persisted_active() {
+        let (_root, config, key, worktree) = managed_checkout_fixture_at(
+            false,
+            "github-o-r/release-guard",
+            Some(lazybox_core::ProjectKey::github("o", "r")),
+        )
+        .await;
+        let mut workspace = load_workspace(&config, &key).expect("fixture workspace");
+        for session in &mut workspace.sessions {
+            session.state = SessionRunState::Active;
+        }
+        commit_upsert(&config, &key, workspace).expect("persist active session");
+
+        assert!(
+            delete_workspace(&config, &key).await.is_some(),
+            "no live terminal means the checkout is not active"
+        );
+        assert!(!worktree.exists(), "managed worktree reclaimed");
+    }
+
+    /// Archiving (`x x`) a workspace whose worktree sits at the production
+    /// `<root>/<scope>/<slug>` path removes it — the layout the reclaimer
+    /// was blind to while it only recognised `<root>/worktrees/` (#1748).
+    #[tokio::test]
+    async fn workspace_delete_reclaims_a_production_layout_worktree() {
+        let (_root, config, key, worktree) = managed_checkout_fixture_at(
+            false,
+            "github-o-r/release-guard",
+            Some(lazybox_core::ProjectKey::github("o", "r")),
+        )
+        .await;
+
+        assert!(
+            delete_workspace(&config, &key).await.is_some(),
+            "clean stopped work remains deletable"
+        );
+        assert!(!worktree.exists(), "managed worktree reclaimed");
+    }
+
+    /// The repo's shared `_main` checkout is inside the managed namespace
+    /// but owned by no single workspace: archiving one that ran an on-main
+    /// session leaves it for the others.
+    #[tokio::test]
+    async fn workspace_delete_leaves_the_shared_main_checkout() {
+        let (_root, config, key, main_checkout) = managed_checkout_fixture_at(
+            false,
+            "github-o-r/_main",
+            Some(lazybox_core::ProjectKey::github("o", "r")),
+        )
+        .await;
+
+        assert!(delete_workspace(&config, &key).await.is_some());
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "workspace row removed"
+        );
+        assert!(main_checkout.exists(), "shared main checkout preserved");
+    }
+
+    /// A squash-merged PR's local tip is unreachable from any remote ref,
+    /// so the deferred delete boundary keeps the tree as "unpushed". Its
+    /// ignored `target/` is dead weight regardless, and goes; the source
+    /// and the local commit stay.
+    #[tokio::test]
+    async fn workspace_delete_drops_build_output_from_a_preserved_merged_worktree() {
+        let (_root, config, key, worktree) = managed_checkout_fixture_at(
+            false,
+            "github-o-r/release-guard",
+            Some(lazybox_core::ProjectKey::github("o", "r")),
+        )
+        .await;
+        std::fs::write(worktree.join(".gitignore"), "target/\n").expect("gitignore");
+        std::fs::write(worktree.join("release-fix.txt"), "only local copy\n").expect("local work");
+        run_git(&worktree, &["add", "."]).await;
+        run_git(&worktree, &["commit", "-q", "-m", "release fix"]).await;
+        std::fs::create_dir_all(worktree.join("target/debug")).expect("target");
+        std::fs::write(worktree.join("target/debug/blob"), vec![0u8; 8192]).expect("blob");
+        let mut workspace = load_workspace(&config, &key).expect("fixture workspace");
+        workspace.pr = Some(merged_pr_task());
+        commit_upsert(&config, &key, workspace).expect("persist merged pr");
+
+        assert!(
+            delete_workspace(&config, &key).await.is_some(),
+            "a merged PR's unpushed-looking tip does not block the archive"
+        );
+        assert!(
+            worktree.exists(),
+            "tree with unreachable commits is preserved"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("release-fix.txt")).unwrap(),
+            "only local copy\n"
+        );
+        assert!(!worktree.join("target").exists(), "build output dropped");
+    }
+
+    /// Uncommitted edits keep the whole tree, build output included.
+    #[tokio::test]
+    async fn workspace_delete_keeps_build_output_with_a_dirty_worktree() {
+        let (_root, config, key, worktree) = managed_checkout_fixture_at(
+            false,
+            "github-o-r/release-guard",
+            Some(lazybox_core::ProjectKey::github("o", "r")),
+        )
+        .await;
+        std::fs::write(worktree.join("wip.txt"), "uncommitted\n").expect("wip");
+        std::fs::create_dir_all(worktree.join("target/debug")).expect("target");
+        std::fs::write(worktree.join("target/debug/blob"), vec![0u8; 8192]).expect("blob");
+
+        assert_eq!(
+            delete_workspace(&config, &key).await.map(|_| ()),
+            None,
+            "x x fails closed on uncommitted work"
+        );
+        assert!(worktree.join("wip.txt").exists());
+        assert!(
+            worktree.join("target/debug/blob").exists(),
+            "build output kept"
+        );
+    }
+
+    /// A merged PR on the fixture branch — the shape whose squash-merge
+    /// leaves the local tip unreachable from any remote ref.
+    fn merged_pr_task() -> lazybox_core::Task {
+        lazybox_core::Task {
+            author: String::new(),
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: "o/r#1166".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: lazybox_core::TaskState::Merged,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::default(),
+            review: lazybox_core::ReviewStatus::default(),
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some("o/r".to_string()),
+            branch: Some("release-guard".into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Unknown,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+            blocked_by: vec![],
+            merge_after: vec![],
+            contracts: vec![],
+            blocked_on: None,
+        }
     }
 }
 

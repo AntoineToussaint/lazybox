@@ -177,8 +177,14 @@ if needed. Manage stale worktrees from Settings → Inspect/Clean worktrees.
 
 ### How it works (brief)
 `WorktreeManager` (`crates/git-ops/src/lib.rs`) keeps bare clones at
-`~/.lazybox/v2/repos/<owner>/<repo>.git` and worktrees under
-`~/.lazybox/v2/worktrees/`. `checkout()` is idempotent (returns the existing
+`~/.lazybox/v2/repos/<owner>/<repo>.git` and worktrees at
+`~/.lazybox/v2/<scope>/<slug>` (the repo's shared main checkout at
+`<scope>/_main`; a scope-less workspace at `~/.lazybox/v2/<slug>`). A managed
+worktree is anything under the v2 root outside `repos/`
+(`WorktreeManager::is_managed_worktree_path`) — the inspector enumerates them
+from each bare clone's `git worktree list`, not from a fixed subdirectory, and
+still walks the legacy `~/.lazybox/v2/worktrees/` for ghosts git no longer
+knows about. `checkout()` is idempotent (returns the existing
 worktree if present) and falls back from `refs/remotes/origin/<branch>` to a
 local branch. `checkout_new_branch()` creates a worktree from a fresh branch off
 a base. Mounts symlink shared dirs (`placement: inside|above`); scripts
@@ -212,14 +218,20 @@ Makes the worktree leak visible and reclaimable from the command line, so it can
 be cleaned up before the disk fills — without opening the TUI:
 
 - `lazybox worktree list` — read-only report of every managed worktree with its
-  size, branch, and orphan reasons, plus three totals: **worktree bytes on disk**
-  (the `worktrees/` tree; bare clones under `repos/` are not counted), bytes
-  **auto-reclaimable** by `gc`, and bytes in orphans **needing review** (the disk
-  hogs usually land here — see below).
+  size (and the share of it that is `target/` build output), branch, and orphan
+  reasons, plus the totals: **worktree bytes on disk** (bare clones under
+  `repos/` are not counted), bytes **auto-reclaimable** by `gc` as whole
+  worktrees, bytes of **build output on landed work** (`target/` in clean
+  worktrees whose PR merged / issue closed — source and branch stay), and bytes
+  in orphans **needing review** (see below).
 - `lazybox worktree gc` — reclaims the *safe* orphaned worktrees (merged/closed
   upstream, session stopped, or untracked; no uncommitted/unpushed work, not
-  locked, and backed by a bare clone so the delete can be verified). Confirms
-  first unless `--force`; `--dry-run` reports without deleting.
+  locked, and backed by a bare clone so the delete can be verified), prunes the
+  stale registrations of worktrees whose directory is gone, and drops the
+  git-ignored `target/` of landed, clean worktrees (a Rust `target/` is ~99% of a
+  worktree's footprint and is rebuilt on demand; a tracked or unignored
+  `target/` is content and is left alone). Confirms first unless `--force`;
+  `--dry-run` reports without deleting.
 
 ### How to use it
 ```
@@ -245,6 +257,8 @@ walk before deleting anything.
 
 ### Test checklist
 - [ ] `lazybox worktree list` reports every worktree with sizes, plus the auto-reclaimable and needs-review totals.
+- [ ] `lazybox worktree list` reports a non-zero total for a worktree at the production `<scope>/<slug>` path.
+- [ ] `gc` drops `target/` from a clean, landed worktree and leaves its source, branch, and registration; a dirty worktree keeps its `target/`.
 - [ ] `lazybox worktree gc` only offers orphaned + safe + bare-clone-backed worktrees; dirty/unpushed/locked/no-bare ones are surfaced as "needs review" and skipped.
 - [ ] `gc` without `--force` aborts on any answer other than `y`/`yes` (and on EOF from a pipe).
 - [ ] `gc` refuses while lazybox is running (and re-checks after the inspection walk).

@@ -6120,7 +6120,7 @@ pub fn main_worktree_path(workspace: &Workspace) -> Option<PathBuf> {
 pub fn main_worktree_path_under(workspace: &Workspace, root: &std::path::Path) -> Option<PathBuf> {
     workspace
         .worktree_scope()
-        .map(|scope| root.join(scope).join("_main"))
+        .map(|scope| root.join(scope).join(lazybox_git_ops::SHARED_MAIN_DIR))
 }
 
 /// Whether the workspace behind `session_key` is a linked (no-worktree)

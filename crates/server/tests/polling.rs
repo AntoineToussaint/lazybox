@@ -1979,6 +1979,43 @@ fn pr_qualifiers_two_roles_emit_involves_not_paren_or() {
     );
 }
 
+/// The repo-first sweep reads the role term back off the qualifier list
+/// (`GhClient::repo_sweep_pr_query`), so every term this builder emits
+/// must parse as one of `lazybox_gh::RoleQualifier` — a term that
+/// doesn't would silently leave the member query unscoped (#1716).
+#[test]
+fn pr_qualifiers_role_term_round_trips_through_the_shared_vocabulary() {
+    use lazybox_gh::RoleQualifier;
+    let cases = [
+        (vec!["pr.author"], RoleQualifier::Author),
+        (vec!["pr.reviewer"], RoleQualifier::ReviewRequested),
+        (vec!["pr.assignee"], RoleQualifier::Assignee),
+        (vec!["pr.mentioned"], RoleQualifier::Mentions),
+        (
+            vec!["pr.author", "pr.reviewer", "pr.assignee"],
+            RoleQualifier::Involves,
+        ),
+        (vec![], RoleQualifier::Involves),
+    ];
+    for (keys, expected) in cases {
+        let mut filter = ProviderConfig::default();
+        for key in &keys {
+            filter.enabled_keys.insert((*key).into());
+        }
+        let quals = polling::build_pr_search_qualifiers(
+            &filter,
+            &std::collections::BTreeSet::new(),
+            "alice",
+        );
+        let roles: Vec<RoleQualifier> = quals
+            .iter()
+            .filter_map(|q| RoleQualifier::parse(q))
+            .collect();
+        assert_eq!(roles, vec![expected], "{keys:?} → {quals:?}");
+        assert_eq!(quals[0], expected.for_user("alice"));
+    }
+}
+
 #[test]
 fn issue_qualifiers_have_no_reviewer() {
     // Issues never have a reviewer — `pr.reviewer` is irrelevant for

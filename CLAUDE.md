@@ -148,8 +148,13 @@ crates/
   one windowed PR query + one issue query on a rotation sized by
   `providers.github.repo_refresh_interval` (default 5 min); a 30-min /
   `Shift-R` reconcile sweeps the whole roster unwindowed and is the only
-  pass allowed to retire rows. The user-centric `involves:USER` global
-  sweep only runs when no scopes are configured.
+  pass allowed to retire rows. The discovery filters' role term rides
+  each member PR query (`pr.author` → `author:USER`; 2+ roles →
+  `involves:USER` plus a `review-requested:USER` companion, since
+  GitHub's `involves:` omits review requests); watched repos stay
+  unscoped and the issue query is never role-scoped (the `@lazybox`
+  mention scan reads it) (#1716). The user-centric `involves:USER`
+  global sweep only runs when no scopes are configured.
 - **Credential chain**: `EnvProvider("GH_TOKEN") → EnvProvider("GITHUB_TOKEN") → CommandProvider("gh auth token")`. Trait-based, extensible (Vault, Keychain, OAuth).
 - **Store**: `Store` trait with `SqliteStore` backend at `~/.lazybox/v2/state.db`.
   Read/unread, snooze, and session metadata persist across launches.

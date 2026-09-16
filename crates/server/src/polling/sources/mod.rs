@@ -1553,10 +1553,15 @@ impl GhSource {
             },
         ));
         for spec in &specs {
-            self.emit_progress(format!(
-                "repo query: {}",
-                lazybox_gh::repo_sweep_pr_query(&spec.member, spec.since)
-            ));
+            let mut query = self.client.repo_sweep_pr_query(&spec.member, spec.since);
+            if let Some(companion) = self
+                .client
+                .repo_sweep_reviewer_query(&spec.member, spec.since)
+            {
+                query.push_str(" + ");
+                query.push_str(&companion);
+            }
+            self.emit_progress(format!("repo query: {query}"));
         }
         let outcome = match self
             .client
@@ -2695,10 +2700,10 @@ pub fn build_pr_search_qualifiers(
 ) -> Vec<String> {
     let mut quals = Vec::new();
     let pr_roles = [
-        ("pr.author", "author"),
-        ("pr.reviewer", "review-requested"),
-        ("pr.assignee", "assignee"),
-        ("pr.mentioned", "mentions"),
+        ("pr.author", lazybox_gh::RoleQualifier::Author),
+        ("pr.reviewer", lazybox_gh::RoleQualifier::ReviewRequested),
+        ("pr.assignee", lazybox_gh::RoleQualifier::Assignee),
+        ("pr.mentioned", lazybox_gh::RoleQualifier::Mentions),
     ];
     quals.push(role_qualifier(filter, username, &pr_roles));
     if let Some(s) = scope_qualifier(scopes) {
@@ -2716,9 +2721,9 @@ pub fn build_issue_search_qualifiers(
 ) -> Vec<String> {
     let mut quals = Vec::new();
     let issue_roles = [
-        ("issue.author", "author"),
-        ("issue.assignee", "assignee"),
-        ("issue.mentioned", "mentions"),
+        ("issue.author", lazybox_gh::RoleQualifier::Author),
+        ("issue.assignee", lazybox_gh::RoleQualifier::Assignee),
+        ("issue.mentioned", lazybox_gh::RoleQualifier::Mentions),
     ];
     quals.push(role_qualifier(filter, username, &issue_roles));
     if let Some(s) = scope_qualifier(scopes) {
@@ -2751,16 +2756,19 @@ pub fn build_issue_search_qualifiers(
 ///
 /// Net effect: the wire query never contains a parens group, so the
 /// "0 results from a valid query" footgun is gone.
-fn role_qualifier(filter: &ProviderConfig, username: &str, keys: &[(&str, &str)]) -> String {
-    let enabled: Vec<&str> = keys
+fn role_qualifier(
+    filter: &ProviderConfig,
+    username: &str,
+    keys: &[(&str, lazybox_gh::RoleQualifier)],
+) -> String {
+    let enabled: Vec<lazybox_gh::RoleQualifier> = keys
         .iter()
         .filter(|(k, _)| filter.has(k))
-        .map(|(_, op)| *op)
+        .map(|(_, role)| *role)
         .collect();
-    match enabled.len() {
-        0 => format!("involves:{username}"),
-        1 => format!("{}:{username}", enabled[0]),
-        _ => format!("involves:{username}"),
+    match enabled.as_slice() {
+        [role] => role.for_user(username),
+        _ => lazybox_gh::RoleQualifier::Involves.for_user(username),
     }
 }
 

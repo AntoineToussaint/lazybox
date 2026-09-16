@@ -280,7 +280,7 @@ pub fn render_quit_hint(frame: &mut Frame, area: Rect, quit_keys: &str) {
 /// fold. Every layout's essential head — through `close terminal`, plus
 /// the workspace-addressed cluster — now fits, so a new command costs a
 /// deliberate bump here rather than quietly evicting an existing one.
-pub(crate) const LEADER_MAX_ROWS: usize = 13;
+pub(crate) const LEADER_MAX_ROWS: usize = 14;
 
 /// Render the which-key popup for the armed terminal `]]` leader
 /// (issues #205, #252). Lists the leader's command menu — the caller

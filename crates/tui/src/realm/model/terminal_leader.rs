@@ -446,7 +446,7 @@ mod tests {
         ] {
             let rows = LeaderCmd::menu_rows(splits, tabs, NewTerminalLayout::Tabs, None);
             let visible: Vec<&str> = rows.iter().take(cap).map(|(k, _)| k.as_str()).collect();
-            for required in ["s", "l", "r", "h", "n", "u", "x"] {
+            for required in ["R", "s", "l", "r", "h", "n", "u", "x"] {
                 assert!(
                     visible.contains(&required),
                     "{label}: `]]{required}` fell below the fold — raise LEADER_MAX_ROWS \

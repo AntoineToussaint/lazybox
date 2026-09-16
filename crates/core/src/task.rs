@@ -116,8 +116,15 @@ pub enum TaskRole {
     Reviewer,
     /// You're assigned to work on it.
     Assignee,
-    /// You're mentioned or subscribed.
+    /// You take part without owning it: you were @-mentioned, you
+    /// commented or reviewed, or the provider subscribed you to it.
     Mentioned,
+    /// Nothing ties you to it. A repo-scoped or watched sweep returns
+    /// every item in the repo, and this is what the ones that never
+    /// name you derive to — so `Mentioned` keeps meaning "you're in
+    /// the conversation". The role gate never admits it; a watched
+    /// repo bypasses that gate by design.
+    Observer,
 }
 
 /// The lifecycle state of a task (source-agnostic).

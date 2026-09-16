@@ -3,4 +3,4 @@
 /**
  * Why this task is on your radar.
  */
-export type TaskRole = "Author" | "Reviewer" | "Assignee" | "Mentioned";
+export type TaskRole = "Author" | "Reviewer" | "Assignee" | "Mentioned" | "Observer";

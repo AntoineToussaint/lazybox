@@ -887,7 +887,8 @@ fn emit_repo_group<'a>(
                 Some(lazybox_core::TaskRole::Author) => summary.authored += 1,
                 Some(lazybox_core::TaskRole::Reviewer) => summary.reviewing += 1,
                 Some(lazybox_core::TaskRole::Assignee) => summary.assigned += 1,
-                Some(lazybox_core::TaskRole::Mentioned) | None => {}
+                Some(lazybox_core::TaskRole::Mentioned | lazybox_core::TaskRole::Observer)
+                | None => {}
             }
         }
         if input.collapsed_repos.contains(repo) {

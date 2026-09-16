@@ -419,8 +419,9 @@ pub(crate) fn relative_time(
 
 /// Single-letter role marker + color for the workspace row. Renders
 /// as a leading badge (`A` for author, `R` for reviewer, `@` for
-/// assignee, dim `·` for mentioned/done) so the user can scan the
-/// inbox and pick out "PRs I have to act on" without reading titles.
+/// assignee, dim `·` for mentioned/done, blank for a row that never
+/// names you) so the user can scan the inbox and pick out "PRs I have
+/// to act on" without reading titles.
 ///
 /// All colors come from the active theme — no hardcoded RGB — so
 /// the badges sit on the same palette as the rest of the UI and
@@ -434,6 +435,7 @@ pub(crate) fn role_badge(
         lazybox_core::TaskRole::Reviewer => ('R', theme.accent),
         lazybox_core::TaskRole::Assignee => ('@', theme.warn),
         lazybox_core::TaskRole::Mentioned => ('·', theme.text_dim),
+        lazybox_core::TaskRole::Observer => (' ', theme.text_dim),
     }
 }
 

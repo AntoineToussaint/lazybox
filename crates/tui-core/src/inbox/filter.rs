@@ -145,6 +145,10 @@ pub enum Filter {
     Reviewer,
     Assignee,
     Mentioned,
+    /// No relationship to you at all — a row a watched repo or a
+    /// repo sync pulled in. Completes the axis so the four "mine"
+    /// predicates together are the complement of this one.
+    Observer,
     // ── Kind ───────────────────────────────────────────────────────
     Pr,
     Issue,
@@ -159,7 +163,7 @@ impl Filter {
     /// Every fixed filter, in menu order (State, Role, Kind, Priority).
     /// Value-driven axes (Label, Linear state) are enumerated separately
     /// from the candidate set — see [`FilterSet`] and `Sidebar`.
-    pub const ALL: [Filter; 29] = [
+    pub const ALL: [Filter; 30] = [
         Filter::WithAgent,
         Filter::AgentWorking,
         Filter::Claimed,
@@ -183,6 +187,7 @@ impl Filter {
         Filter::Reviewer,
         Filter::Assignee,
         Filter::Mentioned,
+        Filter::Observer,
         Filter::Pr,
         Filter::Issue,
         Filter::PriorityUrgent,
@@ -212,9 +217,11 @@ impl Filter {
             | Filter::Snoozed
             | Filter::Blocked
             | Filter::Ready => FilterAxis::State,
-            Filter::Author | Filter::Reviewer | Filter::Assignee | Filter::Mentioned => {
-                FilterAxis::Role
-            }
+            Filter::Author
+            | Filter::Reviewer
+            | Filter::Assignee
+            | Filter::Mentioned
+            | Filter::Observer => FilterAxis::Role,
             Filter::Pr | Filter::Issue => FilterAxis::Kind,
             Filter::PriorityUrgent
             | Filter::PriorityHigh
@@ -260,6 +267,7 @@ impl Filter {
             Filter::Reviewer => "reviewer",
             Filter::Assignee => "assignee",
             Filter::Mentioned => "mentioned",
+            Filter::Observer => "observer",
             Filter::Pr => "PR",
             Filter::Issue => "issue",
             Filter::PriorityUrgent => "urgent",
@@ -334,6 +342,7 @@ impl Filter {
             Filter::Reviewer => task.is_some_and(|t| t.role == TaskRole::Reviewer),
             Filter::Assignee => task.is_some_and(|t| t.role == TaskRole::Assignee),
             Filter::Mentioned => task.is_some_and(|t| t.role == TaskRole::Mentioned),
+            Filter::Observer => task.is_some_and(|t| t.role == TaskRole::Observer),
             Filter::Pr => WorkspaceKind::classify(w) == WorkspaceKind::Pr,
             Filter::Issue => WorkspaceKind::classify(w) == WorkspaceKind::Issue,
             Filter::PriorityUrgent
@@ -1333,6 +1342,51 @@ mod tests {
             }),
             "PR-kind axis ANDs, so the reviewer issue is filtered out"
         );
+    }
+
+    /// `observer` sits on the Role axis and matches only rows that never
+    /// name the viewer — the complement of the four "mine" predicates —
+    /// so a watched repo's foreign PRs are selectable, and excluded by
+    /// selecting the other four, without leaking into `mentioned`.
+    #[test]
+    fn observer_is_a_role_predicate_disjoint_from_mentioned() {
+        let agents = HashMap::new();
+        let observer = workspace("o", TaskRole::Observer, CiStatus::None, TaskKind::Pr);
+        let mentioned = workspace("m", TaskRole::Mentioned, CiStatus::None, TaskKind::Pr);
+        assert_eq!(Filter::Observer.axis(), FilterAxis::Role);
+
+        let mut only_observer = FilterSet::default();
+        only_observer.toggle(Filter::Observer);
+        assert!(only_observer.accepts(&FilterCtx {
+            w: &observer,
+            agents: &agents,
+            now: now(),
+        }));
+        assert!(!only_observer.accepts(&FilterCtx {
+            w: &mentioned,
+            agents: &agents,
+            now: now(),
+        }));
+
+        let mut mine = FilterSet::default();
+        for f in [
+            Filter::Author,
+            Filter::Reviewer,
+            Filter::Assignee,
+            Filter::Mentioned,
+        ] {
+            mine.toggle(f);
+        }
+        assert!(mine.accepts(&FilterCtx {
+            w: &mentioned,
+            agents: &agents,
+            now: now(),
+        }));
+        assert!(!mine.accepts(&FilterCtx {
+            w: &observer,
+            agents: &agents,
+            now: now(),
+        }));
     }
 
     #[test]

@@ -3950,6 +3950,9 @@ impl GhClient {
                 tasks.push(graphql::issue_to_task(issue, &self.user));
             }
         }
+        if graphql::query_names_viewer(&query, &self.user) {
+            graphql::mark_involved(&mut tasks);
+        }
         self.merge_native_blocked_by(&mut tasks).await;
         Ok(tasks)
     }
@@ -4527,7 +4530,7 @@ impl GhClient {
             DEFAULT_MAX_PAGES,
         )
         .await?;
-        let (tasks, incomplete) = match outcome {
+        let (mut tasks, incomplete) = match outcome {
             PaginationOutcome::Complete(tasks) => (tasks, None),
             PaginationOutcome::Partial { items, reason } => (items, Some(reason)),
         };
@@ -4541,6 +4544,9 @@ impl GhClient {
                 metrics.requests
             );
             return Err(incomplete_pagination_error(class, tasks.len(), reason));
+        }
+        if graphql::query_names_viewer(search_query, &self.user) {
+            graphql::mark_involved(&mut tasks);
         }
         Ok(tasks)
     }
@@ -4637,7 +4643,7 @@ impl GhClient {
             max_pages,
         )
         .await?;
-        let (tasks, incomplete) = match outcome {
+        let (mut tasks, incomplete) = match outcome {
             PaginationOutcome::Complete(tasks) => (tasks, None),
             PaginationOutcome::Partial { items, reason } => (items, Some(reason)),
         };
@@ -4651,6 +4657,9 @@ impl GhClient {
                 metrics.requests
             );
             return Err(incomplete_pagination_error(op, tasks.len(), reason));
+        }
+        if graphql::query_names_viewer(&query, &self.user) {
+            graphql::mark_involved(&mut tasks);
         }
         Ok(tasks)
     }
@@ -5025,6 +5034,9 @@ impl GhClient {
             );
             return Err(incomplete_pagination_error(op, tasks.len(), reason));
         }
+        if graphql::query_names_viewer(&query, &self.user) {
+            graphql::mark_involved(&mut tasks);
+        }
         self.merge_native_blocked_by(&mut tasks).await;
         Ok((tasks, mentions))
     }
@@ -5233,6 +5245,9 @@ impl GhClient {
                 tasks.len(),
                 reason,
             ));
+        }
+        if graphql::query_names_viewer(&search_query, &self.user) {
+            graphql::mark_involved(&mut tasks);
         }
         // Enrich the `involves:`-query issues with native dependency edges.
         // The watched-repo fan-out below enriches its own tasks inside

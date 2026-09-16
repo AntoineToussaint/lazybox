@@ -236,6 +236,6 @@ pub fn punches_through(
             lazybox_core::CiStatus::Failure | lazybox_core::CiStatus::Mixed
         ),
         lazybox_core::TaskRole::Mentioned => w.unread_count() > 0,
-        lazybox_core::TaskRole::Assignee => false,
+        lazybox_core::TaskRole::Assignee | lazybox_core::TaskRole::Observer => false,
     }
 }

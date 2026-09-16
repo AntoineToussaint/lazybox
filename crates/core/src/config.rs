@@ -63,18 +63,18 @@ impl ProviderConfig {
 
     // ── GitHub: per-type role checks ─────────────────────────────────
 
-    /// Does the user want this role for **PRs**?
+    /// Does the user want this role for **PRs**? Always returns `false`
+    /// for `Observer` — a task that doesn't name the user has no key;
+    /// watched repos are how a whole repo is admitted.
     pub fn allows_pr_role(&self, role: crate::task::TaskRole) -> bool {
-        self.has(pr_key(role))
+        pr_key(role).is_some_and(|key| self.has(key))
     }
 
     /// Does the user want this role for **issues**? Always returns
-    /// `false` for `Reviewer` (issues have no reviewers).
+    /// `false` for `Reviewer` (issues have no reviewers) and for
+    /// `Observer` (no key, as for PRs).
     pub fn allows_issue_role(&self, role: crate::task::TaskRole) -> bool {
-        match issue_key(role) {
-            Some(key) => self.has(key),
-            None => false,
-        }
+        issue_key(role).is_some_and(|key| self.has(key))
     }
 
     /// Whether to fetch PRs at all — true if any `pr.*` key is set.
@@ -105,6 +105,7 @@ impl ProviderConfig {
             crate::task::TaskRole::Reviewer => return false, // issue trackers have no reviewer
             crate::task::TaskRole::Assignee => "role.assignee",
             crate::task::TaskRole::Mentioned => "role.mentioned",
+            crate::task::TaskRole::Observer => return false,
         };
         self.has(key)
     }
@@ -191,24 +192,27 @@ impl ProviderConfig {
     }
 }
 
-/// Map a `TaskRole` to its `pr.*` key.
-fn pr_key(role: crate::task::TaskRole) -> &'static str {
+/// Map a `TaskRole` to its `pr.*` key. `Observer` returns `None`: a
+/// task with no relationship to the user has nothing to opt into.
+fn pr_key(role: crate::task::TaskRole) -> Option<&'static str> {
     match role {
-        crate::task::TaskRole::Author => "pr.author",
-        crate::task::TaskRole::Reviewer => "pr.reviewer",
-        crate::task::TaskRole::Assignee => "pr.assignee",
-        crate::task::TaskRole::Mentioned => "pr.mentioned",
+        crate::task::TaskRole::Author => Some("pr.author"),
+        crate::task::TaskRole::Reviewer => Some("pr.reviewer"),
+        crate::task::TaskRole::Assignee => Some("pr.assignee"),
+        crate::task::TaskRole::Mentioned => Some("pr.mentioned"),
+        crate::task::TaskRole::Observer => None,
     }
 }
 
 /// Map a `TaskRole` to its `issue.*` key. `Reviewer` returns `None`
-/// because issues have no reviewers.
+/// because issues have no reviewers; `Observer` as for [`pr_key`].
 fn issue_key(role: crate::task::TaskRole) -> Option<&'static str> {
     match role {
         crate::task::TaskRole::Author => Some("issue.author"),
         crate::task::TaskRole::Reviewer => None,
         crate::task::TaskRole::Assignee => Some("issue.assignee"),
         crate::task::TaskRole::Mentioned => Some("issue.mentioned"),
+        crate::task::TaskRole::Observer => None,
     }
 }
 
@@ -404,6 +408,32 @@ mod tests {
         let c = cfg_with(&["pr.author"]);
         assert!(c.allows_pr_role(TaskRole::Author));
         assert!(!c.allows_pr_role(TaskRole::Reviewer));
+    }
+
+    /// `Observer` has no key on any schema: even a filter with every
+    /// role on never admits a task that doesn't name the user, so the
+    /// repo-first sweep's foreign rows stay out unless the repo is
+    /// watched.
+    #[test]
+    fn observer_is_never_admitted_by_any_role_key() {
+        let c = cfg_with(&[
+            "pr.author",
+            "pr.reviewer",
+            "pr.assignee",
+            "pr.mentioned",
+            "issue.author",
+            "issue.assignee",
+            "issue.mentioned",
+            "role.author",
+            "role.assignee",
+            "role.mentioned",
+        ]);
+        assert!(c.allows_pr_role(TaskRole::Mentioned));
+        assert!(!c.allows_pr_role(TaskRole::Observer));
+        assert!(c.allows_issue_role(TaskRole::Mentioned));
+        assert!(!c.allows_issue_role(TaskRole::Observer));
+        assert!(!c.allows_linear_role(TaskRole::Observer));
+        assert!(!c.allows_jira_role(TaskRole::Observer));
     }
 
     #[test]

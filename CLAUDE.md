@@ -155,7 +155,12 @@ crates/
   GitHub's `involves:` omits review requests); watched repos stay
   unscoped and the issue query is never role-scoped (the `@lazybox`
   mention scan reads it) (#1716). The user-centric `involves:USER`
-  global sweep only runs when no scopes are configured.
+  global sweep only runs when no scopes are configured. A PR or issue
+  the payload never names the viewer in derives to `TaskRole::Observer`
+  (never admitted by the role gate; `observer` on the `f` role axis),
+  so `Mentioned` means a real @-mention / comment / review by the
+  viewer — or a result of a query that names the viewer, which
+  `mark_involved` lifts from `Observer` (#1760).
 - **Credential chain**: `EnvProvider("GH_TOKEN") → EnvProvider("GITHUB_TOKEN") → CommandProvider("gh auth token")`. Trait-based, extensible (Vault, Keychain, OAuth).
 - **Store**: `Store` trait with `SqliteStore` backend at `~/.lazybox/v2/state.db`.
   Read/unread, snooze, and session metadata persist across launches.

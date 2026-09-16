@@ -816,6 +816,52 @@ pub fn roster_member_qualifier(member: &str) -> String {
     }
 }
 
+/// A viewer-relationship qualifier of GitHub's search grammar. The
+/// polling layer emits exactly one per search from the discovery filters
+/// and the repo-first sweep reads it back off the filter list, so both
+/// sides share this vocabulary instead of a string convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleQualifier {
+    Author,
+    ReviewRequested,
+    Assignee,
+    Mentions,
+    /// `involves:` — author, assignee, mentioned, commenter. GitHub
+    /// defines it *without* requested reviewers, so a search built on it
+    /// pairs with a [`RoleQualifier::ReviewRequested`] companion.
+    Involves,
+}
+
+impl RoleQualifier {
+    pub const ALL: [RoleQualifier; 5] = [
+        RoleQualifier::Author,
+        RoleQualifier::ReviewRequested,
+        RoleQualifier::Assignee,
+        RoleQualifier::Mentions,
+        RoleQualifier::Involves,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RoleQualifier::Author => "author",
+            RoleQualifier::ReviewRequested => "review-requested",
+            RoleQualifier::Assignee => "assignee",
+            RoleQualifier::Mentions => "mentions",
+            RoleQualifier::Involves => "involves",
+        }
+    }
+
+    pub fn for_user(self, user: &str) -> String {
+        format!("{}:{user}", self.as_str())
+    }
+
+    /// The qualifier a search term names, if it is one of these.
+    pub fn parse(term: &str) -> Option<Self> {
+        let (name, _) = term.split_once(':')?;
+        Self::ALL.into_iter().find(|q| q.as_str() == name)
+    }
+}
+
 /// PR search for one roster member of the repo-first sweep.
 ///
 /// Unwindowed (`since == None`) → every OPEN PR in the member: the
@@ -824,34 +870,45 @@ pub fn roster_member_qualifier(member: &str) -> String {
 /// A merge or close bumps `updatedAt`, so dropping `is:open` is what lets
 /// a steady rotation observe state transitions without a separate global
 /// merged sweep, and the window keeps the steady-state page near-empty.
-pub fn repo_sweep_pr_query(member: &str, since: Option<DateTime<Utc>>) -> String {
-    let mut quals = Vec::with_capacity(5);
-    if since.is_none() {
-        quals.push("is:open".to_string());
-    }
-    quals.push("is:pr".to_string());
-    quals.push("archived:false".to_string());
-    quals.push(roster_member_qualifier(member));
-    if let Some(since) = since {
-        quals.push(updated_since_qualifier(since));
-    }
-    build_query(&quals)
+///
+/// `role` is a viewer-relationship term (`author:USER`,
+/// `review-requested:USER`, …) — `None` sweeps the member's whole set.
+pub fn repo_sweep_pr_query(
+    member: &str,
+    role: Option<&str>,
+    since: Option<DateTime<Utc>>,
+) -> String {
+    build_query(&repo_sweep_qualifiers("is:pr", member, role, since))
 }
 
 /// Issue counterpart of [`repo_sweep_pr_query`]: same window semantics,
-/// `is:issue` instead of `is:pr`.
+/// `is:issue` instead of `is:pr`, never role-scoped — the `@lazybox`
+/// mention scan rides this query and must see every issue in the
+/// member; the display filter narrows the rows post-fetch.
 pub fn repo_sweep_issue_query(member: &str, since: Option<DateTime<Utc>>) -> String {
-    let mut quals = Vec::with_capacity(5);
+    build_issues_query(&repo_sweep_qualifiers("is:issue", member, None, since))
+}
+
+fn repo_sweep_qualifiers(
+    kind: &str,
+    member: &str,
+    role: Option<&str>,
+    since: Option<DateTime<Utc>>,
+) -> Vec<String> {
+    let mut quals = Vec::with_capacity(6);
     if since.is_none() {
         quals.push("is:open".to_string());
     }
-    quals.push("is:issue".to_string());
+    quals.push(kind.to_string());
     quals.push("archived:false".to_string());
     quals.push(roster_member_qualifier(member));
+    if let Some(role) = role {
+        quals.push(role.to_string());
+    }
     if let Some(since) = since {
         quals.push(updated_since_qualifier(since));
     }
-    build_issues_query(&quals)
+    quals
 }
 
 /// Per-page size for the PR search. Was 100 (GraphQL's maximum)
@@ -4579,11 +4636,11 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(
-            repo_sweep_pr_query("acme/widgets", None),
+            repo_sweep_pr_query("acme/widgets", None, None),
             "is:open is:pr archived:false repo:acme/widgets"
         );
         assert_eq!(
-            repo_sweep_pr_query("acme/widgets", Some(since)),
+            repo_sweep_pr_query("acme/widgets", None, Some(since)),
             "is:pr archived:false repo:acme/widgets updated:>=2026-09-05T12:00:00+00:00"
         );
         assert_eq!(
@@ -4593,6 +4650,42 @@ mod tests {
         assert_eq!(
             repo_sweep_issue_query("acme", Some(since)),
             "is:issue archived:false org:acme updated:>=2026-09-05T12:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn role_qualifier_round_trips_through_its_search_term() {
+        for role in RoleQualifier::ALL {
+            let term = role.for_user("me");
+            assert_eq!(RoleQualifier::parse(&term), Some(role), "{term}");
+        }
+        assert_eq!(RoleQualifier::Involves.for_user("octo"), "involves:octo");
+        assert_eq!(RoleQualifier::parse("repo:o/r"), None);
+        assert_eq!(RoleQualifier::parse("org:acme"), None);
+        assert_eq!(
+            RoleQualifier::parse("-author:me"),
+            None,
+            "a negation is not a role"
+        );
+        assert_eq!(RoleQualifier::parse("author"), None, "no user, no term");
+    }
+
+    /// A role term rides the PR member query on both the exhaustive and
+    /// the windowed shape, so a discovery filter narrows the sweep on the
+    /// wire instead of only post-fetch.
+    #[test]
+    fn repo_sweep_queries_carry_the_role_qualifier() {
+        let since = DateTime::parse_from_rfc3339("2026-09-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            repo_sweep_pr_query("acme/widgets", Some("author:me"), None),
+            "is:open is:pr archived:false repo:acme/widgets author:me"
+        );
+        assert_eq!(
+            repo_sweep_pr_query("acme/widgets", Some("review-requested:me"), Some(since)),
+            "is:pr archived:false repo:acme/widgets review-requested:me \
+             updated:>=2026-09-05T12:00:00+00:00"
         );
     }
 

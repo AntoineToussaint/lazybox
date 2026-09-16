@@ -169,6 +169,22 @@ watched repos (the *roster*):
   priority, outside the poll loop.
 - **Org scopes** are one roster member each (`org:name`), covered by a
   single query pair rather than one per repo.
+- **Discovery filters ride the member PR query** (#1716). The role term
+  the filters resolve to (`pr.author` → `author:USER`; two or more roles
+  → `involves:USER`) is appended to every member's PR query, so the
+  setting means the same thing here as on the global sweep. Because
+  GitHub defines `involves:` *without* requested reviewers, the
+  `involves:` shape is paired with a `review-requested:USER` companion
+  query per member — the same pairing the global sweep runs — and the
+  budget forecast counts both. The scope is also what keeps a busy
+  member inside the 4-page cap: an unscoped query on a repo with 100+
+  open PRs pages out every pass, the member never completes, and its
+  stale rows are never retired. A watched repo — or an org member
+  covering one — is swept unscoped and without the companion, so its
+  foreign PRs still download in full. The issue query is never
+  role-scoped: the `@lazybox` mention scan rides it and must see every
+  issue in the member; the display filter (`filter_github_tasks_with_watches`)
+  drops the rows post-fetch.
 - Without a roster (no scopes), the legacy `involves:USER` global sweep
   and discovered-repo round robin still run. Both paths now advance
   their floors and clear a forced refresh on *discovery* success

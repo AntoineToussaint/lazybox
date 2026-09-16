@@ -15,7 +15,7 @@ pub use client::{
     RepoSweepOutcome, RepoSweepSpec, SelectedFetchOutcome, credential_fingerprint,
 };
 pub use graphql::{
-    CiFailureRecheck, PrDetails, repo_sweep_issue_query, repo_sweep_pr_query,
+    CiFailureRecheck, PrDetails, RoleQualifier, repo_sweep_issue_query, repo_sweep_pr_query,
     roster_member_qualifier,
 };
 pub use mentions::{LazyboxMention, MentionSource, parse_label_directive, scan_issue};

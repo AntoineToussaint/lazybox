@@ -1,7 +1,8 @@
 //! Generated registry of the sidebar's on-screen markers — status
-//! pills, the per-session agent-state glyph, and the passive row badges
-//! — each defined once as `{ label, meaning, when it shows }` and fed
-//! into the Ask Lazybox context (#883).
+//! pills, the per-session agent-state glyph, the passive row badges, and
+//! the repo header's kind / role counts — each defined once as
+//! `{ label, meaning, when it shows }` and fed into the Ask Lazybox
+//! context (#883) and the `Shift-I` legend modal (#1744).
 //!
 //! The point is that these stay in sync with the code the way the action
 //! catalog already does for keybindings: a new status pill or agent
@@ -48,7 +49,9 @@ pub struct MarkerDoc {
 /// `StatusTag`, so a new variant can't ship without a decision here; the
 /// *set* of documented pills is pinned to what the real renderer emits
 /// by `documented_status_pills_match_the_renderer` in `tui` (#883).
-fn status_pill_doc(tag: StatusTag) -> Option<MarkerDoc> {
+/// Public so the legend modal can pair each tag's doc with the tone the
+/// renderer paints it in.
+pub fn status_pill_doc(tag: StatusTag) -> Option<MarkerDoc> {
     let doc = |label, meaning, when| {
         Some(MarkerDoc {
             label,
@@ -146,7 +149,7 @@ fn status_pill_doc(tag: StatusTag) -> Option<MarkerDoc> {
 /// Documentation for the per-session agent-state glyph (the row's state
 /// slot and the terminal tab badge). Exhaustive over [`AgentState`], so
 /// a new state can't ship without a meaning (#883).
-fn agent_state_doc(state: &AgentState) -> MarkerDoc {
+pub fn agent_state_doc(state: &AgentState) -> MarkerDoc {
     let doc = |label, meaning, when| MarkerDoc {
         label,
         meaning,
@@ -282,6 +285,46 @@ const ROW_BADGES: &[MarkerDoc] = &[
     },
 ];
 
+/// The repo header's summary of its rows (#1744), in the vocabulary the
+/// rows themselves use: a kind pair and a role trio, each token the count
+/// followed by the row glyph (`3⇄ 2○ · 2A 1R`). `N` stands for the
+/// count. Only non-zero tokens render, and when the header runs out of
+/// room a whole group is dropped rather than a token clipped. Hand-curated
+/// like [`ROW_BADGES`]; `header_breakdown_glyphs_are_documented` in `tui`
+/// pins the glyph set to the header renderer.
+const HEADER_BREAKDOWN: &[MarkerDoc] = &[
+    MarkerDoc {
+        label: "N⇄",
+        meaning: "Pull requests in this repo group — how many of its rows carry the `⇄` PR glyph.",
+        when: "Shows on a repo header while the group holds at least one PR workspace.",
+    },
+    MarkerDoc {
+        label: "N○",
+        meaning: "GitHub issues in this repo group — rows carrying the `○` issue glyph.",
+        when: "Shows on a repo header while the group holds at least one issue-only workspace.",
+    },
+    MarkerDoc {
+        label: "N◆",
+        meaning: "Linear tickets in this group — rows carrying the `◆` ticket glyph.",
+        when: "Shows on a Linear team header while the group holds at least one ticket.",
+    },
+    MarkerDoc {
+        label: "NA",
+        meaning: "Rows you authored — the same `A` role letter each row leads with.",
+        when: "Shows after the kind pair while the group holds a PR or issue you opened.",
+    },
+    MarkerDoc {
+        label: "NR",
+        meaning: "Rows waiting on your review — the `R` role letter, counted.",
+        when: "Shows while the group holds a PR whose review was requested from you.",
+    },
+    MarkerDoc {
+        label: "N@",
+        meaning: "Rows assigned to you — the `@` role letter, counted.",
+        when: "Shows while the group holds a PR or issue assigned to you.",
+    },
+];
+
 /// Every status pill that renders (all [`StatusTag`] variants but
 /// `None`), in severity order.
 pub fn status_pill_docs() -> Vec<MarkerDoc> {
@@ -299,6 +342,11 @@ pub fn agent_state_docs() -> Vec<MarkerDoc> {
 /// The passive row badges.
 pub fn row_badge_docs() -> &'static [MarkerDoc] {
     ROW_BADGES
+}
+
+/// The repo header's kind / role count tokens (#1744).
+pub fn header_breakdown_docs() -> &'static [MarkerDoc] {
+    HEADER_BREAKDOWN
 }
 
 #[cfg(test)]
@@ -370,6 +418,24 @@ mod tests {
         assert!(doc.label.contains("Spawning"));
         assert!(doc.meaning.contains("provisioning"));
         assert!(!doc.when.is_empty());
+    }
+
+    /// The header's count tokens (#1744) cover both axes — the three
+    /// kind glyphs and the three role letters — and each is filled in.
+    #[test]
+    fn header_breakdown_covers_kind_and_role() {
+        let docs = header_breakdown_docs();
+        let labels: Vec<&str> = docs.iter().map(|d| d.label).collect();
+        assert_eq!(labels, ["N⇄", "N○", "N◆", "NA", "NR", "N@"]);
+        for doc in docs {
+            assert!(
+                doc.label.starts_with('N'),
+                "{}: the count is the `N`",
+                doc.label
+            );
+            assert!(!doc.meaning.is_empty(), "{}: empty meaning", doc.label);
+            assert!(!doc.when.is_empty(), "{}: empty when", doc.label);
+        }
     }
 
     /// Every agent state has a non-empty meaning, one doc per variant.

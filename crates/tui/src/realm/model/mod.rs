@@ -96,6 +96,10 @@ pub enum Id {
     /// `Arc`), so daemon-event handlers stream the answer in without
     /// remounting.
     HelpAsk,
+    /// The sidebar glyph legend (#1744) — the marker registry rendered
+    /// as a scrollable reader, grouped status / agent state / badges /
+    /// repo header. Opened by `Shift-I` anywhere or from the `?` panel.
+    Legend,
     Error,
     /// Provider-owned sign-in confirmation and retry prompt.
     AgentAuth,
@@ -586,6 +590,7 @@ impl Id {
             Id::WorktreeProgress
                 | Id::SyncStatus
                 | Id::Messages
+                | Id::Legend
                 | Id::ErrorInbox
                 | Id::Stats
                 | Id::Error
@@ -1299,6 +1304,9 @@ pub enum Msg {
     /// `?` pressed at Ask Lazybox's empty prompt — swap to the compact
     /// all-shortcuts index.
     HelpIndexOpen,
+    /// The legend key pressed on the Shortcuts panel — swap it for the
+    /// glyph legend (#1744).
+    LegendOpen,
     /// Question submitted from the `HelpAsk` modal. The modal stays
     /// mounted; the answer streams back into `Model::help_convo`.
     HelpAsked(String, HelpQuestionKind),
@@ -7826,11 +7834,20 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_help_ask();
             }
             Msg::HelpIndexOpen => {
-                // `?` at Ask's empty prompt: swap to the compact index.
-                if matches!(self.modal_stack.last(), Some(Id::HelpAsk)) {
+                // `?` at Ask's empty prompt — or on the glyph legend
+                // (#1744) — swaps to the compact index.
+                if matches!(self.modal_stack.last(), Some(Id::HelpAsk | Id::Legend)) {
                     self.pop_modal();
                 }
                 self.mount_help();
+            }
+            Msg::LegendOpen => {
+                // The legend key on Shortcuts: swap the index for the
+                // glyph legend rather than stacking the two.
+                if matches!(self.modal_stack.last(), Some(Id::Help)) {
+                    self.pop_modal();
+                }
+                self.mount_legend();
             }
             Msg::HelpAsked(question, kind) => {
                 // The HelpAsk modal stays mounted — the answer streams

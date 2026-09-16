@@ -9068,6 +9068,7 @@ mod stale_input_tests {
                 | Id::Polling
                 | Id::SyncStatus
                 | Id::Messages
+                | Id::Legend
                 | Id::ErrorInbox
                 | Id::Stats
                 | Id::InspectLoading
@@ -9088,6 +9089,7 @@ mod stale_input_tests {
             Id::Splash,
             Id::Help,
             Id::HelpAsk,
+            Id::Legend,
             Id::Error,
             Id::AgentAuth,
             Id::Update,
@@ -25339,6 +25341,30 @@ mod dismiss_and_messages_tests {
         // A non-navigation, non-`c` key pops it back off.
         m.dispatch_modal_key(key(Key::Esc));
         assert!(m.top_modal().is_none(), "Esc closes the messages window");
+    }
+
+    /// `Shift-I` opens the glyph legend from the sidebar (catalog →
+    /// dispatch → mount, #1744); `?` there swaps to the shortcuts panel,
+    /// whose legend key swaps back — the two never stack — and any other
+    /// key closes it.
+    #[test]
+    fn shift_i_opens_the_legend_and_swaps_with_the_shortcuts_panel() {
+        let mut m = build_model();
+        assert!(m.top_modal().is_none(), "no modal before Shift-I");
+
+        m.dispatch_key(KeyEvent::new(Key::Char('I'), KeyModifiers::SHIFT));
+        assert_eq!(m.top_modal(), Some(&Id::Legend));
+
+        m.dispatch_modal_key(key(Key::Char('?')));
+        assert_eq!(m.top_modal(), Some(&Id::Help), "`?` swaps to shortcuts");
+        assert_eq!(m.modal_stack.len(), 1, "swapped, not stacked");
+
+        m.dispatch_modal_key(key(Key::Char('I')));
+        assert_eq!(m.top_modal(), Some(&Id::Legend), "the key swaps back");
+        assert_eq!(m.modal_stack.len(), 1, "swapped, not stacked");
+
+        m.dispatch_modal_key(key(Key::Esc));
+        assert!(m.top_modal().is_none(), "Esc closes the legend");
     }
 
     /// `c` in the window wipes the durable log and leaves the window up,

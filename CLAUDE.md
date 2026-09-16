@@ -316,7 +316,12 @@ automatically), `Shift-T` coach (the onboarding coach rail — one
 objective at a time, gated on you doing it; press again to end it,
 `Ctrl-n` skips a step), `Shift-D` sync status, `Shift-M`
 messages log (a scrollable, `c`-clearable history of recent footer
-notices; #309), `Esc` dismiss the current footer notice regardless of
+notices; #309), `Shift-I` glyph legend (every sidebar marker — status
+pills, agent-state glyphs, row badges, the repo header's kind / role
+counts — painted as it renders beside its meaning, straight from the
+generated `tui-core/src/markers.rs` registry that Ask Lazybox reads, so
+it can't drift from the rows; the same key opens it from the `?`
+panel, and `?` there returns to the shortcuts; #1744), `Esc` dismiss the current footer notice regardless of
 severity — severity only drives auto-fade, never dismissability, and
 `Esc` resolves through a fixed chain: it yields first to a live
 terminal (the PTY owns it), then clears a live `v` multi-select (from
@@ -414,7 +419,12 @@ the filter / sort / find chips with today's tally right-aligned (no
 row's automation phrase (`AUTO-MERGE · GitHub`, `AUTO-FIX ON`, `$ METER`)
 and the per-provider usage bars each take a row only when present.
 Keep-awake (`☼ awake`) is daemon status and lives in the footer's
-status slot. A row's `◆` model badge marks a deviation only: a single
+status slot. A repo group's header summarises its rows in the rows' own
+vocabulary — `3⇄ 2○ · 2A 1R`, the kind pair (PR / issue / ticket) then
+your role trio (authored / review-requested / assigned), non-zero
+tokens only — in place of a bare attention count; as the sidebar
+narrows a whole group is dropped, role trio first, never a token
+clipped (#1744). A row's `◆` model badge marks a deviation only: a single
 agent running its default tier (`agents.<id>.models.default`, else the
 built-in default) shows no badge, a Sonnet run beside an Opus default
 shows `◆S`. The cursor row is a full-row band (theme `fill`) with a

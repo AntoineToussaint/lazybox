@@ -23,8 +23,9 @@ use ratatui::style::{Color, Modifier, Style};
 /// `±` / `⚠` / …) rather than the wide text pills the row used to carry
 /// (` CI FAIL `, ` APPROVED `): color is the primary signal, the glyph
 /// the secondary, and the reclaimed cells go to the title (#1046). The
-/// full meaning stays discoverable in the `?` help legend
-/// ([`status_legend`]) and the Ask Lazybox marker docs.
+/// full meaning stays discoverable in the `Shift-I` legend modal
+/// (`crate::realm::components::legend`) and the Ask Lazybox marker docs,
+/// both rendered from `lazybox_tui_core::markers`.
 pub(crate) struct StatusPill {
     /// The rendered glyph, with a leading space so two slots separate
     /// visually (` ✓ ✗`). Trimmed, this is what the marker docs pin to.
@@ -56,7 +57,6 @@ const G_CONFLICT: &str = " ⚠\u{fe0e}"; // merge conflict
 const G_CLOSED: &str = " ⊘"; // closed without merging
 const G_DRAFT: &str = " ◇"; // draft PR
 const G_QUEUED: &str = " ⧖"; // sitting in the merge queue
-#[cfg(test)]
 const G_BEHIND: &str = " ↓"; // branch behind its base (tag-map only; no row pill)
 
 /// A fg-colored, bold status glyph with a leading-space separator.
@@ -93,15 +93,40 @@ fn glyph_pill(label: &'static str, fg: Color) -> StatusPill {
 /// Wired from `display.ascii_glyphs` in `~/.lazybox/config.yaml`.
 pub(crate) fn workspace_type_label(workspace: &Workspace, ascii: bool) -> Option<&'static str> {
     if workspace.pr.is_some() {
-        return Some(if ascii { "p" } else { "⇄" });
+        return Some(pr_glyph(ascii));
     }
     if !workspace.gh_issues.is_empty() {
-        return Some(if ascii { "i" } else { "○" });
+        return Some(issue_glyph(ascii));
     }
     if !workspace.linear_issues.is_empty() {
-        return Some(if ascii { "l" } else { "◆" });
+        return Some(ticket_glyph(ascii));
     }
     None
+}
+
+// ── Workspace-type glyphs ─────────────────────────────────────────────
+//
+// Shared by the row's type column and the repo header's kind counts
+// (`3⇄ 2○`, #1744), so the header summarises its rows in the rows' own
+// vocabulary. The marker registry documents them as `N⇄` / `N○` / `N◆`;
+// `header_breakdown_glyphs_are_documented` pins the two together.
+pub(crate) const G_PR: &str = "⇄";
+pub(crate) const G_ISSUE: &str = "○";
+pub(crate) const G_TICKET: &str = "◆";
+
+/// The pull-request type glyph (`⇄`, or `p` under `display.ascii_glyphs`).
+pub(crate) fn pr_glyph(ascii: bool) -> &'static str {
+    if ascii { "p" } else { G_PR }
+}
+
+/// The GitHub-issue type glyph (`○`, or `i` in ASCII mode).
+pub(crate) fn issue_glyph(ascii: bool) -> &'static str {
+    if ascii { "i" } else { G_ISSUE }
+}
+
+/// The Linear-ticket type glyph (`◆`, or `l` in ASCII mode).
+pub(crate) fn ticket_glyph(ascii: bool) -> &'static str {
+    if ascii { "l" } else { G_TICKET }
 }
 
 /// Render the right-trailer pill for a task. **Pure mapping** from
@@ -276,7 +301,6 @@ fn draft_blocker_pill(
 /// contract tests (`status_pill_consistency_tests`) can pin every
 /// `(StatusTag, StatusPill)` pair without going through a
 /// constructed `Task`.
-#[cfg(test)]
 pub(crate) fn pill_for_tag(tag: lazybox_core::StatusTag) -> Option<StatusPill> {
     pill_for_tag_in(tag, crate::theme::current())
 }
@@ -284,7 +308,6 @@ pub(crate) fn pill_for_tag(tag: lazybox_core::StatusTag) -> Option<StatusPill> {
 /// [`pill_for_tag`] against an explicit theme, so a test can sample what a
 /// glyph would look like under another palette without switching the
 /// process-global active theme under every render on a sibling thread.
-#[cfg(test)]
 pub(crate) fn pill_for_tag_in(
     tag: lazybox_core::StatusTag,
     theme: &crate::theme::Theme,
@@ -312,7 +335,7 @@ pub(crate) fn pill_for_tag_in(
 // ── Policy-badge glyphs ───────────────────────────────────────────────
 //
 // The merge-on-green arms and auto-fix badge, rendered by
-// `workspace_row` and described in the `?` legend. `◆` (auto-merge) and
+// `workspace_row` and described in the `Shift-I` legend. `◆` (auto-merge) and
 // `⤓` (track-main) are already trusted single-cell glyphs elsewhere in
 // the sidebar.
 pub(crate) const ARM_GLYPH: &str = "⚡"; // lazybox client-side merge-on-green
@@ -320,59 +343,6 @@ pub(crate) const AUTO_GLYPH: &str = "◆"; // GitHub-native auto-merge
 pub(crate) const FIX_GLYPH: &str = "⚙\u{FE0E}"; // auto-fix armed (text-presentation gear, not the emoji wrench)
 pub(crate) const TRACK_GLYPH: &str = "⤓"; // track-main (auto-sync to default branch)
 pub(crate) const CLAIM_GLYPH: &str = "⚑"; // cross-machine working claim (owner-qualified lease, or a preserved legacy `working` label)
-
-/// One row of the sidebar status-icon legend shown in the `?` help
-/// modal: the glyph in its real theme color plus a one-line meaning.
-/// Built here (client side) so the colors come straight from the active
-/// theme — the tui-core marker docs carry the same meanings as plain
-/// text for Ask Lazybox, but only the UI can paint the swatch.
-pub(crate) struct LegendRow {
-    pub(crate) glyph: &'static str,
-    pub(crate) style: Style,
-    pub(crate) meaning: &'static str,
-}
-
-/// The full sidebar status-icon legend, grouped CI → review → lifecycle
-/// → policy. Every glyph a workspace row's status/policy columns can
-/// carry, so the compact icons stay discoverable (#1046).
-pub(crate) fn status_legend() -> Vec<LegendRow> {
-    let theme = crate::theme::current();
-    let row = |glyph: &'static str, fg: Color, meaning: &'static str| LegendRow {
-        glyph,
-        style: Style::default().fg(fg).add_modifier(Modifier::BOLD),
-        meaning,
-    };
-    vec![
-        row(G_OK.trim(), theme.success, "CI passing"),
-        row(G_FAIL.trim(), theme.error, "CI failing / changes requested"),
-        row(G_MIXED.trim(), theme.warn, "CI partly failing"),
-        row(G_RUNNING.trim(), theme.accent, "CI running"),
-        row(G_OK.trim(), theme.accent, "approved"),
-        row(G_REVIEW.trim(), theme.warn, "review requested / pending"),
-        row(G_CONFLICT.trim(), theme.error, "merge conflict"),
-        row(G_QUEUED.trim(), theme.success, "in the merge queue"),
-        row(G_DRAFT.trim(), theme.text_dim, "draft"),
-        row(G_MERGED.trim(), theme.text_dim, "merged"),
-        row(G_CLOSED.trim(), theme.text_dim, "closed"),
-        row(
-            ARM_GLYPH,
-            theme.success,
-            "merge-on-green armed (lazybox, g g)",
-        ),
-        row(AUTO_GLYPH, theme.accent, "GitHub auto-merge enabled"),
-        row(FIX_GLYPH, theme.warn, "auto-fix armed"),
-        row(
-            CLAIM_GLYPH,
-            theme.warn,
-            "claimed by an agent (possibly another machine)",
-        ),
-        row(
-            TRACK_GLYPH,
-            theme.accent,
-            "track-main (auto-sync to default)",
-        ),
-    ]
-}
 
 /// Compact relative time for the right-side trailer. `now` < 1m → "now",
 /// < 1h → `Xm`, < 24h → `Xh`, < 30d → `Xd`, else `Xmo`. Always 2-3

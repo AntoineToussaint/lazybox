@@ -323,6 +323,24 @@ pub struct RepoSummary {
     /// isn't time-box snoozed.
     #[serde(default)]
     pub source_snooze_until_epoch_ms: Option<i64>,
+    /// Active rows holding a pull request — the header's `N⇄` (#1744).
+    #[serde(default)]
+    pub prs: usize,
+    /// Active rows holding a GitHub issue and no PR — the header's `N○`.
+    #[serde(default)]
+    pub issues: usize,
+    /// Active rows holding a Linear ticket and nothing else — `N◆`.
+    #[serde(default)]
+    pub tickets: usize,
+    /// Active rows whose primary task you authored — the header's `NA`.
+    #[serde(default)]
+    pub authored: usize,
+    /// Active rows whose primary task awaits your review — `NR`.
+    #[serde(default)]
+    pub reviewing: usize,
+    /// Active rows whose primary task is assigned to you — `N@`.
+    #[serde(default)]
+    pub assigned: usize,
 }
 
 #[cfg(test)]

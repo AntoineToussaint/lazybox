@@ -4970,11 +4970,12 @@ pub(crate) use lazybox_tui_core::inbox::workspace_needs_attention;
 // Re-export the ratatui-styled pills.rs items so callers in the rest of
 // the crate keep their `crate::components::sidebar::*` import paths.
 pub(crate) use pills::{
-    ARM_GLYPH, AUTO_GLYPH, CLAIM_GLYPH, FIX_GLYPH, LegendRow, TRACK_GLYPH, badge_pill_style,
-    relative_time, role_badge, status_legend, status_pills, workspace_type_label,
+    ARM_GLYPH, AUTO_GLYPH, CLAIM_GLYPH, FIX_GLYPH, G_ISSUE, G_PR, G_TICKET, TRACK_GLYPH,
+    badge_pill_style, issue_glyph, pill_for_tag, pr_glyph, relative_time, role_badge, status_pills,
+    ticket_glyph, workspace_type_label,
 };
 #[cfg(test)]
-pub(crate) use pills::{pill_for_tag, pill_for_tag_in, status_pill};
+pub(crate) use pills::{pill_for_tag_in, status_pill};
 
 // Prompt builders moved to `lazybox_tui_core::prompts` (so `intent`,
 // which also lives there, can call them without creating a dep

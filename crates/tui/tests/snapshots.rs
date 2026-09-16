@@ -595,6 +595,66 @@ fn sidebar_cursor_band_snapshot() {
     insta::assert_snapshot!("sidebar_cursor_band", body.join("\n"));
 }
 
+/// The repo header summarises its rows in their own vocabulary (#1744):
+/// a kind pair then a role trio, `2⇄ 1○ · 2A 1R`, in place of the bare
+/// attention count. As the sidebar narrows a whole group is dropped —
+/// the role trio first — rather than a token clipped mid-way.
+#[test]
+fn repo_header_breaks_down_kind_and_role() {
+    let mut s = sidebar();
+    let mut authored = make_task("owner/repo#12", 3);
+    authored.kind = Some(lazybox_core::TaskKind::Pr);
+    let mut reviewing = make_task("owner/repo#7", 90);
+    reviewing.kind = Some(lazybox_core::TaskKind::Pr);
+    reviewing.role = TaskRole::Reviewer;
+    let issue = make_task("owner/repo#3", 600);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(authored, fixed_time()),
+            Workspace::from_task(reviewing, fixed_time()),
+            Workspace::from_task(issue, fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    let header_at = |s: &mut Sidebar, width: u16| -> String {
+        render_to_string(s, width, 12, true)
+            .lines()
+            .find(|l| l.contains("owner/repo"))
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("no repo header at width {width}"))
+    };
+
+    let wide = header_at(&mut s, 60);
+    assert!(
+        wide.contains("2⇄ 1○ · 2A 1R"),
+        "wide header carries both groups: {wide:?}"
+    );
+    assert!(!wide.contains('●'), "the bare count is gone: {wide:?}");
+
+    let narrow = header_at(&mut s, 24);
+    assert!(
+        narrow.contains("2⇄ 1○"),
+        "the kind pair survives a narrow sidebar: {narrow:?}"
+    );
+    assert!(
+        !narrow.contains('·') && !narrow.contains("2A"),
+        "the role trio is dropped whole, not clipped: {narrow:?}"
+    );
+
+    let tight = header_at(&mut s, 18);
+    assert!(
+        !tight.contains('⇄') && !tight.contains('○'),
+        "with no room for the kind pair nothing is clipped in: {tight:?}"
+    );
+    assert!(
+        lazybox_tui::util::visual_width(&tight) <= 18,
+        "header overflowed: {tight:?}"
+    );
+}
+
 /// Golden look of the three-row sidebar header (#1502): brand + dim
 /// version, every attention counter on row 0 (unread, input, CI), the
 /// item summary right; chips + today's tally on row 1 (no `today`

@@ -30,4 +30,28 @@ source_attention: string | null,
  * the header's "⏾ wakes in 3d" label. `None` when the source
  * isn't time-box snoozed.
  */
-source_snooze_until_epoch_ms: number | null, };
+source_snooze_until_epoch_ms: number | null,
+/**
+ * Active rows holding a pull request — the header's `N⇄` (#1744).
+ */
+prs: number,
+/**
+ * Active rows holding a GitHub issue and no PR — the header's `N○`.
+ */
+issues: number,
+/**
+ * Active rows holding a Linear ticket and nothing else — `N◆`.
+ */
+tickets: number,
+/**
+ * Active rows whose primary task you authored — the header's `NA`.
+ */
+authored: number,
+/**
+ * Active rows whose primary task awaits your review — `NR`.
+ */
+reviewing: number,
+/**
+ * Active rows whose primary task is assigned to you — `N@`.
+ */
+assigned: number, };

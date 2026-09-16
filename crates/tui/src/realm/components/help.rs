@@ -2,7 +2,8 @@
 //!
 //! `?` opens "Ask Lazybox"; a second `?` swaps it for this panel (#302). Arrow /
 //! `j` `k` / PgUp / PgDn / Home / End scroll the panel when it overflows
-//! a short terminal (#338); any other keyboard event dismisses.
+//! a short terminal (#338); the `open_legend` key swaps it for the glyph
+//! legend (#1744); any other keyboard event dismisses.
 
 use crate::pane::Binding;
 use crate::realm::Msg;
@@ -173,11 +174,11 @@ impl LeaderGroup {
 pub struct Help {
     leaders: Vec<LeaderGroup>,
     sections: Vec<HelpSection>,
-    /// Legend for the sidebar's compact status/policy icons (#1046) —
-    /// glyph + meaning, colored in the real theme tone so a green `✓` /
-    /// red `✗` reads the way it does on a row. Keeps the icon language
-    /// discoverable now that the wide text pills are gone.
-    legend: Vec<crate::components::sidebar::LegendRow>,
+    /// The effective `open_legend` chord (#1744): pressing it here swaps
+    /// this panel for the glyph legend, and its display rides the footer
+    /// hint. Read from the runtime catalog so a remap shows and works
+    /// here too; `None` when the action has no single-stroke chord.
+    legend_key: Option<KeyStroke>,
     /// Rows scrolled down from the top. Only meaningful when the whole
     /// panel doesn't fit the screen — the leader band plus five section
     /// grids overflow a short terminal, so the bottom (Terminal) rows
@@ -291,10 +292,19 @@ impl Help {
             .map(|(_, (title, bindings))| HelpSection { title, bindings })
             .collect();
         let leaders = LeaderGroup::all_from_catalog(catalog, used);
+        let legend_key = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::OpenLegend)
+            .and_then(|e| {
+                e.chords.iter().find_map(|c| match c {
+                    Chord::Key(k) => Some(*k),
+                    Chord::Seq(_) => None,
+                })
+            });
         Self {
             leaders,
             sections,
-            legend: crate::components::sidebar::status_legend(),
+            legend_key,
             scroll: 0,
         }
     }
@@ -314,15 +324,9 @@ impl Help {
             .filter(|s| !s.bindings.is_empty())
             .map(|s| 1 + s.bindings.len().div_ceil(cols) as u16)
             .sum();
-        // Sidebar-icon legend: a title row + its own grid (#1046).
-        let legend_rows = if self.legend.is_empty() {
-            0
-        } else {
-            1 + self.legend.len().div_ceil(cols) as u16
-        };
         // Two-row Ask Lazybox callout leads the reference. Help is a
         // discovery surface first, a table second.
-        2 + leader_rows + sep_rows + section_rows + legend_rows
+        2 + leader_rows + sep_rows + section_rows
     }
 
     fn flat(&self) -> Vec<&HelpBinding> {
@@ -334,9 +338,9 @@ impl Help {
 }
 
 const MAX_MODAL_WIDTH: u16 = 132;
-// Tall enough that the full reference — leader index, five section grids,
-// and the sidebar-icon legend (#1046) — fits on a roomy terminal without
-// forcing the scroll affordance; short terminals still overflow and scroll.
+// Tall enough that the full reference — leader index and five section
+// grids — fits on a roomy terminal without forcing the scroll affordance;
+// short terminals still overflow and scroll.
 const MAX_MODAL_HEIGHT: u16 = 44;
 
 fn grid_columns(width: u16) -> usize {
@@ -580,35 +584,6 @@ impl Component for Help {
             lrow = draw_grid(frame, &items, lrow);
         }
 
-        // Sidebar-icon legend (#1046): the compact status/policy glyphs
-        // painted in their real theme color, so `✓`/`✗`/`⚡`/… stay
-        // discoverable now that the wide text pills are gone.
-        if !self.legend.is_empty() {
-            full_line(frame, "Sidebar icons", lrow, section_title_style);
-            lrow += 1;
-            for (idx, entry) in self.legend.iter().enumerate() {
-                let grow = lrow + (idx / cols_count) as u16;
-                let Some(sy) = screen_y(grow) else { continue };
-                let col = cols[idx % cols_count];
-                let cell = Rect {
-                    x: col.x,
-                    y: sy,
-                    width: col.width,
-                    height: 1,
-                };
-                let line = Line::from(vec![
-                    Span::styled(" ", panel_bg),
-                    Span::styled(entry.glyph, entry.style.bg(theme.surface)),
-                    Span::styled("  ", panel_bg),
-                    Span::styled(
-                        entry.meaning,
-                        Style::default().bg(theme.surface).fg(theme.text_strong),
-                    ),
-                ]);
-                frame.render_widget(Paragraph::new(line), cell);
-            }
-        }
-
         let mut hint = vec![
             Span::styled(
                 " ? ",
@@ -616,6 +591,15 @@ impl Component for Help {
             ),
             Span::styled(" Ask Lazybox  ", Style::default().fg(theme.text_strong)),
         ];
+        // The glyph legend (#1744) is one key away rather than a grid in
+        // here: it renders the whole marker registry, which no longer
+        // fits a corner of the shortcuts reference.
+        if let Some(key) = self.legend_key {
+            hint.extend([
+                Span::styled(key.display(), Style::default().fg(theme.accent).bold()),
+                Span::styled(" legend  ", Style::default().fg(theme.text_dim)),
+            ]);
+        }
         if overflow {
             let above = scroll;
             let below = content_rows.saturating_sub(scroll + view_h);
@@ -655,6 +639,15 @@ impl AppComponent<Msg, UserEvent> for Help {
         // A second `?` swaps to the ask modal.
         if matches!(key.code, Key::Char('?')) {
             return Some(Msg::HelpAskOpen);
+        }
+        // The legend key swaps to the glyph legend (#1744), matched
+        // against the catalog's effective chord so a remap holds here.
+        if let Some(legend) = self.legend_key
+            && crate::realm::model::key_event_to_stroke(
+                crate::realm::keymap::realm_key_to_crossterm(key),
+            ) == Some(legend)
+        {
+            return Some(Msg::LegendOpen);
         }
         // Scroll keys navigate the (possibly overflowing) panel instead
         // of dismissing it — vim + arrows + paging, mirroring the ask
@@ -1067,6 +1060,54 @@ mod tests {
         assert!(help.on(&press(Key::Char('x'))).is_none());
     }
 
+    /// The `open_legend` key on the shortcuts panel swaps to the glyph
+    /// legend (#1744), matched against the catalog's *effective* chord —
+    /// a remap moves the key here too — and the footer names it.
+    #[test]
+    fn legend_key_follows_the_catalog_and_swaps_to_the_legend() {
+        use crate::realm::Msg;
+        use lazybox_tui_core::action::ActionDef;
+        use tuirealm::component::{AppComponent, Component};
+        use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let press = |code| Event::Keyboard(KeyEvent::new(code, KeyModifiers::NONE));
+        let render = |help: &mut Help| -> String {
+            let mut term = Terminal::new(TestBackend::new(140, 60)).unwrap();
+            term.draw(|f| help.view(f, f.area())).unwrap();
+            format!("{:?}", term.backend().buffer())
+        };
+
+        let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        let mut help = Help::from_catalog(&catalog, ']', &Default::default());
+        assert!(matches!(
+            help.on(&press(Key::Char('I'))),
+            Some(Msg::LegendOpen)
+        ));
+        assert!(
+            help.on(&press(Key::Char('i'))).is_none(),
+            "the unshifted letter is not the chord"
+        );
+        assert!(
+            render(&mut help).contains("legend"),
+            "the footer names the key"
+        );
+        assert!(
+            !render(&mut help).contains("Sidebar icons"),
+            "the inline icon grid is gone — the registry renders in the legend modal"
+        );
+
+        let remapped: std::collections::BTreeMap<String, String> =
+            [("open_legend".to_string(), "Shift-Y".to_string())].into();
+        let catalog = ActionDef::catalog(&[], &remapped);
+        let mut help = Help::from_catalog(&catalog, ']', &Default::default());
+        assert!(matches!(
+            help.on(&press(Key::Char('Y'))),
+            Some(Msg::LegendOpen)
+        ));
+        assert!(help.on(&press(Key::Char('I'))).is_none());
+    }
+
     /// On a short terminal the panel overflows: the scroll hint appears
     /// and the bottom (Terminal) section is initially clipped but becomes
     /// reachable by scrolling. On a tall terminal everything fits, so no
@@ -1361,11 +1402,9 @@ mod tests {
             marked_out.contains("shortcuts you've used"),
             "legend appears once a shortcut is used",
         );
-        // The sidebar-icon legend paints its own `✓`, so compare counts:
-        // the marked rows add checkmarks beyond the icon legend.
         assert!(
             marked_out.matches('✓').count() > fresh_out.matches('✓').count(),
-            "the used rows add checkmarks beyond the icon legend",
+            "the used rows add checkmarks",
         );
         assert!(
             marked_out.contains("✓ 1/"),

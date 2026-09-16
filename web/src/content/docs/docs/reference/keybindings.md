@@ -34,6 +34,7 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `t` | theme | Open the theme picker — arrow through the built-in palettes with a live preview, Enter to keep one. |
 | `]` | snippets | Browse the snippet workflow library — every `]]s<key>` shortcut with its description and body, so you can see what's available without already knowing the key. |
 | `?` | ask lazybox | Search the live keymap or ask how to use lazybox in plain language. |
+| `Shift-I` | icon legend | Open the glyph legend — every sidebar marker (status pills, agent-state glyphs, row badges, and the repo header's kind / role counts such as `3⇄ 2○ · 2A 1R`) painted the way it renders on a row, beside its one-line meaning. |
 | `Shift-T` | coach | Start (or re-run) the onboarding coach — a slim rail that gives you one objective at a time and confirms when you actually do it. |
 | `Shift-D` | sync diagnostics | Show recent provider-sync outcomes, last poll times, and errors. |
 | `Shift-M` | messages | Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. |

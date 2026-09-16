@@ -312,7 +312,8 @@ fn section_scope(section: crate::action::Section) -> &'static str {
 /// like `CHANGES` without anyone hand-writing it into the prose docs.
 fn push_markers(out: &mut String) {
     use crate::markers::{
-        MarkerDoc, agent_state_docs, row_badge_docs, spawning_doc, status_pill_docs,
+        MarkerDoc, agent_state_docs, header_breakdown_docs, row_badge_docs, spawning_doc,
+        status_pill_docs,
     };
 
     fn write_group(out: &mut String, docs: &[MarkerDoc]) {
@@ -348,6 +349,14 @@ badge) showing what the workspace's agent is doing:\n",
 pills:\n",
     );
     write_group(out, row_badge_docs());
+
+    out.push_str(
+        "\n## Repo header breakdown\n\nA repo group's header summarises its rows in the rows' own \
+vocabulary — `3⇄ 2○ · 2A 1R` — a kind pair (PRs / issues / tickets) then your role (authored / \
+review-requested / assigned). `N` is the count; only non-zero tokens show, and a whole group is \
+dropped, never clipped, when the sidebar is too narrow. The `Shift-I` legend lists every glyph:\n",
+    );
+    write_group(out, header_breakdown_docs());
 }
 
 /// Build the help agent's first message: instructions plus the full
@@ -668,6 +677,13 @@ fallback shouldn't resurrect it)",
             assert!(
                 ctx.contains(doc.meaning),
                 "agent state {} missing from context",
+                doc.label
+            );
+        }
+        for doc in crate::markers::header_breakdown_docs() {
+            assert!(
+                ctx.contains(doc.meaning),
+                "header token {} missing from context",
                 doc.label
             );
         }

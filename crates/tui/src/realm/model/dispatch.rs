@@ -2331,6 +2331,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenHelp => {
                 self.mount_help_ask();
             }
+            Action::OpenLegend => {
+                self.mount_legend();
+            }
             Action::OpenTour => {
                 self.toggle_coach();
             }

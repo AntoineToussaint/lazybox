@@ -9,9 +9,11 @@
 //!                                    + how much is safely reclaimable)
 //!   lazybox worktree gc [--force]    reclaim the safe orphaned worktrees
 //!         [--dry-run]                (merged/closed upstream, stopped or
-//!                                    untracked session) — confirms first
-//!                                    unless `--force`; `--dry-run` only
-//!                                    reports
+//!                                    untracked session) and drop the
+//!                                    build output (`target/`) of clean
+//!                                    worktrees whose PR/issue has landed
+//!                                    — confirms first unless `--force`;
+//!                                    `--dry-run` only reports
 //!
 //! Both reuse the exact inspection + safety gates the in-TUI worktree
 //! inspector uses (`WorktreeManager::{inspect_worktrees,delete_inspected}`):
@@ -24,10 +26,10 @@
 //! Output goes to stdout because `init_tracing` redirects fd 2 into the
 //! log file.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
-use lazybox_git_ops::{TrackedSession, WorktreeInspection, WorktreeManager};
+use lazybox_git_ops::{BUILD_DIR, TrackedSession, WorktreeInspection, WorktreeManager};
 use lazybox_server::lifecycle::{self, ServerStatus};
 
 pub async fn worktree_subcommand(args: &[String]) -> anyhow::Result<()> {
@@ -38,7 +40,8 @@ pub async fn worktree_subcommand(args: &[String]) -> anyhow::Result<()> {
             println!(
                 "usage: lazybox worktree [list | gc [--force] [--dry-run]]\n\n\
                  list  read-only report of every managed worktree (size, age, orphan reasons)\n\
-                 gc    reclaim the safe orphaned worktrees; confirms first unless --force"
+                 gc    reclaim the safe orphaned worktrees and drop the build output of\n\
+                       landed work; confirms first unless --force"
             );
             std::process::exit(2);
         }
@@ -46,14 +49,15 @@ pub async fn worktree_subcommand(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// `lazybox worktree list` — read-only inventory of every managed
-/// worktree with sizes and orphan reasons, plus the two totals that
-/// make the leak visible: bytes on disk and bytes safely reclaimable.
+/// worktree with sizes and orphan reasons, plus the totals that make
+/// the leak visible: bytes on disk, bytes safely reclaimable as whole
+/// worktrees, and bytes of build output sitting on landed work.
 async fn list() -> anyhow::Result<()> {
     let mgr = WorktreeManager::default_base();
-    let tracked = collect_tracked_sessions();
-    let inspections = mgr.inspect_worktrees(&tracked).await?;
+    let Tracked { sessions, landed } = collect_tracked_sessions();
+    let inspections = mgr.inspect_worktrees(&sessions).await?;
 
-    let root = lazybox_core::paths::worktrees_root();
+    let root = lazybox_core::paths::state_root();
     if inspections.is_empty() {
         println!("No managed worktrees under {}.", root.display());
         return Ok(());
@@ -66,7 +70,7 @@ async fn list() -> anyhow::Result<()> {
         root.display(),
     );
     for row in &inspections {
-        println!("  {}", format_row(row));
+        println!("  {}", format_row(row, is_landed(row, &landed)));
     }
 
     let total = total_bytes(&inspections);
@@ -74,6 +78,8 @@ async fn list() -> anyhow::Result<()> {
     let reap = reap_set(&inspections);
     let review = review_set(&inspections);
     let review_bytes: u64 = review.iter().map(|r| r.size_bytes).sum();
+    let builds = build_reap_set(&inspections, &landed);
+    let build_bytes = build_reclaimable_bytes(&inspections, &landed);
 
     println!(
         "\n{} in worktrees (bare clones under repos/ not counted).",
@@ -85,6 +91,14 @@ async fn list() -> anyhow::Result<()> {
         reap.len(),
         if reap.len() == 1 { "" } else { "s" },
     );
+    if !builds.is_empty() {
+        println!(
+            "  {} of {BUILD_DIR}/ build output on {} landed worktree{} (source and branch kept)",
+            format_size(build_bytes),
+            builds.len(),
+            if builds.len() == 1 { "" } else { "s" },
+        );
+    }
     if !review.is_empty() {
         // The disk hogs usually land here: orphans with no backing bare
         // clone, uncommitted, unpushed, or locked. `gc` won't touch them
@@ -97,8 +111,8 @@ async fn list() -> anyhow::Result<()> {
             if review.len() == 1 { "" } else { "s" },
         );
     }
-    if !reap.is_empty() {
-        println!("\nRun `lazybox worktree gc` to reclaim the safe orphans.");
+    if !reap.is_empty() || !builds.is_empty() {
+        println!("\nRun `lazybox worktree gc` to reclaim it.");
     }
     if !review.is_empty() {
         println!("Review the rest in the worktree inspector (Settings → Inspect worktrees…).");
@@ -129,10 +143,11 @@ async fn gc(args: &[String]) -> anyhow::Result<()> {
     }
 
     let mgr = WorktreeManager::default_base();
-    let tracked = collect_tracked_sessions();
-    let inspections = mgr.inspect_worktrees(&tracked).await?;
+    let Tracked { sessions, landed } = collect_tracked_sessions();
+    let inspections = mgr.inspect_worktrees(&sessions).await?;
     let reap = reap_set(&inspections);
     let review = review_set(&inspections);
+    let builds = build_reap_set(&inspections, &landed);
 
     // Whatever `gc` can't safely reap, name the disk it holds and where
     // to deal with it — so a big orphan is never silently ignored.
@@ -149,9 +164,11 @@ async fn gc(args: &[String]) -> anyhow::Result<()> {
         }
     };
 
-    if reap.is_empty() {
+    if reap.is_empty() && builds.is_empty() {
         if review.is_empty() {
-            println!("Nothing to reclaim — no safe orphaned worktrees.");
+            println!(
+                "Nothing to reclaim — no safe orphaned worktrees, no build output on landed work."
+            );
         } else {
             print!("Nothing to auto-reclaim. ");
             review_note();
@@ -160,16 +177,31 @@ async fn gc(args: &[String]) -> anyhow::Result<()> {
     }
 
     let reclaim = reclaimable_bytes(&inspections);
-    println!(
-        "{} safe orphaned worktree{} · {} reclaimable:\n",
-        reap.len(),
-        if reap.len() == 1 { "" } else { "s" },
-        format_size(reclaim),
-    );
-    for row in &reap {
-        println!("  {}", format_row(row));
+    let build_bytes = build_reclaimable_bytes(&inspections, &landed);
+    if !reap.is_empty() {
+        println!(
+            "{} safe orphaned worktree{} · {} reclaimable:\n",
+            reap.len(),
+            if reap.len() == 1 { "" } else { "s" },
+            format_size(reclaim),
+        );
+        for row in &reap {
+            println!("  {}", format_row(row, false));
+        }
+        println!();
     }
-    println!();
+    if !builds.is_empty() {
+        println!(
+            "{} landed worktree{} · {} of {BUILD_DIR}/ to drop (source and branch kept):\n",
+            builds.len(),
+            if builds.len() == 1 { "" } else { "s" },
+            format_size(build_bytes),
+        );
+        for row in &builds {
+            println!("  {}", format_row(row, true));
+        }
+        println!();
+    }
     review_note();
 
     if dry_run {
@@ -178,11 +210,11 @@ async fn gc(args: &[String]) -> anyhow::Result<()> {
     }
 
     if !force
-        && !confirm(&format!(
-            "Delete {} worktree{} and reclaim {}? [y/N] ",
+        && !confirm(&confirm_prompt(
             reap.len(),
-            if reap.len() == 1 { "" } else { "s" },
-            format_size(reclaim),
+            reclaim,
+            builds.len(),
+            build_bytes,
         ))
     {
         println!("Aborted.");
@@ -210,13 +242,65 @@ async fn gc(args: &[String]) -> anyhow::Result<()> {
             Err(e) => println!("  ! {}: {e}", row.path.display()),
         }
     }
-    println!(
-        "\nReclaimed {removed}/{} worktree{} · {} freed.",
-        reap.len(),
-        if reap.len() == 1 { "" } else { "s" },
-        format_size(freed),
-    );
+    let mut dropped = 0usize;
+    let mut build_freed = 0u64;
+    for row in &builds {
+        match mgr.reclaim_build_dir(row, || true).await {
+            Ok(Some(bytes)) => {
+                dropped += 1;
+                build_freed += bytes;
+            }
+            Ok(None) => {}
+            Err(e) => println!("  ! {}: {e}", row.path.display()),
+        }
+    }
+    if !reap.is_empty() {
+        println!(
+            "\nReclaimed {removed}/{} worktree{} · {} freed.",
+            reap.len(),
+            if reap.len() == 1 { "" } else { "s" },
+            format_size(freed),
+        );
+    }
+    if !builds.is_empty() {
+        println!(
+            "Dropped {BUILD_DIR}/ from {dropped}/{} landed worktree{} · {} freed.",
+            builds.len(),
+            if builds.len() == 1 { "" } else { "s" },
+            format_size(build_freed),
+        );
+    }
     Ok(())
+}
+
+/// The `[y/N]` question naming everything a `gc` run will touch.
+fn confirm_prompt(
+    worktrees: usize,
+    worktree_bytes: u64,
+    builds: usize,
+    build_bytes: u64,
+) -> String {
+    let mut parts = Vec::new();
+    if worktrees > 0 {
+        parts.push(format!(
+            "delete {worktrees} worktree{}",
+            if worktrees == 1 { "" } else { "s" }
+        ));
+    }
+    if builds > 0 {
+        parts.push(format!(
+            "drop {BUILD_DIR}/ from {builds} landed worktree{}",
+            if builds == 1 { "" } else { "s" }
+        ));
+    }
+    let mut prompt = parts.join(" and ");
+    if let Some(first) = prompt.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    format!(
+        "{prompt} and reclaim {}? [y/N] ",
+        format_size(worktree_bytes + build_bytes)
+    )
 }
 
 /// Whether `gc` will actually reclaim a row: an orphan the inspector
@@ -258,9 +342,50 @@ fn reclaimable_bytes(inspections: &[WorktreeInspection]) -> u64 {
     reap_set(inspections).iter().map(|r| r.size_bytes).sum()
 }
 
+/// Whether the workspace behind `row` has landed (its PR merged / closed,
+/// its issue closed) per the tracked-session projection.
+fn is_landed(row: &WorktreeInspection, landed: &HashSet<PathBuf>) -> bool {
+    landed.contains(&canonical_or_self(&row.path))
+}
+
+/// The build-reclaim set: worktrees `gc` keeps (source, branch,
+/// registration) but strips of their `target/` — landed work whose tree
+/// is verified clean and unlocked, and which actually carries build
+/// output. Rows in the reap set are excluded: they go whole. Dirty and
+/// unverifiable trees are never touched.
+fn build_reap_set<'a>(
+    inspections: &'a [WorktreeInspection],
+    landed: &HashSet<PathBuf>,
+) -> Vec<&'a WorktreeInspection> {
+    inspections
+        .iter()
+        .filter(|r| {
+            r.build_bytes > 0
+                && !is_reclaimable(r)
+                && r.bare_path.is_some()
+                && is_landed(r, landed)
+                && r.status_verified
+                && !r.has_uncommitted_changes
+                && !r.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
+        })
+        .collect()
+}
+
+/// Bytes the build-reclaim pass would free.
+fn build_reclaimable_bytes(inspections: &[WorktreeInspection], landed: &HashSet<PathBuf>) -> u64 {
+    build_reap_set(inspections, landed)
+        .iter()
+        .map(|r| r.build_bytes)
+        .sum()
+}
+
+fn canonical_or_self(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// One inspector row as a single line, mirroring the TUI inspector's
 /// `[reasons] name · branch · size · flags` shape.
-fn format_row(row: &WorktreeInspection) -> String {
+fn format_row(row: &WorktreeInspection, build_reclaim: bool) -> String {
     let name = row
         .path
         .file_name()
@@ -286,13 +411,21 @@ fn format_row(row: &WorktreeInspection) -> String {
     if is_reclaimable(row) {
         flags.push("safe-reclaim");
     }
+    if build_reclaim {
+        flags.push("target-reclaim");
+    }
     let flag_str = if flags.is_empty() {
         String::new()
     } else {
         format!(" [{}]", flags.join(","))
     };
+    let build = if row.build_bytes > 0 {
+        format!(" ({BUILD_DIR}/ {})", format_size(row.build_bytes))
+    } else {
+        String::new()
+    };
     format!(
-        "[{reasons}] {name} · {branch} · {}{flag_str}",
+        "[{reasons}] {name} · {branch} · {}{build}{flag_str}",
         format_size(row.size_bytes),
     )
 }
@@ -316,25 +449,39 @@ fn confirmed(input: &str) -> bool {
     matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
+/// The store's view of the worktrees on disk: every persisted session in
+/// the inspector's [`TrackedSession`] shape, plus the paths whose work
+/// has landed upstream.
+#[derive(Default)]
+struct Tracked {
+    sessions: Vec<TrackedSession>,
+    /// Canonical worktree paths of workspaces whose primary task is
+    /// merged or closed — their build output is dead weight.
+    landed: HashSet<PathBuf>,
+}
+
 /// Project every persisted session into the inspector's
 /// [`TrackedSession`] shape — the daemon-free twin of the server's
-/// `collect_tracked_sessions`. A session in `SessionRunState::Stopped`
-/// marks its worktree as an orphan candidate. Reads the production DB
+/// `collect_tracked_sessions`, minus its terminal registry: with no
+/// daemon there is no liveness to consult (a tmux-backed agent can
+/// outlive it), and the daemon never persists `SessionRunState::Stopped`,
+/// so from here every tracked session reads live and only untracked or
+/// branch-gone worktrees are orphan candidates. Reads the production DB
 /// best-effort: a missing / unreadable store yields an empty list, so
 /// every on-disk worktree is then treated as untracked (still guarded
 /// by the safety gate before any deletion).
-fn collect_tracked_sessions() -> Vec<TrackedSession> {
+fn collect_tracked_sessions() -> Tracked {
     use lazybox_store::Store;
 
     let db_path = lazybox_core::paths::state_db();
     if !db_path.exists() {
-        return Vec::new();
+        return Tracked::default();
     }
     let Ok(store) = lazybox_store::SqliteStore::open(&db_path) else {
-        return Vec::new();
+        return Tracked::default();
     };
     let Ok(records) = store.list_workspaces() else {
-        return Vec::new();
+        return Tracked::default();
     };
 
     // Aggregate per worktree path: several sessions (an agent + a shell)
@@ -345,6 +492,7 @@ fn collect_tracked_sessions() -> Vec<TrackedSession> {
     // sessions by path, so emitting one row per path is also what it
     // expects. `index` preserves first-seen order + session id.
     let mut out: Vec<TrackedSession> = Vec::new();
+    let mut landed: HashSet<PathBuf> = HashSet::new();
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
     for record in records {
         let Some(json) = record.workspace_json else {
@@ -353,8 +501,12 @@ fn collect_tracked_sessions() -> Vec<TrackedSession> {
         let Ok(workspace) = serde_json::from_str::<lazybox_core::Workspace>(&json) else {
             continue;
         };
+        let is_landed = workspace_landed(&workspace);
         for session in workspace.sessions {
             let is_stopped = matches!(session.state, lazybox_core::SessionRunState::Stopped);
+            if is_landed {
+                landed.insert(canonical_or_self(&session.worktree_path));
+            }
             match index.get(&session.worktree_path) {
                 Some(&i) => out[i].is_stopped &= is_stopped,
                 None => {
@@ -370,7 +522,22 @@ fn collect_tracked_sessions() -> Vec<TrackedSession> {
             }
         }
     }
-    out
+    Tracked {
+        sessions: out,
+        landed,
+    }
+}
+
+/// Whether the workspace's work is finished upstream: its primary task
+/// (the PR when one exists, else the issue) is merged or closed. A
+/// task-less workspace never counts — there is nothing to have landed.
+fn workspace_landed(workspace: &lazybox_core::Workspace) -> bool {
+    workspace.primary_task().is_some_and(|task| {
+        matches!(
+            task.state,
+            lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
+        )
+    })
 }
 
 /// Human-readable byte size, matching the TUI inspector's `format_size`
@@ -410,6 +577,7 @@ mod tests {
             session_id: None,
             reasons,
             size_bytes: size,
+            build_bytes: 0,
             last_modified: None,
             has_uncommitted_changes: false,
             status_verified: true,
@@ -469,7 +637,7 @@ mod tests {
         assert!(reap_set(rows).is_empty());
         assert_eq!(reclaimable_bytes(rows), 0);
         assert_eq!(total_bytes(rows), 500);
-        assert!(!format_row(&row).contains("safe-reclaim"));
+        assert!(!format_row(&row, false).contains("safe-reclaim"));
     }
 
     #[test]
@@ -510,7 +678,7 @@ mod tests {
             vec![OrphanReason::BranchDeletedUpstream],
             true,
         );
-        let line = format_row(&row);
+        let line = format_row(&row, false);
         assert!(line.contains("branch-deleted-upstream"), "{line}");
         assert!(line.contains("safe-reclaim"), "{line}");
         assert!(line.contains("2.0M"), "{line}");
@@ -519,9 +687,72 @@ mod tests {
     #[test]
     fn format_row_labels_a_healthy_worktree() {
         let row = inspection("live", 100, vec![], false);
-        let line = format_row(&row);
+        let line = format_row(&row, false);
         assert!(line.contains("healthy"), "{line}");
         assert!(!line.contains("safe-reclaim"), "{line}");
+    }
+
+    fn landed_set(rows: &[WorktreeInspection]) -> HashSet<PathBuf> {
+        rows.iter().map(|r| r.path.clone()).collect()
+    }
+
+    #[test]
+    fn build_reap_set_is_clean_landed_rows_with_build_output() {
+        let mut landed_clean = inspection("landed", 10_000, vec![], false);
+        landed_clean.build_bytes = 9_000;
+        let mut landed_dirty = inspection("dirty", 10_000, vec![], false);
+        landed_dirty.build_bytes = 9_000;
+        landed_dirty.has_uncommitted_changes = true;
+        let mut unverified = inspection("unverified", 10_000, vec![], false);
+        unverified.build_bytes = 9_000;
+        unverified.status_verified = false;
+        let mut locked = inspection("locked", 10_000, vec![OrphanReason::Locked], false);
+        locked.build_bytes = 9_000;
+        let mut no_build = inspection("source-only", 10_000, vec![], false);
+        no_build.build_bytes = 0;
+        // Reapable whole: goes through the worktree reap set, not this one.
+        let mut whole = inspection("whole", 10_000, vec![OrphanReason::SessionStopped], true);
+        whole.build_bytes = 9_000;
+        let mut open = inspection("open", 10_000, vec![], false);
+        open.build_bytes = 9_000;
+
+        let rows = vec![
+            landed_clean,
+            landed_dirty,
+            unverified,
+            locked,
+            no_build,
+            whole,
+            open.clone(),
+        ];
+        let mut landed = landed_set(&rows);
+        landed.remove(&open.path);
+
+        let names: Vec<_> = build_reap_set(&rows, &landed)
+            .iter()
+            .map(|r| r.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["landed"]);
+        assert_eq!(build_reclaimable_bytes(&rows, &landed), 9_000);
+        assert!(format_row(&rows[0], true).contains("target-reclaim"));
+        assert!(format_row(&rows[0], true).contains("(target/ 8.8K)"));
+        assert!(!format_row(&rows[0], false).contains("target-reclaim"));
+    }
+
+    #[test]
+    fn confirm_prompt_names_every_action() {
+        assert_eq!(
+            confirm_prompt(2, 1024, 0, 0),
+            "Delete 2 worktrees and reclaim 1.0K? [y/N] "
+        );
+        assert_eq!(
+            confirm_prompt(0, 0, 1, 1024),
+            "Drop target/ from 1 landed worktree and reclaim 1.0K? [y/N] "
+        );
+        assert_eq!(
+            confirm_prompt(1, 512, 3, 512),
+            "Delete 1 worktree and drop target/ from 3 landed worktrees and reclaim 1.0K? [y/N] "
+        );
     }
 
     #[test]

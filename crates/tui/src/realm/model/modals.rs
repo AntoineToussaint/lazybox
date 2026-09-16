@@ -3154,7 +3154,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.modal_flow = Some(ModalFlow::InspectList { rows });
 
         if items.is_empty() {
-            self.flash_info("no worktrees found under <state_root>/worktrees/");
+            self.flash_info("no worktrees found under <state_root>/");
             return;
         }
 

@@ -2860,10 +2860,13 @@ pub(crate) async fn delete_orphaned_worktree_with(
         }
     };
 
-    // Re-inspect, then look up this path in the report. Cheap: one
-    // walk under `worktrees/` + a few git calls — far less work than
-    // a full inspection-from-scratch on the TUI side.
-    let inspections = match mgr.inspect_worktrees(&tracked).await {
+    // Re-inspect just this path, then look it up in the report: a few
+    // git calls, no disk walk — far less work than the full inspection
+    // the TUI side already ran to show the row.
+    let inspections = match mgr
+        .inspect_paths(std::slice::from_ref(&path), &tracked)
+        .await
+    {
         Ok(rows) => rows,
         Err(e) => {
             let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
@@ -3185,7 +3188,8 @@ async fn workspace_local_work(
             return None;
         }
     };
-    match mgr.inspect_worktrees(&tracked).await {
+    let paths: Vec<std::path::PathBuf> = session_paths.iter().cloned().collect();
+    match mgr.inspect_paths(&paths, &tracked).await {
         Ok(rows) => Some(session_paths.iter().any(|path| {
             rows.iter()
                 .find(|row| canon(&row.path) == *path)
@@ -3302,7 +3306,12 @@ pub(crate) async fn cleanup_merged_worktrees_with(
             return;
         }
     };
-    let inspections = match mgr.inspect_worktrees(&tracked).await {
+    let session_paths: Vec<std::path::PathBuf> = workspace
+        .sessions
+        .iter()
+        .map(|session| session.worktree_path.clone())
+        .collect();
+    let inspections = match mgr.inspect_paths(&session_paths, &tracked).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(workspace = %key, "cleanup_merged_worktrees: inspect failed: {e}");
@@ -4281,17 +4290,31 @@ mod inspect_tests {
         assert!(diff.files.iter().any(|file| file.path == "linked.txt"));
     }
 
-    /// Healthy inspector path: one bare clone + one tracked active
-    /// session → exactly one inspection row, untagged, with the
-    /// session id attached.
+    /// Healthy inspector path: one bare clone + one tracked session with a
+    /// live terminal bound to it → exactly one inspection row, untagged,
+    /// with the session id attached. Liveness is the registry binding, not
+    /// the persisted `SessionRunState` (which the daemon never advances).
     #[tokio::test]
     async fn inspect_emits_tracked_active_worktree() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "ok", "feat").await;
         let store = Arc::new(MemoryStore::new());
-        seed_workspace(&store, wt.clone(), /*stopped=*/ false);
+        let session_id = seed_workspace(&store, wt.clone(), /*stopped=*/ false);
 
         let config = fresh_config(store);
+        config
+            .terminal
+            .register_terminal(
+                TerminalId(7),
+                "ok-agent".into(),
+                WorkspaceKey::new("github:o/r#1").as_str().into(),
+                TerminalKind::Agent("codex".into()),
+            )
+            .await;
+        config
+            .terminal
+            .associate_session(TerminalId(7), session_id)
+            .await;
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 

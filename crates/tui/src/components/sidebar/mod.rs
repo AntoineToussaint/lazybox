@@ -2236,6 +2236,14 @@ impl Sidebar {
     /// the plain resume (`Shift-K`, a settle-gated `continue` into each) and
     /// the restart with fresh credentials (`a R`, stop + `--resume`) apply
     /// to. Sorted like [`Self::limit_reached_terminals`].
+    /// Every terminal the daemon currently reports as live. Used to prune a
+    /// standing set (auth-failed terminals, #1719) against reality before
+    /// issuing a kill+respawn, so an entry for a pane that has since exited
+    /// can never target a dead id.
+    pub fn running_terminal_ids(&self) -> std::collections::HashSet<TerminalId> {
+        self.running_terminals.keys().copied().collect()
+    }
+
     pub fn limited_terminals(&self) -> Vec<TerminalId> {
         let mut ids: Vec<TerminalId> = self
             .agent_terminal_states

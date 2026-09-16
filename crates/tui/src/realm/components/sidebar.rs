@@ -867,6 +867,11 @@ impl Sidebar {
         self.inner.limit_reached_terminals()
     }
 
+    /// See `Sidebar::running_terminal_ids`.
+    pub fn running_terminal_ids(&self) -> std::collections::HashSet<lazybox_ipc::TerminalId> {
+        self.inner.running_terminal_ids()
+    }
+
     /// See `Sidebar::limited_terminals`.
     pub fn limited_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
         self.inner.limited_terminals()

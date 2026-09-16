@@ -55,6 +55,27 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Ship the daemon-side teardowns an event-time decision queued.
+    /// `TerminalStack::on_event` has no command sink, so the abandoned-
+    /// restart path (#1726 review, finding 2) parks the successor's id
+    /// and this drains it. Runs wherever the resync flush runs, so the
+    /// close goes out on the same pass that observed the replacement.
+    pub(super) fn flush_pending_terminal_closes(&mut self) {
+        let ids = self.terminals.drain_pending_closes();
+        if ids.is_empty() {
+            return;
+        }
+        for (sent, id) in ids.iter().enumerate() {
+            if !self.try_send_cmd(IpcCommand::Close {
+                terminal_id: *id,
+                client_request_id: None,
+            }) {
+                self.terminals.requeue_pending_closes(ids[sent..].to_vec());
+                return;
+            }
+        }
+    }
+
     /// Tick-driven resync retry (#1254 finding 2): re-arm any desynced
     /// terminal whose `TerminalResyncUnavailable` backoff has elapsed and
     /// flush the resulting requests. Runs every loop iteration so a
@@ -2246,6 +2267,13 @@ impl<T: TerminalAdapter> Model<T> {
                 other_session_count,
                 ..
             } => {
+                // Standing record, separate from the prompt queue below, which
+                // is drained as soon as its modal mounts (#1719). `a R` needs
+                // to find these later — an agent whose token died is stuck in
+                // exactly the way a rate-limited one is: the process read its
+                // credential at startup and never re-reads it, so only a
+                // stop-respawn-continue frees it.
+                self.auth_failed_terminals.insert(*terminal_id);
                 self.queue_agent_auth_prompt(super::AgentAuthPrompt {
                     terminal_id: *terminal_id,
                     display_name: display_name.clone(),
@@ -2253,6 +2281,22 @@ impl<T: TerminalAdapter> Model<T> {
                     retry: false,
                     error: None,
                 });
+            }
+            IpcEvent::TerminalReplaced {
+                old_terminal_id,
+                authenticating: false,
+                ..
+            } => {
+                self.auth_failed_terminals.remove(old_terminal_id);
+                self.auth_prompt_queue
+                    .retain(|prompt| prompt.terminal_id != *old_terminal_id);
+                if self.top_modal() == Some(&Id::AgentAuth)
+                    && matches!(self.modal_flow, Some(ModalFlow::AgentAuth { terminal_id, .. }) if terminal_id == *old_terminal_id)
+                {
+                    self.pop_modal();
+                    self.modal_flow = None;
+                    self.drain_queued_daemon_prompts();
+                }
             }
             IpcEvent::AgentAuthProgress { phase, .. } => {
                 let message = match phase {
@@ -2273,6 +2317,10 @@ impl<T: TerminalAdapter> Model<T> {
                 error,
             } => {
                 if *success {
+                    // Recovered: both the terminal that failed and the one the
+                    // recovery ran in leave the set, so a healed session is
+                    // never restarted out from under the user.
+                    self.auth_failed_terminals.remove(recovery_terminal_id);
                     self.flash_info(format!("{display_name} conversation resumed"));
                     self.set_focus(PaneFocus::Terminals);
                 } else {
@@ -2293,6 +2341,7 @@ impl<T: TerminalAdapter> Model<T> {
             _ => {}
         }
         self.flush_pending_terminal_resyncs();
+        self.flush_pending_terminal_closes();
         if matches!(&event, IpcEvent::TerminalResyncUnavailable { .. }) {
             self.flash(
                 "terminal output paused — authoritative replay unavailable; retrying",

@@ -74,6 +74,11 @@ impl PickerRow {
             // The preview must show exactly what gets sent, so a
             // skill-dispatching snippet (#798) previews its resolved skill
             // invocation, not the raw authored body.
+            //
+            // `dispatch_body`, not `delivery_body`: the shared output
+            // contract (#1697) is appended to every built-in identically,
+            // so it carries no per-snippet information and is named once in
+            // the picker chrome instead of repeated in all 61 previews.
             body: snippet.dispatch_body(),
             origin: snippet.origin.label().to_string(),
             badge: String::new(),

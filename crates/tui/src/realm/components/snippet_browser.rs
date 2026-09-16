@@ -4,7 +4,10 @@
 //! `]]s<key>` (you had to already know the key) and the terminal-leader
 //! popup, which never functions as a browsable list. This modal lists
 //! every merged snippet — key, origin, description, and the full body —
-//! so a user can see what's available and what each one expands to.
+//! so a user can see what's available and what each one expands to. The
+//! shared output contract (#1697) is appended at delivery rather than
+//! stored in a body, so it is named once in the header instead of being
+//! repeated under every entry.
 //! Reachable from any pane via `]`, the `,` Settings palette, and listed
 //! in Ask Lazybox's shortcut index.
 //!
@@ -112,6 +115,20 @@ impl SnippetBrowser {
             return wrap_one(line, width);
         }
         let mut lines: Vec<Line<'static>> = Vec::new();
+        // The shared output contract (#1697) is appended at *delivery*, not
+        // stored in any body, so it appears nowhere below. Said once here
+        // rather than repeated under all 61 built-ins, which would bury
+        // what actually differs between them — the reason to open this.
+        lines.extend(wrap_one(
+            Line::from(Span::styled(
+                "Built-ins are delivered with a shared ending contract (one STATUS line \
+                 + a short verdict); it is not part of the bodies below. See \
+                 docs/snippets.md.",
+                Style::default().fg(theme.text_dim).italic(),
+            )),
+            width,
+        ));
+        lines.push(Line::raw(""));
         let mut starts: Vec<(usize, String)> = Vec::with_capacity(self.rows.len());
         for (i, r) in self.rows.iter().enumerate() {
             if i > 0 {
@@ -443,14 +460,28 @@ mod tests {
         // line, but the long single-line body is forced to wrap.
         let width = 30u16;
         let lines = comp.body_lines(theme, width);
-        let body: Vec<String> = lines
+        let flat = |l: &Line<'static>| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        // The catalog note (#1697) is a document-level preamble, not a
+        // body row, so it is not indented. `row_starts` is where the
+        // first snippet begins, so slicing there drops the note by
+        // position instead of relaxing the indent rule below.
+        let first_row = comp.row_starts.first().expect("one row").0;
+        assert!(
+            lines[..first_row]
+                .iter()
+                .map(flat)
+                .collect::<String>()
+                .contains("shared ending contract"),
+            "the catalog note precedes the first snippet",
+        );
+        let body: Vec<String> = lines[first_row..]
             .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
+            .map(flat)
             .filter(|s| !s.starts_with("]]srev")) // drop the heading row
             .filter(|s| !s.trim().is_empty())
             .collect();

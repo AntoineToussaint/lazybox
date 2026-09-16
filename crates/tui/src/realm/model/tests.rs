@@ -157,9 +157,6 @@ mod agent_auth_recovery_tests {
     #[test]
     fn auth_required_warns_about_other_provider_sessions_and_confirms() {
         let mut model = build_model();
-        // A non-isolated provider still tells the user re-auth touches the
-        // machine-wide login and names the other sessions — but reassures
-        // that a single pane's re-auth no longer signs them out (#1376).
         model.handle_daemon_event(Event::AgentAuthRequired {
             terminal_id: TerminalId(7),
             agent_id: "claude".into(),
@@ -179,12 +176,27 @@ mod agent_auth_recovery_tests {
             .join(" ");
         assert!(screen.contains("Claude Code authentication is no longer valid"));
         assert!(
-            screen.contains("shared machine-wide Claude Code login in place")
-                && screen.contains("2 other running Claude Code sessions")
-                && screen.contains("won't be signed out"),
+            screen.contains("shared Claude Code login")
+                && screen.contains("2 other running Claude Code sessions"),
             "{screen}"
         );
-        assert!(screen.contains("Sign in and continue"));
+        // The prompt describes lazybox's POLICY, never a headcount it
+        // promises to act on. `other_session_count` is measured when the
+        // failure is detected; the sweep runs after an interactive login
+        // that can take minutes, by which time auto-fix or an armed epic
+        // may have spawned more sessions. "we will restart your 2 sessions"
+        // followed by stopping nine is consent the user never gave.
+        assert!(
+            screen.contains("restarts the idle ones onto the new login")
+                && screen.contains("mid-task is left running untouched"),
+            "{screen}"
+        );
+        assert!(
+            !screen.contains("restart them and continue their conversations automatically"),
+            "{screen}"
+        );
+        assert!(screen.contains("Sign in again and continue"));
+        assert!(!screen.contains("[Enter]"));
         assert!(matches!(
             model.handle_confirmed(true).as_slice(),
             [Command::ReauthenticateAgent {
@@ -193,14 +205,8 @@ mod agent_auth_recovery_tests {
         ));
     }
 
-    /// The prompt must not offer to sign in "with another account".
-    /// lazybox never runs the provider `logout` — that would sign out every
-    /// session sharing the machine-wide login (#1376) — so `login` runs with
-    /// the old credential still present and refreshes it in place. A provider
-    /// that short-circuits on an already-valid credential would then resume
-    /// on the very account the user asked to leave, and report success.
     #[test]
-    fn auth_required_offers_a_refresh_not_an_account_switch() {
+    fn auth_required_explains_shared_login_with_no_other_sessions() {
         let mut model = build_model();
         model.handle_daemon_event(Event::AgentAuthRequired {
             terminal_id: TerminalId(7),
@@ -221,11 +227,64 @@ mod agent_auth_recovery_tests {
         );
         assert!(screen.contains("Sign in again and continue"), "{screen}");
         assert!(
-            screen.contains("refreshes the machine-wide Codex login in place"),
+            screen.contains("replaces the machine-wide Codex login")
+                && screen.contains("No other sessions of this agent are running in lazybox"),
             "{screen}"
         );
         // ...and it must say how to actually change accounts.
         assert!(screen.contains("codex logout"), "{screen}");
+    }
+
+    #[test]
+    fn auth_required_names_one_other_session() {
+        let mut model = build_model();
+        model.handle_daemon_event(Event::AgentAuthRequired {
+            terminal_id: TerminalId(7),
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            reason: "expired".into(),
+            other_session_count: 1,
+        });
+        let screen = rendered_auth_modal(&mut model)
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            screen.contains("1 other running Codex session."),
+            "{screen}"
+        );
+        assert!(screen.contains("restarts the idle ones"), "{screen}");
+    }
+
+    #[test]
+    fn automatic_restart_clears_mounted_and_queued_auth_prompts() {
+        let mut model = build_model();
+        for id in [7, 8] {
+            model.handle_daemon_event(Event::AgentAuthRequired {
+                terminal_id: TerminalId(id),
+                agent_id: "codex".into(),
+                display_name: "Codex".into(),
+                reason: "expired".into(),
+                other_session_count: 1,
+            });
+        }
+        for id in [8, 7] {
+            model.handle_daemon_event(Event::TerminalReplaced {
+                old_terminal_id: TerminalId(id),
+                terminal_id: TerminalId(id + 10),
+                session_key: lazybox_core::SessionKey::new(format!("github:owner/repo#{id}")),
+                kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                authenticating: false,
+            });
+            assert!(!model.auth_failed_terminals.contains(&TerminalId(id)));
+        }
+        assert!(model.auth_prompt_queue.is_empty());
+        assert!(model.top_modal().is_none());
+        assert!(model.modal_flow.is_none());
     }
 
     #[test]
@@ -260,7 +319,9 @@ mod agent_auth_recovery_tests {
             .join(" ");
         assert!(screen.contains("Claude Code sign-in did not complete"));
         assert!(screen.contains("conversation is still saved"));
-        assert!(screen.contains("Retry"));
+        assert!(screen.contains("Retry sign-in and resume it?"));
+        assert!(!screen.contains("[Enter]"));
+        assert!(screen.contains("[Y]es") && screen.contains("[N]o"));
         assert!(matches!(
             model.handle_confirmed(true).as_slice(),
             [Command::ReauthenticateAgent {
@@ -4977,6 +5038,81 @@ snippets:
                 .iter()
                 .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
             "the continuation is the daemon's job after the respawn, not a client inject: {cmds:?}",
+        );
+    }
+
+    /// Regression (#1719): `a R` also restarts an agent whose *credential*
+    /// died, not just one that hit a usage limit.
+    ///
+    /// They are the same problem: the process read a token at startup, it was
+    /// invalidated underneath it (an account switch, a sign-out elsewhere),
+    /// and a running process never re-reads one — so `continue` loops on the
+    /// same rejection forever. The daemon's stop → resume-same-conversation →
+    /// continue is the fix for both, and it used to refuse to look at the
+    /// auth-failed ones.
+    #[test]
+    fn restart_rate_limited_also_takes_auth_failed_agents() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("codex".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent(), agent()]);
+        // 1 is rate-limited; 2 and 3 are healthy as far as AgentState goes —
+        // an auth failure is invisible to the lifecycle state, which is
+        // exactly why it needed its own signal.
+        for (i, state) in [AgentState::LimitReached, AgentState::Done, AgentState::Done]
+            .into_iter()
+            .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+        m.handle_daemon_event(IpcEvent::AgentAuthRequired {
+            terminal_id: TerminalId(2),
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            reason: "Codex authentication is no longer valid.".into(),
+            other_session_count: 0,
+        });
+
+        let cmds = m.dispatch_action(&Action::RestartRateLimited);
+        let mut restarted: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::RestartAgentAndContinue { terminal_id } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        restarted.sort();
+        assert_eq!(
+            restarted,
+            vec![1, 2],
+            "the limited agent AND the signed-out one restart; the healthy one doesn't: {cmds:?}",
+        );
+
+        // Recovering clears the standing record, so a healed session is never
+        // restarted out from under the user on the next press.
+        m.handle_daemon_event(IpcEvent::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(2),
+            terminal_id: TerminalId(2),
+            display_name: "Codex".into(),
+            success: true,
+            error: None,
+        });
+        let after = m.dispatch_action(&Action::RestartRateLimited);
+        let restarted_after: Vec<u64> = after
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::RestartAgentAndContinue { terminal_id } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            restarted_after,
+            vec![1],
+            "a recovered session drops out of the auth-failed set: {after:?}",
         );
     }
 
@@ -20743,6 +20879,125 @@ mod terminal_section_dispatch_tests {
         )
     }
 
+    /// A model focused on one agent terminal, with the workspace behind
+    /// it seeded in the sidebar. Unlike `model_in_live_terminal` this
+    /// survives `handle_pane_key`'s trailing `sync_panes`, which projects
+    /// the sidebar selection onto the stack and would otherwise clear the
+    /// active session (and with it `active_terminal_id`) after the first
+    /// key. Tests that press more than one key need this one.
+    fn model_with_seeded_agent_terminal() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let ws_key = lazybox_core::WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(7),
+            session_key,
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(7)));
+        m
+    }
+
+    /// The same model with its agent crashed — the frozen `#356` pane.
+    fn model_in_exited_terminal() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let mut m = model_with_seeded_agent_terminal();
+        m.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: Some(1),
+            last_output: None,
+        });
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(7)));
+        m
+    }
+
+    fn close_key() -> RealmKey {
+        RealmKey::new(Key::Char('X'), RealmMods::SHIFT)
+    }
+
+    /// The `close_exited_pane` catalog row exists for `?` help and the
+    /// `PANE_NATIVE_KINDS` audit only — it has no `Action`, so the
+    /// dispatcher must neither fire it nor arm a leader. If it ever
+    /// gained one, the key typed at a LIVE agent would be swallowed by a
+    /// which-key popup instead of reaching the PTY.
+    #[test]
+    fn the_close_exited_pane_row_never_intercepts_its_key_in_a_live_terminal() {
+        let mut m = model_with_seeded_agent_terminal();
+        m.dispatch_key(close_key());
+        assert!(
+            !m.terminal_leader_armed && !m.leader.is_armed(),
+            "a documentation-only catalog row must not arm a leader",
+        );
+        m.dispatch_key(close_key());
+        assert_eq!(
+            m.terminals.active_terminal_id(),
+            Some(TerminalId(7)),
+            "the close key in a LIVE terminal is a character, not a close",
+        );
+    }
+
+    /// End-to-end through the real dispatcher: the deliberate,
+    /// modifier-bearing key closes a frozen pane (#1726 review,
+    /// finding 1).
+    #[test]
+    fn exited_pane_closes_on_the_close_key_through_the_dispatcher() {
+        let mut m = model_in_exited_terminal();
+        m.dispatch_key(close_key());
+        assert_eq!(
+            m.terminals.active_terminal_id(),
+            None,
+            "the close key reaches the pane with no `]]` leader",
+        );
+    }
+
+    /// The lowercase letter must NOT: `x` is the workspace leader (and
+    /// `x x` is Archive), so it stays a character the PTY would have got.
+    #[test]
+    fn a_bare_lowercase_x_never_closes_an_exited_pane_through_the_dispatcher() {
+        let mut m = model_in_exited_terminal();
+        for _ in 0..4 {
+            m.dispatch_key(RealmKey::new(Key::Char('x'), RealmMods::NONE));
+        }
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(7)));
+    }
+
+    /// The `key_kind` plumbing (#1726 review, finding 4):
+    /// `crossterm_to_realm` drops Press/Repeat, so without `set_key_kind`
+    /// the pane could not tell the tail of a held close key from fresh
+    /// input — and would type it into the terminal that inherits focus.
+    #[test]
+    fn a_held_close_key_stops_at_the_pane_it_closed() {
+        let mut m = model_in_exited_terminal();
+        m.set_key_kind(crossterm::event::KeyEventKind::Press);
+        m.dispatch_key(close_key());
+        assert_eq!(m.terminals.active_terminal_id(), None);
+
+        // The rest of the same hold must not become input anywhere.
+        m.set_key_kind(crossterm::event::KeyEventKind::Repeat);
+        for _ in 0..6 {
+            m.dispatch_key(close_key());
+        }
+        assert_eq!(m.terminals.active_terminal_id(), None);
+    }
+
     /// The leave chord is the escape char doubled — that's what the
     /// dispatcher matches. A baked-in `leave_terminal: Esc` override does
     /// NOT leave: the catalog chord is never consulted under terminal
@@ -20817,6 +21072,12 @@ mod terminal_section_dispatch_tests {
                 ActionKind::LeaveTerminal => {}
                 // Exercised by `terminal_scroll_chord_stays_in_the_pane`.
                 ActionKind::TerminalScroll => {}
+                // Exercised by
+                // `exited_pane_closes_on_the_close_key_through_the_dispatcher`
+                // (and its live-terminal / autorepeat siblings). Fires
+                // only on an EXITED pane, so the live-terminal models the
+                // other arms use deliberately do not close.
+                ActionKind::CloseExitedPane => {}
                 other => panic!(
                     "Section::Terminal action {other:?} has no dispatch round-trip test (#188)",
                 ),

@@ -360,8 +360,14 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let cmds: Vec<IpcCommand> = terminals
             .iter()
+            // `continue_work: true` — every terminal in this set is *stuck*
+            // (usage-limit-blocked, or signed out with a dead credential),
+            // so the continuation is exactly what frees it and the turn it
+            // resumes is the one the limit interrupted. This is the case the
+            // prompt was written for; the at-rest case belongs to `]]R`.
             .map(|terminal_id| IpcCommand::RestartAgentAndContinue {
                 terminal_id: *terminal_id,
+                continue_work: true,
             })
             .collect();
         let restarted = terminals.len();
@@ -375,6 +381,121 @@ impl<T: TerminalAdapter> Model<T> {
         ));
         self.redraw = true;
         cmds
+    }
+
+    /// `]]R` — restart the focused agent in place so it picks up fresh
+    /// credentials.
+    ///
+    /// Unlike `a R`, which restarts a set the client has already proved is
+    /// stuck, this targets whatever pane the user is looking at — so the
+    /// filtering `a R` gets from its target selection has to happen here.
+    /// `RestartAgentAndContinue` is a kill+respawn and the daemon applies no
+    /// state policy of its own: `restart_agent_in_place` checks only that
+    /// launch metadata exists and no re-auth is running, and `remember_spawn`
+    /// records that metadata for *every* agent spawn — so a healthy,
+    /// mid-turn agent sails through every daemon guard.
+    ///
+    /// The classification below is the one the daemon already wrote down in
+    /// `PeerRecovery::for_state` for the automatic post-sign-in sweep, which
+    /// faces the identical question ("this process holds a stale credential
+    /// — is swapping it worth what the swap costs?"):
+    ///
+    /// * At rest (`Idle` / `Done`) the swap is lossless — restart, but send
+    ///   no continuation, because the conversation was finished and nudging
+    ///   it would start a turn the user never asked for.
+    /// * Blocked (`LimitReached` / `AwaitingReset`), or signed out with a
+    ///   dead credential (#1719) — restart *and* continue: the pane is stuck
+    ///   mid-work and the continuation is what frees it.
+    /// * Mid-flight (`Working` / `InputNeeded` / `CreditExhausted`) — refuse.
+    ///   The kill destroys the in-flight turn: the streaming response, the
+    ///   running tool call, a half-applied multi-file edit, the pending
+    ///   permission question. `--resume` restores the provider-side
+    ///   conversation, NOT the turn that was in progress, and the pane comes
+    ///   back looking healthy, so the loss is silent.
+    /// * `Exited` — refuse and point at the pane's own restart key. That
+    ///   path (`TerminalStack::restart_exited`) sets `resume_in_flight` so a
+    ///   close racing the respawn can't let it land as a fresh unasked-for
+    ///   agent, and routes an auth-failed pane to `ReauthenticateAgent`
+    ///   instead of a resume that would fail on the same dead credential.
+    ///   Neither is expressible through this command.
+    ///
+    /// Note the client has no "hasn't reported yet" reading to guard: the
+    /// terminal stack folds a missing snapshot state to `Idle`
+    /// (`snap.agent_state.unwrap_or(AgentState::Idle)`), which is the
+    /// documented safe default for an agent that can't tell, and an agent
+    /// that has actually worked resolves to `Working` / `Done` and never
+    /// back to `Idle`. So an unreported pane restarts *without* a
+    /// continuation — losing nothing, because nothing has run — while real
+    /// in-flight work is caught by the `Working` arm. `None` here therefore
+    /// only ever means "not an agent", which the check above already
+    /// rejected; the catch-all keeps it refused regardless.
+    pub(super) fn restart_focused_agent(&mut self) -> Vec<IpcCommand> {
+        use lazybox_ipc::AgentState;
+        let Some(terminal_id) = self.terminals.focused_terminal_id() else {
+            self.flash_hint("no focused agent to restart");
+            return Vec::new();
+        };
+        if !self.terminals.terminal_is_agent(terminal_id) {
+            self.flash_hint("no focused agent to restart — this is a shell");
+            return Vec::new();
+        }
+        if self.restart_in_flight.contains(&terminal_id) {
+            // Not a no-op for politeness: the daemon serializes rather than
+            // coalescing, so a second command would queue behind the first
+            // and kill the agent it just respawned.
+            self.flash_hint("already restarting this agent");
+            return Vec::new();
+        }
+        // `Exited` is checked FIRST, ahead of the signed-out shortcut below:
+        // an auth-failed pane that has already died is exactly the case the
+        // pane's own restart routes to `ReauthenticateAgent`, and letting
+        // "signed out" win here would send it a resume that fails again on
+        // the same dead credential.
+        let state = self.terminals.terminal_agent_state(terminal_id);
+        if matches!(state, Some(AgentState::Exited { .. })) {
+            self.flash_hint(
+                "this agent already exited — restart it from the pane itself, \
+                 which resumes it without a stray continuation",
+            );
+            return Vec::new();
+        }
+        // A live auth-failed pane is stuck exactly the way a rate-limited one
+        // is (#1719) whatever its screen reading says, and `a R` already
+        // restarts it — so it resolves as blocked before the state match.
+        let signed_out = self.auth_failed_terminals.contains(&terminal_id);
+        let continue_work = match state {
+            _ if signed_out => true,
+            Some(AgentState::LimitReached | AgentState::AwaitingReset) => true,
+            Some(AgentState::Idle | AgentState::Done) => false,
+            state => {
+                let what = match state {
+                    Some(AgentState::Working) => "is working",
+                    Some(AgentState::InputNeeded) => "is waiting on you",
+                    Some(AgentState::CreditExhausted) => "is out of credit",
+                    _ => "hasn't reported its state yet",
+                };
+                self.flash_hint(format!(
+                    "not restarting — the agent {what}; a restart would lose the turn \
+                     in progress. Let it come to rest first",
+                ));
+                return Vec::new();
+            }
+        };
+        self.restart_in_flight.insert(terminal_id);
+        // "requested": this is a kill+respawn the daemon can still refuse (a
+        // pane with no launch metadata, or one mid re-authentication), and
+        // claiming a destructive action happened when it was refused is the
+        // worse error — the same reason `a R` says "up to N".
+        self.flash_info(if continue_work {
+            "restart requested — resuming this agent with fresh credentials"
+        } else {
+            "restart requested — swapping credentials, not resuming the conversation"
+        });
+        self.redraw = true;
+        vec![IpcCommand::RestartAgentAndContinue {
+            terminal_id,
+            continue_work,
+        }]
     }
 
     pub(super) fn recover_agent_credit(&mut self, bulk: bool) -> Vec<IpcCommand> {

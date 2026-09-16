@@ -131,6 +131,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | `]]s` | Open the snippet picker (typing a full key auto-submits — `]]srev`) |
 | `]]l` | Open the skills picker — trigger one of the focused agent's skills explicitly (typing a full name auto-submits) |
 | `]]r` | Restore the in-flight draft, or the last submitted agent prompt, without sending it |
+| `]]R` | Restart the focused agent with fresh credentials (resumes its work only if it was blocked; an agent mid-turn is left alone) |
 | `]]h` | Browse this session's prompt history (newest-first, snippets tagged); Enter re-sends one |
 | `]]n` | Send the follow-up declared by the last snippet sent here (`next:` in snippets.yaml) |
 | `]]u` | Scan the visible terminal for URLs and open the picked one in the browser (a lone URL opens straight away) |

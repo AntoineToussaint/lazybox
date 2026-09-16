@@ -1216,6 +1216,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
             LeaderCmd::Skills => self.mount_skill_picker(String::new()),
             LeaderCmd::RecallPrompt => self.recall_prompt(cmds),
+            LeaderCmd::RestartAgent => cmds.extend(self.restart_focused_agent()),
             LeaderCmd::PromptHistory => self.mount_prompt_history_picker(),
             LeaderCmd::FollowUp => match self.picker_target_terminal() {
                 Some(terminal_id) => self.send_follow_up(terminal_id, cmds),

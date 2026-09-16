@@ -663,10 +663,21 @@ impl PeerRecovery {
 /// than a blind keystroke so it waits for the booted composer. A pane
 /// without launch metadata, or one mid re-authentication, is rejected
 /// rather than half-restarted.
-pub(crate) async fn restart_agent_and_continue(config: &ServerConfig, terminal_id: TerminalId) {
-    if let Err(message) =
-        restart_agent_in_place(config, terminal_id, Some(crate::auto_wait::resume_prompt())).await
-    {
+///
+/// `continue_work` carries the caller's claim about what it is restarting
+/// (see [`lazybox_ipc::Command::RestartAgentAndContinue`]): a stuck pane
+/// wants the continuation that frees it, a pane at rest wants the credential
+/// swap alone. Sending the nudge unconditionally would make every restart of
+/// a *finished* conversation start a turn the user never asked for — the case
+/// [`PeerRecovery::for_state`] already refuses to create on the automatic
+/// post-sign-in path.
+pub(crate) async fn restart_agent_and_continue(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    continue_work: bool,
+) {
+    let continuation = continue_work.then(crate::auto_wait::resume_prompt);
+    if let Err(message) = restart_agent_in_place(config, terminal_id, continuation).await {
         let _ = config.bus.send(Event::CommandRejected {
             command: "RestartAgentAndContinue".into(),
             message,
@@ -2335,8 +2346,8 @@ mod tests {
     async fn concurrent_restarts_resume_a_conversation_once() {
         let (config, mock, terminal_id) = recovery_fixture("codex", Some("original")).await;
         tokio::join!(
-            restart_agent_and_continue(&config, terminal_id),
-            restart_agent_and_continue(&config, terminal_id),
+            restart_agent_and_continue(&config, terminal_id, true),
+            restart_agent_and_continue(&config, terminal_id, true),
         );
         assert_eq!(
             mock.all_argv()
@@ -3222,7 +3233,7 @@ mod tests {
             .and_then(|c| c.backend_key)
             .expect("blocked backend");
 
-        restart_agent_and_continue(&config, terminal_id).await;
+        restart_agent_and_continue(&config, terminal_id, true).await;
 
         wait_for_argv(&mock, &["claude", "--resume", "sess-limited"]).await;
         assert!(
@@ -3245,7 +3256,7 @@ mod tests {
         let (config, _mock) = ServerConfig::in_memory_with_mock();
         let mut events = config.bus.subscribe();
 
-        restart_agent_and_continue(&config, TerminalId(4242)).await;
+        restart_agent_and_continue(&config, TerminalId(4242), true).await;
 
         assert!(matches!(
             events.try_recv(),

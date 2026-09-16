@@ -746,7 +746,24 @@ standing `not vetted by lazybox` line; discovery only, no install path.
 of truth for why), `]]r`
 recalls the last prompt (in-flight draft, else last submitted message)
 back into the agent composer without submitting it — both survive a
-restart (persisted per terminal in the store, #373), `]]h` opens the
+restart (persisted per terminal in the store, #373), `]]R` restarts the
+focused agent in place so it picks up fresh credentials after an external
+account / API-key switch — the single-pane twin of `a R`, stopping the
+process and respawning the same conversation via `--resume`. What it does
+next is decided by the agent's state, mirroring the daemon's own
+`PeerRecovery` policy for the post-sign-in sweep: a *blocked* agent
+(`LimitReached` / `AwaitingReset`, or signed out) is restarted **and**
+continued, since the nudge is what frees it; an agent *at rest*
+(`Idle` / `Done`) gets the credential swap with **no** continuation,
+because resuming a finished conversation would start a turn the user never
+asked for; and an agent *mid-flight* (`Working` / `InputNeeded` /
+`CreditExhausted`, or one that hasn't reported yet) is **refused** — the
+kill would destroy the in-flight turn and `--resume` restores the
+conversation, not the turn. An exited pane is deferred to its own restart
+key, which alone sets `resume_in_flight` and routes an auth-failed pane to
+re-authentication. A repeat press while one restart is in flight is
+swallowed: the daemon serializes rather than coalescing, so a second
+command would kill the agent the first just respawned. `]]h` opens the
 per-session prompt-history picker (#523 — every prompt sent to this
 agent, newest-first and timestamped, snippet-sourced entries tagged
 with their key; Enter re-sends the picked prompt; the full history is

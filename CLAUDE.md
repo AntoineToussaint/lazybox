@@ -453,8 +453,10 @@ the active filters; matches title, number, repo, labels, reviewers /
 assignees). An `agent:<term>` / `said:<term>` qualifier searches the
 workspace's **agent text** instead of its metadata (#1774) — today that
 corpus is the per-workspace prompt history (`]]h`), which the daemon
-replays for every live terminal, so `agent:parser` answers "which of
-these 40 workspaces was about the parser?". A `field:"two words"` value
+replays for every live terminal, so `#agent:parser` answers "which of
+these 40 workspaces was about the parser?" (`#`, not `/` — the qualifier
+does not widen scope on its own, and `/` stays pinned to the cursor's
+repo group like every other term). A `field:"two words"` value
 may be quoted; bare (unqualified) queries are byte-for-byte the legacy
 search, and a row an `agent:` term matched trails a dim `⌕ …excerpt…`
 cue in its title cell, since the hit isn't in the title the `/`

@@ -119,6 +119,19 @@ fn client_scrollback_bytes() -> Option<usize> {
 /// 4 KiB is enough to span any prompt the agents have shipped so far.
 pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 
+/// Largest index `<= at` that `s` can be split on without cutting a
+/// multi-byte char. (`str::floor_char_boundary` is still unstable.)
+fn floor_char_boundary(s: &str, at: usize) -> usize {
+    if at >= s.len() {
+        return s.len();
+    }
+    let mut i = at;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Per-workspace byte budget for the searchable agent-text corpus
 /// (#1774). The daemon already caps a workspace's stored prompt history
 /// at 200 entries / 128 KiB; this bounds what the client re-scans on
@@ -3808,10 +3821,15 @@ impl TerminalStack {
                 prompts.sort_by_key(|p| std::cmp::Reverse(p.timestamp_ms));
                 let mut corpus = String::new();
                 for prompt in prompts {
-                    if corpus.len() + prompt.text.len() > AGENT_TEXT_CORPUS_CAP {
+                    let room = AGENT_TEXT_CORPUS_CAP.saturating_sub(corpus.len());
+                    if room == 0 {
                         break;
                     }
-                    corpus.push_str(&prompt.text);
+                    // A prompt bigger than the whole budget is TRUNCATED, not
+                    // skipped: dropping it would leave a workspace whose one
+                    // prompt was a pasted log silently unsearchable, and the
+                    // user has no way to see why their query missed.
+                    corpus.push_str(&prompt.text[..floor_char_boundary(&prompt.text, room)]);
                     corpus.push('\n');
                 }
                 (!corpus.trim().is_empty()).then_some((key, corpus))
@@ -13532,12 +13550,32 @@ mod agent_crash_tests {
         push(&mut stack, 1, &"old ".repeat(AGENT_TEXT_CORPUS_CAP), 1);
         push(&mut stack, 1, "newest prompt wins", 99);
         let text = &stack.agent_text_by_session()[&sk];
-        assert!(text.len() <= AGENT_TEXT_CORPUS_CAP + "newest prompt wins".len() + 1);
+        assert!(text.len() <= AGENT_TEXT_CORPUS_CAP + "newest prompt wins".len() + 2);
         assert!(
             text.contains("newest prompt wins"),
             "the newest prompt is kept when the budget binds: {}",
             &text[..text.len().min(80)]
         );
+
+        // A single prompt larger than the whole budget is truncated, not
+        // dropped — otherwise its workspace would be silently unsearchable.
+        let mut lone = active_stack(9, &sk, TerminalKind::Agent("claude".into()));
+        let huge = format!("找 needle {}", "pad ".repeat(AGENT_TEXT_CORPUS_CAP));
+        lone.terminals
+            .get_mut(&TerminalId(9))
+            .unwrap()
+            .prompt_history
+            .push(lazybox_ipc::UserPrompt {
+                text: huge,
+                timestamp_ms: 1,
+                source: lazybox_ipc::PromptSource::Typed,
+            });
+        let text = &lone.agent_text_by_session()[&sk];
+        assert!(
+            text.contains("needle"),
+            "an over-budget prompt still contributes its head"
+        );
+        assert!(text.len() <= AGENT_TEXT_CORPUS_CAP + 1);
 
         // Losing the terminal loses its text — and says so in the digest.
         let before = stack.agent_text_rev();

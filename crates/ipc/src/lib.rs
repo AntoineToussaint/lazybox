@@ -4170,6 +4170,45 @@ impl WorktreeRecovery {
         (!name.is_empty()).then(|| name.to_string())
     }
 
+    /// The branch a `BranchMismatch` spawn asked for, parsed out of the
+    /// daemon's message (`… not the requested branch '<expected>'…`). With
+    /// [`Self::mismatch_branch`] it lets the modal state the collision as
+    /// the two names side by side.
+    pub fn requested_branch(message: &str) -> Option<String> {
+        let after = message.split_once("not the requested branch '")?.1;
+        let name = after.split_once('\'')?.0.trim();
+        (!name.is_empty()).then(|| name.to_string())
+    }
+
+    /// The message with its `thiserror` source-chain segments removed
+    /// (`worktree: checkout_at: <fact>` → `<fact>`). Each such segment is
+    /// a bare lowercase identifier between `: ` separators — a variant or
+    /// function name that tells the user nothing. They are dropped
+    /// wherever they sit, because the daemon also embeds one chain inside
+    /// another (`re-checkout of <path> failed …: worktree: checkout_at:
+    /// <fact>`). Parsers keep reading the raw message; this is for what
+    /// the user sees.
+    pub fn user_facing(message: &str) -> String {
+        let identifier = |segment: &str| {
+            !segment.is_empty()
+                && segment.starts_with(|c: char| c.is_ascii_lowercase())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        };
+        // The last segment is the fact itself and is always kept, even
+        // when it happens to be one bare word (`boom`).
+        let segments: Vec<&str> = message.split(": ").collect();
+        let (chain, fact) = segments.split_at(segments.len() - 1);
+        chain
+            .iter()
+            .copied()
+            .filter(|segment| !identifier(segment))
+            .chain(fact.iter().copied())
+            .collect::<Vec<_>>()
+            .join(": ")
+    }
+
     /// The worktree path a `BranchMismatch` message names (`worktree
     /// <path> is checked out on branch …`), so the preserve-aside confirm
     /// can say which checkout it is about to move.
@@ -4257,8 +4296,8 @@ impl WorktreeRecovery {
                  Preserve or remove it, then start again."
             }
             Self::BranchMismatch => {
-                "This worktree is on another branch — a adopts it, r preserves it aside \
-                 and starts fresh."
+                "This worktree is on another branch — a uses it, r moves it aside and \
+                 starts fresh."
             }
             Self::DirtyLeftover => {
                 "A leftover folder holds uncommitted work. Move it aside, then start again."
@@ -4332,8 +4371,8 @@ impl WorktreeRecovery {
             // once you can see which branch you would be adopting (#1572).
             Self::BranchMismatch => match Self::mismatch_branch(message) {
                 Some(branch) => format!(
-                    "This worktree is on another branch ({branch}) — a adopts it, \
-                     r preserves it aside and starts fresh."
+                    "This worktree is on another branch ({branch}) — a uses it, \
+                     r moves it aside and starts fresh."
                 ),
                 None => self.hint().to_string(),
             },
@@ -5119,6 +5158,74 @@ mod worktree_recovery_tests {
             WorktreeRecovery::df_conflict_branch(msg).as_deref(),
             Some("release/v0.2.102"),
         );
+    }
+
+    /// #1755: the modal states a collision as the two branch names side
+    /// by side, so the requested branch has to parse out of the same
+    /// message the actual one does.
+    #[test]
+    fn branch_mismatch_carries_the_requested_branch() {
+        let msg = "worktree: checkout_at: worktree /tmp/w is checked out on branch \
+             'fix/document-qa-review', not the requested branch 'feat/document-rpc-tools' \
+             — refusing to reuse it; preserve or switch that checkout, then retry";
+        assert_eq!(
+            WorktreeRecovery::requested_branch(msg).as_deref(),
+            Some("feat/document-rpc-tools"),
+        );
+        assert_eq!(
+            WorktreeRecovery::mismatch_branch(msg).as_deref(),
+            Some("fix/document-qa-review"),
+        );
+        assert_eq!(
+            WorktreeRecovery::requested_branch("branch 'feat' is already checked out at /tmp/w"),
+            None,
+        );
+    }
+
+    /// #1755: `thiserror` source-chain segments (`worktree: checkout_at:`)
+    /// are function names, not information. The user-facing text drops
+    /// every bare-identifier segment — leading or embedded, since the
+    /// daemon wraps one chain inside another — and keeps every clause
+    /// with real words in it, including one that starts with a capital.
+    #[test]
+    fn user_facing_strips_the_error_source_chain() {
+        assert_eq!(
+            WorktreeRecovery::user_facing(
+                "worktree: checkout_at: worktree /tmp/w is checked out on branch 'a'"
+            ),
+            "worktree /tmp/w is checked out on branch 'a'",
+        );
+        assert_eq!(
+            WorktreeRecovery::user_facing("workspace: Linear team `OBI` has no repo mapping"),
+            "Linear team `OBI` has no repo mapping",
+        );
+        // The wrapped shape the no-checklist route delivers.
+        assert_eq!(
+            WorktreeRecovery::user_facing(
+                "worktree: re-checkout of /tmp/w failed — spawn aborted, retry once the \
+                 cause is fixed: worktree: checkout_at: branch 'feat' is already checked \
+                 out at /tmp/other — refusing to take it"
+            ),
+            "re-checkout of /tmp/w failed — spawn aborted, retry once the cause is \
+             fixed: branch 'feat' is already checked out at /tmp/other — refusing to take it",
+        );
+        assert_eq!(
+            WorktreeRecovery::user_facing("git command failed: fatal: not a repository"),
+            "git command failed: not a repository",
+            "a clause with spaces is the message; a bare severity word is not",
+        );
+        assert_eq!(
+            WorktreeRecovery::user_facing("I/O error: No such file or directory (os error 2)"),
+            "I/O error: No such file or directory (os error 2)",
+        );
+        assert_eq!(
+            WorktreeRecovery::user_facing("could not read from remote"),
+            "could not read from remote",
+        );
+        // A one-word fact is a fact, not a chain.
+        assert_eq!(WorktreeRecovery::user_facing("boom"), "boom");
+        assert_eq!(WorktreeRecovery::user_facing("worktree: boom"), "boom");
+        assert_eq!(WorktreeRecovery::user_facing(""), "");
     }
 
     /// #1572: the mismatch modal's `a adopt` needs the branch the checkout

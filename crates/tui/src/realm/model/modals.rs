@@ -3992,6 +3992,7 @@ impl<T: TerminalAdapter> Model<T> {
         }
         // A new spawn supersedes any stale checklist (e.g. the previous
         // one errored and the user re-pressed `w`).
+        let pr_head = self.pr_head_for(&session_key);
         let state = match self.worktree_progress.as_mut() {
             Some(s) if s.session_key == session_key => s,
             _ => {
@@ -3999,6 +4000,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.worktree_progress.as_mut().expect("just assigned Some")
             }
         };
+        state.set_pr_head(pr_head);
         state.apply(step, status);
         let modal = WorktreeProgress::from_state(state);
         self.modal_stack.retain(|id| id != &Id::WorktreeProgress);
@@ -4181,7 +4183,9 @@ impl<T: TerminalAdapter> Model<T> {
             return true;
         }
         let step = lazybox_ipc::WorktreeRecovery::classify(message).failed_step();
+        let pr_head = self.pr_head_for(&session_key);
         let mut state = WorktreeProgressState::new(session_key);
+        state.set_pr_head(pr_head);
         state.apply(
             step,
             lazybox_ipc::WorktreeStepStatus::Failed(message.to_string()),
@@ -4195,6 +4199,16 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::WorktreeProgress, modal);
         self.redraw = true;
         true
+    }
+
+    /// The head branch of `session_key`'s PR, when the client knows the
+    /// workspace and it has one — what a branch-collision modal names as
+    /// the branch the PR keeps tracking.
+    fn pr_head_for(&self, session_key: &lazybox_core::SessionKey) -> Option<String> {
+        self.sidebar
+            .workspace_by_key(session_key)
+            .and_then(|ws| ws.pr.as_ref())
+            .and_then(|pr| pr.branch.clone())
     }
 
     /// `r` on a failed `WorktreeProgress` modal: re-issue the spawn that

@@ -1627,7 +1627,24 @@ pub async fn handle_adopt_worktree_branch(
     };
     match adoptable_branch_at(config, &workspace, spawn.session_id, on_main).await {
         Ok((target, actual)) => {
-            adopt_drifted_branch(config, &workspace_key, &target, &actual).await;
+            // A workspace with no session yet resolves its next spawn's
+            // branch from the PR head, so rewriting the record alone would
+            // send the spawn straight back into the same collision. The
+            // adopted checkout becomes the workspace's session instead —
+            // and because that record is what the spawn below relies on,
+            // a store failure here is a refusal, not a warning.
+            if let Err(reason) = adopt_drifted_branch(
+                config,
+                &workspace_key,
+                &target,
+                &actual,
+                Some(session_kind_from_terminal(&spawn.kind)),
+            )
+            .await
+            {
+                refuse_adoption(config, reason);
+                return;
+            }
         }
         Err(reason) => {
             refuse_adoption(config, reason);
@@ -4793,7 +4810,9 @@ async fn provision_worktree(
     // is what gates the second — a branch-agnostic shell reuses a drifted
     // tree without rewriting the record it reuses.
     if adopt_drift && let lazybox_git_ops::BranchDrift::Drifted { actual } = &worktree.drift {
-        adopt_drifted_branch(config, &workspace.key, target, actual).await;
+        // Best-effort here: the checkout is already usable, and the next
+        // provision re-adopts the same branch.
+        let _ = adopt_drifted_branch(config, &workspace.key, target, actual, None).await;
     }
     Ok(worktree.branch)
 }
@@ -4802,14 +4821,21 @@ async fn provision_worktree(
 /// sits on (#1572). The mirror of the issue→PR reconciliation #787 does:
 /// there the upstream head is authoritative, here — a workspace whose
 /// expected branch is a name lazybox derived — the on-disk branch is.
-/// Best-effort: the checkout is already usable, so a store failure must
-/// not fail the spawn; the next provision re-adopts the same branch.
+///
+/// `record_as` adds a session for `target` when none is recorded there,
+/// so a workspace that had no session before the adopt reuses this
+/// checkout on its next spawn instead of re-provisioning at the same path.
+/// The returned error names why the records could not be written; the
+/// caller decides whether that is fatal (an explicit `a`, whose spawn
+/// depends on the record) or not (the provision path, whose checkout is
+/// already usable and re-adopts next time).
 async fn adopt_drifted_branch(
     config: &ServerConfig,
     workspace_key: &WorkspaceKey,
     target: &std::path::Path,
     actual: &str,
-) {
+    record_as: Option<SessionKind>,
+) -> Result<(), String> {
     let _guard = config.lock_workspace(workspace_key.as_str()).await;
     let mut workspace = match load_workspace(config, workspace_key) {
         Ok(workspace) => workspace,
@@ -4818,22 +4844,43 @@ async fn adopt_drifted_branch(
                 workspace = workspace_key.as_str(),
                 "could not reload the workspace to adopt its drifted branch: {error}",
             );
-            return;
+            return Err(format!(
+                "the workspace could not be reloaded to record the adopted branch: {error}"
+            ));
         }
     };
     let from = workspace.branch.clone();
     workspace.branch = actual.to_string();
+    let mut recorded = false;
     for session in &mut workspace.sessions {
         if paths_match(&session.worktree_path, target) {
             session.worktree_branch = Some(actual.to_string());
+            recorded = true;
         }
     }
+    let created = match record_as {
+        Some(kind) if !recorded => {
+            let mut session = Session::new(
+                workspace_key.clone(),
+                kind,
+                target.to_path_buf(),
+                Utc::now(),
+            );
+            session.worktree_branch = Some(actual.to_string());
+            workspace.add_session(session.clone());
+            Some(session)
+        }
+        _ => None,
+    };
     if let Err(error) = persist_and_broadcast(config, &workspace).await {
         tracing::warn!(
             workspace = workspace_key.as_str(),
             "could not persist the adopted branch: {error}",
         );
-        return;
+        return Err(format!("could not persist the adopted branch: {error}"));
+    }
+    if let Some(session) = created {
+        let _ = config.bus.send(Event::SessionCreated(Box::new(session)));
     }
     tracing::info!(
         workspace = workspace_key.as_str(),
@@ -4845,6 +4892,7 @@ async fn adopt_drifted_branch(
         title: "Branch adopted".to_string(),
         body: format!("adopted branch {actual} (the agent switched to it)"),
     });
+    Ok(())
 }
 
 async fn apply_worktree_setup(
@@ -20779,6 +20827,18 @@ mod tests {
     /// A repo bare-cloned into `config`'s worktree root plus a worktree
     /// provisioned at `<root>/wt` on `branch`, for the branch-drift tests.
     async fn drifted_worktree_fixture(root: &Path, config: &ServerConfig, branch: &str) -> PathBuf {
+        let wt = root.join("wt");
+        drifted_worktree_fixture_at(root, config, &wt, branch).await
+    }
+
+    /// [`drifted_worktree_fixture`] with the worktree provisioned at an
+    /// exact path — the one a spawn would resolve for its workspace.
+    async fn drifted_worktree_fixture_at(
+        root: &Path,
+        config: &ServerConfig,
+        wt: &Path,
+        branch: &str,
+    ) -> PathBuf {
         let upstream = root.join("upstream");
         std::fs::create_dir_all(&upstream).unwrap();
         test_git(&upstream, &["init", "-q", "-b", "main"]);
@@ -20800,11 +20860,11 @@ mod tests {
             ],
         );
 
-        let wt = root.join("wt");
-        mgr.checkout_new_branch_at(&wt, "acme", "core", branch, "main")
+        std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        mgr.checkout_new_branch_at(wt, "acme", "core", branch, "main")
             .await
             .expect("provision worktree");
-        wt
+        wt.to_path_buf()
     }
 
     fn head_branch(wt: &Path) -> String {
@@ -21449,6 +21509,295 @@ mod tests {
             head_branch(&wt),
             "main",
             "and it must not touch the checkout either",
+        );
+    }
+
+    /// A PR workspace with no recorded session whose slug path already
+    /// holds a checkout on another branch with uncommitted tracked work —
+    /// the shape behind #1755.
+    async fn session_less_pr_workspace_with_drifted_checkout(
+        root: &Path,
+        config: &ServerConfig,
+    ) -> (Workspace, PathBuf) {
+        let mut task = titled_task("github", "acme/core#74", "add reusable tools");
+        task.repo = Some("acme/core".into());
+        task.kind = Some(lazybox_core::TaskKind::Pr);
+        task.branch = Some("feat/document-rpc-tools".into());
+        let ws = Workspace::from_task(task, Utc::now());
+        assert!(ws.sessions.is_empty(), "the row has no session yet");
+        persist_and_broadcast(config, &ws).await.unwrap();
+
+        let target = worktree_path_for_session_under(&ws, 0, config.worktree_root_path());
+        let wt =
+            drifted_worktree_fixture_at(root, config, &target, "feat/document-rpc-tools").await;
+        test_git(&wt, &["switch", "-q", "-c", "fix/document-qa-review"]);
+        std::fs::write(wt.join("README.md"), "review fixes in progress\n").unwrap();
+        (ws, wt)
+    }
+
+    fn bak_siblings(dir: &Path) -> Vec<String> {
+        let mut siblings = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".bak-"))
+            .collect::<Vec<_>>();
+        siblings.sort();
+        siblings
+    }
+
+    /// #1755: `a` on a PR workspace that had no recorded session rewrote
+    /// `workspace.branch` and re-spawned — but a session-less PR spawn
+    /// resolves its branch from the PR head, so the spawn hit the very
+    /// same mismatch and the modal came straight back. Adopting has to
+    /// record the checkout as the workspace's session, so the spawn that
+    /// follows reuses it on the adopted branch.
+    #[tokio::test]
+    async fn adopt_command_records_the_checkout_for_a_session_less_pr_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let (ws, wt) = session_less_pr_workspace_with_drifted_checkout(root.path(), &config).await;
+        let session_key = SessionKey::new(ws.key.as_str());
+        let kind = TerminalKind::Agent("claude".into());
+
+        // The PR head stays authoritative and the tree is dirty, so the
+        // spawn refuses — this is the modal the user is looking at.
+        let error = resolve_or_create_session(
+            &config,
+            &session_key,
+            None,
+            &kind,
+            false,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect_err("a dirty checkout on another branch refuses the PR spawn");
+        assert_eq!(
+            lazybox_ipc::WorktreeRecovery::classify(&error.to_string()),
+            lazybox_ipc::WorktreeRecovery::BranchMismatch,
+            "{error}"
+        );
+
+        handle_adopt_worktree_branch(
+            &config,
+            lazybox_ipc::SpawnFallback {
+                session_key: session_key.clone(),
+                session_id: None,
+                client_request_id: None,
+                kind: kind.clone(),
+                cwd: None,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            },
+            None,
+            false,
+        )
+        .await;
+
+        let reloaded = load_workspace(&config, &ws.key).expect("reload");
+        assert_eq!(reloaded.branch, "fix/document-qa-review");
+        let session = reloaded
+            .sessions
+            .iter()
+            .find(|s| s.worktree_path == wt)
+            .expect("adopting records the checkout as this workspace's session");
+        assert_eq!(
+            session.worktree_branch.as_deref(),
+            Some("fix/document-qa-review"),
+            "the session is recorded on the adopted branch",
+        );
+
+        let (path, _id, _on_main) = resolve_or_create_session(
+            &config,
+            &session_key,
+            None,
+            &kind,
+            false,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("the spawn after adopt reuses the adopted checkout");
+        assert_eq!(path, wt);
+        assert_eq!(head_branch(&wt), "fix/document-qa-review");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("README.md")).unwrap(),
+            "review fixes in progress\n",
+            "the uncommitted work is untouched",
+        );
+        assert!(
+            bak_siblings(wt.parent().unwrap()).is_empty(),
+            "adopt moves nothing aside"
+        );
+    }
+
+    /// A store that accepts every write until `reject` is flipped, then
+    /// refuses them — a stand-in for SQLite failing under the adopt.
+    struct RejectingSaveStore {
+        inner: lazybox_store::MemoryStore,
+        reject: std::sync::atomic::AtomicBool,
+    }
+
+    impl RejectingSaveStore {
+        fn new() -> Self {
+            Self {
+                inner: lazybox_store::MemoryStore::new(),
+                reject: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl lazybox_store::Store for RejectingSaveStore {
+        fn apply_batch(
+            &self,
+            mutations: &[lazybox_store::StoreMutation],
+        ) -> Result<(), lazybox_store::StoreError> {
+            self.inner.apply_batch(mutations)
+        }
+
+        fn get_kv(&self, key: &str) -> Result<Option<String>, lazybox_store::StoreError> {
+            self.inner.get_kv(key)
+        }
+
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), lazybox_store::StoreError> {
+            if self.reject.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(lazybox_store::StoreError::Backend(
+                    "injected save failure".into(),
+                ));
+            }
+            self.inner.set_kv(key, value)
+        }
+
+        fn delete_kv(&self, key: &str) -> Result<(), lazybox_store::StoreError> {
+            self.inner.delete_kv(key)
+        }
+    }
+
+    /// The session record `a` writes is what the spawn after it relies
+    /// on, so a store failure there must refuse the adopt visibly rather
+    /// than warn and spawn anyway — which would re-run the same collision
+    /// and remount the same modal, the exact "a does nothing" of #1755.
+    #[tokio::test]
+    async fn adopt_command_refuses_when_the_record_cannot_be_persisted() {
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(RejectingSaveStore::new());
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store.clone(),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let (ws, wt) = session_less_pr_workspace_with_drifted_checkout(root.path(), &config).await;
+        let session_key = SessionKey::new(ws.key.as_str());
+        let mut events = config.bus.subscribe();
+        store
+            .reject
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        handle_adopt_worktree_branch(
+            &config,
+            lazybox_ipc::SpawnFallback {
+                session_key: session_key.clone(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            },
+            None,
+            false,
+        )
+        .await;
+
+        let mut refused = None;
+        let mut spawned = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                Event::ProviderError {
+                    source, message, ..
+                } if source == "spawn:adopt" => refused = Some(message),
+                Event::WorktreeProgress { .. } | Event::TerminalSpawned { .. } => spawned = true,
+                _ => {}
+            }
+        }
+        let refused = refused.expect("a failed record write refuses the adopt visibly");
+        assert!(
+            refused.contains("persist"),
+            "the refusal names the store failure: {refused}"
+        );
+        assert!(!spawned, "no spawn runs on a record that was never written");
+
+        let reloaded = load_workspace(&config, &ws.key).expect("reload");
+        assert!(reloaded.sessions.is_empty(), "nothing was recorded");
+        assert_eq!(reloaded.branch, "feat/document-rpc-tools");
+        assert_eq!(
+            head_branch(&wt),
+            "fix/document-qa-review",
+            "the checkout is untouched",
+        );
+    }
+
+    /// #1755's other key: `r` on the same session-less PR workspace moves
+    /// the leftover checkout aside and lands a fresh worktree on the PR
+    /// head, with a session recorded for it.
+    #[tokio::test]
+    async fn recreate_command_moves_a_session_less_pr_checkout_aside_and_reprovisions() {
+        let root = tempfile::tempdir().unwrap();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let (ws, wt) = session_less_pr_workspace_with_drifted_checkout(root.path(), &config).await;
+        let session_key = SessionKey::new(ws.key.as_str());
+        let kind = TerminalKind::Agent("claude".into());
+
+        handle_recreate_worktree(
+            &config,
+            lazybox_ipc::SpawnFallback {
+                session_key: session_key.clone(),
+                session_id: None,
+                client_request_id: None,
+                kind: kind.clone(),
+                cwd: None,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            },
+            None,
+            false,
+            None,
+        )
+        .await;
+
+        let siblings = bak_siblings(wt.parent().unwrap());
+        assert_eq!(
+            siblings.len(),
+            1,
+            "the leftover is preserved aside: {siblings:?}"
+        );
+        let preserved = wt.parent().unwrap().join(&siblings[0]);
+        assert_eq!(
+            std::fs::read_to_string(preserved.join("README.md")).unwrap(),
+            "review fixes in progress\n",
+            "the uncommitted work rides along in the .bak copy",
+        );
+        assert_eq!(
+            head_branch(&wt),
+            "feat/document-rpc-tools",
+            "the fresh worktree is on the PR head",
+        );
+        let reloaded = load_workspace(&config, &ws.key).expect("reload");
+        let session = reloaded
+            .sessions
+            .iter()
+            .find(|s| s.worktree_path == wt)
+            .expect("the recreated worktree is recorded as the workspace's session");
+        assert_eq!(
+            session.worktree_branch.as_deref(),
+            Some("feat/document-rpc-tools")
         );
     }
 

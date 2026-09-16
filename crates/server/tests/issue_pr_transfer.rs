@@ -19,6 +19,8 @@
 //!   (d) the session survives a daemon restart — `recover_sessions`
 //!       reattaches it to the PR workspace with scrollback intact.
 
+mod common;
+
 use lazybox_core::{SessionKind, Task, TaskId, Workspace, WorkspaceKey};
 use lazybox_ipc::{Command, Event, TerminalKind, channel};
 use lazybox_server::backend::SessionBackend;
@@ -58,7 +60,7 @@ impl IsolatedConfigHome {
         let git_global = tmp.path().join("gitconfig");
         std::fs::write(
             &git_global,
-            "[fetch]\n\tprune = true\n[user]\n\temail = t@example.com\n\tname = Tester\n[commit]\n\tgpgsign = false\n",
+            "[fetch]\n\tprune = true\n[user]\n\temail = t@example.com\n\tname = Tester\n[commit]\n\tgpgsign = false\n[maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n",
         )
         .unwrap();
         // SAFETY: mutation is serialized by ENV_LOCK for this binary;

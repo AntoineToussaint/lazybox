@@ -21,6 +21,8 @@
 //!   - The scroll owner is the ONLY caller of `scroll_viewport`
 //!     (source-level guard, so a new raw offset poke fails the build).
 
+mod common;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazybox_core::{SessionKey, SessionLayout, TileTree};
 use lazybox_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};

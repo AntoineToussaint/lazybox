@@ -4,6 +4,8 @@
 //! session must land in a real git repo on its lazybox branch, and a
 //! re-provision must never wipe the user's work.
 
+mod common;
+
 use lazybox_git_ops::{CheckoutPhase, WorktreeManager};
 use std::path::Path;
 use std::process::Command;

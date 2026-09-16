@@ -2,6 +2,8 @@
 //! registers, a client connects by box-id, and bytes flow both ways
 //! through the relay — which only ever splices opaque bytes.
 
+mod common;
+
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

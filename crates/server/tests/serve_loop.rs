@@ -2,6 +2,8 @@
 //! `ipc::channel::pair` — zero serialization, zero sockets — so tests
 //! are fast and deterministic.
 
+mod common;
+
 use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRunRequestId,
     AgentRuntimeMode, Command, Event, HookEvent, HookEventKind, PrincipalId,

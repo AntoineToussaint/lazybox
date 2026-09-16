@@ -18,6 +18,8 @@
 //!   `LAZYBOX_E2E_LIVE_AGENTS=1` plus `--run-ignored`, because they need
 //!   an installed, authenticated CLI and consume real tokens.
 
+mod common;
+
 use lazybox_ipc::{Command, Event, TerminalInputIntent, TerminalKind, channel};
 use lazybox_server::backend::SessionBackend;
 use lazybox_server::backend::TmuxBackend;
@@ -96,6 +98,7 @@ impl Drop for IsolatedConfigHome {
 fn git(cwd: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .current_dir(cwd)
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")

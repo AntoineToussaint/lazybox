@@ -3,6 +3,8 @@
 //! The owner publishes {pid, url, token}; the attacher reads discovery
 //! and drives the JSON `/v1` gateway over real TCP with the bearer.
 
+mod common;
+
 use std::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

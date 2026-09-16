@@ -3,6 +3,8 @@
 //! the Subscribe → Snapshot contract works end-to-end — just like
 //! the in-process `channel::pair` path, but over a real Unix socket.
 
+mod common;
+
 use lazybox_ipc::{Command, Event, socket, transport};
 use lazybox_server::ServerConfig;
 use lazybox_server::backend::SessionBackend;

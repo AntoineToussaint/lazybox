@@ -1,6 +1,8 @@
 //! TerminalStack tests: event-driven state machine, tab management,
 //! key → Write routing, ANSI strip, render.
 
+mod common;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazybox_core::SessionKey;
 use lazybox_ipc::{

@@ -4,6 +4,8 @@
 //! curl. Tests drive synthetic output via `MockBackend::emit` and end
 //! sessions via `finish`.
 
+mod common;
+
 use lazybox_ipc::{Command, Event, TerminalInputIntent, TerminalKind, channel};
 use lazybox_server::backend::{MockBackend, SessionBackend};
 use lazybox_server::spawn_handler::SpawnOptions;

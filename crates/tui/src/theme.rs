@@ -207,6 +207,27 @@ pub fn cycle_next() -> &'static str {
     reg[next].name
 }
 
+/// Serializes tests around the process-global active theme.
+///
+/// `ACTIVE_THEME_IDX` is one value for the whole test binary, and the
+/// activity cache key (`RightPane::activity_buffer_key`) folds the theme
+/// name in — so a test that briefly switches themes on one thread makes a
+/// render on another thread rebuild, and a rebuild-count assertion fails
+/// with nothing in its own body to explain it (#1751). Every test that
+/// switches the theme holds this for its whole body, as does every test
+/// that asserts render-cache reuse; `theme_switching_tests_take_the_lock`
+/// scans for both. It does not cover a plain render on a sibling thread:
+/// a switcher must therefore also switch to a theme with the *same
+/// colors* (a derived copy, the already-current theme) or not switch at
+/// all — sample the other theme's colors through `pill_for_tag_in` and
+/// friends instead — because `Theme` is colors only, and a render can only
+/// observe a switch through them.
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Switch to a theme by exact name match. Returns true on hit, false
 /// when no theme has that name (caller should report the error).
 /// Used by the persisted "remember last theme" path on startup.
@@ -420,14 +441,111 @@ mod tests {
 
     #[test]
     fn registered_theme_appears_in_list_and_is_settable() {
+        let _theme = crate::theme::test_lock();
+        let prev = current().name;
         let derived = LAZYBOX_DARK.derive("test_registered_unique").build();
         register(derived);
         let names: Vec<_> = list().iter().map(|t| t.name).collect();
         assert!(names.contains(&"test_registered_unique"));
         assert!(set_by_name("test_registered_unique"));
         assert_eq!(current().name, "test_registered_unique");
-        // Restore default for other tests.
-        set_by_name("Lazybox Dark");
+        set_by_name(prev);
+    }
+
+    /// A theme switch that skips [`test_lock`] races every render on a
+    /// sibling thread, and the failure lands in that sibling — a
+    /// rebuild-count or snapshot assertion with nothing in its own body to
+    /// explain it. Scan the crate rather than trusting each new test to
+    /// remember: any *test function* that switches the active theme,
+    /// mounts the picker (which switches it to preview), or asserts on
+    /// render-cache reuse has to take the lock — per function, since one
+    /// locked test in a 280-test file must not vouch for the other 279.
+    #[test]
+    fn theme_switching_tests_take_the_lock() {
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let markers = [
+            "set_by_name(",
+            "cycle_next(",
+            "mount_theme_picker(",
+            "activity_rebuilds()",
+        ];
+        let mut unguarded = Vec::new();
+        for file in rust_sources(&src) {
+            let body = std::fs::read_to_string(&file).expect("read source");
+            // Only test code is held to the rule: a `tests.rs` is test code
+            // throughout, and elsewhere it starts at the inline
+            // `#[cfg(test)] mod … {` — not at a `cfg(test)` helper, which
+            // can sit above production switches like the picker's.
+            let test_code = if file.file_name().is_some_and(|name| name == "tests.rs") {
+                body.as_str()
+            } else {
+                let inline_test_module =
+                    body.match_indices("#[cfg(test)]\nmod ").find(|(at, _)| {
+                        body[*at..]
+                            .lines()
+                            .nth(1)
+                            .is_some_and(|decl| decl.trim_end().ends_with('{'))
+                    });
+                match inline_test_module {
+                    Some((at, _)) => &body[at..],
+                    None => continue,
+                }
+            };
+            for function in test_functions(test_code) {
+                // This scan names the markers it looks for; it holds no lock.
+                if function.contains("fn theme_switching_tests_take_the_lock") {
+                    continue;
+                }
+                let touches_theme = markers.iter().any(|needle| function.contains(needle));
+                if touches_theme && !function.contains("theme::test_lock()") {
+                    let name = function
+                        .lines()
+                        .find_map(|line| line.trim().strip_prefix("fn ")?.split('(').next())
+                        .unwrap_or("<unnamed>");
+                    unguarded.push(format!("{}::{name}", file.display()));
+                }
+            }
+        }
+        assert!(
+            unguarded.is_empty(),
+            "these tests switch or depend on the active theme without holding \
+             `crate::theme::test_lock()`: {unguarded:#?}"
+        );
+    }
+
+    /// Split test code at each `#[test]` / `#[tokio::test…]` attribute: one
+    /// piece per test function, its body running up to the next attribute.
+    /// Helpers between tests attach to the test above them, which is the
+    /// conservative side — a helper that switches the theme is flagged with
+    /// the nearest test rather than vouched for by a lock elsewhere.
+    fn test_functions(test_code: &str) -> Vec<&str> {
+        let mut starts: Vec<usize> = test_code
+            .match_indices("#[test]")
+            .chain(test_code.match_indices("#[tokio::test"))
+            .map(|(at, _)| at)
+            .collect();
+        starts.sort_unstable();
+        starts
+            .iter()
+            .enumerate()
+            .map(|(i, &at)| &test_code[at..starts.get(i + 1).copied().unwrap_or(test_code.len())])
+            .collect()
+    }
+
+    fn rust_sources(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(rust_sources(&path));
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
+        found
     }
 
     /// Approximate relative luminance (0 = black, 1 = white) of an RGB

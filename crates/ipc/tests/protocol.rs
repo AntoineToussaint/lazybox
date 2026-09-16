@@ -550,6 +550,7 @@ fn all_commands() -> Vec<Command> {
         },
         Command::RestartAgentAndContinue {
             terminal_id: TerminalId(41),
+            continue_work: true,
         },
         Command::UpsertEpic {
             record: lazybox_core::EpicRecord::new(

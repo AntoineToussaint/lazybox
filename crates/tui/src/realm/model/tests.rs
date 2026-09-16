@@ -5023,7 +5023,12 @@ snippets:
         let mut restarted: Vec<u64> = cmds
             .iter()
             .filter_map(|c| match c {
-                IpcCommand::RestartAgentAndContinue { terminal_id } => Some(terminal_id.0),
+                IpcCommand::RestartAgentAndContinue {
+                    terminal_id,
+                    // `a R` targets only panes it has proved are stuck, so it
+                    // must keep asking for the continuation that frees them.
+                    continue_work: true,
+                } => Some(terminal_id.0),
                 _ => None,
             })
             .collect();
@@ -5081,7 +5086,12 @@ snippets:
         let mut restarted: Vec<u64> = cmds
             .iter()
             .filter_map(|c| match c {
-                IpcCommand::RestartAgentAndContinue { terminal_id } => Some(terminal_id.0),
+                IpcCommand::RestartAgentAndContinue {
+                    terminal_id,
+                    // `a R` targets only panes it has proved are stuck, so it
+                    // must keep asking for the continuation that frees them.
+                    continue_work: true,
+                } => Some(terminal_id.0),
                 _ => None,
             })
             .collect();
@@ -5105,7 +5115,12 @@ snippets:
         let restarted_after: Vec<u64> = after
             .iter()
             .filter_map(|c| match c {
-                IpcCommand::RestartAgentAndContinue { terminal_id } => Some(terminal_id.0),
+                IpcCommand::RestartAgentAndContinue {
+                    terminal_id,
+                    // `a R` targets only panes it has proved are stuck, so it
+                    // must keep asking for the continuation that frees them.
+                    continue_work: true,
+                } => Some(terminal_id.0),
                 _ => None,
             })
             .collect();
@@ -31009,31 +31024,211 @@ mod follow_up_chain_tests {
         assert!(m.sidebar.focus_workspace_key(&key));
     }
 
-    #[test]
-    fn restart_leader_resumes_only_the_focused_codex_without_leaving_the_pane() {
-        for modifiers in [RealmMods::NONE, RealmMods::SHIFT] {
-            let (mut m, mut server) = model_with(vec![
-                (1, "local:a", TerminalKind::Agent("codex".into()), vec![]),
-                agent(2, "local:b", vec![]),
-            ]);
-            m.leader_target = Some(TerminalId(2));
-            while server.rx.try_recv().is_ok() {}
-            for key in [']', ']'] {
+    /// Drive `]]R` on terminal 1 in `state` and return what reached the
+    /// daemon. Shared by the restart-policy tests so each one differs only
+    /// in the agent state it puts the pane in.
+    fn restart_leader_in_state(
+        state: Option<lazybox_ipc::AgentState>,
+        presses: usize,
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        Vec<IpcCommand>,
+    ) {
+        let (mut m, mut server) = model_with(vec![
+            (1, "local:a", TerminalKind::Agent("codex".into()), vec![]),
+            agent(2, "local:b", vec![]),
+        ]);
+        if let Some(state) = state {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: SessionKey::from("local:a"),
+                terminal_id: TerminalId(1),
+                state,
+            });
+        }
+        while server.rx.try_recv().is_ok() {}
+        for _ in 0..presses {
+            for key in [']', ']', 'R'] {
                 m.dispatch_key(RealmKey::new(Key::Char(key), RealmMods::NONE));
             }
-            m.dispatch_key(RealmKey::new(Key::Char('R'), modifiers));
-            let commands: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok())
-                .filter(|cmd| !matches!(cmd, IpcCommand::RecordAction { .. }))
-                .collect();
-            assert!(matches!(
-                commands.as_slice(),
-                [IpcCommand::RestartAgentAndContinue {
-                    terminal_id: TerminalId(1)
-                }]
-            ));
+        }
+        let commands = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .filter(|cmd| !matches!(cmd, IpcCommand::RecordAction { .. }))
+            .collect();
+        (m, commands)
+    }
+
+    /// A blocked agent is what the restart was built for: it is stuck
+    /// mid-work on a credential the process will never re-read, so the
+    /// continuation that frees it must ride along.
+    #[test]
+    fn restart_leader_continues_a_blocked_agent() {
+        for state in [
+            lazybox_ipc::AgentState::LimitReached,
+            lazybox_ipc::AgentState::AwaitingReset,
+        ] {
+            let (m, commands) = restart_leader_in_state(Some(state), 1);
+            assert!(
+                matches!(
+                    commands.as_slice(),
+                    [IpcCommand::RestartAgentAndContinue {
+                        terminal_id: TerminalId(1),
+                        continue_work: true,
+                    }]
+                ),
+                "{state:?}: expected a continuing restart, got {commands:?}"
+            );
             assert_eq!(m.focus, PaneFocus::Terminals);
             assert!(!m.terminal_leader_pending());
         }
+    }
+
+    /// An agent at rest gets the credential swap WITHOUT the nudge. The
+    /// conversation was finished; continuing it would start a turn the user
+    /// never asked for — with `git` / `gh` write access — when all they
+    /// asked for was fresh credentials.
+    #[test]
+    fn restart_leader_does_not_resume_work_on_an_agent_at_rest() {
+        for state in [lazybox_ipc::AgentState::Idle, lazybox_ipc::AgentState::Done] {
+            let (_m, commands) = restart_leader_in_state(Some(state), 1);
+            assert!(
+                matches!(
+                    commands.as_slice(),
+                    [IpcCommand::RestartAgentAndContinue {
+                        terminal_id: TerminalId(1),
+                        continue_work: false,
+                    }]
+                ),
+                "{state:?}: a finished conversation must not be nudged, got {commands:?}"
+            );
+        }
+    }
+
+    /// The regression this guard exists for: a kill destroys the in-flight
+    /// turn (the streaming response, the running tool call, a half-applied
+    /// multi-file edit, the pending permission question) and `--resume`
+    /// restores the conversation but NOT the turn — so the pane comes back
+    /// looking healthy with the work silently gone.
+    ///
+    /// An agent that has never reported is deliberately NOT in this list: the
+    /// terminal stack folds a missing state to `Idle`, and a pane that has
+    /// actually worked resolves to `Working` / `Done` and never back to
+    /// `Idle` — so "unreported" restarts without a continuation and loses
+    /// nothing, while real in-flight work lands in `Working` and is refused
+    /// here.
+    #[test]
+    fn restart_leader_refuses_to_kill_a_mid_flight_agent() {
+        for state in [
+            lazybox_ipc::AgentState::Working,
+            lazybox_ipc::AgentState::InputNeeded,
+            lazybox_ipc::AgentState::CreditExhausted,
+        ] {
+            let (m, commands) = restart_leader_in_state(Some(state), 1);
+            assert!(
+                !commands
+                    .iter()
+                    .any(|c| matches!(c, IpcCommand::RestartAgentAndContinue { .. })),
+                "{state:?}: a mid-flight agent must not be restarted, got {commands:?}"
+            );
+            assert!(
+                notice(&m).contains("not restarting"),
+                "{state:?}: expected an explanation, got {:?}",
+                notice(&m)
+            );
+        }
+    }
+
+    /// An exited pane has its own restart path, which sets `resume_in_flight`
+    /// so a close racing the respawn can't let it land as a fresh
+    /// unasked-for agent, and routes an auth-failed pane to re-authentication
+    /// instead of a resume that would fail on the same dead credential.
+    /// Neither is expressible through `RestartAgentAndContinue`.
+    #[test]
+    fn restart_leader_defers_an_exited_pane_to_its_own_restart() {
+        let (m, commands) =
+            restart_leader_in_state(Some(lazybox_ipc::AgentState::Exited { code: Some(1) }), 1);
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, IpcCommand::RestartAgentAndContinue { .. })),
+            "an exited pane must use its own restart, got {commands:?}"
+        );
+        assert!(notice(&m).contains("already exited"), "{:?}", notice(&m));
+    }
+
+    /// An auth-failed pane that has already DIED must still defer to the
+    /// pane's own restart, which routes it to re-authentication. Treating
+    /// "signed out" as blocked-and-restartable first would send it a resume
+    /// that fails again on the same dead credential — and skip the
+    /// `resume_in_flight` guard besides.
+    #[test]
+    fn restart_leader_defers_an_exited_pane_even_when_it_is_signed_out() {
+        let (mut m, mut server) = model_with(vec![
+            (1, "local:a", TerminalKind::Agent("codex".into()), vec![]),
+            agent(2, "local:b", vec![]),
+        ]);
+        m.handle_daemon_event(IpcEvent::AgentAuthRequired {
+            terminal_id: TerminalId(1),
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            reason: "signed out".into(),
+            other_session_count: 0,
+        });
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: SessionKey::from("local:a"),
+            terminal_id: TerminalId(1),
+            state: lazybox_ipc::AgentState::Exited { code: Some(1) },
+        });
+        while server.rx.try_recv().is_ok() {}
+        for key in [']', ']', 'R'] {
+            m.dispatch_key(RealmKey::new(Key::Char(key), RealmMods::NONE));
+        }
+        let commands: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, IpcCommand::RestartAgentAndContinue { .. })),
+            "a dead signed-out pane needs re-authentication, not a resume: {commands:?}"
+        );
+        assert!(notice(&m).contains("already exited"), "{:?}", notice(&m));
+    }
+
+    /// The daemon SERIALIZES the destructive operations rather than
+    /// coalescing them, so a second command does not merge into the first —
+    /// it queues behind it and kills the agent the first one just respawned,
+    /// discarding its continuation. `]]R` hangs off a leader the user is
+    /// already trained to double-tap, so the stutter is expected input.
+    #[test]
+    fn restart_leader_swallows_a_repeat_while_one_is_in_flight() {
+        let (m, commands) = restart_leader_in_state(Some(lazybox_ipc::AgentState::Done), 2);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| matches!(c, IpcCommand::RestartAgentAndContinue { .. }))
+                .count(),
+            1,
+            "a double press must not kill the freshly respawned agent: {commands:?}"
+        );
+        assert!(
+            notice(&m).contains("already restarting"),
+            "{:?}",
+            notice(&m)
+        );
+    }
+
+    /// ...and the guard releases once the daemon answers, so the key does
+    /// not go inert for the rest of the session.
+    #[test]
+    fn restart_leader_rearms_once_the_daemon_replaces_the_pane() {
+        let (mut m, _) = restart_leader_in_state(Some(lazybox_ipc::AgentState::Done), 1);
+        assert!(m.restart_in_flight.contains(&TerminalId(1)));
+        m.handle_daemon_event(IpcEvent::CommandRejected {
+            command: "RestartAgentAndContinue".into(),
+            message: "this agent pane has no resumable launch metadata".into(),
+        });
+        assert!(
+            m.restart_in_flight.is_empty(),
+            "a refused restart must re-arm the key"
+        );
     }
 
     #[test]
@@ -31048,6 +31243,44 @@ mod follow_up_chain_tests {
                 .any(|cmd| matches!(cmd, IpcCommand::RestartAgentAndContinue { .. }))
         );
         assert!(notice(&m).contains("no focused agent"));
+    }
+
+    /// `Shift-R` and a bare `R` are the same chord — `from_key` accepts both
+    /// encodings — so the destructive command must behave identically under
+    /// either, rather than one of them silently falling through to a cancel.
+    #[test]
+    fn restart_leader_accepts_both_shift_encodings() {
+        for modifiers in [RealmMods::NONE, RealmMods::SHIFT] {
+            let (mut m, mut server) = model_with(vec![
+                (1, "local:a", TerminalKind::Agent("codex".into()), vec![]),
+                agent(2, "local:b", vec![]),
+            ]);
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: SessionKey::from("local:a"),
+                terminal_id: TerminalId(1),
+                state: lazybox_ipc::AgentState::Done,
+            });
+            while server.rx.try_recv().is_ok() {}
+            for key in [']', ']'] {
+                m.dispatch_key(RealmKey::new(Key::Char(key), RealmMods::NONE));
+            }
+            m.dispatch_key(RealmKey::new(Key::Char('R'), modifiers));
+            let commands: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok())
+                .filter(|cmd| !matches!(cmd, IpcCommand::RecordAction { .. }))
+                .collect();
+            assert!(
+                matches!(
+                    commands.as_slice(),
+                    [IpcCommand::RestartAgentAndContinue {
+                        terminal_id: TerminalId(1),
+                        continue_work: false,
+                    }]
+                ),
+                "{modifiers:?}: got {commands:?}"
+            );
+            assert_eq!(m.focus, PaneFocus::Terminals);
+            assert!(!m.terminal_leader_pending());
+        }
     }
 
     #[test]

@@ -2123,6 +2123,19 @@ pub struct Model<T: TerminalAdapter> {
     /// does for a rate-limited agent. Without this set the one action that
     /// unsticks them can't see them.
     auth_failed_terminals: std::collections::HashSet<lazybox_ipc::TerminalId>,
+    /// Terminals with a `]]R` restart already sent and not yet answered by
+    /// the daemon's replacement pane.
+    ///
+    /// `RestartAgentAndContinue` is a kill+respawn, and the daemon's
+    /// `lock_operation` *serializes* the destructive operations rather than
+    /// coalescing them — so a second command for the same terminal does not
+    /// merge into the first, it queues behind it and kills the process the
+    /// first one just brought up, discarding its continuation. `]]R` sits
+    /// behind a leader the user is already trained to double-tap (`]]`), so
+    /// the stutter is the expected input, not a rare one. Cleared when the
+    /// daemon publishes the replacement (`TerminalReplaced`) or the pane
+    /// goes away, exactly like `TerminalStack::resume_in_flight`.
+    restart_in_flight: std::collections::HashSet<lazybox_ipc::TerminalId>,
     /// Async half of `x f` after the role picker resolves. Correlated to
     /// one structured run by `request_id`, then retained while the source
     /// PTY closes and the fresh target spawns.
@@ -2848,6 +2861,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_hopper_action: None,
             auth_prompt_queue: std::collections::VecDeque::new(),
             auth_failed_terminals: std::collections::HashSet::new(),
+            restart_in_flight: std::collections::HashSet::new(),
             conversion: None,
             last_reply_body: None,
             awaiting_repo_labels: None,

@@ -70,7 +70,7 @@ pub(crate) async fn run_io_router(
             | Command::DeliverSnippet { terminal_id, .. }
             | Command::RecoverAgentCredit { terminal_id, .. }
             | Command::ResumeAgent { terminal_id }
-            | Command::RestartAgentAndContinue { terminal_id }
+            | Command::RestartAgentAndContinue { terminal_id, .. }
             | Command::ReauthenticateAgent { terminal_id, .. }
             | Command::CancelAgentReauthentication { terminal_id } => *terminal_id,
             other => {
@@ -313,8 +313,9 @@ async fn run_io_lane(
             Command::ResumeAgent { .. } => {
                 crate::agent_auth::resume_agent(&config, terminal_id).await;
             }
-            Command::RestartAgentAndContinue { .. } => {
-                crate::agent_auth::restart_agent_and_continue(&config, terminal_id).await;
+            Command::RestartAgentAndContinue { continue_work, .. } => {
+                crate::agent_auth::restart_agent_and_continue(&config, terminal_id, continue_work)
+                    .await;
             }
             Command::ReauthenticateAgent { .. } => {
                 crate::agent_auth::start_reauthentication(
@@ -726,7 +727,10 @@ mod tests {
             let router = tokio::spawn(run_io_router(config.clone(), event_tx, command_rx));
 
             command_tx
-                .send(Command::RestartAgentAndContinue { terminal_id })
+                .send(Command::RestartAgentAndContinue {
+                    terminal_id,
+                    continue_work: true,
+                })
                 .await
                 .expect("router open");
 

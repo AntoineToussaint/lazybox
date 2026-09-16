@@ -2260,6 +2260,29 @@ impl<T: TerminalAdapter> Model<T> {
         }
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
+        // Release the `]]R` repeat guard the moment the daemon answers for
+        // that pane — the replacement landed, the restart was refused, or
+        // the pane died. Matched unconditionally (not inside the
+        // `authenticating: false` arm below) because every one of those
+        // outcomes ends the in-flight window, and a guard that outlived it
+        // would make the key inert until the client restarted.
+        match &event {
+            IpcEvent::TerminalReplaced {
+                old_terminal_id, ..
+            } => {
+                self.restart_in_flight.remove(old_terminal_id);
+            }
+            IpcEvent::TerminalExited { terminal_id, .. } => {
+                self.restart_in_flight.remove(terminal_id);
+            }
+            IpcEvent::CommandRejected { command, .. } if command == "RestartAgentAndContinue" => {
+                // The rejection names no terminal, so clear the whole set:
+                // at most one restart is armed at a time in practice, and a
+                // stale guard is strictly worse than an early release.
+                self.restart_in_flight.clear();
+            }
+            _ => {}
+        }
         match &event {
             IpcEvent::AgentAuthRequired {
                 terminal_id,

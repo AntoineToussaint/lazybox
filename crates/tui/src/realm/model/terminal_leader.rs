@@ -102,13 +102,6 @@ struct FixedCommandSpec {
 
 const FIXED_COMMANDS: &[FixedCommandSpec] = &[
     FixedCommandSpec {
-        key: 'R',
-        command: LeaderCmd::RestartAgent,
-        menu_label: "restart agent",
-        reference: "Restart the focused agent with fresh credentials, resume the same conversation in this pane, and continue",
-        sidebar: false,
-    },
-    FixedCommandSpec {
         key: 's',
         command: LeaderCmd::Snippets,
         menu_label: "snippets",
@@ -128,6 +121,19 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         menu_label: "recall prompt",
         reference: "Restore the in-flight draft, or the last submitted agent prompt, without sending it",
         sidebar: true,
+    },
+    // Sits directly after `recall prompt`, its lowercase twin, so the two
+    // credential/conversation commands read together — and deliberately NOT
+    // at index 0. The popup's first `j` lands the highlight on row 0, so the
+    // head row is what `]]`+`j`+`Enter` fires (#343); a kill+respawn is the
+    // wrong thing to leave under a muscle-memory keystroke that used to open
+    // the snippet picker.
+    FixedCommandSpec {
+        key: 'R',
+        command: LeaderCmd::RestartAgent,
+        menu_label: "restart agent",
+        reference: "Restart the focused agent with fresh credentials (resumes its work only if it was blocked; an agent mid-turn is left alone)",
+        sidebar: false,
     },
     FixedCommandSpec {
         key: 'h',
@@ -454,6 +460,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `]]R` is a kill+respawn, so it must not sit on the popup's head row.
+    /// The first `j` lands the highlight on row 0 and `Enter` fires it
+    /// (#343), so the head row is what a muscle-memory `]]`+`j`+`Enter`
+    /// reaches — historically the snippet picker. A destructive command
+    /// there is the wrong default.
+    #[test]
+    fn the_restart_command_is_not_the_popup_head_row() {
+        for (splits, tabs, label) in [
+            (false, 1, "tabs, one terminal"),
+            (false, 2, "tabs, two tabs"),
+            (true, 2, "splits"),
+        ] {
+            let rows = LeaderCmd::menu_rows(splits, tabs, NewTerminalLayout::Tabs, None);
+            assert_ne!(
+                rows.first().map(|(k, _)| k.as_str()),
+                Some("R"),
+                "{label}: a kill+respawn must not be what `]]`+`j`+`Enter` fires",
+            );
+            assert_eq!(
+                rows.first().map(|(k, _)| k.as_str()),
+                Some("s"),
+                "{label}: the head row stays the snippet picker",
+            );
+        }
+    }
+
+    /// `]]R` resolves against the TERMINAL pane's focused tile, which has no
+    /// meaning when the leader was armed from the sidebar — there the cursor
+    /// workspace, not the focused tile, is the subject. Flipping it to
+    /// `sidebar: true` without also retargeting it would silently restart a
+    /// different workspace's agent than the one under the cursor, so the
+    /// flag is pinned here.
+    #[test]
+    fn the_restart_command_is_terminal_addressed_only() {
+        assert_eq!(
+            LeaderCmd::from_key(Key::Char('R'), KeyModifiers::NONE),
+            Some(LeaderCmd::RestartAgent),
+        );
+        assert_eq!(
+            LeaderCmd::from_key(Key::Char('R'), KeyModifiers::SHIFT),
+            Some(LeaderCmd::RestartAgent),
+            "`Shift-R` and a bare `R` are the same chord",
+        );
+        assert!(!LeaderCmd::RestartAgent.available_in_sidebar());
+        assert!(
+            !LeaderCmd::sidebar_menu_rows()
+                .iter()
+                .any(|(key, _)| key == "R"),
+            "the sidebar menu must not advertise `R`",
+        );
     }
 
     /// `]]n` resolves to the follow-up command and is offered in the

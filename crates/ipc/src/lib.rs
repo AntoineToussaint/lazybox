@@ -2091,19 +2091,38 @@ pub enum Command {
         action_id: String,
         via: ActionVia,
     },
-    /// Restart one usage-limit-blocked agent so it picks up fresh
-    /// credentials, then continue its interrupted work: the daemon stops
-    /// the running process, respawns the exact conversation in the same
+    /// Restart one agent so it picks up fresh credentials: the daemon stops
+    /// the running process and respawns the exact conversation in the same
     /// pane through the provider's `--resume` builder (as [`Self::ResumeAgent`]
-    /// does for an exited pane), and hands the configured continuation
-    /// prompt (`ui.credit_recovery_prompt`) to the spawn-time injector. The
-    /// bulk `a R` (restart rate-limited) action sends one per limited
-    /// terminal after the user has switched Claude account / API key
-    /// externally — a plain `Shift-K` "continue" cannot make a running
-    /// process re-read its credentials. Appended last (bincode is
-    /// ordinal-sensitive).
+    /// does for an exited pane). The bulk `a R` (restart rate-limited) action
+    /// sends one per limited terminal after the user has switched Claude
+    /// account / API key externally — a plain `Shift-K` "continue" cannot
+    /// make a running process re-read its credentials.
+    ///
+    /// `continue_work` decides whether the configured continuation prompt
+    /// (`ui.credit_recovery_prompt`) is handed to the spawn-time injector
+    /// after the respawn. It is the caller's statement about the
+    /// conversation it is restarting, and the two senders differ:
+    ///
+    /// * `true` — the pane was *stuck* (usage-limit-blocked, or signed out
+    ///   with a dead credential). The continuation is what frees it, and the
+    ///   turn it resumes is the one the limit interrupted. This is `a R`.
+    /// * `false` — the pane was *at rest* (`Idle` / `Done`). The swap is a
+    ///   pure credential refresh, so nudging it would start a turn the user
+    ///   never asked for — the same reasoning `PeerRecovery::for_state`
+    ///   applies to the post-sign-in sweep. This is `]]R` on a finished
+    ///   agent, where a blind continuation would set an agent with `git` /
+    ///   `gh` write access working on a conversation the user considered
+    ///   closed.
+    ///
+    /// Restarting a *mid-flight* agent (`Working` / `InputNeeded` /
+    /// `CreditExhausted`) is not expressible here and must not be sent: the
+    /// kill destroys the in-flight turn, and `--resume` restores the
+    /// conversation but not the turn. Senders filter those out.
+    /// Appended last (bincode is ordinal-sensitive).
     RestartAgentAndContinue {
         terminal_id: TerminalId,
+        continue_work: bool,
     },
     /// Create or replace an epic record (#1522). The daemon persists it under
     /// `epic:<key>` and recomputes its derived status.

@@ -2748,8 +2748,11 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::ResumeAgent { terminal_id } => {
             agent_auth::resume_agent(config, terminal_id).await;
         }
-        lazybox_ipc::Command::RestartAgentAndContinue { terminal_id } => {
-            agent_auth::restart_agent_and_continue(config, terminal_id).await;
+        lazybox_ipc::Command::RestartAgentAndContinue {
+            terminal_id,
+            continue_work,
+        } => {
+            agent_auth::restart_agent_and_continue(config, terminal_id, continue_work).await;
         }
         lazybox_ipc::Command::ReauthenticateAgent { terminal_id } => {
             agent_auth::start_reauthentication(config, terminal_id, Some(tx.clone())).await;

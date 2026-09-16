@@ -33,6 +33,8 @@ pub(super) enum LeaderCmd {
     /// last submitted message) back into the agent's composer, without
     /// submitting it, so a restart doesn't lose what you'd typed.
     RecallPrompt,
+    /// `]]R` — restart the focused agent with fresh credentials and resume.
+    RestartAgent,
     /// `]]h` — open the per-session prompt-history picker (issue #523):
     /// every prompt sent to this agent, newest-first, snippet entries
     /// tagged; Enter re-sends the picked one.
@@ -99,6 +101,13 @@ struct FixedCommandSpec {
 }
 
 const FIXED_COMMANDS: &[FixedCommandSpec] = &[
+    FixedCommandSpec {
+        key: 'R',
+        command: LeaderCmd::RestartAgent,
+        menu_label: "restart agent",
+        reference: "Restart the focused agent with fresh credentials, resume the same conversation in this pane, and continue",
+        sidebar: false,
+    },
     FixedCommandSpec {
         key: 's',
         command: LeaderCmd::Snippets,

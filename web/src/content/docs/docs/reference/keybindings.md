@@ -128,6 +128,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 
 | Chord | Action |
 | --- | --- |
+| `]]R` | Restart the focused agent with fresh credentials, resume the same conversation in this pane, and continue |
 | `]]s` | Open the snippet picker (typing a full key auto-submits — `]]srev`) |
 | `]]l` | Open the skills picker — trigger one of the focused agent's skills explicitly (typing a full name auto-submits) |
 | `]]r` | Restore the in-flight draft, or the last submitted agent prompt, without sending it |

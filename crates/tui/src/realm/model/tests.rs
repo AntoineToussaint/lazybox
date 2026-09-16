@@ -31010,6 +31010,47 @@ mod follow_up_chain_tests {
     }
 
     #[test]
+    fn restart_leader_resumes_only_the_focused_codex_without_leaving_the_pane() {
+        for modifiers in [RealmMods::NONE, RealmMods::SHIFT] {
+            let (mut m, mut server) = model_with(vec![
+                (1, "local:a", TerminalKind::Agent("codex".into()), vec![]),
+                agent(2, "local:b", vec![]),
+            ]);
+            m.leader_target = Some(TerminalId(2));
+            while server.rx.try_recv().is_ok() {}
+            for key in [']', ']'] {
+                m.dispatch_key(RealmKey::new(Key::Char(key), RealmMods::NONE));
+            }
+            m.dispatch_key(RealmKey::new(Key::Char('R'), modifiers));
+            let commands: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok())
+                .filter(|cmd| !matches!(cmd, IpcCommand::RecordAction { .. }))
+                .collect();
+            assert!(matches!(
+                commands.as_slice(),
+                [IpcCommand::RestartAgentAndContinue {
+                    terminal_id: TerminalId(1)
+                }]
+            ));
+            assert_eq!(m.focus, PaneFocus::Terminals);
+            assert!(!m.terminal_leader_pending());
+        }
+    }
+
+    #[test]
+    fn restart_leader_does_not_restart_a_shell() {
+        let (mut m, mut server) = model_with(vec![(1, "local:a", TerminalKind::Shell, vec![])]);
+        while server.rx.try_recv().is_ok() {}
+        for key in [']', ']', 'R'] {
+            m.dispatch_key(RealmKey::new(Key::Char(key), RealmMods::NONE));
+        }
+        assert!(
+            !std::iter::from_fn(|| server.rx.try_recv().ok())
+                .any(|cmd| matches!(cmd, IpcCommand::RestartAgentAndContinue { .. }))
+        );
+        assert!(notice(&m).contains("no focused agent"));
+    }
+
+    #[test]
     fn snippet_delete_preserves_catalog_on_error_and_delivery_target_on_success() {
         let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         struct RestoreHome(Option<std::ffi::OsString>);

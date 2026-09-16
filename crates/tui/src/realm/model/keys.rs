@@ -1216,6 +1216,13 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
             LeaderCmd::Skills => self.mount_skill_picker(String::new()),
             LeaderCmd::RecallPrompt => self.recall_prompt(cmds),
+            LeaderCmd::RestartAgent => match self.terminals.focused_terminal_id() {
+                Some(terminal_id) if self.terminals.terminal_is_agent(terminal_id) => {
+                    cmds.push(IpcCommand::RestartAgentAndContinue { terminal_id });
+                    self.flash_info("restarting agent with fresh credentials in this pane");
+                }
+                _ => self.flash_hint("no focused agent to restart"),
+            },
             LeaderCmd::PromptHistory => self.mount_prompt_history_picker(),
             LeaderCmd::FollowUp => match self.picker_target_terminal() {
                 Some(terminal_id) => self.send_follow_up(terminal_id, cmds),

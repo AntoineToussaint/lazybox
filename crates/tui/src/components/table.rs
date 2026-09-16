@@ -8,6 +8,13 @@
 //! arithmetic so renderers describe COLUMNS once and feed CELLS per
 //! row — width is computed across all rows at the top of the pass.
 //!
+//! One per-row exception: a column marked
+//! [`yield_when_empty`](Column::yield_when_empty) contributes its width
+//! to the row's flex column on any row whose cell in it is empty. The
+//! table-wide width still fixes where a present cell lands, but a row
+//! with nothing to show there hands the slack to its title instead of
+//! reserving a blank slot for what other rows carry.
+//!
 //! The public surface is intentionally small:
 //!
 //! - [`Column`] — one column's width strategy + minimum width.
@@ -77,6 +84,10 @@ pub struct Column {
     /// dropped — they shrink to their `min` and then elide with `…`.
     /// Defaults to [`DEFAULT_PRIORITY`] (kept until last).
     pub priority: u8,
+    /// On a row whose cell in this column is empty, give the column's
+    /// width to the row's flex columns instead of rendering it as blank
+    /// padding. See [`Column::yield_when_empty`].
+    pub yield_empty: bool,
 }
 
 impl Column {
@@ -85,6 +96,7 @@ impl Column {
             width: ColumnWidth::Fixed(width),
             align: Align::Left,
             priority: DEFAULT_PRIORITY,
+            yield_empty: false,
         }
     }
 
@@ -93,6 +105,7 @@ impl Column {
             width: ColumnWidth::Max { min },
             align: Align::Left,
             priority: DEFAULT_PRIORITY,
+            yield_empty: false,
         }
     }
 
@@ -101,6 +114,7 @@ impl Column {
             width: ColumnWidth::Flex { min },
             align: Align::Left,
             priority: DEFAULT_PRIORITY,
+            yield_empty: false,
         }
     }
 
@@ -123,6 +137,18 @@ impl Column {
     /// too narrow to fit every column. Chainable: `Column::max(0).priority(10)`.
     pub fn priority(mut self, priority: u8) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Let a row that has nothing in this column hand the column's
+    /// width to its flex columns. The width is still sized table-wide,
+    /// so a present cell lands where every other present cell does;
+    /// only rows with an empty cell here reclaim the slot. Without this
+    /// a bare row pays, in title width, for every badge some other row
+    /// carries — the row with the least to show truncating the most.
+    /// Chainable: `Column::max(0).right().yield_when_empty()`.
+    pub fn yield_when_empty(mut self) -> Self {
+        self.yield_empty = true;
         self
     }
 }
@@ -501,8 +527,48 @@ pub fn render_table(
     let widths = compute_widths(columns, &cell_widths, total_width);
 
     rows.iter()
-        .map(|row| render_row(row, columns, &widths))
+        .map(|row| render_row(row, columns, &row_widths(row, columns, &widths)))
         .collect()
+}
+
+/// Per-row variant of the table-wide `widths`: every
+/// [`yield_when_empty`](Column::yield_when_empty) column whose cell is
+/// empty on this row collapses to 0, and the reclaimed width goes to the
+/// flex columns, split as `compute_widths` splits slack. The row still
+/// renders to the same total width, so the columns that ARE present keep
+/// their table-wide size; they only pack toward the reclaimed side.
+/// A table with no flex column has nowhere to put the slack and keeps
+/// the table-wide widths.
+fn row_widths(row: &Row, columns: &[Column], widths: &[usize]) -> Vec<usize> {
+    let flex_indices: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c.width, ColumnWidth::Flex { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    let mut out = widths.to_vec();
+    if flex_indices.is_empty() {
+        return out;
+    }
+    let mut reclaimed = 0usize;
+    for (i, col) in columns.iter().enumerate() {
+        if !col.yield_empty || out[i] == 0 {
+            continue;
+        }
+        if row.cells.get(i).is_none_or(|c| c.width() == 0) {
+            reclaimed += out[i];
+            out[i] = 0;
+        }
+    }
+    if reclaimed == 0 {
+        return out;
+    }
+    let per_flex = reclaimed / flex_indices.len();
+    let leftover = reclaimed % flex_indices.len();
+    for (idx, &col_idx) in flex_indices.iter().enumerate() {
+        out[col_idx] += per_flex + usize::from(idx < leftover);
+    }
+    out
 }
 
 /// Emit `content` into `out` padded to fill a column, placing the
@@ -1107,5 +1173,147 @@ mod tests {
         let out = truncate_line_keep_suffix(body, Span::raw(" ↗"), 40);
         let s: String = out.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(s, "short ↗");
+    }
+
+    fn text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// A yielding column collapses only on the rows whose cell is empty:
+    /// the bare row's flex title runs right up to the time column, the
+    /// badge-bearing row keeps its badge at the table-wide slot, and both
+    /// rows still render to the same total width.
+    #[test]
+    fn yielding_column_collapses_per_row_into_the_flex() {
+        let cols = [
+            Column::flex(1),
+            Column::max(0).right().yield_when_empty(),
+            Column::fixed(3).right(),
+        ];
+        let rows = [
+            Row::new(vec![
+                Cell::from_span(Span::raw("a")),
+                Cell::from_span(Span::raw(" C ")),
+                Cell::from_span(Span::raw(" 5m")),
+            ]),
+            Row::new(vec![
+                Cell::from_span(Span::raw("a title of eleven")),
+                Cell::empty(),
+                Cell::from_span(Span::raw(" 1h")),
+            ]),
+        ];
+        let lines = render_table(&rows, &cols, 20);
+        assert_eq!(text(&lines[0]), "a              C  5m");
+        assert_eq!(text(&lines[1]), "a title of eleven 1h");
+    }
+
+    /// Without the opt-in the table-wide reservation stands: the bare row
+    /// pays for the badge column and its title elides.
+    #[test]
+    fn column_without_opt_in_keeps_its_reservation_on_empty_rows() {
+        let cols = [
+            Column::flex(1),
+            Column::max(0).right(),
+            Column::fixed(3).right(),
+        ];
+        let rows = [
+            Row::new(vec![
+                Cell::from_span(Span::raw("a")),
+                Cell::from_span(Span::raw(" C ")),
+                Cell::from_span(Span::raw(" 5m")),
+            ]),
+            Row::new(vec![
+                Cell::from_span(Span::raw("a title of eleven")),
+                Cell::empty(),
+                Cell::from_span(Span::raw(" 1h")),
+            ]),
+        ];
+        let lines = render_table(&rows, &cols, 20);
+        assert_eq!(text(&lines[1]), "a title of el…    1h");
+    }
+
+    /// A row with several empty yielding columns reclaims all of them,
+    /// and the present trailer cells pack toward the right edge, so a
+    /// flex whose content is still too long elides at the reclaimed
+    /// width rather than the reserved one.
+    #[test]
+    fn multiple_empty_yielding_columns_all_go_to_the_flex() {
+        let cols = [
+            Column::flex(1),
+            Column::max(0).yield_when_empty(),
+            Column::max(0).right().yield_when_empty(),
+            Column::max(0).right().yield_when_empty(),
+        ];
+        let rows = [
+            Row::new(vec![
+                Cell::from_span(Span::raw("x")),
+                Cell::from_span(Span::raw(" C ")),
+                Cell::from_span(Span::raw("]2")),
+                Cell::from_span(Span::raw(" ✗ ")),
+            ]),
+            Row::new(vec![
+                Cell::from_span(Span::raw("a rather longer title than fits")),
+                Cell::empty(),
+                Cell::from_span(Span::raw("]1")),
+                Cell::empty(),
+            ]),
+        ];
+        let lines = render_table(&rows, &cols, 20);
+        assert_eq!(text(&lines[0]), "x            C ]2 ✗ ");
+        // 20 − 2 (the `]1` it does carry) = 18 cells of title, elided.
+        assert_eq!(text(&lines[1]), "a rather longer t…]1");
+    }
+
+    /// A flex cell whose own trailing atomic tail (the sidebar's label
+    /// chips) was excluded from the table-wide floor gets to show it
+    /// once the row's empty yielding columns hand their width over.
+    #[test]
+    fn reclaimed_width_lets_the_flex_tail_render() {
+        let cols = [
+            Column::flex(1),
+            Column::max(0).right().yield_when_empty(),
+            Column::fixed(3).right(),
+        ];
+        let rows = [
+            Row::new(vec![
+                Cell::from_span(Span::raw("a")),
+                Cell::from_span(Span::raw(" ●3 ")),
+                Cell::from_span(Span::raw(" 5m")),
+            ]),
+            Row::new(vec![
+                Cell::new(vec![Span::raw("a title"), Span::raw(" [bug]")]).atomic_tail(1),
+                Cell::empty(),
+                Cell::from_span(Span::raw(" 1h")),
+            ]),
+        ];
+        let lines = render_table(&rows, &cols, 16);
+        assert_eq!(text(&lines[1]), "a title [bug] 1h");
+    }
+
+    /// With no flex column there is nowhere to put the reclaimed width,
+    /// so a yielding column keeps its table-wide slot and the trailer
+    /// stays aligned.
+    #[test]
+    fn yielding_is_inert_without_a_flex_column() {
+        let cols = [
+            Column::fixed(4),
+            Column::max(0).right().yield_when_empty(),
+            Column::fixed(3).right(),
+        ];
+        let rows = [
+            Row::new(vec![
+                Cell::from_span(Span::raw("a")),
+                Cell::from_span(Span::raw(" C ")),
+                Cell::from_span(Span::raw(" 5m")),
+            ]),
+            Row::new(vec![
+                Cell::from_span(Span::raw("b")),
+                Cell::empty(),
+                Cell::from_span(Span::raw(" 1h")),
+            ]),
+        ];
+        let lines = render_table(&rows, &cols, 20);
+        assert_eq!(text(&lines[0]), "a    C  5m");
+        assert_eq!(text(&lines[1]), "b       1h");
     }
 }

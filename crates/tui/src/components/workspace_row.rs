@@ -245,6 +245,15 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// (each Max column expands to the widest natural cell across the whole
 /// table, and collapses to 0 when no row has content).
 ///
+/// Every trailer column right of the title (6–12) also yields per row
+/// (#1754): on a row whose cell there is empty, the column's table-wide
+/// width goes to that row's title instead of being reserved as a blank
+/// slot. The badges a row carries still render at their table-wide size
+/// and pack toward the time column; only the badges it does NOT carry
+/// stop costing it title width. Before this, a bare issue row paid for
+/// the full badge set of the heaviest PR row in the table and truncated
+/// its title into a third-empty row.
+///
 /// Order (left → right):
 ///
 /// 0. Prefix — `▎` accent bar (cursor) / `✓` (selected) / ` `. A single shared
@@ -282,8 +291,8 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///    flex's protected floor, so under width pressure they shed whole
 ///    (after the status pill — #328) before the title elides.
 /// 6. Unread pill — ` ●N `, right-aligned. Max so the column collapses
-///    when no row has unread, and lines up at a consistent x when any
-///    row does.
+///    when no row has unread; a row without unread yields the slot to
+///    its title (#1754).
 /// 7. Badge: agent slot — ` C ` / ` C×2 ` / ` CX ` / blank. Same
 ///    Max semantics. A single agent's model rides here as a compact
 ///    `◆O` tier badge (#803, abbreviated to one glyph — #1068), so even
@@ -362,19 +371,19 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // signal) survives rather than being evicted to show a longer title.
     const TITLE_MIN: usize = 20;
     vec![
-        Column::fixed(1),                          // 0: prefix (shared 1-col caret gutter)
-        Column::fixed(2),                          // 1: type glyph + trailing space separator
-        Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, one space off the glyph)
-        Column::fixed(2).priority(P_ROLE), // 3: role (" R" or blank)
+        Column::fixed(1),                   // 0: prefix (shared 1-col caret gutter)
+        Column::fixed(2),                   // 1: type glyph + trailing space separator
+        Column::fixed(max_pr_num_width),    // 2: pr_num (left-aligned, one space off the glyph)
+        Column::fixed(2).priority(P_ROLE),  // 3: role (" R" or blank)
         Column::fixed(3).priority(P_STATE), // 4: state slot (" ? "/" ⠋ "/blank, reserved)
-        Column::flex(TITLE_MIN),         // 5: title (labels ride inline at its tail)
-        Column::max(0).right().priority(P_UNREAD), // 6: unread
-        Column::max(0).priority(P_BADGE_AGENT), // 7: badge_agent (+ capped model label)
-        Column::max(0).priority(P_BADGE_SHELL), // 8: badge_shell (carries its own leading space)
-        Column::max(0).right().priority(P_BADGES), // 9: passive-info badge cluster (#813)
-        Column::max(0).right().priority(P_ARMS), // 10: merge-arm badge cluster (#813)
-        Column::max(0).right().priority(P_STATUS), // 11: status (CI / review pills)
-        Column::max(0).right().priority(P_TIME), // 12: time (carries its own leading space)
+        Column::flex(TITLE_MIN),            // 5: title (labels ride inline at its tail)
+        Column::max(0).right().priority(P_UNREAD).yield_when_empty(), // 6: unread
+        Column::max(0).priority(P_BADGE_AGENT).yield_when_empty(), // 7: badge_agent (+ capped model label)
+        Column::max(0).priority(P_BADGE_SHELL).yield_when_empty(), // 8: badge_shell (carries its own leading space)
+        Column::max(0).right().priority(P_BADGES).yield_when_empty(), // 9: passive-info badge cluster (#813)
+        Column::max(0).right().priority(P_ARMS).yield_when_empty(), // 10: merge-arm badge cluster (#813)
+        Column::max(0).right().priority(P_STATUS).yield_when_empty(), // 11: status (CI / review pills)
+        Column::max(0).right().priority(P_TIME).yield_when_empty(), // 12: time (carries its own leading space)
     ]
 }
 
@@ -3752,9 +3761,11 @@ mod tests {
 
     /// Regression for issue #22, part 2: a row WITHOUT a `C` badge
     /// (and no other right-side content) does not leave the badge
-    /// column as a ragged gap. When at least one row has a `C`
-    /// badge, every other row pads to the same column width so the
-    /// `C` letters line up at the same x position across rows.
+    /// column as a ragged gap. Both rows render to the same total
+    /// width, and the badge-less row shows blank cells where the other
+    /// row's `C` sits — since #1754 that blank is the title's own
+    /// padding rather than a reserved slot, but the eye reads the same
+    /// thing: nothing ragged, trailing time column aligned.
     #[test]
     fn badge_column_lines_up_across_rows() {
         // Row A: has a Claude agent badge. Row B: no badge.
@@ -4576,17 +4587,198 @@ mod tests {
             line_text(&lines[1]),
         );
 
-        // Give the OTHER row a snippet badge: its column now reserves 4
-        // cells for every row, so the long title loses that width.
+        // Give the OTHER row a snippet badge: the column is sized for it
+        // table-wide, but the badge-less row yields the slot to its title
+        // (#1754), so the long title still fits — the badge shows on the
+        // row that carries it, and only that row pays for it.
         let mut ctx_short_snip = ctx_for(&ws_short, &short, &theme);
         ctx_short_snip.sent_snippet_count = 2;
         let rows = vec![build_row(&ctx_short_snip), build_row(&ctx_titled)];
         let lines = crate::components::table::render_table(&rows, &columns, BUDGET);
         assert!(
-            !line_text(&lines[1]).contains(long),
-            "occupied snippet column must steal width from the title: {:?}",
+            line_text(&lines[0]).contains("]2"),
+            "the row carrying the snippet badge must still show it: {:?}",
+            line_text(&lines[0]),
+        );
+        assert!(
+            line_text(&lines[1]).contains(long),
+            "another row's snippet badge must not steal title width: {:?}",
             line_text(&lines[1]),
         );
+    }
+
+    /// A badge-heavy row for the #1754 tests: agent badges with a jump
+    /// number, a shell, passive-info badges, a merge arm, unread, and a
+    /// failing-CI pill — the full trailer set a busy PR row carries.
+    fn heavy_ctx<'a>(ws: &'a Workspace, task: &'a Task, theme: &'a Theme) -> WorkspaceRowCtx<'a> {
+        let mut ctx = ctx_for(ws, task, theme);
+        ctx.badges = vec![('C', 1), ('X', 1), ('S', 1)];
+        ctx.agent_number = Some(1);
+        ctx.has_notes = true;
+        ctx.sent_snippet_count = 2;
+        ctx.auto_merge_armed = true;
+        ctx
+    }
+
+    /// #1754: a table of badge-less rows truncates no title that fits —
+    /// each title runs right up to the time column.
+    #[test]
+    fn bare_rows_render_titles_up_to_the_time_column() {
+        let theme = theme();
+        const BUDGET: usize = 60;
+        // prefix 1 + glyph 2 + number 4 + role 2 + state 3 = 12 cells
+        // before the title; ` now` is 4 after it → 44 cells of title.
+        let exact = "x".repeat(44);
+        let titles = [
+            "Dictation support: a capture-and-review loop",
+            &exact,
+            "short",
+        ];
+        let tasks: Vec<Task> = titles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| make_task(&format!("owner/repo#{}", i + 1), t))
+            .collect();
+        let wss: Vec<Workspace> = tasks
+            .iter()
+            .map(|t| Workspace::from_task(t.clone(), fixed_time()))
+            .collect();
+        let rows: Vec<Row> = tasks
+            .iter()
+            .zip(&wss)
+            .map(|(t, ws)| build_row(&ctx_for(ws, t, &theme)))
+            .collect();
+        let lines = crate::components::table::render_table(&rows, &build_columns(4), BUDGET);
+        for (line, title) in lines.iter().zip(titles) {
+            let text = line_text(line);
+            assert!(
+                text.contains(title) && !text.contains('…'),
+                "bare row truncated a title that fits: {text:?}",
+            );
+            assert_eq!(crate::util::visual_width(&text), BUDGET);
+        }
+    }
+
+    /// #1754: one badge-heavy row beside several bare ones. The bare rows
+    /// keep their full titles — they no longer reserve the heavy row's
+    /// badge columns — while the heavy row still renders every badge and
+    /// its own (shorter) title, and every row keeps the same total width
+    /// so the time column stays aligned.
+    #[test]
+    fn heavy_row_does_not_truncate_bare_rows_titles() {
+        let theme = theme();
+        const BUDGET: usize = 72;
+        let mut heavy_task = pr_task("owner/repo", 1753);
+        heavy_task.title = "Heavy PR".into();
+        heavy_task.ci = CiStatus::Failure;
+        heavy_task.recent_activity = (0..3)
+            .map(|i| lazybox_core::Activity {
+                author: "reviewer".into(),
+                body: format!("comment {i}"),
+                created_at: fixed_time() - chrono::Duration::minutes(i),
+                kind: lazybox_core::ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            })
+            .collect();
+        let heavy_ws = Workspace::from_task(heavy_task.clone(), fixed_time());
+        let heavy = build_row(&heavy_ctx(&heavy_ws, &heavy_task, &theme));
+
+        let bare_titles = [
+            "Chrome density pass: apply the deviation ladder",
+            "Test suite is not trustworthy under fleet load",
+            "276 GB of worktrees, and `worktree list` lies",
+        ];
+        let bare_tasks: Vec<Task> = bare_titles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| make_task(&format!("owner/repo#{}", 1750 + i), t))
+            .collect();
+        let bare_wss: Vec<Workspace> = bare_tasks
+            .iter()
+            .map(|t| Workspace::from_task(t.clone(), fixed_time()))
+            .collect();
+        let mut rows = vec![heavy];
+        rows.extend(
+            bare_tasks
+                .iter()
+                .zip(&bare_wss)
+                .map(|(t, ws)| build_row(&ctx_for(ws, t, &theme))),
+        );
+        let columns = build_columns(4);
+        let lines = crate::components::table::render_table(&rows, &columns, BUDGET);
+
+        let heavy_text = line_text(&lines[0]);
+        for badge in ["Heavy PR", "●3", "1CX S", "✎", "]2", "⚡", "✗", "now"] {
+            assert!(
+                heavy_text.contains(badge),
+                "heavy row lost {badge:?}: {heavy_text:?}",
+            );
+        }
+        for (line, title) in lines[1..].iter().zip(bare_titles) {
+            let text = line_text(line);
+            assert!(
+                text.contains(title) && !text.contains('…'),
+                "bare row paid for the heavy row's badges: {text:?}",
+            );
+        }
+        for line in &lines {
+            assert_eq!(
+                crate::util::visual_width(&line_text(line)),
+                BUDGET,
+                "rows drifted apart in width: {:?}",
+                line_text(line),
+            );
+        }
+
+        // The same bare rows at the same width, with the heavy row absent,
+        // render identically: the heavy row's presence costs them nothing.
+        let alone = crate::components::table::render_table(&rows[1..], &columns, BUDGET);
+        for (with_heavy, without) in lines[1..].iter().zip(&alone) {
+            assert_eq!(line_text(with_heavy), line_text(without));
+        }
+    }
+
+    /// #1754 must not reclaim space by dropping signal: a title that is
+    /// genuinely too long still elides with `…`, and a badge-bearing row
+    /// beside it still renders every badge at that width.
+    #[test]
+    fn too_long_title_still_elides_and_badges_still_render() {
+        let theme = theme();
+        // Wide enough that the heavy row sheds nothing, so every badge is
+        // expected; the bare row's title still overruns the 48 cells left
+        // once its own trailer (just the time) is subtracted.
+        const BUDGET: usize = 64;
+        let long_task = make_task(
+            "owner/repo#1",
+            "A title far longer than forty-eight cells can ever hold on one row",
+        );
+        let long_ws = Workspace::from_task(long_task.clone(), fixed_time());
+        let mut heavy_task = pr_task("owner/repo", 2);
+        heavy_task.title = "Short".into();
+        heavy_task.ci = CiStatus::Failure;
+        let heavy_ws = Workspace::from_task(heavy_task.clone(), fixed_time());
+        let rows = vec![
+            build_row(&ctx_for(&long_ws, &long_task, &theme)),
+            build_row(&heavy_ctx(&heavy_ws, &heavy_task, &theme)),
+        ];
+        let lines = crate::components::table::render_table(&rows, &build_columns(4), BUDGET);
+        let long_text = line_text(&lines[0]);
+        assert!(
+            long_text.contains('…') && long_text.contains("A title far longer"),
+            "over-long title should elide with `…`: {long_text:?}",
+        );
+        assert_eq!(crate::util::visual_width(&long_text), BUDGET);
+        let heavy_text = line_text(&lines[1]);
+        for badge in ["Short", "1CX S", "✎", "]2", "⚡", "✗", "now"] {
+            assert!(
+                heavy_text.contains(badge),
+                "badge-bearing row lost {badge:?}: {heavy_text:?}",
+            );
+        }
     }
 
     #[test]

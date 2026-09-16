@@ -687,6 +687,89 @@ mod tests {
         assert!(m.is_empty());
     }
 
+    /// The regression #1757 asked for: drive `scan_issue` from a
+    /// DESERIALIZED wire payload, not a hand-built struct.
+    ///
+    /// Every other test here builds `GqlComment` through `comment()`,
+    /// which always sets a body. That is precisely why the original bug
+    /// survived: the scanner was correct and its tests passed, while the
+    /// query handed it comments whose body defaulted to "". A fixture
+    /// that only carries the fields the query actually selects is the
+    /// one shape that fails when the two drift apart.
+    ///
+    /// Paired with `issue_comment_selection_carries_every_field_the_
+    /// scanner_needs` in `graphql`: that test pins what the query asks
+    /// for, this one pins that the scanner fires on what comes back.
+    /// Neither alone closes the gap between them.
+    #[test]
+    fn scan_issue_fires_on_a_deserialized_issue_comment_payload() {
+        let raw = serde_json::json!({
+            "id": "I_kwDOabc",
+            "number": 1757,
+            "title": "a long-running issue",
+            "body": "no mention in the body",
+            "url": "https://github.com/o/r/issues/1757",
+            "updatedAt": "2026-09-15T10:00:00Z",
+            "state": "OPEN",
+            "author": { "login": "alice" },
+            "labels": { "nodes": [] },
+            "assignees": { "nodes": [] },
+            "reactions": { "viewerHasReacted": false },
+            "repository": { "nameWithOwner": "o/r" },
+            "comments": { "nodes": [{
+                "id": "IC_kwDOxyz",
+                "author": { "login": "alice" },
+                "body": "@lazybox please take this one",
+                "createdAt": "2026-09-15T11:00:00Z",
+                "reactions": { "viewerHasReacted": false }
+            }]}
+        });
+        let issue: GqlIssue = serde_json::from_value(raw).expect("deserialize issue");
+        let found = scan_issue(&issue, &allow_only("alice"));
+        assert_eq!(found.len(), 1, "comment mention must fire: {found:?}");
+        assert!(
+            matches!(found[0].source, MentionSource::Comment { .. }),
+            "expected a comment-sourced mention, got {:?}",
+            found[0].source,
+        );
+        assert_eq!(found[0].target_node_id, "IC_kwDOxyz");
+    }
+
+    /// The other half of the same contract: a payload shaped like a
+    /// query that FORGOT `body` must not silently pass. If this ever
+    /// starts finding a mention, `body` stopped being load-bearing and
+    /// the scanner is matching on something it shouldn't.
+    #[test]
+    fn scan_issue_cannot_fire_when_the_query_omits_the_comment_body() {
+        let raw = serde_json::json!({
+            "id": "I_kwDOabc",
+            "number": 1757,
+            "title": "a long-running issue",
+            "body": "no mention in the body",
+            "url": "https://github.com/o/r/issues/1757",
+            "updatedAt": "2026-09-15T10:00:00Z",
+            "state": "OPEN",
+            "author": { "login": "alice" },
+            "labels": { "nodes": [] },
+            "assignees": { "nodes": [] },
+            "reactions": { "viewerHasReacted": false },
+            "repository": { "nameWithOwner": "o/r" },
+            // `body` omitted exactly as the starved query left it.
+            "comments": { "nodes": [{
+                "id": "IC_kwDOxyz",
+                "author": { "login": "alice" },
+                "createdAt": "2026-09-15T11:00:00Z",
+                "reactions": { "viewerHasReacted": false }
+            }]}
+        });
+        let issue: GqlIssue = serde_json::from_value(raw).expect("deserialize issue");
+        assert!(
+            scan_issue(&issue, &allow_only("alice")).is_empty(),
+            "a bodiless comment has nothing to match — this is the shape that \
+             made #1757 silent, kept here so the query-side guard has a partner",
+        );
+    }
+
     #[test]
     fn extract_repo_from_issue_url() {
         assert_eq!(

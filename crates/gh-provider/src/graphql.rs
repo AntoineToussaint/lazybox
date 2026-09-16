@@ -2361,7 +2361,18 @@ macro_rules! issue_task_fields {
       labels(first: 25) { nodes { name color } }
       assignees(first: 10) { nodes { login } }
       reactions(content: EYES) { viewerHasReacted }
-      comments(first: 15) {
+      # `last: 15`, NOT `first: 15` (#1757). This is the only comment
+      # selection `scan_issue` ever reads — the PR queries are never
+      # mention-scanned — so this window decides which comments can
+      # trigger `@lazybox` at all. `first` takes the OLDEST 15, so on
+      # any issue past its 15th comment a fresh mention fell outside
+      # the window and the scanner never saw it: the trigger went
+      # silently dead exactly on the long-running issues where it is
+      # most useful. `last` takes the NEWEST 15, which is the end a
+      # mention arrives at. Node order within the page is ascending
+      # either way, so `activities_from_comments` and the
+      # `last_commenter` line are unaffected.
+      comments(last: 15) {
         nodes {
           id
           author { login }
@@ -4860,7 +4871,7 @@ mod tests {
             // for why `{ name }` alone is a silent data-loss bug.
             "labels(first: 25) { nodes { name color } }",
             "assignees(first: 10)",
-            "comments(first: 15)",
+            "comments(last: 15)",
             "repository { nameWithOwner }",
             // The sub-issue edge — the ticket forest / epic membership.
             "parent { number repository { nameWithOwner } }",
@@ -5998,10 +6009,65 @@ mod tests {
         assert_eq!(pr_page_count(26), 2);
         assert_eq!(issue_page_count(101), 2);
         assert!(
-            ISSUES_QUERY.contains("comments(first: 15)"),
+            ISSUES_QUERY.contains("comments(last: 15)"),
             "issue comments cap drifted",
         );
-        assert!(!ISSUES_QUERY.contains("comments(first: 30)"));
+        assert!(!ISSUES_QUERY.contains("comments(last: 30)"));
+    }
+
+    /// The window END is load-bearing, not just its size (#1757).
+    ///
+    /// This is the ONLY comment selection the `@lazybox` scanner ever
+    /// reads: `scan_issue` takes a `&GqlIssue`, and `ISSUES_QUERY` is
+    /// the only query that produces one. `first: 15` took the OLDEST
+    /// 15 comments, so on any issue past its 15th comment a fresh
+    /// mention fell outside the window and could never be seen — the
+    /// trigger died silently on exactly the long-running issues where
+    /// it matters. Pinning the cap alone would let that regress.
+    #[test]
+    fn issue_comment_window_takes_the_newest_comments() {
+        assert!(
+            ISSUES_QUERY.contains("comments(last: 15)"),
+            "issue comments must read the NEWEST comments — `first` takes the oldest, \
+             which is how a mention on a busy issue became unreachable (#1757)",
+        );
+        assert!(
+            !ISSUES_QUERY.contains("comments(first:"),
+            "an oldest-first comment window cannot reach a new @lazybox mention",
+        );
+    }
+
+    /// The scanner's field contract, scoped to the COMMENT block.
+    ///
+    /// Not a duplicate of `issue_task_fields_covers_every_field_its_
+    /// consumers_read`: that one searches the whole selection set, so
+    /// its `id` and `body` assertions are satisfied by the ISSUE-level
+    /// `id` and `body` and say nothing about the comment. #1757 was a
+    /// comment selection that compiled, ran, and could never match
+    /// because the query omitted the very field the scanner compares —
+    /// a gap a whole-string `contains` cannot see. Each field below is
+    /// one the scanner silently fails without:
+    /// - `body` — what `contains_lazybox_mention` reads. Absent ⇒
+    ///   `#[serde(default)]` yields `""` ⇒ the scanner never fires.
+    /// - `id` — the idempotency handle; a comment without one is
+    ///   skipped outright by `scan_issue`.
+    /// - `reactions` — the 👀 read-back. Absent ⇒ `None` ⇒ reads as
+    ///   "unacknowledged" ⇒ re-spawns EVERY poll.
+    #[test]
+    fn issue_comment_selection_carries_every_field_the_scanner_needs() {
+        let start = ISSUES_QUERY
+            .find("comments(last: 15)")
+            .expect("issue comment selection");
+        let block = &ISSUES_QUERY[start..];
+        let end = block.find("      }\n").expect("end of comment selection");
+        let block = &block[..end];
+        for field in ["id", "body", "author { login }", "reactions(content: EYES)"] {
+            assert!(
+                block.contains(field),
+                "issue comment selection dropped `{field}` — the mention scanner \
+                 fails silently without it (#1757). Block was:\n{block}",
+            );
+        }
     }
 
     // ── PR details (lazy-fetch) ────────────────────────────────────

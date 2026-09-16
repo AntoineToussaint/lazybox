@@ -1267,10 +1267,13 @@ impl SearchHit {
     };
 }
 
-/// Visible width budget for the excerpt an `agent:` hit renders (#1774).
-/// Wide enough to carry the match plus enough surrounding words to
-/// recognize the moment, short enough to ride in the title cell's
-/// sheddable tail rather than fight the title for space.
+/// Length budget, in `char`s, for the excerpt an `agent:` hit renders
+/// (#1774). Wide enough to carry the match plus enough surrounding words
+/// to recognize the moment, short enough to ride in the title cell's
+/// sheddable tail rather than fight the title for space. Counted in
+/// chars, not display columns, so a full-width (CJK) excerpt draws wider
+/// than this — harmless, because the renderer sheds the whole cue on a
+/// narrow row rather than letting it overflow.
 pub const AGENT_EXCERPT_CHARS: usize = 48;
 
 /// The qualifiers that search agent text. `said:` reads better for a
@@ -1357,29 +1360,36 @@ pub fn search_evaluate(query: &str, w: &Workspace, agent_text: Option<&str>) -> 
 /// `split_whitespace` did, which is what keeps a bare query byte-for-byte
 /// the legacy search.
 fn search_terms(raw: &str) -> Vec<&str> {
-    let bytes = raw.as_bytes();
     let mut terms = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        let start = i;
-        let mut quoted = false;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if quoted {
-                quoted = b != b'"';
-            } else if b == b'"' && i > start && bytes[i - 1] == b':' {
-                quoted = true;
-            } else if b.is_ascii_whitespace() {
-                break;
+    let mut start: Option<usize> = None;
+    let mut quoted = false;
+    let mut prev = '\0';
+    for (i, ch) in raw.char_indices() {
+        match start {
+            // Splitting on `char::is_whitespace`, not the ASCII subset:
+            // `split_whitespace` uses the Unicode property, so an NBSP or
+            // an ideographic space pasted into the query has to keep
+            // separating terms exactly as it did before.
+            None => {
+                if !ch.is_whitespace() {
+                    start = Some(i);
+                }
             }
-            i += 1;
+            Some(s) => {
+                if quoted {
+                    quoted = ch != '"';
+                } else if ch == '"' && prev == ':' {
+                    quoted = true;
+                } else if ch.is_whitespace() {
+                    terms.push(&raw[s..i]);
+                    start = None;
+                }
+            }
         }
-        if i > start {
-            terms.push(&raw[start..i]);
-        }
+        prev = ch;
+    }
+    if let Some(s) = start {
+        terms.push(&raw[s..]);
     }
     terms
 }
@@ -3760,6 +3770,39 @@ mod tests {
         assert_eq!(search_terms("a \"b c\" d"), vec!["a", "\"b", "c\"", "d"]);
         assert_eq!(search_terms("said:\"b c\" d"), vec!["said:\"b c\"", "d"]);
         assert_eq!(search_terms("  spaced   out "), vec!["spaced", "out"]);
+    }
+
+    /// Every query WITHOUT a `field:"` sequence must tokenize exactly as
+    /// `split_whitespace` did — the compatibility guarantee the grammar
+    /// documents. Splitting on the ASCII subset instead of the Unicode
+    /// `White_Space` property silently fuses terms around a pasted NBSP
+    /// and empties the result set (#1774).
+    #[test]
+    fn unquoted_queries_tokenize_exactly_like_split_whitespace() {
+        for q in [
+            "login flow",
+            "  spaced   out ",
+            "login\u{a0}flow",    // NBSP, what a paste from HTML carries
+            "login\u{3000}flow",  // ideographic space, from a CJK IME
+            "login\u{b}flow",     // vertical tab: whitespace, but not ASCII-ws
+            "\u{a0}\u{2007}lead", // leading Unicode whitespace
+            "a \"b c\" d",        // a quote NOT opening a qualifier value
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                search_terms(q),
+                q.split_whitespace().collect::<Vec<_>>(),
+                "query {q:?} must tokenize as the legacy search did"
+            );
+        }
+
+        // And the end-to-end consequence: an NBSP-separated query still
+        // finds the row its ASCII-spaced twin does.
+        let mut ws = workspace_with_task("a", Some("acme/api"), 5);
+        ws.gh_issues.first_mut().expect("task").title = "Fix login flow".into();
+        assert!(search_matches("login flow", &ws));
+        assert!(search_matches("login\u{a0}flow", &ws));
     }
 
     /// The excerpt is the row's "why did this match" cue, so it must

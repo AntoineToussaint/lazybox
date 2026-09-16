@@ -3782,14 +3782,17 @@ impl TerminalStack {
     /// read, so a caller can skip rebuilding the corpus when nothing has
     /// changed (#1774).
     ///
-    /// Derived rather than incremented at each mutation site: prompt
-    /// history is assigned from a snapshot, inherited across a respawn,
-    /// appended on submit, and dropped with its terminal — a
-    /// hand-maintained counter that missed one of those would leave the
-    /// search quietly matching stale text, which is exactly the failure
-    /// the user could not diagnose. Per-slot length and newest timestamp
-    /// move on every one of those paths, and the fold is over terminals,
-    /// not prompts, so it stays cheap enough for the per-frame check.
+    /// Derived rather than incremented at each mutation site: the corpus
+    /// changes when prompt history is assigned from a snapshot, inherited
+    /// across a respawn, appended on submit, or dropped with its
+    /// terminal — and ALSO when a rebadge re-keys a slot's session
+    /// without touching its history at all. A hand-maintained counter
+    /// that missed one of those would leave the search quietly matching
+    /// stale text, the failure a user cannot diagnose. So the digest
+    /// folds every input the corpus is built from — the session key it
+    /// is keyed by, plus per-slot history length and newest timestamp —
+    /// over terminals rather than prompts, staying cheap enough for the
+    /// per-frame check.
     pub fn agent_text_rev(&self) -> u64 {
         let mut fold: u64 = 0;
         for (id, slot) in &self.terminals {
@@ -3797,8 +3800,18 @@ impl TerminalStack {
                 continue;
             }
             let newest = slot.prompt_history.last().map_or(0, |p| p.timestamp_ms);
+            // The session key is part of the digest because it is what the
+            // corpus is KEYED by, and a rebadge (`TerminalsRebadged`, the
+            // issue→PR fold) re-points it in place without touching the
+            // terminal id, the history length or any timestamp. Folding only
+            // the history would leave the corpus filed under a key no row has
+            // any more, and the search would quietly match nothing.
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(slot.session_key.as_str(), &mut h);
             fold = fold.wrapping_add(
-                id.0 ^ (slot.prompt_history.len() as u64).rotate_left(17) ^ newest.rotate_left(33),
+                id.0 ^ (slot.prompt_history.len() as u64).rotate_left(17)
+                    ^ newest.rotate_left(33)
+                    ^ std::hash::Hasher::finish(&h).rotate_left(7),
             );
         }
         fold
@@ -11494,6 +11507,48 @@ mod rebadge_tests {
                 text.trim_end().to_string()
             })
             .collect()
+    }
+
+    /// A rebadge (the issue→PR fold) re-keys a slot's session without
+    /// touching its prompt history, so the corpus digest has to move on
+    /// it too — otherwise the sidebar keeps the agent text filed under a
+    /// key no row carries any more and `agent:` quietly matches nothing
+    /// until the next unrelated prompt (#1774).
+    #[test]
+    fn rebadge_moves_the_agent_text_digest_and_rekeys_the_corpus() {
+        let issue = SessionKey::new("github:o/r#1");
+        let pr = SessionKey::new("github:o/r#2");
+        let mut stack = spawned_stack(TerminalId(1), &issue);
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .prompt_history
+            .push(lazybox_ipc::UserPrompt {
+                text: "rewrite the parser".into(),
+                timestamp_ms: 7,
+                source: lazybox_ipc::PromptSource::Typed,
+            });
+
+        let before = stack.agent_text_rev();
+        assert!(stack.agent_text_by_session().contains_key(&issue));
+
+        stack.on_event(&Event::TerminalsRebadged {
+            from: issue.clone(),
+            to: pr.clone(),
+        });
+
+        assert_ne!(
+            stack.agent_text_rev(),
+            before,
+            "a rebadge changes the corpus even though no prompt moved"
+        );
+        let corpus = stack.agent_text_by_session();
+        assert!(
+            corpus.contains_key(&pr),
+            "the agent text follows the workspace to its new key"
+        );
+        assert!(!corpus.contains_key(&issue), "and leaves no orphan behind");
     }
 
     #[test]

@@ -243,12 +243,13 @@ struct PorcelainEntry {
 
 impl WorktreeManager {
     /// Return live worktrees for `branch` that belong to this manager's
-    /// bare clone and sit under its managed `worktrees/` root.
+    /// bare clone and that lazybox provisioned
+    /// ([`Self::is_managed_worktree_path`]).
     ///
     /// This is narrower than [`Self::inspect_worktrees`]: callers that
     /// need to claim an existing checkout can inspect one repo/branch
     /// without walking every cached repository or probing worktree
-    /// cleanliness. Paths outside the managed root are deliberately
+    /// cleanliness. Paths outside the managed namespace are deliberately
     /// excluded even when they are registered against the same bare clone.
     pub async fn managed_worktrees_for_branch(
         &self,
@@ -264,14 +265,14 @@ impl WorktreeManager {
 
         let lock = crate::repo_lock(&bare);
         let _guard = lock.lock(priority).await;
-        let managed_root = canonical_or_self(&self.base_dir().join("worktrees"));
         let mut paths = Vec::new();
         for entry in list_porcelain(self.git_runner(), &bare).await? {
             if entry.prunable || entry.branch.as_deref() != Some(branch) {
                 continue;
             }
-            let path = canonical_or_self(&entry.path);
-            if path.starts_with(&managed_root) && crate::worktree_dir_ready(&entry.path).await {
+            if self.is_managed_worktree_path(&entry.path)
+                && crate::worktree_dir_ready(&entry.path).await
+            {
                 paths.push(entry.path);
             }
         }
@@ -283,8 +284,9 @@ impl WorktreeManager {
     /// Remove a non-live managed holder only when it has no local
     /// work to preserve. The caller owns session-liveness validation;
     /// this boundary validates that `path` is a registered worktree for
-    /// `branch`, lives under lazybox's managed root, is unlocked, clean,
-    /// and has no unpushed commits before asking git to remove it.
+    /// `branch`, is one lazybox provisioned
+    /// ([`Self::is_managed_worktree_path`]), is unlocked, clean, and has
+    /// no unpushed commits before asking git to remove it.
     ///
     /// The local branch ref is deliberately retained so the caller can
     /// immediately check it out at the intended workspace path.
@@ -303,11 +305,10 @@ impl WorktreeManager {
 
         let lock = crate::repo_lock(&bare);
         let _guard = lock.lock(priority).await;
-        let managed_root = canonical_or_self(&self.base_dir().join("worktrees"));
-        let key = canonical_or_self(path);
-        if !key.starts_with(&managed_root) {
+        if !self.is_managed_worktree_path(path) {
             return Ok(WorktreeReclaimOutcome::NotManaged);
         }
+        let key = canonical_or_self(path);
 
         let entries = list_porcelain(self.git_runner(), &bare).await?;
         let Some(entry) = entries.into_iter().find(|entry| {

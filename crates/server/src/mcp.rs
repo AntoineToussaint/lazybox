@@ -1083,7 +1083,7 @@ impl LazyboxMcp {
     ) -> Result<(String, String), McpError> {
         let launch_dir = self
             .load_workspace(&lazybox_core::WorkspaceKey::new(target.as_str()))
-            .and_then(|ws| snippet_launch_dir(&ws));
+            .and_then(|ws| snippet_launch_dir(&ws, self.config.worktree_root_path()));
         let catalog = lazybox_config::Snippets::load_for_launch_dir(launch_dir.as_deref());
         let Some(snippet) = catalog.get(key) else {
             let names: Vec<&str> = catalog.all().map(|(k, _)| k).collect();
@@ -2746,14 +2746,17 @@ fn apply_snippet_vars(body: &str, vars: &std::collections::BTreeMap<String, Stri
 /// workspace: the first of its checkout candidates that actually carries
 /// one. `None` leaves the catalog at built-in + global, which is what the
 /// picker shows on a workspace without a repo library.
-fn snippet_launch_dir(workspace: &lazybox_core::Workspace) -> Option<std::path::PathBuf> {
+fn snippet_launch_dir(
+    workspace: &lazybox_core::Workspace,
+    worktree_root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
     [
         workspace.linked_checkout.clone(),
         workspace
             .sessions
             .first()
             .map(|session| session.worktree_path.clone()),
-        crate::spawn_handler::main_worktree_path(workspace),
+        crate::spawn_handler::main_worktree_path_under(workspace, worktree_root),
     ]
     .into_iter()
     .flatten()

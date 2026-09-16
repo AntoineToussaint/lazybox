@@ -7460,3 +7460,136 @@ mod epic_notification_tests {
         );
     }
 }
+
+/// A `★ Focused` row is the same workspace lifted out of its repo group,
+/// so it must carry every column that workspace shows under its own
+/// header — glyph, number, role, agent badge, status, age — with the
+/// source cue *added* after the title, never spliced ahead of it (#1747).
+#[cfg(test)]
+mod focused_row_identity_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::{CiStatus, Project, ProjectKey, Workspace, WorkspaceKey};
+    use lazybox_ipc::{TerminalId, TerminalKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    const REPO: &str = "AntoineToussaint/lazybox";
+    const TITLE: &str = "orion on Azure: author + stand up orion's Azure con";
+
+    fn row_containing(sb: &mut Sidebar, width: u16, needle: &str) -> String {
+        let backend = TestBackend::new(width, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no row containing {needle:?} at width {width}"))
+    }
+
+    fn sidebar_with_pr() -> (Sidebar, SessionKey) {
+        let mut t = base_task();
+        t.id.source = "github".into();
+        t.id.key = format!("{REPO}#798");
+        t.url = format!("https://github.com/{REPO}/pull/798");
+        t.repo = Some(REPO.into());
+        t.title = TITLE.into();
+        t.ci = CiStatus::Failure;
+        t.unread_count = 3;
+        t.updated_at = chrono::Utc::now() - chrono::Duration::hours(13);
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        let key = SessionKey::from(&w.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(key.clone(), w);
+        sb.running_terminals.insert(
+            TerminalId(1),
+            (key.clone(), TerminalKind::Agent("codex".to_string())),
+        );
+        sb.recompute_visible();
+        (sb, key)
+    }
+
+    #[test]
+    fn focused_pr_row_keeps_every_column_and_trails_its_source() {
+        let (mut sb, key) = sidebar_with_pr();
+        let under_header = row_containing(&mut sb, 120, "orion");
+        let identity = format!("⇄ 798 A   {TITLE}");
+        assert!(
+            under_header.contains(&identity),
+            "fixture row under its repo header: {under_header:?}",
+        );
+
+        sb.focused_workspaces.push(key);
+        sb.recompute_visible();
+
+        let wide = row_containing(&mut sb, 120, "orion");
+        assert!(
+            wide.contains(&format!("{identity} · {REPO}")),
+            "the focused row opens with the same identity cluster and the \
+             source cue follows the title: {wide:?}",
+        );
+        for column in ["X", "✗", "13h"] {
+            assert!(
+                wide.contains(column),
+                "focused row must keep the {column:?} column: {wide:?}",
+            );
+        }
+
+        // Narrow: the cue is the redundant half, so it is what gives way —
+        // the number, role, agent, CI and age all survive.
+        let narrow = row_containing(&mut sb, 60, "orion");
+        assert!(
+            !narrow.contains(REPO),
+            "the source cue must shed before the row's own columns: {narrow:?}",
+        );
+        for column in ["⇄ 798 A", "X", "✗", "13h"] {
+            assert!(
+                narrow.contains(column),
+                "narrow focused row must keep the {column:?} column: {narrow:?}",
+            );
+        }
+    }
+
+    /// The row from the report: a task-less workspace named `Bug`. It has
+    /// no number or status to show, so the name IS its identity — the cue
+    /// must follow it, not turn it into a `repo · Bug` compound.
+    #[test]
+    fn focused_taskless_row_leads_with_its_name() {
+        let now = chrono::Utc::now();
+        let (owner, name) = REPO.split_once('/').expect("owner/repo");
+        let mut projects = std::collections::BTreeMap::new();
+        let project = Project::github(owner, name, now);
+        projects.insert(project.key.clone(), project);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.apply_projects(projects);
+
+        let mut w = Workspace::empty(
+            WorkspaceKey::new("github:AntoineToussaint/lazybox/bug"),
+            "bug",
+            now,
+        );
+        w.name = "Bug".into();
+        w.project_key = Some(ProjectKey::github(owner, name));
+        let key = SessionKey::from(&w.key);
+        sb.workspaces.insert(key.clone(), w);
+        sb.focused_workspaces.push(key);
+        sb.recompute_visible();
+
+        let row = row_containing(&mut sb, 100, "Bug");
+        assert!(
+            row.contains(&format!("Bug · {REPO}")),
+            "the name leads and the source trails it: {row:?}",
+        );
+        assert!(
+            !row.contains(&format!("{REPO} · Bug")),
+            "the source must not prefix the name: {row:?}",
+        );
+    }
+}

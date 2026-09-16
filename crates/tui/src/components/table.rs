@@ -276,10 +276,9 @@ pub fn compute_widths(
 ///
 /// `atomic_head` is the mirror image for LEADING spans: the first N are
 /// a droppable unit, excluded from the protected floor and shed whole
-/// before the protected body is ever sliced. The title cell uses it for
-/// the dim `repo · ` source prefix on `★ Focused` rows (#1450) — the cue
-/// is worthless if it evicts the very title it annotates, so it must
-/// yield to the title on a narrow pane rather than truncate it away.
+/// before the protected body is ever sliced — a leading cue is worthless
+/// if it evicts the very content it annotates, so it yields on a narrow
+/// pane rather than truncate the body away.
 #[derive(Debug, Clone, Default)]
 pub struct Cell {
     pub spans: Vec<ratatui::text::Span<'static>>,
@@ -559,11 +558,11 @@ fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text:
             );
         } else {
             // Over-wide. Droppable wrappers — the trailing atomic tail
-            // (the title's label chips) and the leading atomic head (the
-            // `★ Focused` repo prefix) — are shed WHOLE before the
-            // protected body is ever sliced; cutting into one would leave
-            // a dangling `[depend…` or a repo prefix that swallowed the
-            // title it annotates (#1450). Only when the body itself
+            // (the title's label chips and `★ Focused` source cue) and the
+            // leading atomic head — are shed WHOLE before the protected
+            // body is ever sliced; cutting into one would leave a dangling
+            // `[depend…` or a repo cue that swallowed the title it
+            // annotates (#1450). Only when the body itself
             // overflows do we char-truncate it with a trailing `…`.
             let body_start = cell.body_start();
             let body_end = cell.spans.len() - cell.atomic_tail;

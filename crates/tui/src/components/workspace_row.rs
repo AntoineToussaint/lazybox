@@ -193,13 +193,13 @@ pub struct WorkspaceRowCtx<'a> {
     /// so the user can see *what* matched — the vim `/pattern` cue (#1099).
     /// Already `#`-stripped and trimmed by the caller.
     pub highlight_query: Option<&'a str>,
-    /// Source group label to render as a dim `repo · ` prefix ahead of the
+    /// Source group label to render as a dim ` · repo` cue trailing the
     /// title (#1450). `Some` only for rows in the synthetic `★ Focused`
     /// section, which are lifted out of their repo group and so carry no
     /// repo header to say where they came from; the label is the same one
     /// [`group_label`](lazybox_tui_core::inbox::group_label) gives the row's
     /// repo header elsewhere. `None` for rows shown under their own header.
-    pub repo_prefix: Option<String>,
+    pub source_repo: Option<String>,
 }
 
 /// Gutter glyph on the cursor row: a left-edge accent bar (U+258E). The
@@ -661,26 +661,8 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // unit — after the status pill (#328), never sliced mid-chip —
     // when the row is too narrow (see `Cell::atomic_tail`).
     let labels = label_spans(ctx);
-    let tail = labels.len();
-    // A `★ Focused` row is lifted out of its repo group, so it has no repo
-    // header to say where it came from — name the source inline (#1450).
-    // Dim so it reads as a cue rather than competing with the title, but
-    // legible (no forced dim) on the cursor row, mirroring the title and
-    // the tree prefix. It leads the cell as an atomic head so a narrow
-    // pane sheds it whole rather than truncating the title behind it.
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let head = if let Some(repo) = &ctx.repo_prefix {
-        let prefix_style = if ctx.is_cursor {
-            ctx.row_style()
-        } else {
-            ctx.row_style().fg(ctx.theme.text_dim)
-        };
-        spans.push(Span::styled(format!("{repo} · "), prefix_style));
-        1
-    } else {
-        0
-    };
-    spans.extend(ticket_tree_prefix(ctx));
+    let mut tail = labels.len();
+    let mut spans: Vec<Span<'static>> = ticket_tree_prefix(ctx);
     spans.extend(title_spans(
         ctx.raw_title(),
         ctx.highlight_query,
@@ -688,7 +670,26 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ctx.theme,
     ));
     spans.extend(labels);
-    Cell::new(spans).atomic_tail(tail).atomic_head(head)
+    // A `★ Focused` row is lifted out of its repo group, so it has no repo
+    // header to say where it came from — name the source inline (#1450).
+    // It trails the title rather than leading it: the row must open with
+    // exactly what it shows under its own repo header, so a task-less
+    // workspace named `Bug` reads as `Bug · owner/repo`, not as a
+    // `owner/repo · Bug` compound that swallows the name (#1747). Dim so
+    // it reads as a cue rather than competing with the title, but legible
+    // (no forced dim) on the cursor row, mirroring the title and the tree
+    // prefix. It joins the atomic tail so a narrow pane sheds it whole,
+    // never the title it annotates.
+    if let Some(repo) = &ctx.source_repo {
+        let cue_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            ctx.row_style().fg(ctx.theme.text_dim)
+        };
+        spans.push(Span::styled(format!(" · {repo}"), cue_style));
+        tail += 1;
+    }
+    Cell::new(spans).atomic_tail(tail)
 }
 
 /// Split a title into styled spans, underlining the first case-insensitive
@@ -1748,7 +1749,7 @@ mod tests {
             inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
-            repo_prefix: None,
+            source_repo: None,
         }
     }
 
@@ -2264,7 +2265,7 @@ mod tests {
             inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
-            repo_prefix: None,
+            source_repo: None,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -2281,74 +2282,132 @@ mod tests {
         assert_eq!(cell.spans[0].content.as_ref(), "[CI] cache post-job upload");
     }
 
+    /// #1747: the source cue trails the title. The cell opens with the
+    /// title exactly as it renders under the row's own repo header, and
+    /// the dim ` · repo` follows it as a droppable tail.
     #[test]
-    fn cell_title_prepends_dim_repo_prefix_when_set() {
+    fn cell_title_appends_dim_source_repo_when_set() {
         let task = make_task("owner/repo#1", "Fix the thing");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.repo_prefix = Some("owner/repo".into());
+        ctx.source_repo = Some("owner/repo".into());
         let cell = cell_title(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), "owner/repo · ");
-        assert_eq!(cell.spans[0].style.fg, Some(theme.text_dim));
-        // The title itself still follows, unchanged.
-        assert_eq!(cell.spans[1].content.as_ref(), "Fix the thing");
+        assert_eq!(cell.spans[0].content.as_ref(), "Fix the thing");
+        let cue = cell.spans.last().expect("cue span");
+        assert_eq!(cue.content.as_ref(), " · owner/repo");
+        assert_eq!(cue.style.fg, Some(theme.text_dim));
+        assert_eq!(cell.atomic_tail, 1, "the cue sheds as part of the tail");
+    }
+
+    /// #1747: a task-less workspace's identity is its name alone, so the
+    /// cue must not turn `Bug` into a `repo · Bug` compound — the name
+    /// leads and the source follows.
+    #[test]
+    fn cell_title_leads_with_the_workspace_name_ahead_of_its_source() {
+        let mut ws = Workspace::empty(
+            lazybox_core::WorkspaceKey::new("local:bug"),
+            "bug",
+            fixed_time(),
+        );
+        ws.name = "Bug".into();
+        let theme = theme();
+        let unused = make_task("owner/repo#1", "unused");
+        let mut ctx = ctx_for(&ws, &unused, &theme);
+        ctx.task = None;
+        ctx.source_repo = Some("AntoineToussaint/lazybox".into());
+        let cell = cell_title(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), "Bug");
+        assert_eq!(
+            cell.spans[1].content.as_ref(),
+            " · AntoineToussaint/lazybox"
+        );
     }
 
     #[test]
-    fn cell_title_has_no_repo_prefix_by_default() {
+    fn cell_title_has_no_source_repo_by_default() {
         let task = make_task("owner/repo#1", "Fix the thing");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_title(&ctx);
+        assert_eq!(cell.spans.len(), 1);
         assert_eq!(cell.spans[0].content.as_ref(), "Fix the thing");
     }
 
     /// #1450 regression: the original fix put the `repo · ` prefix ahead
     /// of the title in the same cell, and right-edge truncation then ate
-    /// the title and left only the prefix on a narrow pane. The prefix is
-    /// now a droppable atomic head, so it sheds whole and the title stays.
+    /// the title and left only the prefix on a narrow pane. The cue is a
+    /// droppable atomic tail, so it sheds whole and the title stays.
     #[test]
-    fn focused_prefix_never_evicts_the_title_on_a_narrow_pane() {
+    fn focused_source_never_evicts_the_title_on_a_narrow_pane() {
         let task = make_task("owner/repo#1", "Fix the thing");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
-        // A long owner/repo that, ahead of the title, would have shoved it
-        // off the row entirely.
-        ctx.repo_prefix = Some("AntoineToussaint/lazybox".into());
+        // A long owner/repo that, kept at any cost, would have shoved the
+        // title off the row entirely.
+        ctx.source_repo = Some("AntoineToussaint/lazybox".into());
         let columns = build_columns(4);
         let lines = crate::components::table::render_table(&[build_row(&ctx)], &columns, 30);
         let text = line_text(&lines[0]);
         assert!(
             text.contains("Fix the thing"),
-            "the title must stay whole, not be crowded out by the prefix: {text:?}",
+            "the title must stay whole, not be crowded out by the cue: {text:?}",
         );
         assert!(
             !text.contains("AntoineToussaint"),
-            "the long repo prefix must shed, not swallow the title: {text:?}",
+            "the long repo cue must shed, not swallow the title: {text:?}",
         );
     }
 
-    /// #1450: on the cursor row the prefix must stay legible — no forced
-    /// dim fg, which reads as low-contrast grey over the highlight fill.
+    /// The cue sheds together with the label chips, before the title is
+    /// ever truncated — and stays when there is room for all of it.
+    #[test]
+    fn focused_source_rides_the_label_tail() {
+        let mut task = make_task("owner/repo#1", "Fix the thing");
+        task.labels = vec![lazybox_core::Label {
+            name: "bug".into(),
+            color: String::new(),
+        }];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.source_repo = Some("owner/repo".into());
+        let cell = cell_title(&ctx);
+        assert_eq!(
+            cell.atomic_tail,
+            label_spans(&ctx).len() + 1,
+            "labels + cue form one droppable tail",
+        );
+        let columns = build_columns(4);
+        let wide = crate::components::table::render_table(&[build_row(&ctx)], &columns, 80);
+        let text = line_text(&wide[0]);
+        assert!(
+            text.contains("Fix the thing [bug] · owner/repo"),
+            "with room, the title leads and labels then source follow: {text:?}",
+        );
+    }
+
+    /// #1450: on the cursor row the cue must stay legible — no forced dim
+    /// fg, which reads as low-contrast grey over the highlight fill.
     /// Mirrors how `cell_title`/`ticket_tree_prefix` suppress dimming on
     /// the cursor row.
     #[test]
-    fn focused_prefix_is_legible_not_dimmed_on_the_cursor_row() {
+    fn focused_source_is_legible_not_dimmed_on_the_cursor_row() {
         let task = make_task("owner/repo#1", "Fix the thing");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.repo_prefix = Some("owner/repo".into());
+        ctx.source_repo = Some("owner/repo".into());
         ctx.is_cursor = true;
         let cell = cell_title(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), "owner/repo · ");
+        let cue = cell.spans.last().expect("cue span");
+        assert_eq!(cue.content.as_ref(), " · owner/repo");
         assert_ne!(
-            cell.spans[0].style.fg,
+            cue.style.fg,
             Some(theme.text_dim),
-            "cursor-row prefix must not be forced to the dim fg",
+            "cursor-row cue must not be forced to the dim fg",
         );
     }
 
@@ -2864,7 +2923,7 @@ mod tests {
             inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
-            repo_prefix: None,
+            source_repo: None,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -4421,7 +4480,7 @@ mod tests {
             inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
-            repo_prefix: None,
+            source_repo: None,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

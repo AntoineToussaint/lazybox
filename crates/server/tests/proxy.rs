@@ -3,6 +3,8 @@
 //! streamed response comes back byte-for-byte, and the token usage is
 //! parsed and attributed to the agent named in the request path.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 
 use lazybox_ipc::AgentUsage;

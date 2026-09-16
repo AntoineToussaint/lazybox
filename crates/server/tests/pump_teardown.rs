@@ -12,6 +12,8 @@
 //!    hook-era map entries and persisted `terminal:*` kv rows must not
 //!    outlive a recovered terminal.
 
+mod common;
+
 use lazybox_ipc::{Command, Event, TerminalKind, channel};
 use lazybox_server::{Server, ServerConfig};
 use std::time::Duration;

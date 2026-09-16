@@ -4974,7 +4974,7 @@ pub(crate) use pills::{
     relative_time, role_badge, status_legend, status_pills, workspace_type_label,
 };
 #[cfg(test)]
-pub(crate) use pills::{pill_for_tag, status_pill};
+pub(crate) use pills::{pill_for_tag, pill_for_tag_in, status_pill};
 
 // Prompt builders moved to `lazybox_tui_core::prompts` (so `intent`,
 // which also lives there, can call them without creating a dep

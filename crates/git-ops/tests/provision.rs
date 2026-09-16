@@ -10,6 +10,8 @@
 //! - concurrent checkouts of the same repo serialize on the per-repo
 //!   lock so both succeed.
 
+mod common;
+
 use lazybox_git_ops::WorktreeManager;
 use std::path::{Path, PathBuf};
 use std::process::Command;

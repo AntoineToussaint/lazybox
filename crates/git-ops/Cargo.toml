@@ -16,6 +16,7 @@ tracing = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+ctor = "1.0"
 tempfile = "3"
 tokio = { workspace = true, features = ["full", "test-util"] }
 

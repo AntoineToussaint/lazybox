@@ -1,8 +1,30 @@
 #![cfg(unix)]
 
+mod common;
+
 use lazybox_ipc::{Command, socket, transport};
 use std::process::Stdio;
 use std::time::Duration;
+
+/// Liveness bound on the helper: parse args, dial one socket, send one frame,
+/// exit. Far above what that costs, because the bound is there to turn a hung
+/// helper into a named failure — not to measure the box.
+const HELPER_EXIT_BUDGET: Duration = Duration::from_secs(30);
+
+/// Run the binary once outside any timed section. The first exec of a
+/// freshly built debug `lazybox` (~200 MB) pages it in from a cold cache —
+/// measured at 13s on a loaded box against 20ms once warm — and that cost
+/// belongs to the build, not to the round-trip these tests time.
+fn warm_binary(binary: &str) {
+    let status = std::process::Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run lazybox --version");
+    assert!(status.success(), "lazybox --version failed: {status}");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn notification_click_cli_sends_the_workspace_to_its_socket() {
@@ -24,6 +46,7 @@ async fn notification_click_cli_sends_the_workspace_to_its_socket() {
     });
 
     let binary = env!("CARGO_BIN_EXE_lazybox");
+    warm_binary(binary);
     let workspace = "github:owner/repo#674";
     let socket_arg = socket_path.clone();
     let home = temp.path().join("home");
@@ -42,7 +65,7 @@ async fn notification_click_cli_sends_the_workspace_to_its_socket() {
             .expect("run notification helper")
     });
 
-    let status = tokio::time::timeout(Duration::from_secs(5), child)
+    let status = tokio::time::timeout(HELPER_EXIT_BUDGET, child)
         .await
         .expect("helper exits")
         .expect("helper task");
@@ -97,6 +120,7 @@ async fn notification_click_selects_the_terminal_session_before_focusing_workspa
     paths.extend(std::env::split_paths(&inherited_path));
     let test_path = std::env::join_paths(paths).expect("PATH");
     let binary = env!("CARGO_BIN_EXE_lazybox");
+    warm_binary(binary);
     let socket_arg = socket_path.clone();
     let home = temp.path().join("home");
     let capture = capture_path.clone();
@@ -121,7 +145,7 @@ async fn notification_click_selects_the_terminal_session_before_focusing_workspa
             .expect("run notification helper")
     });
 
-    let status = tokio::time::timeout(Duration::from_secs(5), child)
+    let status = tokio::time::timeout(HELPER_EXIT_BUDGET, child)
         .await
         .expect("helper exits")
         .expect("helper task");

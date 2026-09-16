@@ -1,3 +1,5 @@
+mod common;
+
 pub use lazybox_server::metrics;
 pub use lazybox_server::polling;
 pub use lazybox_server::pty;
@@ -75,10 +77,20 @@ impl Agent for FakePtyAgent {
             // the backpressure path under test. The count must stay
             // comfortably above the capacity; if EVENT_CHANNEL_CAPACITY
             // grows again, bump this too (the wait loop asserts it).
+            //
+            // Each line is paced by a shell-builtin delay loop, not an
+            // external `sleep`: the pacing exists so the PTY reader picks
+            // each line up as its own chunk (one `seq` per line), and a
+            // fork+exec per line made the fixture's wall clock a function
+            // of box load — 21ms per line at load 40, so ~86s for the loop
+            // against a 120s bound (#1751). The 1500-iteration loop is a
+            // few ms on an idle box and stretches with load, as the reader
+            // it paces does.
             "sleep 1; printf '__LB_SIZE__'; stty size; printf '__LB_BEGIN__\\n'; \
              i=0; while [ \"$i\" -lt 4000 ]; do \
              printf '__LB_OUTPUT__%04d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; \
-             i=$((i + 1)); sleep 0.003; done; printf '__LB_END__\\n'; \
+             i=$((i + 1)); j=0; while [ \"$j\" -lt 1500 ]; do j=$((j + 1)); done; done; \
+             printf '__LB_END__\\n'; \
              IFS= read -r line; printf '__LB_INPUT__%s\\n' \"$line\"; sleep 30"
                 .into(),
         ]
@@ -1485,7 +1497,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 /// failure never prints. `nextest_budget_outlasts_the_in_test_pty_bounds`
 /// pins that ordering.
 const PTY_OUTPUT_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const PTY_OUTPUT_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const PTY_OUTPUT_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
 
 /// The in-test bounds only produce a readable failure if they fire before
 /// nextest kills the process, so the two budgets are a matched pair: raising

@@ -1,3 +1,5 @@
+mod common;
+
 use lazybox_core::SessionKey;
 use lazybox_ipc::{AgentState, Event, HookEvent, HookEventKind, TerminalId, TerminalKind};
 use lazybox_server::ServerConfig;

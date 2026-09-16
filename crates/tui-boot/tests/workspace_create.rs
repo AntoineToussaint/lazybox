@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod common;
+
 use lazybox_ipc::{Command, Event, socket, transport};
 use std::process::Stdio;
 use std::time::Duration;

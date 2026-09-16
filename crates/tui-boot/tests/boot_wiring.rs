@@ -11,6 +11,8 @@
 //! technique the workspace dep-rules test uses — rather than by
 //! booting a TUI in a test harness.
 
+mod common;
+
 fn main_rs() -> String {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs");
     std::fs::read_to_string(path).expect("read main.rs")

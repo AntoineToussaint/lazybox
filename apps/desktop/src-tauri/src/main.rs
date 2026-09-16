@@ -328,6 +328,10 @@ impl InboxModel {
             collapsed_epics: &collapsed_epics,
             now,
             search: search.as_ref(),
+            // No terminal stack here, so there is no agent text to
+            // search; an empty map makes an `agent:` term match nothing
+            // rather than changing any other query (#1774).
+            agent_text: &std::collections::HashMap::new(),
         });
         DesktopInboxView {
             revision: self.revision,

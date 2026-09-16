@@ -1840,6 +1840,10 @@ pub struct Model<T: TerminalAdapter> {
     /// the next poll instead of flickering off within seconds. Rolled back
     /// when the worker reports the spawn dropped.
     remote_marks: std::collections::HashMap<lazybox_core::SessionKey, String>,
+    /// Digest of the prompt history last pushed into the sidebar's
+    /// `agent:` search corpus (#1774), so `view` rebuilds it only when
+    /// the terminal stack's history actually moved.
+    agent_text_rev: u64,
     /// UI→worker control channel for the remote box: explicit
     /// connect/disconnect (the `Shift-C` action) and the startup
     /// auto-connect (#1066). `None` when no `sandbox:` box is configured.
@@ -2816,6 +2820,7 @@ impl<T: TerminalAdapter> Model<T> {
             remote_disabled_repos: std::collections::BTreeSet::new(),
             remote_notice_rx: None,
             remote_marks: std::collections::HashMap::new(),
+            agent_text_rev: 0,
             remote_control: None,
             remote_require_connect: false,
             event_backlog: helpers::BacklogMonitor::default(),
@@ -6975,12 +6980,28 @@ impl<T: TerminalAdapter> Model<T> {
             });
     }
 
+    /// Keep the sidebar's `agent:` search corpus in step with the prompt
+    /// history the terminal stack holds (#1774). The two live in disjoint
+    /// panes, so — like the usage badges above — the join happens here.
+    /// Guarded by a digest of the history so the per-frame cost is the
+    /// fold over terminals, not a rebuild.
+    fn refresh_agent_search_text(&mut self) {
+        let rev = self.terminals.agent_text_rev();
+        if rev == self.agent_text_rev {
+            return;
+        }
+        self.agent_text_rev = rev;
+        self.sidebar
+            .set_agent_text(self.terminals.agent_text_by_session());
+    }
+
     pub fn view(&mut self) {
         // Refresh the agent tabs' live spend/headroom badges (#1490) from the
         // usage tracker before drawing, so the figure tracks live usage and a
         // plan window drops the instant its reset passes. Done here (not in the
         // draw closure) because the closure holds `&mut self.terminals`.
         self.refresh_terminal_usage_badges();
+        self.refresh_agent_search_text();
         // Pull state out before the closure so the borrow checker is
         // happy — `terminal.draw` takes `&mut self.terminal` while we
         // also need `&mut self.app` etc. inside.

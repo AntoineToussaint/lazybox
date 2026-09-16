@@ -433,6 +433,16 @@ impl Sidebar {
         self.inner.search()
     }
 
+    /// Replace the agent-text corpus the `/` search's `agent:` / `said:`
+    /// qualifiers read (#1774). See
+    /// [`crate::components::sidebar::Sidebar::set_agent_text`].
+    pub fn set_agent_text(
+        &mut self,
+        agent_text: std::collections::HashMap<lazybox_core::SessionKey, String>,
+    ) {
+        self.inner.set_agent_text(agent_text);
+    }
+
     /// Read currently selected workspace key (for selection projection).
     pub fn selected_workspace_key(&self) -> Option<&lazybox_core::SessionKey> {
         self.inner.selected_session_key()

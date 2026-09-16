@@ -3524,6 +3524,64 @@ mod search_tests {
         );
     }
 
+    /// End-to-end `agent:` search (#1774): the qualifier selects rows by
+    /// what their agent was asked, independently of the title, and the
+    /// surviving row carries an excerpt saying why — the row's title has
+    /// nothing for the usual underline to mark.
+    #[test]
+    fn agent_search_filters_by_agent_text_and_exposes_an_excerpt() {
+        // Same repo group so a scoped `/` search covers both rows; the
+        // titles are what distinguishes a metadata hit from an agent hit.
+        let a = issue_ws_in_repo("o/a", "1", "Tidy the changelog");
+        let b = issue_ws_in_repo("o/a", "2", "parser rewrite");
+        let a_key = SessionKey::from(&a.key);
+        let b_key = SessionKey::from(&b.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(a_key.clone(), a);
+        sb.workspaces.insert(b_key.clone(), b);
+        sb.set_agent_text(HashMap::from([(
+            a_key.clone(),
+            "please rewrite the parser to handle nested groups".to_string(),
+        )]));
+        sb.recompute_visible();
+
+        sb.open_search();
+        type_query(&mut sb, "agent:parser");
+        let shown: Vec<&SessionKey> = sb
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![&a_key],
+            "only the workspace whose AGENT text mentions the term survives — \
+             the row whose TITLE says `parser` does not",
+        );
+        let excerpt = sb.agent_excerpt(&a_key).expect("the hit carries a cue");
+        assert!(excerpt.contains("parser"), "{excerpt:?}");
+        assert!(sb.agent_excerpt(&b_key).is_none());
+
+        // Replacing the corpus re-filters live: the same query now
+        // selects the other row.
+        sb.set_agent_text(HashMap::from([(
+            b_key.clone(),
+            "the parser is fine; check the lexer".to_string(),
+        )]));
+        let shown: Vec<&SessionKey> = sb
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown, vec![&b_key], "a corpus change re-runs the search");
+    }
+
     /// A matching row underlines the searched substring in its title so
     /// the user can see *what* matched — the vim `/pattern` cue (#1099).
     #[test]

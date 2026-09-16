@@ -45,6 +45,13 @@ pub struct ComputeOutcome {
     pub summaries: BTreeMap<String, RepoSummary>,
     /// Per-workspace ticket hierarchy for rows in `visible`.
     pub ticket_tree: HashMap<SessionKey, TicketTreeMeta>,
+    /// For rows an `agent:` term matched, a short excerpt of the agent
+    /// text around the hit (#1774). The row's title holds nothing the
+    /// underline could mark — the match isn't in it — so the excerpt is
+    /// what tells the user *why* the row is in the result set. Produced
+    /// by the same [`search_evaluate`] pass that filtered the row, so a
+    /// shown excerpt always corresponds to a real hit.
+    pub agent_excerpts: HashMap<SessionKey, String>,
 }
 
 /// Inputs to the visible-rows pass. Borrowed so the function
@@ -120,6 +127,14 @@ pub struct ComputeInputs<'a> {
     /// untouched; a global search (`scope: None`) keeps only
     /// fuzzy-matching rows across every project. See [`search_matches`].
     pub search: Option<&'a SearchState>,
+    /// Per-workspace agent text the `agent:` / `said:` qualifiers search
+    /// (#1774), keyed by the same `SessionKey` as `workspaces`. A key
+    /// that's absent simply never matches an `agent:` term — a workspace
+    /// that has never run an agent has nothing to say. Only read when
+    /// the query carries one of those qualifiers, so the cost of holding
+    /// it is paid by the feature that asks for it. An empty map is the
+    /// no-op identity.
+    pub agent_text: &'a HashMap<SessionKey, String>,
 }
 
 const NO_REPO: &str = "(no repo)";
@@ -349,6 +364,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 || (snoozed_lens && w.is_snoozed(input.now))
         })
         .collect();
+    let mut agent_excerpts: HashMap<SessionKey, String> = HashMap::new();
     let mut filtered: Vec<(&SessionKey, &Workspace)> = mailbox_rows
         .iter()
         .copied()
@@ -367,9 +383,22 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         // `search_scope_covers` is the single definition of "in scope",
         // shared with the sidebar's match-highlight decision so the two
         // can't drift (#1099).
-        .filter(|(_, w)| {
-            !search_scope_covers(input.search, w, input.projects, input.workspaces)
-                || input.search.is_some_and(|s| search_matches(&s.query, w))
+        .filter(|(key, w)| {
+            // Out-of-scope rows pass through untouched; an in-scope row is
+            // kept only if it matches. `search_scope_covers` is `false`
+            // for `None` / blank queries, so the `else` is the no-search
+            // and out-of-scope case alike.
+            let Some(s) = input
+                .search
+                .filter(|s| search_scope_covers(Some(s), w, input.projects, input.workspaces))
+            else {
+                return true;
+            };
+            let hit = search_evaluate(&s.query, w, input.agent_text.get(*key).map(String::as_str));
+            if let Some(excerpt) = hit.agent_excerpt {
+                agent_excerpts.insert((*key).clone(), excerpt);
+            }
+            hit.matched
         })
         .collect();
 
@@ -792,6 +821,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         visible,
         summaries,
         ticket_tree,
+        agent_excerpts,
     }
 }
 
@@ -1212,9 +1242,53 @@ pub fn identifier_width(task: &Task) -> Option<usize> {
 /// empty query (after trimming) matches everything — callers guard
 /// against that, but it keeps the function total.
 pub fn search_matches(query: &str, w: &Workspace) -> bool {
+    search_evaluate(query, w, None).matched
+}
+
+/// What a search evaluation found. [`search_matches`] is the boolean
+/// projection of this; the extra field carries the agent-text excerpt so
+/// the filter and the row's "why did this match" cue come from ONE pass
+/// over the query — the same no-drift discipline `search_scope_covers`
+/// enforces for the title highlight (#1099).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchHit {
+    pub matched: bool,
+    /// Text around the first `agent:` hit, whitespace-collapsed and
+    /// ellipsized to [`AGENT_EXCERPT_CHARS`]. `None` whenever no
+    /// `agent:` term contributed — including for a row that matched on
+    /// metadata alone, which has nothing extra to explain.
+    pub agent_excerpt: Option<String>,
+}
+
+impl SearchHit {
+    const MISS: Self = Self {
+        matched: false,
+        agent_excerpt: None,
+    };
+}
+
+/// Visible width budget for the excerpt an `agent:` hit renders (#1774).
+/// Wide enough to carry the match plus enough surrounding words to
+/// recognize the moment, short enough to ride in the title cell's
+/// sheddable tail rather than fight the title for space.
+pub const AGENT_EXCERPT_CHARS: usize = 48;
+
+/// The qualifiers that search agent text. `said:` reads better for a
+/// phrase the agent produced, `agent:` for a topic — same corpus.
+const AGENT_QUALIFIERS: [&str; 2] = ["agent", "said"];
+
+/// [`search_matches`], plus the agent-text corpus for this workspace and
+/// the excerpt of what matched in it. `agent_text` is `None` for a
+/// workspace that has never run an agent — an `agent:` term then simply
+/// doesn't match it, which is why the search filter can pass `None`
+/// freely rather than guarding first.
+pub fn search_evaluate(query: &str, w: &Workspace, agent_text: Option<&str>) -> SearchHit {
     let raw = normalized_query(query).to_lowercase();
     if raw.is_empty() {
-        return true;
+        return SearchHit {
+            matched: true,
+            agent_excerpt: None,
+        };
     }
     // Qualifier grammar (#scale, C2): whitespace-split terms AND
     // together. A term is `-`-negatable and either field-qualified —
@@ -1225,16 +1299,31 @@ pub fn search_matches(query: &str, w: &Workspace) -> bool {
     // fuzzy-subsequence title), so a query with no qualifiers is
     // byte-for-byte the legacy search.
     let mut bare: Vec<&str> = Vec::new();
-    for term in raw.split_whitespace() {
+    let mut agent_excerpt: Option<String> = None;
+    for term in search_terms(&raw) {
         let (negated, term) = match term.strip_prefix('-') {
             Some(rest) if !rest.is_empty() => (true, rest),
             _ => (false, term),
         };
+        // `agent:` / `said:` reach outside the workspace record, so they
+        // resolve here rather than in `qualified_term_matches` (which is
+        // a pure function of the task). The first hit's excerpt is the
+        // one the row shows.
+        if let Some(value) = agent_qualifier_value(term) {
+            let hit = agent_text.and_then(|text| agent_excerpt_around(text, value));
+            if hit.is_some() == negated {
+                return SearchHit::MISS;
+            }
+            if agent_excerpt.is_none() {
+                agent_excerpt = hit;
+            }
+            continue;
+        }
         match qualified_term_matches(term, w) {
             // A qualified term must match (or, negated, must NOT).
             Some(matched) => {
                 if matched == negated {
-                    return false;
+                    return SearchHit::MISS;
                 }
             }
             // Not a recognized qualifier: a negated bare term excludes
@@ -1243,7 +1332,7 @@ pub fn search_matches(query: &str, w: &Workspace) -> bool {
             None => {
                 if negated {
                     if bare_blob_matches(term, w) {
-                        return false;
+                        return SearchHit::MISS;
                     }
                 } else {
                     bare.push(term);
@@ -1251,10 +1340,67 @@ pub fn search_matches(query: &str, w: &Workspace) -> bool {
             }
         }
     }
-    if bare.is_empty() {
-        return true;
+    let matched = bare.is_empty() || bare_blob_matches(&bare.join(" "), w);
+    SearchHit {
+        matched,
+        agent_excerpt: matched.then_some(agent_excerpt).flatten(),
     }
-    bare_blob_matches(&bare.join(" "), w)
+}
+
+/// Split a query into terms. Whitespace-separated, except that a `"`
+/// opening immediately after a qualifier's `:` runs to the next `"` — so
+/// `said:"cannot borrow"` is one term and multi-word phrases are
+/// expressible. The quotes stay inside the returned slice (it borrows
+/// from `raw`); the value parser strips them.
+///
+/// A query with no `field:"` sequence tokenizes exactly as
+/// `split_whitespace` did, which is what keeps a bare query byte-for-byte
+/// the legacy search.
+fn search_terms(raw: &str) -> Vec<&str> {
+    let bytes = raw.as_bytes();
+    let mut terms = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let start = i;
+        let mut quoted = false;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if quoted {
+                quoted = b != b'"';
+            } else if b == b'"' && i > start && bytes[i - 1] == b':' {
+                quoted = true;
+            } else if b.is_ascii_whitespace() {
+                break;
+            }
+            i += 1;
+        }
+        if i > start {
+            terms.push(&raw[start..i]);
+        }
+    }
+    terms
+}
+
+/// The needle of an `agent:` / `said:` term, or `None` when `term` is
+/// anything else. An empty value (`agent:`) is not a qualifier — it
+/// falls through to bare text rather than matching every row.
+fn agent_qualifier_value(term: &str) -> Option<&str> {
+    let (field, value) = term.split_once(':')?;
+    if !AGENT_QUALIFIERS.contains(&field) {
+        return None;
+    }
+    let value = unquote(value);
+    (!value.is_empty()).then_some(value)
+}
+
+/// Drop one pair of surrounding double quotes, if present.
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .map_or(value, |v| v.strip_suffix('"').unwrap_or(v))
 }
 
 /// One field-qualified search term. `None` = not a qualifier (bare
@@ -1266,6 +1412,7 @@ fn qualified_term_matches(term: &str, w: &Workspace) -> Option<bool> {
         return Some(task.is_some_and(|t| task_involves(t, login)));
     }
     let (field, value) = term.split_once(':')?;
+    let value = unquote(value);
     if value.is_empty() {
         return None;
     }
@@ -1359,6 +1506,74 @@ pub fn search_scope_covers(
 /// highlight, so all three agree on when a query is "empty" (#1099).
 pub fn normalized_query(query: &str) -> &str {
     query.trim().trim_start_matches('#')
+}
+
+/// Byte offset of the first ASCII-case-insensitive occurrence of
+/// `needle` (already lowercased by the caller) in `hay`, at a char
+/// boundary.
+///
+/// Folding one side byte-wise rather than lowercasing `hay` is what
+/// keeps an `agent:` query off the allocator: the corpus is orders of
+/// magnitude larger than any metadata field, and the search re-runs on
+/// every keystroke. Non-ASCII bytes compare verbatim, so a non-ASCII
+/// needle matches exactly rather than case-insensitively.
+fn ci_find(hay: &str, needle: &str) -> Option<usize> {
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    let last = h.len().checked_sub(n.len())?;
+    (0..=last).find(|&i| {
+        hay.is_char_boundary(i)
+            && h[i..i + n.len()]
+                .iter()
+                .zip(n)
+                .all(|(a, b)| a.to_ascii_lowercase() == *b)
+    })
+}
+
+/// A one-line window of `text` around its first case-insensitive
+/// occurrence of `needle`, for the row's "why did this match" cue.
+/// Whitespace (newlines included — the corpus is multi-line) collapses
+/// to single spaces, and the window is ellipsized on whichever side it
+/// was cut. `None` when `needle` isn't there.
+fn agent_excerpt_around(text: &str, needle: &str) -> Option<String> {
+    let at = ci_find(text, needle)?;
+    // A little lead-in so the match reads in context rather than opening
+    // the excerpt, but short enough that the match itself always fits.
+    let lead = AGENT_EXCERPT_CHARS / 4;
+    let start = text[..at]
+        .char_indices()
+        .nth_back(lead.saturating_sub(1))
+        .map_or(0, |(i, _)| i);
+    let mut out = String::new();
+    let mut last_was_space = true;
+    let mut taken = 0usize;
+    let mut end = start;
+    for (offset, ch) in text[start..].char_indices() {
+        if taken >= AGENT_EXCERPT_CHARS {
+            break;
+        }
+        end = start + offset + ch.len_utf8();
+        if ch.is_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+                taken += 1;
+                last_was_space = true;
+            }
+            continue;
+        }
+        out.push(ch);
+        taken += 1;
+        last_was_space = false;
+    }
+    let out = out.trim_end();
+    let mut excerpt = String::with_capacity(out.len() + 6);
+    if start > 0 {
+        excerpt.push('…');
+    }
+    excerpt.push_str(out);
+    if end < text.len() {
+        excerpt.push('…');
+    }
+    Some(excerpt)
 }
 
 /// True when every char of `needle` appears in `haystack` in order
@@ -1507,6 +1722,8 @@ mod tests {
             std::sync::LazyLock::new(HashSet::new);
         static NO_EPICS: BTreeMap<String, lazybox_ipc::EpicSnapshot> = BTreeMap::new();
         static NO_COLLAPSED_EPICS: BTreeSet<String> = BTreeSet::new();
+        static NO_AGENT_TEXT: std::sync::LazyLock<HashMap<SessionKey, String>> =
+            std::sync::LazyLock::new(HashMap::new);
         ComputeInputs {
             workspaces,
             mailbox: Mailbox::Inbox,
@@ -1527,6 +1744,7 @@ mod tests {
             collapsed_epics: &NO_COLLAPSED_EPICS,
             now: fixed_time(),
             search: None,
+            agent_text: &NO_AGENT_TEXT,
         }
     }
 
@@ -3443,6 +3661,176 @@ mod tests {
         // An unknown `is:` value degrades to bare text instead of
         // silently emptying the sidebar.
         assert!(!search_matches("is:banana", &ws));
+    }
+
+    /// `agent:` reaches the agent-text corpus and ONLY that corpus
+    /// (#1774): a word present in the title but absent from what the
+    /// agent was asked must not match, or the qualifier would be a
+    /// no-op alias for bare search.
+    #[test]
+    fn agent_qualifier_searches_agent_text_not_the_title() {
+        let mut ws = workspace_with_task("a", Some("acme/api"), 5);
+        ws.gh_issues.first_mut().expect("task").title = "Fix login flow".into();
+        let text = "rewrite the parser to handle nested groups";
+
+        assert!(search_evaluate("agent:parser", &ws, Some(text)).matched);
+        assert!(search_evaluate("said:parser", &ws, Some(text)).matched);
+        // In the title, not in the agent text.
+        assert!(!search_evaluate("agent:login", &ws, Some(text)).matched);
+        // In the agent text, not in the title — the whole point.
+        assert!(!search_matches("parser", &ws));
+
+        // Qualifiers AND with the rest of the grammar, and negate.
+        assert!(search_evaluate("agent:parser login", &ws, Some(text)).matched);
+        assert!(!search_evaluate("agent:parser nomatch", &ws, Some(text)).matched);
+        assert!(!search_evaluate("-agent:parser", &ws, Some(text)).matched);
+        assert!(search_evaluate("-agent:zzz login", &ws, Some(text)).matched);
+
+        // Case-insensitive, both directions.
+        assert!(search_evaluate("agent:PARSER", &ws, Some("The Parser broke")).matched);
+    }
+
+    /// A workspace that has never run an agent has no corpus. An
+    /// `agent:` term must simply not match it (#1774) — not match
+    /// everything, and not blow up.
+    #[test]
+    fn agent_qualifier_never_matches_a_workspace_without_an_agent() {
+        let mut ws = workspace_with_task("a", Some("acme/api"), 5);
+        ws.gh_issues.first_mut().expect("task").title = "parser rewrite".into();
+
+        assert!(!search_evaluate("agent:parser", &ws, None).matched);
+        assert!(!search_evaluate("agent:parser", &ws, Some("")).matched);
+        // Negated, an absent corpus is a non-hit, so the row survives.
+        assert!(search_evaluate("-agent:parser parser", &ws, None).matched);
+        // A bare query is unaffected by the missing corpus.
+        assert!(search_evaluate("parser", &ws, None).matched);
+    }
+
+    /// The compatibility guarantee the grammar's doc comment makes: a
+    /// query carrying no qualifier resolves identically whether or not
+    /// a corpus is present, so adding agent text can't shift the legacy
+    /// result set (#1774).
+    #[test]
+    fn bare_queries_are_unchanged_by_the_agent_corpus() {
+        let mut ws = workspace_with_task("a", Some("acme/api"), 5);
+        {
+            let t = ws.gh_issues.first_mut().expect("task");
+            t.title = "Fix login flow".into();
+            t.author = "Alice".into();
+            t.labels = vec![lazybox_core::Label::new("bug")];
+        }
+        let text = "nothing here matches the metadata terms zzz";
+        for q in [
+            "login",
+            "bug",
+            "acme",
+            "sfb",
+            "#1",
+            "nomatch",
+            "zzz",
+            "author:alice",
+            "-login",
+            "is:issue",
+            "@alice",
+            "",
+        ] {
+            assert_eq!(
+                search_evaluate(q, &ws, Some(text)).matched,
+                search_matches(q, &ws),
+                "query {q:?} must resolve identically with and without a corpus"
+            );
+        }
+    }
+
+    /// A quoted value keeps its spaces, so a phrase is one term rather
+    /// than a word plus a stray bare term (#1774).
+    #[test]
+    fn quoted_qualifier_values_match_whole_phrases() {
+        let ws = workspace_with_task("a", Some("acme/api"), 5);
+        let text = "error: cannot borrow `self` as mutable";
+
+        assert!(search_evaluate("said:\"cannot borrow\"", &ws, Some(text)).matched);
+        assert!(!search_evaluate("said:\"cannot compile\"", &ws, Some(text)).matched);
+        // Unquoted, the second word is a bare term matched against
+        // metadata — which this workspace's title doesn't carry.
+        assert!(!search_evaluate("said:cannot borrow", &ws, Some(text)).matched);
+
+        // Only a quote opening right after `:` groups; a bare quote is
+        // ordinary text, so legacy tokenization is untouched.
+        assert_eq!(search_terms("a \"b c\" d"), vec!["a", "\"b", "c\"", "d"]);
+        assert_eq!(search_terms("said:\"b c\" d"), vec!["said:\"b c\"", "d"]);
+        assert_eq!(search_terms("  spaced   out "), vec!["spaced", "out"]);
+    }
+
+    /// The excerpt is the row's "why did this match" cue, so it must
+    /// carry the hit, collapse the corpus's newlines to one line, and
+    /// stay within its width budget (#1774).
+    #[test]
+    fn agent_hit_yields_a_bounded_single_line_excerpt() {
+        let ws = workspace_with_task("a", Some("acme/api"), 5);
+        let text = "first line\n\n   second line mentions the parser here\nthird line";
+
+        let hit = search_evaluate("agent:parser", &ws, Some(text));
+        assert!(hit.matched);
+        let excerpt = hit.agent_excerpt.expect("hit yields an excerpt");
+        assert!(
+            excerpt.to_lowercase().contains("parser"),
+            "excerpt must carry the match: {excerpt:?}"
+        );
+        assert!(
+            !excerpt.contains('\n'),
+            "excerpt must be one line: {excerpt:?}"
+        );
+        assert!(
+            !excerpt.contains("  "),
+            "runs of whitespace collapse: {excerpt:?}"
+        );
+        assert!(
+            excerpt.chars().count() <= AGENT_EXCERPT_CHARS + 2,
+            "excerpt stays within budget (plus ellipses): {excerpt:?}"
+        );
+
+        // A long corpus is elided on both sides.
+        let long = format!("{} needle {}", "pad ".repeat(40), "tail ".repeat(40));
+        let excerpt = search_evaluate("agent:needle", &ws, Some(&long))
+            .agent_excerpt
+            .expect("excerpt");
+        assert!(
+            excerpt.starts_with('…') && excerpt.ends_with('…'),
+            "{excerpt:?}"
+        );
+
+        // No excerpt without an `agent:` term, and none for a row the
+        // rest of the query rejected.
+        assert!(
+            search_evaluate("login", &ws, Some(text))
+                .agent_excerpt
+                .is_none()
+        );
+        assert!(
+            search_evaluate("agent:parser nomatch", &ws, Some(text))
+                .agent_excerpt
+                .is_none()
+        );
+    }
+
+    /// A multi-byte corpus must not panic the excerpt's window walk or
+    /// the case-folded scan (#1774).
+    #[test]
+    fn agent_search_handles_multibyte_text() {
+        let ws = workspace_with_task("a", Some("acme/api"), 5);
+        let text = "né… café ☕ the PARSER exploded 日本語テキスト";
+
+        let hit = search_evaluate("agent:parser", &ws, Some(text));
+        assert!(hit.matched);
+        assert!(
+            hit.agent_excerpt
+                .expect("excerpt")
+                .to_lowercase()
+                .contains("parser")
+        );
+        assert!(search_evaluate("agent:café", &ws, Some(text)).matched);
+        assert!(!search_evaluate("agent:zzz", &ws, Some(text)).matched);
     }
 
     /// Announced re-entry (#scale, B4): a row whose event-conditional

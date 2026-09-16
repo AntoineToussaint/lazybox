@@ -494,6 +494,19 @@ pub struct Sidebar {
     /// O(1) lookup instead of re-deriving each row's group label per frame.
     /// Empty when no search is active.
     searched_keys: std::collections::HashSet<SessionKey>,
+    /// Per-workspace agent text the `agent:` / `said:` search qualifiers
+    /// read (#1774), mirrored from the terminal stack's prompt history by
+    /// [`Self::set_agent_text`]. Empty until an agent has been prompted.
+    agent_text: HashMap<SessionKey, String>,
+    /// Excerpt of the agent text that matched, for rows an `agent:` term
+    /// selected — the row's "why did this match" cue, since the hit isn't
+    /// in the title the underline marks. Rebuilt by every recompute from
+    /// the same pass that filtered the rows.
+    agent_excerpts: HashMap<SessionKey, String>,
+    /// Bumped whenever `agent_text` is replaced, so the per-frame line
+    /// cache invalidates on a corpus change (the excerpt a row renders
+    /// depends on it, and the query alone can't see that it moved).
+    agent_text_rev: u64,
     /// Workspace rows the user multi-selected with `v` (or swept with
     /// Shift-↑/↓). While non-empty, every bulk-appropriate workspace
     /// action targets this whole set instead of the cursor row (#932) —
@@ -703,6 +716,9 @@ impl Sidebar {
             now_override: None,
             search: None,
             searched_keys: std::collections::HashSet::new(),
+            agent_text: HashMap::new(),
+            agent_excerpts: HashMap::new(),
+            agent_text_rev: 0,
             broadcast_selected: std::collections::HashSet::new(),
             sweep: None,
             keep_awake_active: false,
@@ -4499,11 +4515,13 @@ impl Sidebar {
                 agents: &self.agents,
                 now: self.now(),
                 search: self.search.as_ref(),
+                agent_text: &self.agent_text,
             },
         );
         self.visible = outcome.visible;
         self.repo_summaries = outcome.summaries;
         self.ticket_tree = outcome.ticket_tree;
+        self.agent_excerpts = outcome.agent_excerpts;
         self.recompute_stacks();
         self.recompute_searched_keys();
         self.recompute_space_members();
@@ -4600,6 +4618,26 @@ impl Sidebar {
             members.entry(space).or_default().push(key.clone());
         }
         self.space_members = members;
+    }
+
+    /// Replace the agent-text corpus the `agent:` / `said:` search
+    /// qualifiers read (#1774). Recomputes only when a search is live —
+    /// the corpus is inert to every other projection, so a busy agent
+    /// appending prompts must not cost a rebuild per frame.
+    pub fn set_agent_text(&mut self, agent_text: HashMap<SessionKey, String>) {
+        self.agent_text = agent_text;
+        self.agent_text_rev = self.agent_text_rev.wrapping_add(1);
+        if self.search.as_ref().is_some_and(|s| {
+            !crate::components::visible_rows::normalized_query(&s.query).is_empty()
+        }) {
+            self.recompute_visible();
+        }
+    }
+
+    /// The agent-text excerpt to show on a row, when an `agent:` term is
+    /// what put it in the result set (#1774).
+    pub fn agent_excerpt(&self, key: &SessionKey) -> Option<&str> {
+        self.agent_excerpts.get(key).map(String::as_str)
     }
 
     fn recompute_searched_keys(&mut self) {

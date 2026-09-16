@@ -653,6 +653,19 @@ impl Terminals {
         self.inner.apply_delivered_prompt(id, prompt);
     }
 
+    /// Digest of the agent text the `/` search's `agent:` qualifier reads
+    /// (#1774). See
+    /// [`crate::components::terminal_stack::TerminalStack::agent_text_rev`].
+    pub fn agent_text_rev(&self) -> u64 {
+        self.inner.agent_text_rev()
+    }
+
+    /// The searchable agent text per workspace (#1774). See
+    /// [`crate::components::terminal_stack::TerminalStack::agent_text_by_session`].
+    pub fn agent_text_by_session(&self) -> std::collections::HashMap<SessionKey, String> {
+        self.inner.agent_text_by_session()
+    }
+
     /// The focused agent terminal's prompt history, newest-first, for the
     /// `]]h` history picker (issue #523). See
     /// [`crate::components::terminal_stack::TerminalStack::focused_prompt_history`].

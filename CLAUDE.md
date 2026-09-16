@@ -450,7 +450,16 @@ repos render first in pin order, the rest keep the algorithmic order;
 the pin set persists — #760), `Shift-S`
 cycle mailbox (Inbox → Inactive → Snoozed), `/` search (composes with
 the active filters; matches title, number, repo, labels, reviewers /
-assignees). While editing, the bottom bar is a filled, accented field
+assignees). An `agent:<term>` / `said:<term>` qualifier searches the
+workspace's **agent text** instead of its metadata (#1774) — today that
+corpus is the per-workspace prompt history (`]]h`), which the daemon
+replays for every live terminal, so `agent:parser` answers "which of
+these 40 workspaces was about the parser?". A `field:"two words"` value
+may be quoted; bare (unqualified) queries are byte-for-byte the legacy
+search, and a row an `agent:` term matched trails a dim `⌕ …excerpt…`
+cue in its title cell, since the hit isn't in the title the `/`
+underline marks. What the agent *said back* lives only in the daemon's
+output rings and is not searchable yet. While editing, the bottom bar is a filled, accented field
 with a `⌕ /<query>` prefix + block cursor so it's unmistakable you're
 typing into search, matched substrings are underlined in the visible
 rows, and a query that filters everything away shows an explicit "No

@@ -37,7 +37,9 @@ pub enum ColumnWidth {
     Fixed(usize),
     /// At least `min` cells, expands to the widest cell across all
     /// rows. PR number column uses this: `#31` → 3 cells, `#7204` →
-    /// 5 cells, all rows pad to whichever wins.
+    /// 5 cells, all rows pad to whichever wins — unless the column
+    /// [yields when empty](Column::yield_when_empty), in which case a
+    /// row with nothing in it hands that width to its flex column.
     Max { min: usize },
     /// Absorbs remaining horizontal space after Fixed + Max columns
     /// are subtracted from `total_width`. Title column uses this.
@@ -534,11 +536,13 @@ pub fn render_table(
 /// Per-row variant of the table-wide `widths`: every
 /// [`yield_when_empty`](Column::yield_when_empty) column whose cell is
 /// empty on this row collapses to 0, and the reclaimed width goes to the
-/// flex columns, split as `compute_widths` splits slack. The row still
-/// renders to the same total width, so the columns that ARE present keep
-/// their table-wide size; they only pack toward the reclaimed side.
-/// A table with no flex column has nowhere to put the slack and keeps
-/// the table-wide widths.
+/// nearest flex column on its LEFT (the nearest on its right when there
+/// is none). Handing it leftward keeps every column to the right of the
+/// collapsed one at its table-wide x, so a trailer that IS present still
+/// lines up with the same trailer on other rows; only the columns
+/// between the flex and the collapsed one shift. The row still renders
+/// to the same total width. A table with no flex column has nowhere to
+/// put the slack and keeps the table-wide widths.
 fn row_widths(row: &Row, columns: &[Column], widths: &[usize]) -> Vec<usize> {
     let flex_indices: Vec<usize> = columns
         .iter()
@@ -550,23 +554,23 @@ fn row_widths(row: &Row, columns: &[Column], widths: &[usize]) -> Vec<usize> {
     if flex_indices.is_empty() {
         return out;
     }
-    let mut reclaimed = 0usize;
     for (i, col) in columns.iter().enumerate() {
         if !col.yield_empty || out[i] == 0 {
             continue;
         }
-        if row.cells.get(i).is_none_or(|c| c.width() == 0) {
-            reclaimed += out[i];
-            out[i] = 0;
+        if row.cells.get(i).is_some_and(|c| c.width() > 0) {
+            continue;
         }
-    }
-    if reclaimed == 0 {
-        return out;
-    }
-    let per_flex = reclaimed / flex_indices.len();
-    let leftover = reclaimed % flex_indices.len();
-    for (idx, &col_idx) in flex_indices.iter().enumerate() {
-        out[col_idx] += per_flex + usize::from(idx < leftover);
+        let Some(&target) = flex_indices
+            .iter()
+            .rev()
+            .find(|&&f| f < i)
+            .or_else(|| flex_indices.iter().find(|&&f| f > i))
+        else {
+            continue;
+        };
+        out[target] += out[i];
+        out[i] = 0;
     }
     out
 }
@@ -1288,6 +1292,53 @@ mod tests {
         ];
         let lines = render_table(&rows, &cols, 16);
         assert_eq!(text(&lines[1]), "a title [bug] 1h");
+    }
+
+    /// Reclaimed width goes to the nearest flex on the LEFT of the
+    /// collapsed column, so with two flex columns the one to the right
+    /// keeps its table-wide start on every row instead of drifting by
+    /// half the reclaimed width.
+    #[test]
+    fn reclaimed_width_goes_to_the_nearest_flex_on_the_left() {
+        let cols = [
+            Column::flex(1),
+            Column::max(0).yield_when_empty(),
+            Column::flex(1),
+        ];
+        let rows = [
+            Row::new(vec![
+                Cell::from_span(Span::raw("a")),
+                Cell::from_span(Span::raw(" C ")),
+                Cell::from_span(Span::raw("b")),
+            ]),
+            Row::new(vec![
+                Cell::from_span(Span::raw("a")),
+                Cell::empty(),
+                Cell::from_span(Span::raw("b")),
+            ]),
+        ];
+        // 20 − 3 = 17 across two flexes → 9 + 8; the right flex starts at
+        // cell 12 on both rows.
+        let lines = render_table(&rows, &cols, 20);
+        assert_eq!(text(&lines[0]), "a         C b       ");
+        assert_eq!(text(&lines[1]), "a           b       ");
+    }
+
+    /// A yielding column with no flex to its left hands the width to the
+    /// nearest flex on its right, which then starts earlier on that row.
+    #[test]
+    fn reclaimed_width_falls_back_to_the_nearest_flex_on_the_right() {
+        let cols = [Column::max(0).yield_when_empty(), Column::flex(1)];
+        let rows = [
+            Row::new(vec![
+                Cell::from_span(Span::raw("C ")),
+                Cell::from_span(Span::raw("a")),
+            ]),
+            Row::new(vec![Cell::empty(), Cell::from_span(Span::raw("a"))]),
+        ];
+        let lines = render_table(&rows, &cols, 6);
+        assert_eq!(text(&lines[0]), "C a   ");
+        assert_eq!(text(&lines[1]), "a     ");
     }
 
     /// With no flex column there is nowhere to put the reclaimed width,

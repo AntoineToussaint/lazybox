@@ -245,14 +245,17 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// (each Max column expands to the widest natural cell across the whole
 /// table, and collapses to 0 when no row has content).
 ///
-/// Every trailer column right of the title (6–12) also yields per row
+/// Every badge column right of the title (6–11) also yields per row
 /// (#1754): on a row whose cell there is empty, the column's table-wide
 /// width goes to that row's title instead of being reserved as a blank
 /// slot. The badges a row carries still render at their table-wide size
 /// and pack toward the time column; only the badges it does NOT carry
 /// stop costing it title width. Before this, a bare issue row paid for
 /// the full badge set of the heaviest PR row in the table and truncated
-/// its title into a third-empty row.
+/// its title into a third-empty row. The time column (12) does not
+/// yield: every task row carries one, so there is nothing to reclaim,
+/// and the taskless rows that don't keep it as the gutter that stops
+/// their name running flush into the pane border.
 ///
 /// Order (left → right):
 ///
@@ -383,7 +386,7 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
         Column::max(0).right().priority(P_BADGES).yield_when_empty(), // 9: passive-info badge cluster (#813)
         Column::max(0).right().priority(P_ARMS).yield_when_empty(), // 10: merge-arm badge cluster (#813)
         Column::max(0).right().priority(P_STATUS).yield_when_empty(), // 11: status (CI / review pills)
-        Column::max(0).right().priority(P_TIME).yield_when_empty(), // 12: time (carries its own leading space)
+        Column::max(0).right().priority(P_TIME), // 12: time (carries its own leading space)
     ]
 }
 
@@ -3761,27 +3764,47 @@ mod tests {
 
     /// Regression for issue #22, part 2: a row WITHOUT a `C` badge
     /// (and no other right-side content) does not leave the badge
-    /// column as a ragged gap. Both rows render to the same total
+    /// column as a ragged gap. Every row renders to the same total
     /// width, and the badge-less row shows blank cells where the other
-    /// row's `C` sits — since #1754 that blank is the title's own
+    /// rows' `C` sits — since #1754 that blank is the title's own
     /// padding rather than a reserved slot, but the eye reads the same
-    /// thing: nothing ragged, trailing time column aligned.
+    /// thing: nothing ragged, trailing time column aligned. Two rows
+    /// that both carry the badge, with titles of different lengths, put
+    /// their `C` at the same x: the column is sized table-wide and only
+    /// yields on rows that have nothing in it.
     #[test]
     fn badge_column_lines_up_across_rows() {
-        // Row A: has a Claude agent badge. Row B: no badge.
+        // Row A: has a Claude agent badge. Row B: no badge. Row C: the
+        // badge again, behind a much longer title.
         let task_a = make_task("owner/repo#1", "A");
         let task_b = make_task("owner/repo#2", "B");
+        let task_c = make_task("owner/repo#3", "A title long enough to move a badge");
         let ws_a = Workspace::from_task(task_a.clone(), fixed_time());
         let ws_b = Workspace::from_task(task_b.clone(), fixed_time());
+        let ws_c = Workspace::from_task(task_c.clone(), fixed_time());
         let theme = theme();
         let mut ctx_a = ctx_for(&ws_a, &task_a, &theme);
         ctx_a.badges = vec![('C', 1)];
         let ctx_b = ctx_for(&ws_b, &task_b, &theme);
+        let mut ctx_c = ctx_for(&ws_c, &task_c, &theme);
+        ctx_c.badges = vec![('C', 1)];
         let columns = build_columns(4);
-        let rows = vec![build_row(&ctx_a), build_row(&ctx_b)];
+        let rows = vec![build_row(&ctx_a), build_row(&ctx_b), build_row(&ctx_c)];
         let lines = crate::components::table::render_table(&rows, &columns, 80);
         let row_a: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let row_b: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        let row_c: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        let c_offset = |s: &str| {
+            s.chars()
+                .collect::<Vec<_>>()
+                .windows(3)
+                .position(|w| w == [' ', 'C', ' '])
+        };
+        assert_eq!(
+            c_offset(&row_a),
+            c_offset(&row_c),
+            "badge-bearing rows must put ` C ` at the same x: {row_a:?} vs {row_c:?}",
+        );
         // Same total visible width across rows — that's what makes
         // every fixed-position column (incl. the trailing time
         // column) align across rows.
@@ -4446,6 +4469,46 @@ mod tests {
         );
     }
 
+    /// A taskless workspace has no time cell, and the time column does
+    /// not yield (#1754): its name keeps the trailing gutter the task rows'
+    /// times occupy instead of running flush into the pane border.
+    #[test]
+    fn taskless_row_keeps_the_time_gutter() {
+        let theme = theme();
+        let task = pr_task("owner/repo", 312);
+        let ws_task = Workspace::from_task(task.clone(), fixed_time());
+        let ctx_task = ctx_for(&ws_task, &task, &theme);
+        let time_w = cell_time(&ctx_task).width();
+
+        let mut ws_scratch = Workspace::empty(
+            lazybox_core::WorkspaceKey("scratch-branch".into()),
+            "main",
+            fixed_time(),
+        );
+        ws_scratch.name =
+            "a scratch workspace with a very long name that has to elide at this width".into();
+        let mut ctx_scratch = ctx_for(&ws_task, &task, &theme);
+        ctx_scratch.workspace = Some(&ws_scratch);
+        ctx_scratch.task = None;
+
+        const BUDGET: usize = 60;
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];
+        let lines = crate::components::table::render_table(&rows, &columns, BUDGET);
+        let scratch = line_text(&lines[1]);
+        assert_eq!(crate::util::visual_width(&scratch), BUDGET);
+        assert!(
+            scratch.contains('…'),
+            "fixture name should elide: {scratch:?}"
+        );
+        let tail: String = scratch.chars().rev().take(time_w).collect();
+        assert_eq!(
+            tail.trim(),
+            "",
+            "taskless name must stop short of the time gutter: {scratch:?}",
+        );
+    }
+
     /// Build a linked (no-worktree) workspace so `cell_linked` renders
     /// its `⎇ local` badge.
     fn linked_ws(name: &str) -> Workspace {
@@ -4627,8 +4690,12 @@ mod tests {
         let theme = theme();
         const BUDGET: usize = 60;
         // prefix 1 + glyph 2 + number 4 + role 2 + state 3 = 12 cells
-        // before the title; ` now` is 4 after it → 44 cells of title.
-        let exact = "x".repeat(44);
+        // before the title; the rendered time cell is the only thing
+        // after it, so a title of exactly the remainder must fit whole.
+        let probe = make_task("owner/repo#0", "probe");
+        let probe_ws = Workspace::from_task(probe.clone(), fixed_time());
+        let time_w = cell_time(&ctx_for(&probe_ws, &probe, &theme)).width();
+        let exact = "x".repeat(BUDGET - 12 - time_w);
         let titles = [
             "Dictation support: a capture-and-review loop",
             &exact,

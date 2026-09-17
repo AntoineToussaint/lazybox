@@ -717,9 +717,10 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::new(spans).atomic_tail(tail).outer_tail(cue)
 }
 
-/// The agent-text match cue: a dim `⌕ …excerpt…` after the labels
-/// (#1774). Dim and glyph-led so it reads as an annotation on the row
-/// rather than a second title; empty for every row no `agent:` term
+/// The agent-text match cue: a dim `⌕ …excerpt…` trailing the row
+/// (#1774). Dim and glyph-led so it reads as an annotation rather than a
+/// second title, and it rides the cell's outer tail so it is the first
+/// thing a narrowing row gives up. Empty for every row no `agent:` term
 /// matched, which is every row of an ordinary search.
 fn agent_excerpt_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
     let Some(excerpt) = ctx.agent_excerpt.filter(|e| !e.is_empty()) else {
@@ -5039,8 +5040,9 @@ mod tests {
             "ascii mode substitutes the glyph"
         );
 
-        // The whole cue lives in the cell's atomic tail, so a narrow row
-        // sheds it rather than slicing it or the title.
+        // The whole cue lives in the cell's OUTER tail, so a narrow row
+        // sheds it — before the label chips and long before the title —
+        // rather than slicing it.
         ctx.ascii_glyphs = false;
         use crate::components::table::render_table;
         let wide = render_table(

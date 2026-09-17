@@ -259,6 +259,11 @@ const ROW_BADGES: &[MarkerDoc] = &[
         when: "Shows once at least one snippet was sent to the workspace.",
     },
     MarkerDoc {
+        label: "⌕ …excerpt…",
+        meaning: "Why this row matched an `agent:` / `said:` search: a snippet of the agent text the query hit, since the match is not in the title the `/` underline marks.",
+        when: "Shows only on rows an `agent:` or `said:` search term matched.",
+    },
+    MarkerDoc {
         label: "★ Focused",
         meaning: "Starred workspaces are lifted into a synthetic \"★ Focused\" group pinned at the top of the sidebar.",
         when: "Appears when the sidebar has one or more starred workspaces.",

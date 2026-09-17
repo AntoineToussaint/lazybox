@@ -452,8 +452,11 @@ cycle mailbox (Inbox → Inactive → Snoozed), `/` search (composes with
 the active filters; matches title, number, repo, labels, reviewers /
 assignees). An `agent:<term>` / `said:<term>` qualifier searches the
 workspace's **agent text** instead of its metadata (#1774) — today that
-corpus is the per-workspace prompt history (`]]h`), which the daemon
-replays for every live terminal, so `#agent:parser` answers "which of
+corpus is the per-workspace prompt history (`]]h`), which the daemon reads
+from the durable `workspace-msgs:` rows and replays as
+`Event::AgentSearchText` (on connect, and per workspace on each prompt), so
+it reaches a workspace whose agent exited long ago — not only ones with a
+live terminal. `#agent:parser` answers "which of
 these 40 workspaces was about the parser?" (`#`, not `/` — the qualifier
 does not widen scope on its own, and `/` stays pinned to the cursor's
 repo group like every other term). A `field:"two words"` value

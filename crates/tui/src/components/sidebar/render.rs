@@ -1223,15 +1223,20 @@ impl Sidebar {
                         // header has less room than a row, so a group is
                         // appended only when it fits whole: dropped, never
                         // clipped mid-token, like the header strip's
-                        // counters.
+                        // counters. A demoted (quiet / digest / muted)
+                        // group keeps only its level chip: the ladder
+                        // exists to make that header read as background,
+                        // and a tally would undo it.
                         let mut used = spans_visual_width(&spans)
                             + match_span
                                 .as_ref()
                                 .map_or(0, |m| visual_width(m.content.as_ref()));
-                        for (placed, group) in header_breakdown(s, self.ascii_glyphs, theme, row_bg)
-                            .into_iter()
-                            .enumerate()
-                        {
+                        let breakdown = if demoted {
+                            Vec::new()
+                        } else {
+                            header_breakdown(s, self.ascii_glyphs, theme, row_bg)
+                        };
+                        for (placed, group) in breakdown.into_iter().enumerate() {
                             let sep = if placed == 0 { "  " } else { " · " };
                             let width = visual_width(sep) + spans_visual_width(&group);
                             if used + width > row_budget {

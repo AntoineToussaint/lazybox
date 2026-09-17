@@ -14,7 +14,7 @@
 
 use crate::components::sidebar::{
     ARM_GLYPH, AUTO_GLYPH, CLAIM_GLYPH, FIX_GLYPH, G_ISSUE, G_PR, G_TICKET, TRACK_GLYPH,
-    pill_for_tag, role_badge,
+    pill_for_tag_in, role_badge,
 };
 use crate::realm::components::scrollable::{
     centered_rect, draw_frame, handle_scroll_key, max_scroll,
@@ -166,7 +166,7 @@ pub(crate) fn legend_groups(theme: &Theme) -> Vec<LegendGroup> {
         .into_iter()
         .filter_map(|tag| {
             let doc = markers::status_pill_doc(tag)?;
-            let style = pill_for_tag(tag).map_or(bold(theme.text_strong), |p| p.style);
+            let style = pill_for_tag_in(tag, theme).map_or(bold(theme.text_strong), |p| p.style);
             Some(row(doc.label.trim().to_string(), style, doc.meaning))
         })
         .collect();
@@ -199,7 +199,9 @@ pub(crate) fn legend_groups(theme: &Theme) -> Vec<LegendGroup> {
         .iter()
         .map(|doc| {
             let style = match doc.label {
-                l if l == ARM_GLYPH => bold(theme.success),
+                // The row paints ARM as a filled success pill, not a
+                // coloured glyph — mirror it so the swatch is the badge.
+                l if l == ARM_GLYPH => Style::default().bg(theme.success).fg(Color::Black),
                 l if l == AUTO_GLYPH || l == TRACK_GLYPH => bold(theme.accent),
                 l if l == FIX_GLYPH || l == CLAIM_GLYPH => bold(theme.warn),
                 _ => bold(theme.text_strong),
@@ -357,12 +359,22 @@ mod tests {
             .collect()
     }
 
+    /// An explicit palette rather than the process-global active theme:
+    /// the theme-picker tests switch that one under sibling threads
+    /// (#1751), so sampling it twice in one test is a race.
+    fn light() -> &'static Theme {
+        crate::theme::list()
+            .into_iter()
+            .find(|t| t.name == "Lazybox Light")
+            .expect("light theme must exist")
+    }
+
     /// The legend is the registry, whole: every status pill, agent
     /// state, row badge and header token the docs know about has a row,
     /// each carrying the registry's own meaning — no copy of its own.
     #[test]
     fn every_registry_entry_has_a_row() {
-        let rows = all_rows(crate::theme::current());
+        let rows = all_rows(light());
         let has = |label: &str, meaning: &str| {
             rows.iter()
                 .any(|r| r.glyph == label.trim() && r.meaning == meaning)
@@ -413,13 +425,13 @@ mod tests {
     /// the way they do on a row.
     #[test]
     fn status_rows_use_the_pill_renderers_tone() {
-        let theme = crate::theme::current();
+        let theme = light();
         let rows = all_rows(theme);
         for tag in StatusTag::ALL {
             let Some(doc) = markers::status_pill_doc(tag) else {
                 continue;
             };
-            let pill = pill_for_tag(tag).expect("documented pill renders");
+            let pill = pill_for_tag_in(tag, theme).expect("documented pill renders");
             let row = rows
                 .iter()
                 .find(|r| r.glyph == doc.label.trim() && r.meaning == doc.meaning)
@@ -428,18 +440,32 @@ mod tests {
         }
     }
 
-    /// Every swatch is a theme-derived RGB tone — the #1046 rule that a
-    /// fixed palette index is unreadable on the light surface.
+    /// Every swatch carries a theme-derived RGB tone — the #1046 rule
+    /// that a fixed palette index is unreadable on the light surface. A
+    /// filled pill (ARM) carries it as its background.
     #[test]
     fn swatches_are_theme_tones() {
-        for row in all_rows(crate::theme::current()) {
-            let fg = row.style.fg.expect("every glyph has a foreground");
+        for row in all_rows(light()) {
+            let tone = row
+                .style
+                .bg
+                .or(row.style.fg)
+                .expect("every glyph has a tone");
             assert!(
-                matches!(fg, Color::Rgb(..)),
-                "{}: {fg:?} is not a theme tone",
+                matches!(tone, Color::Rgb(..)),
+                "{}: {tone:?} is not a theme tone",
                 row.glyph
             );
         }
+        let arm = all_rows(light())
+            .into_iter()
+            .find(|r| r.glyph == ARM_GLYPH)
+            .expect("ARM row");
+        assert_eq!(
+            arm.style.bg,
+            Some(light().success),
+            "ARM is the row's filled pill"
+        );
     }
 
     /// The body carries all four groups in order, long registry
@@ -451,7 +477,7 @@ mod tests {
         let out = render(&mut legend, 100, 60);
         assert!(out.contains("Legend"), "title: {out}");
         assert!(out.contains("Status"), "first group visible: {out}");
-        let lines = legend.body_lines(60, crate::theme::current());
+        let lines = legend.body_lines(60, light());
         let titles: Vec<usize> = ["Status", "Agent state", "Row badges", "Repo header"]
             .iter()
             .map(|title| {
@@ -468,7 +494,7 @@ mod tests {
             .max_by_key(|m| m.len())
             .unwrap();
         assert!(
-            lines.len() > all_rows(crate::theme::current()).len() + 4,
+            lines.len() > all_rows(light()).len() + 4,
             "a {}-char meaning must wrap onto continuation lines",
             longest.len()
         );
@@ -545,7 +571,7 @@ mod tests {
         let mut legend = Legend::from_registry();
         legend.scroll = u16::MAX;
         let _ = render(&mut legend, 100, 30);
-        let total = legend.body_lines(94, crate::theme::current()).len();
+        let total = legend.body_lines(94, light()).len();
         assert_eq!(legend.scroll, max_scroll(total, legend.body_height));
         assert!(legend.scroll < u16::MAX);
     }

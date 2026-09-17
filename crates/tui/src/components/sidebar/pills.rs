@@ -301,13 +301,15 @@ fn draft_blocker_pill(
 /// contract tests (`status_pill_consistency_tests`) can pin every
 /// `(StatusTag, StatusPill)` pair without going through a
 /// constructed `Task`.
+#[cfg(test)]
 pub(crate) fn pill_for_tag(tag: lazybox_core::StatusTag) -> Option<StatusPill> {
     pill_for_tag_in(tag, crate::theme::current())
 }
 
-/// [`pill_for_tag`] against an explicit theme, so a test can sample what a
-/// glyph would look like under another palette without switching the
-/// process-global active theme under every render on a sibling thread.
+/// The tag → pill mapping against an explicit theme, so a test — or the
+/// legend modal — can sample what a glyph looks like under a palette
+/// without switching the process-global active theme under every render
+/// on a sibling thread.
 pub(crate) fn pill_for_tag_in(
     tag: lazybox_core::StatusTag,
     theme: &crate::theme::Theme,

@@ -653,6 +653,22 @@ fn repo_header_breaks_down_kind_and_role() {
         lazybox_tui::util::visual_width(&tight) <= 18,
         "header overflowed: {tight:?}"
     );
+
+    // A demoted source keeps its quiet header: the level chip only, no
+    // tally — the attention ladder made it background on purpose.
+    s.set_source_attention(
+        "owner/repo",
+        lazybox_config::SourceAttention {
+            level: lazybox_config::SourceAttentionLevel::Quiet,
+            snoozed_until: None,
+        },
+    );
+    let quiet = header_at(&mut s, 60);
+    assert!(quiet.contains("⌀ quiet"), "level chip: {quiet:?}");
+    assert!(
+        !quiet.contains('⇄') && !quiet.contains("2A"),
+        "a demoted group carries no breakdown: {quiet:?}"
+    );
 }
 
 /// Golden look of the three-row sidebar header (#1502): brand + dim

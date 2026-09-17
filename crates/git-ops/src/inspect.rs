@@ -89,6 +89,13 @@ pub const BUILD_DIR: &str = "target";
 /// `[a-z0-9-]` only), which is what makes matching on the name safe.
 pub const SHARED_MAIN_DIR: &str = "_main";
 
+/// Whether `path` is a repo's shared main checkout (`<scope>/_main`).
+/// Owned by no single workspace, so never a branch holder to adopt or
+/// reclaim on one workspace's behalf.
+fn is_shared_main_checkout(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == SHARED_MAIN_DIR)
+}
+
 /// One row of the inspector report.
 #[derive(Debug, Clone)]
 pub struct WorktreeInspection {
@@ -243,13 +250,18 @@ struct PorcelainEntry {
 
 impl WorktreeManager {
     /// Return live worktrees for `branch` that belong to this manager's
-    /// bare clone and sit under its managed `worktrees/` root.
+    /// bare clone and that lazybox provisioned
+    /// ([`Self::is_managed_worktree_path`]).
     ///
     /// This is narrower than [`Self::inspect_worktrees`]: callers that
     /// need to claim an existing checkout can inspect one repo/branch
     /// without walking every cached repository or probing worktree
-    /// cleanliness. Paths outside the managed root are deliberately
-    /// excluded even when they are registered against the same bare clone.
+    /// cleanliness. Paths outside the managed namespace are deliberately
+    /// excluded even when they are registered against the same bare clone,
+    /// and so is the shared main checkout (`<scope>/_main`): it holds the
+    /// default branch for every workspace on the repo, so a branch that
+    /// happens to share that name (a fork PR opened from the fork's
+    /// `main`) must not see it as a holder it could claim or reclaim.
     pub async fn managed_worktrees_for_branch(
         &self,
         owner: &str,
@@ -264,14 +276,15 @@ impl WorktreeManager {
 
         let lock = crate::repo_lock(&bare);
         let _guard = lock.lock(priority).await;
-        let managed_root = canonical_or_self(&self.base_dir().join("worktrees"));
         let mut paths = Vec::new();
         for entry in list_porcelain(self.git_runner(), &bare).await? {
             if entry.prunable || entry.branch.as_deref() != Some(branch) {
                 continue;
             }
-            let path = canonical_or_self(&entry.path);
-            if path.starts_with(&managed_root) && crate::worktree_dir_ready(&entry.path).await {
+            if self.is_managed_worktree_path(&entry.path)
+                && !is_shared_main_checkout(&entry.path)
+                && crate::worktree_dir_ready(&entry.path).await
+            {
                 paths.push(entry.path);
             }
         }
@@ -283,8 +296,10 @@ impl WorktreeManager {
     /// Remove a non-live managed holder only when it has no local
     /// work to preserve. The caller owns session-liveness validation;
     /// this boundary validates that `path` is a registered worktree for
-    /// `branch`, lives under lazybox's managed root, is unlocked, clean,
-    /// and has no unpushed commits before asking git to remove it.
+    /// `branch`, is one lazybox provisioned
+    /// ([`Self::is_managed_worktree_path`]) and not the shared main
+    /// checkout, is unlocked, clean, and has no unpushed commits before
+    /// asking git to remove it.
     ///
     /// The local branch ref is deliberately retained so the caller can
     /// immediately check it out at the intended workspace path.
@@ -303,11 +318,10 @@ impl WorktreeManager {
 
         let lock = crate::repo_lock(&bare);
         let _guard = lock.lock(priority).await;
-        let managed_root = canonical_or_self(&self.base_dir().join("worktrees"));
-        let key = canonical_or_self(path);
-        if !key.starts_with(&managed_root) {
+        if !self.is_managed_worktree_path(path) || is_shared_main_checkout(path) {
             return Ok(WorktreeReclaimOutcome::NotManaged);
         }
+        let key = canonical_or_self(path);
 
         let entries = list_porcelain(self.git_runner(), &bare).await?;
         let Some(entry) = entries.into_iter().find(|entry| {

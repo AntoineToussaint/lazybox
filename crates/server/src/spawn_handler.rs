@@ -3991,10 +3991,11 @@ async fn managed_worktree_has_live_main_owner(config: &ServerConfig, candidate: 
         .filter(|(_, (_, on_main))| *on_main)
         .map(|((workspace, _), _)| workspace.clone())
         .collect();
+    let root = config.worktree_root_path();
     if inflight_main_workspaces.into_iter().any(|workspace_key| {
         load_workspace(config, &WorkspaceKey::new(workspace_key))
             .ok()
-            .and_then(|workspace| main_worktree_path(&workspace))
+            .and_then(|workspace| main_worktree_path_under(&workspace, root))
             .is_some_and(|path| paths_match(&path, candidate))
     }) {
         return true;
@@ -4011,7 +4012,7 @@ async fn managed_worktree_has_live_main_owner(config: &ServerConfig, candidate: 
             .and_then(|(session_key, _)| {
                 load_workspace(config, &WorkspaceKey::new(session_key.as_str())).ok()
             })
-            .and_then(|workspace| main_worktree_path(&workspace))
+            .and_then(|workspace| main_worktree_path_under(&workspace, root))
             .is_some_and(|path| paths_match(&path, candidate))
     })
 }
@@ -6075,19 +6076,15 @@ pub(crate) fn release_delete_tombstone(config: &ServerConfig, workspace_key: &st
 ///
 /// Returns whether any session record was actually rewritten. No-op
 /// when every session already lives at the right place (most polls).
-pub async fn migrate_session_paths_if_needed(workspace: &mut Workspace) -> bool {
-    let root = worktree_root();
-    migrate_session_paths_if_needed_under(workspace, &root).await
-}
-
-/// Explicit-root form of [`migrate_session_paths_if_needed`]. Keeping the
-/// filesystem namespace as an argument makes migration tests hermetic and
-/// ensures one root snapshot is used for the entire reconciliation pass even
-/// if process configuration changes concurrently.
+///
+/// `root` is the daemon's worktree namespace
+/// (`ServerConfig::worktree_root_path`). Taking it as an argument keeps
+/// migration tests hermetic and pins one root snapshot for the entire
+/// reconciliation pass.
 pub async fn migrate_session_paths_if_needed_under(workspace: &mut Workspace, root: &Path) -> bool {
     let mut moved_any = false;
     // Sort sessions by created_at so the index assignment matches
-    // what `worktree_path_for_session` expects (first = no suffix,
+    // what `worktree_path_for_session_under` expects (first = no suffix,
     // second = -2, etc.).
     let mut order: Vec<usize> = (0..workspace.sessions.len()).collect();
     order.sort_by_key(|&i| workspace.sessions[i].created_at);
@@ -6145,14 +6142,6 @@ pub async fn migrate_session_paths_if_needed_under(workspace: &mut Workspace, ro
     moved_any
 }
 
-/// Root directory for every workspace's worktrees. Sits under the v2
-/// state root next to `state.db` so a single `rm -rf ~/.lazybox/v2/`
-/// wipes everything lazybox owns on disk. Override the parent via the
-/// `LAZYBOX_HOME` env var (see `lazybox_core::paths`).
-pub fn worktree_root() -> PathBuf {
-    lazybox_core::paths::worktrees_root()
-}
-
 /// Compose the on-disk path for the Nth session of a workspace.
 /// `index = 0` → `<root>/<scope>/<slug>` (no suffix, cleanest case).
 /// `index = N` → `<root>/<scope>/<slug>-{N+1}` so the second session is
@@ -6164,13 +6153,14 @@ pub fn worktree_root() -> PathBuf {
 /// "Issues" in `ownerA/repoA` and `ownerB/repoB`) collide on the same
 /// directory and cross-contaminate. A repo-less, project-less workspace
 /// has no scope and keeps the flat `<root>/<slug>` path.
-pub fn worktree_path_for_session(workspace: &Workspace, index: usize) -> PathBuf {
-    worktree_path_for_session_under(workspace, index, &worktree_root())
-}
-
-/// Explicit-root form of [`worktree_path_for_session`]. `root` is the
-/// directory that contains repo/project scopes, normally
-/// [`worktree_root`].
+///
+/// `root` is the daemon's worktree namespace
+/// (`ServerConfig::worktree_root_path`): the v2 state root next to
+/// `state.db`, so a single `rm -rf ~/.lazybox/v2/` wipes everything
+/// lazybox owns on disk. There is no process-global default — every
+/// caller passes the config's root so a test config stays hermetic and
+/// so no second notion of "where worktrees live" can drift from the one
+/// provisioning uses.
 pub fn worktree_path_for_session_under(
     workspace: &Workspace,
     index: usize,
@@ -6193,8 +6183,8 @@ pub fn worktree_path_for_session_under(
 /// `None` for a repo-less / project-less workspace, which has no scope
 /// and no meaningful default branch to sit on.
 ///
-/// The leading underscore matters: `worktree_path_for_session` names
-/// isolated trees `<scope>/<slug>`, and `slug::slugify` only ever emits
+/// The leading underscore matters: `worktree_path_for_session_under`
+/// names isolated trees `<scope>/<slug>`, and `slug::slugify` only ever emits
 /// `[a-z0-9-]`, so `_main` can never collide with a per-session slug —
 /// including a workspace or project literally named "main". Without it a
 /// "main"-slugged workspace's isolated tree and the shared checkout would
@@ -6204,12 +6194,9 @@ pub fn worktree_path_for_session_under(
 /// The `main` label is stable; the branch actually checked out is the
 /// repo's resolved default (`main` or `master`), which the folder name
 /// doesn't try to track.
-pub fn main_worktree_path(workspace: &Workspace) -> Option<PathBuf> {
-    main_worktree_path_under(workspace, &worktree_root())
-}
-
-/// Explicit-root form of [`main_worktree_path`] — spawn provisioning
-/// passes the config's root so test configs stay hermetic (#1237).
+///
+/// `root` is the config's worktree root, as for
+/// [`worktree_path_for_session_under`] (#1237).
 pub fn main_worktree_path_under(workspace: &Workspace, root: &std::path::Path) -> Option<PathBuf> {
     workspace
         .worktree_scope()
@@ -20318,22 +20305,17 @@ mod tests {
             lazybox_core::ProjectKey::github("ownerB", "repoB"),
         );
 
-        let path_a = worktree_path_for_session(&a, 0);
-        let path_b = worktree_path_for_session(&b, 0);
+        let root = Path::new("/state/v2");
+        let path_a = worktree_path_for_session_under(&a, 0, root);
+        let path_b = worktree_path_for_session_under(&b, 0, root);
         assert_ne!(path_a, path_b);
-        assert_eq!(
-            path_a,
-            worktree_root().join("github-ownera-repoa").join("issues")
-        );
-        assert_eq!(
-            path_b,
-            worktree_root().join("github-ownerb-repob").join("issues")
-        );
+        assert_eq!(path_a, root.join("github-ownera-repoa").join("issues"));
+        assert_eq!(path_b, root.join("github-ownerb-repob").join("issues"));
 
         // Second session keeps the `-2` suffix under the same scope.
         assert_eq!(
-            worktree_path_for_session(&a, 1),
-            worktree_root().join("github-ownera-repoa").join("issues-2"),
+            worktree_path_for_session_under(&a, 1, root),
+            root.join("github-ownera-repoa").join("issues-2"),
         );
     }
 
@@ -20357,22 +20339,23 @@ mod tests {
         let issue = named("Issues", lazybox_core::ProjectKey::github("acme", "widget"));
         let other = named("Issues", lazybox_core::ProjectKey::github("acme", "gadget"));
 
-        let expected = worktree_root().join("github-acme-widget").join("_main");
-        assert_eq!(main_worktree_path(&pr), Some(expected.clone()));
+        let root = Path::new("/state/v2");
+        let expected = root.join("github-acme-widget").join("_main");
+        assert_eq!(main_worktree_path_under(&pr, root), Some(expected.clone()));
         assert_eq!(
-            main_worktree_path(&issue),
+            main_worktree_path_under(&issue, root),
             Some(expected),
             "two workspaces on the same repo share one main checkout",
         );
         assert_ne!(
-            main_worktree_path(&pr),
-            main_worktree_path(&other),
+            main_worktree_path_under(&pr, root),
+            main_worktree_path_under(&other, root),
             "different repos get different main checkouts",
         );
 
         // A repo-less / project-less workspace has no shared main.
         let bare = Workspace::empty(WorkspaceKey::new("bare"), "main", Utc::now());
-        assert_eq!(main_worktree_path(&bare), None);
+        assert_eq!(main_worktree_path_under(&bare, root), None);
 
         // The shared segment must never collide with an isolated
         // per-session tree — even for a workspace literally named "main"
@@ -20383,8 +20366,8 @@ mod tests {
         named_main.name = "main".into();
         named_main.project_key = Some(lazybox_core::ProjectKey::github("acme", "widget"));
         assert_ne!(
-            main_worktree_path(&named_main),
-            Some(worktree_path_for_session(&named_main, 0)),
+            main_worktree_path_under(&named_main, root),
+            Some(worktree_path_for_session_under(&named_main, 0, root)),
             "shared main checkout must not collide with a `main`-named workspace's tree",
         );
     }
@@ -20615,6 +20598,180 @@ mod tests {
         assert!(holder.exists(), "the racing spawn's checkout is untouched");
     }
 
+    /// A non-live holder at the layout provisioning actually produces
+    /// (`<root>/<scope>/<slug>`) is reclaimed before a re-provision, not
+    /// preserved as if it were a foreign checkout.
+    #[tokio::test]
+    async fn stale_holder_at_the_production_layout_is_reclaimed() {
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let manager = config.worktree_manager();
+        let bare = manager.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        test_git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        test_git(&bare, &["branch", "feature", "main"]);
+
+        let mut ws = Workspace::empty(WorkspaceKey::new("local:old-title"), "feature", Utc::now());
+        ws.name = "old title".into();
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "core"));
+        let holder = worktree_path_for_session_under(&ws, 0, config.worktree_root_path());
+        assert!(!holder.starts_with(root.path().join("worktrees")));
+        std::fs::create_dir_all(holder.parent().unwrap()).unwrap();
+        test_git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feature",
+                &holder.to_string_lossy(),
+                "refs/heads/feature",
+            ],
+        );
+
+        let intended = root.path().join("github-acme-core").join("new-title");
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config, &manager, "acme", "core", "feature", &holder, &intended, true,
+            )
+            .await,
+            BranchHolderReclaim::Reclaimed,
+        );
+        assert!(!holder.exists());
+    }
+
+    /// An isolated spawn whose branch is the default branch (a fork PR
+    /// opened from the fork's `main`) finds the shared `_main` checkout
+    /// holding it. With nobody in a terminal there, every liveness guard
+    /// passes — no session ever records `_main` — so the reclaim must be
+    /// refused at the holder itself, not by luck of a `target/` dir.
+    #[tokio::test]
+    async fn shared_main_checkout_is_preserved_from_branch_holder_reclaim() {
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let manager = config.worktree_manager();
+        let bare = manager.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        test_git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+
+        let mut ws = Workspace::empty(WorkspaceKey::new("github:acme/core#7"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "core"));
+        let shared_main = main_worktree_path_under(&ws, config.worktree_root_path()).unwrap();
+        std::fs::create_dir_all(shared_main.parent().unwrap()).unwrap();
+        test_git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "main",
+                &shared_main.to_string_lossy(),
+                "refs/heads/main",
+            ],
+        );
+
+        let intended = worktree_path_for_session_under(&ws, 0, config.worktree_root_path());
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config,
+                &manager,
+                "acme",
+                "core",
+                "main",
+                &shared_main,
+                &intended,
+                true,
+            )
+            .await,
+            BranchHolderReclaim::Preserved,
+        );
+        assert!(
+            shared_main.exists(),
+            "the shared main checkout is untouched"
+        );
+    }
+
+    /// The live-main-owner guard compares candidates against the shared
+    /// `_main` checkout under the config's worktree root — the path an
+    /// on-main spawn actually provisions — so an in-flight on-main spawn
+    /// protects its checkout from the branch-holder reclaim.
+    #[tokio::test]
+    async fn live_main_owner_guard_matches_the_config_rooted_main_checkout() {
+        let config = ServerConfig::in_memory();
+        let mut ws = Workspace::empty(WorkspaceKey::new("acme-widget"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "widget"));
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+        let main = main_worktree_path_under(&ws, config.worktree_root_path()).unwrap();
+        assert!(main.starts_with(config.worktree_root_path()));
+
+        assert!(
+            !managed_worktree_has_live_main_owner(&config, &main).await,
+            "nothing in flight → no owner"
+        );
+
+        let session_key = SessionKey::new("acme-widget");
+        let kind = TerminalKind::Agent("claude".into());
+        let _claim = InflightSpawnGuard::try_claim(&config.spawn, &session_key, &kind, true)
+            .expect("first claim");
+        assert!(
+            managed_worktree_has_live_main_owner(&config, &main).await,
+            "an in-flight on-main spawn owns the config-rooted `_main` checkout"
+        );
+        assert!(
+            !managed_worktree_has_live_main_owner(
+                &config,
+                &worktree_path_for_session_under(&ws, 0, config.worktree_root_path())
+            )
+            .await,
+            "the isolated tree is not the main checkout"
+        );
+    }
+
     /// A linked (no-worktree) workspace resolves every spawn straight to
     /// its on-disk checkout: the returned cwd is the linked path, it's
     /// reported as landed-on-main (so it reuses the shared-checkout
@@ -20664,7 +20821,7 @@ mod tests {
         );
         // No worktree provisioned anywhere under the managed root.
         assert!(
-            !main_worktree_path(&ws).is_some_and(|p| p.exists()),
+            !main_worktree_path_under(&ws, config.worktree_root_path()).is_some_and(|p| p.exists()),
             "a linked workspace must not provision a `_main` worktree",
         );
     }
@@ -21263,7 +21420,7 @@ mod tests {
             ws.sessions.is_empty(),
             "no session may be persisted for a worktree that was never provisioned"
         );
-        let path = worktree_path_for_session(&ws, 0);
+        let path = worktree_path_for_session_under(&ws, 0, config.worktree_root_path());
         assert!(
             !path.exists(),
             "no empty dir fabricated at {}",

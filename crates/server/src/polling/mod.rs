@@ -4426,7 +4426,11 @@ async fn commit_merge(
         .flat_map(|merge| merge.moved_session_ids.iter().copied())
         .collect();
     retire_pr_stub_sessions(config, &mut pr_ws, &moved).await;
-    crate::spawn_handler::migrate_session_paths_if_needed(&mut pr_ws).await;
+    crate::spawn_handler::migrate_session_paths_if_needed_under(
+        &mut pr_ws,
+        config.worktree_root_path(),
+    )
+    .await;
     let pr_key = pr_ws.key.clone();
     let deletes = pending
         .iter()
@@ -4844,7 +4848,11 @@ pub async fn handle_adopt_sessions(
         session.workspace_key = target_key.clone();
         target_ws.add_session(session);
     }
-    crate::spawn_handler::migrate_session_paths_if_needed(&mut target_ws).await;
+    crate::spawn_handler::migrate_session_paths_if_needed_under(
+        &mut target_ws,
+        config.worktree_root_path(),
+    )
+    .await;
 
     tracing::info!(
         source_workspace = %source_key,

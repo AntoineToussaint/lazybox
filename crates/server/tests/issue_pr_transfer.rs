@@ -1029,13 +1029,15 @@ async fn collapse_retires_pristine_pr_stub_and_carries_wip_worktree() {
         let pr_task = gh_task("o/r#51", true, Some("feat"), vec![issue_task_id]);
         let mut pr = Workspace::from_task(pr_task, chrono::Utc::now());
         let pr_key = pr.key.clone();
-        // A real provisioned stub lives under the manager-owned namespace;
-        // the fail-closed reclaimer deliberately refuses registered
-        // worktrees elsewhere because they may be user-owned checkouts.
-        let stub_path = config
-            .worktree_root_path()
-            .join("worktrees")
-            .join("PR-51-t");
+        // The stub sits exactly where a spawn on the PR row provisions it
+        // (`<root>/<scope>/<slug>`); the fail-closed reclaimer deliberately
+        // refuses registered worktrees elsewhere because they may be
+        // user-owned checkouts.
+        let stub_path = lazybox_server::spawn_handler::worktree_path_for_session_under(
+            &pr,
+            0,
+            config.worktree_root_path(),
+        );
         std::fs::create_dir_all(stub_path.parent().expect("stub parent")).unwrap();
         git(
             &bare,

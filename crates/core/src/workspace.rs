@@ -1595,7 +1595,7 @@ impl Workspace {
     ///
     /// Back-compat: a session's `worktree_path` is persisted at
     /// creation and reused in place when the directory is a live
-    /// worktree (see the server's `migrate_session_paths_if_needed`),
+    /// worktree (see the server's `migrate_session_paths_if_needed_under`),
     /// so a slug-scheme change only affects worktrees provisioned
     /// after it — existing checkouts keep resolving.
     pub fn worktree_slug(&self) -> String {

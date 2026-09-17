@@ -735,7 +735,7 @@ async fn mark_workspace_read_no_op_when_workspace_missing() {
 }
 // ── PR-attach migration ──────────────────────────────────────────────
 //
-// `migrate_session_paths_if_needed` walks the workspace's sessions
+// `migrate_session_paths_if_needed_under` walks the workspace's sessions
 // and moves any whose persisted `worktree_path` no longer matches
 // what the current slug would produce. The git-side `worktree move`
 // needs a real bare clone to test honestly; these cover the
@@ -792,9 +792,12 @@ async fn migrate_no_op_when_path_already_matches() {
 }
 #[tokio::test]
 async fn migrate_handles_zero_sessions() {
+    let root = tempfile::tempdir().unwrap();
     let task = make_task("o/r#33");
     let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
-    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
+    let moved =
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed_under(&mut ws, root.path())
+            .await;
     assert!(!moved, "no sessions → nothing to migrate");
 }
 #[tokio::test]
@@ -919,7 +922,7 @@ async fn migrate_reuses_live_worktree_in_place_on_slug_change() {
     use lazybox_core::WorkspaceSession;
 
     // A real worktree on disk is just a directory containing a `.git`
-    // entry — all `migrate_session_paths_if_needed` inspects to tell a
+    // entry — all `migrate_session_paths_if_needed_under` inspects to tell a
     // live worktree from a stale record or a V1 leftover.
     let live = tempfile::tempdir().unwrap();
     std::fs::create_dir(live.path().join(".git")).unwrap();
@@ -943,13 +946,17 @@ async fn migrate_reuses_live_worktree_in_place_on_slug_change() {
     let mut renamed = make_task("o/r#9001");
     renamed.title = "Reuse the worktree in place".into();
     ws.attach_task(renamed);
-    let slug_path = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
+    let root = tempfile::tempdir().unwrap();
+    let slug_path =
+        lazybox_server::spawn_handler::worktree_path_for_session_under(&ws, 0, root.path());
     assert_ne!(
         slug_path, live_path,
         "fixture must make the slug path differ from the live worktree"
     );
 
-    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
+    let moved =
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed_under(&mut ws, root.path())
+            .await;
 
     assert!(
         !moved,
@@ -1006,7 +1013,10 @@ async fn migrate_reuses_both_worktrees_when_pr_absorbs_an_issue_session() {
     let absorbed_id = ws.add_session(absorbed);
     let pr_own_id = ws.add_session(pr_own);
 
-    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
+    let root = tempfile::tempdir().unwrap();
+    let moved =
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed_under(&mut ws, root.path())
+            .await;
 
     assert!(!moved, "two live worktrees are both reused in place");
     assert_eq!(

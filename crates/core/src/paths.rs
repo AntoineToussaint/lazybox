@@ -68,11 +68,6 @@ pub fn state_db() -> PathBuf {
     state_root().join("state.db")
 }
 
-/// Worktree base. `<home>/v2/worktrees/`.
-pub fn worktrees_root() -> PathBuf {
-    state_root().join("worktrees")
-}
-
 /// Durable per-terminal scrollback. `<home>/v2/scrollback/`. Each file
 /// holds the recent raw output bytes of one session's terminal so its
 /// history survives a daemon restart; the in-memory replay ring alone
@@ -303,10 +298,6 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-x");
         assert_eq!(state_db(), PathBuf::from("/tmp/lazybox-x/v2/state.db"));
-        assert_eq!(
-            worktrees_root(),
-            PathBuf::from("/tmp/lazybox-x/v2/worktrees")
-        );
     }
 
     #[test]

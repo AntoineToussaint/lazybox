@@ -881,6 +881,163 @@ async fn reclaim_managed_holder_removes_only_safe_sessionless_checkout() {
     );
 }
 
+/// The branch-holder lookup sees the layout provisioning actually
+/// produces (`<base>/<scope>/<slug>`), not only the legacy
+/// `<base>/worktrees/` root the older fixtures use. A registered
+/// checkout outside the base (the user's own) and one inside the
+/// bare-clone cache (an agent's `<bare>/.claude/worktrees/`) are both
+/// left out.
+#[tokio::test]
+async fn managed_worktrees_for_branch_sees_the_production_layout() {
+    let fx = setup_fixture().await;
+    let production = add_wt_at(
+        &fx,
+        fx.base.path().join("github-o-r").join("issue-9-fix"),
+        "issue-9-fix",
+        "main",
+    )
+    .await;
+    let elsewhere = TempDir::new().unwrap();
+    let external = add_wt_at(&fx, elsewhere.path().join("mine"), "mine", "main").await;
+    let agent_owned = add_wt_at(
+        &fx,
+        fx.bare.join(".claude").join("worktrees").join("agent-abc"),
+        "agent-abc",
+        "main",
+    )
+    .await;
+    let manager = mgr(&fx);
+
+    let holders = manager
+        .managed_worktrees_for_branch(
+            "o",
+            "r",
+            "issue-9-fix",
+            lazybox_git_ops::LockPriority::Interactive,
+        )
+        .await
+        .unwrap();
+    let canonical: Vec<PathBuf> = holders
+        .iter()
+        .map(|path| std::fs::canonicalize(path).unwrap())
+        .collect();
+    assert_eq!(canonical, vec![std::fs::canonicalize(&production).unwrap()]);
+
+    for (branch, path) in [("mine", &external), ("agent-abc", &agent_owned)] {
+        let holders = manager
+            .managed_worktrees_for_branch(
+                "o",
+                "r",
+                branch,
+                lazybox_git_ops::LockPriority::Interactive,
+            )
+            .await
+            .unwrap();
+        assert!(
+            holders.is_empty(),
+            "{} is not a lazybox-provisioned holder: {holders:?}",
+            path.display()
+        );
+    }
+}
+
+/// A clean, session-less holder at the production layout is reclaimable,
+/// while a registered checkout outside the base is never touched.
+#[tokio::test]
+async fn reclaim_managed_holder_at_the_production_layout() {
+    let fx = setup_fixture().await;
+    let stale = add_wt_at(
+        &fx,
+        fx.base.path().join("github-o-r").join("issue-3-old-title"),
+        "issue-3",
+        "main",
+    )
+    .await;
+    let elsewhere = TempDir::new().unwrap();
+    let external = add_wt_at(&fx, elsewhere.path().join("mine"), "mine", "main").await;
+    let manager = mgr(&fx);
+
+    assert_eq!(
+        manager
+            .reclaim_managed_worktree_if_safe(
+                "o",
+                "r",
+                "issue-3",
+                &stale,
+                lazybox_git_ops::LockPriority::Interactive
+            )
+            .await
+            .unwrap(),
+        WorktreeReclaimOutcome::Reclaimed,
+    );
+    assert!(
+        !stale.exists(),
+        "the stale production-layout checkout is removed"
+    );
+    assert!(local_branch_exists(&fx, "issue-3").await);
+
+    assert_eq!(
+        manager
+            .reclaim_managed_worktree_if_safe(
+                "o",
+                "r",
+                "mine",
+                &external,
+                lazybox_git_ops::LockPriority::Interactive
+            )
+            .await
+            .unwrap(),
+        WorktreeReclaimOutcome::NotManaged,
+    );
+    assert!(
+        external.exists(),
+        "a checkout outside the base is the user's"
+    );
+}
+
+/// The shared main checkout sits inside the managed namespace but is
+/// owned by no workspace. A branch that shares the default branch's name
+/// (a fork PR opened from the fork's `main`) must neither find it as a
+/// holder nor reclaim it, or the isolated spawn would delete the
+/// checkout every on-main session on the repo relies on.
+#[tokio::test]
+async fn shared_main_checkout_is_never_a_branch_holder() {
+    let fx = setup_fixture().await;
+    let main = add_wt_at(
+        &fx,
+        fx.base
+            .path()
+            .join("github-o-r")
+            .join(lazybox_git_ops::SHARED_MAIN_DIR),
+        "main",
+        "main",
+    )
+    .await;
+    let manager = mgr(&fx);
+    assert!(manager.is_managed_worktree_path(&main));
+
+    let holders = manager
+        .managed_worktrees_for_branch("o", "r", "main", lazybox_git_ops::LockPriority::Interactive)
+        .await
+        .unwrap();
+    assert!(holders.is_empty(), "`_main` is not a holder: {holders:?}");
+
+    assert_eq!(
+        manager
+            .reclaim_managed_worktree_if_safe(
+                "o",
+                "r",
+                "main",
+                &main,
+                lazybox_git_ops::LockPriority::Interactive
+            )
+            .await
+            .unwrap(),
+        WorktreeReclaimOutcome::NotManaged,
+    );
+    assert!(main.exists(), "the clean shared checkout survives");
+}
+
 /// `worktree_is_pristine` — true only when a checkout carries nothing
 /// that exists solely on disk: uncommitted changes and unpushed
 /// commits each flip it false.

@@ -104,7 +104,7 @@ pub struct WorkspaceRowCtx<'a> {
     /// This workspace's 1-based jump number — its slot in the
     /// sidebar-order focused roster (`Sidebar::numbered_workspace_keys`).
     /// `Some` only for focused (starred) workspaces; rendered in the
-    /// prefix gutter ([`cell_prefix`]) so the user can see which
+    /// prefix gutter (`cell_prefix`) so the user can see which
     /// `]]<digit>` lands here, in a column that reads straight down.
     /// `None` for unfocused rows (and for the 10th focused workspace
     /// onward, which has no single-digit jump).

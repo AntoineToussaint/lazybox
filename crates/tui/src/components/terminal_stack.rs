@@ -6130,6 +6130,11 @@ impl TerminalStack {
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        // Tones come from `agent_state_tone`, shared with the sidebar
+        // row's state slot and the legend, so a state can't look
+        // different across surfaces; only the weight is decided here.
+        let tone = crate::components::sidebar::agent_state_tone(theme, &state);
+        let bold = Style::default().fg(tone).add_modifier(Modifier::BOLD);
         match state {
             AgentState::InputNeeded => Some((
                 if compact {
@@ -6137,32 +6142,21 @@ impl TerminalStack {
                 } else {
                     "! needs input"
                 },
-                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+                bold,
             )),
-            AgentState::Working => Some(("· working", Style::default().fg(theme.accent))),
-            AgentState::Done => Some((
-                "✓ done",
-                Style::default()
-                    .fg(theme.success)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            AgentState::Working => Some(("· working", Style::default().fg(tone))),
+            AgentState::Done => Some(("✓ done", bold)),
             // A provider usage / rate-limit block (#847) — the agent is
             // parked waiting on the user just like `InputNeeded`, so it
             // gets the same attention treatment, with the `⧗` glyph the
             // sidebar pill already uses for it.
-            AgentState::LimitReached => Some((
-                "⧗ limited",
-                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-            )),
-            AgentState::CreditExhausted => Some((
-                "¢ no credit",
-                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-            )),
+            AgentState::LimitReached => Some(("⧗ limited", bold)),
+            AgentState::CreditExhausted => Some(("¢ no credit", bold)),
             // The calm sibling of `LimitReached`: auto-wait pressed Wait and
             // the agent is parked until reset — handled, nothing for you to
             // do — so it gets a quiet ☾ in the dim text color, NOT the
             // alerting bold `warn` the two blocks above use.
-            AgentState::AwaitingReset => Some(("☾ waiting", Style::default().fg(theme.text_dim))),
+            AgentState::AwaitingReset => Some(("☾ waiting", Style::default().fg(tone))),
             // Idle has nothing to act on; `Exited` is surfaced by the
             // `exited` flag above (the process-ended pill lives on the
             // slot, not the live state).

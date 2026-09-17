@@ -7,13 +7,16 @@
 //! is no copy of its own: the registry is the single source, so the
 //! legend inherits `documented_status_pills_match_the_renderer` and a
 //! pill can't reach the sidebar without a row here. Only the *tones* are
-//! decided client-side, because only the UI can see the active theme.
+//! decided client-side, because only the UI can see the active theme —
+//! and those come from the same functions the rows call
+//! (`pill_for_tag_in`, `agent_state_tone`, `TypeGlyph::tone`,
+//! `role_badge`), never a copy.
 //!
 //! Navigation keys scroll; `?` returns to the Shortcuts panel; any other
 //! key dismisses.
 
 use crate::components::sidebar::{
-    ARM_GLYPH, AUTO_GLYPH, CLAIM_GLYPH, FIX_GLYPH, G_ISSUE, G_PR, G_TICKET, TRACK_GLYPH,
+    ARM_GLYPH, AUTO_GLYPH, CLAIM_GLYPH, FIX_GLYPH, TRACK_GLYPH, TypeGlyph, agent_state_tone,
     pill_for_tag_in, role_badge,
 };
 use crate::realm::components::scrollable::{
@@ -150,10 +153,11 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 }
 
 /// The registry rendered into groups, painted in `theme`. Each glyph
-/// carries the tone the sidebar gives it: status pills straight from the
-/// pill renderer, agent states per `workspace_row::cell_state`, the
-/// policy badges by their glyph constant, and the header's kind / role
-/// tokens as the row's type glyph and role letter.
+/// carries the tone the sidebar gives it, read from the row renderers'
+/// own functions: status pills from the pill renderer, agent states from
+/// `agent_state_tone`, the header's kind / role tokens from
+/// `TypeGlyph::tone` and `role_badge`. Only the policy badges, whose
+/// tones sit inline in `workspace_row`, are mapped by glyph here.
 pub(crate) fn legend_groups(theme: &Theme) -> Vec<LegendGroup> {
     let bold = |c: Color| Style::default().fg(c).add_modifier(Modifier::BOLD);
     let row = |glyph: String, style: Style, meaning: &'static str| LegendRow {
@@ -171,16 +175,7 @@ pub(crate) fn legend_groups(theme: &Theme) -> Vec<LegendGroup> {
         })
         .collect();
 
-    let agent_style = |state: &AgentState| match state {
-        AgentState::InputNeeded | AgentState::LimitReached | AgentState::CreditExhausted => {
-            bold(theme.warn)
-        }
-        AgentState::Working => bold(theme.accent),
-        AgentState::Done => bold(theme.success),
-        AgentState::Idle | AgentState::Exited { .. } | AgentState::AwaitingReset => {
-            Style::default().fg(theme.text_dim)
-        }
-    };
+    let agent_style = |state: &AgentState| bold(agent_state_tone(theme, state));
     let mut agent: Vec<LegendRow> = AgentState::ALL
         .iter()
         .map(|state| {
@@ -214,10 +209,11 @@ pub(crate) fn legend_groups(theme: &Theme) -> Vec<LegendGroup> {
         .iter()
         .map(|doc| {
             let glyph = doc.label.trim_start_matches('N');
+            let kind = [TypeGlyph::Pr, TypeGlyph::Issue, TypeGlyph::Ticket]
+                .into_iter()
+                .find(|k| k.glyph(false) == glyph);
             let color = match glyph {
-                g if g == G_PR => theme.success,
-                g if g == G_ISSUE => theme.text_strong,
-                g if g == G_TICKET => theme.accent,
+                _ if kind.is_some() => kind.map(|k| k.tone(theme)).unwrap_or(theme.text_strong),
                 "A" => role_badge(theme, TaskRole::Author).1,
                 "R" => role_badge(theme, TaskRole::Reviewer).1,
                 "@" => role_badge(theme, TaskRole::Assignee).1,
@@ -437,6 +433,41 @@ mod tests {
                 .find(|r| r.glyph == doc.label.trim() && r.meaning == doc.meaning)
                 .expect("row present");
             assert_eq!(row.style, pill.style, "{:?} tone differs", tag);
+        }
+    }
+
+    /// Agent-state rows take their tone from the shared `agent_state_tone`
+    /// — the map the row's state slot and the tab badge read — and the
+    /// header's kind tokens from `TypeGlyph::tone`, so the legend can't
+    /// disagree with a row.
+    #[test]
+    fn agent_and_kind_rows_use_the_shared_tones() {
+        let theme = light();
+        let rows = all_rows(theme);
+        for state in AgentState::ALL {
+            let doc = markers::agent_state_doc(state);
+            let row = rows
+                .iter()
+                .find(|r| r.glyph == doc.label)
+                .expect("agent row present");
+            assert_eq!(
+                row.style.fg,
+                Some(agent_state_tone(theme, state)),
+                "{}: legend tone differs from the row's",
+                doc.label
+            );
+        }
+        for kind in [TypeGlyph::Pr, TypeGlyph::Issue, TypeGlyph::Ticket] {
+            let label = format!("N{}", kind.glyph(false));
+            let row = rows
+                .iter()
+                .find(|r| r.glyph == label)
+                .expect("kind row present");
+            assert_eq!(
+                row.style.fg,
+                Some(kind.tone(theme)),
+                "{label}: tone differs"
+            );
         }
     }
 

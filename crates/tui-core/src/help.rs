@@ -310,7 +310,7 @@ fn section_scope(section: crate::action::Section) -> &'static str {
 /// it ships — the same "derived from code" guarantee the action catalog
 /// gives keybindings (#883). This is why Ask Lazybox can explain a pill
 /// like `CHANGES` without anyone hand-writing it into the prose docs.
-fn push_markers(out: &mut String) {
+fn push_markers(out: &mut String, legend_key: &str) {
     use crate::markers::{
         MarkerDoc, agent_state_docs, header_breakdown_docs, row_badge_docs, spawning_doc,
         status_pill_docs,
@@ -350,12 +350,13 @@ pills:\n",
     );
     write_group(out, row_badge_docs());
 
-    out.push_str(
+    out.push_str(&format!(
         "\n## Repo header breakdown\n\nA repo group's header summarises its rows in the rows' own \
 vocabulary — `3⇄ 2○ · 2A 1R` — a kind pair (PRs / issues / tickets) then your role (authored / \
 review-requested / assigned). `N` is the count; only non-zero tokens show, and a whole group is \
-dropped, never clipped, when the sidebar is too narrow. The `Shift-I` legend lists every glyph:\n",
-    );
+dropped, never clipped, when the sidebar is too narrow. The glyph legend (`{legend_key}`) lists \
+every glyph on screen:\n",
+    ));
     write_group(out, header_breakdown_docs());
 }
 
@@ -528,7 +529,15 @@ char `{escape_char}`, doubled), then choose:\n\
 `Esc` or any unbound key cancels back to the terminal.\n"
     ));
 
-    push_markers(&mut out);
+    // The legend's key is the user's effective chord, not the default —
+    // a remap must not leave the agent naming a key that does nothing.
+    let legend_key = catalog
+        .iter()
+        .find(|e| e.kind == ActionKind::OpenLegend)
+        .map(|e| e.keys_display.to_string())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| "open_legend, unbound".to_string());
+    push_markers(&mut out, &legend_key);
 
     out.push_str("\n# Documentation\n");
     for (title, body) in DOCS {
@@ -687,6 +696,22 @@ fallback shouldn't resurrect it)",
                 doc.label
             );
         }
+    }
+
+    /// The legend's key in the marker docs is the effective chord: a
+    /// remapped `open_legend` is named by its new key, and an unbound one
+    /// says so rather than naming a dead default.
+    #[test]
+    fn agent_context_names_the_effective_legend_key() {
+        assert!(agent_context(&catalog(), ']').contains("glyph legend (`Shift-I`)"));
+        let remapped: std::collections::BTreeMap<String, String> =
+            [("open_legend".to_string(), "Shift-Y".to_string())].into();
+        let ctx = agent_context(&ActionDef::catalog(&[], &remapped), ']');
+        assert!(ctx.contains("glyph legend (`Shift-Y`)"), "{ctx}");
+        assert!(
+            !ctx.contains("`Shift-I`"),
+            "the stale default must not survive a remap"
+        );
     }
 
     /// The embedded docs ride along — the snippets doc is the agent's

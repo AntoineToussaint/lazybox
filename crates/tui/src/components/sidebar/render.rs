@@ -95,20 +95,11 @@ fn header_breakdown(
         }
         out
     };
-    // Kind tones mirror `workspace_row::cell_type`: PR → success, issue
-    // → strong text (work, not an alarm), Linear → accent.
+    let kind = |n: usize, kind: TypeGlyph| (n, kind.glyph(ascii).to_string(), kind.tone(theme));
     let kinds = group([
-        (summary.prs, pr_glyph(ascii).to_string(), theme.success),
-        (
-            summary.issues,
-            issue_glyph(ascii).to_string(),
-            theme.text_strong,
-        ),
-        (
-            summary.tickets,
-            ticket_glyph(ascii).to_string(),
-            theme.accent,
-        ),
+        kind(summary.prs, TypeGlyph::Pr),
+        kind(summary.issues, TypeGlyph::Issue),
+        kind(summary.tickets, TypeGlyph::Ticket),
     ]);
     let role = |n: usize, role: TaskRole| {
         let (letter, color) = role_badge(theme, role);

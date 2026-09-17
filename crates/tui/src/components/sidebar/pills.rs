@@ -14,6 +14,7 @@
 //! `pub(super) use` gymnastics for no real readability win.
 
 use lazybox_core::Workspace;
+use lazybox_ipc::AgentState;
 use ratatui::style::{Color, Modifier, Style};
 
 /// Right-side status glyph showing the most actionable signal on the
@@ -91,42 +92,84 @@ fn glyph_pill(label: &'static str, fg: Color) -> StatusPill {
 /// `ascii` toggles the fallback letters (`p` / `i` / `l`) for fonts
 /// that don't render the unicode glyphs reliably as a single cell.
 /// Wired from `display.ascii_glyphs` in `~/.lazybox/config.yaml`.
+#[cfg(test)]
 pub(crate) fn workspace_type_label(workspace: &Workspace, ascii: bool) -> Option<&'static str> {
-    if workspace.pr.is_some() {
-        return Some(pr_glyph(ascii));
-    }
-    if !workspace.gh_issues.is_empty() {
-        return Some(issue_glyph(ascii));
-    }
-    if !workspace.linear_issues.is_empty() {
-        return Some(ticket_glyph(ascii));
-    }
-    None
+    TypeGlyph::of(workspace).map(|kind| kind.glyph(ascii))
 }
 
 // ── Workspace-type glyphs ─────────────────────────────────────────────
 //
-// Shared by the row's type column and the repo header's kind counts
-// (`3⇄ 2○`, #1744), so the header summarises its rows in the rows' own
-// vocabulary. The marker registry documents them as `N⇄` / `N○` / `N◆`;
-// `header_breakdown_glyphs_are_documented` pins the two together.
+// Shared by the row's type column, the repo header's kind counts
+// (`3⇄ 2○`, #1744) and the legend, so every surface paints a kind in
+// one glyph and one tone. The marker registry documents them as `N⇄` /
+// `N○` / `N◆`; `header_breakdown_glyphs_are_documented` pins the two
+// together.
 pub(crate) const G_PR: &str = "⇄";
 pub(crate) const G_ISSUE: &str = "○";
 pub(crate) const G_TICKET: &str = "◆";
 
-/// The pull-request type glyph (`⇄`, or `p` under `display.ascii_glyphs`).
-pub(crate) fn pr_glyph(ascii: bool) -> &'static str {
-    if ascii { "p" } else { G_PR }
+/// The kind a workspace row's type glyph names. `of` follows the row's
+/// precedence — a folded issue+PR row is a PR — so exactly one kind
+/// matches any glyph-bearing workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TypeGlyph {
+    Pr,
+    Issue,
+    Ticket,
 }
 
-/// The GitHub-issue type glyph (`○`, or `i` in ASCII mode).
-pub(crate) fn issue_glyph(ascii: bool) -> &'static str {
-    if ascii { "i" } else { G_ISSUE }
+impl TypeGlyph {
+    pub(crate) fn of(workspace: &Workspace) -> Option<Self> {
+        if workspace.pr.is_some() {
+            Some(Self::Pr)
+        } else if !workspace.gh_issues.is_empty() {
+            Some(Self::Issue)
+        } else if !workspace.linear_issues.is_empty() {
+            Some(Self::Ticket)
+        } else {
+            None
+        }
+    }
+
+    /// The glyph (`⇄` / `○` / `◆`), or its `p` / `i` / `l` fallback under
+    /// `display.ascii_glyphs`.
+    pub(crate) fn glyph(self, ascii: bool) -> &'static str {
+        match (self, ascii) {
+            (Self::Pr, false) => G_PR,
+            (Self::Pr, true) => "p",
+            (Self::Issue, false) => G_ISSUE,
+            (Self::Issue, true) => "i",
+            (Self::Ticket, false) => G_TICKET,
+            (Self::Ticket, true) => "l",
+        }
+    }
+
+    /// The tone the glyph takes: PR → success, issue → strong text, Linear
+    /// → accent. Issues are deliberately not a hot color — red / magenta
+    /// is for things that are wrong, and an issue is just work.
+    pub(crate) fn tone(self, theme: &crate::theme::Theme) -> Color {
+        match self {
+            Self::Pr => theme.success,
+            Self::Issue => theme.text_strong,
+            Self::Ticket => theme.accent,
+        }
+    }
 }
 
-/// The Linear-ticket type glyph (`◆`, or `l` in ASCII mode).
-pub(crate) fn ticket_glyph(ascii: bool) -> &'static str {
-    if ascii { "l" } else { G_TICKET }
+/// The tone an agent state is painted in on every surface — the row's
+/// state slot, the terminal tab badge, and the legend — defined once so
+/// the three can't disagree. Exhaustive so a new state picks a tone here
+/// before it can render anywhere. `Idle` paints no glyph; its tone is
+/// what a caller falls back to.
+pub(crate) fn agent_state_tone(theme: &crate::theme::Theme, state: &AgentState) -> Color {
+    match state {
+        AgentState::InputNeeded | AgentState::LimitReached | AgentState::CreditExhausted => {
+            theme.warn
+        }
+        AgentState::Working => theme.accent,
+        AgentState::Done => theme.success,
+        AgentState::Idle | AgentState::Exited { .. } | AgentState::AwaitingReset => theme.text_dim,
+    }
 }
 
 /// Render the right-trailer pill for a task. **Pure mapping** from

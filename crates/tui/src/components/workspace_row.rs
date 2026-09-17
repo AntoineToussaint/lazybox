@@ -13,7 +13,7 @@
 //! sidebar.
 
 use crate::components::sidebar::{
-    badge_pill_style, role_badge, status_pills, workspace_type_label,
+    TypeGlyph, agent_state_tone, badge_pill_style, role_badge, status_pills,
 };
 use crate::components::table::{Cell, Column, Row};
 use crate::theme::Theme;
@@ -431,30 +431,21 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let Some(workspace) = ctx.workspace else {
         return Cell::empty();
     };
-    let Some(glyph) = workspace_type_label(workspace, ctx.ascii_glyphs) else {
+    let Some(kind) = TypeGlyph::of(workspace) else {
         return Cell::empty();
     };
+    let glyph = kind.glyph(ctx.ascii_glyphs);
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
         // Color the glyph by source so PR / GitHub issue / Linear are
         // distinguishable at a glance — they used to share one dim grey,
-        // which hid the Linear `◆` entirely. Mirrors the section-header
-        // markers (PR → success, issue → strong text) and gives Linear
-        // the accent tone. Issues are deliberately NOT a hot color: red /
-        // magenta is reserved for things that are wrong (failing CI,
-        // conflicts, blocked), and an issue is just work. The branch order
-        // matches `workspace_type_label`, so if a glyph rendered, exactly
-        // one arm matches; the final arm is Linear (the only other
-        // glyph-bearing kind).
-        let color = if workspace.pr.is_some() {
-            ctx.theme.success
-        } else if !workspace.gh_issues.is_empty() {
-            ctx.theme.text_strong
-        } else {
-            ctx.theme.accent
-        };
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
+        // which hid the Linear `◆` entirely. The tone lives on
+        // `TypeGlyph` so the repo header's kind counts and the legend
+        // paint it identically.
+        Style::default()
+            .fg(kind.tone(ctx.theme))
+            .add_modifier(Modifier::BOLD)
     };
     // Glyph + a single trailing space so the row reads `⇄ 312`
     // instead of the cramped `⇄312` (issue #94); the space separator
@@ -568,14 +559,19 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// on a cold re-provision `spawning > exited` shows the "coming up" arc
 /// instead of stranding a stale ✗ over an agent that is restarting.
 fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    use lazybox_ipc::AgentState;
+    // Tones come from `agent_state_tone` — the one map the terminal tab
+    // badge and the legend read too — so a state can't look different
+    // across surfaces.
+    let tone = |state: AgentState| agent_state_tone(ctx.theme, &state);
     let (glyph, fg) = if ctx.credit_exhausted {
-        ("¢", ctx.theme.warn)
+        ("¢", tone(AgentState::CreditExhausted))
     } else if ctx.limit_reached {
-        ("⧗", ctx.theme.warn)
+        ("⧗", tone(AgentState::LimitReached))
     } else if ctx.asking {
-        ("?", ctx.theme.warn)
+        ("?", tone(AgentState::InputNeeded))
     } else if ctx.working {
-        (ctx.working_glyph, ctx.theme.accent)
+        (ctx.working_glyph, tone(AgentState::Working))
     } else if ctx.awaiting_reset {
         // The calm auto-waiting block: parked until reset, handled — a quiet
         // ☾ ("asleep until the limit resets") in the dim text color, NOT an
@@ -583,13 +579,13 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         // (`pills::G_REVIEW`). Below `working` so a live sibling's spinner
         // wins; above `done` so a still-parked agent shows over a
         // merely-finished one.
-        ("☾", ctx.theme.text_dim)
+        ("☾", tone(AgentState::AwaitingReset))
     } else if ctx.done {
-        ("✓", ctx.theme.success)
+        ("✓", tone(AgentState::Done))
     } else if ctx.spawning {
         (ctx.spawning_glyph, ctx.theme.text_dim)
     } else if ctx.exited {
-        ("✗", ctx.theme.text_dim)
+        ("✗", tone(AgentState::Exited { code: None }))
     } else if ctx.recently_woken {
         // Announced re-entry (#scale, B4): the snooze's wake condition
         // fired. Single-width glyph on purpose — emoji here would

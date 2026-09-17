@@ -27,12 +27,21 @@ use lazybox_ipc::{AgentRunId, AgentUsage, ContextAccounting, ProviderQuota, Quot
 /// Cells in the `▓▓▓░░` progress bar.
 const BAR_WIDTH: usize = 5;
 
-/// Render a micro-USD cost as a compact dollar string: `$1.23`, and finer
-/// precision (`$0.0042`) below a cent so a small metered session still shows
-/// a non-zero figure instead of `$0.00`.
+/// Render a micro-USD cost as a compact dollar string — the ONE cost
+/// formatter every surface goes through (#1746), so the rule can't drift
+/// between the sidebar strip, the terminal tab and the stats modal.
+///
+/// Precision is spent only where it changes a reading. At a dollar or more
+/// the cents never change a decision and the figure sits where width is
+/// scarcest, so it rounds to whole dollars (`$9.31` → `$9`). Below a dollar
+/// they are the whole figure, so `$0.42` keeps its cents and a sub-cent
+/// session keeps four places (`$0.0042`) rather than reading `$0.00` and
+/// looking broken.
 pub fn format_cost_micros(micros: u64) -> String {
     let dollars = micros as f64 / 1_000_000.0;
-    if micros == 0 || dollars >= 0.01 {
+    if dollars >= 1.0 {
+        format!("${}", dollars.round() as u64)
+    } else if micros == 0 || dollars >= 0.01 {
         format!("${dollars:.2}")
     } else {
         format!("${dollars:.4}")
@@ -660,9 +669,23 @@ mod tests {
         // The agent-level roll-up spans both workspaces.
         assert_eq!(tracker.cost_micros_for("claude"), 2_250_000);
         assert!(tracker.has_session_cost());
-        assert_eq!(format_cost_micros(2_000_000), "$2.00");
+        assert_eq!(format_cost_micros(2_000_000), "$2");
         assert_eq!(format_cost_micros(250_000), "$0.25");
         assert_eq!(format_cost_micros(4_200), "$0.0042");
+    }
+
+    /// The single cost rule (#1746): whole dollars at a dollar and up,
+    /// full precision below one — a sub-cent session must never render as
+    /// `$0.00` and read as "nothing was spent".
+    #[test]
+    fn cost_rounds_to_dollars_and_keeps_sub_dollar_precision() {
+        assert_eq!(format_cost_micros(9_310_000), "$9");
+        assert_eq!(format_cost_micros(9_710_000), "$10");
+        assert_eq!(format_cost_micros(1_000_000), "$1");
+        assert_eq!(format_cost_micros(999_999), "$1.00");
+        assert_eq!(format_cost_micros(420_000), "$0.42");
+        assert_eq!(format_cost_micros(4_200), "$0.0042");
+        assert_eq!(format_cost_micros(0), "$0.00");
     }
 
     #[test]

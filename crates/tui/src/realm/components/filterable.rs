@@ -186,6 +186,67 @@ pub struct FilterModalChrome<'a> {
     pub modal_w: u16,
     pub empty: &'a str,
     pub help: Vec<Span<'static>>,
+    /// Full text of the highlighted row, shown beside (or under) the
+    /// list so the row's one-line summary is never the only thing the
+    /// user can read before acting on it (#1733). `None` keeps the
+    /// original single-column chrome.
+    pub preview: Option<PreviewPane>,
+}
+
+/// The highlighted row's complete content, for the reader pane
+/// [`render_filter_modal`] lays out. The picker owns `scroll` (the keys
+/// that move it are its own), and [`wrapped_window`](crate::realm::components::scrollable::wrapped_window) clamps
+/// it against the laid-out viewport on each render.
+pub struct PreviewPane {
+    pub lines: Vec<Line<'static>>,
+    pub scroll: u16,
+}
+
+/// Below this inner width a side-by-side reader would leave both halves
+/// too narrow to read, so the preview moves under the list instead.
+const SIDE_PREVIEW_MIN_W: u16 = 72;
+
+/// Rows the bottom preview takes when it can't sit beside the list —
+/// enough for a couple of wrapped lines plus its position cue.
+const BOTTOM_PREVIEW_H: u16 = 6;
+
+/// Split the picker body into `(list, preview)` rects, side-by-side on a
+/// wide modal and stacked on a narrow one. Returns `(list, None)` when
+/// there is no preview, or when the body is too small to divide without
+/// starving the list.
+fn split_preview(body: Rect, has_preview: bool) -> (Rect, Option<Rect>) {
+    if !has_preview {
+        return (body, None);
+    }
+    if body.width >= SIDE_PREVIEW_MIN_W {
+        let list_w = body.width / 2;
+        let list = Rect {
+            width: list_w,
+            ..body
+        };
+        let preview = Rect {
+            x: body.x + list_w + 1,
+            width: body.width - list_w - 1,
+            ..body
+        };
+        return (list, Some(preview));
+    }
+    // Stacked: only worth it while the list keeps more rows than the
+    // reader takes, otherwise the picker stops being a picker.
+    if body.height <= BOTTOM_PREVIEW_H * 2 {
+        return (body, None);
+    }
+    let list_h = body.height - BOTTOM_PREVIEW_H - 1;
+    let list = Rect {
+        height: list_h,
+        ..body
+    };
+    let preview = Rect {
+        y: body.y + list_h + 1,
+        height: BOTTOM_PREVIEW_H,
+        ..body
+    };
+    (list, Some(preview))
 }
 
 /// Draw the shared single-column picker chrome: a centered rounded modal
@@ -206,6 +267,7 @@ pub fn render_filter_modal<P: FilterableList>(
         modal_w,
         empty,
         help,
+        mut preview,
     } = chrome;
     let modal_w = modal_w.min(area.width.saturating_sub(4));
     let modal_h = 24u16.min(area.height.saturating_sub(4));
@@ -268,6 +330,11 @@ pub fn render_filter_modal<P: FilterableList>(
         div_rect,
     );
 
+    let (body_rect, preview_rect) = split_preview(body_rect, preview.is_some());
+    if let (Some(pane), Some(rect)) = (preview.as_mut(), preview_rect) {
+        render_preview(frame, rect, pane, theme);
+    }
+
     // Scroll the visible window so the cursor stays on screen.
     let rows = body_rect.height as usize;
     let cursor = picker.cursor().unwrap_or(0);
@@ -286,6 +353,46 @@ pub fn render_filter_modal<P: FilterableList>(
     frame.render_widget(Paragraph::new(body), body_rect);
 
     frame.render_widget(Paragraph::new(Line::from(help)), help_rect);
+}
+
+/// Draw the reader pane: the highlighted row's full text, wrapped to the
+/// pane and windowed at its scroll offset, with the last row reserved
+/// for the position cue whenever anything is out of sight (#1733).
+fn render_preview(
+    frame: &mut Frame,
+    rect: Rect,
+    pane: &mut PreviewPane,
+    theme: &crate::theme::Theme,
+) {
+    let body_h = rect.height.saturating_sub(1).max(1);
+    let (lines, cue) = crate::realm::components::scrollable::wrapped_window(
+        pane.lines.clone(),
+        rect.width,
+        body_h,
+        &mut pane.scroll,
+    );
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect {
+            height: body_h,
+            ..rect
+        },
+    );
+    if let Some(cue) = cue
+        && rect.height > body_h
+    {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                cue,
+                Style::default().fg(theme.text_dim).italic(),
+            ))),
+            Rect {
+                y: rect.y + body_h,
+                height: 1,
+                ..rect
+            },
+        );
+    }
 }
 
 #[cfg(test)]

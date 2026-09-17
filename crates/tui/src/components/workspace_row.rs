@@ -103,10 +103,11 @@ pub struct WorkspaceRowCtx<'a> {
     pub agent_models: Vec<(char, String)>,
     /// This workspace's 1-based jump number — its slot in the
     /// sidebar-order focused roster (`Sidebar::numbered_workspace_keys`).
-    /// `Some` only for focused (starred) workspaces; rendered as a small
-    /// badge ahead of the agent pill so the user can see which
-    /// `]]<digit>` lands here. `None` for unfocused rows (and for the
-    /// 10th focused workspace onward, which has no single-digit jump).
+    /// `Some` only for focused (starred) workspaces; rendered in the
+    /// prefix gutter ([`cell_prefix`]) so the user can see which
+    /// `]]<digit>` lands here, in a column that reads straight down.
+    /// `None` for unfocused rows (and for the 10th focused workspace
+    /// onward, which has no single-digit jump).
     pub agent_number: Option<usize>,
     /// Render the type indicator as plain ASCII (`p`/`i`/`l`) instead
     /// of the default unicode glyphs (`⇄`/`○`/`◆`). Wired from
@@ -266,7 +267,8 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///
 /// Order (left → right):
 ///
-/// 0. Prefix — `▎` accent bar (cursor) / `✓` (selected) / ` `. A single shared
+/// 0. Prefix — `▎` accent bar (cursor) / `✓` (selected) / the starred
+///    row's `]]<digit>` jump number (#1784) / ` `. A single shared
 ///    selection gutter: the marker occupies one column reused across
 ///    every row type, instead of a 2-col marker re-added at each depth
 ///    (issue #231). Rows sit one column in from the repo header's
@@ -429,21 +431,36 @@ fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // The cursor row is a full-row band (`row_style`), so its gutter
     // glyph is a slim accent bar rather than an arrow: it marks the
     // band's edge instead of competing with it (#1502).
+    // A starred row advertises its `]]<digit>` jump number in the same
+    // gutter (#1784). It used to prefix the agent pill, which sits right
+    // of the title — and since #1754 hands a row's empty trailer columns
+    // back to its title, the title's width (and everything past it)
+    // varies per row, so two starred rows with different trailers put
+    // their digits a pill-width apart. This gutter is column 0 on every
+    // row, so the digits read straight down; and being a slot that
+    // already exists, a straight column costs no width at all. The cursor
+    // and selection marks outrank it, which loses nothing: the digit
+    // exists to reach a row you are not on.
+    let jump = ctx.agent_number.map(|n| n.to_string());
     let s = if ctx.is_selected {
         "✓"
     } else if ctx.is_cursor {
         if ctx.ascii_glyphs { ">" } else { CURSOR_BAR }
     } else {
-        " "
+        jump.as_deref().unwrap_or(" ")
     };
     let style = if ctx.is_cursor || ctx.is_selected {
         ctx.row_style()
             .fg(ctx.theme.accent)
             .add_modifier(Modifier::BOLD)
+    } else if jump.is_some() {
+        ctx.row_style()
+            .fg(ctx.theme.text_dim)
+            .add_modifier(Modifier::BOLD)
     } else {
         ctx.row_style()
     };
-    Cell::from_span(Span::styled(s, style))
+    Cell::from_span(Span::styled(s.to_string(), style))
 }
 
 fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -983,7 +1000,9 @@ fn cell_unread(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// Agent-letter badges — one for every non-`S` entry in `ctx.badges`.
 /// A single agent keeps its padded pill; multiple agents share one
 /// compact group (` C×2X `) so the complete set remains visible in a
-/// narrow sidebar. A dim jump number prefixes the group when present.
+/// narrow sidebar. The `]]<digit>` jump number used to prefix the group;
+/// it rides the prefix gutter now, where the per-row title width can't
+/// slide it out of line ([`cell_prefix`], #1784).
 fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let agent_count = ctx
         .badges
@@ -994,26 +1013,15 @@ fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         return Cell::empty();
     }
 
-    let mut spans = Vec::with_capacity(agent_count + usize::from(ctx.agent_number.is_some()));
-    if let Some(num) = ctx.agent_number {
-        let num_style = if ctx.is_cursor {
-            ctx.row_style()
-        } else {
-            Style::default()
-                .fg(ctx.theme.text_dim)
-                .add_modifier(Modifier::BOLD)
-        };
-        spans.push(Span::styled(format!(" {num}"), num_style));
-    }
+    let mut spans = Vec::with_capacity(agent_count);
     spans.extend(
         ctx.badges
             .iter()
             .filter(|(letter, _)| *letter != 'S')
             .enumerate()
             .map(|(index, &(letter, n))| {
-                let leading_space = agent_count == 1 || (ctx.agent_number.is_none() && index == 0);
-                let trailing_space =
-                    agent_count == 1 || (ctx.agent_number.is_none() && index + 1 == agent_count);
+                let leading_space = agent_count == 1 || index == 0;
+                let trailing_space = agent_count == 1 || index + 1 == agent_count;
                 let count = if n > 1 {
                     format!("×{n}")
                 } else {
@@ -1817,6 +1825,11 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         assert_eq!(flex_indices, vec![5]);
+        // Every badge column right of the title yields per row (#1754).
+        assert!(
+            cols[6..].iter().take(5).all(|c| c.yield_empty),
+            "badge columns still yield per row"
+        );
     }
 
     /// Regression for issue #231: the row prefix is a single shared
@@ -2666,35 +2679,91 @@ mod tests {
         assert_eq!(text, " C×2X ");
     }
 
-    /// A jump number prefixes the agent pill (` 2 C `, 5 cells) so the
-    /// `]]<digit>` target is visible; the digit is the `agent_number`.
+    /// The jump number is its own cell now (#1784) — the agent pill is
+    /// the bare ` C ` whether or not the row is starred, so the digit
+    /// can't ride a column whose x depends on the row's title width.
     #[test]
-    fn cell_badge_agent_shows_jump_number() {
+    fn jump_number_left_the_agent_pill() {
         let task = make_task("owner/repo#1", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.badges = vec![('C', 1)];
+
+        ctx.agent_number = None;
+        let bare = cell_badge_agent(&ctx);
         ctx.agent_number = Some(2);
-        let cell = cell_badge_agent(&ctx);
-        // ` 2`(2) + ` C `(3) = 5 cells, vs. 3 for the bare pill.
-        assert_eq!(cell.width(), 5);
-        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains('2'), "jump number missing: {text:?}");
-        assert!(text.contains('C'), "agent letter missing: {text:?}");
+        let starred = cell_badge_agent(&ctx);
+
+        assert_eq!(bare.width(), 3);
+        assert_eq!(starred.width(), 3);
+        assert_eq!(cell_text(&starred), " C ");
     }
 
-    /// Without a jump number the agent pill stays at its bare ` C ` —
-    /// non-agent rows and agents past the ninth get no badge.
+    /// The digit lives in the prefix gutter — one fixed cell at column 0
+    /// on every row (#1784) — and yields to the cursor and selection
+    /// marks, which say something about the row you are already on.
     #[test]
-    fn cell_badge_agent_no_number_stays_bare() {
+    fn prefix_gutter_carries_the_jump_digit_behind_the_cursor_and_selection() {
         let task = make_task("owner/repo#1", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.badges = vec![('C', 1)];
+
         ctx.agent_number = None;
-        assert_eq!(cell_badge_agent(&ctx).width(), 3);
+        assert_eq!(cell_text(&cell_prefix(&ctx)), " ");
+
+        ctx.agent_number = Some(2);
+        let cell = cell_prefix(&ctx);
+        assert_eq!(cell.width(), 1, "the gutter stays one cell");
+        assert_eq!(cell_text(&cell), "2");
+
+        ctx.is_cursor = true;
+        assert_eq!(cell_text(&cell_prefix(&ctx)), CURSOR_BAR);
+        ctx.is_selected = true;
+        assert_eq!(cell_text(&cell_prefix(&ctx)), "✓");
+    }
+
+    /// #1784: two starred rows with different trailer sets put their
+    /// `]]<digit>` badges at the same x. The heavy row carries a failing
+    /// CI pill, badges and notes; the bare row carries nothing — under
+    /// #1754 that difference lands entirely in the title width, which is
+    /// why the digit had to move left of it.
+    #[test]
+    fn jump_digits_share_one_x_across_rows_with_different_trailers() {
+        let theme = theme();
+        const BUDGET: usize = 64;
+
+        let mut heavy_task = pr_task("owner/repo", 2);
+        heavy_task.title = "Heavy PR".into();
+        heavy_task.ci = CiStatus::Failure;
+        let heavy_ws = Workspace::from_task(heavy_task.clone(), fixed_time());
+        let heavy = heavy_ctx(&heavy_ws, &heavy_task, &theme);
+
+        let bare_task = make_task("owner/repo#3", "Bare row");
+        let bare_ws = Workspace::from_task(bare_task.clone(), fixed_time());
+        let mut bare = ctx_for(&bare_ws, &bare_task, &theme);
+        bare.agent_number = Some(2);
+
+        let lines = crate::components::table::render_table(
+            &[build_row(&heavy), build_row(&bare)],
+            &build_columns(4),
+            BUDGET,
+        );
+        let digit_x = |line: &ratatui::text::Line<'_>, digit: char| {
+            let text = line_text(line);
+            let byte_idx = text.find(digit).unwrap_or_else(|| {
+                panic!("jump digit {digit:?} missing from {text:?}");
+            });
+            crate::util::visual_width(&text[..byte_idx])
+        };
+        assert_eq!(
+            digit_x(&lines[0], '1'),
+            digit_x(&lines[1], '2'),
+            "jump digits drifted: {:?} vs {:?}",
+            line_text(&lines[0]),
+            line_text(&lines[1]),
+        );
     }
 
     /// #779/#803/#1068: a single agent shows its model after the pill as a
@@ -4437,9 +4506,13 @@ mod tests {
         );
     }
 
-    /// A persisted multi-agent workspace keeps its complete badge set
-    /// and jump number at the default 40-column sidebar width (38 cells
-    /// inside the border).
+    /// A persisted multi-agent workspace keeps its complete badge set at
+    /// the default 40-column sidebar width (38 cells inside the border).
+    /// The jump number is the one thing that yields there (#1784): with
+    /// its own anchored slot it no longer rides the badge cell, and at a
+    /// width this tight the badges — which agent is running — outrank the
+    /// advertisement of a key that still works unadvertised. Give the row
+    /// a few more cells and both render.
     #[test]
     fn mixed_agent_badges_are_not_truncated_under_width_pressure() {
         let task = make_task("owner/repo#1", "Readable workspace title");
@@ -4453,8 +4526,14 @@ mod tests {
         let lines = crate::components::table::render_table(&rows, &columns, 38);
         let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            line.contains(" 1C×2X"),
-            "mixed agent badges or jump number were truncated: {line:?}",
+            line.contains(" C×2X"),
+            "mixed agent badges were truncated: {line:?}",
+        );
+        let roomy = crate::components::table::render_table(&rows, &columns, 48);
+        let roomy: String = roomy[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            roomy.contains("1 ") && roomy.contains(" C×2X"),
+            "jump number should return once the row has room: {roomy:?}",
         );
         assert!(
             line.contains("Readable workspace"),
@@ -4890,7 +4969,7 @@ mod tests {
         let lines = crate::components::table::render_table(&rows, &columns, BUDGET);
 
         let heavy_text = line_text(&lines[0]);
-        for badge in ["Heavy PR", "●3", "1CX S", "✎", "]2", "⚡", "✗", "now"] {
+        for badge in ["Heavy PR", "●3", "CX", " S ", "✎", "]2", "⚡", "✗", "now"] {
             assert!(
                 heavy_text.contains(badge),
                 "heavy row lost {badge:?}: {heavy_text:?}",
@@ -4951,7 +5030,7 @@ mod tests {
         );
         assert_eq!(crate::util::visual_width(&long_text), BUDGET);
         let heavy_text = line_text(&lines[1]);
-        for badge in ["Short", "1CX S", "✎", "]2", "⚡", "✗", "now"] {
+        for badge in ["Short", "CX", " S ", "✎", "]2", "⚡", "✗", "now"] {
             assert!(
                 heavy_text.contains(badge),
                 "badge-bearing row lost {badge:?}: {heavy_text:?}",

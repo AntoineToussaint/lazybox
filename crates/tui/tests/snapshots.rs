@@ -202,11 +202,23 @@ fn sidebar_multiple_agent_badges_shows_counts() {
     // this row in-memory (via config apply, no disk write) to make its
     // `]]1` badge render alongside the agent badges.
     star_workspace(&mut s, &key);
+    // The digit lives in the prefix gutter now (#1784), where the cursor
+    // mark outranks it — park the cursor on the group header so the row
+    // renders the badge it would for any row you are not standing on.
+    s.move_cursor_to_edge(false);
 
     let rendered = render_to_string(&mut s, 40, 8, true);
+    let row = rendered
+        .lines()
+        .find(|l| l.contains("Multi-agent"))
+        .unwrap_or_else(|| panic!("no workspace row:\n{rendered}"));
     assert!(
-        rendered.contains(" 1C×2X"),
-        "default-width sidebar row must show its jump number, both agents, and the Claude count:\n{rendered}",
+        row.trim_start().starts_with('1'),
+        "the jump digit leads the row, in the gutter:\n{rendered}",
+    );
+    assert!(
+        row.contains("C×2X"),
+        "default-width sidebar row must show both agents and the Claude count:\n{rendered}",
     );
 }
 

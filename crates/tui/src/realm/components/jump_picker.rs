@@ -139,6 +139,7 @@ impl Component for JumpPicker {
                 modal_w: 80,
                 empty,
                 help,
+                preview: None,
             },
             |row_idx, is_cursor| {
                 let caret = if is_cursor { "▸ " } else { "  " };

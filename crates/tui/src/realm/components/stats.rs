@@ -541,9 +541,10 @@ fn fmt_compact(n: i64) -> String {
     }
 }
 
-/// USD micros (millionths of a dollar) → `$1.23`.
+/// USD micros (millionths of a dollar) → `$9` / `$0.42`, through the one
+/// shared cost rule (#1746).
 fn fmt_cost(micros: i64) -> String {
-    format!("${:.2}", micros as f64 / 1_000_000.0)
+    lazybox_tui_core::usage::format_cost_micros(micros.max(0) as u64)
 }
 
 /// Below this a two-decimal dollar figure rounds to `$0.00`, so the saving is
@@ -767,7 +768,7 @@ mod tests {
         assert!(out.contains("Tokens out"), "{out}");
         // …and recombined (1.2k + 800 = 2.0k) in the recent-totals footer.
         assert!(out.contains("2.0k"), "{out}");
-        assert!(out.contains("$1.25"), "{out}");
+        assert!(out.contains("$1"), "{out}");
         // The sparkline bars keep a gap from their label rather than
         // butting straight against the "7d".
         assert!(out.contains("Sessions · 7d ▁"), "{out}");
@@ -777,7 +778,7 @@ mod tests {
     }
 
     /// #1621: `shadow` never elides a byte upstream, and shadow is the
-    /// shipped default. Rendered as `Compaction −$1.84`, the row claims a
+    /// shipped default. Rendered as `Compaction −$2`, the row claims a
     /// saving against a bill that did not move — on most installs, the only
     /// compaction row there is.
     #[test]
@@ -796,7 +797,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("Projected"))
             .expect("a projected row");
-        assert!(row.contains("−$1.84 gross · 12 blocks"), "{out}");
+        assert!(row.contains("−$2 gross · 12 blocks"), "{out}");
         // A shadow-only window mints no realized row, so nothing on screen
         // can be read as money already saved. The marker sits in the label
         // column precisely because that is what a narrow terminal keeps.
@@ -897,7 +898,7 @@ mod tests {
             .position(|l| l.contains("Compaction"))
             .expect("compaction");
         assert_eq!(saving, cost + 1, "{out}");
-        assert!(out.contains("−$1.84 gross · 12 blocks"), "{out}");
+        assert!(out.contains("−$2 gross · 12 blocks"), "{out}");
         // Today saw no back-out even though the window did — the row reports
         // the active tab, not the whole window.
         assert!(out.contains("Regressions  0"), "{out}");
@@ -1154,7 +1155,9 @@ mod tests {
         assert_eq!(fmt_compact(2_300_000), "2.3M");
         assert_eq!(fmt_compact(1500), "1.5k");
         assert_eq!(fmt_compact(999), "999");
-        assert_eq!(fmt_cost(1_250_000), "$1.25");
+        // Whole dollars at a dollar and up, cents only below one (#1746).
+        assert_eq!(fmt_cost(1_250_000), "$1");
+        assert_eq!(fmt_cost(420_000), "$0.42");
         assert_eq!(fmt_days(0), "0 days");
         assert_eq!(fmt_days(1), "1 day");
         assert_eq!(fmt_days(5), "5 days");

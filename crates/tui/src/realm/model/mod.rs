@@ -1630,6 +1630,18 @@ pub(crate) fn default_model_labels(
     models: &std::collections::BTreeMap<String, lazybox_core::AgentModels>,
 ) -> std::collections::HashMap<char, String> {
     let registry = lazybox_tui_core::agents::registry();
+    default_tier_labels(models)
+        .into_iter()
+        .map(|(agent_id, label)| (registry.badge_for(&agent_id), label))
+        .collect()
+}
+
+/// The same defaults keyed by `agent_id` — what the terminal tab strip
+/// compares against, since a tab knows the agent it runs directly rather
+/// than through the sidebar's badge letter (#1745).
+pub(crate) fn default_tier_labels(
+    models: &std::collections::BTreeMap<String, lazybox_core::AgentModels>,
+) -> Vec<(String, String)> {
     models
         .iter()
         .filter_map(|(agent_id, m)| {
@@ -1642,7 +1654,7 @@ pub(crate) fn default_model_labels(
                 .tier(&alias)
                 .or_else(|| builtin.as_ref().and_then(|b| b.tier(&alias)))
                 .map(|t| t.label.clone())?;
-            Some((registry.badge_for(agent_id), label))
+            Some((agent_id.clone(), label))
         })
         .collect()
 }
@@ -4919,6 +4931,10 @@ impl<T: TerminalAdapter> Model<T> {
         // hand the sidebar each agent's default label (#1502).
         self.sidebar
             .set_default_model_labels(default_model_labels(&models));
+        // The terminal tab strip and tile headers follow the same rule,
+        // keyed by agent id rather than badge letter (#1745).
+        self.terminals
+            .set_default_model_labels(default_tier_labels(&models).into_iter().collect());
         self.agent_models = models;
         self.rebuild_catalog();
     }

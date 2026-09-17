@@ -368,7 +368,7 @@ The three layers merge from least to most specific:
 
 | Scope          | Path                          | Use it for                                      |
 | -------------- | ----------------------------- | ----------------------------------------------- |
-| **Built-in**   | _(shipped with lazybox)_       | 61 categorized daily engineering workflows.    |
+| **Built-in**   | _(shipped with lazybox)_       | 63 categorized daily engineering workflows.    |
 | **Global**     | `~/.lazybox/snippets.yaml`     | Personal habits reused across every repository. |
 | **Launch directory** | `<launch-dir>/.lazybox/snippets.yaml` | Overrides for this lazybox client catalog. |
 

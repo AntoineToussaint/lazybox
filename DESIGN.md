@@ -2,7 +2,7 @@
 
 This is the architectural reference for lazybox. For execution status and
 phased deliverables see `ROADMAP.md`. For day-to-day conventions see
-`CLAUDE.md`.
+`AGENTS.md`.
 
 ## North star: an OSS project people want to use
 

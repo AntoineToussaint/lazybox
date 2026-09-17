@@ -28,7 +28,8 @@ be scoped to, powering the setup wizard's scope picker.
 You don't call these directly — they're the extension points. To add a source,
 implement `TaskProvider` (+ `ScopeSource` for setup) in a new
 `crates/<x>-provider/` crate and wire its poller into `crates/server/`.
-See [`CLAUDE.md` § Adding a new provider](../../CLAUDE.md).
+See the `add-a-provider` skill (`.agents/skills/add-a-provider/`) and
+[`crates/gh-provider/AGENTS.md`](../../crates/gh-provider/AGENTS.md).
 
 ### How it works (brief)
 `TaskProvider` (`crates/core/src/provider.rs`) has `name()`,

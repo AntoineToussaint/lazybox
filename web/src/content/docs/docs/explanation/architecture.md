@@ -5,7 +5,7 @@ description: Client/daemon split, the crates, the event bus, the credential chai
 
 This page explains how lazybox is put together and why. For the canonical,
 always-current detail, read
-[CLAUDE.md](https://github.com/AntoineToussaint/lazybox/blob/main/CLAUDE.md) and
+[AGENTS.md](https://github.com/AntoineToussaint/lazybox/blob/main/AGENTS.md) and
 [DESIGN.md](https://github.com/AntoineToussaint/lazybox/blob/main/DESIGN.md) in
 the repository.
 
@@ -88,6 +88,6 @@ their final screen visible without deleting the workspace.
 
 - The [mental model](/docs/explanation/mental-model/) for the concepts these
   mechanisms serve.
-- [CLAUDE.md](https://github.com/AntoineToussaint/lazybox/blob/main/CLAUDE.md) and
+- [AGENTS.md](https://github.com/AntoineToussaint/lazybox/blob/main/AGENTS.md) and
   [DESIGN.md](https://github.com/AntoineToussaint/lazybox/blob/main/DESIGN.md) for
   the deep, current architecture notes.

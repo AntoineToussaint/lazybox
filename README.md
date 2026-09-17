@@ -189,7 +189,7 @@ an orientation of every command.
 - **[Explanation](https://lazybox.ai/docs/explanation/)** — the [mental model](https://lazybox.ai/docs/explanation/mental-model/), the [architecture](https://lazybox.ai/docs/explanation/architecture/), and [how lazybox compares](https://lazybox.ai/docs/explanation/comparison/).
 
 Copy-paste config starters live in [`examples/`](examples/). Deep architecture
-notes are in [`CLAUDE.md`](CLAUDE.md) and [`DESIGN.md`](DESIGN.md); the
+notes are in [`AGENTS.md`](AGENTS.md) and [`DESIGN.md`](DESIGN.md); the
 per-feature dev catalog — what each piece does, where it lives, and how to test
 it — is in [`docs/features/`](docs/features/).
 

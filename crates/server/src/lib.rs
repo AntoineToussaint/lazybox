@@ -326,7 +326,7 @@ fn open_store_at(path: &Path) -> Result<Arc<dyn Store>, ServerError> {
 /// Server-side error type. Used by `Server::serve` and the internal
 /// helpers it composes. Public API exposes `Display` only — the
 /// in-process TUI consumer just prints the message — but the typed
-/// variants give us a `#[derive(Error)]` enum per CLAUDE.md's
+/// variants give us a `#[derive(Error)]` enum per AGENTS.md's
 /// library-crate convention (and let future consumers like the JSON
 /// API gateway dispatch on kind).
 ///

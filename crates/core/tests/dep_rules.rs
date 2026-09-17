@@ -1,6 +1,6 @@
 //! Workspace dependency-rule enforcement.
 //!
-//! CLAUDE.md states the layering rules ("core libraries must not
+//! AGENTS.md states the layering rules ("core libraries must not
 //! depend on each other", "provider crates depend on core + auth
 //! only") but nothing enforced them, and reality drifted (store →
 //! core is now blessed). This test parses every `crates/*/Cargo.toml`
@@ -32,7 +32,7 @@ fn workspace_root() -> PathBuf {
 /// UPDATE DELIBERATELY: adding an edge here is an architectural
 /// decision, not a formality. Notable calls already made:
 /// - `lazybox-store` → `lazybox-core` is accepted reality (the store
-///   speaks `WorkspaceKey`/`ProjectKey`), superseding CLAUDE.md's
+///   speaks `WorkspaceKey`/`ProjectKey`), superseding AGENTS.md's
 ///   original "core libraries never depend on each other" for this
 ///   one edge. core ↔ auth ↔ store must otherwise stay disjoint.
 /// - Provider crates (`gh`, `linear`, `slack`) stay within core + auth;

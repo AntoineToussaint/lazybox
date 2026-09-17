@@ -4001,7 +4001,7 @@ mod tests {
         // Workspace vs undo-mark-read in Activity) is a DELIBERATE,
         // focus-ranked override and intentionally not flagged here. This is the single audit surface the catalog
         // gained so collisions surface at build time instead of as
-        // tribal knowledge in CLAUDE.md.
+        // tribal knowledge in AGENTS.md.
         use std::collections::HashMap;
         let mut seen: HashMap<(Section, Chord), ActionKind> = HashMap::new();
         for def in ActionDef::all() {

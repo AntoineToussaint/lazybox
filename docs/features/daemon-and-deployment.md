@@ -300,7 +300,7 @@ authenticated user's quota. Using a different account changes the viewer
 identity and the work GitHub returns, so it is not a drop-in quota-isolation
 mechanism. Each provider builds its own chain. To add an auth source, implement
 the trait and add it to the chain in `crates/server/` (see
-[`CLAUDE.md`](../../CLAUDE.md)).
+[`AGENTS.md`](../../AGENTS.md)).
 
 ### Test checklist
 - [ ] With no GitHub token environment variable, creds resolve from `gh auth token`.

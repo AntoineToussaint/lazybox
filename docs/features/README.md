@@ -7,7 +7,7 @@ review and for dev onboarding.
 
 This is deliberately an *inventory + audit*, not polished user docs. For the
 *why* behind the architecture, read [`DESIGN.md`](../../DESIGN.md); for
-day-to-day conventions, [`CLAUDE.md`](../../CLAUDE.md); for execution status of
+day-to-day conventions, [`AGENTS.md`](../../AGENTS.md); for execution status of
 the bigger bets, [`ROADMAP.md`](../../ROADMAP.md). For the user-facing
 onboarding effort this catalog feeds, see issue #165.
 

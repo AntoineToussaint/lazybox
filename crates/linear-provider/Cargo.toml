@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 lazybox-core = { workspace = true }
-# Provider rule (CLAUDE.md): provider crates depend on core + auth so
+# Provider rule (AGENTS.md): provider crates depend on core + auth so
 # credentials flow through the chain instead of every provider rolling
 # its own env-var lookup. linear-provider's `from_env` constructor is
 # kept for back-compat, but new code should use `from_credential` so

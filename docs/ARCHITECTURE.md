@@ -1,6 +1,6 @@
 # lazybox architecture — robustness and performance
 
-This document details the architectural improvements and design patterns that enable lazybox to stay responsive and reliable under load. For high-level architecture, see [`DESIGN.md`](../DESIGN.md). For day-to-day conventions, see [`CLAUDE.md`](../CLAUDE.md).
+This document details the architectural improvements and design patterns that enable lazybox to stay responsive and reliable under load. For high-level architecture, see [`DESIGN.md`](../DESIGN.md). For day-to-day conventions, see [`AGENTS.md`](../AGENTS.md).
 
 ## Terminal robustness
 
@@ -231,4 +231,4 @@ The full workspace test suite runs 5,473 tests and is green on every build.
 
 - [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — user-facing guidance for common issues.
 - [`DESIGN.md`](../DESIGN.md) — high-level design goals and the client/daemon split.
-- [`CLAUDE.md`](../CLAUDE.md) — build, run, and contributor conventions.
+- [`AGENTS.md`](../AGENTS.md) — build, run, and contributor conventions.

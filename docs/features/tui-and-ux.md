@@ -5,7 +5,7 @@ the pane structure, the action/keybinding system, the overlays (help, settings,
 coach), the activity feed, reply, mouse handling, modals, and desktop
 notifications.
 
-See [`CLAUDE.md` § TUI tiers](../../CLAUDE.md) and
+See [`crates/tui/AGENTS.md`](../../crates/tui/AGENTS.md) and
 [`DESIGN.md` § Component tree](../../DESIGN.md) for the architecture. The full
 key reference also lives in [`README.md`](../../README.md#key-bindings). Ask
 Lazybox (`?`) is the always-current source: type to search the live keymap, or

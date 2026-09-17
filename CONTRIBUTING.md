@@ -60,7 +60,7 @@ crates/
   tui-boot/       # `lazybox` / `lb` binaries and daemon/provider wiring.
 ```
 
-More detail in [`CLAUDE.md`](./CLAUDE.md) (architecture decisions, key patterns).
+More detail in [`AGENTS.md`](./AGENTS.md) (architecture decisions, key patterns).
 
 ## Sample config
 
@@ -93,7 +93,7 @@ attention:
 
 - **Questions, setup help, sharing configs** → [GitHub Discussions](https://github.com/AntoineToussaint/lazybox/discussions) or the [Question / setup help form](https://github.com/AntoineToussaint/lazybox/issues/new?template=question.yml).
 - **Bugs and feature requests** → [Issues](https://github.com/AntoineToussaint/lazybox/issues/new/choose) (use the templates).
-- **Docs & architecture** → the [docs site](https://lazybox.ai/docs/), plus [`CLAUDE.md`](./CLAUDE.md) and `DESIGN.md` for deeper notes.
+- **Docs & architecture** → the [docs site](https://lazybox.ai/docs/), plus [`AGENTS.md`](./AGENTS.md) and `DESIGN.md` for deeper notes.
 
 lazybox is pre-1.0, so support is best-effort. See [`SUPPORT.md`](./SUPPORT.md) for the short version.
 

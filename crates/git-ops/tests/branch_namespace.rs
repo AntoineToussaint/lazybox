@@ -261,3 +261,63 @@ async fn a_worktree_provisioned_on_the_chosen_name_is_reused_by_the_next_spawn()
         chosen,
     );
 }
+
+/// The data-loss guard (#1742 review). A disambiguated candidate is only a
+/// candidate because the name *looked* free — the namespace probe and the
+/// add don't share a lock, so on a box running a fleet of agents the name
+/// can be taken in between. `-B` would then reset that branch to base and
+/// orphan its commits. The create-only entry point makes git refuse under
+/// its own ref lock, and reports it as a typed error the caller can act on.
+#[tokio::test]
+async fn a_picked_name_never_resets_a_branch_that_took_it() {
+    let (_upstream, base, bare) = setup("acme", "widget");
+    // Someone else's branch already occupies the candidate name, with a
+    // commit that is not on main.
+    let theirs = base.path().join("theirs");
+    git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            &theirs.to_string_lossy(),
+            "-b",
+            "deps-grouping",
+            "-q",
+        ],
+    );
+    git(&theirs, &["config", "user.email", "t@example.com"]);
+    git(&theirs, &["config", "user.name", "Tester"]);
+    git(
+        &theirs,
+        &["commit", "--allow-empty", "-m", "their work", "-q"],
+    );
+    let theirs_sha = git_out(&theirs, &["rev-parse", "HEAD"]);
+    git(&theirs, &["checkout", "--detach", "-q"]);
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let target = base.path().join("ours");
+    let err = wm
+        .checkout_fresh_branch_at(&target, "acme", "widget", "deps-grouping", "main")
+        .await
+        .expect_err("a picked name must never take over an existing branch");
+    assert!(
+        matches!(
+            err,
+            lazybox_git_ops::GitError::BranchAlreadyExists { ref branch }
+                if branch == "deps-grouping"
+        ),
+        "the refusal must be typed so the caller can pick another: {err:?}",
+    );
+    assert_eq!(
+        git_out(&bare, &["rev-parse", "deps-grouping"]),
+        theirs_sha,
+        "their commit must still be on their branch — `-B` would have reset it to main",
+    );
+
+    // The workspace's OWN derived name keeps the take-over semantics a
+    // half-finished spawn depends on.
+    let own = base.path().join("own");
+    wm.checkout_new_branch_at(&own, "acme", "widget", "deps-grouping", "main")
+        .await
+        .expect("the reset entry point still adopts an existing branch");
+}

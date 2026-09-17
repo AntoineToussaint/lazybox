@@ -193,6 +193,26 @@ pub enum GitError {
          rename '{conflicting}', then retry"
     )]
     BranchDirFileConflict { branch: String, conflicting: String },
+    #[error(
+        "branch '{branch}' already exists — refusing to reset a branch this spawn only \
+         picked because the name looked free"
+    )]
+    BranchAlreadyExists { branch: String },
+}
+
+/// Whether a worktree add may take over an existing branch of the same
+/// name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchCreate {
+    /// `-B`: reset an existing branch to the start point. What a
+    /// workspace's *own* derived branch wants — a stale branch left by a
+    /// spawn that died mid-setup must not wedge every later attempt.
+    Reset,
+    /// `-b`: refuse when the branch already exists, reported as
+    /// [`GitError::BranchAlreadyExists`]. What a *picked* name wants: it
+    /// was chosen because it looked free, so the branch that actually
+    /// holds it belongs to someone else.
+    MustBeNew,
 }
 
 /// Boxed async result returned by [`GitRunner`] operations.
@@ -1132,6 +1152,7 @@ impl WorktreeManager {
                 branch,
                 &start_point,
                 &auth,
+                BranchCreate::Reset,
             )
             .await?;
         }
@@ -1194,6 +1215,10 @@ impl WorktreeManager {
     /// from a stable session UUID and must not depend on branch names
     /// (so a branch rename inside the worktree doesn't relocate the
     /// on-disk folder).
+    ///
+    /// Takes over an existing branch of the same name
+    /// ([`BranchCreate::Reset`]) — see the `-B` rationale at the add. For a
+    /// name that must be *fresh*, use [`Self::checkout_fresh_branch_at`].
     pub async fn checkout_new_branch_at(
         &self,
         wt_path: &Path,
@@ -1201,6 +1226,58 @@ impl WorktreeManager {
         repo: &str,
         new_branch: &str,
         base_branch: &str,
+    ) -> Result<Worktree, GitError> {
+        self.checkout_branch_at_with(
+            wt_path,
+            owner,
+            repo,
+            new_branch,
+            base_branch,
+            BranchCreate::Reset,
+        )
+        .await
+    }
+
+    /// [`Self::checkout_new_branch_at`] for a branch name that must not
+    /// already exist: the add uses `-b`, so git refuses rather than
+    /// resetting, and the refusal comes back as
+    /// [`GitError::BranchAlreadyExists`].
+    ///
+    /// This is the entry point for a name lazybox *picked* — a
+    /// disambiguated candidate, or one the user chose in the recovery
+    /// prompt (#1742). Such a name is only a candidate because it was
+    /// believed free, so taking over the branch that actually holds it
+    /// would reset a stranger's commits to the base. Checking first can't
+    /// give that guarantee: the check and the add don't share a lock, and
+    /// on a box running a fleet of agents the window is real. `-b` makes
+    /// git enforce it atomically under its own ref lock.
+    pub async fn checkout_fresh_branch_at(
+        &self,
+        wt_path: &Path,
+        owner: &str,
+        repo: &str,
+        new_branch: &str,
+        base_branch: &str,
+    ) -> Result<Worktree, GitError> {
+        self.checkout_branch_at_with(
+            wt_path,
+            owner,
+            repo,
+            new_branch,
+            base_branch,
+            BranchCreate::MustBeNew,
+        )
+        .await
+    }
+
+    async fn checkout_branch_at_with(
+        &self,
+        wt_path: &Path,
+        owner: &str,
+        repo: &str,
+        new_branch: &str,
+        base_branch: &str,
+        create: BranchCreate,
     ) -> Result<Worktree, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
@@ -1349,6 +1426,7 @@ impl WorktreeManager {
             new_branch,
             &start_point,
             &auth,
+            create,
         )
         .await?;
 
@@ -3009,7 +3087,8 @@ fn fetch_failure_reason(err: &GitError, authed: bool) -> String {
         GitError::BranchHeldLive { .. }
         | GitError::BranchHeldManaged { .. }
         | GitError::WorktreeBranchMismatch { .. }
-        | GitError::BranchDirFileConflict { .. } => err.to_string(),
+        | GitError::BranchDirFileConflict { .. }
+        | GitError::BranchAlreadyExists { .. } => err.to_string(),
     };
     let line = raw
         .lines()
@@ -3218,10 +3297,15 @@ async fn add_worktree_resilient(
     branch: &str,
     start_point: &str,
     auth: &[(String, String)],
+    create: BranchCreate,
 ) -> Result<(), GitError> {
     let wt = wt_path.to_string_lossy();
     let wt: &str = &wt;
-    let plain: [&str; 6] = ["worktree", "add", "-B", branch, wt, start_point];
+    let create_flag = match create {
+        BranchCreate::Reset => "-B",
+        BranchCreate::MustBeNew => "-b",
+    };
+    let plain: [&str; 6] = ["worktree", "add", create_flag, branch, wt, start_point];
     let forced: [&str; 5] = ["worktree", "add", "--force", wt, branch];
 
     let err = match git.run_transfer(bare_path, &plain, auth, None).await {
@@ -3268,7 +3352,7 @@ async fn add_worktree_resilient(
                     Ok(()) => return Ok(()),
                     Err(e) => match branch_dir_file_conflict(&e) {
                         Some(next) => conflicting = next,
-                        None => return Err(explain_promisor_failure(e)),
+                        None => return Err(typed_add_failure(e)),
                     },
                 }
             }
@@ -3277,7 +3361,7 @@ async fn add_worktree_resilient(
                 conflicting,
             });
         }
-        return Err(explain_promisor_failure(err));
+        return Err(typed_add_failure(err));
     };
 
     let _ = run_git_in(git, bare_path, &["worktree", "prune"]).await;
@@ -3435,6 +3519,27 @@ async fn interrupted_add_registration(git: &dyn GitRunner, bare_path: &Path, pat
         registered.is_some_and(|p| paths_equal(p, path))
             && block.lines().any(|l| l.trim() == "locked initializing")
     })
+}
+
+/// The branch name in git's refusal to create one that already exists
+/// (`fatal: a branch named 'deps-grouping' already exists`), which only a
+/// [`BranchCreate::MustBeNew`] add can provoke.
+fn branch_already_exists(err: &GitError) -> Option<String> {
+    let GitError::Command(msg) = err else {
+        return None;
+    };
+    let after = msg.split_once("a branch named '")?.1;
+    let name = after.split_once('\'')?.0.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Classify a worktree-add failure, preferring a typed variant the caller
+/// can act on over the raw command error.
+fn typed_add_failure(err: GitError) -> GitError {
+    match branch_already_exists(&err) {
+        Some(branch) => GitError::BranchAlreadyExists { branch },
+        None => explain_promisor_failure(err),
+    }
 }
 
 /// The worktree that currently has `branch` checked out, if any.
@@ -5804,9 +5909,17 @@ mod resilient_add_tests {
         std::fs::write(nested.join("agent-work.txt"), "in progress").expect("write agent file");
 
         let target = tmp.path().join("target");
-        add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
-            .await
-            .expect("nested agent collision must resolve, not fail");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "feat",
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect("nested agent collision must resolve, not fail");
 
         assert!(target.join(".git").exists(), "target is a real worktree");
         assert_eq!(
@@ -5835,9 +5948,17 @@ mod resilient_add_tests {
         git(&bare, &["branch", "release/v0.2.102", "HEAD"]);
 
         let target = tmp.path().join("target");
-        add_worktree_resilient(default_git_runner(), &bare, &target, "release", "HEAD", &[])
-            .await
-            .expect("the D/F conflict must be cleared, not fail");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "release",
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect("the D/F conflict must be cleared, not fail");
 
         assert!(target.join(".git").exists(), "target is a real worktree");
         let branch_exists = |name: &str| {
@@ -5891,10 +6012,17 @@ mod resilient_add_tests {
         git(&holder, &["checkout", "--detach", "HEAD"]);
 
         let target = tmp.path().join("target");
-        let err =
-            add_worktree_resilient(default_git_runner(), &bare, &target, "release", "HEAD", &[])
-                .await
-                .expect_err("an unmergeable conflict must not silently succeed");
+        let err = add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "release",
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect_err("an unmergeable conflict must not silently succeed");
         assert!(
             matches!(err, GitError::BranchDirFileConflict { .. }),
             "expected a typed D/F conflict, got: {err:?}"
@@ -5940,6 +6068,7 @@ mod resilient_add_tests {
             "release-2",
             "HEAD",
             &[],
+            BranchCreate::Reset,
         )
         .await
         .expect("a leaf sibling name provisions past the namespace conflict");
@@ -6004,6 +6133,7 @@ mod resilient_add_tests {
             "deps/grouping-2",
             "HEAD",
             &[],
+            BranchCreate::Reset,
         )
         .await
         .expect_err("a leaf suffix cannot clear an ancestor blocker");
@@ -6015,9 +6145,17 @@ mod resilient_add_tests {
         // …while the candidate the helper actually offers provisions.
         assert_eq!(suffixed, "deps-grouping");
         let target = tmp.path().join("target");
-        add_worktree_resilient(default_git_runner(), &bare, &target, &suffixed, "HEAD", &[])
-            .await
-            .expect("a flattened name provisions past the namespace conflict");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            &suffixed,
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect("a flattened name provisions past the namespace conflict");
 
         let branch_exists = |name: &str| {
             std::process::Command::new("git")
@@ -6085,9 +6223,17 @@ mod resilient_add_tests {
         );
 
         let target = tmp.path().join("target");
-        add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
-            .await
-            .expect("prune must clear the stale registration and let the retry win");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "feat",
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect("prune must clear the stale registration and let the retry win");
         assert_eq!(
             validate_worktree_dir(default_git_runner(), &target, &bare)
                 .await
@@ -6175,9 +6321,17 @@ mod resilient_add_tests {
             "sanity: prune alone leaves the locked corpse in place"
         );
 
-        add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
-            .await
-            .expect("the locked corpse must be cleared, not reported as a live holder");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "feat",
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect("the locked corpse must be cleared, not reported as a live holder");
         assert_eq!(
             validate_worktree_dir(default_git_runner(), &target, &bare)
                 .await
@@ -6200,9 +6354,17 @@ mod resilient_add_tests {
         let ghost = tmp.path().join("ghost");
         stage_interrupted_add(&bare, &ghost, "feat", false);
         let target = tmp.path().join("target");
-        add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
-            .await
-            .expect("an initializing corpse elsewhere is not a live holder");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "feat",
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect("an initializing corpse elsewhere is not a live holder");
         assert!(target.join("f.txt").exists());
         assert!(!is_locked(&bare, &ghost));
     }
@@ -6238,9 +6400,17 @@ mod resilient_add_tests {
         );
         std::fs::remove_dir_all(&usb).expect("unmount");
         let target = tmp.path().join("target");
-        let err = add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
-            .await
-            .expect_err("a deliberate lock is honoured");
+        let err = add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "feat",
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect_err("a deliberate lock is honoured");
         assert!(matches!(err, GitError::BranchHeldLive { .. }), "{err}");
         assert!(is_locked(&bare, &usb), "the deliberate lock survives");
     }
@@ -6296,9 +6466,17 @@ mod resilient_add_tests {
         );
 
         let target = tmp.path().join("target");
-        let err = add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
-            .await
-            .expect_err("a live external holder must not be silently stolen from");
+        let err = add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "feat",
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect_err("a live external holder must not be silently stolen from");
         assert!(
             matches!(
                 &err,
@@ -6346,9 +6524,17 @@ mod resilient_add_tests {
         std::fs::write(rogue.join("f.txt"), "someone else's work\n").expect("edit rogue file");
 
         let target = tmp.path().join("target");
-        let err = add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
-            .await
-            .expect_err("a non-agent holder inside the bare dir must not be force-stolen");
+        let err = add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "feat",
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect_err("a non-agent holder inside the bare dir must not be force-stolen");
         let msg = err.to_string();
         assert!(msg.contains("already checked out at"), "{msg}");
         assert_eq!(
@@ -6394,9 +6580,17 @@ mod resilient_add_tests {
     async fn rm_rfed_worktree_readded_at_same_path_recovers() {
         let (tmp, bare) = local_bare_clone();
         let target = tmp.path().join("target");
-        add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
-            .await
-            .expect("initial provision");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "feat",
+            "HEAD",
+            &[],
+            BranchCreate::Reset,
+        )
+        .await
+        .expect("initial provision");
         // Simulate the user's manual `rm -rf`: the directory is gone,
         // the registration in `<bare>/worktrees/` survives.
         std::fs::remove_dir_all(&target).expect("rm -rf the worktree");
@@ -6410,6 +6604,7 @@ mod resilient_add_tests {
             "feat-renamed",
             "HEAD",
             &[],
+            BranchCreate::Reset,
         )
         .await
         .expect("re-add at the same path must prune the stale registration and retry");
@@ -6431,6 +6626,7 @@ mod resilient_add_tests {
             "feat-renamed",
             "HEAD",
             &[],
+            BranchCreate::Reset,
         )
         .await
         .expect("same-branch re-add also recovers");

@@ -1690,6 +1690,18 @@ pub async fn handle_resolve_branch_conflict(
     resolution: lazybox_ipc::BranchConflictResolution,
 ) {
     let session_key = spawn.session_key.clone();
+    // Clearing the conflict runs real git work — a base-branch lookup and,
+    // on a blobless clone, a checkout that downloads blobs. The client
+    // tore its checklist down to send this, so without a progress event
+    // the recovery is a silent multi-second pause with nothing on screen.
+    // `Fetch` is the same leading sub-phase a normal provision mounts on.
+    emit_worktree_progress(
+        config,
+        &session_key,
+        WorktreeStep::Fetch,
+        WorktreeStepStatus::Started,
+        lazybox_ipc::SpawnOrigin::Interactive,
+    );
     if let Err(reason) = clear_branch_conflict(config, &spawn, on_main, resolution).await {
         // `spawn:worktree` is what routes a provisioning failure back to
         // the recovery modal rather than a fading footer line. A refused
@@ -1825,10 +1837,32 @@ async fn clear_branch_conflict(
                 .default_branch(owner, name, lazybox_git_ops::LockPriority::Interactive)
                 .await
                 .map_err(|e| format!("could not resolve {repo}'s default branch: {e}"))?;
-            mgr.checkout_new_branch_at(&target, owner, name, &chosen, &base)
+            emit_worktree_progress(
+                config,
+                &spawn.session_key,
+                WorktreeStep::WorktreeAdd,
+                WorktreeStepStatus::Started,
+                lazybox_ipc::SpawnOrigin::Interactive,
+            );
+            // Create-only for the same reason the disambiguation loop is:
+            // the user picked this name believing it free, and the probe
+            // above can go stale before the add runs.
+            mgr.checkout_fresh_branch_at(&target, owner, name, &chosen, &base)
                 .await
                 .map(|_| ())
-                .map_err(|e| format!("could not create '{chosen}': {e}"))
+                .map_err(|e| match e {
+                    // Report it the way the original collision arrived, so
+                    // the client re-opens the prompt against this blocker
+                    // instead of stranding the user on a notice.
+                    lazybox_git_ops::GitError::BranchAlreadyExists { branch } => {
+                        lazybox_git_ops::GitError::BranchDirFileConflict {
+                            branch: branch.clone(),
+                            conflicting: branch,
+                        }
+                        .to_string()
+                    }
+                    e => format!("could not create '{chosen}': {e}"),
+                })
         }
     }
 }
@@ -4897,10 +4931,32 @@ async fn provision_worktree(
                     // can't spin.
                     let preferred_branch = new_branch.clone();
                     let mut df_attempts = 0;
+                    // The blocker that started the disambiguation. It, not
+                    // whatever refused the latest candidate, is what decides
+                    // the SHAPE of the next one: `deps` blocking
+                    // `deps/grouping` needs the flattened form, and deriving
+                    // from a taken candidate instead would fall back to the
+                    // suffix that never clears `deps`.
+                    let mut df_blocker: Option<String> = None;
                     loop {
-                        let mut checkout = mgr
-                            .checkout_new_branch_at(target, owner, name, &new_branch, &base)
-                            .await;
+                        // The workspace's OWN derived name keeps the
+                        // take-over semantics: a stale branch from a spawn
+                        // that died mid-setup must not wedge every later
+                        // attempt. A disambiguated candidate must not — it
+                        // is only a candidate because the name looked
+                        // free, so the branch actually holding it is
+                        // someone else's, and `-B` would reset it to base.
+                        // `checkout_fresh_branch_at` makes git enforce
+                        // that under its own ref lock, which the
+                        // namespace probe below cannot: probe and add
+                        // don't share a lock.
+                        let mut checkout = if df_attempts == 0 {
+                            mgr.checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                                .await
+                        } else {
+                            mgr.checkout_fresh_branch_at(target, owner, name, &new_branch, &base)
+                                .await
+                        };
                         let reclaim = match &checkout {
                             Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => {
                                 Some((
@@ -4936,10 +4992,29 @@ async fn provision_worktree(
                             _ => {}
                         }
                         match checkout {
+                            // The candidate was taken between the probe
+                            // and the add. Same remedy as a probe hit: move
+                            // to the next candidate, keeping the blocker
+                            // that started this off as the shape to clear.
+                            Err(lazybox_git_ops::GitError::BranchAlreadyExists { branch })
+                                if df_attempts < MAX_DF_DISAMBIGUATION =>
+                            {
+                                tracing::info!(
+                                    workspace = workspace.key.as_str(),
+                                    candidate = %branch,
+                                    "disambiguation candidate was taken between the \
+                                     namespace probe and the add; trying the next",
+                                );
+                                df_attempts += 1;
+                                let shape = df_blocker.as_deref().unwrap_or(&branch);
+                                new_branch =
+                                    disambiguated_branch(&preferred_branch, shape, df_attempts);
+                            }
                             Err(lazybox_git_ops::GitError::BranchDirFileConflict {
                                 conflicting,
                                 ..
                             }) if df_attempts < MAX_DF_DISAMBIGUATION => {
+                                df_blocker = Some(conflicting.clone());
                                 // Walk to the first candidate the ref
                                 // namespace actually has room for. The add
                                 // uses `-B`, which force-resets a branch of
@@ -20226,6 +20301,32 @@ mod tests {
         assert_eq!(derive_branch_for_workspace("", &ws), "my-experiment");
     }
 
+    /// Every candidate the loop tries must clear the ORIGINAL blocker,
+    /// however a later candidate was refused. Deriving the next name from
+    /// the taken candidate instead loses the collision's direction and
+    /// reverts to the leaf suffix — `deps/grouping-3`, which still wants
+    /// the `deps/` directory `deps` occupies. That is the exact defect
+    /// this issue is about, one iteration deeper into the loop.
+    #[test]
+    fn every_candidate_clears_the_original_blocker_not_the_last_refusal() {
+        let preferred = "deps/grouping";
+        let blocker = "deps";
+        // Attempt 2 is reached when the first candidate was taken; the
+        // shape must still come from `deps`.
+        let second = disambiguated_branch(preferred, blocker, 2);
+        assert_eq!(second, "deps-grouping-2");
+        assert!(
+            !lazybox_core::branch_namespace::conflicts(&second, blocker),
+            "{second} must clear {blocker}",
+        );
+        // Deriving from the taken candidate is what must NOT happen.
+        let wrong = disambiguated_branch(preferred, "deps-grouping", 2);
+        assert!(
+            lazybox_core::branch_namespace::conflicts(&wrong, blocker),
+            "pinned so the difference stays visible: {wrong} still collides",
+        );
+    }
+
     /// A workspace whose branch is a PR head, persisted so
     /// `clear_branch_conflict` reads it the way the daemon does.
     fn workspace_on_pr_branch(config: &ServerConfig, key: &str, head: &str) -> SessionKey {
@@ -20254,6 +20355,141 @@ mod tests {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
         }
+    }
+
+    /// The `UseBranch` happy path end to end against real git, which no
+    /// other test covered: the recovery provisions the checkout itself and
+    /// then lets the ordinary spawn path run, so it only resumes the
+    /// user's work if the branch really lands at the path that spawn will
+    /// look at. A mismatch there would silently re-collide instead.
+    #[tokio::test]
+    async fn use_branch_provisions_the_chosen_name_where_the_spawn_will_find_it() {
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let manager = config.worktree_manager();
+        let bare = manager.bare_path("acme", "widget");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        test_git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        // `deps` occupies the namespace the derived branch would need.
+        test_git(&bare, &["branch", "deps", "main"]);
+
+        // A branchless workspace on that repo — no PR, so its branch is a
+        // name lazybox derived and may be moved.
+        let mut ws = Workspace::empty(
+            WorkspaceKey::new("github:acme/widget#7"),
+            "main",
+            Utc::now(),
+        );
+        ws.gh_issues = vec![task_for("github", "acme/widget#7")];
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: ws.key.as_str().into(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize workspace")),
+            })
+            .expect("save workspace");
+        let session_key = SessionKey::new("github:acme/widget#7");
+        let spawn = fallback_spawn(&session_key);
+
+        clear_branch_conflict(
+            &config,
+            &spawn,
+            false,
+            lazybox_ipc::BranchConflictResolution::UseBranch("deps-grouping".into()),
+        )
+        .await
+        .expect("the chosen name provisions");
+
+        // The path the resumed spawn computes, derived independently.
+        let target = worktree_path_for_session_under(&ws, 0, config.worktree_root_path());
+        assert!(
+            target.exists(),
+            "a checkout must exist at {}",
+            target.display()
+        );
+        assert_eq!(
+            manager
+                .existing_worktree_branch("acme", "widget", &target)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("deps-grouping"),
+            "the spawn must find the chosen branch at the path it targets",
+        );
+        // And the blocker is untouched.
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(&bare)
+                .args(["rev-parse", "--verify", "--quiet", "refs/heads/deps"])
+                .status()
+                .expect("run git rev-parse")
+                .success(),
+            "the blocking branch is never removed to make room",
+        );
+    }
+
+    /// The client dismisses its checklist to send the resolution, so the
+    /// daemon has to re-open one: clearing the conflict runs a base-branch
+    /// lookup and a checkout that, on a blobless clone, downloads blobs.
+    /// Without a progress event that is a silent pause with nothing on
+    /// screen — the failure mode the checklist exists to prevent.
+    #[tokio::test]
+    async fn resolving_a_conflict_reports_progress_before_it_starts_work() {
+        let config = ServerConfig::in_memory();
+        let session_key = workspace_on_pr_branch(&config, "github:acme/widget#42", "deps/grouping");
+        let mut bus_rx = config.bus.subscribe();
+        // A refused resolution is enough: the progress event must be out
+        // before any of the work that could stall is attempted.
+        handle_resolve_branch_conflict(
+            &config,
+            fallback_spawn(&session_key),
+            None,
+            false,
+            lazybox_ipc::BranchConflictResolution::UseBranch("deps-grouping".into()),
+        )
+        .await;
+
+        let mut progress = Vec::new();
+        let mut refusal = None;
+        while let Ok(ev) = bus_rx.try_recv() {
+            match ev {
+                Event::WorktreeProgress { step, status, .. } => progress.push((step, status)),
+                Event::ProviderError {
+                    source, message, ..
+                } => refusal = Some((source, message)),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            progress.first(),
+            Some(&(WorktreeStep::Fetch, WorktreeStepStatus::Started)),
+            "the checklist must re-open before the work starts: {progress:?}",
+        );
+        let (source, _) = refusal.expect("the refusal still reaches the client");
+        assert_eq!(
+            source, "spawn:worktree",
+            "only this source routes a failure back to the recovery modal",
+        );
     }
 
     /// #1742: a PR's head branch is never moved to another name. The PR

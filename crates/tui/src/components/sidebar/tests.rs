@@ -7520,9 +7520,14 @@ mod focused_row_identity_tests {
     fn focused_pr_row_keeps_every_column_and_trails_its_source() {
         let (mut sb, key) = sidebar_with_pr();
         let under_header = row_containing(&mut sb, 120, "orion");
-        let identity = format!("⇄ 798 A   {TITLE}");
+        // The identity cluster is whatever the row shows under its repo
+        // header from the type glyph through the end of the title —
+        // derived from that render rather than spelled out, so a column
+        // spacing change can't turn this into a false failure.
+        let title_end = under_header.find(TITLE).expect("title in the row") + TITLE.len();
+        let identity = under_header[..title_end].trim_start_matches([' ', '▎']);
         assert!(
-            under_header.contains(&identity),
+            identity.starts_with("⇄ 798"),
             "fixture row under its repo header: {under_header:?}",
         );
 

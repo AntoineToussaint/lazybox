@@ -661,7 +661,7 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // unit — after the status pill (#328), never sliced mid-chip —
     // when the row is too narrow (see `Cell::atomic_tail`).
     let labels = label_spans(ctx);
-    let mut tail = labels.len();
+    let tail = labels.len();
     let mut spans: Vec<Span<'static>> = ticket_tree_prefix(ctx);
     spans.extend(title_spans(
         ctx.raw_title(),
@@ -678,8 +678,10 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // `owner/repo · Bug` compound that swallows the name (#1747). Dim so
     // it reads as a cue rather than competing with the title, but legible
     // (no forced dim) on the cursor row, mirroring the title and the tree
-    // prefix. It joins the atomic tail so a narrow pane sheds it whole,
-    // never the title it annotates.
+    // prefix. It is the cell's outer tail: a narrow pane sheds it whole,
+    // and before the label chips, so starring a row never costs it the
+    // chips it shows under its repo header — never the title either.
+    let mut cue = 0;
     if let Some(repo) = &ctx.source_repo {
         let cue_style = if ctx.is_cursor {
             ctx.row_style()
@@ -687,9 +689,9 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             ctx.row_style().fg(ctx.theme.text_dim)
         };
         spans.push(Span::styled(format!(" · {repo}"), cue_style));
-        tail += 1;
+        cue = 1;
     }
-    Cell::new(spans).atomic_tail(tail)
+    Cell::new(spans).atomic_tail(tail).outer_tail(cue)
 }
 
 /// Split a title into styled spans, underlining the first case-insensitive
@@ -2297,7 +2299,8 @@ mod tests {
         let cue = cell.spans.last().expect("cue span");
         assert_eq!(cue.content.as_ref(), " · owner/repo");
         assert_eq!(cue.style.fg, Some(theme.text_dim));
-        assert_eq!(cell.atomic_tail, 1, "the cue sheds as part of the tail");
+        assert_eq!(cell.outer_tail, 1, "the cue is the outer, first-shed tail");
+        assert_eq!(cell.atomic_tail, 0);
     }
 
     /// #1747: a task-less workspace's identity is its name alone, so the
@@ -2361,10 +2364,13 @@ mod tests {
         );
     }
 
-    /// The cue sheds together with the label chips, before the title is
-    /// ever truncated — and stays when there is room for all of it.
+    /// #1747: the cue sheds BEFORE the label chips. Starring a labelled
+    /// row must not cost it the chips it shows under its repo header, so
+    /// at a width where title + chips fit but the cue does not, the chips
+    /// stay and only the cue goes; with room for all of it, the title
+    /// leads and chips then source follow.
     #[test]
-    fn focused_source_rides_the_label_tail() {
+    fn focused_source_sheds_before_the_label_chips() {
         let mut task = make_task("owner/repo#1", "Fix the thing");
         task.labels = vec![lazybox_core::Label {
             name: "bug".into(),
@@ -2373,19 +2379,32 @@ mod tests {
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
+        let columns = build_columns(4);
+        let render = |ctx: &WorkspaceRowCtx<'_>, width| {
+            line_text(
+                &crate::components::table::render_table(&[build_row(ctx)], &columns, width)[0],
+            )
+        };
+        let under_header = render(&ctx, 46);
+        assert!(
+            under_header.contains("Fix the thing [bug]"),
+            "fixture: the chips fit under the repo header at 46: {under_header:?}",
+        );
+
         ctx.source_repo = Some("owner/repo".into());
         let cell = cell_title(&ctx);
-        assert_eq!(
-            cell.atomic_tail,
-            label_spans(&ctx).len() + 1,
-            "labels + cue form one droppable tail",
-        );
-        let columns = build_columns(4);
-        let wide = crate::components::table::render_table(&[build_row(&ctx)], &columns, 80);
-        let text = line_text(&wide[0]);
+        assert_eq!(cell.atomic_tail, label_spans(&ctx).len());
+        assert_eq!(cell.outer_tail, 1);
+
+        let starred = render(&ctx, 46);
         assert!(
-            text.contains("Fix the thing [bug] · owner/repo"),
-            "with room, the title leads and labels then source follow: {text:?}",
+            starred.contains("Fix the thing [bug]") && !starred.contains("owner/repo"),
+            "starred at 46: chips survive, only the cue sheds: {starred:?}",
+        );
+        let wide = render(&ctx, 80);
+        assert!(
+            wide.contains("Fix the thing [bug] · owner/repo"),
+            "with room, the title leads and labels then source follow: {wide:?}",
         );
     }
 

@@ -274,17 +274,19 @@ pub fn compute_widths(
 /// chips (#329) — the chips render when there's room but drop cleanly,
 /// after the status pill, when there isn't.
 ///
-/// `atomic_head` is the mirror image for LEADING spans: the first N are
-/// a droppable unit, excluded from the protected floor and shed whole
-/// before the protected body is ever sliced — a leading cue is worthless
-/// if it evicts the very content it annotates, so it yields on a narrow
-/// pane rather than truncate the body away.
+/// `outer_tail` is a second droppable unit past the atomic tail — the
+/// last N spans of the cell, shed *before* the tail. It carries an
+/// annotation that outranks nothing: the title cell's `★ Focused`
+/// source cue (#1450) trails the label chips and goes first when the
+/// row narrows, so starring a labelled row never costs it the chips it
+/// shows under its own repo header (#1747). Excluded from the floor
+/// like the tail.
 #[derive(Debug, Clone, Default)]
 pub struct Cell {
     pub spans: Vec<ratatui::text::Span<'static>>,
     pub fill_style: Option<ratatui::style::Style>,
     pub atomic_tail: usize,
-    pub atomic_head: usize,
+    pub outer_tail: usize,
 }
 
 impl Cell {
@@ -293,7 +295,7 @@ impl Cell {
             spans,
             fill_style: None,
             atomic_tail: 0,
-            atomic_head: 0,
+            outer_tail: 0,
         }
     }
 
@@ -302,7 +304,7 @@ impl Cell {
             spans: vec![span],
             fill_style: None,
             atomic_tail: 0,
-            atomic_head: 0,
+            outer_tail: 0,
         }
     }
 
@@ -317,24 +319,31 @@ impl Cell {
     }
 
     /// Mark the last `n` spans as an atomic, droppable tail (see the
-    /// struct doc). Clamped to the span count. Chainable.
+    /// struct doc). Clamped so tail + outer tail never exceed the span
+    /// count. Chainable.
     pub fn atomic_tail(mut self, n: usize) -> Self {
-        self.atomic_tail = n.min(self.spans.len());
+        self.atomic_tail = n.min(self.spans.len() - self.outer_tail);
         self
     }
 
-    /// Mark the first `n` spans as an atomic, droppable head (see the
-    /// struct doc). Clamped to the span count. Chainable.
-    pub fn atomic_head(mut self, n: usize) -> Self {
-        self.atomic_head = n.min(self.spans.len());
+    /// Mark the last `n` spans as the outer tail, shed before the atomic
+    /// tail (see the struct doc). Clamped so tail + outer tail never
+    /// exceed the span count. Chainable.
+    pub fn outer_tail(mut self, n: usize) -> Self {
+        self.outer_tail = n.min(self.spans.len() - self.atomic_tail);
         self
     }
 
-    /// Start index of the protected body — the first span past the
-    /// atomic head, never crossing the body end so head+tail can't
-    /// overlap into a reversed range.
-    fn body_start(&self) -> usize {
-        self.atomic_head.min(self.spans.len() - self.atomic_tail)
+    /// End index (exclusive) of the atomic tail — where the outer tail
+    /// begins.
+    fn tail_end(&self) -> usize {
+        self.spans.len() - self.outer_tail
+    }
+
+    /// End index (exclusive) of the protected body — where the atomic
+    /// tail begins.
+    fn body_end(&self) -> usize {
+        self.tail_end() - self.atomic_tail
     }
 
     /// Total visible width of the cell — sum of all span widths in
@@ -347,18 +356,20 @@ impl Cell {
             .sum()
     }
 
-    /// Width of the cell excluding its atomic head AND tail — what a flex
-    /// column is protected to. The head/tail render opportunistically
-    /// (when slack remains) but never force a sibling column to shed, nor
-    /// shield space from the protected body they wrap.
+    /// Width of the cell excluding both tails — what a flex column is
+    /// protected to. The tails render opportunistically (when slack
+    /// remains) but never force a sibling column to shed, nor shield
+    /// space from the protected body they follow.
     pub fn floor_width(&self) -> usize {
-        let start = self.body_start();
-        let end = self.spans.len() - self.atomic_tail;
-        self.spans[start..end]
-            .iter()
-            .map(|s| crate::util::visual_width(s.content.as_ref()))
-            .sum()
+        span_width(&self.spans[..self.body_end()])
     }
+}
+
+fn span_width(spans: &[ratatui::text::Span<'static>]) -> usize {
+    spans
+        .iter()
+        .map(|s| crate::util::visual_width(s.content.as_ref()))
+        .sum()
 }
 
 /// One row's cells. The slice order matches the `Column` slice
@@ -488,11 +499,12 @@ pub fn render_table(
     columns: &[Column],
     total_width: usize,
 ) -> Vec<ratatui::text::Line<'static>> {
-    // Width math uses each cell's FLOOR width (content minus any atomic
-    // tail): a flex column is protected only to its head, so a trailing
-    // droppable tail (the title's label chips) never sheds a
-    // higher-priority sibling column to reserve space it may not keep.
-    // For cells without a tail this is identical to `width()`.
+    // Width math uses each cell's FLOOR width (content minus its
+    // droppable tails): a flex column is protected only to its body, so
+    // a trailing droppable tail (the title's label chips, its source cue)
+    // never sheds a higher-priority sibling column to reserve space it
+    // may not keep. For cells without a tail this is identical to
+    // `width()`.
     let cell_widths: Vec<Vec<usize>> = rows
         .iter()
         .map(|r| r.cells.iter().map(|c| c.floor_width()).collect())
@@ -557,54 +569,48 @@ fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text:
                 fill_style,
             );
         } else {
-            // Over-wide. Droppable wrappers — the trailing atomic tail
-            // (the title's label chips and `★ Focused` source cue) and the
-            // leading atomic head — are shed WHOLE before the protected
-            // body is ever sliced; cutting into one would leave a dangling
-            // `[depend…` or a repo cue that swallowed the title it
-            // annotates (#1450). Only when the body itself
-            // overflows do we char-truncate it with a trailing `…`.
-            let body_start = cell.body_start();
-            let body_end = cell.spans.len() - cell.atomic_tail;
+            // Over-wide. The droppable tails — the outer tail (the title's
+            // `★ Focused` source cue) first, then the atomic tail (its
+            // label chips) — are shed WHOLE, outermost first, before the
+            // protected body is ever sliced; cutting into one would leave
+            // a dangling `[depend…` or a repo cue that swallowed the title
+            // it annotates (#1450). Only when the body itself overflows do
+            // we char-truncate it with a trailing `…`.
+            let body_end = cell.body_end();
             let body_w = cell.floor_width();
-            let head_w: usize = cell.spans[..body_start]
-                .iter()
-                .map(|s| crate::util::visual_width(s.content.as_ref()))
-                .sum();
-            // Head + body fits: keep the head, drop only the tail.
-            if head_w + body_w <= *target_w {
-                let pad = *target_w - (head_w + body_w);
+            let tail_w = span_width(&cell.spans[body_end..cell.tail_end()]);
+            // Body + tail fits: drop only the outer tail.
+            if body_w + tail_w <= *target_w {
+                let pad = *target_w - (body_w + tail_w);
                 push_padded(
                     &mut spans,
-                    cell.spans.iter().take(body_end).cloned(),
+                    cell.spans[..cell.tail_end()].iter().cloned(),
                     pad,
                     align,
                     fill_style,
                 );
                 continue;
             }
-            // Body alone fits: drop the head too so the title stays whole
-            // rather than being crowded out by its own source prefix.
-            if body_start > 0 && body_w <= *target_w {
+            // Body alone fits: drop both tails.
+            if body_w <= *target_w {
                 let pad = *target_w - body_w;
                 push_padded(
                     &mut spans,
-                    cell.spans[body_start..body_end].iter().cloned(),
+                    cell.spans[..body_end].iter().cloned(),
                     pad,
                     align,
                     fill_style,
                 );
                 continue;
             }
-            // Truncate: walk body spans (the head is already dropped)
-            // until we've consumed `target_w - 1` cells, then push a `…`
-            // to mark the cut. Truncation always clips on the right edge
-            // regardless of align — a right-aligned over-wide cell is an
-            // unusual case and clipping the left would lose the high-signal
-            // end (e.g. a status pill's label).
+            // Truncate: walk body spans until we've consumed `target_w - 1`
+            // cells, then push a `…` to mark the cut. Truncation always
+            // clips on the right edge regardless of align — a right-aligned
+            // over-wide cell is an unusual case and clipping the left would
+            // lose the high-signal end (e.g. a status pill's label).
             let mut consumed = 0usize;
             let budget = target_w.saturating_sub(1);
-            for span in cell.spans[body_start..body_end].iter() {
+            for span in cell.spans[..body_end].iter() {
                 let span_w = crate::util::visual_width(span.content.as_ref());
                 if consumed + span_w <= budget {
                     spans.push(span.clone());
@@ -863,46 +869,70 @@ mod tests {
         assert_eq!(widths[0], 15, "droppable column must survive a short head");
     }
 
-    /// The atomic head (e.g. a `★ Focused` `repo · ` prefix) is shed
-    /// WHOLE before the protected body is sliced — so the body renders
-    /// clean and padded, never truncated behind its own prefix (#1450).
-    #[test]
-    fn atomic_head_sheds_whole_when_body_fits() {
-        let cols = [Column::fixed(6)];
-        let cell = Cell::new(vec![Span::raw("repo · "), Span::raw("title")]).atomic_head(1);
-        let lines = render_table(&[Row::new(vec![cell])], &cols, 6);
-        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        // Prefix dropped whole; the full title survives with padding.
-        assert_eq!(joined, "title ");
+    fn joined(lines: &[ratatui::text::Line<'static>]) -> String {
+        lines[0].spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// When even the body overflows, the head is still dropped whole and
-    /// the BODY is char-truncated with `…` — the title is what the reader
-    /// keeps, never a prefix that swallowed it.
+    fn two_tier_cell() -> Cell {
+        Cell::new(vec![
+            Span::raw("title"),
+            Span::raw(" [bug]"),
+            Span::raw(" · repo"),
+        ])
+        .atomic_tail(1)
+        .outer_tail(1)
+    }
+
+    /// The outer tail (the `★ Focused` source cue) is shed first and
+    /// whole: with room for the body and the atomic tail but not the
+    /// cue, the label chips survive (#1747).
     #[test]
-    fn atomic_head_dropped_then_body_truncated() {
+    fn outer_tail_sheds_before_the_atomic_tail() {
+        let cols = [Column::fixed(12)];
+        let lines = render_table(&[Row::new(vec![two_tier_cell()])], &cols, 12);
+        assert_eq!(joined(&lines), "title [bug] ");
+    }
+
+    /// Both tails drop, outermost first, before the body is touched.
+    #[test]
+    fn both_tails_shed_when_only_the_body_fits() {
+        let cols = [Column::fixed(7)];
+        let lines = render_table(&[Row::new(vec![two_tier_cell()])], &cols, 7);
+        assert_eq!(joined(&lines), "title  ");
+    }
+
+    /// Even when the body overflows, the tails are gone and the BODY is
+    /// char-truncated with `…` — never a tail fragment.
+    #[test]
+    fn body_truncates_after_both_tails_are_shed() {
         let cols = [Column::fixed(4)];
-        let cell = Cell::new(vec![Span::raw("repo · "), Span::raw("title")]).atomic_head(1);
-        let lines = render_table(&[Row::new(vec![cell])], &cols, 4);
-        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        // "tit" + "…" — the title truncated, no prefix fragment.
-        assert_eq!(joined, "tit…");
+        let lines = render_table(&[Row::new(vec![two_tier_cell()])], &cols, 4);
+        assert_eq!(joined(&lines), "tit…");
     }
 
-    /// A flex column is protected only to its body width: the atomic head
-    /// must not inflate the floor and shed a lower-priority sibling to
-    /// reserve space it may drop. Fixed(15) + flex(min 20); the cell's
-    /// head is 40 and its body is 5. Floor = min(body 5, 20) = 5, so
-    /// 15 + 5 = 20 ≤ 25 and the fixed column survives. Had the 40-cell
-    /// head counted toward the floor, it would have dropped it.
+    /// With room for everything, both tails render in order.
     #[test]
-    fn atomic_head_excluded_from_flex_floor() {
+    fn both_tails_render_when_they_fit() {
+        let cols = [Column::fixed(18)];
+        let lines = render_table(&[Row::new(vec![two_tier_cell()])], &cols, 18);
+        assert_eq!(joined(&lines), "title [bug] · repo");
+    }
+
+    /// A flex column is protected only to its body width: neither tail
+    /// inflates the floor to shed a lower-priority sibling for space it
+    /// may drop. Fixed(15) + flex(min 20); the cell's body is 5, its
+    /// tails 40. Floor = min(body 5, 20) = 5, so 15 + 5 = 20 ≤ 25 and the
+    /// fixed column survives.
+    #[test]
+    fn outer_tail_excluded_from_flex_floor() {
         let cols = [Column::fixed(15).priority(1), Column::flex(20)];
         let cell = Cell::new(vec![
-            Span::raw("a-very-long-leading-atomic-head-prefix · "),
             Span::raw("short"),
+            Span::raw(" [chip]"),
+            Span::raw(" · a-very-long-trailing-source-cue"),
         ])
-        .atomic_head(1);
+        .atomic_tail(1)
+        .outer_tail(1);
         let rows = [Row::new(vec![Cell::from_span(Span::raw("x")), cell])];
         let cell_widths: Vec<Vec<usize>> = rows
             .iter()
@@ -910,6 +940,18 @@ mod tests {
             .collect();
         let widths = compute_widths(&cols, &cell_widths, 25);
         assert_eq!(widths[0], 15, "droppable column must survive a short body");
+    }
+
+    /// The two tails clamp against each other, so a caller can't push
+    /// the body end past the cell's start.
+    #[test]
+    fn tails_clamp_to_the_span_count() {
+        let cell = Cell::new(vec![Span::raw("a"), Span::raw("b")])
+            .atomic_tail(5)
+            .outer_tail(5);
+        assert_eq!(cell.atomic_tail, 2);
+        assert_eq!(cell.outer_tail, 0);
+        assert_eq!(cell.floor_width(), 0);
     }
 
     /// Render truncates over-wide cells with an ellipsis.

@@ -22842,6 +22842,115 @@ mod worktree_progress_recovery_tests {
         assert!(!on_main);
     }
 
+    /// A REFUSED resolution must not strand the user. Submitting dismisses
+    /// the checklist, so a daemon refusal that only reached the footer left
+    /// no modal at all — while its own text said "pick another", with
+    /// nowhere left to type. The refusal is a provisioning failure, so it
+    /// routes back to the recovery modal; a name taken by something else
+    /// re-opens the branch prompt against the NEW blocker.
+    #[test]
+    fn a_refused_resolution_reopens_the_branch_prompt() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = WorkspaceKey::new("github:acme/widget#42");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: None,
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: None,
+            initial_prompt: Some("group the bumps".into()),
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        });
+        // The state after a submitted resolution: checklist gone, spawn
+        // still remembered.
+        m.force_dismiss_worktree_progress();
+        m.worktree_progress_dismissed = None;
+        while server.rx.try_recv().is_ok() {}
+
+        // The daemon refuses: the chosen name is taken by `feature-x`.
+        m.handle_daemon_event(IpcEvent::provider_error_permanent(
+            "spawn:worktree",
+            "branch 'weekly-bumps' can't be created because 'feature-x' already exists \
+             — git can't hold both a branch and a path named 'weekly-bumps' (a \
+             directory/file conflict). Delete or rename 'feature-x', then retry",
+        ));
+
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "a refused recovery must land back on an actionable modal, not a footer",
+        );
+        // And the prompt is reachable again, now suggesting against the
+        // blocker that actually refused it.
+        m.prompt_for_another_branch();
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::WorktreeBranchName),
+            "the alternative stays editable after a refusal",
+        );
+        assert_eq!(
+            lazybox_core::branch_namespace::alternative("weekly-bumps", "feature-x", 1),
+            "weekly-bumps-2",
+            "the fresh suggestion is derived from the new blocker",
+        );
+    }
+
+    /// git's own D/F phrasing carries no "cannot lock ref" wrapper, and it
+    /// used to fall past every arm to `Unknown` — whose only offer is the
+    /// retry that replays this exact add. It must reach the modal as a
+    /// branch collision with both names and its repairs.
+    #[test]
+    fn a_raw_git_collision_still_reaches_the_branch_repairs() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = WorkspaceKey::new("github:acme/widget#42");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: None,
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: None,
+            initial_prompt: None,
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        });
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::WorktreeAdd,
+            status: WorktreeStepStatus::Failed(
+                "worktree: checkout_at: fatal: 'refs/heads/deps' exists; cannot create \
+                 'refs/heads/deps/grouping'"
+                    .into(),
+            ),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        while server.rx.try_recv().is_ok() {}
+
+        let state = m.worktree_progress.as_ref().expect("a failed checklist");
+        assert_eq!(
+            state.recovery(),
+            Some(lazybox_ipc::WorktreeRecovery::BranchDirFileConflict),
+            "git's raw refusal is a branch collision, not an unknown failure",
+        );
+        m.prompt_for_another_branch();
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::WorktreeBranchName),
+            "the repairs must be reachable on the raw phrasing too",
+        );
+    }
+
     /// A name that still collides can't be submitted: `deps/grouping-2`
     /// looks like a fix and asks for the very `deps/` directory `deps`
     /// occupies, so accepting it would spend a round trip re-failing.

@@ -1691,8 +1691,14 @@ pub async fn handle_resolve_branch_conflict(
 ) {
     let session_key = spawn.session_key.clone();
     if let Err(reason) = clear_branch_conflict(config, &spawn, on_main, resolution).await {
+        // `spawn:worktree` is what routes a provisioning failure back to
+        // the recovery modal rather than a fading footer line. A refused
+        // recovery is still a provisioning failure, and it is the one the
+        // user most needs another go at: the message classifies, so a
+        // still-held blocker offers the jump to its holder and a taken
+        // name re-opens the editable prompt against the NEW blocker.
         let _ = config.bus.send(Event::provider_error(
-            "spawn:branch-conflict",
+            "spawn:worktree",
             reason,
             lazybox_ipc::ProviderErrorKind::Permanent,
         ));
@@ -1751,10 +1757,29 @@ async fn clear_branch_conflict(
         // a commit, so it is the only repair that works when the branch we
         // want is a PR head. `rename_branch` holds the safety: it refuses a
         // branch checked out live, and a destination that is itself taken.
-        Resolution::RenameBlocking { from, to } => mgr
-            .rename_branch(owner, name, &from, &to)
-            .await
-            .map_err(|e| format!("could not rename '{from}' to '{to}': {e}")),
+        Resolution::RenameBlocking { from, to } => {
+            mgr.rename_branch(owner, name, &from, &to)
+                .await
+                .map_err(|e| {
+                    // A held blocker keeps its own `checked out at <path> —`
+                    // marker, so this still classifies as `BranchHeldLive` and
+                    // the modal offers the jump. A taken destination must not:
+                    // re-stating it as a D/F would name `to` as the branch
+                    // being created, which it never was, and the prompt would
+                    // then propose alternatives to the wrong name.
+                    match e {
+                        lazybox_git_ops::GitError::BranchDirFileConflict {
+                            conflicting, ..
+                        } => {
+                            format!(
+                                "could not move '{from}' aside: the name '{to}' is taken by \
+                             '{conflicting}'"
+                            )
+                        }
+                        e => format!("could not rename '{from}' to '{to}': {e}"),
+                    }
+                })
+        }
         Resolution::UseBranch(chosen) => {
             // A PR's head branch is not lazybox's to rename: the PR would
             // keep tracking the old ref and the work would land nowhere
@@ -1785,10 +1810,16 @@ async fn clear_branch_conflict(
                 .await
                 .map_err(|e| format!("could not check whether '{chosen}' is free: {e}"))?
             {
-                return Err(format!(
-                    "'{chosen}' is not free either — '{blocker}' occupies that name; \
-                     pick another"
-                ));
+                // Report the *new* collision in the same shape the original
+                // one arrived in, so the client re-opens the branch prompt
+                // with a suggestion derived from this blocker instead of
+                // stranding the user on a notice telling them to pick a
+                // name they no longer have anywhere to type.
+                return Err(lazybox_git_ops::GitError::BranchDirFileConflict {
+                    branch: chosen,
+                    conflicting: blocker,
+                }
+                .to_string());
             }
             let base = mgr
                 .default_branch(owner, name, lazybox_git_ops::LockPriority::Interactive)

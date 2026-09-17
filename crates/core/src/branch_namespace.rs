@@ -50,6 +50,10 @@ fn is_ancestor(ancestor: &str, descendant: &str) -> bool {
 /// full ref namespace — the daemon by attempting the checkout, which is
 /// the only check that can't go stale.
 pub fn alternative(branch: &str, conflicting: &str, attempt: usize) -> String {
+    // Normalized so the distinctness property holds for every input, not
+    // just the counting the two callers happen to use: without it a 0th
+    // attempt repeats the 1st in one arm and skips a name in the other.
+    let attempt = attempt.max(1);
     match flatten_under(branch, conflicting) {
         // The blocker owns a directory this name needs. Flattening that
         // one boundary is the whole fix, so it is the first candidate;
@@ -125,13 +129,17 @@ mod tests {
             ("deps/a/b", "deps"),
         ] {
             let mut seen = Vec::new();
-            for attempt in 1..=5 {
+            for attempt in 0..=5 {
                 let candidate = alternative(branch, conflicting, attempt);
                 assert!(
                     !conflicts(&candidate, conflicting),
                     "{candidate} still conflicts with {conflicting}"
                 );
-                assert!(!seen.contains(&candidate), "{candidate} repeated");
+                // Attempt 0 is normalized to 1, so it is the one repeat
+                // the contract allows.
+                if attempt > 1 {
+                    assert!(!seen.contains(&candidate), "{candidate} repeated");
+                }
                 seen.push(candidate);
             }
         }

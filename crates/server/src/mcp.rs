@@ -3377,7 +3377,8 @@ mod tests {
             .task_status_payload("acme/widget#7", None)
             .await
             .expect("payload");
-        assert_eq!(payload["verdict"]["state"], "NoWorkspace");
+        // The published snake_case contract, not serde's default PascalCase.
+        assert_eq!(payload["verdict"]["state"], "no_workspace");
         assert_eq!(payload["schema_version"], 1);
     }
 

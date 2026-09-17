@@ -57,6 +57,18 @@ pub struct TaskStatusReport {
     /// Every workspace that holds this record under any of its task ids —
     /// normally one, more only when the fleet has genuinely split the work.
     pub workspaces: Vec<WorkspaceStatus>,
+    /// Workspace rows the daemon could not decode while answering. They are
+    /// reported rather than dropped: an undecodable row *could* be a second
+    /// workspace holding this record, so a silent skip would present a partial
+    /// answer as a complete one. Empty in the normal case.
+    ///
+    /// Emitted unconditionally. This type crosses the socket as bincode, which
+    /// is not self-describing: a `skip_serializing_if` here would omit the
+    /// field on the wire while the decoder still expected it, desyncing the
+    /// whole frame — the reader then takes the *next* field's bytes as this
+    /// one's length and dies with `LimitExceeded`.
+    #[serde(default)]
+    pub unreadable_workspaces: Vec<String>,
     pub verdict: Verdict,
 }
 
@@ -161,7 +173,10 @@ pub struct BlockerFacts {
     pub reason: String,
     pub kind: String,
     pub owner: String,
-    pub since: DateTime<Utc>,
+    /// When it was declared. `None` when the stored timestamp cannot be read —
+    /// substituting "now" would make a months-old blocker look brand new,
+    /// inverting the staleness this report exists to expose.
+    pub since: Option<DateTime<Utc>>,
 }
 
 /// A persisted session (one worktree). Its state is the *session's*, which
@@ -210,6 +225,12 @@ pub struct Verdict {
 /// the work actually landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+// The documented values (`docs/features/terminals-and-agents.md`, the CLI
+// reference) are snake_case, and a consumer matching them against PascalCase
+// would simply never match — silently. Bincode encodes the variant by ordinal,
+// so the socket wire is unaffected by the rename.
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "desktop-contract", ts(rename_all = "snake_case"))]
 pub enum WorkState {
     /// No workspace holds this record — nobody here is on it. Note this is a
     /// statement about *this* daemon's inbox, not about the fleet.
@@ -250,21 +271,6 @@ pub enum WorkState {
 }
 
 impl WorkState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NoWorkspace => "no_workspace",
-            Self::Archived => "archived",
-            Self::NotStarted => "not_started",
-            Self::Working => "working",
-            Self::AwaitingInput => "awaiting_input",
-            Self::TurnEnded => "turn_ended",
-            Self::AgentExited => "agent_exited",
-            Self::ClaimedElsewhere => "claimed_elsewhere",
-            Self::Unknown => "unknown",
-            Self::Stalled => "stalled",
-        }
-    }
-
     /// Whether an agent turn is executing right now. Deliberately narrow:
     /// only [`Self::Working`] qualifies, because a quiet terminal, a standing
     /// claim and a retained session are each compatible with nothing running.
@@ -365,7 +371,9 @@ pub fn derive_verdict(workspaces: &[WorkspaceStatus], archived: bool) -> Verdict
                 "{}: declared blocker ({}) since {} — {}",
                 workspace.key,
                 blocker.kind,
-                blocker.since.to_rfc3339(),
+                blocker
+                    .since
+                    .map_or_else(|| "an unreadable time".to_string(), |at| at.to_rfc3339()),
                 blocker.reason
             ));
         }
@@ -793,7 +801,7 @@ mod tests {
             reason: "waiting on legal".into(),
             kind: "decision".into(),
             owner: "operator".into(),
-            since: now() - chrono::Duration::days(3),
+            since: Some(now() - chrono::Duration::days(3)),
         });
         ws.agents.push(agent(Some(AgentState::Working)));
         let verdict = derive_verdict(&[ws], false);
@@ -819,11 +827,76 @@ mod tests {
         assert!(verdict.evidence.len() <= MAX_EVIDENCE);
     }
 
+    /// The published `--json` contract. This asserts what the *serializer*
+    /// emits, not a hand-written table beside it: the previous version of this
+    /// test checked a parallel `as_str()` helper, so it passed while serde
+    /// emitted `"NoWorkspace"` and every consumer matching the documented
+    /// `no_workspace` silently failed.
     #[test]
-    fn work_state_words_are_stable() {
-        assert_eq!(WorkState::NoWorkspace.as_str(), "no_workspace");
-        assert_eq!(WorkState::TurnEnded.as_str(), "turn_ended");
-        assert_eq!(WorkState::ClaimedElsewhere.as_str(), "claimed_elsewhere");
+    fn work_state_serializes_as_the_documented_snake_case() {
+        let expected = [
+            (WorkState::NoWorkspace, "no_workspace"),
+            (WorkState::Archived, "archived"),
+            (WorkState::NotStarted, "not_started"),
+            (WorkState::Working, "working"),
+            (WorkState::AwaitingInput, "awaiting_input"),
+            (WorkState::TurnEnded, "turn_ended"),
+            (WorkState::AgentExited, "agent_exited"),
+            (WorkState::ClaimedElsewhere, "claimed_elsewhere"),
+            (WorkState::Unknown, "unknown"),
+            (WorkState::Stalled, "stalled"),
+        ];
+        for (state, wire) in expected {
+            assert_eq!(
+                serde_json::to_value(state).expect("serialize"),
+                serde_json::Value::String(wire.to_string()),
+                "{state:?} must serialize as the documented value"
+            );
+            assert_eq!(
+                serde_json::from_value::<WorkState>(serde_json::json!(wire)).expect("round trip"),
+                state,
+            );
+        }
+    }
+
+    /// Every field must reach the wire unconditionally. Bincode is not
+    /// self-describing, so a `skip_serializing_if` that omits an empty
+    /// collection desyncs the frame for the decoder, which then reads the
+    /// following field's bytes as a length and fails with `LimitExceeded`.
+    /// This round-trips the *empty* case, which is the one such an attribute
+    /// would drop — and the one every ordinary reply carries.
+    #[test]
+    fn a_report_round_trips_through_bincode_with_empty_collections() {
+        let report = TaskStatusReport {
+            schema_version: TASK_STATUS_SCHEMA_VERSION,
+            task: TaskRefInfo {
+                id: TaskId {
+                    source: "github".into(),
+                    key: "o/r#151".into(),
+                },
+                repo: Some("o/r".into()),
+                number: Some(151),
+            },
+            observed_at: now(),
+            workspaces: Vec::new(),
+            unreadable_workspaces: Vec::new(),
+            verdict: derive_verdict(&[], false),
+        };
+        let config = bincode::config::legacy();
+        let bytes = bincode::serde::encode_to_vec(&report, config).expect("encode");
+        let (back, consumed): (TaskStatusReport, usize) =
+            bincode::serde::decode_from_slice(&bytes, config).expect("decode");
+        assert_eq!(consumed, bytes.len(), "the frame must decode exactly");
+        assert_eq!(back, report);
+    }
+
+    /// The verdict is what a consumer actually reads, so pin it end to end
+    /// rather than only the enum in isolation.
+    #[test]
+    fn a_report_verdict_carries_the_snake_case_state() {
+        let verdict = derive_verdict(&[], false);
+        let json = serde_json::to_value(&verdict).expect("serialize");
+        assert_eq!(json["state"], "no_workspace");
     }
 
     #[test]

@@ -46,8 +46,9 @@ pub async fn report(
             detail: format!("read workspaces: {error}"),
         })?;
 
-    // An undecodable row is reported, never skipped: silently dropping it could
-    // turn "a worker is on this" into "nobody is".
+    // An undecodable row is surfaced, never skipped: it could itself be a
+    // workspace holding this record, so dropping it would turn "a worker is on
+    // this" into "nobody is" — or present one match as the whole answer.
     let mut unreadable = Vec::new();
     let mut matches = Vec::new();
     for record in records {
@@ -69,7 +70,7 @@ pub async fn report(
             detail: format!(
                 "{} workspace row(s) could not be decoded, so this record cannot be ruled out: {}",
                 unreadable.len(),
-                unreadable.join(", ")
+                unreadable.join(", "),
             ),
         });
     }
@@ -85,6 +86,15 @@ pub async fn report(
     // Stable order so repeated queries read the same way.
     workspaces.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
 
+    // Archiving tombstones the key of the workspace actually archived
+    // (`workspace::archive_workspace_key`), so this finds a record archived
+    // under its *own* standalone key. A record that had already folded into
+    // another row is tombstoned under that row's key instead, and the fold link
+    // died with the deleted row — so there is nothing left to resolve it back.
+    // Such a record reports `NoWorkspace`, whose wording is careful to claim
+    // only that this daemon holds no workspace for it, never that nobody
+    // worked on it. `archived_after_a_fold_is_reported_as_no_workspace` pins
+    // the boundary so `Archived` is not read as exhaustive.
     let archived = workspaces.is_empty() && {
         let key = lazybox_core::workspace_key_for_id(id);
         crate::workspace::load_archived_set(config).contains(&key)
@@ -100,6 +110,7 @@ pub async fn report(
         observed_at: now,
         verdict: derive_verdict(&workspaces, archived),
         workspaces,
+        unreadable_workspaces: unreadable,
     })
 }
 
@@ -140,7 +151,7 @@ fn workspace_status(
                 reason: blocker.reason,
                 kind: blocker.kind.as_str().to_string(),
                 owner: format!("{:?}", blocker.owner).to_lowercase(),
-                since: chrono::DateTime::from_timestamp_millis(blocker.since).unwrap_or(now),
+                since: chrono::DateTime::from_timestamp_millis(blocker.since),
             }),
         sessions: workspace
             .sessions
@@ -381,6 +392,38 @@ mod tests {
         assert_eq!(report.verdict.state, WorkState::Archived);
     }
 
+    /// Known boundary of the `Archived` verdict: once an issue has folded into
+    /// its PR workspace, archiving tombstones the *PR* key, and the deleted
+    /// issue row took the link with it — so a query for the issue cannot tell
+    /// "archived" from "never seen". This pins that it degrades to
+    /// `NoWorkspace` (whose reason claims only that this daemon holds no
+    /// workspace) rather than silently claiming the work never happened.
+    #[tokio::test]
+    async fn archived_after_a_fold_is_reported_as_no_workspace() {
+        let config = ServerConfig::in_memory();
+        let issue = id("o/r", 151);
+        // The user archived the folded row, which is keyed by the PR.
+        assert!(crate::workspace::archive_workspace_key(
+            &config,
+            &lazybox_core::workspace_key_for_id(&id("o/r", 187)),
+        ));
+
+        let report = report(&config, &issue).await.expect("report");
+        assert_eq!(
+            report.verdict.state,
+            WorkState::NoWorkspace,
+            "the fold link is gone with the row, so Archived is not recoverable here"
+        );
+        assert!(
+            report
+                .verdict
+                .reason
+                .contains("no workspace on this daemon"),
+            "the reason must not claim nobody ever worked on it: {}",
+            report.verdict.reason
+        );
+    }
+
     /// A claim label with no local claim row is a claim this daemon is not
     /// renewing — reported as held elsewhere, never as a running worker.
     #[tokio::test]
@@ -450,7 +493,13 @@ mod tests {
         let blocker = report.workspaces[0].blocker.as_ref().expect("blocker");
         assert_eq!(blocker.reason, "waiting on the API contract");
         assert_eq!(blocker.kind, "contract");
-        assert_eq!(blocker.since.timestamp_millis(), 1_700_000_000_000);
+        assert_eq!(
+            blocker
+                .since
+                .expect("a readable timestamp")
+                .timestamp_millis(),
+            1_700_000_000_000
+        );
     }
 
     /// Two workspaces genuinely holding the record are both reported. The issue
@@ -564,6 +613,62 @@ mod tests {
             found.matched_tracker.as_ref().expect("matched").state,
             lazybox_core::TaskState::Open,
             "the issue the caller asked about is still open"
+        );
+    }
+
+    /// An undecodable row alongside a good match must not vanish: it could be a
+    /// second workspace holding this record, which would make the answer
+    /// partial while reading as complete.
+    #[tokio::test]
+    async fn an_undecodable_row_is_surfaced_even_when_another_workspace_matched() {
+        let config = ServerConfig::in_memory();
+        let workspace =
+            Workspace::from_task(task("o/r", 41, lazybox_core::TaskKind::Issue), Utc::now());
+        save(&config, &workspace);
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: "github-o-r-corrupt".into(),
+                created_at: Utc::now(),
+                workspace_json: Some("{ not json".into()),
+            })
+            .expect("save");
+
+        let report = report(&config, &id("o/r", 41)).await.expect("report");
+        assert_eq!(report.workspaces.len(), 1, "the good row still answers");
+        assert_eq!(
+            report.unreadable_workspaces,
+            vec!["github-o-r-corrupt".to_string()],
+            "the undecodable row rides the report instead of being dropped"
+        );
+    }
+
+    /// A blocker whose stored timestamp cannot be read must report an unknown
+    /// age, never the current time — that would make a stale blocker look fresh.
+    #[tokio::test]
+    async fn an_unreadable_blocker_timestamp_reports_no_age_rather_than_now() {
+        let config = ServerConfig::in_memory();
+        let workspace =
+            Workspace::from_task(task("o/r", 42, lazybox_core::TaskKind::Issue), Utc::now());
+        save(&config, &workspace);
+        crate::epics::persist_declared(
+            &config,
+            &crate::epics::DeclaredBlocker {
+                workspace: workspace.key.clone(),
+                reason: "waiting".into(),
+                kind: lazybox_ipc::BlockerKind::Decision,
+                owner: lazybox_ipc::BlockerOwner::Operator,
+                since: i64::MAX,
+            },
+        )
+        .expect("persist");
+
+        let report = report(&config, &id("o/r", 42)).await.expect("report");
+        let blocker = report.workspaces[0].blocker.as_ref().expect("blocker");
+        assert!(
+            blocker.since.is_none(),
+            "an unreadable timestamp must not be substituted with now: {:?}",
+            blocker.since
         );
     }
 

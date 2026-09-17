@@ -2798,7 +2798,14 @@ pub async fn dispatch_command(
                         },
                     ),
                 };
-            let _ = config.bus.send(lazybox_ipc::Event::TaskStatus {
+            // Answer on the asking connection, not the bus. A status lookup is
+            // request/response: broadcasting it would oblige the caller to
+            // `Subscribe` (paying for a full `Snapshot` of every workspace and
+            // terminal just to ask a question), push the report at every other
+            // client, and — because a lagging subscriber's events are dropped
+            // outright — let a loaded daemon lose the reply and report a
+            // timeout for an answer it computed correctly.
+            let _ = tx.send(lazybox_ipc::Event::TaskStatus {
                 client_request_id,
                 result,
             });

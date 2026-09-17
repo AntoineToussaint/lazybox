@@ -51,11 +51,25 @@ async fn status(args: &[String]) -> anyhow::Result<()> {
     let socket_path = crate::take_value(&mut args, "--socket")
         .map(PathBuf::from)
         .unwrap_or_else(lifecycle::socket_path);
-    // `--issue` / `--pr` are accepted as aliases for the positional reference:
-    // the issue's proposed spelling, and what a caller reaches for first.
-    let reference = crate::take_value(&mut args, "--issue")
-        .or_else(|| crate::take_value(&mut args, "--pr"))
-        .or_else(|| crate::take_value(&mut args, "--ticket"));
+    // `--issue` / `--pr` / `--ticket` are aliases for the positional reference:
+    // the issue's proposed spelling, and what a caller reaches for first. All
+    // three are consumed unconditionally rather than short-circuited, so giving
+    // two of them is diagnosed as the ambiguity it is — left in `args`, the
+    // second one surfaced as "unknown flag", which sends the caller looking for
+    // a typo that isn't there.
+    let aliases: Vec<String> = ["--issue", "--pr", "--ticket"]
+        .into_iter()
+        .filter_map(|flag| crate::take_value(&mut args, flag))
+        .collect();
+    if aliases.len() > 1 {
+        println!(
+            "lazybox task status: pass one record, not {} (--issue / --pr / --ticket are \
+             aliases for the same argument)\n{USAGE}",
+            aliases.len()
+        );
+        std::process::exit(2);
+    }
+    let reference = aliases.into_iter().next();
     let default_repo = crate::take_value(&mut args, "--repo");
 
     if let Some(unknown) = args.iter().find(|arg| arg.starts_with("--")) {
@@ -79,7 +93,10 @@ async fn status(args: &[String]) -> anyhow::Result<()> {
             "lazybox task status could not reach the daemon, so it cannot tell you whether \
                   anyone is working on this record",
         )?;
-    client.send(lazybox_ipc::Command::Subscribe)?;
+    // Deliberately no `Subscribe`: the daemon answers on this connection, so
+    // subscribing would only buy a full `Snapshot` of every workspace and
+    // terminal — and put the reply on a bus that drops events for a lagging
+    // client.
     let client_request_id = uuid::Uuid::new_v4().to_string();
     client.send(lazybox_ipc::Command::QueryTaskStatus {
         reference: reference.clone(),
@@ -160,11 +177,21 @@ fn render(report: &TaskStatusReport) -> String {
                 "  blocker    {} ({}, declared {})\n",
                 blocker.reason,
                 blocker.kind,
-                blocker.since.to_rfc3339()
+                blocker
+                    .since
+                    .map_or_else(|| "at an unreadable time".to_string(), |at| at.to_rfc3339()),
             ));
         }
     }
 
+    if !report.unreadable_workspaces.is_empty() {
+        out.push_str(&format!(
+            "\n  warning    {} workspace row(s) could not be read, so this answer may be \
+             incomplete: {}\n",
+            report.unreadable_workspaces.len(),
+            report.unreadable_workspaces.join(", "),
+        ));
+    }
     out.push_str(&format!(
         "\n  observed   {}\n",
         report.observed_at.to_rfc3339()
@@ -281,6 +308,7 @@ mod tests {
             },
             observed_at: chrono::Utc::now(),
             workspaces,
+            unreadable_workspaces: Vec::new(),
             verdict: Verdict {
                 state,
                 reason: "because".into(),
@@ -409,6 +437,30 @@ mod tests {
     fn a_workspace_with_no_agent_says_so_explicitly() {
         let text = render(&report(WorkState::NotStarted, vec![workspace()]));
         assert!(text.contains("agent      none running"), "{text}");
+    }
+
+    /// A partial answer must announce itself; rendering only the rows that
+    /// decoded would present it as complete.
+    #[test]
+    fn unreadable_rows_are_surfaced_in_the_human_output() {
+        let mut report = report(WorkState::NotStarted, vec![workspace()]);
+        report.unreadable_workspaces = vec!["github-o-r-corrupt".into()];
+        let text = render(&report);
+        assert!(text.contains("incomplete"), "{text}");
+        assert!(text.contains("github-o-r-corrupt"), "{text}");
+    }
+
+    #[test]
+    fn a_blocker_with_an_unreadable_time_does_not_render_a_fabricated_date() {
+        let mut workspace = workspace();
+        workspace.blocker = Some(lazybox_ipc::task_status::BlockerFacts {
+            reason: "waiting on legal".into(),
+            kind: "decision".into(),
+            owner: "operator".into(),
+            since: None,
+        });
+        let text = render(&report(WorkState::NotStarted, vec![workspace]));
+        assert!(text.contains("at an unreadable time"), "{text}");
     }
 
     #[test]

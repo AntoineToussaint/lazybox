@@ -1449,6 +1449,11 @@ fn all_events() -> Vec<Event> {
                 },
                 observed_at: sample_time(),
                 workspaces: Vec::new(),
+                // Deliberately EMPTY: a `skip_serializing_if` on this field
+                // omits it from the wire only in this case, and bincode is not
+                // self-describing, so the frame desyncs. A non-empty sample
+                // here passes while every real reply fails.
+                unreadable_workspaces: Vec::new(),
                 verdict: lazybox_ipc::task_status::Verdict {
                     state: lazybox_ipc::task_status::WorkState::NoWorkspace,
                     reason: "no workspace on this daemon holds this record".into(),

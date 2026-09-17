@@ -30,7 +30,7 @@ use crate::realm::ChoicePayload;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use crate::realm::components::filterable::{
-    FilterModalChrome, FilterableList, PreviewPane, render_filter_modal, subsequence_icase,
+    FilterModalChrome, FilterableList, PreviewPane, contains_icase, render_filter_modal,
 };
 use crate::realm::components::scrollable::handle_scroll_key;
 use tuirealm::command::{Cmd, CmdResult};
@@ -125,17 +125,17 @@ impl FilterableList for PromptHistoryPicker {
         } else {
             // Matched against the FULL prompt, not the row's one-line
             // summary (#1733) — a word that only appears in the third
-            // paragraph still finds it.
+            // paragraph still finds it. Substring, not subsequence: over a
+            // multi-paragraph body a gapped match returns almost every row,
+            // so widening the corpus would have cost the filter the
+            // selectivity it exists for. Neither side is copied.
             self.rows
                 .iter()
                 .enumerate()
                 .filter_map(|(i, r)| {
                     let body = self.texts.get(i).map_or(r.text.as_str(), String::as_str);
-                    let hay = match &r.tag {
-                        Some(tag) => format!("{tag} {body}"),
-                        None => body.to_string(),
-                    };
-                    subsequence_icase(&hay, q).then_some(i)
+                    let tag_hit = r.tag.as_deref().is_some_and(|t| contains_icase(t, q));
+                    (tag_hit || contains_icase(body, q)).then_some(i)
                 })
                 .collect()
         }
@@ -213,7 +213,7 @@ impl Component for PromptHistoryPicker {
                 .collect(),
             scroll: self.preview_scroll,
         });
-        render_filter_modal(
+        let clamped = render_filter_modal(
             self,
             frame,
             area,
@@ -259,6 +259,12 @@ impl Component for PromptHistoryPicker {
                 Line::from(spans)
             },
         );
+        // Adopt the offset the reader actually settled on, so paging past
+        // the end doesn't bank a runaway scroll that swallows the next
+        // several PageUps.
+        if let Some(scroll) = clamped {
+            self.preview_scroll = scroll;
+        }
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -438,6 +444,88 @@ mod tests {
         assert!(p.preview_scroll > 0);
         let _ = p.on_key(&key(Key::Down));
         assert_eq!(p.preview_scroll, 0);
+    }
+
+    /// Paging past the end must not bank a runaway offset: the reader
+    /// clamps to the last screenful, and the picker adopts that clamped
+    /// value, so the very next PageUp moves the view. Before the
+    /// write-back, ten PageDowns on a short prompt left `preview_scroll`
+    /// at 80 and swallowed the next nine PageUps.
+    #[test]
+    fn overscrolling_does_not_swallow_the_next_page_up() {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let body = (0..30)
+            .map(|i| format!("L{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut p = PromptHistoryPicker::new(vec![(
+            PromptRow {
+                when: "now".into(),
+                tag: None,
+                text: "L0 …".into(),
+            },
+            body,
+        )]);
+        let render = |p: &mut PromptHistoryPicker| {
+            let mut t = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+            t.draw(|f| p.view(f, Rect::new(0, 0, 100, 30)))
+                .expect("draw");
+            let buf = t.backend().buffer().clone();
+            (0..30)
+                .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        for _ in 0..10 {
+            let _ = p.on_key(&key(Key::PageDown));
+        }
+        let bottom = render(&mut p);
+        assert!(bottom.contains("L29"), "never reached the end:\n{bottom}");
+        let settled = p.preview_scroll;
+        assert!(settled < 30, "runaway offset banked: {settled}");
+
+        let _ = p.on_key(&key(Key::PageUp));
+        let after = render(&mut p);
+        assert_ne!(bottom, after, "one PageUp moved nothing:\n{after}");
+    }
+
+    /// Widening the corpus to the full prompt must not cost the filter its
+    /// selectivity: a gapped (subsequence) match over paragraphs hits
+    /// almost everything, so the match is a substring.
+    #[test]
+    fn full_text_search_still_discriminates() {
+        let mut p = PromptHistoryPicker::new(vec![
+            (
+                PromptRow {
+                    when: "a".into(),
+                    tag: None,
+                    text: "Please rebase…".into(),
+                },
+                "Please rebase onto main and resolve the conflicts in the parser".into(),
+            ),
+            (
+                PromptRow {
+                    when: "b".into(),
+                    tag: None,
+                    text: "Investigate…".into(),
+                },
+                "Investigate the flaky test under load and report what you find".into(),
+            ),
+        ]);
+        // `tin` is a subsequence of BOTH bodies and a substring of neither.
+        for c in "tin".chars() {
+            let _ = p.on_key(&ke(c));
+        }
+        assert!(p.visible_indices.is_empty(), "gapped match resurfaced");
+        for _ in 0..3 {
+            let _ = p.on_key(&key(Key::Backspace));
+        }
+        for c in "parser".chars() {
+            let _ = p.on_key(&ke(c));
+        }
+        assert_eq!(p.visible_indices, vec![0], "a real word past the summary");
     }
 
     #[test]

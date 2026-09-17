@@ -53,6 +53,23 @@ pub fn subsequence_icase(haystack: &str, needle: &str) -> bool {
     true
 }
 
+/// Case-insensitive substring test, allocation-free. The right matcher
+/// for a long body: [`subsequence_icase`] allows gaps, which over a
+/// paragraph matches nearly everything (`tin` hits any body with a `t`,
+/// an `i` and an `n` in that order), so it discriminates only over short
+/// labels and keys. Same rule the snippet picker already applies to its
+/// bodies.
+pub fn contains_icase(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
 /// The contract every filter-as-you-type picker implements. The provided
 /// [`FilterableList::dispatch_key`] is the single home of the common key
 /// protocol; everything above it is per-picker data the protocol needs.
@@ -261,7 +278,7 @@ pub fn render_filter_modal<P: FilterableList>(
     theme: &crate::theme::Theme,
     chrome: FilterModalChrome<'_>,
     mut render_row: impl FnMut(usize, bool) -> Line<'static>,
-) {
+) -> Option<u16> {
     let FilterModalChrome {
         title,
         modal_w,
@@ -285,7 +302,7 @@ pub fn render_filter_modal<P: FilterableList>(
     frame.render_widget(block, modal);
 
     if inner.height < 4 {
-        return;
+        return None;
     }
     let filter_rect = Rect {
         x: inner.x,
@@ -331,8 +348,14 @@ pub fn render_filter_modal<P: FilterableList>(
     );
 
     let (body_rect, preview_rect) = split_preview(body_rect, preview.is_some());
+    // The clamped offset goes back to the caller: the picker owns the
+    // field, and `wrapped_window` is the only place that knows the real
+    // viewport. Without the write-back an overscrolled picker keeps a
+    // runaway offset and its next PageUp moves nothing on screen.
+    let mut clamped = None;
     if let (Some(pane), Some(rect)) = (preview.as_mut(), preview_rect) {
         render_preview(frame, rect, pane, theme);
+        clamped = Some(pane.scroll);
     }
 
     // Scroll the visible window so the cursor stays on screen.
@@ -353,6 +376,7 @@ pub fn render_filter_modal<P: FilterableList>(
     frame.render_widget(Paragraph::new(body), body_rect);
 
     frame.render_widget(Paragraph::new(Line::from(help)), help_rect);
+    clamped
 }
 
 /// Draw the reader pane: the highlighted row's full text, wrapped to the
@@ -366,7 +390,7 @@ fn render_preview(
 ) {
     let body_h = rect.height.saturating_sub(1).max(1);
     let (lines, cue) = crate::realm::components::scrollable::wrapped_window(
-        pane.lines.clone(),
+        std::mem::take(&mut pane.lines),
         rect.width,
         body_h,
         &mut pane.scroll,

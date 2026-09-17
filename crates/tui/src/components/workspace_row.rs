@@ -441,13 +441,20 @@ fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // already exists, a straight column costs no width at all. The cursor
     // and selection marks outrank it, which loses nothing: the digit
     // exists to reach a row you are not on.
-    let jump = ctx.agent_number.map(|n| n.to_string());
+    // Static digits, so the gutter allocates nothing per row per frame —
+    // the same hot-path rule `cell_state` keeps. Only the first nine
+    // focused workspaces are numbered.
+    const JUMP_DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    let jump = ctx
+        .agent_number
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|i| JUMP_DIGITS.get(i).copied());
     let s = if ctx.is_selected {
         "✓"
     } else if ctx.is_cursor {
         if ctx.ascii_glyphs { ">" } else { CURSOR_BAR }
     } else {
-        jump.as_deref().unwrap_or(" ")
+        jump.unwrap_or(" ")
     };
     let style = if ctx.is_cursor || ctx.is_selected {
         ctx.row_style()
@@ -460,7 +467,7 @@ fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     } else {
         ctx.row_style()
     };
-    Cell::from_span(Span::styled(s.to_string(), style))
+    Cell::from_span(Span::styled(s, style))
 }
 
 fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {

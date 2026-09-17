@@ -146,6 +146,16 @@ async fn drain_auto_fix_config(client: &mut lazybox_ipc::Client) {
         matches!(costs, Event::SessionCosts { .. }),
         "expected SessionCosts, got {costs:?}"
     );
+    // Durable agent-text corpus (#1774) rides the same post-snapshot
+    // scaffolding, between the meter totals and the mastery ledger.
+    let agent_text = timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("agent search text deadline")
+        .expect("agent search text event");
+    assert!(
+        matches!(agent_text, Event::AgentSearchText { .. }),
+        "expected AgentSearchText, got {agent_text:?}"
+    );
     let mastery = timeout(Duration::from_secs(1), client.recv())
         .await
         .expect("mastery ledger deadline")

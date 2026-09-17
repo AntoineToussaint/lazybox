@@ -376,6 +376,13 @@ impl Sidebar {
         self.inner.hydrate_session_costs(costs);
     }
 
+    /// Adopt the daemon's durable agent-text corpus on connect
+    /// (`Event::AgentSearchText`, #1774). See
+    /// [`crate::components::sidebar::Sidebar::ingest_durable_agent_text`].
+    pub fn ingest_durable_agent_text(&mut self, entries: Vec<(String, String)>) {
+        self.inner.ingest_durable_agent_text(entries);
+    }
+
     /// Record a provider plan-quota report (`AgentProviderQuota`) — the
     /// 5h/weekly "can I keep working?" headroom.
     pub fn note_provider_quota(

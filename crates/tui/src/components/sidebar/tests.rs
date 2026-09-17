@@ -3582,6 +3582,109 @@ mod search_tests {
         assert_eq!(shown, vec![&b_key], "a corpus change re-runs the search");
     }
 
+    /// The durable corpus the daemon replays covers workspaces with NO
+    /// live terminal, and the live corpus wins where both have the same
+    /// workspace (#1774). Reading only the terminal stack made a
+    /// workspace whose agent had exited permanently unsearchable — the
+    /// exact workspace the user can no longer place.
+    #[test]
+    fn durable_agent_text_covers_workspaces_with_no_terminal() {
+        let exited = issue_ws_in_repo("o/a", "1", "Tidy the changelog");
+        let live = issue_ws_in_repo("o/a", "2", "Bump deps");
+        let exited_key = SessionKey::from(&exited.key);
+        let live_key = SessionKey::from(&live.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(exited_key.clone(), exited);
+        sb.workspaces.insert(live_key.clone(), live);
+
+        // The daemon's durable replay knows both; the terminal stack knows
+        // only the one that still has a terminal.
+        sb.ingest_durable_agent_text(vec![
+            (exited_key.to_string(), "rewrite the parser".into()),
+            (live_key.to_string(), "stale snapshot copy".into()),
+        ]);
+        sb.set_agent_text(HashMap::from([(
+            live_key.clone(),
+            "stale snapshot copy\nand a prompt typed since".to_string(),
+        )]));
+        sb.recompute_visible();
+
+        let shown = |sb: &Sidebar| -> Vec<SessionKey> {
+            sb.visible
+                .iter()
+                .filter_map(|r| match r {
+                    VisibleRow::Workspace(k) => Some(k.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        sb.open_search();
+        type_query(&mut sb, "agent:parser");
+        assert_eq!(
+            shown(&sb),
+            vec![exited_key.clone()],
+            "a workspace with no terminal is still searchable from the durable corpus"
+        );
+
+        // The live half wins: a prompt submitted since the snapshot is
+        // searchable even though the daemon's copy predates it.
+        sb.search = None;
+        sb.recompute_visible();
+        sb.open_search();
+        // Quoted, so the second word is part of the needle rather than a
+        // bare term the title would have to match.
+        type_query(&mut sb, "agent:\"typed since\"");
+        assert_eq!(
+            shown(&sb),
+            vec![live_key],
+            "live prompt history overlays the daemon's older copy"
+        );
+    }
+
+    /// The daemon re-publishes ONE workspace's corpus each time a prompt is
+    /// persisted, so ingestion has to merge (#1774). Replacing would let a
+    /// single incremental push wipe every other workspace's agent text and
+    /// silently empty an `agent:` search.
+    #[test]
+    fn an_incremental_agent_text_push_merges_instead_of_replacing() {
+        let a = issue_ws_in_repo("o/a", "1", "First");
+        let b = issue_ws_in_repo("o/a", "2", "Second");
+        let a_key = SessionKey::from(&a.key);
+        let b_key = SessionKey::from(&b.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(a_key.clone(), a);
+        sb.workspaces.insert(b_key.clone(), b);
+
+        // Connect: the full set.
+        sb.ingest_durable_agent_text(vec![
+            (a_key.to_string(), "about the parser".into()),
+            (b_key.to_string(), "about the lexer".into()),
+        ]);
+        // A prompt lands in B — the daemon pushes B's row alone.
+        sb.ingest_durable_agent_text(vec![(
+            b_key.to_string(),
+            "about the lexer and tokens".into(),
+        )]);
+        sb.recompute_visible();
+
+        sb.open_search();
+        type_query(&mut sb, "agent:parser");
+        let shown: Vec<SessionKey> = sb
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![a_key],
+            "A's corpus must survive an incremental push that only named B"
+        );
+    }
+
     /// A matching row underlines the searched substring in its title so
     /// the user can see *what* matched — the vim `/pattern` cue (#1099).
     #[test]

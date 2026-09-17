@@ -341,6 +341,7 @@ async fn wait_for_started(
             Event::KeepAwakeStatus { .. } => {}
             Event::SnippetKeepMine { .. } => {}
             Event::SessionCosts { .. } => {}
+            Event::AgentSearchText { .. } => {}
             Event::MasteryLedger { .. } => {}
             other => panic!("expected AgentRunStarted, got {other:?}"),
         }

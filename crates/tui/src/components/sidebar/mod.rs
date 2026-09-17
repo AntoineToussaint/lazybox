@@ -495,9 +495,19 @@ pub struct Sidebar {
     /// Empty when no search is active.
     searched_keys: std::collections::HashSet<SessionKey>,
     /// Per-workspace agent text the `agent:` / `said:` search qualifiers
-    /// read (#1774), mirrored from the terminal stack's prompt history by
-    /// [`Self::set_agent_text`]. Empty until an agent has been prompted.
+    /// read (#1774) — the union of [`Self::agent_text_durable`] and
+    /// [`Self::agent_text_live`], rebuilt whenever either moves.
     agent_text: HashMap<SessionKey, String>,
+    /// The daemon's durable corpus, read from the persisted
+    /// `workspace-msgs:` rows and replayed on connect. Covers every
+    /// workspace with stored history, including those whose agent has long
+    /// exited and which therefore have no terminal at all.
+    agent_text_durable: HashMap<SessionKey, String>,
+    /// This client's live prompt history, from the terminal stack. Takes
+    /// precedence over the durable copy for the workspaces it covers,
+    /// because it additionally holds prompts submitted since the snapshot —
+    /// the daemon's copy is only re-read on connect.
+    agent_text_live: HashMap<SessionKey, String>,
     /// Excerpt of the agent text that matched, for rows an `agent:` term
     /// selected — the row's "why did this match" cue, since the hit isn't
     /// in the title the underline marks. Rebuilt by every recompute from
@@ -717,6 +727,8 @@ impl Sidebar {
             search: None,
             searched_keys: std::collections::HashSet::new(),
             agent_text: HashMap::new(),
+            agent_text_durable: HashMap::new(),
+            agent_text_live: HashMap::new(),
             agent_excerpts: HashMap::new(),
             agent_text_rev: 0,
             broadcast_selected: std::collections::HashSet::new(),
@@ -4625,7 +4637,40 @@ impl Sidebar {
     /// the corpus is inert to every other projection, so a busy agent
     /// appending prompts must not cost a rebuild per frame.
     pub fn set_agent_text(&mut self, agent_text: HashMap<SessionKey, String>) {
-        self.agent_text = agent_text;
+        self.agent_text_live = agent_text;
+        self.rebuild_agent_text();
+    }
+
+    /// Adopt the daemon's durable per-workspace agent text
+    /// (`Event::AgentSearchText`, #1774). This is what lets `agent:` reach a
+    /// workspace whose agent has exited — its history lives in the store,
+    /// not in any terminal this client can see.
+    pub fn ingest_durable_agent_text(&mut self, entries: Vec<(String, String)>) {
+        // MERGED, not replaced: the daemon sends the full set on connect and
+        // a single workspace's row each time a prompt is persisted, so a
+        // replace would let one incremental push wipe every other
+        // workspace's corpus. An entry for a workspace that later
+        // disappears is inert — the search only ever looks up keys that are
+        // in the workspace map — and a reconnect refreshes the live ones.
+        self.agent_text_durable.extend(
+            entries
+                .into_iter()
+                .map(|(key, text)| (SessionKey::new(key), text)),
+        );
+        self.rebuild_agent_text();
+    }
+
+    /// Re-merge the two corpora and re-run a live search against the result.
+    /// The live half wins per key: it is the durable half plus whatever has
+    /// been submitted since the snapshot.
+    fn rebuild_agent_text(&mut self) {
+        let mut merged = self.agent_text_durable.clone();
+        merged.extend(
+            self.agent_text_live
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+        self.agent_text = merged;
         self.agent_text_rev = self.agent_text_rev.wrapping_add(1);
         if self.search.as_ref().is_some_and(|s| {
             !crate::components::visible_rows::normalized_query(&s.query).is_empty()

@@ -133,12 +133,15 @@ fn floor_char_boundary(s: &str, at: usize) -> usize {
 }
 
 /// Per-workspace byte budget for the searchable agent-text corpus
-/// (#1774). The daemon already caps a workspace's stored prompt history
-/// at 200 entries / 128 KiB; this bounds what the client re-scans on
-/// every keystroke of an `agent:` query, so search cost stays a function
-/// of the workspace count rather than of how much an agent has been
+/// (#1774). Matches the daemon's own prompt-history retention
+/// (`PROMPT_HISTORY_MAX_BYTES`) so that everything the daemon keeps is
+/// searchable: a smaller budget here would leave stored history silently
+/// unfindable, with nothing to tell the user their query missed because
+/// the corpus was clipped rather than because the words weren't there.
+/// It still bounds what an `agent:` query re-scans per keystroke to a
+/// function of the workspace count, not of how much an agent has been
 /// talked to.
-pub const AGENT_TEXT_CORPUS_CAP: usize = 16 * 1024;
+pub const AGENT_TEXT_CORPUS_CAP: usize = 128 * 1024;
 
 /// Copy `area` out of a frame buffer into an owned buffer keyed to
 /// that same area — the composed-frame cache behind the U1 render

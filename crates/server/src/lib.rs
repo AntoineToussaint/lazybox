@@ -2161,6 +2161,7 @@ pub async fn dispatch_command(
             };
             let snippet_keepmine = client_kv.snippet_keepmine;
             let session_costs = client_kv.session_costs;
+            let agent_search_text = client_kv.agent_search_text;
             let mastery = client_kv.mastery;
             let _ = tx.send(Event::Snapshot {
                 workspaces: workspaces.values,
@@ -2271,6 +2272,13 @@ pub async fn dispatch_command(
             // AutoFixPolicyConfig so that stays the end-of-replay marker.
             let _ = tx.send(Event::SessionCosts {
                 costs: session_costs,
+            });
+            // Durable per-workspace agent text (#1774): same post-snapshot
+            // scaffolding, so `agent:` search reaches workspaces whose agent
+            // has exited and whose history only exists in the store. Kept
+            // before AutoFixPolicyConfig so that stays the end-of-replay marker.
+            let _ = tx.send(Event::AgentSearchText {
+                entries: agent_search_text,
             });
             // Durable per-action usage counts (#1502): replayed as the same
             // post-snapshot scaffolding so onboarding chrome seeds its

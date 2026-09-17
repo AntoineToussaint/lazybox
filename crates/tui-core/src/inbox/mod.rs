@@ -1378,7 +1378,12 @@ fn search_terms(raw: &str) -> Vec<&str> {
             Some(s) => {
                 if quoted {
                     quoted = ch != '"';
-                } else if ch == '"' && prev == ':' {
+                } else if ch == '"' && prev == ':' && raw[i + 1..].contains('"') {
+                    // Only open a quoted run that actually CLOSES. Without
+                    // the lookahead a missing closing quote swallowed the
+                    // rest of the query into one needle — `said:"a b is:pr`
+                    // became a single term and the `is:pr` filter vanished
+                    // silently, which is easy to hit mid-typing.
                     quoted = true;
                 } else if ch.is_whitespace() {
                     terms.push(&raw[s..i]);
@@ -1518,24 +1523,32 @@ pub fn normalized_query(query: &str) -> &str {
     query.trim().trim_start_matches('#')
 }
 
-/// Byte offset of the first ASCII-case-insensitive occurrence of
-/// `needle` (already lowercased by the caller) in `hay`, at a char
-/// boundary.
+/// Byte offset into `hay` of the first case-insensitive occurrence of
+/// `needle` (already `to_lowercase`d by the caller).
 ///
-/// Folding one side byte-wise rather than lowercasing `hay` is what
-/// keeps an `agent:` query off the allocator: the corpus is orders of
-/// magnitude larger than any metadata field, and the search re-runs on
-/// every keystroke. Non-ASCII bytes compare verbatim, so a non-ASCII
-/// needle matches exactly rather than case-insensitively.
+/// Folds the haystack a char at a time through `char::to_lowercase`
+/// rather than lowercasing it into a new `String`: the corpus is orders
+/// of magnitude larger than any metadata field and the search re-runs on
+/// every keystroke, so an allocation per row per keystroke is what this
+/// avoids. It matters that the fold is the SAME one `str::to_lowercase`
+/// applied to the needle — folding the haystack ASCII-only would make
+/// this the one qualifier in the grammar that is case-sensitive for
+/// non-ASCII, and asymmetrically so (`agent:CAFÉ` would find `café`
+/// while `agent:café` missed `CAFÉ`). `to_lowercase` yields an iterator,
+/// so the multi-char expansions (`İ` → `i̇`) line up on both sides
+/// without either allocating.
+///
+/// The offset indexes the ORIGINAL `hay`, so the excerpt reads back in
+/// the case the user wrote — which a lowercased copy could not give,
+/// since lowercasing is not length-preserving and its offsets would not
+/// map back.
 fn ci_find(hay: &str, needle: &str) -> Option<usize> {
-    let (h, n) = (hay.as_bytes(), needle.as_bytes());
-    let last = h.len().checked_sub(n.len())?;
-    (0..=last).find(|&i| {
-        hay.is_char_boundary(i)
-            && h[i..i + n.len()]
-                .iter()
-                .zip(n)
-                .all(|(a, b)| a.to_ascii_lowercase() == *b)
+    if needle.is_empty() {
+        return None;
+    }
+    hay.char_indices().map(|(i, _)| i).find(|&i| {
+        let mut folded = hay[i..].chars().flat_map(char::to_lowercase);
+        needle.chars().all(|n| folded.next() == Some(n))
     })
 }
 
@@ -3772,6 +3785,40 @@ mod tests {
         assert_eq!(search_terms("  spaced   out "), vec!["spaced", "out"]);
     }
 
+    /// An unclosed quote must not group (#1774). It used to swallow the
+    /// rest of the query into one needle, so a qualifier typed after it
+    /// was silently dropped from the filter — trivially reachable while
+    /// typing a phrase left-to-right.
+    #[test]
+    fn an_unclosed_quote_does_not_swallow_the_rest_of_the_query() {
+        assert_eq!(
+            search_terms("said:\"a b is:pr"),
+            vec!["said:\"a", "b", "is:pr"],
+            "without a closing quote the run splits on whitespace as usual"
+        );
+        // The filter that was being dropped now survives.
+        let mut ws = workspace_with_task("a", Some("acme/api"), 5);
+        ws.gh_issues.first_mut().expect("task").title = "zzz".into();
+        assert!(
+            !search_evaluate("said:\"parser is:pr", &ws, Some("rewrite the parser")).matched,
+            "`is:pr` still applies, and this workspace is an issue"
+        );
+        // A closed quote still groups.
+        assert_eq!(
+            search_terms("said:\"a b\" is:pr"),
+            vec!["said:\"a b\"", "is:pr"]
+        );
+        // Every prefix of a phrase typed left-to-right tokenizes without
+        // ever absorbing a later term.
+        for n in 0.."said:\"cannot borrow\" is:pr".len() {
+            let typed = &"said:\"cannot borrow\" is:pr"[..n];
+            assert!(
+                search_terms(typed).len() >= typed.split_whitespace().count().saturating_sub(1),
+                "prefix {typed:?} collapsed its terms"
+            );
+        }
+    }
+
     /// Every query WITHOUT a `field:"` sequence must tokenize exactly as
     /// `split_whitespace` did — the compatibility guarantee the grammar
     /// documents. Splitting on the ASCII subset instead of the Unicode
@@ -3874,6 +3921,52 @@ mod tests {
         );
         assert!(search_evaluate("agent:café", &ws, Some(text)).matched);
         assert!(!search_evaluate("agent:zzz", &ws, Some(text)).matched);
+    }
+
+    /// `agent:` folds case the same way every other qualifier does, in
+    /// both directions (#1774). Folding the corpus ASCII-only made this
+    /// the one case-sensitive qualifier in the grammar — and
+    /// asymmetrically, since the needle arrives `to_lowercase`d: an
+    /// upper-case query found lower-case text but not the reverse, so a
+    /// prompt mentioning `CAFÉ` was unreachable by `agent:café` while
+    /// `label:café` matched a `CAFÉ` label.
+    #[test]
+    fn agent_qualifier_folds_case_like_every_other_qualifier() {
+        let mut ws = workspace_with_task("a", Some("acme/api"), 5);
+        {
+            let t = ws.gh_issues.first_mut().expect("task");
+            t.title = "zzz".into();
+            t.labels = vec![lazybox_core::Label::new("CAFÉ")];
+        }
+        // The sibling qualifier is the oracle: whatever `label:` does
+        // with this needle, `agent:` must do with the same text.
+        assert!(search_matches("label:café", &ws), "oracle: label: folds É");
+        for (corpus, query) in [
+            ("Error: CAFÉ_CONFIG missing", "agent:café"),
+            ("Error: café_config missing", "agent:CAFÉ"),
+            ("ÉCOLE", "agent:école"),
+            ("école", "agent:ÉCOLE"),
+            ("STRAßE", "said:straße"),
+            ("Grüße", "said:GRÜSSE"),
+        ] {
+            let hit = search_evaluate(query, &ws, Some(corpus)).matched;
+            // `GRÜSSE`.to_lowercase() is `grüsse`, which is NOT a
+            // substring of `grüße` — full case folding is a different
+            // operation and neither this nor `label:` claims it. Assert
+            // the two agree rather than asserting a hit.
+            let oracle = corpus.to_lowercase().contains(
+                normalized_query(query)
+                    .to_lowercase()
+                    .split_once(':')
+                    .expect("qualifier")
+                    .1,
+            );
+            assert_eq!(
+                hit, oracle,
+                "agent:/said: must fold {query:?} against {corpus:?} exactly as \
+                 `to_lowercase().contains()` does"
+            );
+        }
     }
 
     /// Announced re-entry (#scale, B4): a row whose event-conditional

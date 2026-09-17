@@ -303,6 +303,90 @@ pub fn session_costs(store: &dyn lazybox_store::Store) -> Vec<(String, u64)> {
     }
 }
 
+/// Per-workspace agent prompt text for the `/` search's `agent:` /
+/// `said:` qualifiers (#1774), read from the durable `workspace-msgs:`
+/// rows rather than from the live terminal registry.
+///
+/// That distinction is the whole point: prompt history is persisted per
+/// STABLE session key and outlives the terminal that produced it, so a
+/// workspace whose agent exited long ago still has its history on disk.
+/// Building the corpus from live terminals instead made precisely those
+/// workspaces — the ones a user is least likely to remember, and so most
+/// likely to search for — the ones the search could not reach.
+///
+/// Newest prompts win the byte budget, which is the daemon's own
+/// retention cap, so everything retained is searchable; truncating below
+/// it would leave stored history silently unfindable. A prompt larger
+/// than the whole budget is truncated on a char boundary rather than
+/// dropped, so a workspace whose one prompt was a pasted log still
+/// matches.
+pub fn agent_search_text(store: &dyn lazybox_store::Store) -> Vec<(String, String)> {
+    let rows = match store.list_kv_prefix(crate::spawn_handler::WORKSPACE_MSGS_PREFIX) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("read agent search text failed: {e}");
+            return Vec::new();
+        }
+    };
+    rows.into_iter()
+        .filter_map(|(key, value)| {
+            let session_key = key.strip_prefix(crate::spawn_handler::WORKSPACE_MSGS_PREFIX)?;
+            corpus_of(session_key, &value)
+        })
+        .collect()
+}
+
+/// The corpus for ONE workspace, for the incremental re-publish after a
+/// prompt is persisted. Same shape as a row of [`agent_search_text`], so a
+/// client can merge it in by key. Empty when the row is missing or holds
+/// nothing searchable.
+pub fn agent_search_text_for(
+    store: &dyn lazybox_store::Store,
+    session_key: &str,
+) -> Vec<(String, String)> {
+    let key = format!(
+        "{}{session_key}",
+        crate::spawn_handler::WORKSPACE_MSGS_PREFIX
+    );
+    match store.get_kv(&key) {
+        Ok(Some(value)) => corpus_of(session_key, &value).into_iter().collect(),
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::warn!("read agent search text for {session_key} failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Fold one persisted history row into `(session_key, corpus)`.
+fn corpus_of(session_key: &str, value: &str) -> Option<(String, String)> {
+    let mut history: Vec<lazybox_ipc::UserPrompt> = serde_json::from_str(value).ok()?;
+    history.sort_by_key(|p| std::cmp::Reverse(p.timestamp_ms));
+    let mut corpus = String::new();
+    for prompt in history {
+        let room = crate::spawn_handler::PROMPT_HISTORY_MAX_BYTES.saturating_sub(corpus.len());
+        if room == 0 {
+            break;
+        }
+        corpus.push_str(&prompt.text[..floor_char_boundary(&prompt.text, room)]);
+        corpus.push('\n');
+    }
+    (!corpus.trim().is_empty()).then(|| (session_key.to_string(), corpus))
+}
+
+/// Largest index `<= at` that `s` can be split on without cutting a
+/// multi-byte char. (`str::floor_char_boundary` is still unstable.)
+fn floor_char_boundary(s: &str, at: usize) -> usize {
+    if at >= s.len() {
+        return s.len();
+    }
+    let mut i = at;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Increment the mastery ledger for one invocation of `action_id` through
 /// `via` (#1502): read-modify-write the action's per-channel count map and
 /// persist. The RMW runs under `config.mastery_lock` because `RecordAction`
@@ -373,6 +457,7 @@ pub fn snapshot(store: &dyn lazybox_store::Store) -> ClientKvSnapshot {
         snippet_keepmine: load_list(store, SNIPPET_KEEPMINE_KV_KEY),
         session_costs: session_costs(store),
         mastery: mastery_ledger(store),
+        agent_search_text: agent_search_text(store),
     }
 }
 
@@ -393,6 +478,11 @@ pub struct ClientKvSnapshot {
     /// the snapshot bundle and replayed on connect as `Event::MasteryLedger`
     /// so per-action usage counts survive a restart (#1502).
     pub mastery: Vec<(String, ActionVia, u32)>,
+    /// Per-workspace agent prompt text as `(session_key, corpus)`, replayed
+    /// on connect as `Event::AgentSearchText` so the `/` search's `agent:`
+    /// qualifier reaches every workspace with stored history — not only the
+    /// ones that still have a live terminal (#1774).
+    pub agent_search_text: Vec<(String, String)>,
 }
 
 /// Read a JSON `{ "<via>": count }` map from `key`, degrading to empty on
@@ -433,6 +523,7 @@ fn load_list(store: &dyn lazybox_store::Store, key: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use lazybox_store::MemoryStore;
+    use lazybox_store::Store as _;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -447,6 +538,93 @@ mod tests {
         let snap = snapshot(&*store);
         // "a" re-used → front; cap keeps the 5 newest, "b" evicted.
         assert_eq!(snap.recent_snippets, vec!["a", "f", "e", "d", "c"]);
+    }
+
+    /// The corpus is read from the DURABLE `workspace-msgs:` rows, so a
+    /// workspace whose agent has exited — no terminal, nothing in any
+    /// snapshot the client can see — is still searchable (#1774). Building
+    /// it from live terminals made exactly the forgotten workspaces
+    /// unreachable, which is the case the feature exists for.
+    #[tokio::test]
+    async fn agent_search_text_reads_durable_rows_not_live_terminals() {
+        let store = Arc::new(MemoryStore::new());
+        let prompts = |texts: &[(&str, u64)]| {
+            serde_json::to_string(
+                &texts
+                    .iter()
+                    .map(|(t, ts)| lazybox_ipc::UserPrompt {
+                        text: (*t).to_string(),
+                        timestamp_ms: *ts,
+                        source: lazybox_ipc::PromptSource::Typed,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        // No terminal exists for either of these; only the store rows do.
+        store
+            .set_kv(
+                "workspace-msgs:github:o/r#1",
+                &prompts(&[("rewrite the parser", 10)]),
+            )
+            .unwrap();
+        store
+            .set_kv(
+                "workspace-msgs:github:o/r#2",
+                &prompts(&[("fix the lexer", 20)]),
+            )
+            .unwrap();
+        // An empty history contributes no entry rather than a blank one.
+        store.set_kv("workspace-msgs:github:o/r#3", "[]").unwrap();
+        // A corrupt row is skipped, never panics or poisons the batch.
+        store
+            .set_kv("workspace-msgs:github:o/r#4", "not json")
+            .unwrap();
+
+        let mut out = agent_search_text(&*store);
+        out.sort();
+        assert_eq!(out.len(), 2, "got {out:?}");
+        assert_eq!(out[0].0, "github:o/r#1");
+        assert!(out[0].1.contains("rewrite the parser"));
+        assert_eq!(out[1].0, "github:o/r#2");
+        assert!(out[1].1.contains("fix the lexer"));
+
+        // It rides the snapshot bundle, so a subscriber gets it on connect.
+        assert_eq!(snapshot(&*store).agent_search_text.len(), 2);
+    }
+
+    /// Everything the daemon RETAINS must be searchable: the corpus budget
+    /// is the retention cap, and an over-budget single prompt is truncated
+    /// on a char boundary rather than dropped (#1774).
+    #[tokio::test]
+    async fn agent_search_text_keeps_newest_within_the_retention_budget() {
+        let store = Arc::new(MemoryStore::new());
+        let huge = format!(
+            "找 needle {}",
+            "pad ".repeat(crate::spawn_handler::PROMPT_HISTORY_MAX_BYTES)
+        );
+        let json = serde_json::to_string(&[
+            lazybox_ipc::UserPrompt {
+                text: "ancient prompt".into(),
+                timestamp_ms: 1,
+                source: lazybox_ipc::PromptSource::Typed,
+            },
+            lazybox_ipc::UserPrompt {
+                text: huge,
+                timestamp_ms: 2,
+                source: lazybox_ipc::PromptSource::Typed,
+            },
+        ])
+        .unwrap();
+        store.set_kv("workspace-msgs:github:o/r#9", &json).unwrap();
+
+        let out = agent_search_text(&*store);
+        let corpus = &out[0].1;
+        assert!(
+            corpus.contains("needle"),
+            "an over-budget prompt still contributes its head"
+        );
+        assert!(corpus.len() <= crate::spawn_handler::PROMPT_HISTORY_MAX_BYTES + 1);
     }
 
     #[tokio::test]

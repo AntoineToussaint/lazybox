@@ -13,4 +13,13 @@ export type ComputeOutcome = { visible: Array<VisibleRow>, summaries: { [key in 
 /**
  * Per-workspace ticket hierarchy for rows in `visible`.
  */
-ticket_tree: { [key in SessionKey]: TicketTreeMeta }, };
+ticket_tree: { [key in SessionKey]: TicketTreeMeta },
+/**
+ * For rows an `agent:` term matched, a short excerpt of the agent
+ * text around the hit (#1774). The row's title holds nothing the
+ * underline could mark — the match isn't in it — so the excerpt is
+ * what tells the user *why* the row is in the result set. Produced
+ * by the same [`search_evaluate`] pass that filtered the row, so a
+ * shown excerpt always corresponds to a real hit.
+ */
+agent_excerpts: { [key in SessionKey]: string }, };

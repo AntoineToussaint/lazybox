@@ -337,6 +337,17 @@ struct EpicStatusArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct TaskStatusArgs {
+    /// The tracker record to ask about: `owner/repo#N`, a GitHub issue/PR URL,
+    /// a Linear identifier (`ENG-45`), or `#N` beside `repo`.
+    task: String,
+    /// `owner/repo` used to resolve the bare `#N` / `N` forms. Omit when
+    /// `task` already names the repo.
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct EpicReadyArgs {
     /// Restrict to one epic by key. Omit to draw the ready queue from every
     /// non-archived epic.
@@ -2071,6 +2082,43 @@ impl LazyboxMcp {
         }))
     }
 
+    /// Resolve a tracker reference and report what work is happening on it.
+    async fn task_status_payload(
+        &self,
+        task: &str,
+        repo: Option<&str>,
+    ) -> Result<serde_json::Value, McpError> {
+        let Some(id) = lazybox_core::task_ref::parse_task_ref(task, repo) else {
+            return Err(McpError::invalid_request(
+                lazybox_ipc::task_status::TaskStatusError::UnresolvedReference {
+                    reference: task.to_string(),
+                }
+                .to_string(),
+                None,
+            ));
+        };
+        let report = crate::task_status::report(&self.config, &id)
+            .await
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        serde_json::to_value(&report)
+            .map_err(|error| McpError::internal_error(format!("encode report: {error}"), None))
+    }
+
+    #[tool(
+        description = "Is anyone working on a tracker record? Resolves `owner/repo#N`, a GitHub issue/PR URL or a Linear key to the workspace(s) holding it and reports what the daemon can actually observe: the live agent turn, the working-claim and whether this box holds it, declared blockers, sessions, and the record's own open/closed/merged state — each as a separate fact, plus a compact verdict with its evidence. An issue still resolves after its PR takes the row over. Read-only: it never spawns, resumes, claims or changes anything. An agent turn ending is NOT task completion, and a claim alone is not a running worker."
+    )]
+    async fn task_status(
+        &self,
+        Parameters(args): Parameters<TaskStatusArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        Ok(json_result(
+            self.task_status_payload(&args.task, args.repo.as_deref())
+                .await?,
+        ))
+    }
+
     #[tool(
         description = "The live derived status of every cross-repo epic (or one, by `epic` key): each member's status, wave, blockers, and the epic's ready/blocked/asking/failing rollup plus critical path. This is the plan of record — answer \"where does the epic stand / what's blocked / what's left\" from here, not by re-deriving from individual PRs."
     )]
@@ -2277,7 +2325,12 @@ impl ServerHandler for LazyboxMcp {
                  handoff, ask_session sends a question (or a catalog snippet \
                  via send_snippet) to a sibling and returns its reply; if you \
                  receive a <lazybox-request>, answer it with reply_request \
-                 before moving on. For cross-repo epics: epic_status is the live \
+                 before moving on. To answer \"is anyone working on owner/repo#N?\", call \
+                 task_status with that record — it resolves the issue or PR to \
+                 the workspace(s) and live agent(s) on it and separates the \
+                 facts that get conflated (a finished agent turn is not a \
+                 finished task; a claim label is not a running worker). \
+                 For cross-repo epics: epic_status is the live \
                  plan of record (each member's derived status, blockers, and the \
                  ready/blocked rollup) and epic_ready is the ranked queue of \
                  what's workable now — answer epic questions from these rather \
@@ -3305,6 +3358,58 @@ mod tests {
                 workspace_json: Some(serde_json::to_string(&ws).unwrap()),
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_status_payload_refuses_an_unparseable_reference() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let err = handler
+            .task_status_payload("not a record", None)
+            .await
+            .expect_err("an unresolvable reference must be refused, not reported as no worker");
+        assert!(err.to_string().contains("owner/repo#N"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn task_status_payload_reports_an_unknown_record_as_no_workspace() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let payload = handler
+            .task_status_payload("acme/widget#7", None)
+            .await
+            .expect("payload");
+        assert_eq!(payload["verdict"]["state"], "NoWorkspace");
+        assert_eq!(payload["schema_version"], 1);
+    }
+
+    /// The MCP tool and the CLI must answer from the same derivation — this
+    /// pins the tool onto `task_status::report` rather than a parallel read.
+    #[tokio::test]
+    async fn task_status_payload_finds_an_issue_through_its_pr_workspace() {
+        let config = ServerConfig::in_memory();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("github-acme-widget-187"),
+            "branch",
+            chrono::Utc::now(),
+        );
+        ws.gh_issues.push(github_issue_task("acme/widget", 151));
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+
+        let handler = LazyboxMcp::new(config);
+        let payload = handler
+            .task_status_payload("151", Some("acme/widget"))
+            .await
+            .expect("payload");
+        assert_eq!(
+            payload["workspaces"][0]["key"], "github-acme-widget-187",
+            "a bare number plus --repo must resolve: {payload}"
+        );
     }
 
     #[tokio::test]

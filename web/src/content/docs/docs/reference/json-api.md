@@ -165,6 +165,7 @@ connection *is* the session, so no tool takes a "who am I" argument.
 | `ask_session(workspace, text? \| snippet?, timeout_s?, mode?)` | The inject above, wrapped in a `<lazybox-request>` envelope, plus a request row in the kv (`lazybox:request:*`). `wait` blocks up to `timeout_s` (default 120 s, max 600 s — your MCP client's call timeout is the real ceiling); `async` returns a `request_id` |
 | `reply_request(request_id, text)` | Answers a request; only the session it was asked of may. Wakes a waiting asker and emits `AgentRequestReplied` |
 | `poll_request(request_id)` | The request row plus the target's live agent state, so "pending" can be told from "parked at a prompt" |
+| `task_status(task, repo?)` | "Is anyone working on `owner/repo#N`?" — the record's workspace(s), live agent turn, working-claim, blocker and tracker state as separate facts, plus a verdict with its evidence. Resolves an issue through the PR workspace it folded into. Read-only. Same report as `lazybox task status` |
 
 An unanswered request does not hang the asker: when the target ends a turn
 without replying, the tail of its output is captured as the answer with

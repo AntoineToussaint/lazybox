@@ -27,6 +27,7 @@ pub mod channel;
 pub mod pairing;
 pub mod port_forward;
 pub mod socket;
+pub mod task_status;
 pub mod transport;
 
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
@@ -1549,6 +1550,21 @@ pub enum Command {
     SetTrackMain {
         session_key: SessionKey,
         enabled: bool,
+    },
+    /// Ask what work is happening on a tracker record (#1785).
+    ///
+    /// Read-only: the daemon resolves the reference against the workspaces it
+    /// already holds and never materializes one, so asking about a record can
+    /// never create it, claim it, or start an agent on it. The answer comes
+    /// back as [`Event::TaskStatus`] correlated by `client_request_id`.
+    QueryTaskStatus {
+        /// A tracker reference as a human or agent wrote it: `owner/repo#N`, a
+        /// GitHub issue/PR URL, a Linear key, or `#N` resolved against
+        /// `default_repo`.
+        reference: String,
+        /// `owner/repo` for the repo-less `#N` / `N` forms.
+        default_repo: Option<String>,
+        client_request_id: Option<String>,
     },
     /// Set the workspace's metering opt-in (the `$ meter` canary). When
     /// enabled, every agent spawn in this workspace is routed through the
@@ -3716,6 +3732,18 @@ pub enum Event {
     AgentRequestsOpen {
         workspace_key: lazybox_core::WorkspaceKey,
         open: usize,
+    },
+    /// Reply to [`Command::QueryTaskStatus`] (#1785): what the daemon can
+    /// observe about work on one tracker record.
+    ///
+    /// `result` is `Err` only when status could not be *established* — an
+    /// unparseable reference, or state the daemon could not read. A record
+    /// nobody is working on is a successful report whose verdict says so, so a
+    /// caller never has to read "no worker" out of a failure. Appended last
+    /// (bincode is ordinal-sensitive).
+    TaskStatus {
+        client_request_id: Option<String>,
+        result: Result<task_status::TaskStatusReport, task_status::TaskStatusError>,
     },
 }
 

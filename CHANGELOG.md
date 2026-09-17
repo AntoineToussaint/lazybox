@@ -6,6 +6,26 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Added
+
+- **One supported answer to "are we working on `owner/repo#N`?"** (#1785). A
+  `task_status` MCP tool — wired into every Claude session by default and named
+  in its `SessionStart` briefing — plus `lazybox task status <ref> [--json]` for
+  a shell, or for an agent that gets no MCP tools (Codex, `--strict-mcp-config`,
+  a restricted profile). Both go through the daemon's one derivation, so a
+  person and an agent cannot be told different things. It takes
+  `owner/repo#N`, a GitHub issue/PR URL, a Linear key, or `#N` beside `--repo`,
+  and an **issue still resolves after its PR has taken over its row**. The
+  report keeps apart the facts that previously got conflated — tracker
+  lifecycle, working-claim (with whether this box actually holds it), session,
+  live agent turn, and review/CI — and the compact verdict carries its reason
+  and evidence. A finished agent turn is never reported as a finished task, an
+  unexpired claim is never reported as a running worker, and contradictory or
+  missing evidence reports `unknown` rather than a guess. Read-only: the lookup
+  never spawns, resumes, claims or mutates anything. An unresolvable reference
+  exits `2` and an unreachable daemon exits `1`, so a failed lookup is never
+  read as "nobody is working on it".
+
 ### Changed
 
 - **`best`/`high`/`medium`/`low` labels are model tiers, not priorities**

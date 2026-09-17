@@ -58,6 +58,7 @@ mod setup_detect;
 mod setup_persist;
 mod slack_init;
 mod slack_prune;
+mod task_status_cli;
 #[cfg(test)]
 mod test_env;
 
@@ -498,6 +499,13 @@ Remote & services:
                               --depth N to bound the walk, --hidden for dotdirs)
   lazybox worktree list       report managed worktrees (size, orphan reasons, totals)
   lazybox worktree gc         reclaim safe orphaned worktrees (--force / --dry-run)
+  lazybox task status <REF>   is anyone working on this record? Takes owner/repo#N,
+                              a GitHub issue/PR URL, a Linear key, or #N beside
+                              --repo. Reports the workspace, the live agent turn,
+                              the working-claim and any blocker as separate facts
+                              (a finished turn is not a finished task); --json for
+                              the full structured report. Read-only — it never
+                              spawns, resumes or claims anything
   lazybox workspace create    attach to a tracker record's workspace via the daemon
     --issue|--pr|--ticket <R> (owner/repo#N, a GitHub URL, #N beside --repo, or a
                               Linear key. --name <name> --scratch instead for
@@ -643,6 +651,7 @@ async fn main() -> anyhow::Result<()> {
         Some("scan") => scan_subcommand(&args[1..]).await,
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("workspace") => workspace_subcommand(&args[1..]).await,
+        Some("task") => task_status_cli::task_subcommand(&args[1..]).await,
         Some("log") => log_subcommand(&args[1..]).await,
         Some("device") => device_cli::device_subcommand(&args[1..]).await,
         Some("auth") => auth_cli::auth_subcommand(&args[1..]).await,
@@ -1518,7 +1527,7 @@ async fn resolve_project_key(
 
 /// `--key value` and `--key=value` parser. Removes both the flag and
 /// its value from `args`.
-fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
+pub(crate) fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
     let prefix = format!("{flag}=");
     if let Some(pos) = args.iter().position(|a| a == flag) {
         args.remove(pos);
@@ -1793,7 +1802,7 @@ async fn wait_for_exit_signal() {
 
 /// Remove a flag from `args` if present. Returns `true` if it was
 /// found.
-fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
+pub(crate) fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
     if let Some(pos) = args.iter().position(|a| a == flag) {
         args.remove(pos);
         true

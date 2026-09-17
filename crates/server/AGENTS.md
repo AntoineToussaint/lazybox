@@ -74,9 +74,25 @@ lazybox armed it.
 not a wrapper around repo actions. Spawned sessions get a per-session bearer
 and a loopback `rmcp` endpoint (identity is the connection) exposing
 `whoami` / `list_sessions` / `read_session`, the `post_note` / `read_notes`
-blackboard, `notify_session`, the epic tools, and `spawn_worker`. Agents drive
-`git` and `gh` directly; adding an approval layer around those is a design
-change, not a fix. Design: [`docs/mcp-coordination.md`](../../docs/mcp-coordination.md).
+blackboard, `notify_session`, `task_status`, the epic tools, and
+`spawn_worker`. Agents drive `git` and `gh` directly; adding an approval layer
+around those is a design change, not a fix. Design:
+[`docs/mcp-coordination.md`](../../docs/mcp-coordination.md).
+
+`task_status` (`task_status.rs`, #1785) answers "is anyone working on
+`owner/repo#N`?". Resolve a record by scanning `Workspace::hierarchy_task_ids()`
+— never `primary_task()`, and never by reverse-parsing a workspace key, which
+`sanitize_key` makes lossy — so an issue still resolves after its PR takes over
+the row. The report keeps tracker lifecycle, working-claim, session
+(`SessionRunState`) and agent turn (`AgentState`) as separate facts because
+none implies another: a finished turn is not a finished task, an unexpired
+`lazybox:w:` claim is not a running process, and a live terminal that has not
+reported a state is `unknown`, not idle. It is read-only — it must never reach
+for `workspace::attach::attach_to_record`, which materializes a workspace from
+the provider — and `Err` is reserved for status that could not be *established*,
+so a failed lookup can never read as "no worker". The same derivation backs
+`lazybox task status <ref>` over `Command::QueryTaskStatus`, which is the
+documented fallback for a session that gets no MCP tools.
 
 ## The metering / context-hygiene proxy
 

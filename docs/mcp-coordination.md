@@ -105,6 +105,7 @@ below.)
 | `lazybox_post_note(text, scope?, tags?)` | Publish to the blackboard. Default `scope` = your own session. | kv `lazybox:note:<scope>:<seq>` |
 | `lazybox_read_notes(scope?, tags?, since?)` | Read the blackboard (defaults to global + your scope). | `list_kv_prefix("lazybox:note:")` |
 | `lazybox_notify_session(workspace, text, submit?)` | Active push into another agent (the existing inject, as a tool). | `/v1/agents/inject` (settle-gated) |
+| `task_status(task, repo?)` | "Is anyone working on `owner/repo#N`?" — the record's workspace(s), live agent turn, claim, blocker and tracker state, kept as separate facts (#1785). Read-only. | `task_status::report` — the workspace scan joined with `agent_runtime_snapshot`; also `lazybox task status` over the socket |
 
 Request/response (#1653) adds the half the push side leaves open — a reply
 channel, so a Coordinator asking "what is left on #581?" gets a paragraph

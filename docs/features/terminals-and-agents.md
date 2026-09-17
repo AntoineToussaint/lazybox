@@ -551,6 +551,7 @@ implicit: the connection *is* the session, so no tool asks "who am I".
 | `ask_session(workspace, text? \| snippet?, timeout_s?, mode?)` | Ask a sibling a question and get the answer back. `wait` (default) blocks; `async` returns a `request_id`. |
 | `reply_request(request_id, text)` | Answer a question you were asked. Only the session it was asked of may answer. |
 | `poll_request(request_id)` | Status / answer of a request you made, plus the target's live agent state. |
+| `task_status(task, repo?)` | Is anyone working on `owner/repo#N`? Resolves a record to its workspace(s), live agent turn, working-claim, blocker and tracker state. Read-only. |
 
 The *notes blackboard* is the primary medium — persistent (kv-backed, it
 outlives the authoring session), low-noise, cross-repo by construction. The
@@ -566,6 +567,43 @@ envelope telling the target to close the loop with `reply_request`; a
 Coordinator can ask a Worker "what is left on #581?" and print the reply in
 one turn. Full design and trade-offs:
 [`../mcp-coordination.md`](../mcp-coordination.md).
+
+`task_status` (#1785) answers the question the bus could not: *"are we working
+on `obin-ai/core-solutions#151`?"*. Everything needed was already in the daemon
+— it was just never joined by a **record** reference, so answering took reading
+`state.db` by hand. The lookup resolves the record through
+`Workspace::hierarchy_task_ids()`, so an issue still resolves after its PR has
+taken over the row (`#151` is answered by `github-obin-ai-core-solutions-187`),
+and it reports every matching workspace rather than an arbitrary first one.
+
+What it exists to keep apart — the facts the manual hunt conflated:
+
+| Fact | Read from | What it does *not* mean |
+|---|---|---|
+| tracker lifecycle | the cached provider `Task` (stamped with its poll time) | — |
+| working-claim | the `lazybox:w:` label's own expiry, plus whether *this* box holds it | an active claim is **not** a running process |
+| session | the persisted `SessionRunState` | a retained worktree is **not** an agent turn |
+| agent turn | the live `AgentState` of a running PTY | a turn ending is **not** task completion |
+| review / CI | the PR's own check + review state | — |
+
+The verdict is a compact `WorkState` (`working`, `awaiting_input`, `stalled`,
+`turn_ended`, `agent_exited`, `claimed_elsewhere`, `not_started`,
+`no_workspace`, `archived`, `unknown`) carrying its reason and bounded
+evidence. `stalled` mirrors `AgentState::Stalled` (#1787) and is kept apart
+from `turn_ended` for the reason that variant exists: an agent that died on a
+502 comes to rest exactly like one that finished, and collapsing the two is
+what hid the failure in the first place. Where evidence is missing or contradictory it reports `unknown`
+rather than guessing: a live terminal that has not reported a turn state is
+not idle, and silence during a long tool call is not a stopped worker. A
+disposition is never inferred from what an agent *wrote* — "partial delivery"
+is prose, while a declared blocker, a pending check and a closed record are
+evidence.
+
+The same report is available from a shell as `lazybox task status <ref>`
+(`--json` for the structured form) — the documented fallback for a session
+that gets no MCP tools at all (Codex, `--strict-mcp-config`, a restricted
+profile). Both go through `Command::QueryTaskStatus`, so the CLI and the tool
+cannot drift.
 
 ### How to use it
 Nothing to set up. Every Claude session lazybox *wires to the bus* is told

@@ -130,7 +130,7 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
 /// length-capped built-in joins, and
 /// `no_builtin_both_caps_its_length_and_licenses_unbounded_output` fails
 /// the build for a capped body that forgot to.
-const ENDING_ONLY_BUILTINS: &[&str] = &["catchup"];
+const ENDING_ONLY_BUILTINS: &[&str] = &["catchup", "clarify"];
 
 /// The output contract as delivered (#1697).
 ///
@@ -1586,6 +1586,44 @@ impl Snippets {
                 // Deliberately NOT `catch`: a built-in key must never be a
                 // strict prefix of another, or the exact-key auto-submit
                 // (`]]scatchup`) stops firing once two keys share the prefix.
+                // Not `explainpr`: `explain` already exists and a built-in key
+                // must never be a strict prefix of another, or the exact-key
+                // auto-submit stops firing once two keys share the prefix.
+                "clarify".to_string(),
+                entry(
+                    "Review",
+                    "Explain this PR in a few lines, no verbiage",
+                    "Explain this PR to me in AT MOST 8 lines total. Not a summary of the \
+                     diff — an explanation a reviewer can act on. Use exactly this shape, \
+                     one line each, no headings and no preamble:\n\n\
+                     First line: what is TRUE NOW that was not true before, in plain words, \
+                     naming the user-visible consequence rather than the code.\n\
+                     Problem: what was actually broken and who it hurt. Name the concrete \
+                     failure, not the category.\n\
+                     Change: the one thing that makes it right. If the fix is small, say \
+                     how small; a one-file fix to a scary-sounding bug is the most \
+                     reassuring fact you have.\n\
+                     Proof: the evidence it works — a number, a command's before/after, or \
+                     the test that fails without it. Never \"added tests\" with no claim.\n\
+                     Risk: what could break, or \"nothing obvious\" if that is honest.\n\n\
+                     Then stop. Add a line only if it changes what the reviewer does: a \
+                     surprise found along the way, a deliberate non-goal a reader would \
+                     otherwise assume was included, or CI that is not green yet.\n\n\
+                     Anchor every claim — file paths, symbol names, issue numbers, real \
+                     command output. \"Refactored for clarity\" is not a claim; \"moved \
+                     marker parsing out of dockerrun so sdk no longer links docker/docker \
+                     (go list -deps: 24 packages -> 0)\" is.\n\n\
+                     Banned: restating my question, \"this PR introduces/implements/ensures\", \
+                     \"comprehensive\", \"robust\", \"various\", a bulleted tour of changed \
+                     files, and any sentence that would still be true of a different PR. If \
+                     something is genuinely unclear from the diff, say which part and stop \
+                     guessing. This explains a PR and changes nothing — no commit, no push, \
+                     no edit. The verdict names what is true now that was not true before, \
+                     in one sentence; NEED CONTEXT means the diff alone does not answer it \
+                     and names the missing piece.",
+                ),
+            ),
+            (
                 "catchup".to_string(),
                 entry(
                     "Review",
@@ -2386,10 +2424,24 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
         assert!(delivered.contains("Hard cap: 7 lines total."));
         assert!(delivered.contains("`report_blocker`"));
 
-        // …and it is the ONLY one. Every other built-in asks for work to be
-        // done first, so withholding the clause there would cap real output.
+        // …and the opt-out is confined to `ENDING_ONLY_BUILTINS`. The rule
+        // is about what the snippet ASKS FOR, not which key it is: a
+        // built-in that asks for work to be done reports findings of
+        // unknown length, so withholding the clause there would cap real
+        // output. `catchup` and `clarify` ask for no work — they explain
+        // something that already happened, so their whole answer IS the
+        // ending and the unbounded preamble contradicts their own cap.
+        //
+        // Quantified over the list rather than a hardcoded key so adding a
+        // second ending-only built-in updates one place; asserting the list
+        // is non-empty keeps an emptied list from vacuously passing.
+        assert!(!ENDING_ONLY_BUILTINS.is_empty());
         for (key, snippet) in b.all() {
-            if key == "catchup" {
+            if ENDING_ONLY_BUILTINS.contains(&key) {
+                assert!(
+                    snippet.answer_is_the_ending,
+                    "built-in `{key}` is listed ending-only but did not get the flag",
+                );
                 continue;
             }
             assert!(

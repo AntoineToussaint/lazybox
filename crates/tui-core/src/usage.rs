@@ -27,24 +27,48 @@ use lazybox_ipc::{AgentRunId, AgentUsage, ContextAccounting, ProviderQuota, Quot
 /// Cells in the `▓▓▓░░` progress bar.
 const BAR_WIDTH: usize = 5;
 
-/// Render a micro-USD cost as a compact dollar string — the ONE cost
-/// formatter every surface goes through (#1746), so the rule can't drift
-/// between the sidebar strip, the terminal tab and the stats modal.
+/// Render a micro-USD cost where width is scarce — the sidebar's today
+/// strip and the terminal tab (#1746).
 ///
 /// Precision is spent only where it changes a reading. At a dollar or more
-/// the cents never change a decision and the figure sits where width is
-/// scarcest, so it rounds to whole dollars (`$9.31` → `$9`). Below a dollar
-/// they are the whole figure, so `$0.42` keeps its cents and a sub-cent
+/// the cents don't change a decision and the figure sits in a row fighting
+/// for columns, so it rounds to whole dollars (`$9.31` → `$9`). Below a
+/// dollar they ARE the figure, so `$0.42` keeps its cents and a sub-cent
 /// session keeps four places (`$0.0042`) rather than reading `$0.00` and
 /// looking broken.
-pub fn format_cost_micros(micros: u64) -> String {
-    let dollars = micros as f64 / 1_000_000.0;
-    if dollars >= 1.0 {
-        format!("${}", dollars.round() as u64)
+///
+/// Use [`format_cost_micros_exact`] on a surface with room, where the
+/// rounding would be a claim rather than a convenience.
+pub fn format_cost_micros(micros: i64) -> String {
+    format_cost(micros, true)
+}
+
+/// Render a micro-USD cost in full — cents always, and four places below a
+/// cent. For surfaces with no width pressure (the stats deep-dive), where
+/// rounding to the dollar would inflate or deflate a figure the reader is
+/// using to judge something: a compaction saving rounded UP to `−$2` from
+/// `−$1.84` overstates a benefit by 9%, and the module reporting it exists
+/// to be "true rather than merely confident".
+///
+/// Shares its sign and sub-cent handling with [`format_cost_micros`], so
+/// the two can differ only in the one way they are documented to differ.
+pub fn format_cost_micros_exact(micros: i64) -> String {
+    format_cost(micros, false)
+}
+
+/// Shared core. A NEGATIVE total keeps its sign rather than being clamped
+/// to `$0.00`: costs are non-negative by construction, so one arriving
+/// negative over the wire is a bug, and a silent `$0.00` would hide it
+/// behind a plausible figure instead of showing something visibly wrong.
+fn format_cost(micros: i64, compact: bool) -> String {
+    let sign = if micros < 0 { "-" } else { "" };
+    let dollars = micros.unsigned_abs() as f64 / 1_000_000.0;
+    if compact && dollars >= 1.0 {
+        format!("{sign}${}", dollars.round() as u64)
     } else if micros == 0 || dollars >= 0.01 {
-        format!("${dollars:.2}")
+        format!("{sign}${dollars:.2}")
     } else {
-        format!("${dollars:.4}")
+        format!("{sign}${dollars:.4}")
     }
 }
 
@@ -674,8 +698,8 @@ mod tests {
         assert_eq!(format_cost_micros(4_200), "$0.0042");
     }
 
-    /// The single cost rule (#1746): whole dollars at a dollar and up,
-    /// full precision below one — a sub-cent session must never render as
+    /// The compact rule (#1746): whole dollars at a dollar and up, full
+    /// precision below one — a sub-cent session must never render as
     /// `$0.00` and read as "nothing was spent".
     #[test]
     fn cost_rounds_to_dollars_and_keeps_sub_dollar_precision() {
@@ -686,6 +710,27 @@ mod tests {
         assert_eq!(format_cost_micros(420_000), "$0.42");
         assert_eq!(format_cost_micros(4_200), "$0.0042");
         assert_eq!(format_cost_micros(0), "$0.00");
+    }
+
+    /// The exact form keeps cents at every scale, for a surface with the
+    /// room for them — rounding a figure a reader judges something by is
+    /// a claim, not a convenience.
+    #[test]
+    fn exact_cost_keeps_cents_at_every_scale() {
+        assert_eq!(format_cost_micros_exact(9_310_000), "$9.31");
+        assert_eq!(format_cost_micros_exact(1_840_000), "$1.84");
+        assert_eq!(format_cost_micros_exact(420_000), "$0.42");
+        assert_eq!(format_cost_micros_exact(4_200), "$0.0042");
+    }
+
+    /// A cost is non-negative by construction, so a negative one arriving
+    /// over the wire is a bug. Both forms keep the sign: clamping it to
+    /// `$0.00` would hide the bug behind a figure that looks fine.
+    #[test]
+    fn a_negative_total_renders_visibly_wrong_not_as_zero() {
+        assert_eq!(format_cost_micros(-9_310_000), "-$9");
+        assert_eq!(format_cost_micros_exact(-9_310_000), "-$9.31");
+        assert_eq!(format_cost_micros_exact(-4_200), "-$0.0042");
     }
 
     #[test]

@@ -187,17 +187,22 @@ impl Component for PromptHistoryPicker {
         } else {
             "  (no matches)"
         };
+        // The reading keys are advertised by the chrome only when it
+        // actually lays a reader out (#1733) — on a modal too short for
+        // one they would name keys that move nothing.
+        let preview_help = vec![
+            Span::styled("PgUp/PgDn", Style::default().fg(theme.accent).bold()),
+            Span::raw(" read"),
+        ];
         let help = vec![
             Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
             Span::raw(" navigate  "),
-            Span::styled("PgUp/PgDn", Style::default().fg(theme.accent).bold()),
-            Span::raw(" read  "),
             Span::styled("Enter", Style::default().fg(theme.success).bold()),
             Span::raw(" re-send  "),
             Span::styled("Type", Style::default().fg(theme.accent).bold()),
             Span::raw(" filter  "),
             Span::styled("Esc", Style::default().fg(theme.error).bold()),
-            Span::raw(" cancel"),
+            Span::raw(" cancel  "),
         ];
         // The reader pane: the highlighted prompt in full, so the row's
         // summary is never the last word on what Enter would send.
@@ -223,6 +228,7 @@ impl Component for PromptHistoryPicker {
                 modal_w: 88,
                 empty,
                 help,
+                preview_help,
                 preview,
             },
             |row_idx, is_cursor| {
@@ -489,6 +495,56 @@ mod tests {
         let _ = p.on_key(&key(Key::PageUp));
         let after = render(&mut p);
         assert_ne!(bottom, after, "one PageUp moved nothing:\n{after}");
+    }
+
+    /// #1733 asks for a reading path on a small terminal, and an 80x20
+    /// one is small: the modal's body is 11 rows there. A fixed split
+    /// dropped the reader entirely at that size — silently, while the
+    /// help line went on naming its scroll keys. The reader now shrinks
+    /// to fit, and the hint appears only when one is laid out.
+    #[test]
+    fn a_small_terminal_still_gets_a_reader_and_an_honest_help_line() {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let body = (0..30)
+            .map(|i| format!("body line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut p = PromptHistoryPicker::new(vec![(
+            PromptRow {
+                when: "now".into(),
+                tag: None,
+                text: "body line 0 …".into(),
+            },
+            body,
+        )]);
+        let render = |p: &mut PromptHistoryPicker, w: u16, h: u16| {
+            let mut t = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+            t.draw(|f| p.view(f, Rect::new(0, 0, w, h))).expect("draw");
+            let buf = t.backend().buffer().clone();
+            (0..h)
+                .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let small = render(&mut p, 80, 20);
+        assert!(
+            small.contains("body line 0"),
+            "no reader on a small terminal:\n{small}",
+        );
+        assert!(small.contains("read"), "reader hint missing:\n{small}");
+        // …and it still reaches the end from there.
+        for _ in 0..10 {
+            let _ = p.on_key(&key(Key::PageDown));
+        }
+        let paged = render(&mut p, 80, 20);
+        assert!(paged.contains("body line 29"), "tail unreachable:\n{paged}");
+
+        // A modal with no room for a reader says so by omission: the
+        // scroll keys are not advertised.
+        let tiny = render(&mut p, 60, 12);
+        assert!(!tiny.contains("read"), "hint outlived the reader:\n{tiny}");
     }
 
     /// Widening the corpus to the full prompt must not cost the filter its

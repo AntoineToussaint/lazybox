@@ -3015,6 +3015,19 @@ impl TerminalStack {
         if !matches!(slot.kind, TerminalKind::Agent(_)) {
             return None;
         }
+        // A focus-mode pane is the exception to #1745's silent `Working`.
+        // That state is unremarkable on the tab strip and the tile headers
+        // because the sidebar row's spinner is on screen beside them; in a
+        // multi-pane focus layout the sidebar is gone and this header is
+        // the only place the state can appear, so "running" and "idle"
+        // would otherwise look identical across the grid.
+        if slot.exited.is_none() && matches!(slot.agent_state, lazybox_ipc::AgentState::Working) {
+            let tone = crate::components::sidebar::agent_state_tone(
+                theme,
+                &lazybox_ipc::AgentState::Working,
+            );
+            return Some(("· working", Style::default().fg(tone)));
+        }
         Self::agent_state_badge(slot.agent_state, slot.exited.is_some(), true, theme)
     }
 
@@ -14204,6 +14217,42 @@ mod zoom_and_tile_header_tests {
                 .to_string()
                 .contains("◆ Sonnet"),
         );
+    }
+
+    /// #1745 quieted `· working` because the tab strip and tile headers
+    /// sit beside a sidebar row that already spins. A focus-mode pane has
+    /// neither, so the word stays there — otherwise a grid of panes can't
+    /// tell a running agent from an idle one.
+    #[test]
+    fn a_focus_pane_still_names_the_working_state() {
+        let (mut stack, _sk) = two_tile_grid();
+        let theme = crate::theme::current();
+        let label =
+            |stack: &TerminalStack| stack.pane_state_badge(TerminalId(1), theme).map(|(l, _)| l);
+
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().agent_state =
+            lazybox_ipc::AgentState::Working;
+        assert_eq!(label(&stack), Some("· working"));
+        // The surfaces that DO have a sibling indicator stay quiet.
+        assert_eq!(
+            TerminalStack::agent_state_badge(lazybox_ipc::AgentState::Working, false, true, theme),
+            None
+        );
+
+        // Idle is still silent here, so the word means something.
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().agent_state =
+            lazybox_ipc::AgentState::Idle;
+        assert_eq!(label(&stack), None);
+
+        // An exited pane reports the process, not a stale "working".
+        let slot = stack.terminals.get_mut(&TerminalId(1)).unwrap();
+        slot.agent_state = lazybox_ipc::AgentState::Working;
+        slot.exited = Some(TerminalExit {
+            code: Some(1),
+            dead_on_arrival: false,
+            last_output: None,
+        });
+        assert_eq!(label(&stack), Some("✗ exited"));
     }
 
     /// #1745: the focus pointer is the arrow alone — the words it used to

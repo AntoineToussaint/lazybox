@@ -208,6 +208,11 @@ pub struct FilterModalChrome<'a> {
     /// user can read before acting on it (#1733). `None` keeps the
     /// original single-column chrome.
     pub preview: Option<PreviewPane>,
+    /// Help spans that describe the reader pane (its scroll keys). Shown
+    /// only when a reader is actually laid out: a modal too small to
+    /// carry one must not advertise keys that move nothing, which is how
+    /// a reader that silently vanished still looked available (#1733).
+    pub preview_help: Vec<Span<'static>>,
 }
 
 /// The highlighted row's complete content, for the reader pane
@@ -224,8 +229,20 @@ pub struct PreviewPane {
 const SIDE_PREVIEW_MIN_W: u16 = 72;
 
 /// Rows the bottom preview takes when it can't sit beside the list —
-/// enough for a couple of wrapped lines plus its position cue.
+/// enough for a couple of wrapped lines plus its position cue. It shrinks
+/// (never below [`MIN_PREVIEW_H`]) rather than disappearing when the modal
+/// is short.
 const BOTTOM_PREVIEW_H: u16 = 6;
+
+/// Floor for the stacked reader: two content rows plus the position cue.
+/// Below this the pane cannot show enough to be read, and no preview is
+/// laid out at all — which the caller must reflect in its help line rather
+/// than advertise keys that now do nothing.
+const MIN_PREVIEW_H: u16 = 3;
+
+/// Rows the list keeps for itself before the reader takes any. A picker
+/// that can't show a few candidates has stopped being a picker.
+const MIN_LIST_H: u16 = 3;
 
 /// Split the picker body into `(list, preview)` rects, side-by-side on a
 /// wide modal and stacked on a narrow one. Returns `(list, None)` when
@@ -248,19 +265,23 @@ fn split_preview(body: Rect, has_preview: bool) -> (Rect, Option<Rect>) {
         };
         return (list, Some(preview));
     }
-    // Stacked: only worth it while the list keeps more rows than the
-    // reader takes, otherwise the picker stops being a picker.
-    if body.height <= BOTTOM_PREVIEW_H * 2 {
+    // Stacked. The reader takes what is left once the list has its floor,
+    // capped at its usual height — so a short modal shrinks the reader
+    // instead of dropping it, and the text stays reachable at sizes where
+    // a fixed split would have left no way to read it at all.
+    let spare = body.height.saturating_sub(MIN_LIST_H + 1);
+    if spare < MIN_PREVIEW_H {
         return (body, None);
     }
-    let list_h = body.height - BOTTOM_PREVIEW_H - 1;
+    let preview_h = spare.min(BOTTOM_PREVIEW_H);
+    let list_h = body.height - preview_h - 1;
     let list = Rect {
         height: list_h,
         ..body
     };
     let preview = Rect {
         y: body.y + list_h + 1,
-        height: BOTTOM_PREVIEW_H,
+        height: preview_h,
         ..body
     };
     (list, Some(preview))
@@ -284,6 +305,7 @@ pub fn render_filter_modal<P: FilterableList>(
         modal_w,
         empty,
         help,
+        preview_help,
         mut preview,
     } = chrome;
     let modal_w = modal_w.min(area.width.saturating_sub(4));
@@ -375,6 +397,10 @@ pub fn render_filter_modal<P: FilterableList>(
     }
     frame.render_widget(Paragraph::new(body), body_rect);
 
+    let mut help = help;
+    if clamped.is_some() {
+        help.extend(preview_help);
+    }
     frame.render_widget(Paragraph::new(Line::from(help)), help_rect);
     clamped
 }

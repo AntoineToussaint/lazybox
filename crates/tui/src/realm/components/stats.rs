@@ -199,11 +199,11 @@ impl Stats {
     /// `−$0.00` beside a real saving is what talks a reader out of the
     /// rollout the number exists to justify.
     fn compaction_saved(&self, unpriced: &str, bytes: &str, micros: &str) -> String {
-        // A saving under half a cent renders `−$0.00` through a two-decimal
-        // format — the same confident zero the unpriced branch exists to
-        // avoid, reached by rounding instead of by a missing rate card. It is
-        // most reachable early in a rollout, on one workspace, which is
-        // exactly when the number is being read to decide anything.
+        // Under half a cent the dollars stop being a unit anyone can act
+        // on — nobody decides a rollout on `−$0.0042` — while the byte
+        // count still scales. So the figure that carries meaning at that
+        // size is reported instead, for the same reason the unpriced
+        // branch reports bytes: the dollar total is the partial one.
         if self.total(unpriced) > 0 || self.total(micros) < MIN_RENDERABLE_MICROS {
             format!("−{}", fmt_bytes(self.total(bytes)))
         } else {
@@ -541,14 +541,25 @@ fn fmt_compact(n: i64) -> String {
     }
 }
 
-/// USD micros (millionths of a dollar) → `$9` / `$0.42`, through the one
-/// shared cost rule (#1746).
+/// USD micros (millionths of a dollar) → `$1.25`, through the shared
+/// cost rule's exact form. This window is not width-scarce — it is a
+/// labelled modal — and #1746's whole-dollar rounding was justified by
+/// scarce columns on a ROW. Applied here it would round a compaction
+/// saving of `−$1.84` up to `−$2`, inflating by 9% the one figure
+/// [`Stats::compaction_saved`] exists to keep honest.
 fn fmt_cost(micros: i64) -> String {
-    lazybox_tui_core::usage::format_cost_micros(micros.max(0) as u64)
+    lazybox_tui_core::usage::format_cost_micros_exact(micros)
 }
 
-/// Below this a two-decimal dollar figure rounds to `$0.00`, so the saving is
-/// reported in bytes instead — true at any scale.
+/// Half a cent: below it a saving is reported in bytes, which stay
+/// meaningful at any scale, rather than in dollars nobody can act on.
+///
+/// The threshold stands on that alone. It was originally the point where
+/// a two-decimal format rounded to `$0.00`, which tied it to the
+/// formatter; the modal now renders sub-cent figures in full
+/// (`−$0.0042`), so nothing rounds to zero and the boundary is a
+/// judgement about usefulness, pinned by
+/// `a_sub_cent_saving_is_reported_in_bytes`.
 const MIN_RENDERABLE_MICROS: i64 = 5_000;
 
 /// Byte counts at the scale a condensed conversation reaches: `812 B`,
@@ -768,7 +779,7 @@ mod tests {
         assert!(out.contains("Tokens out"), "{out}");
         // …and recombined (1.2k + 800 = 2.0k) in the recent-totals footer.
         assert!(out.contains("2.0k"), "{out}");
-        assert!(out.contains("$1"), "{out}");
+        assert!(out.contains("$1.25"), "{out}");
         // The sparkline bars keep a gap from their label rather than
         // butting straight against the "7d".
         assert!(out.contains("Sessions · 7d ▁"), "{out}");
@@ -778,9 +789,45 @@ mod tests {
     }
 
     /// #1621: `shadow` never elides a byte upstream, and shadow is the
-    /// shipped default. Rendered as `Compaction −$2`, the row claims a
+    /// shipped default. Rendered as `Compaction −$1.84`, the row claims a
     /// saving against a bill that did not move — on most installs, the only
     /// compaction row there is.
+    /// The half-cent floor is a judgement about which unit is useful at
+    /// that size, not a workaround for a formatter that rounded to
+    /// `$0.00` — so it holds even though the modal now renders sub-cent
+    /// figures in full. Below it the saving reads in bytes; above it, in
+    /// dollars.
+    #[test]
+    fn a_sub_cent_saving_is_reported_in_bytes() {
+        let saving = |micros| {
+            let mut comp = Stats::new(
+                vec![
+                    bucket("2026-08-25", stats::COMPACTION_PROJECTED_BLOCKS, 3),
+                    bucket("2026-08-25", stats::COMPACTION_PROJECTED_BYTES, 812),
+                    bucket("2026-08-25", stats::COMPACTION_PROJECTED_MICROS, micros),
+                ],
+                today(),
+                false,
+            );
+            let out = render(&mut comp, 60, 40);
+            out.lines()
+                .find(|line| line.contains("Projected"))
+                .unwrap_or_else(|| panic!("a projected row:\n{out}"))
+                .to_string()
+        };
+
+        let tiny = saving(MIN_RENDERABLE_MICROS - 1);
+        assert!(tiny.contains("812 B"), "sub-cent saving in bytes: {tiny:?}");
+        assert!(!tiny.contains('$'), "no dollars at that scale: {tiny:?}");
+
+        // At the floor the unit switches back to dollars — still a small
+        // figure (`−$0.0050`), but one that grows into a readable number
+        // rather than a byte count that never becomes money.
+        let real = saving(MIN_RENDERABLE_MICROS);
+        assert!(real.contains('$'), "at the floor, dollars: {real:?}");
+        assert!(!real.contains(" B"), "not bytes at the floor: {real:?}");
+    }
+
     #[test]
     fn a_projected_saving_is_labelled_and_never_shown_as_money_saved() {
         let mut comp = Stats::new(
@@ -797,7 +844,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("Projected"))
             .expect("a projected row");
-        assert!(row.contains("−$2 gross · 12 blocks"), "{out}");
+        assert!(row.contains("−$1.84 gross · 12 blocks"), "{out}");
         // A shadow-only window mints no realized row, so nothing on screen
         // can be read as money already saved. The marker sits in the label
         // column precisely because that is what a narrow terminal keeps.
@@ -898,7 +945,7 @@ mod tests {
             .position(|l| l.contains("Compaction"))
             .expect("compaction");
         assert_eq!(saving, cost + 1, "{out}");
-        assert!(out.contains("−$2 gross · 12 blocks"), "{out}");
+        assert!(out.contains("−$1.84 gross · 12 blocks"), "{out}");
         // Today saw no back-out even though the window did — the row reports
         // the active tab, not the whole window.
         assert!(out.contains("Regressions  0"), "{out}");
@@ -1155,9 +1202,13 @@ mod tests {
         assert_eq!(fmt_compact(2_300_000), "2.3M");
         assert_eq!(fmt_compact(1500), "1.5k");
         assert_eq!(fmt_compact(999), "999");
-        // Whole dollars at a dollar and up, cents only below one (#1746).
-        assert_eq!(fmt_cost(1_250_000), "$1");
+        // The modal keeps cents: its figures are read to judge something,
+        // and it has the width (#1746 rounds the ROW surfaces, not this).
+        assert_eq!(fmt_cost(1_250_000), "$1.25");
         assert_eq!(fmt_cost(420_000), "$0.42");
+        // A negative total is a daemon bug; it must look wrong, not read
+        // as a plausible $0.00.
+        assert_eq!(fmt_cost(-1_250_000), "-$1.25");
         assert_eq!(fmt_days(0), "0 days");
         assert_eq!(fmt_days(1), "1 day");
         assert_eq!(fmt_days(5), "5 days");

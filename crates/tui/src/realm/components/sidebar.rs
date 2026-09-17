@@ -376,6 +376,13 @@ impl Sidebar {
         self.inner.hydrate_session_costs(costs);
     }
 
+    /// Adopt the daemon's durable agent-text corpus on connect
+    /// (`Event::AgentSearchText`, #1774). See
+    /// [`crate::components::sidebar::Sidebar::ingest_durable_agent_text`].
+    pub fn ingest_durable_agent_text(&mut self, entries: Vec<(String, String)>) {
+        self.inner.ingest_durable_agent_text(entries);
+    }
+
     /// Record a provider plan-quota report (`AgentProviderQuota`) — the
     /// 5h/weekly "can I keep working?" headroom.
     pub fn note_provider_quota(
@@ -431,6 +438,16 @@ impl Sidebar {
     /// The active search state, if any. See `Sidebar::search`.
     pub fn search(&self) -> Option<&crate::components::sidebar::SearchState> {
         self.inner.search()
+    }
+
+    /// Replace the agent-text corpus the `/` search's `agent:` / `said:`
+    /// qualifiers read (#1774). See
+    /// [`crate::components::sidebar::Sidebar::set_agent_text`].
+    pub fn set_agent_text(
+        &mut self,
+        agent_text: std::collections::HashMap<lazybox_core::SessionKey, String>,
+    ) {
+        self.inner.set_agent_text(agent_text);
     }
 
     /// Read currently selected workspace key (for selection projection).

@@ -119,6 +119,30 @@ fn client_scrollback_bytes() -> Option<usize> {
 /// 4 KiB is enough to span any prompt the agents have shipped so far.
 pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 
+/// Largest index `<= at` that `s` can be split on without cutting a
+/// multi-byte char. (`str::floor_char_boundary` is still unstable.)
+fn floor_char_boundary(s: &str, at: usize) -> usize {
+    if at >= s.len() {
+        return s.len();
+    }
+    let mut i = at;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Per-workspace byte budget for the searchable agent-text corpus
+/// (#1774). Matches the daemon's own prompt-history retention
+/// (`PROMPT_HISTORY_MAX_BYTES`) so that everything the daemon keeps is
+/// searchable: a smaller budget here would leave stored history silently
+/// unfindable, with nothing to tell the user their query missed because
+/// the corpus was clipped rather than because the words weren't there.
+/// It still bounds what an `agent:` query re-scans per keystroke to a
+/// function of the workspace count, not of how much an agent has been
+/// talked to.
+pub const AGENT_TEXT_CORPUS_CAP: usize = 128 * 1024;
+
 /// Copy `area` out of a frame buffer into an owned buffer keyed to
 /// that same area — the composed-frame cache behind the U1 render
 /// gate. ~10k cell clones for a full-window tile: three orders of
@@ -3739,6 +3763,94 @@ impl TerminalStack {
         let mut history = slot.prompt_history.clone();
         history.reverse();
         Some((id, history))
+    }
+
+    /// The searchable agent text per workspace, for the `/` search's
+    /// `agent:` / `said:` qualifiers (#1774).
+    ///
+    /// Stage 1 of the corpus is the prompt history: what the agent was
+    /// asked. It's small, already structured, already keyed by
+    /// workspace, and the daemon replays it for EVERY live terminal in
+    /// its bulk snapshot — so "which workspace did I ask about X?"
+    /// answers from data the client is already holding, with no new
+    /// storage and no scan of the megabyte-scale output rings. What the
+    /// agent *said* back lives only in those rings and needs a
+    /// daemon-side search to reach; it is not in this corpus yet.
+    ///
+    /// A workspace with several agent terminals contributes all of
+    /// them — the search asks about the workspace, not the tab. Newest
+    /// prompts win the byte budget, since a query is far likelier to be
+    /// about recent work.
+    /// A digest of everything [`Self::agent_text_by_session`] would
+    /// read, so a caller can skip rebuilding the corpus when nothing has
+    /// changed (#1774).
+    ///
+    /// Derived rather than incremented at each mutation site: the corpus
+    /// changes when prompt history is assigned from a snapshot, inherited
+    /// across a respawn, appended on submit, or dropped with its
+    /// terminal — and ALSO when a rebadge re-keys a slot's session
+    /// without touching its history at all. A hand-maintained counter
+    /// that missed one of those would leave the search quietly matching
+    /// stale text, the failure a user cannot diagnose. So the digest
+    /// folds every input the corpus is built from — the session key it
+    /// is keyed by, plus per-slot history length and newest timestamp —
+    /// over terminals rather than prompts, staying cheap enough for the
+    /// per-frame check.
+    pub fn agent_text_rev(&self) -> u64 {
+        let mut fold: u64 = 0;
+        for (id, slot) in &self.terminals {
+            if !matches!(slot.kind, TerminalKind::Agent(_)) {
+                continue;
+            }
+            let newest = slot.prompt_history.last().map_or(0, |p| p.timestamp_ms);
+            // The session key is part of the digest because it is what the
+            // corpus is KEYED by, and a rebadge (`TerminalsRebadged`, the
+            // issue→PR fold) re-points it in place without touching the
+            // terminal id, the history length or any timestamp. Folding only
+            // the history would leave the corpus filed under a key no row has
+            // any more, and the search would quietly match nothing.
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(slot.session_key.as_str(), &mut h);
+            fold = fold.wrapping_add(
+                id.0 ^ (slot.prompt_history.len() as u64).rotate_left(17)
+                    ^ newest.rotate_left(33)
+                    ^ std::hash::Hasher::finish(&h).rotate_left(7),
+            );
+        }
+        fold
+    }
+
+    pub fn agent_text_by_session(&self) -> HashMap<SessionKey, String> {
+        let mut per_session: HashMap<SessionKey, Vec<&lazybox_ipc::UserPrompt>> = HashMap::new();
+        for slot in self.terminals.values() {
+            if !matches!(slot.kind, TerminalKind::Agent(_)) || slot.prompt_history.is_empty() {
+                continue;
+            }
+            per_session
+                .entry(slot.session_key.clone())
+                .or_default()
+                .extend(slot.prompt_history.iter());
+        }
+        per_session
+            .into_iter()
+            .filter_map(|(key, mut prompts)| {
+                prompts.sort_by_key(|p| std::cmp::Reverse(p.timestamp_ms));
+                let mut corpus = String::new();
+                for prompt in prompts {
+                    let room = AGENT_TEXT_CORPUS_CAP.saturating_sub(corpus.len());
+                    if room == 0 {
+                        break;
+                    }
+                    // A prompt bigger than the whole budget is TRUNCATED, not
+                    // skipped: dropping it would leave a workspace whose one
+                    // prompt was a pasted log silently unsearchable, and the
+                    // user has no way to see why their query missed.
+                    corpus.push_str(&prompt.text[..floor_char_boundary(&prompt.text, room)]);
+                    corpus.push('\n');
+                }
+                (!corpus.trim().is_empty()).then_some((key, corpus))
+            })
+            .collect()
     }
 
     /// The text a `]]r` recall should drop back into the focused agent
@@ -11400,6 +11512,48 @@ mod rebadge_tests {
             .collect()
     }
 
+    /// A rebadge (the issue→PR fold) re-keys a slot's session without
+    /// touching its prompt history, so the corpus digest has to move on
+    /// it too — otherwise the sidebar keeps the agent text filed under a
+    /// key no row carries any more and `agent:` quietly matches nothing
+    /// until the next unrelated prompt (#1774).
+    #[test]
+    fn rebadge_moves_the_agent_text_digest_and_rekeys_the_corpus() {
+        let issue = SessionKey::new("github:o/r#1");
+        let pr = SessionKey::new("github:o/r#2");
+        let mut stack = spawned_stack(TerminalId(1), &issue);
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .prompt_history
+            .push(lazybox_ipc::UserPrompt {
+                text: "rewrite the parser".into(),
+                timestamp_ms: 7,
+                source: lazybox_ipc::PromptSource::Typed,
+            });
+
+        let before = stack.agent_text_rev();
+        assert!(stack.agent_text_by_session().contains_key(&issue));
+
+        stack.on_event(&Event::TerminalsRebadged {
+            from: issue.clone(),
+            to: pr.clone(),
+        });
+
+        assert_ne!(
+            stack.agent_text_rev(),
+            before,
+            "a rebadge changes the corpus even though no prompt moved"
+        );
+        let corpus = stack.agent_text_by_session();
+        assert!(
+            corpus.contains_key(&pr),
+            "the agent text follows the workspace to its new key"
+        );
+        assert!(!corpus.contains_key(&issue), "and leaves no orphan behind");
+    }
+
     #[test]
     fn rebadge_then_remove_keeps_the_moved_terminal() {
         let issue = SessionKey::new("github:o/r#1");
@@ -13381,6 +13535,116 @@ mod agent_crash_tests {
         );
         assert!(matches!(outcome, PaneOutcome::Consumed));
         assert!(cmds.is_empty(), "no Write reaches a dead terminal");
+    }
+
+    /// The `agent:` search corpus (#1774): keyed by workspace (not
+    /// terminal), newest prompts win the byte budget, shells contribute
+    /// nothing, and the digest moves whenever the corpus would.
+    #[test]
+    fn agent_text_corpus_is_per_workspace_bounded_and_revision_tracked() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        // A second agent terminal on the SAME workspace, plus a shell.
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(3),
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+
+        let empty_rev = stack.agent_text_rev();
+        assert!(
+            stack.agent_text_by_session().is_empty(),
+            "an agent that has never been prompted contributes no corpus"
+        );
+
+        let push = |stack: &mut TerminalStack, id: u64, text: &str, ts: u64| {
+            stack
+                .terminals
+                .get_mut(&TerminalId(id))
+                .unwrap()
+                .prompt_history
+                .push(lazybox_ipc::UserPrompt {
+                    text: text.into(),
+                    timestamp_ms: ts,
+                    source: lazybox_ipc::PromptSource::Typed,
+                });
+        };
+        push(&mut stack, 1, "rewrite the parser", 10);
+        push(&mut stack, 2, "check the lexer", 20);
+        push(&mut stack, 3, "cd /tmp && ls", 30);
+
+        assert_ne!(
+            stack.agent_text_rev(),
+            empty_rev,
+            "appending a prompt must move the digest, or the search goes stale"
+        );
+        let corpus = stack.agent_text_by_session();
+        assert_eq!(corpus.len(), 1, "both agent terminals fold into one row");
+        let text = &corpus[&sk];
+        assert!(text.contains("rewrite the parser"), "{text:?}");
+        assert!(
+            text.contains("check the lexer"),
+            "every agent terminal on the workspace contributes: {text:?}"
+        );
+        assert!(
+            !text.contains("cd /tmp"),
+            "a shell is not an agent saying something: {text:?}"
+        );
+
+        // Newest-first within the budget: an old prompt is what gets cut.
+        push(&mut stack, 1, &"old ".repeat(AGENT_TEXT_CORPUS_CAP), 1);
+        push(&mut stack, 1, "newest prompt wins", 99);
+        let text = &stack.agent_text_by_session()[&sk];
+        assert!(text.len() <= AGENT_TEXT_CORPUS_CAP + "newest prompt wins".len() + 2);
+        assert!(
+            text.contains("newest prompt wins"),
+            "the newest prompt is kept when the budget binds: {}",
+            &text[..text.len().min(80)]
+        );
+
+        // A single prompt larger than the whole budget is truncated, not
+        // dropped — otherwise its workspace would be silently unsearchable.
+        let mut lone = active_stack(9, &sk, TerminalKind::Agent("claude".into()));
+        let huge = format!("找 needle {}", "pad ".repeat(AGENT_TEXT_CORPUS_CAP));
+        lone.terminals
+            .get_mut(&TerminalId(9))
+            .unwrap()
+            .prompt_history
+            .push(lazybox_ipc::UserPrompt {
+                text: huge,
+                timestamp_ms: 1,
+                source: lazybox_ipc::PromptSource::Typed,
+            });
+        let text = &lone.agent_text_by_session()[&sk];
+        assert!(
+            text.contains("needle"),
+            "an over-budget prompt still contributes its head"
+        );
+        assert!(text.len() <= AGENT_TEXT_CORPUS_CAP + 1);
+
+        // Losing the terminal loses its text — and says so in the digest.
+        let before = stack.agent_text_rev();
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(2),
+            exit_code: Some(0),
+            last_output: None,
+        });
+        stack.terminals.remove(&TerminalId(2));
+        assert_ne!(stack.agent_text_rev(), before);
+        assert!(!stack.agent_text_by_session()[&sk].contains("check the lexer"));
     }
 
     #[test]

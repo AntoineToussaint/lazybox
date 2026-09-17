@@ -2504,6 +2504,23 @@ pub enum Event {
     SessionCosts {
         costs: Vec<(String, u64)>,
     },
+    /// Durable per-workspace agent prompt text for the `/` search's
+    /// `agent:` / `said:` qualifiers (`(session_key, text)`), pushed once
+    /// right after [`Event::Snapshot`] on subscribe (#1774).
+    ///
+    /// Its own event for the same reason as [`Event::SessionCosts`]: the
+    /// snapshot construction sites stay untouched. More importantly it is
+    /// keyed by WORKSPACE, not by terminal — `TerminalSnapshot`'s
+    /// `prompt_history` only reaches the client for workspaces that still
+    /// have a live terminal in the registry, while the history itself is
+    /// persisted per stable session key and outlives the terminal. Sending
+    /// only the terminal-borne copy made exactly the workspaces the user is
+    /// least likely to remember — the ones whose agent has long exited —
+    /// the ones the search could not reach. Empty vec is valid (nothing
+    /// prompted yet).
+    AgentSearchText {
+        entries: Vec<(String, String)>,
+    },
     /// Authenticated user's login per provider source ("github" →
     /// "AntoineToussaint", etc.). Emitted once after the daemon's
     /// gh/linear client(s) initialize; the TUI uses these logins

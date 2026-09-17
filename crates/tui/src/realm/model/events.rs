@@ -511,6 +511,14 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::SessionCosts { costs } => {
                 self.sidebar.hydrate_session_costs(costs);
             }
+            // Durable per-workspace agent text replayed on connect (#1774):
+            // the `agent:` search corpus for EVERY workspace with stored
+            // prompt history, including those whose agent has exited and so
+            // contribute no terminal — the client's own terminal stack can
+            // only ever see the live ones.
+            IpcEvent::AgentSearchText { entries } => {
+                self.sidebar.ingest_durable_agent_text(entries.clone());
+            }
             // Durable per-action usage counts replayed on connect (#1502):
             // seed the local mastery ledger so onboarding chrome reflects
             // what the user has already learned instead of resetting.
@@ -1362,6 +1370,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::GithubDiscoveryBehind { .. }
                 | IpcEvent::SessionCosts { .. }
+                | IpcEvent::AgentSearchText { .. }
                 | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::MasteryLedger { .. }
@@ -2434,6 +2443,7 @@ impl<T: TerminalAdapter> Model<T> {
             // classified here before this compiles.
             IpcEvent::Snapshot { .. }
             | IpcEvent::SessionCosts { .. }
+            | IpcEvent::AgentSearchText { .. }
             | IpcEvent::ViewerIdentities { .. }
             | IpcEvent::AutoFixPolicyConfig { .. }
             | IpcEvent::ShellCommandConfig { .. }
@@ -2882,6 +2892,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::SessionCosts { .. }
+                | IpcEvent::AgentSearchText { .. }
                 | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::MasteryLedger { .. }

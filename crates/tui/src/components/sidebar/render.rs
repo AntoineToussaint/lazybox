@@ -1714,6 +1714,10 @@ impl Sidebar {
             }
             None => 0u8.hash(&mut h),
         }
+        // The agent-text excerpt a row renders is a function of the
+        // corpus as well as the query, and a corpus change is invisible
+        // to the query hash (#1774).
+        self.agent_text_rev.hash(&mut h);
         let mut fold: u64 = 0;
         for (k, st) in &self.agents {
             fold = fold.wrapping_add(hash_one(k) ^ agent_state_code(st).rotate_left(1));
@@ -2019,8 +2023,12 @@ impl Sidebar {
                 let q = crate::components::visible_rows::normalized_query(&s.query);
                 (!q.is_empty() && self.searched_keys.contains(key)).then_some(q)
             });
+            // Only a row an `agent:` term actually hit carries a cue, so
+            // this is `None` for every row of an ordinary search (#1774).
+            let agent_excerpt = self.agent_excerpt(key);
             let ctx = WorkspaceRowCtx {
                 workspace,
+                agent_excerpt,
                 task: workspace.and_then(|w| w.primary_task()),
                 theme,
                 now,

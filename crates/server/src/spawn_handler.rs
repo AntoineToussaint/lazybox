@@ -157,7 +157,7 @@ fn agent_state_key(backend_key: &str, generation: u64) -> String {
 /// keeps the old key. The durable PTY scrollback already survives respawn by
 /// keying on the stable session identity; this brings the input side into line
 /// (root cause of the history-orphaned-on-respawn bug).
-const WORKSPACE_MSGS_PREFIX: &str = "workspace-msgs:";
+pub(crate) const WORKSPACE_MSGS_PREFIX: &str = "workspace-msgs:";
 const WORKSPACE_DRAFT_PREFIX: &str = "workspace-draft:";
 /// KV flag marking the one-time `terminal-*` → `workspace-*` re-key migration
 /// as done, so it never re-runs (and never re-folds already-swept legacy rows).
@@ -11113,7 +11113,23 @@ pub async fn handle_record_user_message(
         }
     });
     match write.await {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => {
+            // Re-publish this workspace's search corpus (#1774). Clients seed
+            // it from the durable rows on connect, so without this the copy
+            // they hold is frozen at connect time — and a terminal torn down
+            // later in the session takes its live overlay with it, silently
+            // losing every prompt submitted since. Keyed by workspace, so it
+            // stands on its own once the terminal is gone.
+            let store = config.store.clone();
+            let key_for_read = session_key.clone();
+            if let Ok(entries) = tokio::task::spawn_blocking(move || {
+                crate::client_kv::agent_search_text_for(&*store, &key_for_read)
+            })
+            .await
+            {
+                let _ = config.bus.send(Event::AgentSearchText { entries });
+            }
+        }
         Ok(Err(e)) => tracing::warn!("persist terminal user message: store write failed: {e}"),
         Err(e) => tracing::warn!("persist terminal user message: store task failed: {e}"),
     }
@@ -11124,7 +11140,7 @@ pub async fn handle_record_user_message(
 /// the client's `COMPOSING_CAP` at 16× headroom for the running log) is
 /// exceeded, so a long-lived session can't grow the row without bound.
 const PROMPT_HISTORY_MAX_ENTRIES: usize = 200;
-const PROMPT_HISTORY_MAX_BYTES: usize = 128 * 1024;
+pub(crate) const PROMPT_HISTORY_MAX_BYTES: usize = 128 * 1024;
 
 /// Evict oldest entries until the history fits both the entry-count and
 /// total-byte budgets. Always keeps at least the newest entry so the recap

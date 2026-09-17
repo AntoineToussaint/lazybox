@@ -193,6 +193,13 @@ pub struct WorkspaceRowCtx<'a> {
     /// so the user can see *what* matched — the vim `/pattern` cue (#1099).
     /// Already `#`-stripped and trimmed by the caller.
     pub highlight_query: Option<&'a str>,
+    /// Excerpt of the agent text an `agent:` / `said:` search term hit
+    /// (#1774). An agent-text match has nothing in the title for
+    /// `highlight_query` to underline, so without this the row would
+    /// look arbitrary — it says *why* the row is in the result set.
+    /// Rides the title cell's outer tail, so a narrow sidebar drops it
+    /// before the label chips and long before the title.
+    pub agent_excerpt: Option<&'a str>,
     /// Source group label to render as a dim ` · repo` cue trailing the
     /// title (#1450). `Some` only for rows in the synthetic `★ Focused`
     /// section, which are lifted out of their repo group and so carry no
@@ -699,7 +706,33 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         spans.push(Span::styled(format!(" · {repo}"), cue_style));
         cue = 1;
     }
+    // The agent-text match cue joins that same outer tail, outermost of
+    // all (#1774): it explains a result the user is already looking at,
+    // so it outranks nothing — not the chips, not the source cue, and
+    // certainly not the title. Trailing the source cue keeps #1747's
+    // reading intact: the row still opens as `Bug · owner/repo`.
+    let excerpt = agent_excerpt_spans(ctx);
+    cue += excerpt.len();
+    spans.extend(excerpt);
     Cell::new(spans).atomic_tail(tail).outer_tail(cue)
+}
+
+/// The agent-text match cue: a dim `⌕ …excerpt…` trailing the row
+/// (#1774). Dim and glyph-led so it reads as an annotation rather than a
+/// second title, and it rides the cell's outer tail so it is the first
+/// thing a narrowing row gives up. Empty for every row no `agent:` term
+/// matched, which is every row of an ordinary search.
+fn agent_excerpt_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
+    let Some(excerpt) = ctx.agent_excerpt.filter(|e| !e.is_empty()) else {
+        return Vec::new();
+    };
+    let glyph = if ctx.ascii_glyphs { "~" } else { "⌕" };
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        ctx.row_style().fg(ctx.theme.text_dim)
+    };
+    vec![Span::styled(format!("  {glyph} {excerpt}"), style)]
 }
 
 /// Split a title into styled spans, underlining the first case-insensitive
@@ -1759,6 +1792,7 @@ mod tests {
             inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            agent_excerpt: None,
             source_repo: None,
         }
     }
@@ -2275,6 +2309,7 @@ mod tests {
             inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            agent_excerpt: None,
             source_repo: None,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
@@ -2950,6 +2985,7 @@ mod tests {
             inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            agent_excerpt: None,
             source_repo: None,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
@@ -4529,6 +4565,7 @@ mod tests {
             inbound_requests: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            agent_excerpt: None,
             source_repo: None,
         };
         let columns = build_columns(4);
@@ -4962,6 +4999,68 @@ mod tests {
         // The unmatched flanks keep the base style untouched.
         assert_eq!(spans[0].style.fg, base.fg);
         assert_eq!(spans[2].style.fg, base.fg);
+    }
+
+    /// An `agent:` hit has nothing in the title to underline, so the row
+    /// carries the excerpt instead — and only when there is one (#1774).
+    #[test]
+    fn agent_excerpt_rides_the_title_cell_tail() {
+        let theme = theme();
+        let task = pr_task("owner/repo", 12);
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        assert!(
+            agent_excerpt_spans(&ctx).is_empty(),
+            "no excerpt without an agent hit"
+        );
+        // An empty excerpt is not a cue either — it would render a bare
+        // glyph explaining nothing.
+        ctx.agent_excerpt = Some("");
+        assert!(agent_excerpt_spans(&ctx).is_empty());
+
+        ctx.agent_excerpt = Some("…rewrite the parser…");
+        let spans = agent_excerpt_spans(&ctx);
+        assert_eq!(spans.len(), 1);
+        assert!(
+            spans[0].content.contains("rewrite the parser"),
+            "{:?}",
+            spans[0].content
+        );
+        assert!(spans[0].content.contains('⌕'), "{:?}", spans[0].content);
+        assert_eq!(
+            spans[0].style.fg,
+            Some(theme.text_dim),
+            "the cue is dim so it annotates rather than competes"
+        );
+
+        ctx.ascii_glyphs = true;
+        assert!(
+            agent_excerpt_spans(&ctx)[0].content.contains('~'),
+            "ascii mode substitutes the glyph"
+        );
+
+        // The whole cue lives in the cell's OUTER tail, so a narrow row
+        // sheds it — before the label chips and long before the title —
+        // rather than slicing it.
+        ctx.ascii_glyphs = false;
+        use crate::components::table::render_table;
+        let wide = render_table(
+            &[build_row(&ctx)],
+            &build_columns(ctx.max_pr_num_width),
+            120,
+        );
+        assert!(wide[0].to_string().contains("rewrite the parser"));
+        let narrow = render_table(&[build_row(&ctx)], &build_columns(ctx.max_pr_num_width), 34);
+        let narrow = narrow[0].to_string();
+        assert!(
+            !narrow.contains("rewrite the parser"),
+            "a narrow row sheds the cue: {narrow:?}"
+        );
+        assert!(
+            narrow.chars().count() <= 34,
+            "and stays within budget: {narrow:?}"
+        );
     }
 
     #[test]

@@ -46,9 +46,12 @@ use serde::Deserialize;
 ///     the aggregate `pr.ci` (from `statusCheckRollup.state`) is
 ///     available at inbox-scan time.
 ///   - `role` (see `derive_role_inner`) comes from concrete signals:
-///     author, a review I submitted, an outstanding review request, or
-///     an assignment — never from mere involvement, so the `reviewer`
-///     filter can't sweep in every commented-on PR. Detecting "I
+///     author, a review I submitted, an outstanding review request, an
+///     assignment, or taking part in the conversation (a comment, a
+///     verdict, an @-mention of me) — never from mere presence in the
+///     result set, so the `reviewer` filter can't sweep in every
+///     commented-on PR and the `mentioned` filter can't sweep in a
+///     repo's foreign PRs (those are `Observer`). Detecting "I
 ///     approved, so I'm done" needs the full reviews list; the
 ///     inbox-scan path leans on the review-request / assignee signals
 ///     instead and the lazy-fetch path refines it on workspace open.
@@ -2037,6 +2040,17 @@ pub fn pr_details_to_details(node: &GqlPrDetailsNode, my_username: &str) -> PrDe
             is_author,
             &requested_reviewer_logins(&node.review_requests),
             &assignee_logins(&node.assignees),
+            viewer_participates(
+                my_username,
+                None,
+                &node.comments.nodes,
+                &node.reviews.nodes,
+                node.latest_opinionated_reviews
+                    .nodes
+                    .iter()
+                    .chain(&node.latest_reviews.nodes),
+                &node.review_threads.nodes,
+            ),
         ),
         needs_reply: needs_reply_check_inner(
             &node.review_threads.nodes,
@@ -3648,7 +3662,72 @@ fn derive_role(pr: &GqlPr, my_username: &str, is_author: bool) -> TaskRole {
         is_author,
         &requested_reviewer_logins(&pr.review_requests),
         &assignee_logins(&pr.assignees),
+        viewer_participates(
+            my_username,
+            pr.body.as_deref(),
+            &pr.comments.nodes,
+            &pr.reviews.nodes,
+            pr.latest_opinionated_reviews
+                .nodes
+                .iter()
+                .chain(&pr.latest_reviews.nodes),
+            &pr.review_threads.nodes,
+        ),
     )
+}
+
+/// Whether the payload shows me taking part in the conversation: a
+/// comment, review, or review-thread comment I wrote, or an @-mention of
+/// me in the body or in any of those. It is what separates `Mentioned`
+/// from `Observer` once author / requested reviewer / assignee are ruled
+/// out. Every list is capped by its query's `first:`, so an old
+/// involvement can sit past the window — a search that names the viewer
+/// (`involves:`, `mentions:`, …) closes that gap via [`mark_involved`].
+fn viewer_participates<'a>(
+    my_username: &str,
+    body: Option<&str>,
+    comments: &[GqlComment],
+    reviews: &[GqlReview],
+    verdicts: impl IntoIterator<Item = &'a GqlReviewerVerdict>,
+    threads: &[GqlReviewThread],
+) -> bool {
+    let is_me =
+        |author: &Option<GqlAuthor>| author.as_ref().is_some_and(|a| a.login == my_username);
+    let names_me = |text: &str| crate::mentions::mentions_login(text, my_username);
+    body.is_some_and(names_me)
+        || comments
+            .iter()
+            .chain(threads.iter().flat_map(|t| &t.comments.nodes))
+            .any(|c| is_me(&c.author) || names_me(&c.body))
+        || reviews
+            .iter()
+            .any(|r| is_me(&r.author) || r.body.as_deref().is_some_and(names_me))
+        || verdicts.into_iter().any(|v| is_me(&v.author))
+}
+
+/// The search that returned `tasks` named the viewer (`involves:USER`,
+/// `mentions:USER`, …), so each of them is involved by GitHub's own
+/// definition: a task the payload could not prove involvement for reads
+/// `Mentioned`, not `Observer`. See [`query_names_viewer`].
+pub fn mark_involved(tasks: &mut [Task]) {
+    for task in tasks {
+        if task.role == TaskRole::Observer {
+            task.role = TaskRole::Mentioned;
+        }
+    }
+}
+
+/// Whether a search string carries a viewer-relationship qualifier for
+/// `user` — one of [`RoleQualifier`] applied to that login. A negated
+/// term (`-involves:USER`, the watched-repo fan-out) is not one: it
+/// asserts the opposite.
+pub fn query_names_viewer(query: &str, user: &str) -> bool {
+    query.split_whitespace().any(|term| {
+        RoleQualifier::parse(term).is_some()
+            && term
+                .split_once(':')
+                .is_some_and(|(_, login)| login.eq_ignore_ascii_case(user))
+    })
 }
 
 /// User logins with an outstanding review request. Team requests carry
@@ -3691,11 +3770,14 @@ fn my_latest_review_state<'a>(reviews: &'a [GqlReview], my_username: &str) -> Op
 
 /// My relationship to a PR, for the sidebar role filter.
 ///
-/// The sidebar is populated by an `involves:<me>` search, which returns
-/// every PR I've so much as commented on — so "not the author" must NOT
-/// blanket-default to `Reviewer` (the bug this replaced surfaced every
-/// involved PR under the `reviewer` filter). Role is derived from
-/// concrete per-me signals, in priority order:
+/// PRs reach here from searches with very different guarantees: the
+/// user-centric `involves:<me>` sweep returns every PR I've so much as
+/// commented on, while a repo-first member sweep, a watched repo, or a
+/// `g s` repo sync return a repo's whole set. So "not the author" must
+/// NOT blanket-default to `Reviewer` (every involved PR under the
+/// `reviewer` filter, #800) nor to `Mentioned` (every foreign PR under
+/// the `mentioned` filter, #1760). Role is derived from concrete per-me
+/// signals, in priority order:
 ///
 /// 1. I opened it → [`TaskRole::Author`].
 /// 2. A review is currently requested from me → [`TaskRole::Reviewer`].
@@ -3710,8 +3792,10 @@ fn my_latest_review_state<'a>(reviews: &'a [GqlReview], my_username: &str) -> Op
 /// 4. My latest decisive review (lazy path only): `APPROVED` clears my
 ///    obligation → [`TaskRole::Mentioned`]; anything else (changes
 ///    requested / a review comment) keeps me a [`TaskRole::Reviewer`].
-/// 5. Otherwise I'm only involved via a comment or @-mention →
-///    [`TaskRole::Mentioned`].
+/// 5. I take part in the conversation — a comment, a review, a thread
+///    comment, or an @-mention of me somewhere in the payload
+///    ([`viewer_participates`]) → [`TaskRole::Mentioned`].
+/// 6. Nothing names me → [`TaskRole::Observer`].
 ///
 /// Because the scan-visible signals (author / requested / assignee) are
 /// all resolved before the lazy-only reviews list, the open-time
@@ -3721,19 +3805,23 @@ fn my_latest_review_state<'a>(reviews: &'a [GqlReview], my_username: &str) -> Op
 ///
 /// Known scan-path approximations, corrected on workspace open: (a) a
 /// PR I've already reviewed reads `Mentioned` on the scan — GitHub drops
-/// me from `reviewRequests` once I review and the scan omits the reviews
-/// list, so it's indistinguishable from a never-involved PR until
-/// lazy-fetch; (b) a review requested only from my *team*, or a reviewer
-/// / assignee beyond the query's `first:` cap, also reads `Mentioned`
-/// (team membership isn't in the poll payload). Both err toward
-/// `Mentioned` rather than a false `Reviewer`, keeping the `reviewer`
-/// filter free of the commenter noise this rework removed.
+/// me from `reviewRequests` once I review, my verdict still shows in
+/// `latestOpinionatedReviews` (so I take part), but the reviews list
+/// that would keep me a `Reviewer` after `CHANGES_REQUESTED` is
+/// lazy-only; (b) a review requested only from my *team*, or a reviewer
+/// / assignee beyond the query's `first:` cap, reads `Observer` (team
+/// membership isn't in the poll payload). Both err away from a false
+/// `Reviewer`, keeping the `reviewer` filter free of the commenter noise
+/// this rework removed. Involvement past a capped comment or review list
+/// is visible only to GitHub's search, and only the viewer-scoped
+/// queries restore it ([`mark_involved`]).
 fn derive_role_inner(
     reviews: &[GqlReview],
     my_username: &str,
     is_author: bool,
     requested_reviewers: &[&str],
     assignees: &[&str],
+    participates: bool,
 ) -> TaskRole {
     if is_author {
         return TaskRole::Author;
@@ -3751,7 +3839,11 @@ fn derive_role_inner(
             TaskRole::Reviewer
         };
     }
-    TaskRole::Mentioned
+    if participates {
+        TaskRole::Mentioned
+    } else {
+        TaskRole::Observer
+    }
 }
 
 /// The Reviewers section as GitHub renders it: one entry per reviewer
@@ -4124,7 +4216,10 @@ pub fn issues_query_body(search_query: &str, after: Option<&str>) -> serde_json:
 
 /// Convert a GraphQL Issue into our `Task` type. Issues have no
 /// branch/CI/reviewers — those fields stay empty / None / Default.
-/// Role is determined from author + assignees against `my_username`.
+/// Role is determined from author + assignees against `my_username`,
+/// then from the conversation (a comment I wrote, an @-mention of me in
+/// the body or a comment) → `Mentioned`; an issue that names me nowhere
+/// is `Observer`, the same split as `derive_role_inner`.
 pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
     let repo = issue
         .repository
@@ -4142,8 +4237,17 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         TaskRole::Author
     } else if is_assignee {
         TaskRole::Assignee
-    } else {
+    } else if viewer_participates(
+        my_username,
+        issue.body.as_deref(),
+        &issue.comments.nodes,
+        &[],
+        [],
+        &[],
+    ) {
         TaskRole::Mentioned
+    } else {
+        TaskRole::Observer
     };
 
     let state = match issue.state.as_str() {
@@ -5165,11 +5269,59 @@ mod tests {
         assert!(task.assignees.contains(&"alice".to_string()));
     }
 
+    /// An issue that names me nowhere is `Observer`, not `Mentioned`:
+    /// the repo-first sweep and a `g s` sync return a repo's whole
+    /// issue set, and `Mentioned` must keep meaning "I'm in the
+    /// conversation" (#1760).
     #[test]
-    fn issue_to_task_mentioned_role_when_neither() {
+    fn issue_to_task_observer_role_when_neither() {
         let issue = make_issue(3, "t", Some("other"), &["another"]);
         let task = issue_to_task(&issue, "alice");
-        assert_eq!(task.role, TaskRole::Mentioned);
+        assert_eq!(task.role, TaskRole::Observer);
+    }
+
+    #[test]
+    fn issue_to_task_mentioned_when_body_names_me() {
+        let mut issue = make_issue(3, "t", Some("other"), &[]);
+        issue.body = Some("cc @Alice for the migration".into());
+        assert_eq!(issue_to_task(&issue, "alice").role, TaskRole::Mentioned);
+        // An email-like or a longer login is not a mention of me.
+        issue.body = Some("ping ops@alice.io and @alice-bot".into());
+        assert_eq!(issue_to_task(&issue, "alice").role, TaskRole::Observer);
+    }
+
+    #[test]
+    fn issue_to_task_mentioned_when_i_take_part_in_comments() {
+        let mut issue = make_issue(4, "t", Some("other"), &[]);
+        issue.comments.nodes = vec![comment("alice", "looking")];
+        assert_eq!(issue_to_task(&issue, "alice").role, TaskRole::Mentioned);
+        issue.comments.nodes = vec![comment("bob", "what does @alice think?")];
+        assert_eq!(issue_to_task(&issue, "alice").role, TaskRole::Mentioned);
+        issue.comments.nodes = vec![comment("bob", "nothing for alice here")];
+        assert_eq!(issue_to_task(&issue, "alice").role, TaskRole::Observer);
+    }
+
+    fn comment(author: &str, body: &str) -> GqlComment {
+        serde_json::from_value(serde_json::json!({
+            "author": { "login": author },
+            "body": body,
+            "createdAt": "2025-01-01T00:00:00Z",
+        }))
+        .expect("comment fixture")
+    }
+
+    fn review(author: &str, state: &str) -> GqlReview {
+        GqlReview {
+            author: Some(GqlAuthor {
+                login: author.into(),
+                typename: None,
+            }),
+            body: None,
+            state: state.into(),
+            submitted_at: Some(ts(-10)),
+            id: None,
+            created_at: None,
+        }
     }
 
     #[test]
@@ -6684,27 +6836,137 @@ mod tests {
         assert_eq!(task.last_commenter.as_deref(), Some("carol"));
     }
 
-    /// Regression (#800): a PR I'm only *involved* in — not the author,
-    /// not a requested reviewer, not an assignee, no review submitted —
-    /// must be `Mentioned`, NOT `Reviewer`. The inbox `involves:me`
-    /// search returns every PR I've commented on; before the fix they
-    /// all defaulted to `Reviewer`, so the "author OR reviewer" filter
-    /// surfaced the entire inbox. `reviewDecision` alone (a PR-global
-    /// signal, not about me) must not promote me to reviewer.
+    /// Regression (#800): a PR I'm not the author, requested reviewer,
+    /// or assignee of, with no review submitted, must never be
+    /// `Reviewer` — before the fix every involved PR defaulted to it, so
+    /// the "author OR reviewer" filter surfaced the entire inbox.
+    /// `reviewDecision` alone (a PR-global signal, not about me) must not
+    /// promote me. With no per-me signal in the payload the PR is
+    /// `Observer` (#1760); an `involves:me` search that returned it is
+    /// the proof of involvement, restored by `mark_involved`.
     #[test]
-    fn pr_to_task_involved_but_not_requested_is_mentioned() {
+    fn pr_to_task_involved_but_not_requested_is_never_reviewer() {
         for decision in [None, Some("REVIEW_REQUIRED"), Some("APPROVED")] {
             let mut pr = make_pr(4, "bob");
             pr.review_decision = decision.map(Into::into);
             pr.reviews = GqlReviews::default(); // inbox-scan: no reviews
             // No review request for alice, no assignment.
-            let task = pr_to_task(&pr, "alice");
+            let mut tasks = vec![pr_to_task(&pr, "alice")];
             assert_eq!(
-                task.role,
-                TaskRole::Mentioned,
-                "involved-only PR (reviewDecision={decision:?}) must be Mentioned, not Reviewer",
+                tasks[0].role,
+                TaskRole::Observer,
+                "no-signal PR (reviewDecision={decision:?}) must be Observer, not Reviewer",
             );
+            mark_involved(&mut tasks);
+            assert_eq!(tasks[0].role, TaskRole::Mentioned);
         }
+    }
+
+    /// The scan payload's per-me conversation signals each make a PR
+    /// `Mentioned` on their own: an @-mention in the body, the last
+    /// comment being mine, or my verdict in `latestOpinionatedReviews`
+    /// (GitHub drops me from `reviewRequests` once I review).
+    #[test]
+    fn pr_to_task_mentioned_from_scan_participation_signals() {
+        let mut pr = make_pr(5, "bob");
+        pr.body = Some("@alice mind taking a look?".into());
+        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Mentioned);
+
+        let mut pr = make_pr(5, "bob");
+        pr.comments.nodes = vec![comment("alice", "")];
+        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Mentioned);
+
+        let mut pr = make_pr(5, "bob");
+        pr.latest_opinionated_reviews.nodes = vec![verdict("alice", "CHANGES_REQUESTED")];
+        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Mentioned);
+
+        let mut pr = make_pr(5, "bob");
+        pr.latest_reviews.nodes = vec![verdict("alice", "COMMENTED")];
+        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Mentioned);
+
+        // Someone else's signals don't count.
+        let mut pr = make_pr(5, "bob");
+        pr.body = Some("@carol mind taking a look?".into());
+        pr.comments.nodes = vec![comment("carol", "sure")];
+        pr.latest_opinionated_reviews.nodes = vec![verdict("carol", "APPROVED")];
+        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Observer);
+    }
+
+    /// The lazy payload adds the reviews list and review threads: a
+    /// comment-only review of mine, a thread comment of mine, or a
+    /// comment that @-mentions me all count as taking part.
+    #[test]
+    fn pr_to_task_mentioned_from_lazy_participation_signals() {
+        let mut pr = make_pr(6, "bob");
+        pr.reviews.nodes = vec![review("alice", "COMMENTED")];
+        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Mentioned);
+
+        let mut pr = make_pr(6, "bob");
+        pr.review_threads.nodes = vec![serde_json::from_value(serde_json::json!({
+            "isResolved": false,
+            "isOutdated": false,
+            "comments": { "nodes": [
+                { "author": { "login": "alice" }, "body": "nit", "createdAt": "2025-01-01T00:00:00Z" }
+            ] },
+        }))
+        .expect("thread fixture")];
+        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Mentioned);
+
+        let mut pr = make_pr(6, "bob");
+        pr.comments.nodes = vec![comment("bob", "@alice does this match the RFC?")];
+        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Mentioned);
+    }
+
+    #[test]
+    fn query_names_viewer_reads_role_qualifiers_only() {
+        assert!(query_names_viewer("is:open is:pr involves:alice", "alice"));
+        assert!(query_names_viewer("is:pr mentions:Alice repo:o/r", "alice"));
+        assert!(query_names_viewer(
+            &repo_sweep_pr_query("o/r", Some("involves:alice"), None),
+            "alice"
+        ));
+        assert!(
+            !query_names_viewer(&repo_sweep_pr_query("o/r", None, None), "alice"),
+            "an unscoped member sweep returns the repo's whole set"
+        );
+        assert!(
+            !query_names_viewer("is:open is:pr repo:o/r -involves:alice", "alice"),
+            "the watched-repo fan-out asserts the opposite"
+        );
+        assert!(
+            !query_names_viewer("is:open is:pr author:bob", "alice"),
+            "a term about someone else says nothing about the viewer"
+        );
+    }
+
+    #[test]
+    fn mark_involved_only_lifts_observer() {
+        let mut tasks: Vec<Task> = [
+            TaskRole::Observer,
+            TaskRole::Author,
+            TaskRole::Reviewer,
+            TaskRole::Assignee,
+            TaskRole::Mentioned,
+        ]
+        .into_iter()
+        .map(|role| {
+            let mut t = pr_to_task(&make_pr(1, "bob"), "alice");
+            t.role = role;
+            t
+        })
+        .collect();
+        mark_involved(&mut tasks);
+        let roles: Vec<_> = tasks.iter().map(|t| t.role).collect();
+        assert_eq!(
+            roles,
+            [
+                TaskRole::Mentioned,
+                TaskRole::Author,
+                TaskRole::Reviewer,
+                TaskRole::Assignee,
+                TaskRole::Mentioned,
+            ]
+        );
     }
 
     /// A standing review request for me → `Reviewer`, even on the
@@ -6785,7 +7047,7 @@ mod tests {
     }
 
     /// A team review request carries no login, so it must not match me;
-    /// with no personal signal the PR stays `Mentioned`.
+    /// with no personal signal the PR is `Observer`.
     #[test]
     fn pr_to_task_team_review_request_does_not_make_me_reviewer() {
         let mut pr = make_pr(4, "bob");
@@ -6798,7 +7060,7 @@ mod tests {
             }],
         };
         let task = pr_to_task(&pr, "alice");
-        assert_eq!(task.role, TaskRole::Mentioned);
+        assert_eq!(task.role, TaskRole::Observer);
     }
 
     /// My own submitted review drives the role: an approval means I'm
@@ -7081,19 +7343,18 @@ mod tests {
     }
 
     /// The PR-global `reviewDecision` must NOT drive *my* role: a PR
-    /// where someone else requested changes (`CHANGES_REQUESTED`) but I
-    /// only commented — not requested, not assigned, no review of my own
-    /// — stays `Mentioned` on the inbox scan. An earlier revision used
-    /// `reviewDecision` as a scan fallback, which re-admitted exactly the
-    /// commenter noise this rework removed (review finding); role is now
-    /// keyed only on per-me signals, so an already-reviewed PR simply
-    /// reads `Mentioned` until lazy-fetch refines it on open.
+    /// where someone else requested changes (`CHANGES_REQUESTED`) and
+    /// nothing in the payload names me — not requested, not assigned, no
+    /// review or comment of my own — is `Observer` on the inbox scan. An
+    /// earlier revision used `reviewDecision` as a scan fallback, which
+    /// re-admitted exactly the commenter noise this rework removed
+    /// (review finding); role is keyed only on per-me signals.
     #[test]
-    fn pr_to_task_changes_requested_by_others_is_mentioned_on_scan() {
+    fn pr_to_task_changes_requested_by_others_is_observer_on_scan() {
         let mut pr = make_pr(9, "bob");
-        pr.reviews = GqlReviews::default(); // inbox scan, I'm just a commenter
+        pr.reviews = GqlReviews::default(); // inbox scan
         pr.review_decision = Some("CHANGES_REQUESTED".into());
-        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Mentioned);
+        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Observer);
     }
 
     /// Regression (#800, finding 1): a bot / mannequin / app requested

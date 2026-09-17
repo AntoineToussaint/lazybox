@@ -185,6 +185,20 @@ watched repos (the *roster*):
   role-scoped: the `@lazybox` mention scan rides it and must see every
   issue in the member; the display filter (`filter_github_tasks_with_watches`)
   drops the rows post-fetch.
+- **A row that never names the viewer is `TaskRole::Observer`** (#1760).
+  Whole-repo queries (a watched member, the issue query, `g s`) return
+  PRs and issues with no per-viewer signal, and before this they fell
+  through to `Mentioned`, so the `mentioned` filter matched a repo's
+  foreign rows. Role derivation now reads the conversation the payload
+  carries — an @-mention of the viewer in the body or a comment, a
+  comment or review the viewer wrote — and only that makes `Mentioned`;
+  the role gate never admits `Observer` (a watched repo bypasses the
+  gate). A query that itself names the viewer (`involves:USER`,
+  `mentions:USER`, the `review-requested:` companion) is proof of
+  involvement GitHub saw past the payload's capped lists, so its
+  `Observer` results are lifted to `Mentioned` (`mark_involved`), and
+  the lazy PR details — which carry no body — never demote a stored
+  `Mentioned` to `Observer`.
 - Without a roster (no scopes), the legacy `involves:USER` global sweep
   and discovered-repo round robin still run. Both paths now advance
   their floors and clear a forced refresh on *discovery* success

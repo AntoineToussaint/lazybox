@@ -2301,7 +2301,15 @@ fn merge_pr_details_into_workspace(ws: &mut Workspace, details: lazybox_gh::PrDe
     // authoritative for who has reviewed — overwrite even when empty
     // (a PR with no reviews yet must clear a stale list).
     pr.reviews = details.reviews;
-    pr.role = details.role;
+    // The lazy payload carries no PR body and capped comment / review
+    // lists, so it can prove involvement but never its absence: an
+    // `Observer` here must not demote a `Mentioned` the sweep established
+    // from the body or from a viewer-scoped search.
+    if !(details.role == lazybox_core::TaskRole::Observer
+        && pr.role == lazybox_core::TaskRole::Mentioned)
+    {
+        pr.role = details.role;
+    }
     pr.needs_reply = details.needs_reply;
     pr.last_commenter = details.last_commenter;
     pr.unread_count = details.activities.len() as u32;
@@ -2383,6 +2391,32 @@ mod merge_pr_details_tests {
             source: "github".into(),
             key: "o/r#42".into(),
         }
+    }
+
+    /// The lazy payload has no PR body and capped comment / review lists,
+    /// so an `Observer` verdict from it cannot disprove an involvement the
+    /// sweep saw (a body @-mention, or an `involves:` search naming the
+    /// viewer): `Mentioned` survives it. Every other role, and every other
+    /// transition, still takes the lazy value.
+    #[test]
+    fn lazy_observer_does_not_demote_mentioned() {
+        let mut ws = Workspace::from_task(pr_task(vec![]), chrono::Utc::now());
+        ws.pr.as_mut().unwrap().role = TaskRole::Mentioned;
+        let mut lazy = details(vec![]);
+        lazy.role = TaskRole::Observer;
+        merge_pr_details_into_workspace(&mut ws, lazy);
+        assert_eq!(ws.pr.as_ref().unwrap().role, TaskRole::Mentioned);
+
+        let mut lazy = details(vec![]);
+        lazy.role = TaskRole::Reviewer;
+        merge_pr_details_into_workspace(&mut ws, lazy);
+        assert_eq!(ws.pr.as_ref().unwrap().role, TaskRole::Reviewer);
+
+        // A withdrawn request is a real transition the lazy list can see.
+        let mut lazy = details(vec![]);
+        lazy.role = TaskRole::Observer;
+        merge_pr_details_into_workspace(&mut ws, lazy);
+        assert_eq!(ws.pr.as_ref().unwrap().role, TaskRole::Observer);
     }
 
     /// The lazy details list is `closingIssuesReferences` ALONE (no title

@@ -92,8 +92,21 @@ pub fn contains_lazybox_mention(text: &str) -> bool {
 /// (which only needs "is there one?") and [`parse_lazybox_directive`]
 /// (which reads the tokens that follow).
 fn first_mention_end(text: &str) -> Option<usize> {
+    first_mention_end_of(text, "lazybox")
+}
+
+/// Whether `text` @-mentions `login` the way GitHub would link it:
+/// case-insensitive, at a word boundary, so `email@alice.io` and
+/// `@alice-bot` are not mentions of `alice`.
+pub fn mentions_login(text: &str, login: &str) -> bool {
+    !login.is_empty() && first_mention_end_of(text, login).is_some()
+}
+
+/// Byte offset just past the first boundary-valid `@<login>` in `text`.
+fn first_mention_end_of(text: &str, login: &str) -> Option<usize> {
     let bytes = text.as_bytes();
-    let needle_lower = b"@lazybox";
+    let needle = format!("@{login}");
+    let needle_lower = needle.as_bytes();
     let n = needle_lower.len();
     if bytes.len() < n {
         return None;
@@ -115,12 +128,15 @@ fn first_mention_end(text: &str) -> Option<usize> {
                 continue;
             }
         }
-        // Post-boundary: the char after `@lazybox` must NOT be a
+        // Post-boundary: the char after the login must NOT be a
         // login-continuation char — otherwise `@lazyboxs`, `@lazybox1`,
-        // `@lazybox-bot` would match. `.` is also rejected to skip
-        // `@lazybox.io` style email-likes.
+        // `@lazybox-bot` would match. A `.` is rejected only when a
+        // login char follows it (`@lazybox.io` style email-likes); a
+        // sentence-ending `@alice.` is the mention GitHub renders it as.
         if let Some(&next) = bytes.get(i + n)
-            && (is_login_char(next) || next == b'.' || next == b'@')
+            && (is_login_char(next)
+                || next == b'@'
+                || (next == b'.' && bytes.get(i + n + 1).is_some_and(|&c| is_login_char(c))))
         {
             continue;
         }
@@ -456,6 +472,21 @@ mod tests {
             parse_lazybox_directive("hey @lazybox   codex   "),
             (Some("codex".into()), None)
         );
+    }
+
+    #[test]
+    fn mentions_login_matches_at_word_boundaries_case_insensitively() {
+        assert!(mentions_login("@alice", "alice"));
+        assert!(mentions_login("hey @Alice, thoughts?", "alice"));
+        assert!(mentions_login("(@alice)", "alice"));
+        assert!(!mentions_login("ops@alice.io", "alice"));
+        assert!(!mentions_login("@alice.io", "alice"));
+        assert!(mentions_login("thanks @alice.", "alice"));
+        assert!(mentions_login("cc @alice. Next: the migration", "alice"));
+        assert!(!mentions_login("@alice-bot", "alice"));
+        assert!(!mentions_login("@alicex", "alice"));
+        assert!(!mentions_login("alice", "alice"));
+        assert!(!mentions_login("@", ""), "an empty login matches nothing");
     }
 
     #[test]

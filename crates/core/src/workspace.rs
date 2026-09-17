@@ -2692,6 +2692,24 @@ mod tests {
     /// A never-before-fetched issue whose comment history is pulled for
     /// the first time (Linear, #1060) must NOT flood the inbox: comments
     /// created before the user's last visit were available to read then,
+    /// A discovery sweep sees the whole search result and the PR body,
+    /// so its role is authoritative: an `Observer` from a sweep replaces
+    /// a stored `Mentioned` outright (a removed @-mention, or a row a
+    /// pre-#1760 daemon had mislabelled). Only the partial-payload
+    /// refresh paths hold `Mentioned`, and they do so before the upsert.
+    #[test]
+    fn attach_task_takes_the_swept_role_even_when_it_is_observer() {
+        let mut stored = pr("o/r#1");
+        stored.role = TaskRole::Mentioned;
+        let mut ws = Workspace::from_task(stored, now());
+
+        let mut swept = pr("o/r#1");
+        swept.role = TaskRole::Observer;
+        ws.attach_task(swept);
+
+        assert_eq!(ws.pr.as_ref().unwrap().role, TaskRole::Observer);
+    }
+
     /// so they baseline as seen. Only the post-visit comment is unread.
     #[test]
     fn first_activity_before_last_visit_baselines_as_seen() {

@@ -140,6 +140,10 @@ pub struct EngagementSnapshot {
     entries: std::collections::HashMap<String, EngagementEntry>,
     hot_targets: Vec<GithubEngagementTarget>,
     cold_targets: std::collections::BTreeSet<lazybox_gh::NotificationTarget>,
+    /// The stored role of every GitHub row, keyed by its target, so a
+    /// targeted refresh can tell an established involvement from a
+    /// partial payload that merely failed to show one.
+    known_roles: std::collections::BTreeMap<lazybox_gh::NotificationTarget, lazybox_core::TaskRole>,
     cold_only_repos: std::collections::HashSet<String>,
     active_repos: std::collections::HashSet<String>,
     sessioned_repos: std::collections::HashSet<String>,
@@ -175,6 +179,12 @@ impl EngagementSnapshot {
 
     pub fn cold_targets(&self) -> &std::collections::BTreeSet<lazybox_gh::NotificationTarget> {
         &self.cold_targets
+    }
+
+    pub fn known_roles(
+        &self,
+    ) -> &std::collections::BTreeMap<lazybox_gh::NotificationTarget, lazybox_core::TaskRole> {
+        &self.known_roles
     }
 
     pub fn cold_only_repos(&self) -> &std::collections::HashSet<String> {
@@ -235,6 +245,7 @@ struct EngagementCandidate {
     workspace_key: WorkspaceKey,
     target: lazybox_gh::NotificationTarget,
     node_id: Option<String>,
+    role: lazybox_core::TaskRole,
     repo: String,
     updated_at: chrono::DateTime<Utc>,
     cold: bool,
@@ -341,6 +352,7 @@ fn select_engagement_snapshot(
     let mut entries = std::collections::HashMap::new();
     let mut hot_targets = Vec::new();
     let mut cold_targets = std::collections::BTreeSet::new();
+    let mut known_roles = std::collections::BTreeMap::new();
     let mut repos = std::collections::HashSet::new();
     let mut non_cold_repos = std::collections::HashSet::new();
     let mut sessioned_repos = std::collections::HashSet::new();
@@ -364,6 +376,7 @@ fn select_engagement_snapshot(
         if tier != EngagementTier::Cold {
             non_cold_repos.insert(candidate.repo.clone());
         }
+        known_roles.insert(candidate.target.clone(), candidate.role);
         if tier == EngagementTier::Hot {
             hot_targets.push(GithubEngagementTarget {
                 workspace_key: candidate.workspace_key.clone(),
@@ -413,6 +426,7 @@ fn select_engagement_snapshot(
         entries,
         hot_targets,
         cold_targets,
+        known_roles,
         cold_only_repos,
         active_repos: non_cold_repos,
         sessioned_repos,
@@ -504,6 +518,7 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
                 },
             },
             node_id: task.node_id.clone(),
+            role: task.role,
             repo,
             updated_at: task.updated_at,
             cold,
@@ -643,6 +658,7 @@ mod engagement_tier_tests {
             workspace_key: WorkspaceKey::new(format!("github:o/r#{number}")),
             target: target(number),
             node_id: Some(format!("PR_{number}")),
+            role: TaskRole::Author,
             repo: "o/r".into(),
             updated_at: Utc::now(),
             cold: false,
@@ -740,6 +756,28 @@ mod engagement_tier_tests {
         );
         assert!(snapshot.cold_only_repos().contains("o/cold"));
         assert!(!snapshot.cold_only_repos().contains("o/warm"));
+    }
+
+    /// Every candidate's stored role rides the snapshot, hot or cold, so
+    /// a targeted refresh of any existing row can consult it.
+    #[test]
+    fn snapshot_carries_every_candidates_stored_role() {
+        let mut hot = candidate(1);
+        hot.role = TaskRole::Mentioned;
+        let mut cold = candidate(2);
+        cold.cold = true;
+        cold.own_open_pr = false;
+        cold.role = TaskRole::Observer;
+
+        let snapshot = select_engagement_snapshot(vec![hot, cold], None, Utc::now());
+        assert_eq!(
+            snapshot.known_roles().get(&target(1)),
+            Some(&TaskRole::Mentioned)
+        );
+        assert_eq!(
+            snapshot.known_roles().get(&target(2)),
+            Some(&TaskRole::Observer)
+        );
     }
 
     /// Session-bearing workspaces are NOT hot on their own any more:

@@ -1867,6 +1867,43 @@ fn watched_repo_keeps_uninvolved_prs_past_role_and_scope_filters() {
     assert_eq!(kept[0].repo.as_deref(), Some("acme/infra"));
 }
 
+/// An `Observer` row — one the payload never names the viewer in — is
+/// never admitted by the role gate, even with every `pr.*` key on: that
+/// is what keeps the repo-first sweep's foreign PRs out of the
+/// `mentioned` set (#1760). A watched repo bypasses the gate by design
+/// and still surfaces it.
+#[test]
+fn observer_is_dropped_by_the_role_gate_unless_the_repo_is_watched() {
+    let filter = fully_open_filter();
+    let mut scoped = make_repo_task("acme/app");
+    scoped.role = TaskRole::Observer;
+    let mut mentioned = make_repo_task("acme/app");
+    mentioned.role = TaskRole::Mentioned;
+    let mut watched = make_repo_task("acme/infra");
+    watched.role = TaskRole::Observer;
+
+    let scopes = std::collections::BTreeSet::from(["github:acme/app".to_string()]);
+    let watches = std::collections::BTreeSet::from(["acme/infra".to_string()]);
+    let kept = polling::filter_github_tasks_with_watches(
+        vec![scoped, mentioned, watched],
+        &filter,
+        &scopes,
+        &watches,
+    );
+
+    let kept: Vec<_> = kept
+        .iter()
+        .map(|t| (t.repo.clone().unwrap_or_default(), t.role))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            ("acme/app".to_string(), TaskRole::Mentioned),
+            ("acme/infra".to_string(), TaskRole::Observer),
+        ]
+    );
+}
+
 // ── Scope filter ───────────────────────────────────────────────────
 
 fn make_repo_task(repo: &str) -> Task {

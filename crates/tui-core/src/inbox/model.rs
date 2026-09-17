@@ -171,13 +171,15 @@ impl WorkspaceKind {
 
 /// Sort key for the `ByRole*` modes. Author first (your own PRs are
 /// usually the most actionable), then Reviewer (someone's waiting on
-/// you), then Assignee, then Mentioned. Lower number sorts first.
+/// you), then Assignee, then Mentioned, then Observer (nothing about
+/// you). Lower number sorts first.
 pub fn role_rank(role: Option<lazybox_core::TaskRole>) -> u8 {
     match role {
         Some(lazybox_core::TaskRole::Author) => 0,
         Some(lazybox_core::TaskRole::Reviewer) => 1,
         Some(lazybox_core::TaskRole::Assignee) => 2,
         Some(lazybox_core::TaskRole::Mentioned) => 3,
+        Some(lazybox_core::TaskRole::Observer) => 4,
         None => 4,
     }
 }

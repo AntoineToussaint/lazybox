@@ -25,6 +25,7 @@ mod session_key;
 pub mod slug;
 pub mod stack;
 mod task;
+pub mod task_record;
 pub mod task_ref;
 pub mod time;
 mod workspace;
@@ -73,6 +74,10 @@ pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};
 pub use session_key::SessionKey;
 pub use stack::{StackPosition, detect_stacks};
 pub use task::*;
+pub use task_record::{
+    PullRequestRecord, RECORD_COMMENT_LIMIT, RecordComment, RecordKind, TASK_FILE_RELATIVE_PATH,
+    TaskRecord, WORKSPACE_RECORD_FILE_SCHEMA, WorkspaceRecordFile, sub_issue_ids,
+};
 pub use workspace::{
     CleanupPrompt, HopperMeta, MAX_ACTIVITY_ITEMS, ROLE_LABEL_PREFIX, Role, SENT_SNIPPETS_MAX,
     Session as WorkspaceSession, SessionId, SessionKind, SessionLayout, SessionRunState,

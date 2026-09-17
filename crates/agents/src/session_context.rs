@@ -57,6 +57,11 @@ can't cross repos). Report the issue URL and don't assume a row opened for it: \
 GitHub issues are off by default in lazybox's filter, and an out-of-scope repo is \
 dropped. Never `lazybox workspace create --name` beside a tracked item — that is \
 repo-less scratch only.\n\
+  - Your tracker record is already on disk at `.lazybox/task.json` — title, body, \
+labels, state, parent, sub-issues and comments, as lazybox last fetched them. Read it \
+instead of `gh issue view` / `gh pr view`: GitHub's 5,000/hour budget is shared with \
+lazybox's own poller, so a session that fans out `gh` reads stops the inbox updating \
+for everyone.\n\
   - Snippets (`]]s`, `~/.lazybox/snippets.yaml`) and skills (`.claude/skills/`) drive \
 you; a prompt you did not type yourself may have come from one.\n\
   - Work on the branch lazybox checked out for you; if you create another one, lazybox \
@@ -92,6 +97,10 @@ with `reply_request` before moving on.\n\
 live agent turn, claim and blocker as separate facts (a finished turn is not a \
 finished task), read-only, and an issue still resolves after its PR takes over \
 the row. From a shell: `lazybox task status <ref>`.\n\
+  - `task` re-reads this workspace's record live from lazybox's cache; `get_issue` / \
+`get_pr` / `list_issues` serve any other polled record in a watched repo, all free of \
+the GitHub budget. Survey a repo with one `list_issues`, never a fan-out of `gh issue \
+view`.\n\
   - `epic_status` / `epic_ready` are the live plan of record for any epic this \
 workspace joins — the daemon derives status, so answer \"what's blocked / what's next\" \
 from them, not from re-reading the graph; `report_blocker` flags this workspace as \
@@ -225,6 +234,14 @@ mod tests {
             "epic_ready",
             "report_blocker",
             "clear_blocker",
+            // Tracker-record cache (#1799): an agent that never learns these
+            // exist re-fetches with `gh` what the daemon already holds, and
+            // the shared GitHub budget it spends is the same one the daemon's
+            // poller needs to keep the inbox truthful.
+            "task",
+            "get_issue",
+            "get_pr",
+            "list_issues",
         ] {
             assert!(
                 text.contains(&format!("`{tool}`")),
@@ -247,6 +264,35 @@ mod tests {
         assert!(
             text.contains("reports a handoff, not") && text.contains("delivery"),
             "must say notify reports a handoff, not delivery: {text}"
+        );
+    }
+
+    #[test]
+    fn base_context_hands_over_the_on_disk_record() {
+        // #1799: five parallel sessions each ran `gh issue view` over the
+        // same 20-50 issues, emptied the token's 5,000/hour budget in seven
+        // minutes, and starved the daemon's own poller — the inbox showed
+        // issues open that had been closed for forty minutes. The record is
+        // now written into the worktree at spawn, but a file no agent is
+        // told about changes nothing. This line rides the BASE blurb, not
+        // the MCP half: the file is there for every agent, including the
+        // ones never wired to the bus.
+        let text = lazybox_session_context();
+        assert!(
+            text.contains(".lazybox/task.json"),
+            "must name the record file: {text}"
+        );
+        // Naming the file is not enough — an agent reaches for `gh` by
+        // habit. The briefing has to say *don't*, and say why the habit is
+        // costly, or it reads as an optional convenience.
+        assert!(
+            text.contains("gh issue view") && text.contains("gh pr view"),
+            "must name the calls the file replaces: {text}"
+        );
+        assert!(
+            text.contains("poller"),
+            "must say the budget is shared with lazybox's own polling, which is \
+             why a fan-out is not merely wasteful: {text}"
         );
     }
 
@@ -292,15 +338,22 @@ mod tests {
         // #1785 added the `task_status` bullet — the lookup an agent reaches
         // for when asked "are we working on #N", and the one place the
         // turn-ended-is-not-task-done distinction is stated where an agent
-        // will actually read it; +400 keeps prose-shaped headroom over it.
+        // will actually read it.
+        //
+        // #1799 added two more — the on-disk record in the base half, the
+        // cache tools in the MCP half. They are the rare case where blurb
+        // bytes buy back far more than they cost: the sessions this text
+        // reaches were spending thousands of GitHub requests re-reading what
+        // it now hands them. The cap below carries both additions with
+        // prose-shaped headroom, rather than re-tightening to an exact fit.
         let text = lazybox_session_context_with_mcp();
         assert!(
-            text.lines().count() <= 37,
+            text.lines().count() <= 43,
             "session context should stay tight: {} lines",
             text.lines().count()
         );
         assert!(
-            text.len() <= 4600,
+            text.len() <= 5100,
             "session context should stay tight: {} bytes",
             text.len()
         );

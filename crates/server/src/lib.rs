@@ -219,6 +219,7 @@ pub mod socket_service;
 pub mod spawn_handler;
 mod spawn_plan;
 pub mod stats_accumulator;
+pub mod task_cache;
 pub mod task_status;
 mod terminal_commands;
 mod terminal_io;

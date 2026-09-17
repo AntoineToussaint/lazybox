@@ -7604,7 +7604,7 @@ mod tick_noop_skip_tests {
         let first = drain(&mut rx);
         assert_eq!(
             upserted_keys(&first),
-            vec![key],
+            vec![key.clone()],
             "first sight of a task must upsert + broadcast it"
         );
 
@@ -7621,6 +7621,19 @@ mod tick_noop_skip_tests {
             *source.changed_counts.lock(),
             vec![1, 0],
             "the accounting hook must report durable changes, not fetched rows"
+        );
+        // #1799 stamps a per-workspace fetch time so a spawned agent can judge
+        // how stale lazybox's cached record is. It lives in poll state, not on
+        // the row, precisely so it cannot defeat the skip above — a moving
+        // stamp inside the workspace JSON would re-broadcast every row on
+        // every tick. The stamp must still advance on this no-op re-poll:
+        // finding no change is itself proof the copy is current.
+        assert!(
+            config
+                .poll
+                .tasks_fetched_snapshot()
+                .contains_key(&lazybox_core::WorkspaceKey::new(&key)),
+            "a polled workspace must carry a fetch time even when nothing changed"
         );
     }
 

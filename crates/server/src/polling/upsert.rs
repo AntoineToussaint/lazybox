@@ -656,6 +656,13 @@ async fn prepare_upsert(
         }
         None => Workspace::from_task(task, Utc::now()),
     };
+    // #1799: the task just came off the provider, so lazybox's cached copy of
+    // this row is fresh as of now — including when the poll found nothing
+    // changed, which is itself proof the copy is current. Recorded in poll
+    // state rather than on the row: the commit path skips a byte-identical
+    // workspace to avoid a pointless write and broadcast, and a stamp inside
+    // the row would make every row differ on every tick and defeat it.
+    config.poll.note_tasks_fetched(key);
 
     let observation_window_ms = if task_id.source == lazybox_gh::SOURCE {
         config.event_metrics.observe_sync(key.as_str())

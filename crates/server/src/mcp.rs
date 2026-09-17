@@ -24,6 +24,16 @@
 //! distinct scopes ever written (one per session that posts), which is not
 //! reclaimed here since notes deliberately outlive their author.
 //!
+//! #1799 adds the **tracker-record cache** — the daemon serving back what it
+//! already fetched, so a session never spends GitHub budget re-reading it:
+//!
+//! - `task` — this workspace's own record (the same payload written to
+//!   `.lazybox/task.json` at spawn, re-read live).
+//! - `get_issue` / `get_pr` / `list_issues` — any other record lazybox polls.
+//!
+//! None of them touches a provider: a miss is reported as a miss. See
+//! [`crate::task_cache`].
+//!
 //! Phase 2 (#1420) adds the **push** side, closing the two-way bus:
 //!
 //! - `notify_session` — actively poke another session, delivering text through
@@ -327,6 +337,28 @@ struct ReplyRequestArgs {
 struct PollRequestArgs {
     /// The `request_id` returned by `ask_session`.
     request_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetRecordArgs {
+    /// `owner/name` of the repo holding the record.
+    repo: String,
+    /// The record's number (the `#N`).
+    number: u64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ListIssuesArgs {
+    /// `owner/name` of the repo to list.
+    repo: String,
+    /// Canonical state to keep — `open`, `closed`, `in-progress`, … Omit for
+    /// every state.
+    #[serde(default)]
+    state: Option<String>,
+    /// Maximum records to return, newest-updated first (clamped to 1..=200;
+    /// default 50).
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1671,6 +1703,89 @@ impl LazyboxMcp {
         ))
     }
 
+    /// Maximum records one `list_issues` call returns. A record is agent
+    /// context, not a report: past a couple of hundred the caller wanted a
+    /// query, not a dump.
+    const LIST_ISSUES_MAX: usize = 200;
+
+    /// The caller's own workspace record file — the same payload written to
+    /// `.lazybox/task.json` at spawn, re-read from the cache so a session
+    /// that has been running across several sweeps sees the current copy
+    /// rather than its spawn-time snapshot.
+    async fn task_payload(&self, key: &SessionKey) -> serde_json::Value {
+        let ws_key = lazybox_core::WorkspaceKey::new(key.as_str());
+        let fetched = self.config.poll.tasks_fetched_snapshot();
+        let file = crate::store_blocking(&self.config.store, move |store| {
+            let workspaces = crate::task_cache::cached_workspaces(store);
+            crate::task_cache::workspace_record_file(&workspaces, &fetched, &ws_key)
+        })
+        .await;
+        match file {
+            Some(file) => serde_json::json!(file),
+            None => serde_json::json!({
+                "workspace": key.as_str(),
+                "primary": serde_json::Value::Null,
+                "also_linked": [],
+                "note": "this workspace has no tracker record in lazybox's cache",
+            }),
+        }
+    }
+
+    /// One cached issue or PR by `repo` + `number`. `want_pr` picks which
+    /// half of GitHub's shared numbering is meant.
+    async fn record_payload(
+        &self,
+        repo: String,
+        number: u64,
+        want_pr: bool,
+    ) -> Result<serde_json::Value, McpError> {
+        let repo_for_lookup = repo.clone();
+        let fetched = self.config.poll.tasks_fetched_snapshot();
+        let found = crate::store_blocking(&self.config.store, move |store| {
+            let workspaces = crate::task_cache::cached_workspaces(store);
+            crate::task_cache::find_record(&workspaces, &fetched, &repo_for_lookup, number, want_pr)
+        })
+        .await;
+        let kind = if want_pr { "PR" } else { "issue" };
+        found
+            .map(|record| serde_json::json!(record))
+            .ok_or_else(|| {
+                // A miss is reported, never filled with a fetch: this tool exists
+                // so serving an agent cannot spend the budget it protects.
+                McpError::invalid_request(
+                    format!(
+                        "lazybox has no cached {kind} {repo}#{number} — it is outside the \
+                     configured inbox scope, or lazybox has never polled it. Fetch it \
+                     with `gh` if you actually need it."
+                    ),
+                    None,
+                )
+            })
+    }
+
+    /// Cached issue records in a repo, newest-updated first.
+    async fn list_issues_payload(
+        &self,
+        repo: String,
+        state: Option<String>,
+        limit: Option<usize>,
+    ) -> serde_json::Value {
+        let limit = limit.unwrap_or(50).clamp(1, Self::LIST_ISSUES_MAX);
+        let fetched = self.config.poll.tasks_fetched_snapshot();
+        let records = crate::store_blocking(&self.config.store, move |store| {
+            let workspaces = crate::task_cache::cached_workspaces(store);
+            crate::task_cache::list_issue_records(
+                &workspaces,
+                &fetched,
+                &repo,
+                state.as_deref(),
+                limit,
+            )
+        })
+        .await;
+        serde_json::json!({ "issues": records })
+    }
+
     /// Freshly-resolved snapshots for every non-archived epic, optionally
     /// narrowed to one by key. The read path behind `epic_status`.
     async fn epic_status_payload(&self, epic: Option<&str>) -> serde_json::Value {
@@ -2120,6 +2235,57 @@ impl LazyboxMcp {
     }
 
     #[tool(
+        description = "This workspace's tracker record as the daemon last fetched it — number, title, full body, labels, state, parent epic, sub-issues, comments, and for a PR its branches, diff size and check summary. Served from lazybox's cache, so it costs no GitHub API budget; `fetched_at` says how old the copy is. The same payload is on disk at `.lazybox/task.json`. Read this INSTEAD of `gh issue view` / `gh pr view` for the record you were spawned on."
+    )]
+    async fn task(&self, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, McpError> {
+        let key = self.caller(&ctx)?;
+        Ok(json_result(self.task_payload(&key).await))
+    }
+
+    #[tool(
+        description = "One issue from lazybox's cache by `repo` (owner/name) and `number`, in the same shape as `task`. Costs no GitHub budget. Errors when lazybox has never polled that record — fall back to `gh` only then."
+    )]
+    async fn get_issue(
+        &self,
+        Parameters(args): Parameters<GetRecordArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        Ok(json_result(
+            self.record_payload(args.repo, args.number, false).await?,
+        ))
+    }
+
+    #[tool(
+        description = "One pull request from lazybox's cache by `repo` (owner/name) and `number`, with its branches, diff size, review state and failing checks. Costs no GitHub budget. Errors when lazybox has never polled that PR."
+    )]
+    async fn get_pr(
+        &self,
+        Parameters(args): Parameters<GetRecordArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        Ok(json_result(
+            self.record_payload(args.repo, args.number, true).await?,
+        ))
+    }
+
+    #[tool(
+        description = "Cached issues in `repo` (owner/name), newest-updated first, each with its full body and comments — optionally narrowed by `state` and `limit`. Costs no GitHub budget. This is the cheap way to survey a repo: never fan out `gh issue view` over a list. It returns only what lazybox's inbox scope covers, so an empty result means unpolled, not \"no issues\"."
+    )]
+    async fn list_issues(
+        &self,
+        Parameters(args): Parameters<ListIssuesArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        Ok(json_result(
+            self.list_issues_payload(args.repo, args.state, args.limit)
+                .await,
+        ))
+    }
+
+    #[tool(
         description = "The live derived status of every cross-repo epic (or one, by `epic` key): each member's status, wave, blockers, and the epic's ready/blocked/asking/failing rollup plus critical path. This is the plan of record — answer \"where does the epic stand / what's blocked / what's left\" from here, not by re-deriving from individual PRs."
     )]
     async fn epic_status(
@@ -2330,7 +2496,11 @@ impl ServerHandler for LazyboxMcp {
                  the workspace(s) and live agent(s) on it and separates the \
                  facts that get conflated (a finished agent turn is not a \
                  finished task; a claim label is not a running worker). \
-                 For cross-repo epics: epic_status is the live \
+                 Your own tracker record — and any other \
+                 record lazybox polls — is already cached here: read it with \
+                 task / get_issue / get_pr / list_issues instead of spending \
+                 GitHub API budget on `gh issue view`, which the daemon's own \
+                 poller shares. For cross-repo epics: epic_status is the live \
                  plan of record (each member's derived status, blockers, and the \
                  ready/blocked rollup) and epic_ready is the ranked queue of \
                  what's workable now — answer epic questions from these rather \
@@ -3266,6 +3436,153 @@ mod tests {
         let payload = handler.whoami_payload(&key).await.expect("payload");
         assert_eq!(payload["session_key"], "github:acme/widget#7");
         assert!(payload["agent"].is_null());
+    }
+
+    /// Store a workspace holding one open GitHub issue, stamped as freshly
+    /// polled — the shape the record tools read.
+    fn store_issue_workspace(config: &ServerConfig, key: &str, task_key: &str, body: &str) {
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new(key),
+            "main",
+            chrono::Utc::now(),
+        );
+        let mut task = lazybox_core::Task {
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: task_key.into(),
+            },
+            title: format!("title of {task_key}"),
+            body: Some(body.to_string()),
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: task_key.rsplit_once('#').map(|(repo, _)| repo.to_string()),
+            branch: None,
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![lazybox_core::Label::new("bug")],
+            reviewers: vec![],
+            reviews: vec![],
+            approval_policy: Default::default(),
+            assignees: vec![],
+            author: "someone".into(),
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Unknown,
+            is_behind_base: false,
+            merge_blocked: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            blocked_by: vec![],
+            merge_after: vec![],
+            contracts: vec![],
+            blocked_on: None,
+            parent: None,
+            kind: Some(lazybox_core::TaskKind::Issue),
+            priority: None,
+            state_label: None,
+        };
+        task.updated_at = chrono::Utc::now();
+        ws.gh_issues = vec![task];
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.to_string(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize")),
+            })
+            .expect("save workspace");
+        config
+            .poll
+            .note_tasks_fetched(&lazybox_core::WorkspaceKey::new(key));
+    }
+
+    #[tokio::test]
+    async fn task_payload_serves_the_callers_own_record_body() {
+        // The whole point of #1799: the body an agent used to spend a
+        // `gh issue view` on comes back from the daemon's cache instead.
+        let config = ServerConfig::in_memory();
+        store_issue_workspace(
+            &config,
+            "github-acme-widget-7",
+            "acme/widget#7",
+            "the brief",
+        );
+        let handler = LazyboxMcp::new(config);
+
+        let payload = handler
+            .task_payload(&SessionKey::from("github-acme-widget-7"))
+            .await;
+        assert_eq!(payload["primary"]["body"], "the brief");
+        assert_eq!(payload["primary"]["number"], 7);
+        assert_eq!(payload["repo"], "acme/widget");
+        assert!(
+            payload["primary"]["fetched_at"].is_string(),
+            "an agent cannot judge staleness without the cache age: {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_payload_says_so_when_the_workspace_has_no_record() {
+        // A repo-less scratch workspace has no tracker record at all. It must
+        // read as "nothing cached", not as an empty issue an agent might act on.
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let payload = handler.task_payload(&SessionKey::from("scratch")).await;
+        assert!(payload["primary"].is_null());
+        assert!(payload["note"].is_string());
+    }
+
+    #[tokio::test]
+    async fn record_payload_reports_a_miss_instead_of_fetching() {
+        // The tool exists to stop agents spending GitHub budget; answering a
+        // cache miss with a fetch would spend exactly the budget it protects.
+        // The error has to say so, or an agent reads "not found" as "closed".
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let error = handler
+            .record_payload("acme/widget".into(), 7, false)
+            .await
+            .expect_err("a miss is an error, not an empty record");
+        let message = format!("{error:?}");
+        assert!(message.contains("no cached issue"), "{message}");
+        assert!(message.contains("gh"), "must name the fallback: {message}");
+    }
+
+    #[tokio::test]
+    async fn list_issues_payload_is_scoped_to_the_repo_and_clamped() {
+        let config = ServerConfig::in_memory();
+        store_issue_workspace(&config, "a", "acme/widget#1", "one");
+        store_issue_workspace(&config, "b", "acme/widget#2", "two");
+        store_issue_workspace(&config, "c", "other/repo#3", "three");
+        let handler = LazyboxMcp::new(config);
+
+        let payload = handler
+            .list_issues_payload("acme/widget".into(), None, None)
+            .await;
+        assert_eq!(payload["issues"].as_array().map(Vec::len), Some(2));
+
+        // A zero/absurd limit must not mean "everything" or "nothing": it is
+        // clamped into range, so the caller always gets a usable answer.
+        let one = handler
+            .list_issues_payload("acme/widget".into(), None, Some(0))
+            .await;
+        assert_eq!(one["issues"].as_array().map(Vec::len), Some(1));
+        let capped = handler
+            .list_issues_payload("acme/widget".into(), None, Some(usize::MAX))
+            .await;
+        assert_eq!(capped["issues"].as_array().map(Vec::len), Some(2));
     }
 
     #[tokio::test]

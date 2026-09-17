@@ -1,4 +1,5 @@
 use crate::{polling, terminal_io};
+use chrono::{DateTime, Utc};
 use lazybox_core::{SessionId, SessionKey};
 use lazybox_ipc::{AgentCreditRecoveryStage, AgentRunAccess, AgentState, TerminalId, TerminalKind};
 use std::collections::{HashMap, HashSet};
@@ -1425,9 +1426,34 @@ pub struct PollState {
     /// sidebar `j`/`k` that crossed a row was an immediate `wake(false)`
     /// — scrolling the sidebar ran full poll ticks (2026-08-19 audit).
     focus_wake_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// When each workspace's tasks last came off a provider (#1799), handed
+    /// to spawned agents so a session can judge how stale lazybox's cached
+    /// copy of its tracker record is.
+    ///
+    /// Deliberately not a field on the persisted row: the commit path skips a
+    /// byte-identical workspace to avoid a pointless write and broadcast, and
+    /// a stamp inside the row would make every row differ on every tick and
+    /// defeat that. In-memory also keeps it honest across a restart — a fresh
+    /// daemon reports "unknown" rather than replaying a stamp it can no longer
+    /// vouch for. Bounded by the number of workspaces the poller has seen.
+    tasks_fetched: Arc<parking_lot::RwLock<HashMap<lazybox_core::WorkspaceKey, DateTime<Utc>>>>,
 }
 
 impl PollState {
+    /// Record that `key`'s tasks were just read from their provider.
+    pub(crate) fn note_tasks_fetched(&self, key: &lazybox_core::WorkspaceKey) {
+        self.tasks_fetched.write().insert(key.clone(), Utc::now());
+    }
+
+    /// Snapshot of every recorded fetch time. A workspace absent from it has
+    /// not been polled since this daemon started, which readers surface as an
+    /// unknown cache age rather than a fabricated recent one.
+    pub(crate) fn tasks_fetched_snapshot(
+        &self,
+    ) -> HashMap<lazybox_core::WorkspaceKey, DateTime<Utc>> {
+        self.tasks_fetched.read().clone()
+    }
+
     /// Wake the polling loop, optionally requesting a warm notification sweep.
     pub fn wake(&self, poll_notifications: bool) {
         if poll_notifications {

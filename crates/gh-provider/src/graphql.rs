@@ -3691,11 +3691,8 @@ fn viewer_participates<'a>(
     verdicts: impl IntoIterator<Item = &'a GqlReviewerVerdict>,
     threads: &[GqlReviewThread],
 ) -> bool {
-    let is_me = |author: &Option<GqlAuthor>| {
-        author
-            .as_ref()
-            .is_some_and(|a| a.login.eq_ignore_ascii_case(my_username))
-    };
+    let is_me =
+        |author: &Option<GqlAuthor>| author.as_ref().is_some_and(|a| a.login == my_username);
     let names_me = |text: &str| crate::mentions::mentions_login(text, my_username);
     body.is_some_and(names_me)
         || comments

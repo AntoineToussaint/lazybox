@@ -521,6 +521,8 @@ pub struct GhSource {
     /// Snoozed or terminal-state rows whose notifications wait for
     /// the slower discovery sweep.
     cold_targets: std::collections::BTreeSet<lazybox_gh::NotificationTarget>,
+    /// Stored role of every GitHub row, for [`keep_established_involvement`].
+    known_roles: std::collections::BTreeMap<lazybox_gh::NotificationTarget, lazybox_core::TaskRole>,
     /// Whether this tick also carries the base-cadence notifications
     /// heartbeat. False on the intervening hot-only ticks.
     poll_notifications: bool,
@@ -1473,6 +1475,7 @@ impl GhSource {
         if let Some(error) = first_error {
             return Err(lazybox_core::ProviderError::from(error));
         }
+        keep_established_involvement(&mut tasks, &self.known_roles);
         Ok(TargetedOutcome { tasks })
     }
 
@@ -3090,6 +3093,44 @@ pub fn label_spawn_actions(
     out
 }
 
+/// A targeted refresh re-derives an existing row's role from a partial
+/// payload — the hot shape reads `comments(first: 15)`, the lazy shape has
+/// no body — which can prove involvement but never its absence. A row
+/// that already established `Mentioned` (from the body, or from a
+/// viewer-scoped search that returned it) keeps it over an `Observer`
+/// re-derivation; otherwise the role gate would drop the refresh and the
+/// hot tier would go stale for exactly the rows it exists to keep fresh.
+/// Every other transition takes the fresh value.
+pub(super) fn keep_established_involvement(
+    tasks: &mut [Task],
+    known_roles: &std::collections::BTreeMap<
+        lazybox_gh::NotificationTarget,
+        lazybox_core::TaskRole,
+    >,
+) {
+    for task in tasks {
+        if task.role != lazybox_core::TaskRole::Observer {
+            continue;
+        }
+        let Some((owner, repo, number)) = super::handlers::github_target(task) else {
+            continue;
+        };
+        let target = lazybox_gh::NotificationTarget {
+            owner,
+            repo,
+            number,
+            kind: if task.is_pr() {
+                lazybox_gh::NotificationTargetKind::PullRequest
+            } else {
+                lazybox_gh::NotificationTargetKind::Issue
+            },
+        };
+        if known_roles.get(&target) == Some(&lazybox_core::TaskRole::Mentioned) {
+            task.role = lazybox_core::TaskRole::Mentioned;
+        }
+    }
+}
+
 pub fn readmit_mentioned_tasks(mut kept: Vec<Task>, mentioned: Vec<Task>) -> Vec<Task> {
     for task in mentioned {
         if !kept.iter().any(|k| k.id == task.id) {
@@ -3448,6 +3489,51 @@ mod auto_spawn_dedup_tests {
             )
             .await;
         assert!(!has_live_agent_session(&config, &sk2).await);
+    }
+
+    /// A targeted refresh derives from a partial payload, so its
+    /// `Observer` can't disprove a stored `Mentioned` — the hot tier
+    /// would otherwise re-derive an involved row as `Observer` every
+    /// 15 s, the role gate would drop it, and the row would go stale.
+    /// Any other stored role, or any other fresh role, is left alone.
+    #[test]
+    fn targeted_refresh_keeps_established_mentioned_over_observer() {
+        let target = |key: &str| lazybox_gh::NotificationTarget {
+            owner: "o".into(),
+            repo: "r".into(),
+            number: key.rsplit('#').next().unwrap().parse().unwrap(),
+            kind: lazybox_gh::NotificationTargetKind::Issue,
+        };
+        let known = std::collections::BTreeMap::from([
+            (target("o/r#1"), lazybox_core::TaskRole::Mentioned),
+            (target("o/r#2"), lazybox_core::TaskRole::Reviewer),
+            (target("o/r#3"), lazybox_core::TaskRole::Mentioned),
+        ]);
+        let mut fresh = vec![
+            github_issue_task("o/r#1", vec![]),
+            github_issue_task("o/r#2", vec![]),
+            github_issue_task("o/r#3", vec![]),
+            github_issue_task("o/r#4", vec![]),
+        ];
+        fresh[0].role = lazybox_core::TaskRole::Observer;
+        fresh[1].role = lazybox_core::TaskRole::Observer;
+        fresh[2].role = lazybox_core::TaskRole::Assignee;
+        fresh[3].role = lazybox_core::TaskRole::Observer;
+
+        keep_established_involvement(&mut fresh, &known);
+
+        let roles: Vec<_> = fresh.iter().map(|t| t.role).collect();
+        assert_eq!(
+            roles,
+            [
+                lazybox_core::TaskRole::Mentioned,
+                lazybox_core::TaskRole::Observer,
+                lazybox_core::TaskRole::Assignee,
+                lazybox_core::TaskRole::Observer,
+            ],
+            "only Mentioned→Observer is held; a withdrawn Reviewer, a fresh \
+             Assignee, and a row the snapshot never saw take the fresh value"
+        );
     }
 
     fn github_issue_task(key: &str, labels: Vec<&str>) -> Task {
@@ -4559,6 +4645,7 @@ async fn push_github_source(
         last_reconcile_completed: parking_lot::Mutex::new(Vec::new()),
         hot_targets: engagement.hot_targets().to_vec(),
         cold_targets: engagement.cold_targets().clone(),
+        known_roles: engagement.known_roles().clone(),
         poll_notifications,
         repo_sweep,
     }));

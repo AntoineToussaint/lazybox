@@ -128,12 +128,15 @@ fn first_mention_end_of(text: &str, login: &str) -> Option<usize> {
                 continue;
             }
         }
-        // Post-boundary: the char after `@lazybox` must NOT be a
+        // Post-boundary: the char after the login must NOT be a
         // login-continuation char — otherwise `@lazyboxs`, `@lazybox1`,
-        // `@lazybox-bot` would match. `.` is also rejected to skip
-        // `@lazybox.io` style email-likes.
+        // `@lazybox-bot` would match. A `.` is rejected only when a
+        // login char follows it (`@lazybox.io` style email-likes); a
+        // sentence-ending `@alice.` is the mention GitHub renders it as.
         if let Some(&next) = bytes.get(i + n)
-            && (is_login_char(next) || next == b'.' || next == b'@')
+            && (is_login_char(next)
+                || next == b'@'
+                || (next == b'.' && bytes.get(i + n + 1).is_some_and(|&c| is_login_char(c))))
         {
             continue;
         }
@@ -477,6 +480,9 @@ mod tests {
         assert!(mentions_login("hey @Alice, thoughts?", "alice"));
         assert!(mentions_login("(@alice)", "alice"));
         assert!(!mentions_login("ops@alice.io", "alice"));
+        assert!(!mentions_login("@alice.io", "alice"));
+        assert!(mentions_login("thanks @alice.", "alice"));
+        assert!(mentions_login("cc @alice. Next: the migration", "alice"));
         assert!(!mentions_login("@alice-bot", "alice"));
         assert!(!mentions_login("@alicex", "alice"));
         assert!(!mentions_login("alice", "alice"));

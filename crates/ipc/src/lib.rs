@@ -551,7 +551,7 @@ pub enum EpicMemberStatus {
     Claimed,
     /// Agent state Working.
     InProgress,
-    /// Agent state InputNeeded / LimitReached / CreditExhausted.
+    /// Agent state InputNeeded / LimitReached / CreditExhausted / Stalled.
     Asking,
     /// PR open; carries CI + review summary.
     PrOpen {

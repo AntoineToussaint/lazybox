@@ -187,7 +187,7 @@ pub fn workspace_is_asking(
 /// True iff the workspace's agent is blocked on a provider usage / rate
 /// limit (#847) and alerting (`⧗`). Drives the sidebar row pill, the
 /// alert count and the jump predicate. The "rate-limited" filter axis and
-/// the bulk resume (`Shift-K`) use [`workspace_is_limited`], which also
+/// the bulk resume (`Shift-K`) use [`workspace_needs_recovery`], which also
 /// takes the parked `AwaitingReset` agents.
 pub fn workspace_is_limit_reached(
     workspace: &Workspace,
@@ -216,7 +216,7 @@ pub fn workspace_is_credit_exhausted(
 /// state is *handled*, so it drives the quiet ☾ row glyph and never the
 /// alert count or the `!` jump. It IS rate-limited, though: the
 /// "rate-limited" filter axis and the bulk resume see it through
-/// [`workspace_is_limited`].
+/// [`workspace_needs_recovery`].
 pub fn workspace_is_awaiting_reset(
     workspace: &Workspace,
     states: &HashMap<SessionKey, AgentState>,
@@ -256,7 +256,7 @@ pub fn workspace_is_stalled(
 /// reason: both recovery shapes already fix it — a `continue` for the
 /// transient 502, a stop → `--resume` → continue for a wedged process — so
 /// the work is adding it here, not building a third mechanism (#1787).
-pub fn workspace_is_limited(
+pub fn workspace_needs_recovery(
     workspace: &Workspace,
     states: &HashMap<SessionKey, AgentState>,
 ) -> bool {
@@ -309,9 +309,9 @@ pub fn next_asking_workspace(
 /// jump action.
 ///
 /// The calm `AwaitingReset` is deliberately excluded: it is handled, so it
-/// is in the recovery target set ([`workspace_is_limited`]) but is not
+/// is in the recovery target set ([`workspace_needs_recovery`]) but is not
 /// somewhere the jump should stop.
-pub fn next_limit_reached_workspace(
+pub fn next_stopped_workspace(
     states: &HashMap<SessionKey, AgentState>,
     keys_order: &[SessionKey],
     current: Option<&SessionKey>,
@@ -538,11 +538,11 @@ mod tests {
         states.insert(ws_key(4), Working);
         let order = [ws_key(1), ws_key(2), ws_key(3), ws_key(4)];
         assert_eq!(
-            next_limit_reached_workspace(&states, &order, Some(&ws_key(1))),
+            next_stopped_workspace(&states, &order, Some(&ws_key(1))),
             Some(ws_key(3)),
         );
         assert_eq!(
-            next_limit_reached_workspace(&states, &order, Some(&ws_key(3))),
+            next_stopped_workspace(&states, &order, Some(&ws_key(3))),
             Some(ws_key(1)),
         );
     }
@@ -558,7 +558,7 @@ mod tests {
         assert!(!ch.now_done, "a stall is not a finished turn");
         assert!(workspace_is_stalled(&ws, &states));
         // Both recovery shapes (`Shift-K`, `a R`) read this predicate.
-        assert!(workspace_is_limited(&ws, &states));
+        assert!(workspace_needs_recovery(&ws, &states));
 
         // Leaving flips the axis without re-alerting.
         let ch = apply_agent_state(&mut states, &ws_key(1), Working);
@@ -572,11 +572,11 @@ mod tests {
         states.insert(ws_key(3), AgentState::Stalled);
         let order = [ws_key(1), ws_key(2), ws_key(3)];
         assert_eq!(
-            next_limit_reached_workspace(&states, &order, Some(&ws_key(1))),
+            next_stopped_workspace(&states, &order, Some(&ws_key(1))),
             Some(ws_key(3)),
         );
         assert_eq!(
-            next_limit_reached_workspace(&states, &order, Some(&ws_key(3))),
+            next_stopped_workspace(&states, &order, Some(&ws_key(3))),
             Some(ws_key(1)),
         );
     }

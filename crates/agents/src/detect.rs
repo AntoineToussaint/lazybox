@@ -268,11 +268,47 @@ const CLAUDE_STALL_ERROR_TOKENS: &[&str] = &["upstreamrequestfailed", "connectio
 /// The label Claude prefixes its error cells with, compacted.
 const CLAUDE_API_ERROR_LABEL: &str = "apierror:";
 
+/// The glyphs Claude opens a machine-rendered cell with: `⏺` for a result
+/// cell and `⎿` for the gutter continuation a tool's output lands under.
+/// A marker is accepted directly after one of these (or at the line start
+/// with neither), and nowhere else — see [`stall_marker_pos`].
+const CLAUDE_CELL_GLYPHS: &[char] = &['⏺', '⎿'];
+
 /// The two halves of Claude's failed-background-command cell
 /// (`Background command "Poll CI after the fixes" failed with exit code
 /// 1`). Both must share a line, so the agent's prose about a command that
 /// failed doesn't match.
 const CLAUDE_BACKGROUND_FAILURE_MARKERS: (&str, &str) = ("backgroundcommand", "failedwithexitcode");
+
+/// Every line of `compact` that sits OUTSIDE a markdown fence, as
+/// `(byte offset, line)`. Fence delimiters are consumed, not yielded.
+///
+/// Both machine-rendered-cell scanners need exactly this walk: an agent
+/// quoting a banner or an error inside a ``` block must not trip the
+/// detector that looks for it at a line start. Shared so the fence rule is
+/// written once and the next cell scanner inherits it.
+fn unfenced_lines(compact: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut fence: Option<&str> = None;
+    let mut offset = 0;
+    compact
+        .split_inclusive(['\n', '\r'])
+        .filter_map(move |line| {
+            let start = offset;
+            offset += line.len();
+            if let Some(marker) = ["```", "~~~"]
+                .into_iter()
+                .find(|marker| line.starts_with(marker))
+            {
+                if fence == Some(marker) {
+                    fence = None;
+                } else if fence.is_none() {
+                    fence = Some(marker);
+                }
+                return None;
+            }
+            fence.is_none().then_some((start, line))
+        })
+}
 
 /// Most recent line in `compact` carrying a marker that the turn ended on
 /// an infrastructure failure rather than a finished task (#1782), or
@@ -291,8 +327,9 @@ const CLAUDE_BACKGROUND_FAILURE_MARKERS: (&str, &str) = ("backgroundcommand", "f
 /// * a `Background command "…" failed with exit code N` cell.
 ///
 /// Both families are recognised only as a **result cell**: the marker must
-/// open its line, after Claude's `⏺` cell glyph and nothing else, and the
-/// line must sit outside any markdown fence. That discipline is what makes
+/// open its line, after Claude's cell glyphs ([`CLAUDE_CELL_GLYPHS`]: `⏺`
+/// for a result cell, `⎿` for the gutter a tool's output lands under) and
+/// nothing else, and the line must sit outside any markdown fence. That discipline is what makes
 /// these safe to match at all in this repo, where agents routinely print,
 /// diff and quote these very strings — prose ("the API Error: 502 was
 /// transient") never starts a line with the label, and an error pasted
@@ -301,35 +338,62 @@ const CLAUDE_BACKGROUND_FAILURE_MARKERS: (&str, &str) = ("backgroundcommand", "f
 /// line-leading `■` for the same reason.
 fn stall_marker_pos(compact: &str) -> Option<usize> {
     let (command, failed) = CLAUDE_BACKGROUND_FAILURE_MARKERS;
-    let mut fence = None;
-    let mut offset = 0;
     let mut latest = None;
-    for line in compact.split_inclusive(['\n', '\r']) {
-        if let Some(marker) = ["```", "~~~"]
-            .into_iter()
-            .find(|marker| line.starts_with(marker))
-        {
-            if fence == Some(marker) {
-                fence = None;
-            } else if fence.is_none() {
-                fence = Some(marker);
+    for (offset, line) in unfenced_lines(compact) {
+        let cell = line.trim_start_matches(CLAUDE_CELL_GLYPHS);
+        let cell_start = line.len() - cell.len();
+        let stalled = match cell.strip_prefix(CLAUDE_API_ERROR_LABEL) {
+            // The cell's message wraps: `API Error: 502 proxy: upstream
+            // request failed. This is a server-side issue, usually` runs
+            // onto two more lines. Read the whole cell body, bounded by the
+            // next cell glyph, so a wrapped status code or a token that
+            // landed on a continuation line still counts — the same reason
+            // `codex_usage_limit_pos` bounds its scan on the next `■`
+            // instead of stopping at the line.
+            Some(body) => {
+                let body = cell_body(compact, offset + cell_start + CLAUDE_API_ERROR_LABEL.len())
+                    .unwrap_or(body);
+                is_server_error_status(body) || contains_any(body, CLAUDE_STALL_ERROR_TOKENS)
             }
-        } else if fence.is_none() {
-            let cell = line.strip_prefix('⏺').unwrap_or(line);
-            let stalled = match cell.strip_prefix(CLAUDE_API_ERROR_LABEL) {
-                Some(body) => {
-                    is_server_error_status(body) || contains_any(body, CLAUDE_STALL_ERROR_TOKENS)
-                }
-                None => cell.starts_with(command) && cell.contains(failed),
-            };
-            if stalled {
-                latest = Some(offset);
-            }
+            None => cell.starts_with(command) && cell.contains(failed),
+        };
+        if stalled {
+            latest = Some(offset);
         }
-        offset += line.len();
     }
     latest
 }
+
+/// The rest of a result cell starting at `from`: every following line up to
+/// (not including) the next line that opens a new cell, capped at
+/// [`CELL_BODY_CAP`] bytes so a cell whose closing glyph scrolled out of the
+/// window cannot swallow the rest of the buffer. `None` when `from` is out
+/// of bounds or not on a char boundary.
+fn cell_body(compact: &str, from: usize) -> Option<&str> {
+    let rest = compact.get(from..)?;
+    let end = rest
+        .match_indices('\n')
+        .map(|(i, _)| i + 1)
+        .find(|i| {
+            rest[*i..]
+                .chars()
+                .next()
+                .is_some_and(|c| CLAUDE_CELL_GLYPHS.contains(&c))
+        })
+        .unwrap_or(rest.len());
+    // `CELL_BODY_CAP` is a byte budget, so snap it back to a char boundary:
+    // the buffer is full of multi-byte glyphs and slicing mid-sequence
+    // panics.
+    let mut cap = end.min(CELL_BODY_CAP).min(rest.len());
+    while cap > 0 && !rest.is_char_boundary(cap) {
+        cap -= 1;
+    }
+    Some(&rest[..cap])
+}
+
+/// Upper bound on a cell body scan. Claude's error cell wraps to three or
+/// four lines; anything past this is a cell whose end never arrived.
+const CELL_BODY_CAP: usize = 512;
 
 /// Whether `body` opens with a 5xx HTTP status — the digits immediately
 /// after an `API Error:` label. `502 proxy: …` matches; `400 invalid
@@ -2443,27 +2507,15 @@ fn codex_usage_limit_pos(compact: &str) -> Option<usize> {
     // Codex renders provider errors as a standalone square-prefixed cell;
     // tool output has a gutter and ordinary assistant prose has no square.
     let marker = "■you'vehityourusagelimit";
-    let mut fence = None;
-    let mut offset = 0;
     let mut latest = None;
-    for line in compact.split_inclusive(['\n', '\r']) {
-        if let Some(marker) = ["```", "~~~"]
-            .into_iter()
-            .find(|marker| line.starts_with(marker))
-        {
-            if fence == Some(marker) {
-                fence = None;
-            } else if fence.is_none() {
-                fence = Some(marker);
-            }
-        } else if fence.is_none() && line.starts_with(marker) {
+    for (offset, line) in unfenced_lines(compact) {
+        if line.starts_with(marker) {
             let tail = &compact[offset + marker.len()..];
             let end = tail.find('■').unwrap_or(tail.len());
             if last_compact_match_pos(&tail[..end], CODEX_USAGE_LIMIT_TAIL_PHRASES).is_some() {
                 latest = Some(offset);
             }
         }
-        offset += line.len();
     }
     latest
 }
@@ -3233,6 +3285,93 @@ mod tests {
         // `Working` correction has the evidence to demote a committed
         // `Stalled` — without it the state could never be left.
         assert!(claude_working_supersedes_dialog(retried.as_bytes()));
+    }
+
+    /// The assumption the whole feature rests on, exercised over REAL PTY
+    /// bytes rather than a hand-typed `&str`: tmux paints by absolute
+    /// cursor position, so the cell arrives as SGR runs and cursor moves
+    /// with its inter-word gaps delivered as moves, not spaces. This is the
+    /// transformation that made an earlier readiness check silently never
+    /// match its own footer, so the stall anchor is pinned against it here
+    /// — through the public entry point, so `strip_ansi_lossy` and
+    /// `compact_lower` both run.
+    #[test]
+    fn a_server_error_survives_the_ansi_and_cursor_move_pipeline() {
+        // `⏺` painted in colour, the label's space delivered as a 1-column
+        // cursor move, the status bold, then the resting composer footer.
+        let painted: &[u8] = b"\x1b[2;1H\x1b[38;5;203m\xe2\x8f\xba\x1b[0m\x1b[1C\x1b[1mAPI\x1b[0m\x1b[1CError:\x1b[1C\x1b[38;5;203m502\x1b[0m\x1b[1Cproxy:\x1b[1Cupstream request failed\r\n\x1b[3;1H\x1b[2m? for shortcuts\x1b[0m";
+        assert_eq!(
+            claude_state(painted),
+            Some(AgentState::Stalled),
+            "the cell must still anchor after ANSI stripping and compaction",
+        );
+
+        // The same cell under the tool-result gutter glyph.
+        let gutter: &[u8] = b"\x1b[5;3H\xe2\x8e\xbf\x1b[1CAPI Error: 503 upstream request failed\r\n? for shortcuts";
+        assert_eq!(claude_state(gutter), Some(AgentState::Stalled));
+
+        // And the negative through the same pipeline: a painted line that
+        // merely mentions the error mid-sentence is not a cell.
+        let prose: &[u8] =
+            b"\x1b[2;1HThe \x1b[1mAPI Error: 502\x1b[0m we saw was transient\r\n? for shortcuts";
+        assert_eq!(claude_state(prose), Some(AgentState::Idle));
+    }
+
+    /// The cell body is read past the line break, and the byte cap that
+    /// bounds it must not slice a multi-byte glyph in half.
+    #[test]
+    fn a_wrapped_error_cell_is_read_to_its_end_without_splitting_a_glyph() {
+        // The distinguishing token lands on the SECOND line of the cell,
+        // which a line-only scan would miss.
+        let wrapped = "⏺ API Error: request to the gateway did not complete\n                       because the upstream request failed after 3 retries\n                       ? for shortcuts";
+        assert_eq!(claude_state(wrapped.as_bytes()), Some(AgentState::Stalled));
+
+        // A cell whose closing glyph never arrives is capped, and the cap
+        // lands inside a run of multi-byte glyphs — this must not panic.
+        let long = format!("⏺ API Error: {}\n? for shortcuts", "✻".repeat(400));
+        assert_eq!(claude_state(long.as_bytes()), Some(AgentState::Idle));
+
+        // The cell ends at the next cell glyph, so a later unrelated cell
+        // cannot lend it a token.
+        let bounded = "⏺ API Error: something went sideways\n                       ⏺ Bash(echo connection refused)\n? for shortcuts";
+        assert_eq!(claude_state(bounded.as_bytes()), Some(AgentState::Idle));
+    }
+
+    /// The contract a sticky state depends on, checked end to end rather
+    /// than trusted: any screen that classifies to a BLOCKED state must
+    /// also be demotable, i.e. its markers must be registered in
+    /// `dialog_marker_pos`. A state that lands in `classify` + `is_blocked`
+    /// but not in that list can never be left once committed — the agent
+    /// visibly running again is the only evidence the machine accepts, and
+    /// `claude_working_supersedes_dialog` is where it reads it.
+    #[test]
+    fn every_blocked_shape_is_demotable_by_a_working_anchor() {
+        const WORKING: &str = "\n✻ Working… (5s · ↓ 200 tokens · esc to interrupt)";
+        let shapes: &[(&str, &str)] = &[
+            (
+                "usage limit",
+                "Claude usage limit reached ∙ resets 3pm\n❯ 1. Wait until it resets\n  2. Exit",
+            ),
+            (
+                "auto-continue",
+                "Usage limit reached · continuing automatically at 1:10pm",
+            ),
+            ("consent phrase", "Do you want to overwrite the file?"),
+            ("stall", "⏺ API Error: 502 proxy: upstream request failed"),
+        ];
+        for (name, screen) in shapes {
+            let blocked = claude_state(screen.as_bytes()).expect("classifies");
+            assert!(
+                crate::state_machine::is_blocked(blocked),
+                "{name} should classify to a blocked state, got {blocked:?}",
+            );
+            let resumed = format!("{screen}{WORKING}");
+            assert!(
+                claude_working_supersedes_dialog(resumed.as_bytes()),
+                "{name} is blocked but its markers are missing from \
+                 dialog_marker_pos, so it could never be demoted",
+            );
+        }
     }
 
     /// A parked agent is not reclassified by the new markers: the limit

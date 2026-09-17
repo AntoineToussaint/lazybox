@@ -2379,11 +2379,11 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::JumpToLimited => {
-                if self.sidebar.focus_next_limit_reached_workspace() {
+                if self.sidebar.focus_next_stopped_workspace() {
                     self.set_focus(PaneFocus::Sidebar);
                     self.redraw = true;
                 } else {
-                    self.flash_hint("no rate-limited agents");
+                    self.flash_hint("no stopped agents");
                 }
             }
             Action::JumpToUnread => {

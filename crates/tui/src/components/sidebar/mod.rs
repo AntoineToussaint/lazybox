@@ -2228,10 +2228,10 @@ impl Sidebar {
     /// a usage / rate limit, starting AFTER the current row and wrapping
     /// (`Shift-L`, #847) — the rate-limited analog of
     /// [`Self::focus_next_asking_workspace`].
-    pub fn focus_next_limit_reached_workspace(&mut self) -> bool {
+    pub fn focus_next_stopped_workspace(&mut self) -> bool {
         let keys_order = self.visible_workspace_keys();
         let current = self.selected_session_key().cloned();
-        let Some(target) = crate::agent_attention::next_limit_reached_workspace(
+        let Some(target) = crate::agent_attention::next_stopped_workspace(
             &self.agents,
             &keys_order,
             current.as_ref(),
@@ -2278,7 +2278,7 @@ impl Sidebar {
     /// shapes are exactly its two cures: a `continue` past a transient 502,
     /// a respawn for a wedged process. Sorted like
     /// [`Self::limit_reached_terminals`].
-    pub fn limited_terminals(&self) -> Vec<TerminalId> {
+    pub fn recoverable_terminals(&self) -> Vec<TerminalId> {
         let mut ids: Vec<TerminalId> = self
             .agent_terminal_states
             .iter()
@@ -2302,7 +2302,7 @@ impl Sidebar {
     /// account simply parks again); this set is counted separately so the
     /// resume notice can call out how many were parked and point at `a R`
     /// for the fresh-credentials restart. Counted directly rather than
-    /// derived from [`Self::limited_terminals`] minus
+    /// derived from [`Self::recoverable_terminals`] minus
     /// [`Self::limit_reached_terminals`], so the count says what it means
     /// regardless of what else is limited. Sorted like
     /// [`Self::limit_reached_terminals`].

@@ -817,17 +817,32 @@ impl Sidebar {
     }
 }
 
-fn aggregate_agent_state(
+pub(super) fn aggregate_agent_state(
     states: impl Iterator<Item = lazybox_ipc::AgentState>,
 ) -> Option<lazybox_ipc::AgentState> {
-    states.max_by_key(|state| match state {
+    states.max_by_key(|state| agent_state_rank(*state))
+}
+
+/// The per-terminal priority [`aggregate_agent_state`] folds a workspace's
+/// terminals with. **Every variant must map to a DISTINCT rank**:
+/// `max_by_key` returns the LAST maximum on a tie and the caller iterates a
+/// `HashMap`, so two states sharing a rank make the projected state — and
+/// therefore the row glyph — depend on hash order. That is not merely a
+/// flicker: each flip writes a different value into `self.agents`, so
+/// `state_change` reports a rising edge for a state that never changed and
+/// re-fires its desktop notification. `agent_state_ranks_are_distinct`
+/// fails the build on a collision.
+pub(super) fn agent_state_rank(state: lazybox_ipc::AgentState) -> u8 {
+    match state {
         // A usage-limit block outranks even `InputNeeded`: it's the most
         // urgent "you must act (externally) before this agent moves" state
         // across a workspace's terminals (#847).
-        lazybox_ipc::AgentState::CreditExhausted => 8,
-        lazybox_ipc::AgentState::LimitReached => 7,
-        // A stalled agent ranks with the limit block for the same reason:
-        // the workspace is stopped and only an external act moves it.
+        lazybox_ipc::AgentState::CreditExhausted => 9,
+        lazybox_ipc::AgentState::LimitReached => 8,
+        // Stopped on an infrastructure failure (#1782): the workspace is
+        // stopped and only an external act moves it, so it sits with the
+        // limit block — just below it, since a dead credential is the more
+        // specific diagnosis when one workspace reports both.
         lazybox_ipc::AgentState::Stalled => 7,
         lazybox_ipc::AgentState::InputNeeded => 6,
         lazybox_ipc::AgentState::Working => 5,
@@ -839,7 +854,7 @@ fn aggregate_agent_state(
         lazybox_ipc::AgentState::Done => 3,
         lazybox_ipc::AgentState::Exited { .. } => 2,
         lazybox_ipc::AgentState::Idle => 1,
-    })
+    }
 }
 
 /// Build the desktop notification for a newly-risen attention signal,

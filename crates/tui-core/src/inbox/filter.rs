@@ -304,7 +304,7 @@ impl Filter {
             // `⧗ LimitReached` block, the parked `☾ AwaitingReset` wait, and
             // the `↯ Stalled` infrastructure failure. Counting only the first
             // showed `(0)` over eight parked agents.
-            Filter::RateLimited => crate::agent_attention::workspace_is_limited(w, ctx.agents),
+            Filter::RateLimited => crate::agent_attention::workspace_needs_recovery(w, ctx.agents),
             Filter::ReviewRequested => task.is_some_and(|t| {
                 matches!(
                     t.review,

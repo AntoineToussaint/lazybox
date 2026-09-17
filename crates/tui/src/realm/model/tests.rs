@@ -4846,7 +4846,7 @@ snippets:
         )
         .effective_keys_display(&Default::default());
         assert!(
-            notice.message.contains("resuming 2 rate-limited agents")
+            notice.message.contains("resuming 2 stopped agents")
                 && notice.message.contains("2 parked")
                 && notice.message.contains(restart_keys.as_ref()),
             "the notice reports the resume, the parked count and the restart action \
@@ -4909,7 +4909,7 @@ snippets:
             });
         }
         assert_eq!(
-            m.sidebar.limited_terminals(),
+            m.sidebar.recoverable_terminals(),
             vec![TerminalId(1), TerminalId(2)],
         );
 
@@ -4938,6 +4938,40 @@ snippets:
             })
             .collect();
         assert_eq!(restarted, vec![1, 2], "the stalled agent is restarted too");
+    }
+
+    /// #1787 review: the recovery keys used to report every target as
+    /// "rate-limited", so resuming a stalled agent told the user it had hit
+    /// its quota — the exact misdiagnosis the `Stalled` state exists to end.
+    #[test]
+    fn resuming_a_stalled_agent_does_not_call_it_rate_limited() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent()]);
+        m.ui_defaults.usage_limit_alerts = false;
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Stalled,
+        });
+
+        m.dispatch_action(&Action::ResumeRateLimited);
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a notice is shown")
+            .message
+            .clone();
+        assert!(
+            !notice.contains("rate-limited"),
+            "a stalled agent is not rate-limited: {notice}",
+        );
+        assert!(
+            notice.contains("stopped"),
+            "it is reported as stopped: {notice}"
+        );
     }
 
     /// The stall count is its own header counter, not folded into the
@@ -5004,7 +5038,7 @@ snippets:
         );
         let notice = m.status.notice.as_ref().expect("a notice is shown");
         assert!(
-            notice.message.contains("resuming 2 rate-limited agents")
+            notice.message.contains("resuming 2 stopped agents")
                 && notice.message.contains("1 parked"),
             "the notice reports both resumes and names the single parked agent: {}",
             notice.message

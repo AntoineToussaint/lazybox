@@ -7788,3 +7788,35 @@ mod focused_row_identity_tests {
         );
     }
 }
+
+/// Two states sharing a rank make `aggregate_agent_state` depend on
+/// `HashMap` iteration order (`max_by_key` returns the last maximum), which
+/// flips a workspace's glyph between renders AND re-fires the rising-edge
+/// notification for a state that never changed. #1787 shipped
+/// `Stalled` at the same rank as `LimitReached`; this is the guard that
+/// would have caught it.
+#[test]
+fn agent_state_ranks_are_distinct() {
+    use lazybox_ipc::AgentState;
+    let mut seen: Vec<(AgentState, u8)> = Vec::new();
+    for state in AgentState::ALL {
+        let rank = super::handlers::agent_state_rank(*state);
+        if let Some((other, _)) = seen.iter().find(|(_, r)| *r == rank) {
+            panic!("{state:?} and {other:?} share rank {rank}");
+        }
+        seen.push((*state, rank));
+    }
+}
+
+/// The aggregate is order-independent: a workspace holding a limit block
+/// and a stalled agent resolves the same whichever order its terminals are
+/// visited in.
+#[test]
+fn aggregate_is_independent_of_terminal_order() {
+    use lazybox_ipc::AgentState;
+    let pair = [AgentState::LimitReached, AgentState::Stalled];
+    let forward = super::handlers::aggregate_agent_state(pair.into_iter());
+    let reversed = super::handlers::aggregate_agent_state(pair.into_iter().rev());
+    assert_eq!(forward, reversed, "hash order must not pick the glyph");
+    assert_eq!(forward, Some(AgentState::LimitReached));
+}

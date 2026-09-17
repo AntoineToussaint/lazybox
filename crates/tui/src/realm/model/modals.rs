@@ -1813,6 +1813,18 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Build + mount the glyph legend (#1744): the marker registry
+    /// rendered as a reader, painted in the active theme. Idempotent
+    /// like `mount_help`.
+    pub(super) fn mount_legend(&mut self) {
+        use crate::realm::components::legend::Legend;
+
+        if self.modal_stack.last() == Some(&Id::Legend) {
+            return;
+        }
+        self.mount_modal(Id::Legend, Legend::from_registry());
+    }
+
     /// The focused pane's contextual footer bindings — the state-aware
     /// short list ("g m merge" when the row is READY, "w fix CI" when
     /// CI is failing, …) so the user always sees what's actionable

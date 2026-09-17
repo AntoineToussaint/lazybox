@@ -842,6 +842,23 @@ fn emit_repo_group<'a>(
             {
                 summary.attention += 1;
             }
+            // Kind / role breakdown for the header (#1744). The kind
+            // follows the row's type glyph precedence (a folded issue+PR
+            // row is a PR); the role is the primary task's, so it is the
+            // same letter the row leads with.
+            if w.pr.is_some() {
+                summary.prs += 1;
+            } else if !w.gh_issues.is_empty() {
+                summary.issues += 1;
+            } else if !w.linear_issues.is_empty() {
+                summary.tickets += 1;
+            }
+            match w.primary_task().map(|t| t.role) {
+                Some(lazybox_core::TaskRole::Author) => summary.authored += 1,
+                Some(lazybox_core::TaskRole::Reviewer) => summary.reviewing += 1,
+                Some(lazybox_core::TaskRole::Assignee) => summary.assigned += 1,
+                Some(lazybox_core::TaskRole::Mentioned) | None => {}
+            }
         }
         if input.collapsed_repos.contains(repo) {
             if level == lazybox_config::SourceAttentionLevel::Muted {
@@ -3198,6 +3215,59 @@ mod tests {
         assert!(
             !visible.contains(&"expired".to_string()),
             "an expired snooze must read as awake, not match the lens"
+        );
+    }
+
+    /// #1744: the repo summary counts what the group is made of — kinds
+    /// by the row's type-glyph precedence (a folded issue+PR row is a
+    /// PR) and roles by the primary task's role letter — so the header
+    /// can read `2⇄ 1○ 1◆ · 2A 1R 1@`. Mentioned rows and context-only
+    /// rows count toward neither axis.
+    #[test]
+    fn repo_summary_breaks_down_kind_and_role() {
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+
+        let mut pr_authored = workspace_with_task("pr-a", Some("repo"), 1);
+        let issue = pr_authored.gh_issues.remove(0);
+        let mut pr = issue.clone();
+        pr.kind = Some(lazybox_core::TaskKind::Pr);
+        pr.id.key = "owner/repo#100".into();
+        pr_authored.pr = Some(pr);
+        // The folded issue stays on the row: still one PR, not an issue.
+        pr_authored.gh_issues.push(issue);
+
+        let mut pr_reviewing = workspace_with_task("pr-r", Some("repo"), 2);
+        let mut pr = pr_reviewing.gh_issues.remove(0);
+        pr.kind = Some(lazybox_core::TaskKind::Pr);
+        pr.role = TaskRole::Reviewer;
+        pr_reviewing.pr = Some(pr);
+
+        let mut issue_assigned = workspace_with_task("issue", Some("repo"), 3);
+        issue_assigned.gh_issues[0].role = TaskRole::Assignee;
+
+        let mut ticket = workspace_with_task("ticket", Some("repo"), 4);
+        let mut linear = ticket.gh_issues.remove(0);
+        linear.id.source = "linear".into();
+        linear.role = TaskRole::Mentioned;
+        ticket.linear_issues.push(linear);
+
+        let ws: HashMap<SessionKey, Workspace> =
+            [pr_authored, pr_reviewing, issue_assigned, ticket]
+                .into_iter()
+                .map(|w| (SessionKey::from(&w.key), w))
+                .collect();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
+        let summary = &out.summaries["repo"];
+        assert_eq!(summary.active, 4);
+        assert_eq!((summary.prs, summary.issues, summary.tickets), (2, 1, 1));
+        assert_eq!(
+            (summary.authored, summary.reviewing, summary.assigned),
+            (1, 1, 1),
+            "a mentioned row counts toward no role"
         );
     }
 

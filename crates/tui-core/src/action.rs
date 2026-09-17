@@ -384,6 +384,11 @@ pub enum Action {
     ForceRedraw,
     /// Open Ask Lazybox (`?`): live keymap search plus conversational help.
     OpenHelp,
+    /// Open the glyph legend (#1744) — every sidebar marker from the
+    /// generated registry (`crate::markers`), painted as it renders,
+    /// beside its meaning. Also reachable with the same key from the
+    /// `?` shortcuts panel.
+    OpenLegend,
     /// Start (or re-run) the onboarding coach rail (#1460).
     OpenTour,
     /// Open the debug / sync-status window (Shift+D).
@@ -671,6 +676,7 @@ pub enum ActionKind {
     Refresh,
     ForceRedraw,
     OpenHelp,
+    OpenLegend,
     OpenTour,
     OpenSyncStatus,
     OpenMessages,
@@ -733,6 +739,7 @@ impl ActionKind {
         Self::OpenThemePicker,
         Self::OpenSnippets,
         Self::OpenHelp,
+        Self::OpenLegend,
         Self::OpenTour,
         Self::OpenSyncStatus,
         Self::OpenMessages,
@@ -993,6 +1000,7 @@ impl Action {
             Action::Refresh => ActionKind::Refresh,
             Action::ForceRedraw => ActionKind::ForceRedraw,
             Action::OpenHelp => ActionKind::OpenHelp,
+            Action::OpenLegend => ActionKind::OpenLegend,
             Action::OpenTour => ActionKind::OpenTour,
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
             Action::OpenMessages => ActionKind::OpenMessages,
@@ -1117,6 +1125,13 @@ impl ActionDef {
                 default_keys: "Shift-D",
                 label: "sync diagnostics",
                 describe: "Show recent provider-sync outcomes, last poll times, and errors.",
+                section: Section::Global,
+            },
+            ActionKind::OpenLegend => &Self {
+                kind: ActionKind::OpenLegend,
+                default_keys: "Shift-I",
+                label: "icon legend",
+                describe: "Open the glyph legend — every sidebar marker (status pills, agent-state glyphs, row badges, and the repo header's kind / role counts such as `3⇄ 2○ · 2A 1R`) painted the way it renders on a row, beside its one-line meaning. Generated from the same marker registry Ask Lazybox reads, so it cannot drift from the sidebar. The same key opens it from the `?` shortcuts panel.",
                 section: Section::Global,
             },
             ActionKind::OpenMessages => &Self {
@@ -2528,6 +2543,7 @@ impl ActionKind {
             ActionKind::Refresh => "refresh",
             ActionKind::ForceRedraw => "force_redraw",
             ActionKind::OpenHelp => "open_help",
+            ActionKind::OpenLegend => "open_legend",
             ActionKind::OpenTour => "open_tour",
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenMessages => "open_messages",
@@ -3599,6 +3615,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::Refresh
         | ActionKind::ForceRedraw
         | ActionKind::OpenHelp
+        | ActionKind::OpenLegend
         | ActionKind::OpenTour
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenMessages

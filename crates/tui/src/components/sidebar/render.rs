@@ -68,6 +68,54 @@ fn spans_visual_width(spans: &[Span<'_>]) -> usize {
         .sum()
 }
 
+/// The repo header's kind / role groups (#1744) as styled spans: the kind
+/// pair (`3⇄ 2○`) then the role trio (`2A 1R`), each token the count in
+/// plain text followed by the glyph in the tone the row paints it. Zero
+/// tokens are left out and an empty group is omitted, so the caller can
+/// treat every returned group as something worth a separator.
+fn header_breakdown(
+    summary: &RepoSummary,
+    ascii: bool,
+    theme: &crate::theme::Theme,
+    row_bg: Option<Style>,
+) -> Vec<Vec<Span<'static>>> {
+    use lazybox_core::TaskRole;
+    let base = row_bg.unwrap_or_default();
+    let group = |tokens: [(usize, String, ratatui::style::Color); 3]| -> Vec<Span<'static>> {
+        let mut out: Vec<Span<'static>> = Vec::new();
+        for (n, glyph, color) in tokens {
+            if n == 0 {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(Span::styled(" ", base));
+            }
+            out.push(Span::styled(n.to_string(), base.fg(theme.text_strong)));
+            out.push(Span::styled(glyph, base.fg(color)));
+        }
+        out
+    };
+    let kind = |n: usize, kind: TypeGlyph| (n, kind.glyph(ascii).to_string(), kind.tone(theme));
+    let kinds = group([
+        kind(summary.prs, TypeGlyph::Pr),
+        kind(summary.issues, TypeGlyph::Issue),
+        kind(summary.tickets, TypeGlyph::Ticket),
+    ]);
+    let role = |n: usize, role: TaskRole| {
+        let (letter, color) = role_badge(theme, role);
+        (n, letter.to_string(), color)
+    };
+    let roles = group([
+        role(summary.authored, TaskRole::Author),
+        role(summary.reviewing, TaskRole::Reviewer),
+        role(summary.assigned, TaskRole::Assignee),
+    ]);
+    [kinds, roles]
+        .into_iter()
+        .filter(|g| !g.is_empty())
+        .collect()
+}
+
 /// USD micros (millionths of a dollar) → `$1.23`.
 fn fmt_cost_micros(micros: i64) -> String {
     format!("${:.2}", micros as f64 / 1_000_000.0)
@@ -1136,37 +1184,64 @@ impl Sidebar {
                                 row_bg.unwrap_or_default().fg(theme.text_dim),
                             ));
                         }
-                        // Active count is redundant — the workspace
-                        // rows are visible directly under the header,
-                        // so the user can count them. The attention
-                        // pill is the only summary that adds info
-                        // (and only when non-zero). Two raw numbers
-                        // side-by-side looked like a broken counter.
-                        if s.attention > 0 {
-                            spans.push(Span::styled(
-                                format!("  ● {}", s.attention),
-                                row_bg
-                                    .unwrap_or_default()
-                                    .fg(theme.hover)
-                                    .add_modifier(Modifier::BOLD),
-                            ));
-                        }
                         // While a search filters this project — either a
                         // scoped `/` on it or a global `#` search that
                         // touches every repo — surface the match count so
                         // the header reads as a result tally rather than a
-                        // vanished tree.
-                        if self.search.as_ref().is_some_and(|q| {
-                            !q.query.is_empty()
-                                && q.scope.as_deref().is_none_or(|scope| scope == name)
-                        }) {
+                        // vanished tree. Built first so the breakdown
+                        // below fits around it instead of pushing it off.
+                        let match_span = self
+                            .search
+                            .as_ref()
+                            .filter(|q| {
+                                !q.query.is_empty()
+                                    && q.scope.as_deref().is_none_or(|scope| scope == name)
+                            })
+                            .map(|_| {
+                                Span::styled(
+                                    format!("  {} match", s.active),
+                                    row_bg
+                                        .unwrap_or_default()
+                                        .fg(theme.accent)
+                                        .add_modifier(Modifier::BOLD),
+                                )
+                            });
+                        // What the group is made of, in the rows' own
+                        // vocabulary — `3⇄ 2○ · 2A 1R` (#1744). A bare
+                        // attention count said how many rows wanted a
+                        // look but not what they were, which is the one
+                        // thing a collapsed group needs to tell. The
+                        // header has less room than a row, so a group is
+                        // appended only when it fits whole: dropped, never
+                        // clipped mid-token, like the header strip's
+                        // counters. A demoted (quiet / digest / muted)
+                        // group keeps only its level chip: the ladder
+                        // exists to make that header read as background,
+                        // and a tally would undo it.
+                        let mut used = spans_visual_width(&spans)
+                            + match_span
+                                .as_ref()
+                                .map_or(0, |m| visual_width(m.content.as_ref()));
+                        let breakdown = if demoted {
+                            Vec::new()
+                        } else {
+                            header_breakdown(s, self.ascii_glyphs, theme, row_bg)
+                        };
+                        for (placed, group) in breakdown.into_iter().enumerate() {
+                            let sep = if placed == 0 { "  " } else { " · " };
+                            let width = visual_width(sep) + spans_visual_width(&group);
+                            if used + width > row_budget {
+                                break;
+                            }
                             spans.push(Span::styled(
-                                format!("  {} match", s.active),
-                                row_bg
-                                    .unwrap_or_default()
-                                    .fg(theme.accent)
-                                    .add_modifier(Modifier::BOLD),
+                                sep,
+                                row_bg.unwrap_or_default().fg(theme.text_dim),
                             ));
+                            spans.extend(group);
+                            used += width;
+                        }
+                        if let Some(span) = match_span {
+                            spans.push(span);
                         }
                     }
                     // Without a caret, the cursor reads purely from the

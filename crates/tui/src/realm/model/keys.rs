@@ -3231,6 +3231,7 @@ pub(super) fn action_from_kind(
         ActionKind::BroadcastToSelected => Action::BroadcastToSelected,
         ActionKind::VisualSelect => Action::VisualSelect,
         ActionKind::OpenHelp => Action::OpenHelp,
+        ActionKind::OpenLegend => Action::OpenLegend,
         ActionKind::OpenTour => Action::OpenTour,
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
         ActionKind::OpenMessages => Action::OpenMessages,

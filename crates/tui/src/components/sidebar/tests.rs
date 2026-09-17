@@ -745,6 +745,35 @@ mod status_pill_consistency_tests {
         );
     }
 
+    /// #1744: the repo header's kind / role count tokens are documented
+    /// by the same registry as the pills — every glyph the header can
+    /// paint (the three type glyphs, the three role letters) has an
+    /// `N<glyph>` entry, and nothing is documented that the header
+    /// can't paint.
+    #[test]
+    fn header_breakdown_glyphs_are_documented() {
+        use super::super::{G_ISSUE, G_PR, G_TICKET, role_badge};
+        use lazybox_core::TaskRole;
+        use std::collections::BTreeSet;
+        let theme = crate::theme::current();
+        let mut rendered: BTreeSet<String> = [G_PR, G_ISSUE, G_TICKET]
+            .iter()
+            .map(|g| format!("N{g}"))
+            .collect();
+        for role in [TaskRole::Author, TaskRole::Reviewer, TaskRole::Assignee] {
+            rendered.insert(format!("N{}", role_badge(theme, role).0));
+        }
+        let documented: BTreeSet<String> = lazybox_tui_core::markers::header_breakdown_docs()
+            .iter()
+            .map(|d| d.label.to_string())
+            .collect();
+        assert_eq!(
+            documented, rendered,
+            "the header's count tokens must be exactly the documented ones \
+             (left = tui-core::markers, right = what the header renders)"
+        );
+    }
+
     #[test]
     fn task_pill_matches_tag_priority() {
         // Sanity-check the pipeline: for a handful of (task) inputs

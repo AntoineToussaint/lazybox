@@ -21,6 +21,7 @@ pub mod hopper;
 pub mod input;
 pub mod issue_browser;
 pub mod jump_picker;
+pub mod legend;
 pub mod loading;
 pub mod markdown_modal;
 pub mod merge_history_modal;

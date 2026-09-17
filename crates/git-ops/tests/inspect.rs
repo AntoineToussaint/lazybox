@@ -995,6 +995,49 @@ async fn reclaim_managed_holder_at_the_production_layout() {
     );
 }
 
+/// The shared main checkout sits inside the managed namespace but is
+/// owned by no workspace. A branch that shares the default branch's name
+/// (a fork PR opened from the fork's `main`) must neither find it as a
+/// holder nor reclaim it, or the isolated spawn would delete the
+/// checkout every on-main session on the repo relies on.
+#[tokio::test]
+async fn shared_main_checkout_is_never_a_branch_holder() {
+    let fx = setup_fixture().await;
+    let main = add_wt_at(
+        &fx,
+        fx.base
+            .path()
+            .join("github-o-r")
+            .join(lazybox_git_ops::SHARED_MAIN_DIR),
+        "main",
+        "main",
+    )
+    .await;
+    let manager = mgr(&fx);
+    assert!(manager.is_managed_worktree_path(&main));
+
+    let holders = manager
+        .managed_worktrees_for_branch("o", "r", "main", lazybox_git_ops::LockPriority::Interactive)
+        .await
+        .unwrap();
+    assert!(holders.is_empty(), "`_main` is not a holder: {holders:?}");
+
+    assert_eq!(
+        manager
+            .reclaim_managed_worktree_if_safe(
+                "o",
+                "r",
+                "main",
+                &main,
+                lazybox_git_ops::LockPriority::Interactive
+            )
+            .await
+            .unwrap(),
+        WorktreeReclaimOutcome::NotManaged,
+    );
+    assert!(main.exists(), "the clean shared checkout survives");
+}
+
 /// `worktree_is_pristine` — true only when a checkout carries nothing
 /// that exists solely on disk: uncommitted changes and unpushed
 /// commits each flip it false.

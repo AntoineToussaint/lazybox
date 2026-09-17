@@ -20659,6 +20659,76 @@ mod tests {
         assert!(!holder.exists());
     }
 
+    /// An isolated spawn whose branch is the default branch (a fork PR
+    /// opened from the fork's `main`) finds the shared `_main` checkout
+    /// holding it. With nobody in a terminal there, every liveness guard
+    /// passes — no session ever records `_main` — so the reclaim must be
+    /// refused at the holder itself, not by luck of a `target/` dir.
+    #[tokio::test]
+    async fn shared_main_checkout_is_preserved_from_branch_holder_reclaim() {
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let manager = config.worktree_manager();
+        let bare = manager.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        test_git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+
+        let mut ws = Workspace::empty(WorkspaceKey::new("github:acme/core#7"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "core"));
+        let shared_main = main_worktree_path_under(&ws, config.worktree_root_path()).unwrap();
+        std::fs::create_dir_all(shared_main.parent().unwrap()).unwrap();
+        test_git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "main",
+                &shared_main.to_string_lossy(),
+                "refs/heads/main",
+            ],
+        );
+
+        let intended = worktree_path_for_session_under(&ws, 0, config.worktree_root_path());
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config,
+                &manager,
+                "acme",
+                "core",
+                "main",
+                &shared_main,
+                &intended,
+                true,
+            )
+            .await,
+            BranchHolderReclaim::Preserved,
+        );
+        assert!(
+            shared_main.exists(),
+            "the shared main checkout is untouched"
+        );
+    }
+
     /// The live-main-owner guard compares candidates against the shared
     /// `_main` checkout under the config's worktree root — the path an
     /// on-main spawn actually provisions — so an in-flight on-main spawn

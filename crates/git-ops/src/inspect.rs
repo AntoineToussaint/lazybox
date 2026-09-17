@@ -89,6 +89,13 @@ pub const BUILD_DIR: &str = "target";
 /// `[a-z0-9-]` only), which is what makes matching on the name safe.
 pub const SHARED_MAIN_DIR: &str = "_main";
 
+/// Whether `path` is a repo's shared main checkout (`<scope>/_main`).
+/// Owned by no single workspace, so never a branch holder to adopt or
+/// reclaim on one workspace's behalf.
+fn is_shared_main_checkout(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == SHARED_MAIN_DIR)
+}
+
 /// One row of the inspector report.
 #[derive(Debug, Clone)]
 pub struct WorktreeInspection {
@@ -250,7 +257,11 @@ impl WorktreeManager {
     /// need to claim an existing checkout can inspect one repo/branch
     /// without walking every cached repository or probing worktree
     /// cleanliness. Paths outside the managed namespace are deliberately
-    /// excluded even when they are registered against the same bare clone.
+    /// excluded even when they are registered against the same bare clone,
+    /// and so is the shared main checkout (`<scope>/_main`): it holds the
+    /// default branch for every workspace on the repo, so a branch that
+    /// happens to share that name (a fork PR opened from the fork's
+    /// `main`) must not see it as a holder it could claim or reclaim.
     pub async fn managed_worktrees_for_branch(
         &self,
         owner: &str,
@@ -271,6 +282,7 @@ impl WorktreeManager {
                 continue;
             }
             if self.is_managed_worktree_path(&entry.path)
+                && !is_shared_main_checkout(&entry.path)
                 && crate::worktree_dir_ready(&entry.path).await
             {
                 paths.push(entry.path);
@@ -285,8 +297,9 @@ impl WorktreeManager {
     /// work to preserve. The caller owns session-liveness validation;
     /// this boundary validates that `path` is a registered worktree for
     /// `branch`, is one lazybox provisioned
-    /// ([`Self::is_managed_worktree_path`]), is unlocked, clean, and has
-    /// no unpushed commits before asking git to remove it.
+    /// ([`Self::is_managed_worktree_path`]) and not the shared main
+    /// checkout, is unlocked, clean, and has no unpushed commits before
+    /// asking git to remove it.
     ///
     /// The local branch ref is deliberately retained so the caller can
     /// immediately check it out at the intended workspace path.
@@ -305,7 +318,7 @@ impl WorktreeManager {
 
         let lock = crate::repo_lock(&bare);
         let _guard = lock.lock(priority).await;
-        if !self.is_managed_worktree_path(path) {
+        if !self.is_managed_worktree_path(path) || is_shared_main_checkout(path) {
             return Ok(WorktreeReclaimOutcome::NotManaged);
         }
         let key = canonical_or_self(path);

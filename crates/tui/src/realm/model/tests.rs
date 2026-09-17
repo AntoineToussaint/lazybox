@@ -9119,6 +9119,8 @@ mod stale_input_tests {
                 | Id::ScopeRemovalConfirm
                 | Id::EditorRemoveConfirm
                 | Id::WorktreeRecreateConfirm
+                | Id::WorktreeRenameBlockingConfirm
+                | Id::WorktreeBranchName
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
                 // (HeaderContext's entries are all local/reversible, but
@@ -22754,6 +22756,134 @@ mod worktree_progress_recovery_tests {
             Some("feat/document-rpc-tools"),
             "the provider-error route names the PR head too",
         );
+    }
+
+    /// The whole point of #1742: a branch collision is resolved from the
+    /// modal and the ORIGINALLY requested agent starts — same kind, same
+    /// model tier, same prompt, same access — without the user going back
+    /// through setup. Drives the real client path end to end: failure
+    /// event → `b` → the prefilled prompt → submit → the command on the
+    /// wire.
+    #[test]
+    fn resolving_a_branch_collision_resumes_the_original_spawn() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = WorkspaceKey::new("github:acme/widget#42");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+            model_alias: Some("L".into()),
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: None,
+            kind: TerminalKind::Agent("codex".into()),
+            cwd: None,
+            initial_prompt: Some("group the dependency bumps".into()),
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        });
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::WorktreeAdd,
+            status: WorktreeStepStatus::Failed(
+                "worktree: checkout_new_branch_at: branch 'deps/grouping' can't be \
+                 created because 'deps' already exists — git can't hold both a branch \
+                 and a path named 'deps/grouping' (a directory/file conflict). Delete \
+                 or rename 'deps', then retry"
+                    .into(),
+            ),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        while server.rx.try_recv().is_ok() {}
+
+        m.prompt_for_another_branch();
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::WorktreeBranchName),
+            "`b` opens an editable name prompt, not a dead end",
+        );
+
+        // Submitting the name the prompt proposed carries the spawn.
+        let cmds = m.handle_input_submitted("deps-grouping".to_string());
+        let resolved = cmds
+            .iter()
+            .find_map(|cmd| match cmd {
+                lazybox_ipc::Command::ResolveBranchConflict {
+                    spawn,
+                    initial_prompt,
+                    on_main,
+                    resolution,
+                } => Some((spawn, initial_prompt, on_main, resolution)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected a ResolveBranchConflict, got {cmds:?}"));
+        let (spawn, initial_prompt, on_main, resolution) = resolved;
+        assert_eq!(
+            *resolution,
+            lazybox_ipc::BranchConflictResolution::UseBranch("deps-grouping".into()),
+        );
+        assert!(
+            matches!(&spawn.kind, TerminalKind::Agent(id) if id == "codex"),
+            "the agent the user picked is the agent that starts: {:?}",
+            spawn.kind,
+        );
+        assert_eq!(
+            spawn.model_alias.as_deref(),
+            Some("L"),
+            "model tier survives"
+        );
+        assert_eq!(
+            initial_prompt.as_deref(),
+            Some("group the dependency bumps"),
+            "the prompt survives — the user never retypes it",
+        );
+        assert!(!on_main);
+    }
+
+    /// A name that still collides can't be submitted: `deps/grouping-2`
+    /// looks like a fix and asks for the very `deps/` directory `deps`
+    /// occupies, so accepting it would spend a round trip re-failing.
+    /// The prompt stays open and editable instead.
+    #[test]
+    fn the_branch_prompt_rejects_a_name_that_still_collides() {
+        use crate::realm::Msg;
+        use crate::realm::components::input::Input;
+        use tuirealm::component::AppComponent;
+
+        // The validator the prompt is built with, exercised through the
+        // component's own Enter path: what matters is which names it
+        // lets through, not that the closure is correct in isolation.
+        let prompt = |candidate: &str| -> Input {
+            let blocker = "deps".to_string();
+            Input::new("use instead:")
+                .with_input(candidate.to_string())
+                .with_validator(move |typed: &str| {
+                    let typed = typed.trim();
+                    !typed.is_empty() && !lazybox_core::branch_namespace::conflicts(typed, &blocker)
+                })
+        };
+        let submit = |input: &mut Input| {
+            input.on(&tuirealm::event::Event::Keyboard(
+                tuirealm::event::KeyEvent::from(tuirealm::event::Key::Enter),
+            ))
+        };
+        for rejected in ["deps", "deps/grouping", "deps/grouping-2", "  ", ""] {
+            assert!(
+                submit(&mut prompt(rejected)).is_none(),
+                "{rejected:?} still collides (or is empty) and must not submit",
+            );
+        }
+        for accepted in ["deps-grouping", "deps-grouping-2", "weekly-bumps"] {
+            assert!(
+                matches!(
+                    submit(&mut prompt(accepted)),
+                    Some(Msg::InputSubmitted(ref name)) if name == accepted
+                ),
+                "{accepted} is clear of the blocker and must submit",
+            );
+        }
     }
 
     /// #1572: `r` moves a live checkout into a `.bak-<n>` sibling and

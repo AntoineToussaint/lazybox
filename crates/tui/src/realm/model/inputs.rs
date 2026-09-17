@@ -793,6 +793,31 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_info(format!("view saved: {name} — recall with x V"));
                 }
             }
+            Some(Id::WorktreeBranchName) => {
+                // The typed name resolves the collision and resumes the
+                // spawn that failed, carrying the agent, model and prompt
+                // the user already chose (#1742). Whether the name is
+                // genuinely free is the daemon's call: it revalidates
+                // against the live ref namespace, which may have changed
+                // while this prompt was open.
+                let branch = text.trim().to_string();
+                if let Some(ModalFlow::WorktreeBranchName {
+                    spawn,
+                    initial_prompt,
+                    on_main,
+                }) = self.modal_flow.take()
+                    && !branch.is_empty()
+                {
+                    self.force_dismiss_worktree_progress();
+                    self.worktree_progress_dismissed = None;
+                    cmds.push(IpcCommand::ResolveBranchConflict {
+                        spawn,
+                        initial_prompt,
+                        on_main,
+                        resolution: lazybox_ipc::BranchConflictResolution::UseBranch(branch),
+                    });
+                }
+            }
             Some(Id::RenameWorkspace) => {
                 let name = text.trim().to_string();
                 let target = match self.modal_flow.take() {
@@ -1619,6 +1644,18 @@ showing keybinding search only",
                 {
                     // Only a Yes tears the checklist down; the pop above
                     // already returned a No to it, `a adopt` included.
+                    self.force_dismiss_worktree_progress();
+                    self.worktree_progress_dismissed = None;
+                    cmds.push(*cmd);
+                }
+            }
+            Some(Id::WorktreeRenameBlockingConfirm) => {
+                if let Some(ModalFlow::WorktreeRenameBlockingConfirm { cmd }) =
+                    self.modal_flow.take()
+                    && yes
+                {
+                    // Declining leaves the checklist up with `b` and `r`
+                    // still reachable — a No must not end the flow (#1742).
                     self.force_dismiss_worktree_progress();
                     self.worktree_progress_dismissed = None;
                     cmds.push(*cmd);

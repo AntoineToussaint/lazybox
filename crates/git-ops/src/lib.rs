@@ -1794,6 +1794,73 @@ impl WorktreeManager {
         self.bare_clone_path(owner, repo)
     }
 
+    /// The existing local branch that would block creating `candidate`,
+    /// or `None` when the name is free. Checks the FULL ref namespace,
+    /// not just an exact match: `deps/grouping-2` is reported as blocked
+    /// by `deps`, because git can't hold a `deps` ref and a `deps/`
+    /// directory at once (#1742).
+    ///
+    /// A point-in-time answer — a concurrent fetch can create the
+    /// blocker a moment later — so it validates a name *before* offering
+    /// it, and the checkout itself remains the authority.
+    pub async fn branch_namespace_blocker(
+        &self,
+        owner: &str,
+        repo: &str,
+        candidate: &str,
+    ) -> Result<Option<String>, GitError> {
+        let bare_path = self.bare_clone_path(owner, repo);
+        let listing = run_git_in(
+            self.git_runner(),
+            &bare_path,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        )
+        .await?;
+        Ok(listing
+            .lines()
+            .map(str::trim)
+            .find(|existing| {
+                !existing.is_empty()
+                    && lazybox_core::branch_namespace::conflicts(existing, candidate)
+            })
+            .map(str::to_string))
+    }
+
+    /// Rename local branch `from` to `to`, preserving every commit on it
+    /// — the non-destructive way to clear a branch whose *name* blocks a
+    /// namespace (#1742). Never a deletion: unmerged work moves with the
+    /// branch.
+    ///
+    /// Refuses when `from` is checked out in any worktree, since a
+    /// rename rewrites that worktree's HEAD out from under whoever is
+    /// working in it, and when `to` is itself taken.
+    pub async fn rename_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<(), GitError> {
+        let bare_path = self.bare_clone_path(owner, repo);
+        let lock = repo_lock(&bare_path);
+        let _guard = lock.lock(LockPriority::Interactive).await;
+        let git = self.git_runner();
+        if let Some(holder) = worktree_on_branch(git, &bare_path, from).await {
+            return Err(GitError::BranchHeldLive {
+                branch: from.to_string(),
+                holder,
+            });
+        }
+        if let Some(blocker) = self.branch_namespace_blocker(owner, repo, to).await? {
+            return Err(GitError::BranchDirFileConflict {
+                branch: to.to_string(),
+                conflicting: blocker,
+            });
+        }
+        run_git_in(git, &bare_path, &["branch", "-m", from, to]).await?;
+        Ok(())
+    }
+
     pub async fn remove(&self, owner: &str, repo: &str, branch: &str) -> Result<(), GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
@@ -3367,6 +3434,35 @@ async fn interrupted_add_registration(git: &dyn GitRunner, bare_path: &Path, pat
             .map(Path::new);
         registered.is_some_and(|p| paths_equal(p, path))
             && block.lines().any(|l| l.trim() == "locked initializing")
+    })
+}
+
+/// The worktree that currently has `branch` checked out, if any.
+/// `worktree list --porcelain` names each tree's `branch` as a full
+/// ref, so the comparison is against `refs/heads/<branch>`.
+async fn worktree_on_branch(
+    git: &dyn GitRunner,
+    bare_path: &Path,
+    branch: &str,
+) -> Option<PathBuf> {
+    let listing = run_git_in(git, bare_path, &["worktree", "list", "--porcelain"])
+        .await
+        .ok()?;
+    let wanted = format!("refs/heads/{branch}");
+    listing.split("\n\n").find_map(|block| {
+        block
+            .lines()
+            .any(|l| {
+                l.strip_prefix("branch ")
+                    .is_some_and(|b| b.trim() == wanted)
+            })
+            .then(|| {
+                block
+                    .lines()
+                    .find_map(|l| l.strip_prefix("worktree "))
+                    .map(|p| PathBuf::from(p.trim()))
+            })
+            .flatten()
     })
 }
 
@@ -5865,6 +5961,84 @@ mod resilient_add_tests {
         assert!(
             branch_exists("release/v0.2.102"),
             "the conflicting branch must be preserved, never deleted to free the name"
+        );
+    }
+
+    /// The reported direction (#1742): a plain `deps` branch blocks
+    /// `deps/grouping`, because the ref wants to be a file where the new
+    /// branch needs a directory. The suffix recovery that clears the
+    /// opposite direction is useless here — `deps/grouping-2` asks for the
+    /// very same `deps/` directory — while the flattened candidate the
+    /// namespace helper produces provisions cleanly. Pinned against real
+    /// git, since the whole bug was a candidate that only looked different.
+    #[tokio::test]
+    async fn dir_file_conflict_recovers_on_a_flattened_name() {
+        let (tmp, bare) = local_bare_clone();
+        // An unmergeable `deps`, detached so it isn't "checked out" — the
+        // shape `git branch -d` refuses, so the safe auto-delete can't
+        // clear it and the name genuinely stays occupied.
+        let holder = tmp.path().join("holder");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                holder.to_str().unwrap(),
+                "-B",
+                "deps",
+                "HEAD",
+            ],
+        );
+        std::fs::write(holder.join("extra.txt"), "unmerged work").expect("write");
+        git(&holder, &["add", "."]);
+        git(&holder, &["commit", "-m", "unmerged commit"]);
+        git(&holder, &["checkout", "--detach", "HEAD"]);
+
+        // The suffixed candidate is still blocked by `deps`…
+        let suffixed = lazybox_core::branch_namespace::alternative("deps/grouping", "deps", 1);
+        let doomed = tmp.path().join("doomed");
+        let err = add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &doomed,
+            "deps/grouping-2",
+            "HEAD",
+            &[],
+        )
+        .await
+        .expect_err("a leaf suffix cannot clear an ancestor blocker");
+        assert!(
+            matches!(err, GitError::BranchDirFileConflict { .. }),
+            "expected a typed D/F conflict, got: {err:?}"
+        );
+
+        // …while the candidate the helper actually offers provisions.
+        assert_eq!(suffixed, "deps-grouping");
+        let target = tmp.path().join("target");
+        add_worktree_resilient(default_git_runner(), &bare, &target, &suffixed, "HEAD", &[])
+            .await
+            .expect("a flattened name provisions past the namespace conflict");
+
+        let branch_exists = |name: &str| {
+            std::process::Command::new("git")
+                .current_dir(&bare)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{name}"),
+                ])
+                .status()
+                .expect("run git show-ref")
+                .success()
+        };
+        assert!(
+            branch_exists("deps-grouping"),
+            "the flattened branch exists"
+        );
+        assert!(
+            branch_exists("deps"),
+            "the blocking branch must be preserved, never deleted to free the name"
         );
     }
 

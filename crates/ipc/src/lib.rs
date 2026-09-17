@@ -2240,6 +2240,40 @@ pub enum Command {
         session_key: SessionKey,
         enabled: bool,
     },
+    /// Resolve a [`WorktreeRecovery::BranchDirFileConflict`] and resume the
+    /// spawn it aborted (#1742). `spawn` mirrors the failed
+    /// [`Command::Spawn`], so the originally requested agent / shell /
+    /// model / prompt is what starts once the conflict is cleared — the
+    /// user never re-enters setup. The daemon revalidates `resolution`
+    /// against the live ref namespace before acting, since the branch
+    /// state can change between the modal opening and the keypress.
+    /// Appended last (bincode is ordinal-sensitive).
+    ResolveBranchConflict {
+        spawn: Box<SpawnFallback>,
+        #[serde(default)]
+        initial_prompt: Option<String>,
+        #[serde(default)]
+        on_main: bool,
+        resolution: BranchConflictResolution,
+    },
+}
+
+/// How a branch-namespace collision should be cleared (#1742). Both arms
+/// are non-destructive: one sidesteps the taken name, the other moves the
+/// blocker's *name* while keeping every commit on it. Deleting a branch is
+/// deliberately not expressible here — it is never the repair lazybox
+/// performs on the user's behalf.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum BranchConflictResolution {
+    /// Cut the new work on this name instead. Only valid for a branch
+    /// lazybox derived; the daemon refuses it for a workspace whose branch
+    /// is a PR head, where renaming would silently retarget the PR.
+    UseBranch(String),
+    /// Rename the *blocking* local branch out of the way, then provision
+    /// the originally requested branch. Refused when `from` is checked out
+    /// in a live worktree.
+    RenameBlocking { from: String, to: String },
 }
 
 impl Command {
@@ -4410,9 +4444,8 @@ impl WorktreeRecovery {
             }
             Self::Disk => "Disk or permission error. Free space or fix permissions, then press r.",
             Self::BranchDirFileConflict => {
-                "The branch name collides with an existing branch (a directory/file \
-                 conflict). Delete or rename the conflicting branch — a bare retry \
-                 can't clear it."
+                "The branch name collides with an existing branch, so git can't create \
+                 both. Pick a free name (or move the blocker's name aside) to carry on."
             }
             Self::Unknown => "Press r to retry, or Esc to dismiss.",
         }
@@ -4429,6 +4462,27 @@ impl WorktreeRecovery {
         let start = after[..end].rfind('\'')? + 1;
         let name = after[start..end].trim();
         (!name.is_empty()).then(|| name.to_string())
+    }
+
+    /// The branch the spawn *asked* for in a
+    /// [`Self::BranchDirFileConflict`] message (``branch '<branch>' can't
+    /// be created because …``). With [`Self::df_conflict_branch`] it gives
+    /// the modal both sides of the collision, which is what a usable
+    /// alternative name has to be derived from (#1742).
+    pub fn df_requested_branch(message: &str) -> Option<String> {
+        let after = message.split_once("branch '")?.1;
+        let name = after.split_once('\'')?.0.trim();
+        (!name.is_empty()).then(|| name.to_string())
+    }
+
+    /// Whether the modal can offer to **resolve a branch-namespace
+    /// collision in place** (#1742): pick a free branch name for new work,
+    /// or move the blocking branch's name aside — then resume the spawn
+    /// with everything the user already chose. Only
+    /// [`Self::BranchDirFileConflict`], the one class whose blocker is a
+    /// *name*, not a state lazybox has to wait out.
+    pub fn resolves_branch_conflict(&self) -> bool {
+        matches!(self, Self::BranchDirFileConflict)
     }
 
     /// Concrete recovery text for a particular failure message.
@@ -4452,6 +4506,21 @@ impl WorktreeRecovery {
                 "Managed checkout:",
                 self.hint(),
             ),
+            // Name both sides: which branch blocks which is the whole
+            // fact, and it decides whether the fix is a new name for the
+            // work or a new name for the blocker (#1742).
+            Self::BranchDirFileConflict => {
+                match (
+                    Self::df_requested_branch(message),
+                    Self::df_conflict_branch(message),
+                ) {
+                    (Some(wanted), Some(blocker)) => format!(
+                        "'{blocker}' already occupies the name '{wanted}' needs — \
+                         git can't hold both."
+                    ),
+                    _ => self.hint().to_string(),
+                }
+            }
             // Name the branch: adopting is only obviously the right call
             // once you can see which branch you would be adopting (#1572).
             Self::BranchMismatch => match Self::mismatch_branch(message) {
@@ -5243,6 +5312,71 @@ mod worktree_recovery_tests {
             WorktreeRecovery::df_conflict_branch(msg).as_deref(),
             Some("release/v0.2.102"),
         );
+    }
+
+    /// #1742: the collision is only actionable once BOTH sides are in
+    /// hand — which name blocks which is what decides whether the work
+    /// moves or the blocker does. Pinned on the real
+    /// `GitError::BranchDirFileConflict` text in both directions, since
+    /// the daemon's own retry and the modal's suggestion read from it.
+    #[test]
+    fn dir_file_conflict_carries_both_branch_names() {
+        for (wanted, blocker) in [("release", "release/v0.2.102"), ("deps/grouping", "deps")] {
+            let msg = format!(
+                "worktree: checkout_new_branch_at: branch '{wanted}' can't be created \
+                 because '{blocker}' already exists — git can't hold both a branch and a \
+                 path named '{wanted}' (a directory/file conflict). Delete or rename \
+                 '{blocker}', then retry"
+            );
+            let class = WorktreeRecovery::classify(&msg);
+            assert_eq!(class, WorktreeRecovery::BranchDirFileConflict);
+            assert!(
+                class.resolves_branch_conflict(),
+                "the modal must offer to resolve the collision, not dead-end on it",
+            );
+            assert_eq!(
+                WorktreeRecovery::df_requested_branch(&msg).as_deref(),
+                Some(wanted),
+            );
+            assert_eq!(
+                WorktreeRecovery::df_conflict_branch(&msg).as_deref(),
+                Some(blocker),
+            );
+            // The remediation names the pair rather than repeating the
+            // generic "delete or rename" advice the class used to end on.
+            let remediation = class.remediation(&msg);
+            assert!(
+                remediation.contains(wanted) && remediation.contains(blocker),
+                "remediation must name both sides: {remediation}",
+            );
+        }
+    }
+
+    /// No other class claims the branch-conflict recovery: offering a
+    /// branch rename on, say, a dirty leftover would be a fix for a
+    /// problem the user doesn't have.
+    #[test]
+    fn only_the_branch_collision_resolves_a_branch_conflict() {
+        for class in [
+            WorktreeRecovery::Transient,
+            WorktreeRecovery::BranchHeldLive,
+            WorktreeRecovery::BranchHeldManaged,
+            WorktreeRecovery::BranchMismatch,
+            WorktreeRecovery::DirtyLeftover,
+            WorktreeRecovery::BranchMissing,
+            WorktreeRecovery::Offline,
+            WorktreeRecovery::DefaultBranchUnresolved,
+            WorktreeRecovery::BadRepo,
+            WorktreeRecovery::LinearUnmapped,
+            WorktreeRecovery::JiraUnmapped,
+            WorktreeRecovery::Disk,
+            WorktreeRecovery::Unknown,
+        ] {
+            assert!(
+                !class.resolves_branch_conflict(),
+                "{class:?} must not offer a branch-name recovery",
+            );
+        }
     }
 
     /// #1755: the modal states a collision as the two branch names side

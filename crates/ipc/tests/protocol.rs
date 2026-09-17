@@ -933,6 +933,11 @@ fn all_events() -> Vec<Event> {
             terminal_id: TerminalId(2),
             state: AgentState::AwaitingReset,
         },
+        Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::Stalled,
+        },
         Event::AgentRunStarted {
             request_id: AgentRunRequestId("request-1".into()),
             run_id: AgentRunId(9),

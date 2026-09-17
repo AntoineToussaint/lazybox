@@ -544,12 +544,38 @@ impl Sidebar {
                         crate::util::notice_slug(&workspace.name)
                     ));
                 }
-                // Only a change in asking-ness or rate-limited-ness can
-                // change the visible set (both feed their own attention
-                // axis); a done- or working-only change reads fresh at
-                // render time, and the daemon-event path forces the redraw
-                // via `displays_agent_state`.
-                if change.asking_changed || change.limit_changed {
+                // An agent that stopped because something broke (#1782).
+                // Alerts unconditionally — unlike the limit above there is
+                // no policy that handles it, and the whole cost of the bug
+                // is the hours between the failure and someone noticing.
+                if change.now_stalled
+                    && let Some(workspace) = self.workspaces.get(session_key)
+                {
+                    if self.attention.desktop_notify {
+                        let title = format!("lazybox — {} stopped on an error", workspace.name);
+                        let body = workspace
+                            .primary_task()
+                            .map(|t| t.title.clone())
+                            .unwrap_or_else(|| workspace.name.clone());
+                        self.pending_notifications.push(PendingNotification {
+                            title,
+                            body,
+                            workspace_key: session_key.clone(),
+                            name: workspace.name.clone(),
+                            kind: NotificationKind::Stalled,
+                        });
+                    }
+                    self.pending_asking_notices.push(format!(
+                        "{} stopped on an error — Shift-L to jump, Shift-K to resume all",
+                        crate::util::notice_slug(&workspace.name)
+                    ));
+                }
+                // Only a change in asking-ness, rate-limited-ness or
+                // stalled-ness can change the visible set (each feeds its
+                // own attention axis); a done- or working-only change reads
+                // fresh at render time, and the daemon-event path forces the
+                // redraw via `displays_agent_state`.
+                if change.asking_changed || change.limit_changed || change.stall_changed {
                     self.recompute_visible();
                 }
             }
@@ -800,6 +826,9 @@ fn aggregate_agent_state(
         // across a workspace's terminals (#847).
         lazybox_ipc::AgentState::CreditExhausted => 8,
         lazybox_ipc::AgentState::LimitReached => 7,
+        // A stalled agent ranks with the limit block for the same reason:
+        // the workspace is stopped and only an external act moves it.
+        lazybox_ipc::AgentState::Stalled => 7,
         lazybox_ipc::AgentState::InputNeeded => 6,
         lazybox_ipc::AgentState::Working => 5,
         // The calm auto-waiting block: notable enough to surface over a

@@ -355,6 +355,9 @@ fn aggregate_agent_state(states: impl Iterator<Item = AgentState>) -> Option<Age
         // A usage-limit block outranks even `InputNeeded` — the most
         // urgent "act externally before this moves" state (#847).
         AgentState::LimitReached => 7,
+        // Stopped on an infrastructure failure — ranked with the limit
+        // block: the workspace is stopped until someone acts (#1782).
+        AgentState::Stalled => 7,
         AgentState::InputNeeded => 6,
         AgentState::Working => 5,
         // The calm auto-waiting block surfaces over a resting `Done`, but

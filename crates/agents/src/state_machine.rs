@@ -250,13 +250,19 @@ pub(crate) fn transition_allowed(from: AgentState, to: AgentState) -> bool {
 /// structural prompt (`InputNeeded`), a provider usage-limit block
 /// (`LimitReached`, #847), a credit block (`CreditExhausted`), or the
 /// calm auto-waiting sibling of the limit block (`AwaitingReset` — the
-/// daemon pressed Wait and is holding until reset). They share the same
+/// daemon pressed Wait and is holding until reset), or a turn that ended
+/// on an infrastructure failure (`Stalled`, #1782). They share the same
 /// stickiness contract — a parked agent emits nothing, so an ambiguous
 /// byte-flow reading is an incidental repaint, never evidence the block
 /// resolved — and all are PTY corrections a fresh lifecycle hook can't
 /// see (the block freezes the hook stream), so the gate lets them
 /// through. Grouping them here keeps every "blocked, sticky" rule in one
 /// predicate rather than duplicated per variant.
+///
+/// `Stalled` earns its place for the settle rule in particular: without
+/// it, a clear `Stalled` reading arriving from `Working` is rewritten to
+/// `Done` by the end-of-turn promotion below — which is precisely the
+/// conflation the state exists to undo.
 pub(crate) fn is_blocked(state: AgentState) -> bool {
     matches!(
         state,
@@ -264,6 +270,7 @@ pub(crate) fn is_blocked(state: AgentState) -> bool {
             | AgentState::LimitReached
             | AgentState::CreditExhausted
             | AgentState::AwaitingReset
+            | AgentState::Stalled
     )
 }
 
@@ -676,7 +683,14 @@ mod tests {
     use AgentState::{Done, Idle, InputNeeded, Working};
 
     const EXITED: AgentState = AgentState::Exited { code: Some(0) };
-    const ALL: [AgentState; 5] = [Working, InputNeeded, Idle, Done, EXITED];
+    const ALL: [AgentState; 6] = [
+        Working,
+        InputNeeded,
+        Idle,
+        Done,
+        EXITED,
+        AgentState::Stalled,
+    ];
 
     #[test]
     fn transition_table_enforces_idle_and_exit_invariants() {
@@ -1195,6 +1209,61 @@ mod tests {
         assert_eq!(
             m.on_reading(Some(Working), clear(Idle)),
             Outcome::Committed(Done),
+        );
+    }
+
+    // ── Stalled: the turn that ended on an infrastructure failure (#1782) ─
+
+    #[test]
+    fn stalled_is_blocked() {
+        // It shares the blocked/sticky contract with the parked states —
+        // and it must, or the settle rule below rewrites it to `Done`.
+        assert!(is_blocked(AgentState::Stalled));
+    }
+
+    #[test]
+    fn a_stall_is_not_promoted_to_done_by_the_settle_rule() {
+        // The bug in one assertion: a clear reading arriving from `Working`
+        // is normally rewritten to `Done` ("came to rest after working").
+        // A stall came to rest too — because it broke — so the rewrite is
+        // exactly the conflation `Stalled` exists to undo.
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(Working), clear(AgentState::Stalled)),
+            Outcome::Committed(AgentState::Stalled),
+        );
+    }
+
+    #[test]
+    fn stalled_requires_clear_evidence_to_leave() {
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(Working), clear(AgentState::Stalled)),
+            Outcome::Committed(AgentState::Stalled),
+        );
+        // An incidental repaint is not evidence the agent recovered.
+        assert_eq!(
+            m.on_reading(Some(AgentState::Stalled), ambiguous(Working)),
+            Outcome::Damped,
+        );
+        // The agent visibly running again is.
+        assert_eq!(
+            m.on_reading(Some(AgentState::Stalled), clear(Working)),
+            Outcome::Committed(Working),
+        );
+    }
+
+    #[test]
+    fn a_stall_surfaces_under_a_fresh_hook() {
+        // A stalled agent emits nothing further, so its hook stream freezes
+        // on whatever the failed turn last sent. The byte-silent reading has
+        // to pass the hooks-primary gate exactly as a limit block does, or
+        // the stall is invisible for as long as the hook looks fresh.
+        let mut m = machine();
+        let stall = pty(AgentState::Stalled, true, Liveness::Silent, false);
+        assert_eq!(
+            m.on_pty_reading(Some(Working), stall, Some(FRESH), || false),
+            Outcome::Committed(AgentState::Stalled),
         );
     }
 

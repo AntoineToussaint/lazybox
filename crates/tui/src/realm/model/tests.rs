@@ -4887,6 +4887,81 @@ snippets:
     /// `continue`), and the notice's parked count must be the
     /// `AwaitingReset` count alone (1), not the whole limited set (2).
     ///
+    /// #1787: a stalled agent is in the target set of BOTH recovery
+    /// shapes. That is the whole design — the two actions that already fix
+    /// a transient failure and a wedged process get a new member, rather
+    /// than a third mechanism being invented for stalls.
+    #[test]
+    fn a_stalled_agent_is_resumed_and_restarted_with_the_limited_set() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        m.ui_defaults.usage_limit_alerts = false;
+        for (i, state) in [AgentState::LimitReached, AgentState::Stalled]
+            .into_iter()
+            .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+        assert_eq!(
+            m.sidebar.limited_terminals(),
+            vec![TerminalId(1), TerminalId(2)],
+        );
+
+        // `Shift-K` injects a settle-gated `continue` into both.
+        let injected: Vec<u64> = m
+            .dispatch_action(&Action::ResumeRateLimited)
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt {
+                    terminal_id,
+                    submit: true,
+                    ..
+                } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(injected, vec![1, 2], "the stalled agent is resumed too");
+
+        // `a R` restarts both so a stale credential is swapped in.
+        let restarted: Vec<u64> = m
+            .dispatch_action(&Action::RestartRateLimited)
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::RestartAgentAndContinue { terminal_id, .. } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(restarted, vec![1, 2], "the stalled agent is restarted too");
+    }
+
+    /// The stall count is its own header counter, not folded into the
+    /// `⧗ limited` one: both are fixed by the same keys but a stall is not
+    /// a quota problem, and showing it as one sends you to the wrong place.
+    #[test]
+    fn a_stalled_agent_is_counted_separately_from_a_limit() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        for (i, state) in [AgentState::LimitReached, AgentState::Stalled]
+            .into_iter()
+            .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+        assert_eq!(m.sidebar.stalled_workspace_count(), 1);
+        assert_eq!(m.sidebar.limit_reached_workspace_count(), 1);
+    }
+
     /// The escalating banner is opted out here (`usage_limit_alerts = false`)
     /// so the resume *result* notice is the surface under test: with the
     /// sticky banner up (the default), a non-sticky result flash is routed to

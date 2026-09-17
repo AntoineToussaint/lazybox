@@ -253,6 +253,92 @@ pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
 pub const CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES: &[&str] =
     &["continuing automatically at", "continuing automatically in"];
 
+/// Tokens that mark an `API Error:` cell as an **infrastructure** failure
+/// the agent could retry past (#1782), as opposed to one it reported and
+/// carried on from. Matched only inside a line that already carries the
+/// `API Error:` label (see [`stall_marker_pos`]), which is Claude's own
+/// machine-rendered error cell — the label is what makes these safe to
+/// match at all, since "connection refused" on its own is ordinary output
+/// from any tool the agent runs.
+///
+/// Written space-free: these are compared against a slice of the already
+/// compacted buffer, not fed through [`last_compact_match`].
+const CLAUDE_STALL_ERROR_TOKENS: &[&str] = &["upstreamrequestfailed", "connectionrefused"];
+
+/// The label Claude prefixes its error cells with, compacted.
+const CLAUDE_API_ERROR_LABEL: &str = "apierror:";
+
+/// The two halves of Claude's failed-background-command cell
+/// (`Background command "Poll CI after the fixes" failed with exit code
+/// 1`). Both must share a line, so the agent's prose about a command that
+/// failed doesn't match.
+const CLAUDE_BACKGROUND_FAILURE_MARKERS: (&str, &str) = ("backgroundcommand", "failedwithexitcode");
+
+/// Most recent line in `compact` carrying a marker that the turn ended on
+/// an infrastructure failure rather than a finished task (#1782), or
+/// `None` when the window holds none.
+///
+/// Two families, both anchored on a machine-rendered label so the agent's
+/// own prose can't produce them:
+///
+/// * an `API Error:` cell whose body names a 5xx status, a failed upstream
+///   request, or a refused connection — `API Error: 502 proxy: upstream
+///   request failed … check your inference gateway (127.0.0.1:49526)`,
+///   which is also the shape of a metering-proxy port that moved out from
+///   under a running fleet. A 4xx is deliberately excluded: those are the
+///   agent's own malformed request or a dead credential, which
+///   [`claude_auth_failure`] already routes to re-authentication.
+/// * a `Background command "…" failed with exit code N` cell.
+///
+/// Both families are recognised only as a **result cell**: the marker must
+/// open its line, after Claude's `⏺` cell glyph and nothing else, and the
+/// line must sit outside any markdown fence. That discipline is what makes
+/// these safe to match at all in this repo, where agents routinely print,
+/// diff and quote these very strings — prose ("the API Error: 502 was
+/// transient") never starts a line with the label, and an error pasted
+/// into a fenced block is skipped outright. It follows
+/// [`codex_usage_limit_pos`], which anchors Codex's limit banner on a
+/// line-leading `■` for the same reason.
+fn stall_marker_pos(compact: &str) -> Option<usize> {
+    let (command, failed) = CLAUDE_BACKGROUND_FAILURE_MARKERS;
+    let mut fence = None;
+    let mut offset = 0;
+    let mut latest = None;
+    for line in compact.split_inclusive(['\n', '\r']) {
+        if let Some(marker) = ["```", "~~~"]
+            .into_iter()
+            .find(|marker| line.starts_with(marker))
+        {
+            if fence == Some(marker) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(marker);
+            }
+        } else if fence.is_none() {
+            let cell = line.strip_prefix('⏺').unwrap_or(line);
+            let stalled = match cell.strip_prefix(CLAUDE_API_ERROR_LABEL) {
+                Some(body) => {
+                    is_server_error_status(body) || contains_any(body, CLAUDE_STALL_ERROR_TOKENS)
+                }
+                None => cell.starts_with(command) && cell.contains(failed),
+            };
+            if stalled {
+                latest = Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    latest
+}
+
+/// Whether `body` opens with a 5xx HTTP status — the digits immediately
+/// after an `API Error:` label. `502 proxy: …` matches; `400 invalid
+/// request` and a prose continuation do not.
+fn is_server_error_status(body: &str) -> bool {
+    let mut digits = body.chars().take_while(|c| c.is_ascii_digit());
+    digits.next() == Some('5') && digits.count() == 2
+}
+
 /// Best-effort extraction of the reset time Claude or Codex prints alongside a
 /// usage-limit block (`… resets 3pm`, `… resets at 3:00pm`, `… resets in
 /// 2h`) — the "time-to-reset" a proactive usage indicator surfaces
@@ -661,6 +747,9 @@ enum Trigger {
     StandalonePhrase,
     /// Bare yes/no: a choice marker paired with a question phrase.
     PairedYesNo,
+    /// The turn ended on an infrastructure failure rather than a finished
+    /// task (`stall_marker_pos`) — the `Stalled` state.
+    InfrastructureFailure,
 }
 
 /// Full classification result: the chosen state plus the recency offsets
@@ -1067,6 +1156,28 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
         return d;
     }
 
+    // The turn ended on an infrastructure failure (#1782): an `API Error:
+    // 502 … upstream request failed`, a refused connection to the
+    // inference gateway, a failed background command. Claude prints its
+    // end-of-turn summary and comes to rest at an empty composer exactly
+    // as a finished turn does, so every branch above falls through and the
+    // quiet timer would settle this to `Done` — the agent that gave up
+    // after 38 minutes rendering identically to the one that succeeded.
+    //
+    // Placed LAST, after both `Working` branches: every live shape
+    // outranks it, so an agent that hit an error and kept going is never
+    // pinned here. Gated on the work anchor ONLY, not `resting_pos` — the
+    // resting composer beneath the error is the shape of this stop, not
+    // evidence it is stale (the same reasoning as `UsageLimitAtRest`).
+    // A working anchor painted after the marker does clear it: the agent
+    // retried and recovered, and the error is now scrollback.
+    let stall_pos = stall_marker_pos(compact);
+    if marker_at_least_as_recent(stall_pos, work_anchor_against(stall_pos)) {
+        d.state = AgentState::Stalled;
+        d.trigger = Some(Trigger::InfrastructureFailure);
+        return d;
+    }
+
     // Nothing pending and not streaming: the input box is drawn and
     // quiet, or the output is plain non-interactive text.
     d
@@ -1273,6 +1384,9 @@ fn dialog_marker_pos(compact: &str) -> Option<usize> {
         trust_gate_pos(compact),
         last_compact_match_pos(compact, CLAUDE_USAGE_LIMIT_PHRASES),
         last_compact_match_pos(compact, CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES),
+        // `Stalled` is blocked, so a stale-hook `Working` correction can
+        // only demote it with evidence read from this list.
+        stall_marker_pos(compact),
         compact.rfind("esctocancel"),
     ]
     .into_iter()
@@ -3034,6 +3148,126 @@ mod tests {
         );
     }
 
+    // ── Stalled: a turn that ended on an infrastructure failure (#1782) ──
+
+    /// The headline shape from the issue: a 38-minute turn that died on a
+    /// transient gateway 502 and came to rest looking exactly like success.
+    #[test]
+    fn a_turn_that_ended_on_a_server_error_reads_as_stalled() {
+        let stalled = "⏺ API Error: 502 proxy: upstream request failed. This is a server-side \
+                       issue, usually temporary — try again in a moment.\n\
+                       ✻ Sautéed for 38m 52s · done 7:44 PM\n\
+                       ? for shortcuts";
+        assert_eq!(
+            claude_state(stalled.as_bytes()),
+            Some(AgentState::Stalled),
+            "a 502 that ended the turn is not a finished turn",
+        );
+        // Unlike a live block, the composer is at rest and empty, so the
+        // `Shift-K` "continue" that recovers it lands normally.
+        assert!(claude_ready_for_prompt(stalled.as_bytes()));
+
+        // A refused connection to the inference gateway — the shape of a
+        // metering-proxy port that moved under a running fleet.
+        let refused = "⏺ API Error: Connection refused (127.0.0.1:49526)\n? for shortcuts";
+        assert_eq!(claude_state(refused.as_bytes()), Some(AgentState::Stalled));
+
+        // A failed background command ends the turn the same way.
+        let background = "⏺ Background command \"Poll CI after the fixes\" failed with exit code 1\n\
+                          ? for shortcuts";
+        assert_eq!(
+            claude_state(background.as_bytes()),
+            Some(AgentState::Stalled)
+        );
+    }
+
+    /// The regression that matters most: over-firing makes every finished
+    /// agent look broken, which is worse than the bug being fixed.
+    #[test]
+    fn a_clean_resting_composer_still_reads_as_idle() {
+        let clean = "⏺ Updated 3 files and pushed the branch.\n\
+                     ✻ Sautéed for 38m 52s · done 7:44 PM\n\
+                     ? for shortcuts";
+        assert_eq!(claude_state(clean.as_bytes()), Some(AgentState::Idle));
+
+        // A 4xx is the agent's own bad request or a dead credential — the
+        // auth path owns that, and it is not a retryable stall.
+        let client_error = "⏺ API Error: 400 invalid request\n? for shortcuts";
+        assert_eq!(
+            claude_state(client_error.as_bytes()),
+            Some(AgentState::Idle)
+        );
+
+        // Prose about an error does not start a line with the label, so it
+        // never matches — the case that matters in a repo whose agents
+        // routinely quote and diff these very strings.
+        let prose = "The API Error: 502 upstream request failed we saw was transient.\n\
+                     ? for shortcuts";
+        assert_eq!(claude_state(prose.as_bytes()), Some(AgentState::Idle));
+
+        // Nor does one quoted inside a fenced block.
+        let fenced = "Here is what it printed:\n\
+                      ```\n\
+                      ⏺ API Error: 502 proxy: upstream request failed\n\
+                      ```\n\
+                      ? for shortcuts";
+        assert_eq!(claude_state(fenced.as_bytes()), Some(AgentState::Idle));
+    }
+
+    /// An error marker followed by a live working anchor means the agent
+    /// retried and recovered; the error is scrollback, not a pin.
+    #[test]
+    fn an_error_superseded_by_a_working_anchor_is_not_stalled() {
+        let retried = "⏺ API Error: 502 proxy: upstream request failed\n\
+                       ✻ Working… (5s · ↓ 200 tokens · esc to interrupt)";
+        assert_eq!(claude_state(retried.as_bytes()), Some(AgentState::Working));
+
+        // It recovered, worked, and then finished cleanly: the work anchor
+        // between the error and the redrawn composer still clears it.
+        let recovered = "⏺ API Error: 502 proxy: upstream request failed\n\
+                         ✻ Working… (5s · ↓ 200 tokens · esc to interrupt)\n\
+                         ? for shortcuts";
+        assert_eq!(claude_state(recovered.as_bytes()), Some(AgentState::Idle));
+
+        // The marker also feeds `dialog_marker_pos`, so a stale-hook
+        // `Working` correction has the evidence to demote a committed
+        // `Stalled` — without it the state could never be left.
+        assert!(claude_working_supersedes_dialog(retried.as_bytes()));
+    }
+
+    /// A parked agent is not reclassified by the new markers: the limit
+    /// branches return long before the stall branch is reached.
+    #[test]
+    fn a_limit_block_outranks_a_stall_marker() {
+        let parked = "⏺ API Error: 502 proxy: upstream request failed\n\
+                      Usage limit reached · continuing automatically at 1:10pm\n\
+                      ? for shortcuts";
+        assert_eq!(
+            claude_state(parked.as_bytes()),
+            Some(AgentState::AwaitingReset),
+        );
+
+        let blocked = "⏺ API Error: 502 proxy: upstream request failed\n\
+                       Claude usage limit reached ∙ resets 3pm\n\
+                       ❯ 1. Wait until it resets\n  2. Exit";
+        assert_eq!(
+            claude_state(blocked.as_bytes()),
+            Some(AgentState::LimitReached),
+        );
+    }
+
+    #[test]
+    fn a_live_prompt_outranks_a_stall_marker() {
+        // A stalled turn whose last act was to raise a permission gate is
+        // still asking: it can be answered, so `?` is the honest signal.
+        let asking = "⏺ API Error: 502 proxy: upstream request failed\n\
+                      Do you want to proceed?\n❯ 1. Yes\n  2. No";
+        assert_eq!(
+            claude_state(asking.as_bytes()),
+            Some(AgentState::InputNeeded)
+        );
+    }
+
     #[test]
     fn a_usage_limit_phrase_above_a_resting_composer_is_stale_scrollback() {
         // Regression for the false-positive the review caught: a finished
@@ -3590,6 +3824,11 @@ mod tests {
         assert_eq!(
             trigger("Approve this command?\n1. Yes\n2. No"),
             Some(Trigger::PairedYesNo),
+        );
+        // The turn that ended on an infrastructure failure (#1782).
+        assert_eq!(
+            trigger("⏺ API Error: 502 proxy: upstream request failed\n? for shortcuts"),
+            Some(Trigger::InfrastructureFailure),
         );
         // Idle / Working carry no InputNeeded trigger.
         assert_eq!(trigger("just plain output"), None);

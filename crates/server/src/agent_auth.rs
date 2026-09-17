@@ -607,9 +607,11 @@ async fn peer_recovery_now(config: &ServerConfig, terminal_id: TerminalId) -> Pe
 ///   the conversation and there is no turn to interrupt. Restart, but send
 ///   no continuation: the agent had already finished and stopped, so
 ///   nudging it would start a turn the user never asked for.
-/// * Blocked on the dead credential (`LimitReached` / `AwaitingReset`) the
-///   peer is stuck mid-work and the continuation prompt is exactly what
-///   frees it — this is the `a R` case.
+/// * Blocked on the dead credential (`LimitReached` / `AwaitingReset`), or
+///   stopped on an infrastructure failure (`Stalled`), the peer is stuck
+///   mid-work and the continuation prompt is exactly what frees it — this
+///   is the `a R` case. A stall has already lost its turn, so the kill
+///   costs nothing the failure hadn't already taken.
 /// * Mid-flight (`Working`, `InputNeeded`, `CreditExhausted`) a kill
 ///   destroys the in-flight turn: the streaming response, the running tool
 ///   call, a half-applied multi-file edit, the pending permission question.
@@ -635,7 +637,9 @@ impl PeerRecovery {
         use lazybox_ipc::AgentState;
         match state {
             Some(AgentState::Idle | AgentState::Done) => Self::Restart,
-            Some(AgentState::LimitReached | AgentState::AwaitingReset) => Self::RestartAndContinue,
+            Some(AgentState::LimitReached | AgentState::AwaitingReset | AgentState::Stalled) => {
+                Self::RestartAndContinue
+            }
             Some(
                 AgentState::Working
                 | AgentState::InputNeeded

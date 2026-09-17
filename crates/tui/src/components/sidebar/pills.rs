@@ -163,9 +163,10 @@ impl TypeGlyph {
 /// what a caller falls back to.
 pub(crate) fn agent_state_tone(theme: &crate::theme::Theme, state: &AgentState) -> Color {
     match state {
-        AgentState::InputNeeded | AgentState::LimitReached | AgentState::CreditExhausted => {
-            theme.warn
-        }
+        AgentState::InputNeeded
+        | AgentState::LimitReached
+        | AgentState::CreditExhausted
+        | AgentState::Stalled => theme.warn,
         AgentState::Working => theme.accent,
         AgentState::Done => theme.success,
         AgentState::Idle | AgentState::Exited { .. } | AgentState::AwaitingReset => theme.text_dim,

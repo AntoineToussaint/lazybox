@@ -1443,7 +1443,8 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
         const needsAttention =
           event.AgentState.state === "InputNeeded" ||
           event.AgentState.state === "Done" ||
-          event.AgentState.state === "LimitReached";
+          event.AgentState.state === "LimitReached" ||
+          event.AgentState.state === "Stalled";
         if (needsAttention) {
           const workspace = workspaces.get(record.sessionKey);
           void notifier.signal({

@@ -68,6 +68,13 @@ pub struct StateChange {
     /// Rising edge into `LimitReached` — fire the one-shot "rate-limited"
     /// alert, on the same terms as `now_asking`.
     pub now_limit_reached: bool,
+    /// The workspace's `Stalled` membership flipped in either direction
+    /// (#1782). Drives a `recompute_visible` for the same reason
+    /// `limit_changed` does — it is its own attention axis.
+    pub stall_changed: bool,
+    /// Rising edge into `Stalled` — fire the one-shot "stopped on an error"
+    /// alert, on the same terms as `now_asking`.
+    pub now_stalled: bool,
 }
 
 /// Derive attention edges from a workspace projection changing.
@@ -88,6 +95,9 @@ pub fn state_change(previous: Option<AgentState>, incoming: Option<AgentState>) 
         limit_changed: (previous == Some(AgentState::LimitReached))
             != (incoming == Some(AgentState::LimitReached)),
         now_limit_reached: incoming == Some(AgentState::LimitReached),
+        stall_changed: (previous == Some(AgentState::Stalled))
+            != (incoming == Some(AgentState::Stalled)),
+        now_stalled: incoming == Some(AgentState::Stalled),
     }
 }
 
@@ -217,20 +227,42 @@ pub fn workspace_is_awaiting_reset(
     )
 }
 
-/// True iff the workspace's agent is on a usage limit in either shape —
-/// alerting (`⧗ LimitReached`) or parked (`☾ AwaitingReset`). Single source
-/// of truth for "which agents does a limit hold right now": the
-/// "rate-limited" filter axis and the `Shift-K` resume-all target set.
-/// Counting only the alerting shape showed `rate-limited (0)` in the filter
-/// menu while eight agents sat parked, and let `Shift-K` answer them with a
-/// hint instead of a `continue` (2026-09-08).
+/// True iff the workspace's agent stopped because something broke rather
+/// than because it finished (#1782) — a 5xx from the provider, a refused
+/// connection to the inference gateway, a failed background command.
+/// Alerting like [`workspace_is_limit_reached`]: it drives the `⚠` row
+/// glyph, the header count and the jump, and it is in the recovery target
+/// set below because a stall is usually transient.
+pub fn workspace_is_stalled(
+    workspace: &Workspace,
+    states: &HashMap<SessionKey, AgentState>,
+) -> bool {
+    matches!(
+        workspace_agent_state(workspace, states),
+        Some(AgentState::Stalled)
+    )
+}
+
+/// True iff the workspace's agent is stopped in a shape one of the two
+/// recovery actions can restart — a usage limit, alerting (`⧗
+/// LimitReached`) or parked (`☾ AwaitingReset`), or a turn that died on an
+/// infrastructure failure (`⚠ Stalled`). Single source of truth for "which
+/// agents is something holding right now": the filter axis, the jump, and
+/// the `Shift-K` / `a R` target sets.
+///
+/// Counting only the alerting limit shape showed `(0)` in the filter menu
+/// while eight agents sat parked, and let `Shift-K` answer them with a hint
+/// instead of a `continue` (2026-09-08). `Stalled` joins for the same
+/// reason: both recovery shapes already fix it — a `continue` for the
+/// transient 502, a stop → `--resume` → continue for a wedged process — so
+/// the work is adding it here, not building a third mechanism (#1787).
 pub fn workspace_is_limited(
     workspace: &Workspace,
     states: &HashMap<SessionKey, AgentState>,
 ) -> bool {
     matches!(
         workspace_agent_state(workspace, states),
-        Some(AgentState::LimitReached | AgentState::AwaitingReset)
+        Some(AgentState::LimitReached | AgentState::AwaitingReset | AgentState::Stalled)
     )
 }
 
@@ -270,17 +302,25 @@ pub fn next_asking_workspace(
     })
 }
 
-/// Pick the next workspace whose agent is blocked on a usage / rate
-/// limit, starting after `current` in `keys_order` and wrapping (#847).
-/// The rate-limited analog of [`next_asking_workspace`], driving the
-/// dedicated jump action.
+/// Pick the next workspace whose agent stopped and needs you — blocked on
+/// a usage / rate limit (#847) or stalled on an infrastructure failure
+/// (#1782) — starting after `current` in `keys_order` and wrapping. The
+/// stopped-agent analog of [`next_asking_workspace`], driving the dedicated
+/// jump action.
+///
+/// The calm `AwaitingReset` is deliberately excluded: it is handled, so it
+/// is in the recovery target set ([`workspace_is_limited`]) but is not
+/// somewhere the jump should stop.
 pub fn next_limit_reached_workspace(
     states: &HashMap<SessionKey, AgentState>,
     keys_order: &[SessionKey],
     current: Option<&SessionKey>,
 ) -> Option<SessionKey> {
     next_matching_workspace(keys_order, current, |k| {
-        matches!(states.get(k), Some(AgentState::LimitReached))
+        matches!(
+            states.get(k),
+            Some(AgentState::LimitReached | AgentState::Stalled)
+        )
     })
 }
 
@@ -332,7 +372,7 @@ mod tests {
     use std::collections::HashSet;
 
     const EXITED: AgentState = AgentState::Exited { code: Some(1) };
-    const ALL: [AgentState; 7] = [
+    const ALL: [AgentState; 8] = [
         Working,
         InputNeeded,
         Idle,
@@ -340,6 +380,7 @@ mod tests {
         EXITED,
         LimitReached,
         CreditExhausted,
+        AgentState::Stalled,
     ];
 
     fn ws_key(n: u32) -> SessionKey {
@@ -467,6 +508,7 @@ mod tests {
                     workspace_is_exited(&ws, &states),
                     workspace_is_limit_reached(&ws, &states),
                     workspace_is_credit_exhausted(&ws, &states),
+                    workspace_is_stalled(&ws, &states),
                 ]
                 .iter()
                 .filter(|p| **p)
@@ -495,6 +537,40 @@ mod tests {
         states.insert(ws_key(3), LimitReached);
         states.insert(ws_key(4), Working);
         let order = [ws_key(1), ws_key(2), ws_key(3), ws_key(4)];
+        assert_eq!(
+            next_limit_reached_workspace(&states, &order, Some(&ws_key(1))),
+            Some(ws_key(3)),
+        );
+        assert_eq!(
+            next_limit_reached_workspace(&states, &order, Some(&ws_key(3))),
+            Some(ws_key(1)),
+        );
+    }
+
+    /// `Stalled` is its own attention axis and is in the recovery target
+    /// set — the two halves of #1787 on the client side.
+    #[test]
+    fn stalled_edges_jump_and_recovery_set() {
+        let mut states = HashMap::new();
+        let ws = sample_workspace(1);
+        let ch = apply_agent_state(&mut states, &ws_key(1), AgentState::Stalled);
+        assert!(ch.stall_changed && ch.now_stalled);
+        assert!(!ch.now_done, "a stall is not a finished turn");
+        assert!(workspace_is_stalled(&ws, &states));
+        // Both recovery shapes (`Shift-K`, `a R`) read this predicate.
+        assert!(workspace_is_limited(&ws, &states));
+
+        // Leaving flips the axis without re-alerting.
+        let ch = apply_agent_state(&mut states, &ws_key(1), Working);
+        assert!(ch.stall_changed && !ch.now_stalled);
+
+        // The jump stops on a stall alongside a limit block, and skips the
+        // calm parked state, which is handled.
+        let mut states = HashMap::new();
+        states.insert(ws_key(1), LimitReached);
+        states.insert(ws_key(2), AgentState::AwaitingReset);
+        states.insert(ws_key(3), AgentState::Stalled);
+        let order = [ws_key(1), ws_key(2), ws_key(3)];
         assert_eq!(
             next_limit_reached_workspace(&states, &order, Some(&ws_key(1))),
             Some(ws_key(3)),

@@ -368,6 +368,26 @@ pub enum AgentState {
     /// Appended last: the socket transport encodes this enum by bincode
     /// ordinal, so it must never be reordered ahead of `CreditExhausted`.
     AwaitingReset,
+    /// The agent stopped because something broke — an `API Error: 502`, a
+    /// failed background command, a refused connection to its inference
+    /// gateway — rather than because it finished (#1782). It came to rest
+    /// after working, exactly as `Done` does, which is why `Done` swallowed
+    /// it: a 38-minute turn that died on a transient gateway failure and a
+    /// 38-minute turn that succeeded render identically, so nothing marks
+    /// the hours between the failure and someone reading the pane.
+    ///
+    /// Sticky like the other blocked states and, unlike `AwaitingReset`,
+    /// alerting: it is counted, filterable, and jumpable. Most stalls are
+    /// transient, so it is in the target set of both recovery shapes — the
+    /// `Shift-K` `continue` inject (its composer is live and empty, so a
+    /// prompt lands normally) and the `a R` stop → `--resume` → continue.
+    /// lazybox deliberately does **not** retry on its own: a recurring 502
+    /// is a real outage and an agent looping on it burns tokens invisibly,
+    /// so surfacing is the feature and the retry is the user's call.
+    ///
+    /// Appended last: the socket transport encodes this enum by bincode
+    /// ordinal, so it must never be reordered ahead of `AwaitingReset`.
+    Stalled,
 }
 
 impl AgentState {
@@ -386,6 +406,7 @@ impl AgentState {
         AgentState::LimitReached,
         AgentState::CreditExhausted,
         AgentState::AwaitingReset,
+        AgentState::Stalled,
     ];
 }
 
@@ -5698,9 +5719,10 @@ mod agent_state_tests {
                 | AgentState::Exited { .. }
                 | AgentState::LimitReached
                 | AgentState::CreditExhausted
-                | AgentState::AwaitingReset => {}
+                | AgentState::AwaitingReset
+                | AgentState::Stalled => {}
             }
         }
-        assert_eq!(AgentState::ALL.len(), 8);
+        assert_eq!(AgentState::ALL.len(), 9);
     }
 }

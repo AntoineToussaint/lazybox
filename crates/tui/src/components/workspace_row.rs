@@ -50,6 +50,12 @@ pub struct WorkspaceRowCtx<'a> {
     /// the shared state slot. Highest precedence: it's the most urgent
     /// "act (externally) before this moves" signal.
     pub limit_reached: bool,
+    /// Any agent in this workspace is in `AgentState::Stalled` — its turn
+    /// ended on an infrastructure failure rather than a result (#1782).
+    /// Alerting, and ranked just under `limit_reached`: both mean the
+    /// workspace is stopped until someone acts, and a dead credential is
+    /// the more specific diagnosis when a pane reports both.
+    pub stalled: bool,
     /// Any agent in this workspace is in `AgentState::AwaitingReset` — the
     /// calm auto-waiting block (lazybox pressed Wait; it's parked until the
     /// limit resets). Renders the quiet `☾` glyph. Lower precedence than
@@ -561,12 +567,15 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     ended (clean or crash; #356/#357). Not an alert color — a dead
 ///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
+///   - `Stalled`      → ` ↯ ` (warn) — the turn ended on an
+///     infrastructure failure (a 502, a refused gateway connection, a
+///     failed background command), not on a result.
 ///   - `AwaitingReset` → ` ☾ ` (dim) — a static glyph: lazybox pressed
 ///     Wait and the agent is parked, sleeping until its limit resets. Calm,
 ///     not an alert — nothing for you to do.
 /// Reserved width either way so the kind/title to the right don't
 /// jitter as a row moves between states. Precedence credit-exhausted >
-/// limit-reached > asking > working > awaiting-reset > done > spawning > exited. `spawning` yields to
+/// limit-reached > stalled > asking > working > awaiting-reset > done > spawning > exited. `spawning` yields to
 /// every *live* signal and outranks only the terminal `exited` marker.
 /// That split is exact, not defensive: a terminal's `Working` / `Done` /
 /// `InputNeeded` / `LimitReached` / `CreditExhausted` entry is dropped when it exits (only
@@ -587,6 +596,12 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ("¢", tone(AgentState::CreditExhausted))
     } else if ctx.limit_reached {
         ("⧗", tone(AgentState::LimitReached))
+    } else if ctx.stalled {
+        // Stopped on an infrastructure failure (#1782). Above `asking`
+        // because a stalled agent cannot be answered — it has to be
+        // resumed or restarted — and above `working` for the same reason
+        // the blocks above are: this pane is not making progress.
+        ("↯", tone(AgentState::Stalled))
     } else if ctx.asking {
         ("?", tone(AgentState::InputNeeded))
     } else if ctx.working {
@@ -1764,6 +1779,7 @@ mod tests {
             max_pr_num_width: 4,
             asking: false,
             limit_reached: false,
+            stalled: false,
             awaiting_reset: false,
             credit_exhausted: false,
             working: false,
@@ -2281,6 +2297,7 @@ mod tests {
             max_pr_num_width: 2,
             asking: false,
             limit_reached: false,
+            stalled: false,
             awaiting_reset: false,
             credit_exhausted: false,
             working: false,
@@ -2957,6 +2974,7 @@ mod tests {
             max_pr_num_width: 3,
             asking: false,
             limit_reached: false,
+            stalled: false,
             awaiting_reset: false,
             credit_exhausted: false,
             working: false,
@@ -4537,6 +4555,7 @@ mod tests {
             max_pr_num_width: 4,
             asking: false,
             limit_reached: false,
+            stalled: false,
             awaiting_reset: false,
             credit_exhausted: false,
             working: false,

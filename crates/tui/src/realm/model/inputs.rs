@@ -465,7 +465,12 @@ impl<T: TerminalAdapter> Model<T> {
         let signed_out = self.auth_failed_terminals.contains(&terminal_id);
         let continue_work = match state {
             _ if signed_out => true,
-            Some(AgentState::LimitReached | AgentState::AwaitingReset) => true,
+            // `Stalled` joins the blocked pair: the turn is already lost to
+            // the failure, so `--resume` destroys nothing, and the nudge is
+            // what gets the agent moving again (#1782).
+            Some(AgentState::LimitReached | AgentState::AwaitingReset | AgentState::Stalled) => {
+                true
+            }
             Some(AgentState::Idle | AgentState::Done) => false,
             state => {
                 let what = match state {

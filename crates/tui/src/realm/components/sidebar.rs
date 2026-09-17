@@ -899,6 +899,11 @@ impl Sidebar {
         self.inner.awaiting_reset_terminals()
     }
 
+    /// See `Sidebar::stalled_workspace_count`.
+    pub fn stalled_workspace_count(&self) -> usize {
+        self.inner.stalled_workspace_count()
+    }
+
     /// See `Sidebar::limit_reached_workspace_count`.
     pub fn limit_reached_workspace_count(&self) -> usize {
         self.inner.limit_reached_workspace_count()

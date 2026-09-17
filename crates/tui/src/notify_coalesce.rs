@@ -120,6 +120,7 @@ fn summarize_group(
         NotificationKind::Asking => format!("{count} agents need input"),
         NotificationKind::Done => format!("{count} agents finished"),
         NotificationKind::LimitReached => format!("{count} agents rate-limited"),
+        NotificationKind::Stalled => format!("{count} agents stopped on errors"),
         NotificationKind::Activity => format!("{count} workspaces have new activity"),
         NotificationKind::Epic => format!("{count} epic updates"),
     };

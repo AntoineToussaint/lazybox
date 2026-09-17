@@ -2029,8 +2029,8 @@ impl Sidebar {
                 highlight_query,
                 // Focused rows are lifted out of their repo group, so name
                 // their source inline (#1450). Other rows sit under a repo
-                // header already and carry no prefix.
-                repo_prefix: focused_group.then_some(workspace).flatten().map(|w| {
+                // header already and carry no cue.
+                source_repo: focused_group.then_some(workspace).flatten().map(|w| {
                     crate::components::visible_rows::group_label(
                         w,
                         &self.projects,

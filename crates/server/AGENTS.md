@@ -194,6 +194,31 @@ the real binary, and asks the daemon before it spends
 - **The cache is bounded three ways** — clamped TTL, entry count, total bytes.
   Age alone bounds nothing when the arrival rate scales with the fleet.
 
+## Searching what an agent said
+
+`agent_output_search.rs` answers the `/` search's `agent:` / `said:`
+qualifiers over terminal OUTPUT (#1780). The prompt half (#1774) is
+client-side; output exists only in the replay rings, so the client asks and
+the daemon scans.
+
+- **It returns deduplicated matching LINES, never a byte window.** An agent
+  TUI repaints its whole box continuously, so a window is mostly duplicate
+  frames — and those frames position each row with a CSI rather than a
+  newline, which is why a cursor-move or erase sequence ends a line while an
+  SGR colour does not. Splitting on colour too would tear `cannot borrow`
+  apart wherever the highlighter recoloured, and every multi-word needle
+  would miss.
+- **Cost is bounded before the query is issued**: the newest
+  `SCAN_TAIL_BYTES` of each ring, `MATCH_CORPUS_BYTES` per workspace. The
+  price is a function of terminal count, not of how chatty an agent has
+  been.
+- **An empty reply is load-bearing.** It is what clears the previous
+  query's rows on the client, and a client that hears nothing cannot tell
+  "no match" from "still scanning" — so the handler always sends one.
+- **The reply is scoped to its request id.** The scan is asynchronous and
+  unordered with respect to typing; a reply that outlives its query would
+  filter the sidebar by a needle the user typed past.
+
 ## The metering / context-hygiene proxy
 
 `proxy/` sits between an agent and its provider. Two facts live at different

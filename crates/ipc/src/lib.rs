@@ -53,6 +53,20 @@ pub const MAX_COMMAND_FRAME_BYTES: u32 = 256 * 1024;
 /// reader refuses.
 pub const MAX_WRITE_CHUNK_BYTES: usize = (MAX_COMMAND_FRAME_BYTES / 2) as usize;
 
+/// Needles one [`Command::SearchAgentOutput`] may carry (#1780). A query
+/// AND-ing more `agent:` terms than this is honoured for the terms that
+/// fit: the client evaluates every term itself against the corpus the
+/// scan returns, so a dropped needle can only widen the returned text,
+/// never admit a row the query excludes. The bound exists so the daemon's
+/// per-byte cost stays linear in a number the user cannot inflate.
+pub const MAX_AGENT_OUTPUT_NEEDLES: usize = 4;
+
+/// Longest needle [`Command::SearchAgentOutput`] scans with. A needle past
+/// this is truncated rather than dropped — truncating widens the match set
+/// (the client still applies the full term), while dropping would hand back
+/// text that answers a different question.
+pub const MAX_AGENT_OUTPUT_NEEDLE_BYTES: usize = 128;
+
 /// Magic prefix of the 8-byte connection preamble each side sends
 /// before any frames (`PROTOCOL_MAGIC ++ PROTOCOL_FINGERPRINT as u32
 /// LE`). Lets a peer distinguish "wire-incompatible lazybox" from "not
@@ -2294,6 +2308,25 @@ pub enum Command {
         /// shim waits for before exiting.
         client_request_id: String,
     },
+    /// Scan live agent terminals' output for the `/` search's `agent:` /
+    /// `said:` qualifiers (#1780). What the agent *said back* lives only
+    /// daemon-side, in the per-terminal replay rings; the client holds a
+    /// 4 KiB rolling window per terminal, far too shallow to answer "an
+    /// hour ago".
+    ///
+    /// Each needle is a qualifier VALUE, already lowercased by the
+    /// client's own query normalization — the daemon folds the haystack
+    /// the same way, so the two halves of an `agent:` term can't disagree
+    /// on case. The daemon replies on this connection alone with
+    /// [`Event::AgentOutputMatches`], carrying `request_id` back so the
+    /// client can drop a reply the user has already typed past.
+    ///
+    /// Appended last: bincode identifies variants by ordinal, so this
+    /// position keeps the change mechanical.
+    SearchAgentOutput {
+        request_id: u64,
+        needles: Vec<String>,
+    },
 }
 
 /// How a branch-namespace collision should be cleared (#1742). Both arms
@@ -3828,6 +3861,25 @@ pub enum Event {
     GhShimReply {
         client_request_id: String,
         reply: gh_shim::GhReply,
+    },
+    /// Reply to [`Command::SearchAgentOutput`] (#1780): per-workspace
+    /// excerpts of terminal OUTPUT that matched one of the needles, as
+    /// `(session_key, text)`. Sent on the asking connection, not the bus
+    /// — the scan belongs to one client's query, and the matched text is
+    /// only meaningful against the request that asked for it.
+    ///
+    /// The text is ANSI-stripped and deduplicated matching LINES, not a
+    /// byte window: an agent TUI repaints its whole box continuously, so
+    /// a raw window is mostly duplicate frames. `entries` is keyed by
+    /// workspace rather than terminal because that is what the search
+    /// filters, and a workspace with several agent terminals contributes
+    /// all of them. Empty is the normal "nothing matched" answer, and the
+    /// client must apply it — it is what clears a previous query's rows.
+    ///
+    /// Appended last (bincode is ordinal-sensitive).
+    AgentOutputMatches {
+        request_id: u64,
+        entries: Vec<(String, String)>,
     },
 }
 

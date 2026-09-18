@@ -2003,7 +2003,14 @@ fn strip_ansi_lossy_marked(bytes: &[u8], mark: usize) -> (String, usize) {
 /// Anything else is treated as a two-byte escape (`ESC c`, `ESC =`,
 /// `ESC 7`, …): drop `ESC` plus the single introducer. A lone trailing
 /// `ESC` consumes just itself.
-fn skip_escape(bytes: &[u8], start: usize) -> usize {
+///
+/// Public because it is the shared primitive for "where does this escape
+/// run end": the daemon's terminal-output search walks the same four
+/// families but needs the run's BYTES rather than a stripped string, to
+/// tell a cursor move (a line boundary in repainted output) from an SGR
+/// colour (not one). A second parser there would be a second place for a
+/// malformed sequence to leak payload into matched text.
+pub fn skip_escape(bytes: &[u8], start: usize) -> usize {
     debug_assert_eq!(bytes.get(start), Some(&0x1b));
     let mut i = start + 1;
     let Some(&intro) = bytes.get(i) else {

@@ -1453,6 +1453,18 @@ impl Sidebar {
                 (Some(scope), false) => format!("  # all repos · esc clear · {scope}"),
                 (None, _) => "  all repos · esc clear".to_string(),
             };
+            // A daemon output scan (#1780) leads the hint while it runs:
+            // the rows on screen are the answer from the client's own
+            // corpora alone, and an `agent:` query that currently shows
+            // nothing may still fill in. Leading, because it is the only
+            // part of the hint that is about *right now* — and it is what
+            // keeps an empty result from reading as a final "no matches".
+            if self.agent_output_scanning {
+                spans.push(Span::styled(
+                    "  scanning output…",
+                    with_field_bg(Style::default().fg(theme.accent)),
+                ));
+            }
             spans.push(Span::styled(
                 hint,
                 with_field_bg(Style::default().fg(theme.text_dim)),

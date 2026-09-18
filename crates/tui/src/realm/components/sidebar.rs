@@ -450,6 +450,26 @@ impl Sidebar {
         self.inner.set_agent_text(agent_text);
     }
 
+    /// Replace the terminal-OUTPUT half of that corpus with one daemon
+    /// scan's answer (#1780). See
+    /// [`crate::components::sidebar::Sidebar::set_agent_output_text`].
+    pub fn set_agent_output_text(&mut self, entries: Vec<(String, String)>) {
+        self.inner.set_agent_output_text(entries);
+    }
+
+    /// Note whether a daemon output scan is in flight (#1780). See
+    /// [`crate::components::sidebar::Sidebar::set_agent_output_scanning`].
+    pub fn set_agent_output_scanning(&mut self, scanning: bool) {
+        self.inner.set_agent_output_scanning(scanning);
+    }
+
+    /// The `agent:` / `said:` needles the live query would scan output for
+    /// (#1780). See
+    /// [`crate::components::sidebar::Sidebar::agent_qualifier_needles`].
+    pub fn agent_qualifier_needles(&self) -> Vec<String> {
+        self.inner.agent_qualifier_needles()
+    }
+
     /// Read currently selected workspace key (for selection projection).
     pub fn selected_workspace_key(&self) -> Option<&lazybox_core::SessionKey> {
         self.inner.selected_session_key()

@@ -32,6 +32,7 @@ use lazybox_ipc::{
     AgentState, Blocker, BlockerKind, BlockerOwner, EdgeKind, EpicDelta, EpicEdge, EpicMember,
     EpicMemberStatus, EpicSnapshot, Event, MergeOrderEntry,
 };
+use lazybox_store::StoreMutation;
 use tokio::sync::broadcast;
 
 use crate::ServerConfig;
@@ -223,6 +224,132 @@ pub fn clear_declared(config: &ServerConfig, workspace: &str) -> Result<(), Stri
         .store
         .delete_kv(&declared_storage_key(workspace))
         .map_err(|e| e.to_string())
+}
+
+/// The store mutations that move every declared blocker on `from` onto
+/// `into` — the issue→PR fold's half of the blocker's life.
+///
+/// Returned rather than applied so the caller commits them in the *same*
+/// transaction as the workspace fold itself. Applying them separately leaves a
+/// crash window in which the issue row is gone and its blocker is either lost
+/// or duplicated; the blocker must move exactly when the work does.
+///
+/// Blockers already declared on `into` are merged in, never overwritten: the
+/// oldest declaration wins and the reasons are joined, so the fold cannot
+/// silently drop one.
+pub fn absorb_declared_mutations(
+    config: &ServerConfig,
+    from: &[WorkspaceKey],
+    into: &WorkspaceKey,
+) -> Vec<StoreMutation> {
+    let mut candidates = Vec::new();
+    let mut mutations = Vec::new();
+    for key in from {
+        match load_declared(config, key.as_str()) {
+            Ok(Some(blocker)) => {
+                candidates.push(blocker);
+                mutations.push(StoreMutation::DeleteKv {
+                    key: declared_storage_key(key.as_str()),
+                });
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("epics: reading declared blocker for {key} failed: {e}"),
+        }
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    match load_declared(config, into.as_str()) {
+        Ok(Some(existing)) => candidates.push(existing),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("epics: reading declared blocker for {into} failed: {e}"),
+    }
+    let merged = merge_declared(candidates, into);
+    match serde_json::to_string(&merged) {
+        Ok(json) => mutations.push(StoreMutation::SetKv {
+            key: declared_storage_key(into.as_str()),
+            value: json,
+        }),
+        Err(e) => {
+            tracing::warn!("epics: encoding the folded declared blocker for {into} failed: {e}");
+            // Dropping the deletes too keeps the source rows readable rather
+            // than retiring a blocker we could not re-key.
+            return Vec::new();
+        }
+    }
+    mutations
+}
+
+/// Fold several declared blockers into the one row `into` may hold.
+///
+/// One workspace carries at most one blocker, so a fold has to choose. It
+/// keeps the *oldest* declaration — the work has been stuck since then, and
+/// `since` is what the stale-blocker alert ages on — and appends the other
+/// reasons so none is silently dropped. An operator-owned blocker keeps that
+/// owner whichever declaration wins, since that is the one that raises `!`.
+fn merge_declared(mut candidates: Vec<DeclaredBlocker>, into: &WorkspaceKey) -> DeclaredBlocker {
+    candidates.sort_by_key(|blocker| blocker.since);
+    let operator_owned = candidates
+        .iter()
+        .any(|blocker| matches!(blocker.owner, BlockerOwner::Operator));
+    let mut reasons: Vec<String> = Vec::with_capacity(candidates.len());
+    for blocker in &candidates {
+        if !reasons.iter().any(|seen| seen == &blocker.reason) {
+            reasons.push(blocker.reason.clone());
+        }
+    }
+    let mut merged = candidates.swap_remove(0);
+    merged.workspace = into.clone();
+    merged.reason = reasons.join("; ");
+    if operator_owned {
+        merged.owner = BlockerOwner::Operator;
+    }
+    merged
+}
+
+/// Drop every `declared-blocker:` row whose workspace no longer exists.
+///
+/// A removed workspace (and, before the fold carried it, a folded issue) left
+/// its blocker behind with nothing to read it: a row no reader can reach and
+/// no writer will ever clear. Runs on every recompute, so the strays already
+/// in `state.db` are collected at the next one.
+///
+/// Keys come from the store's workspace listing rather than the decoded
+/// workspaces: a row whose JSON fails to decode is *preserved* by
+/// `load_workspaces`, and pruning against the decoded set would delete the
+/// blocker of a workspace that is still there. An unreadable listing prunes
+/// nothing at all.
+fn prune_declared_blockers(
+    config: &ServerConfig,
+    mut declared: HashMap<WorkspaceKey, DeclaredBlocker>,
+) -> HashMap<WorkspaceKey, DeclaredBlocker> {
+    if declared.is_empty() {
+        return declared;
+    }
+    let live: HashSet<WorkspaceKey> = match config.store.list_workspaces() {
+        Ok(records) => records
+            .into_iter()
+            .map(|record| WorkspaceKey::new(record.key))
+            .collect(),
+        Err(error) => {
+            tracing::warn!(%error, "epics: skipping the declared-blocker prune");
+            return declared;
+        }
+    };
+    declared.retain(|workspace, _| {
+        if live.contains(workspace) {
+            return true;
+        }
+        tracing::info!(
+            %workspace,
+            "epics: dropping a declared blocker whose workspace is gone"
+        );
+        if let Err(e) = clear_declared(config, workspace.as_str()) {
+            tracing::warn!("epics: clearing the orphaned declared blocker failed: {e}");
+        }
+        false
+    });
+    declared
 }
 
 /// Load every declared blocker, keyed by workspace. A row that fails to decode
@@ -1528,6 +1655,16 @@ pub async fn recompute_all(config: &ServerConfig) {
             return;
         }
     };
+    // Declared blockers are not epic-scoped — `task_status` and the `!` alert
+    // read them for any workspace — so their prune runs ahead of the
+    // no-epics exit, not beside the review-row one below.
+    let declared = prune_declared_blockers(
+        config,
+        list_declared(config).unwrap_or_else(|e| {
+            tracing::warn!("epics: list declared blockers failed: {e}");
+            HashMap::new()
+        }),
+    );
     if records.is_empty() {
         // No epic owns anything, so no review row can be legitimate. Falling
         // through to the prune (rather than returning) is what stops a hold
@@ -1537,10 +1674,6 @@ pub async fn recompute_all(config: &ServerConfig) {
     }
 
     let agent_states = config.terminal.agent_states_by_workspace().await;
-    let declared = list_declared(config).unwrap_or_else(|e| {
-        tracing::warn!("epics: list declared blockers failed: {e}");
-        HashMap::new()
-    });
     let workspaces = crate::load_workspaces(&*config.store).values;
     let latches = LatchInputs::load(config, &records);
     let now = chrono::Utc::now().timestamp_millis();
@@ -4508,6 +4641,146 @@ mod tests {
         clear_declared(&config, "w").expect("clear");
         assert!(load_declared(&config, "w").expect("load").is_none());
         assert!(list_declared(&config).expect("list").is_empty());
+    }
+
+    fn declared(workspace: &str, reason: &str, since: i64, owner: BlockerOwner) -> DeclaredBlocker {
+        DeclaredBlocker {
+            workspace: WorkspaceKey::new(workspace),
+            reason: reason.into(),
+            kind: BlockerKind::Contract,
+            owner,
+            since,
+        }
+    }
+
+    #[tokio::test]
+    async fn absorbing_a_declared_blocker_rekeys_it_onto_the_absorbing_row() {
+        let config = ServerConfig::in_memory();
+        persist_declared(
+            &config,
+            &declared(
+                "issue",
+                "waiting on the API contract",
+                100,
+                BlockerOwner::Operator,
+            ),
+        )
+        .expect("persist");
+
+        let mutations = absorb_declared_mutations(
+            &config,
+            &[WorkspaceKey::new("issue")],
+            &WorkspaceKey::new("pr"),
+        );
+        config.store.apply_batch(&mutations).expect("apply");
+
+        let moved = load_declared(&config, "pr")
+            .expect("load")
+            .expect("present");
+        assert_eq!(moved.workspace, WorkspaceKey::new("pr"));
+        assert_eq!(moved.reason, "waiting on the API contract");
+        assert_eq!(
+            moved.since, 100,
+            "the blocker keeps the age it was declared at"
+        );
+        assert!(
+            load_declared(&config, "issue").expect("load").is_none(),
+            "the absorbed row must not be left behind",
+        );
+    }
+
+    #[tokio::test]
+    async fn absorbing_into_a_row_that_already_declared_one_keeps_both_reasons() {
+        let config = ServerConfig::in_memory();
+        persist_declared(
+            &config,
+            &declared(
+                "issue",
+                "waiting on the API contract",
+                100,
+                BlockerOwner::Operator,
+            ),
+        )
+        .expect("persist");
+        persist_declared(
+            &config,
+            &declared(
+                "pr",
+                "needs STRIPE_KEY",
+                400,
+                BlockerOwner::Agent(WorkspaceKey::new("pr")),
+            ),
+        )
+        .expect("persist");
+
+        let mutations = absorb_declared_mutations(
+            &config,
+            &[WorkspaceKey::new("issue")],
+            &WorkspaceKey::new("pr"),
+        );
+        config.store.apply_batch(&mutations).expect("apply");
+
+        let merged = load_declared(&config, "pr")
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            merged.reason, "waiting on the API contract; needs STRIPE_KEY",
+            "neither declaration may be dropped silently",
+        );
+        assert_eq!(
+            merged.since, 100,
+            "the work has been blocked since the older one"
+        );
+        assert!(
+            matches!(merged.owner, BlockerOwner::Operator),
+            "an operator-owned declaration keeps raising `!` after the fold",
+        );
+    }
+
+    #[tokio::test]
+    async fn absorbing_nothing_writes_nothing() {
+        let config = ServerConfig::in_memory();
+        persist_declared(
+            &config,
+            &declared("pr", "needs a decision", 5, BlockerOwner::Operator),
+        )
+        .expect("persist");
+
+        assert!(
+            absorb_declared_mutations(
+                &config,
+                &[WorkspaceKey::new("issue")],
+                &WorkspaceKey::new("pr"),
+            )
+            .is_empty(),
+            "an issue with no blocker must not rewrite the PR's own",
+        );
+    }
+
+    #[tokio::test]
+    async fn recompute_sweeps_a_blocker_whose_workspace_is_gone() {
+        // The orphan left by every pre-fix fold (and by any workspace removal):
+        // a row no reader can reach and no writer will ever clear.
+        let config = ServerConfig::in_memory();
+        save_ws(&config, &ws("live"));
+        persist_declared(
+            &config,
+            &declared("live", "waiting on review", 1, BlockerOwner::Operator),
+        )
+        .expect("persist");
+        persist_declared(
+            &config,
+            &declared("gone", "orphaned", 1, BlockerOwner::Operator),
+        )
+        .expect("persist");
+
+        recompute_all(&config).await;
+
+        assert!(load_declared(&config, "live").expect("load").is_some());
+        assert!(
+            load_declared(&config, "gone").expect("load").is_none(),
+            "a blocker whose workspace no longer exists must be collected",
+        );
     }
 
     #[tokio::test]

@@ -3792,6 +3792,56 @@ async fn gh_client_cache_is_independent_of_poll_state() {
     polling::restore_poll_state(&config.poll, state).await;
 }
 
+/// #1793: a blocker declared on the issue row must follow the work into the
+/// PR row the fold collapses it into. It is stored under the workspace key,
+/// and the fold *re-keys* the workspace — before this, `epic_status`,
+/// `task_status` and the `!` alert all went blind the moment the PR absorbed
+/// the issue, and the row itself leaked behind the deleted workspace.
+#[tokio::test]
+async fn merge_carries_the_issue_declared_blocker_onto_the_pr() {
+    use lazybox_core::WorkspaceKey;
+    use lazybox_ipc::{BlockerKind, BlockerOwner};
+    use lazybox_server::epics::{DeclaredBlocker, load_declared};
+
+    let config = ServerConfig::in_memory();
+    let (issue_key, _) = seed_issue_with_session(&config, "o/r#151").await;
+    lazybox_server::epics::persist_declared(
+        &config,
+        &DeclaredBlocker {
+            workspace: issue_key.clone(),
+            reason: "waiting on the API contract".into(),
+            kind: BlockerKind::Contract,
+            owner: BlockerOwner::Operator,
+            since: 1_700_000_000_000,
+        },
+    )
+    .expect("persist declared blocker");
+    polling::upsert(&config, make_pr_closing("o/r#187", &["o/r#151"])).await;
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
+        "o/r#187",
+        &["o/r#151"],
+    )));
+
+    polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), true).await;
+
+    let carried = load_declared(&config, pr_key.as_str())
+        .expect("load")
+        .expect("the blocker must be readable under the PR workspace");
+    assert_eq!(carried.workspace, pr_key);
+    assert_eq!(carried.reason, "waiting on the API contract");
+    assert_eq!(carried.kind, BlockerKind::Contract);
+    assert_eq!(
+        carried.since, 1_700_000_000_000,
+        "the fold must not reset how long the work has been blocked",
+    );
+    assert!(
+        load_declared(&config, issue_key.as_str())
+            .expect("load")
+            .is_none(),
+        "no declared-blocker row may point at the deleted issue workspace",
+    );
+}
+
 #[tokio::test]
 async fn confirm_merge_accept_runs_the_merge() {
     // After the user says "yes" to the prompt, the merge runs the

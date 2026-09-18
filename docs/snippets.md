@@ -523,10 +523,10 @@ User-defined bodies and overrides are delivered exactly as authored — the
 contract is lazybox's house style for its own built-ins, not a rewrite
 imposed on your file.
 
-The ending takes at most **7 lines**: exactly one status line, a one-sentence
-prose verdict explaining why, and up to five short detail lines only when they
-change what the reader does next. Nothing follows it. Bullets are reserved for
-enumerable findings, not the verdict. The four statuses are:
+The ending takes at most **8 lines**: an opening rule, exactly one status line,
+a one-sentence prose verdict explaining why, and up to five short detail lines
+only when they change what the reader does next. Nothing follows it. Bullets
+are reserved for enumerable findings, not the verdict. The four statuses are:
 
 - 🟢 `DONE`: finished, nothing needed from you.
 - 🔴 `ACTION NEEDED`: you must act; the ending names the exact action. Known blockers take priority.
@@ -554,10 +554,13 @@ without presentation still reads as a wall, and bare uppercase text is the
 thing the contract replaced. So the contract also fixes what the ending looks
 like:
 
-- **A forty-column rule opens it.** It is the ending's only chrome, and the
-  reason a closing summary reads as a lazybox artifact rather than as more
-  scrollback. Being chrome, it is the one line that does not count against
-  the seven.
+- **A forty-column rule opens it.** It is the reason a closing summary reads
+  as a lazybox artifact rather than as more scrollback. It is counted as one
+  of the eight rather than carved out as chrome: a carve-out would let
+  `catchup` promise six lines and emit seven, and would leave
+  `no_builtin_declares_a_line_budget_above_the_contracts_own` measuring
+  bodies against a cap the ending no longer obeyed. The rule is why the cap
+  moved from seven to eight.
 - **A glyph leads the status line, with its word beside it.** The eye lands
   on the colour before it reads anything; the word keeps the status greppable
   and legible where a terminal renders emoji as tofu.

@@ -134,8 +134,8 @@ const CONTRACT_UNBOUNDED_PREAMBLE: &str = "Explore, use tools, and give full fin
 /// any width; a 100-column table wraps into noise in a split pane.
 const CONTRACT_ENDING: &str =
     "Close each snippet, including each step in a next chain, with a ten-second summary:
-exactly one STATUS line, one prose verdict sentence carrying the reason, and at most five
-short detail lines only if they change what the reader does next. Hard cap: 7 lines total.
+a rule, exactly one STATUS line, one prose verdict sentence carrying the reason, and at most
+five short detail lines only if they change what the reader does next. Hard cap: 8 lines total.
 Use bullets only for genuinely enumerable findings, never for the verdict. No fences.
 Choose exactly one status; do not manufacture confidence:
 🟢 DONE — finished, nothing needed from you.
@@ -145,8 +145,8 @@ prose nobody polls, so if you have the lazybox `report_blocker` tool, call it wi
 question — that is what puts the block on the epic readouts and the `E j` jump.
 🟡 UNSURE — done, but low confidence; name exactly what to verify.
 The ending is read at a glance, so it looks the same every time.
-Open it with a rule on its own line — exactly forty ─ characters, nothing else. The rule is
-the frame rather than content, so it alone does not count against the seven.
+Open it with a rule on its own line — exactly forty ─ characters, nothing else, and count it
+as one of the eight.
 Lead the STATUS line with its glyph, then the word: the glyph is what the eye lands on, the
 word is what survives a terminal that renders emoji poorly. Never emit ANSI escapes — the
 glyph carries the colour and cannot clash with the reader's theme.
@@ -161,7 +161,7 @@ Example ending:
 The fix passes locally, but timing under production load remains unverified.
 wanted  p99 under 200ms on the production workload
 found   unmeasured
-Close with exactly this shape, at most 7 lines after the rule, and nothing after it:
+Close with exactly this shape, at most 8 lines, and nothing after it:
 ────────────────────────────────────────
 <🟢 DONE | 🔴 ACTION NEEDED | ❓ NEED CONTEXT | 🟡 UNSURE>
 <verdict — one sentence, prose>
@@ -2414,8 +2414,8 @@ snippets:
         const SHIPPED: &str = "OUTPUT CONTRACT (final ending only)
 Explore, use tools, and give full findings before this ending without a length or format limit.
 Close each snippet, including each step in a next chain, with a ten-second summary:
-exactly one STATUS line, one prose verdict sentence carrying the reason, and at most five
-short detail lines only if they change what the reader does next. Hard cap: 7 lines total.
+a rule, exactly one STATUS line, one prose verdict sentence carrying the reason, and at most
+five short detail lines only if they change what the reader does next. Hard cap: 8 lines total.
 Use bullets only for genuinely enumerable findings, never for the verdict. No fences.
 Choose exactly one status; do not manufacture confidence:
 🟢 DONE — finished, nothing needed from you.
@@ -2425,8 +2425,8 @@ prose nobody polls, so if you have the lazybox `report_blocker` tool, call it wi
 question — that is what puts the block on the epic readouts and the `E j` jump.
 🟡 UNSURE — done, but low confidence; name exactly what to verify.
 The ending is read at a glance, so it looks the same every time.
-Open it with a rule on its own line — exactly forty ─ characters, nothing else. The rule is
-the frame rather than content, so it alone does not count against the seven.
+Open it with a rule on its own line — exactly forty ─ characters, nothing else, and count it
+as one of the eight.
 Lead the STATUS line with its glyph, then the word: the glyph is what the eye lands on, the
 word is what survives a terminal that renders emoji poorly. Never emit ANSI escapes — the
 glyph carries the colour and cannot clash with the reader's theme.
@@ -2441,7 +2441,7 @@ Example ending:
 The fix passes locally, but timing under production load remains unverified.
 wanted  p99 under 200ms on the production workload
 found   unmeasured
-Close with exactly this shape, at most 7 lines after the rule, and nothing after it:
+Close with exactly this shape, at most 8 lines, and nothing after it:
 ────────────────────────────────────────
 <🟢 DONE | 🔴 ACTION NEEDED | ❓ NEED CONTEXT | 🟡 UNSURE>
 <verdict — one sentence, prose>
@@ -2547,10 +2547,12 @@ Close with exactly this shape, at most 7 lines after the rule, and nothing after
             "the example and the closing shape must each open with the rule, \
              spelled at its stated width",
         );
-        // The rule is chrome, so it is carved out of the seven rather than
-        // silently overrunning a cap every other guard reads as absolute.
-        assert!(CONTRACT_ENDING.contains("does not count against the seven"));
-        assert!(CONTRACT_ENDING.contains("Hard cap: 7 lines total."));
+        // The rule is one of the eight, not chrome carved out of them: a
+        // carve-out let `catchup` promise six lines and emit seven, and
+        // left `no_builtin_declares_a_line_budget_above_the_contracts_own`
+        // reading a cap the ending no longer obeyed.
+        assert!(CONTRACT_ENDING.contains("count it\nas one of the eight"));
+        assert!(CONTRACT_ENDING.contains("Hard cap: 8 lines total."));
 
         assert!(CONTRACT_ENDING.contains("never with box-drawing frames"));
         assert!(CONTRACT_ENDING.contains("one item is never a table"));
@@ -2651,7 +2653,7 @@ Close with exactly this shape, at most 7 lines after the rule, and nothing after
         assert!(!delivered.contains("without a length or format limit"));
         // The rest of the contract still rides: shape, statuses, routing.
         assert!(delivered.contains(CONTRACT_HEADER));
-        assert!(delivered.contains("Hard cap: 7 lines total."));
+        assert!(delivered.contains("Hard cap: 8 lines total."));
         assert!(delivered.contains("`report_blocker`"));
 
         // …and the opt-out is confined to `ENDING_ONLY_BUILTINS`. The rule
@@ -2780,8 +2782,8 @@ Close with exactly this shape, at most 7 lines after the rule, and nothing after
     /// one key over — "First line: what is TRUE NOW that was not true
     /// before" *and* "The verdict names what is true now that was not true
     /// before", i.e. the same sentence demanded at the top and at the
-    /// bottom of an answer the contract caps at seven lines, burning two of
-    /// them on one claim.
+    /// bottom of a short capped answer, burning two of its lines on one
+    /// claim.
     ///
     /// The fact an ending-only body assigns to its verdict is stated once,
     /// in the verdict, because there is no body before the ending to state
@@ -2892,11 +2894,17 @@ Close with exactly this shape, at most 7 lines after the rule, and nothing after
 
     /// A body may not promise a longer answer than the contract allows
     /// (#1796). `clarify` shipped "AT MOST 8 lines total" under a contract
-    /// whose own words are "Hard cap: 7 lines total … and nothing after
+    /// whose own words were "Hard cap: 7 lines total … and nothing after
     /// it"; for an ending-only snippet the whole answer *is* that ending,
     /// so the eighth line the body explicitly invited ("CI that is not
-    /// green yet") is a line the contract forbids. On any red-CI PR the two
-    /// instructions could not both be obeyed.
+    /// green yet") was a line the contract forbade. On any red-CI PR the
+    /// two instructions could not both be obeyed.
+    ///
+    /// The cap is read off the shipped text rather than typed again here,
+    /// which is what let #1817 move it from seven to eight — the opening
+    /// rule is one of the eight, not chrome carved out of them — without
+    /// this guard silently measuring bodies against a number the contract
+    /// had stopped stating.
     ///
     /// Quantified over every built-in, not just the ending-only ones: a
     /// body that caps itself at all must be ending-only
@@ -2925,8 +2933,8 @@ Close with exactly this shape, at most 7 lines after the rule, and nothing after
 
         // The contract's own cap, read off the shipped text rather than
         // typed again, so re-tuning the contract re-tunes this guard.
-        assert!(CONTRACT_ENDING.contains("Hard cap: 7 lines total."));
-        const CONTRACT_CAP: usize = 7;
+        assert!(CONTRACT_ENDING.contains("Hard cap: 8 lines total."));
+        const CONTRACT_CAP: usize = 8;
 
         for (key, snippet) in Snippets::builtin().all() {
             let Some(budget) = declared_line_budget(&snippet.body) else {

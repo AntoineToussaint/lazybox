@@ -1333,23 +1333,51 @@ pub async fn inspect_worktree_diff(worktree: &Path) -> Result<WorktreeDiff, GitE
 /// How a checkout stands against one reference commit — the drift that
 /// makes a diff on screen a different document from the one being
 /// merged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Each field carries exactly one fact and says when it has none.
+/// Folding "the probe failed" into "the probe answered zero" is what
+/// makes a drift warning worse than no warning at all: an unreadable
+/// checkout reported as clean, and an unfetched commit reported as
+/// unrelated history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckoutDivergence {
-    /// Paths `git status --porcelain` reports as changed.
-    pub dirty_files: usize,
-    /// `(commits only here, commits only there)` between `HEAD` and the
-    /// reference. `None` when the reference commit is not present in
-    /// the checkout, which is itself divergence no count can express.
-    pub commits: Option<(u32, u32)>,
+    /// Paths `git status --porcelain` reports as changed, or `None`
+    /// when it could not answer — never `Some(0)` for a checkout that
+    /// was not read.
+    pub dirty_files: Option<usize>,
+    pub commits: CommitComparison,
 }
 
-/// Compare the checkout against `reference` (any revision the checkout
-/// can resolve — typically a pull request's head SHA).
+impl CheckoutDivergence {
+    /// Nothing could be read about this checkout, so nothing true can
+    /// be said about it.
+    pub fn is_unknown(&self) -> bool {
+        self.dirty_files.is_none() && self.commits == CommitComparison::Unknown
+    }
+}
+
+/// Where the checkout's `HEAD` stands relative to the reference commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitComparison {
+    /// Both revisions resolved and were counted.
+    Counted {
+        local_only: u32,
+        reference_only: u32,
+    },
+    /// The checkout is readable but the reference commit is not in it —
+    /// never fetched, or genuinely unrelated history. Distinct from a
+    /// zero count, and distinct from a failed probe.
+    ReferenceAbsent,
+    /// The comparison could not be made at all.
+    Unknown,
+}
+
+/// Compare the checkout against `reference` (any revision — typically a
+/// pull request's head SHA).
 ///
-/// Every probe is best-effort: a checkout that is gone, not a
-/// repository, or missing the reference reports what it could read
-/// rather than failing, because this only ever annotates a diff that
-/// has already been produced.
+/// Best-effort by design: this annotates a diff that has already been
+/// produced, so a checkout that is gone or a commit that was never
+/// fetched reports *that*, rather than failing or inventing a zero.
 pub async fn checkout_divergence(worktree: &Path, reference: &str) -> CheckoutDivergence {
     checkout_divergence_with(default_git_runner(), worktree, reference).await
 }
@@ -1369,17 +1397,51 @@ async fn checkout_divergence_with(
                 .lines()
                 .filter(|line| !line.trim().is_empty())
                 .count()
-        })
-        .unwrap_or_default();
+        });
+    // `cat-file` failing means "that commit is not here" only once the
+    // checkout is known readable — every probe fails against a
+    // directory that is gone, and reading that as a missing *commit*
+    // blames a checkout for something it cannot be guilty of.
+    let commits = if dirty_files.is_none() {
+        CommitComparison::Unknown
+    } else if !commit_present(git, worktree, reference).await {
+        // Split before counting so "you have not fetched this commit"
+        // never masquerades as "your history is unrelated" — the first
+        // is the everyday case when reviewing someone else's branch.
+        CommitComparison::ReferenceAbsent
+    } else {
+        match rev_list_left_right(git, worktree, reference).await {
+            Some((local_only, reference_only)) => CommitComparison::Counted {
+                local_only,
+                reference_only,
+            },
+            None => CommitComparison::Unknown,
+        }
+    };
     CheckoutDivergence {
         dirty_files,
-        commits: rev_list_left_right(git, worktree, reference).await,
+        commits,
     }
+}
+
+/// Does the checkout hold `reference` as a commit? `git cat-file -e`
+/// answers without walking history, and separates "not fetched" from
+/// "not a repository": both fail, but only the first has a readable
+/// `git status` beside it.
+async fn commit_present(git: &dyn GitRunner, worktree: &Path, reference: &str) -> bool {
+    git.run(
+        Some(worktree),
+        &["cat-file", "-e", &format!("{reference}^{{commit}}")],
+        &[],
+    )
+    .await
+    .map(|output| output.status.success())
+    .unwrap_or(false)
 }
 
 /// `git rev-list --left-right --count <reference>...HEAD`, which answers
 /// both directions in one process. `None` when either side does not
-/// resolve.
+/// resolve — an unborn `HEAD`, say.
 async fn rev_list_left_right(
     git: &dyn GitRunner,
     worktree: &Path,
@@ -1594,12 +1656,79 @@ fn parse_status_porcelain(bytes: &[u8]) -> Vec<String> {
     rows
 }
 
-/// Parse a unified diff document into per-file hunks.
+/// Parse the hunks of ONE file's patch — the `@@`-and-lines shape a
+/// forge serves per file, with no `diff --git` preamble.
 ///
-/// `source` is a full `diff --git` stream: the same shape `git diff`
-/// emits, and the shape a caller holding only GitHub's per-file patches
-/// assembles so both diff sources render through one parser.
-pub fn parse_unified_diff(source: &str) -> Vec<DiffFile> {
+/// This is the entry point for a caller that already knows the file's
+/// paths and status as structured data. Assembling a `diff --git`
+/// document just to re-parse those fields back out cannot add
+/// information and can lose it: git quotes a path containing a tab or a
+/// newline, and a caller writing the marker lines by hand does not.
+pub fn parse_diff_hunks(patch: &str) -> Vec<DiffHunk> {
+    let mut hunks = Vec::new();
+    let mut hunk: Option<DiffHunk> = None;
+    let mut old_line = 0u32;
+    let mut new_line = 0u32;
+    for line in patch.lines() {
+        if line.starts_with("@@ ") {
+            if let Some(previous) = hunk.take() {
+                hunks.push(previous);
+            }
+            let (parsed_old, parsed_new) = parse_hunk_starts(line);
+            old_line = parsed_old;
+            new_line = parsed_new;
+            hunk = Some(DiffHunk {
+                header: line.to_string(),
+                old_start: old_line,
+                new_start: new_line,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(current) = hunk.as_mut() {
+            current
+                .lines
+                .push(hunk_line(line, &mut old_line, &mut new_line));
+        }
+    }
+    if let Some(hunk) = hunk {
+        hunks.push(hunk);
+    }
+    hunks
+}
+
+/// Classify one line inside a hunk and advance the side counters it
+/// consumes.
+fn hunk_line(line: &str, old_line: &mut u32, new_line: &mut u32) -> DiffLine {
+    let (kind, old, new) = match line.as_bytes().first() {
+        Some(b'+') => {
+            let current = *new_line;
+            *new_line = new_line.saturating_add(1);
+            (DiffLineKind::Addition, None, Some(current))
+        }
+        Some(b'-') => {
+            let current = *old_line;
+            *old_line = old_line.saturating_add(1);
+            (DiffLineKind::Deletion, Some(current), None)
+        }
+        Some(b' ') => {
+            let old = *old_line;
+            let new = *new_line;
+            *old_line = old_line.saturating_add(1);
+            *new_line = new_line.saturating_add(1);
+            (DiffLineKind::Context, Some(old), Some(new))
+        }
+        _ => (DiffLineKind::Meta, None, None),
+    };
+    DiffLine {
+        kind,
+        text: line.to_string(),
+        old_line: old,
+        new_line: new,
+    }
+}
+
+fn parse_unified_diff(source: &str) -> Vec<DiffFile> {
     let mut files = Vec::new();
     let mut file: Option<DiffFile> = None;
     let mut hunk: Option<DiffHunk> = None;
@@ -1638,32 +1767,9 @@ pub fn parse_unified_diff(source: &str) -> Vec<DiffFile> {
             continue;
         }
         if let Some(current_hunk) = hunk.as_mut() {
-            let (kind, old, new) = match line.as_bytes().first() {
-                Some(b'+') => {
-                    let current = new_line;
-                    new_line = new_line.saturating_add(1);
-                    (DiffLineKind::Addition, None, Some(current))
-                }
-                Some(b'-') => {
-                    let current = old_line;
-                    old_line = old_line.saturating_add(1);
-                    (DiffLineKind::Deletion, Some(current), None)
-                }
-                Some(b' ') => {
-                    let old = old_line;
-                    let new = new_line;
-                    old_line = old_line.saturating_add(1);
-                    new_line = new_line.saturating_add(1);
-                    (DiffLineKind::Context, Some(old), Some(new))
-                }
-                _ => (DiffLineKind::Meta, None, None),
-            };
-            current_hunk.lines.push(DiffLine {
-                kind,
-                text: line.to_string(),
-                old_line: old,
-                new_line: new,
-            });
+            current_hunk
+                .lines
+                .push(hunk_line(line, &mut old_line, &mut new_line));
             continue;
         }
 
@@ -2306,23 +2412,37 @@ mod tests {
         std::fs::write(tmp.path().join("a.txt"), "edited\n").expect("dirty edit");
 
         let divergence = checkout_divergence(tmp.path(), &pr_head).await;
-        assert_eq!(divergence.commits, Some((1, 1)));
-        assert_eq!(divergence.dirty_files, 1);
+        assert_eq!(
+            divergence.commits,
+            CommitComparison::Counted {
+                local_only: 1,
+                reference_only: 1,
+            }
+        );
+        assert_eq!(divergence.dirty_files, Some(1));
 
         // A checkout sitting exactly on the PR's head with nothing
         // uncommitted has not diverged — and must not be told it has.
         git(tmp.path(), &["checkout", "-q", "--", "a.txt"]);
         git(tmp.path(), &["checkout", "-q", "pr"]);
         let in_sync = checkout_divergence(tmp.path(), &pr_head).await;
-        assert_eq!(in_sync.commits, Some((0, 0)));
-        assert_eq!(in_sync.dirty_files, 0);
+        assert_eq!(
+            in_sync.commits,
+            CommitComparison::Counted {
+                local_only: 0,
+                reference_only: 0,
+            }
+        );
+        assert_eq!(in_sync.dirty_files, Some(0));
     }
 
-    /// A PR head the checkout has never fetched leaves no counts to
-    /// report — but the absence is itself divergence, so it must be
-    /// distinguishable from "in sync", never reported as zero.
+    /// A PR head the checkout has never fetched is the ordinary case
+    /// when reviewing someone else's branch. It must read as
+    /// "reference absent" — never as a zero count (which claims the
+    /// checkout is in sync) and never as an unreadable checkout
+    /// (which would suppress the notice that says to fetch).
     #[tokio::test]
-    async fn an_unfetched_reference_reports_no_counts_rather_than_zero() {
+    async fn an_unfetched_reference_is_absent_not_zero() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::process::Command::new("git")
             .current_dir(tmp.path())
@@ -2332,7 +2452,31 @@ mod tests {
 
         let divergence =
             checkout_divergence(tmp.path(), "0000000000000000000000000000000000000000").await;
-        assert_eq!(divergence.commits, None);
+        assert_eq!(divergence.commits, CommitComparison::ReferenceAbsent);
+        assert_eq!(
+            divergence.dirty_files,
+            Some(0),
+            "the checkout itself was readable"
+        );
+        assert!(!divergence.is_unknown());
+    }
+
+    /// A checkout that is gone — deleted by hand, or a `.git` pointing
+    /// at a pruned bare clone — must report that it could not be read.
+    ///
+    /// Reporting zero dirty files for it told the reviewer the
+    /// worktree was clean, and reporting "no counts" alongside made the
+    /// viewer accuse an absent checkout of unrelated history. Both
+    /// claims were invented from two probes that simply failed.
+    #[tokio::test]
+    async fn an_unreadable_checkout_claims_nothing_about_itself() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gone = tmp.path().join("never-existed");
+
+        let divergence = checkout_divergence(&gone, "HEAD").await;
+        assert_eq!(divergence.dirty_files, None, "never Some(0) — not read");
+        assert_eq!(divergence.commits, CommitComparison::Unknown);
+        assert!(divergence.is_unknown());
     }
 
     #[tokio::test]

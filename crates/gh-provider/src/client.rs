@@ -1463,7 +1463,6 @@ pub struct PullRequestDiff {
     /// The commit the diff was read at. Anchors both the divergence
     /// notice and the review the reviewer posts back.
     pub head_sha: String,
-    pub base_sha: String,
     pub files: Vec<PullRequestDiffFile>,
     /// The file list or its patch text ran past what one read returns.
     pub truncated: bool,
@@ -6394,7 +6393,6 @@ impl GhClient {
         );
         drop(permit);
         let head_sha = pull.head.sha;
-        let base_sha = pull.base.sha;
 
         let mut files: Vec<PullRequestDiffFile> = Vec::new();
         let mut patch_bytes = 0usize;
@@ -6458,7 +6456,6 @@ impl GhClient {
             if count < Self::PR_DIFF_PAGE_SIZE {
                 return Ok(PullRequestDiff {
                     head_sha,
-                    base_sha,
                     files,
                     truncated,
                 });
@@ -6475,7 +6472,6 @@ impl GhClient {
         }
         Ok(PullRequestDiff {
             head_sha,
-            base_sha,
             files,
             truncated,
         })
@@ -6492,14 +6488,16 @@ impl GhClient {
     /// PR's latest commit and re-anchor every comment onto lines the
     /// reviewer never saw.
     ///
-    /// Returns the review's URL on github.com.
+    /// Returns the review's URL on github.com, or `None` when the
+    /// response carried none — the post still succeeded, and reporting
+    /// an empty string as a URL would say otherwise.
     pub async fn submit_pr_review(
         &self,
         owner: &str,
         repo: &str,
         number: u64,
         review: &PullRequestReview<'_>,
-    ) -> Result<String, GhError> {
+    ) -> Result<Option<String>, GhError> {
         const OPERATION: &str = "submit PR review";
         let payload = serde_json::json!({
             "commit_id": review.commit_id,
@@ -6553,8 +6551,7 @@ impl GhClient {
         Ok(posted
             .get("html_url")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string())
+            .map(str::to_string))
     }
 
     /// Resolve a GitHub login to its node ID via GraphQL. Used as
@@ -14263,7 +14260,6 @@ mod tests {
         let diff = client.fetch_pr_diff("o", "r", 7).await.expect("diff");
 
         assert_eq!(diff.head_sha, "feedface");
-        assert_eq!(diff.base_sha, "0ff1ce");
         assert!(!diff.truncated);
         assert_eq!(diff.files.len(), 2);
         assert_eq!(diff.files[0].path, "src/lib.rs");
@@ -14344,7 +14340,10 @@ mod tests {
             .await
             .expect("review posted");
 
-        assert_eq!(url, "https://github.com/o/r/pull/7#pullrequestreview-9");
+        assert_eq!(
+            url.as_deref(),
+            Some("https://github.com/o/r/pull/7#pullrequestreview-9")
+        );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1, "one review, not one request per comment");
         let request = &requests[0];

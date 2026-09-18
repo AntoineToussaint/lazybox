@@ -15,8 +15,9 @@ use crate::realm::components::scrollable::{centered_rect, draw_frame};
 use crate::realm::{Msg, UserEvent};
 use lazybox_core::WorkspaceKey;
 use lazybox_ipc::{
-    DiffFileDto, DiffLineKindDto, DiffSideDto, ReviewCommentDto, ReviewVerdictDto, TerminalId,
-    WorkspaceDiffDivergenceDto, WorkspaceDiffDto, WorkspaceDiffTarget,
+    CommitComparisonDto, DiffFileDto, DiffLineKindDto, DiffSideDto, ReviewCommentDto,
+    ReviewVerdictDto, TerminalId, WorkspaceDiffDivergenceDto, WorkspaceDiffDto,
+    WorkspaceDiffTarget,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -125,7 +126,18 @@ enum InputMode {
     /// keypress that picks a verdict is also the confirmation — posting
     /// to GitHub is public and must not ride a single stray `S`.
     ReviewVerdict(String),
+    /// The review is with the daemon and GitHub has not answered yet.
+    /// The viewer stays mounted through this: a 422 on a stale
+    /// `commit_id`, a 403, a 502 — any refusal — must leave every
+    /// drafted comment exactly where the reviewer left it, because
+    /// there is nowhere else they exist.
+    Submitting,
 }
+
+/// Attribute the model sets to release the viewer from its in-flight
+/// state when GitHub refused the review, so the drafted comments
+/// become editable and re-submittable.
+pub const REVIEW_IN_FLIGHT: &str = "review-in-flight";
 
 /// One row of the file tree: a directory (with its collapsed chain of
 /// single-child parents folded into the label) or a changed file.
@@ -175,7 +187,8 @@ impl DiffReview {
         agent_terminal_ids: Vec<TerminalId>,
         diff: WorkspaceDiffDto,
     ) -> Self {
-        let rows = build_rows(&diff, false);
+        let pull_request = matches!(target, WorkspaceDiffTarget::PullRequest);
+        let rows = build_rows(&diff, false, pull_request);
         let tree = build_tree(&diff.files);
         Self {
             workspace_key,
@@ -221,7 +234,7 @@ impl DiffReview {
         let next = self
             .idle_rows
             .take()
-            .unwrap_or_else(|| build_rows(&self.diff, split));
+            .unwrap_or_else(|| build_rows(&self.diff, split, self.is_pull_request()));
         let previous = std::mem::replace(&mut self.rows, next);
         self.split = split;
         self.cursor = previous[self.cursor..]
@@ -679,7 +692,9 @@ impl DiffReview {
                 InputMode::Search(input)
                 | InputMode::Comment(input)
                 | InputMode::ReviewSummary(input) => input,
-                InputMode::Normal | InputMode::ReviewVerdict(_) => return (true, None),
+                InputMode::Normal | InputMode::ReviewVerdict(_) | InputMode::Submitting => {
+                    return (true, None);
+                }
             };
             input.extend(text.chars().filter(|character| !character.is_control()));
             return (true, None);
@@ -712,8 +727,26 @@ impl DiffReview {
                 verdict,
                 comments: self.review_comments(),
             });
-            self.mode = InputMode::Normal;
+            // Hold the comments — and the viewer — until GitHub
+            // answers. Dropping them here is what turned a refused
+            // review into an unrecoverable loss of everything typed.
+            self.mode = match message {
+                Some(_) => InputMode::Submitting,
+                None => InputMode::Normal,
+            };
             return (true, message);
+        }
+        // A submit already in flight owns the viewer until the daemon
+        // answers — dropping back to Normal would let the next
+        // `Shift-S` post the same review a second time. Esc still
+        // leaves, so a daemon that never replies cannot strand the
+        // reviewer in a modal that accepts no key at all; that exit
+        // discards the comments, but only because they asked it to.
+        if matches!(self.mode, InputMode::Submitting) {
+            let leaving = matches!(key.code, Key::Esc)
+                || (matches!(key.code, Key::Char('c'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            return (true, leaving.then_some(Msg::ModalDismissed));
         }
         match key.code {
             Key::Esc => {
@@ -732,7 +765,10 @@ impl DiffReview {
                 InputMode::ReviewSummary(summary) if !summary.trim().is_empty() => {
                     self.mode = InputMode::ReviewVerdict(summary.clone());
                 }
-                InputMode::ReviewSummary(_) | InputMode::Normal | InputMode::ReviewVerdict(_) => {}
+                InputMode::ReviewSummary(_)
+                | InputMode::Normal
+                | InputMode::ReviewVerdict(_)
+                | InputMode::Submitting => {}
             },
             Key::Backspace => match &mut self.mode {
                 InputMode::Search(input)
@@ -740,7 +776,7 @@ impl DiffReview {
                 | InputMode::ReviewSummary(input) => {
                     input.pop();
                 }
-                InputMode::Normal | InputMode::ReviewVerdict(_) => {}
+                InputMode::Normal | InputMode::ReviewVerdict(_) | InputMode::Submitting => {}
             },
             Key::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 match &mut self.mode {
@@ -749,7 +785,7 @@ impl DiffReview {
                     | InputMode::ReviewSummary(input) => {
                         input.push(character);
                     }
-                    InputMode::Normal | InputMode::ReviewVerdict(_) => {}
+                    InputMode::Normal | InputMode::ReviewVerdict(_) | InputMode::Submitting => {}
                 }
             }
             _ => {}
@@ -1085,6 +1121,11 @@ impl Component for DiffReview {
                 self.comments.len(),
                 if self.comments.len() == 1 { "" } else { "s" },
             ),
+            InputMode::Submitting => format!(
+                "submitting {} comment{} to GitHub…",
+                self.comments.len(),
+                if self.comments.len() == 1 { "" } else { "s" },
+            ),
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(input, theme.hint()))),
@@ -1125,7 +1166,17 @@ impl Component for DiffReview {
         None
     }
 
-    fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    /// The daemon's answer to a submitted review, routed back through
+    /// the model: clearing the flag releases the viewer so the drafted
+    /// comments can be corrected and sent again.
+    fn attr(&mut self, attribute: Attribute, value: AttrValue) {
+        if attribute == Attribute::Custom(REVIEW_IN_FLIGHT)
+            && value == AttrValue::Flag(false)
+            && matches!(self.mode, InputMode::Submitting)
+        {
+            self.mode = InputMode::Normal;
+        }
+    }
 
     fn state(&self) -> State {
         State::None
@@ -1441,36 +1492,61 @@ struct DirNode {
 /// "2 commits of yours are not in this PR" is a reason to stop.
 fn divergence_notice(divergence: Option<&WorkspaceDiffDivergenceDto>) -> Option<String> {
     let divergence = divergence?;
-    let mut parts = Vec::new();
+    // Proven drift and admitted ignorance are different claims and get
+    // different words. Labelling "I could not check" as DIVERGED is
+    // what turns the warning into noise a reviewer learns to skip —
+    // and the warning only works if it is rare.
+    let mut drift = Vec::new();
+    let mut unknown = Vec::new();
     match divergence.commits {
-        Some(spread) => {
+        CommitComparisonDto::Counted(spread) => {
             if spread.local_only > 0 {
-                parts.push(format!(
+                drift.push(format!(
                     "{} local commit{} not in this PR",
                     spread.local_only,
                     if spread.local_only == 1 { "" } else { "s" },
                 ));
             }
             if spread.pr_only > 0 {
-                parts.push(format!(
+                drift.push(format!(
                     "{} PR commit{} not checked out",
                     spread.pr_only,
                     if spread.pr_only == 1 { "" } else { "s" },
                 ));
             }
         }
-        // The PR's head commit is not in the checkout at all, so no
-        // count exists — but that absence is itself the divergence.
-        None => parts.push("checkout is on an unrelated commit".to_string()),
+        // The everyday case when reviewing someone else's branch: the
+        // commit was never fetched. Saying "unrelated commit" here
+        // accused a perfectly ordinary checkout of being wrong.
+        CommitComparisonDto::ReferenceAbsent => {
+            unknown.push("this PR's head commit isn't in your checkout — fetch to compare".into());
+        }
+        CommitComparisonDto::Unknown => unknown.push("couldn't compare commits".into()),
     }
-    if divergence.dirty_files > 0 {
-        parts.push(format!(
-            "{} uncommitted file{}",
-            divergence.dirty_files,
-            if divergence.dirty_files == 1 { "" } else { "s" },
-        ));
+    match divergence.dirty_files {
+        Some(files) if files > 0 => drift.push(format!(
+            "{files} uncommitted file{}",
+            if files == 1 { "" } else { "s" },
+        )),
+        Some(_) => {}
+        None => unknown.push("couldn't read the checkout's status".into()),
     }
-    (!parts.is_empty()).then(|| format!("DIVERGED — {}", parts.join(" · ")))
+    if drift.is_empty() && unknown.is_empty() {
+        return None;
+    }
+    let label = if drift.is_empty() {
+        "CHECKOUT"
+    } else {
+        "DIVERGED"
+    };
+    Some(format!(
+        "{label} — {}",
+        drift
+            .into_iter()
+            .chain(unknown)
+            .collect::<Vec<_>>()
+            .join(" · ")
+    ))
 }
 
 fn build_tree(files: &[DiffFileDto]) -> Vec<TreeNode> {
@@ -1527,12 +1603,16 @@ fn flatten_tree(node: &DirNode, depth: usize, files: &[DiffFileDto], out: &mut V
     }
 }
 
-fn build_rows(diff: &WorkspaceDiffDto, split: bool) -> Vec<RowKind> {
+/// `pull_request` comes from the target the viewer was mounted with,
+/// the same answer `is_pull_request()` gives the render path. Inferring
+/// it here from the payload instead left two ways to ask one question,
+/// free to disagree.
+fn build_rows(diff: &WorkspaceDiffDto, split: bool, pull_request: bool) -> Vec<RowKind> {
     // A pull request has no working tree, so its diff opens on the
     // divergence notice instead of a porcelain status block — "clean
     // worktree" under a PR diff would be answering a question nobody
     // asked with a fact about somewhere else.
-    let local = diff.head_sha.is_none();
+    let local = !pull_request;
     let mut rows = Vec::new();
     if local {
         rows.push(RowKind::StatusHeader);
@@ -1889,7 +1969,7 @@ mod tests {
                 ],
             )],
         };
-        let rows = build_rows(&diff, true);
+        let rows = build_rows(&diff, true, false);
         let pairs = rows
             .iter()
             .filter_map(|row| match row {
@@ -2362,8 +2442,8 @@ mod tests {
         let mut diff = sample();
         diff.head_sha = Some("f00dcafe".into());
         diff.divergence = Some(WorkspaceDiffDivergenceDto {
-            dirty_files: 2,
-            commits: Some(lazybox_ipc::CommitSpreadDto {
+            dirty_files: Some(2),
+            commits: CommitComparisonDto::Counted(lazybox_ipc::CommitSpreadDto {
                 local_only: 1,
                 pr_only: 3,
             }),
@@ -2394,8 +2474,8 @@ mod tests {
         let mut diff = sample();
         diff.head_sha = Some("f00dcafe".into());
         diff.divergence = Some(WorkspaceDiffDivergenceDto {
-            dirty_files: 0,
-            commits: Some(lazybox_ipc::CommitSpreadDto {
+            dirty_files: Some(0),
+            commits: CommitComparisonDto::Counted(lazybox_ipc::CommitSpreadDto {
                 local_only: 0,
                 pr_only: 0,
             }),
@@ -2404,6 +2484,58 @@ mod tests {
 
         assert!(!render(&mut review).contains("DIVERGED"));
         assert!(!review.rows.contains(&RowKind::Divergence));
+    }
+
+    /// An unfetched PR head is the ordinary case when reviewing someone
+    /// else's branch. Calling it an "unrelated commit" fired the
+    /// warning on every such review — and a warning that fires every
+    /// time is one nobody reads on the day it matters.
+    #[test]
+    fn an_unfetched_pr_head_says_to_fetch_rather_than_accusing_the_checkout() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        diff.divergence = Some(WorkspaceDiffDivergenceDto {
+            dirty_files: Some(0),
+            commits: CommitComparisonDto::ReferenceAbsent,
+        });
+        let mut review = pull_request_review(diff);
+
+        let rendered = render_sized(&mut review, 200, 30);
+        assert!(
+            rendered.contains("this PR's head commit isn't in your checkout — fetch to compare"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("unrelated"),
+            "an unfetched commit is not unrelated history: {rendered}"
+        );
+        assert!(
+            rendered.contains("CHECKOUT —"),
+            "not knowing is not the same claim as having diverged: {rendered}"
+        );
+    }
+
+    /// A status probe that could not run must never render as clean.
+    /// Reporting an unreadable worktree as having nothing uncommitted
+    /// is the reassurance a reviewer acts on right before merging over
+    /// their own unsaved work.
+    #[test]
+    fn an_unreadable_status_is_admitted_not_reported_as_clean() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        diff.divergence = Some(WorkspaceDiffDivergenceDto {
+            dirty_files: None,
+            commits: CommitComparisonDto::Counted(lazybox_ipc::CommitSpreadDto {
+                local_only: 0,
+                pr_only: 0,
+            }),
+        });
+        let mut review = pull_request_review(diff);
+
+        assert!(
+            render_sized(&mut review, 200, 30).contains("couldn't read the checkout's status"),
+            "silence here reads as a clean worktree"
+        );
     }
 
     /// A PR has no working tree, so the porcelain status block is
@@ -2545,7 +2677,67 @@ mod tests {
                 },
             ]
         );
+        // Still mounted and still holding the comments until GitHub
+        // answers — see `a_refused_review_keeps_every_drafted_comment`.
+        assert!(matches!(review.mode, InputMode::Submitting));
+        assert_eq!(review.comments.len(), 2);
+    }
+
+    /// A refused review must leave every drafted comment exactly where
+    /// it was. The viewer is the only place they exist, so closing it
+    /// on submit — before GitHub had even answered — turned a 422 on a
+    /// stale `commit_id` into the silent destruction of everything the
+    /// reviewer had written.
+    #[test]
+    fn a_refused_review_keeps_every_drafted_comment() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        let mut review = pull_request_review(diff);
+        render(&mut review);
+        comment_on(&mut review, "fix();", "this needs a test");
+        review.mode = InputMode::ReviewSummary("a nit".into());
+        review.handle_input(&key(Key::Enter));
+        assert!(review.handle_input(&key(Key::Char('c'))).1.is_some());
+
+        // In flight: the viewer is held, and keys that would discard or
+        // re-send the review are refused while the request is out.
+        assert!(matches!(review.mode, InputMode::Submitting));
+        assert!(render(&mut review).contains("submitting 1 comment to GitHub…"));
+        assert!(
+            review.on(&key(Key::Char('S'))).is_none(),
+            "a second Shift-S must not post the review twice"
+        );
+        assert!(matches!(review.mode, InputMode::Submitting));
+
+        // GitHub refused. The model releases the viewer; the comments
+        // are still here and still editable.
+        review.attr(Attribute::Custom(REVIEW_IN_FLIGHT), AttrValue::Flag(false));
         assert!(matches!(review.mode, InputMode::Normal));
+        assert_eq!(review.comments.len(), 1);
+        assert_eq!(review.comments[0].body, "this needs a test");
+        assert!(review.on(&key(Key::Char('S'))).is_none());
+        assert!(
+            matches!(review.mode, InputMode::ReviewSummary(_)),
+            "the released viewer can compose and send the review again"
+        );
+    }
+
+    /// Esc is the one key that still works in flight. Swallowing every
+    /// key would strand the reviewer in a modal with no exit if the
+    /// reply never came — a daemon restart is enough.
+    #[test]
+    fn esc_can_still_leave_a_review_that_is_in_flight() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        let mut review = pull_request_review(diff);
+        render(&mut review);
+        comment_on(&mut review, "fix();", "this needs a test");
+        review.mode = InputMode::Submitting;
+
+        assert!(matches!(
+            review.on(&key(Key::Esc)),
+            Some(Msg::ModalDismissed)
+        ));
     }
 
     /// GitHub refuses a comment or request-changes review with no body,

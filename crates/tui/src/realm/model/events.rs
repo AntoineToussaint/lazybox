@@ -3148,8 +3148,14 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
         }
-        // The GitHub review landed (or GitHub refused it). Either way
-        // the reviewer needs to know now — the modal is already gone.
+        // The GitHub review landed, or GitHub refused it. Success closes
+        // the viewer; a refusal releases it with every drafted comment
+        // still in place, because the viewer is the only place they
+        // exist and the reviewer's next move is to fix one and retry.
+        //
+        // `error` is the discriminator, never `url`: a post that
+        // succeeds without a parseable URL is still a post, and reading
+        // success off `url` reported it as a failure.
         if let IpcEvent::PullRequestReviewSubmitted {
             comments,
             url,
@@ -3157,15 +3163,24 @@ impl<T: TerminalAdapter> Model<T> {
             ..
         } = &event
         {
-            match (url, error) {
-                (Some(url), _) => self.flash_info(format!(
-                    "posted {comments} comment{} as one review — {url}",
-                    if *comments == 1 { "" } else { "s" }
-                )),
-                (None, Some(error)) => {
+            match error {
+                Some(error) => {
+                    self.release_diff_review();
                     self.flash_error(format!("review not posted: {error}"));
                 }
-                (None, None) => self.flash_error("review not posted"),
+                None => {
+                    if self.modal_stack.last() == Some(&Id::DiffReview) {
+                        self.pop_modal();
+                    }
+                    let posted = format!(
+                        "posted {comments} comment{} as one review",
+                        if *comments == 1 { "" } else { "s" }
+                    );
+                    self.flash_info(match url {
+                        Some(url) => format!("{posted} — {url}"),
+                        None => posted,
+                    });
+                }
             }
         }
         // Dev-folder scan replied. Swap the loading placeholder for the

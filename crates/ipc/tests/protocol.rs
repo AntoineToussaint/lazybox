@@ -1209,11 +1209,13 @@ fn all_events() -> Vec<Event> {
                 truncated: false,
                 head_sha: Some("0ff1ce0ff1ce0ff1ce0ff1ce0ff1ce0ff1ce0ff1".into()),
                 divergence: Some(lazybox_ipc::WorkspaceDiffDivergenceDto {
-                    dirty_files: 2,
-                    commits: Some(lazybox_ipc::CommitSpreadDto {
-                        local_only: 1,
-                        pr_only: 0,
-                    }),
+                    dirty_files: Some(2),
+                    commits: lazybox_ipc::CommitComparisonDto::Counted(
+                        lazybox_ipc::CommitSpreadDto {
+                            local_only: 1,
+                            pr_only: 0,
+                        },
+                    ),
                 }),
                 files: vec![],
             }),

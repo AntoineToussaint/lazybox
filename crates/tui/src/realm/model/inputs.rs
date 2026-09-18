@@ -125,8 +125,13 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         let showing_pull_request = matches!(showing, lazybox_ipc::WorkspaceDiffTarget::PullRequest);
+        // The SAME session `g v` resolved, not merely the newest one: a
+        // workspace can run several agents, and silently landing on a
+        // different one's worktree shows work the reviewer never asked
+        // to see while looking like the work they did.
+        let session_id = self.sidebar.selected_session_id();
         let target = if showing_pull_request {
-            local_diff_target(workspace, None)
+            local_diff_target(workspace, session_id)
         } else {
             workspace
                 .pr
@@ -153,6 +158,23 @@ impl<T: TerminalAdapter> Model<T> {
         });
     }
 
+    /// Take the review viewer out of its in-flight state after GitHub
+    /// refused the review, so the drafted comments become editable and
+    /// re-submittable instead of being stranded behind a prompt.
+    pub(super) fn release_diff_review(&mut self) {
+        if self.modal_stack.last() != Some(&Id::DiffReview) {
+            return;
+        }
+        let _ = self.app.attr(
+            &Id::DiffReview,
+            tuirealm::props::Attribute::Custom(
+                crate::realm::components::diff_review::REVIEW_IN_FLIGHT,
+            ),
+            tuirealm::props::AttrValue::Flag(false),
+        );
+        self.redraw = true;
+    }
+
     /// Re-aim a failed pull-request read at the workspace's checkout.
     /// Returns whether there was one to aim at.
     pub(super) fn fall_back_to_local_diff(
@@ -160,10 +182,11 @@ impl<T: TerminalAdapter> Model<T> {
         workspace_key: lazybox_core::WorkspaceKey,
     ) -> bool {
         let session_key: lazybox_core::SessionKey = workspace_key.as_str().into();
+        let session_id = self.sidebar.selected_session_id();
         let Some(target) = self
             .sidebar
             .workspace_by_key(&session_key)
-            .and_then(|workspace| local_diff_target(workspace, None))
+            .and_then(|workspace| local_diff_target(workspace, session_id))
         else {
             return false;
         };
@@ -1574,6 +1597,15 @@ showing keybinding search only",
                 // `modal_flow` — drop it so a later stray `RepoLabels`
                 // can't re-mount on a stale target.
                 self.awaiting_repo_labels = None;
+            }
+            Some(Id::DiffReview) => {
+                // Closing the viewer abandons the read still in flight.
+                // A source switch (`p`) waits on a GitHub round-trip, so
+                // the window between the request and its reply is
+                // seconds wide — long enough to close the viewer and
+                // have the late reply mount it again, on a source
+                // nobody asked for any more.
+                self.pending_diff_session = None;
             }
             Some(Id::WorktreeProgress) => {
                 // Esc on the checklist — remember WHICH provisioning op

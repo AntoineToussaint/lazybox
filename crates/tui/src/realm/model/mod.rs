@@ -7849,9 +7849,11 @@ impl<T: TerminalAdapter> Model<T> {
                     verdict,
                     comments,
                 }]);
-                if self.modal_stack.last() == Some(&Id::DiffReview) {
-                    self.pop_modal();
-                }
+                // The viewer stays mounted until GitHub answers. It is
+                // the only place the drafted comments exist, so closing
+                // it here turned every refusal — a stale `commit_id`, a
+                // 403, a 502 — into an unrecoverable loss of everything
+                // the reviewer had written.
                 self.flash_info(format!(
                     "submitting {count} comment{} as one review…",
                     if count == 1 { "" } else { "s" }

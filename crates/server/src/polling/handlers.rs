@@ -2705,43 +2705,26 @@ fn to_dto(row: lazybox_git_ops::WorktreeInspection) -> lazybox_ipc::WorktreeInsp
     }
 }
 
+fn diff_line_to_dto(line: lazybox_git_ops::DiffLine) -> lazybox_ipc::DiffLineDto {
+    lazybox_ipc::DiffLineDto {
+        kind: match line.kind {
+            lazybox_git_ops::DiffLineKind::Context => lazybox_ipc::DiffLineKindDto::Context,
+            lazybox_git_ops::DiffLineKind::Addition => lazybox_ipc::DiffLineKindDto::Addition,
+            lazybox_git_ops::DiffLineKind::Deletion => lazybox_ipc::DiffLineKindDto::Deletion,
+            lazybox_git_ops::DiffLineKind::Meta => lazybox_ipc::DiffLineKindDto::Meta,
+        },
+        text: line.text,
+        old_line: line.old_line,
+        new_line: line.new_line,
+    }
+}
+
 fn diff_file_to_dto(file: lazybox_git_ops::DiffFile) -> lazybox_ipc::DiffFileDto {
     lazybox_ipc::DiffFileDto {
         old_path: file.old_path,
         path: file.path,
         headers: file.headers,
-        hunks: file
-            .hunks
-            .into_iter()
-            .map(|hunk| lazybox_ipc::DiffHunkDto {
-                header: hunk.header,
-                old_start: hunk.old_start,
-                new_start: hunk.new_start,
-                lines: hunk
-                    .lines
-                    .into_iter()
-                    .map(|line| lazybox_ipc::DiffLineDto {
-                        kind: match line.kind {
-                            lazybox_git_ops::DiffLineKind::Context => {
-                                lazybox_ipc::DiffLineKindDto::Context
-                            }
-                            lazybox_git_ops::DiffLineKind::Addition => {
-                                lazybox_ipc::DiffLineKindDto::Addition
-                            }
-                            lazybox_git_ops::DiffLineKind::Deletion => {
-                                lazybox_ipc::DiffLineKindDto::Deletion
-                            }
-                            lazybox_git_ops::DiffLineKind::Meta => {
-                                lazybox_ipc::DiffLineKindDto::Meta
-                            }
-                        },
-                        text: line.text,
-                        old_line: line.old_line,
-                        new_line: line.new_line,
-                    })
-                    .collect(),
-            })
-            .collect(),
+        hunks: file.hunks.into_iter().map(hunk_to_dto).collect(),
     }
 }
 
@@ -2756,36 +2739,24 @@ fn diff_to_dto(diff: lazybox_git_ops::WorktreeDiff) -> lazybox_ipc::WorkspaceDif
     }
 }
 
-/// Assemble the unified-diff document GitHub's per-file patches belong
-/// to, so a pull request's diff reaches the viewer through the same
-/// parser the local one does.
-///
-/// GitHub serves hunks with no `diff --git` preamble and no `---` /
-/// `+++` markers; without them the parser has no file boundary to split
-/// on and no path to attach a hunk to.
-fn pr_diff_document(files: &[lazybox_gh::PullRequestDiffFile]) -> String {
+/// The header rows the viewer prints above a file's hunks. Display
+/// text only — the paths that drive commenting come straight from
+/// GitHub's structured fields, never from re-reading these.
+fn pr_diff_headers(file: &lazybox_gh::PullRequestDiffFile) -> Vec<String> {
     use lazybox_gh::PullRequestFileChange;
 
-    let mut document = String::new();
-    for file in files {
-        let old_path = file.previous_path.as_deref().unwrap_or(&file.path);
-        document.push_str(&format!("diff --git a/{old_path} b/{}\n", file.path));
+    let old_path = file.previous_path.as_deref().unwrap_or(&file.path);
+    vec![
+        format!("diff --git a/{old_path} b/{}", file.path),
         match file.change {
-            PullRequestFileChange::Added => document.push_str("--- /dev/null\n"),
-            _ => document.push_str(&format!("--- a/{old_path}\n")),
-        }
+            PullRequestFileChange::Added => "--- /dev/null".to_string(),
+            _ => format!("--- a/{old_path}"),
+        },
         match file.change {
-            PullRequestFileChange::Removed => document.push_str("+++ /dev/null\n"),
-            _ => document.push_str(&format!("+++ b/{}\n", file.path)),
-        }
-        if let Some(patch) = &file.patch {
-            document.push_str(patch);
-            if !patch.ends_with('\n') {
-                document.push('\n');
-            }
-        }
-    }
-    document
+            PullRequestFileChange::Removed => "+++ /dev/null".to_string(),
+            _ => format!("+++ b/{}", file.path),
+        },
+    ]
 }
 
 /// `git diff --stat`'s job for a document git never produced. Not git's
@@ -2808,6 +2779,44 @@ fn pr_diff_stat(files: &[lazybox_gh::PullRequestDiffFile]) -> Vec<String> {
     lines
 }
 
+/// Project one of GitHub's changed files onto the viewer's shape.
+///
+/// The paths are carried across as data. An earlier cut assembled a
+/// `diff --git` document and re-parsed it to recover them, which can
+/// only lose information: git quotes a path holding a tab, the
+/// hand-written marker lines did not, and the path a review comment
+/// posts against came back truncated at the tab.
+fn pr_file_to_dto(file: lazybox_gh::PullRequestDiffFile) -> lazybox_ipc::DiffFileDto {
+    use lazybox_gh::PullRequestFileChange;
+
+    let headers = pr_diff_headers(&file);
+    let hunks = file
+        .patch
+        .as_deref()
+        .map(lazybox_git_ops::parse_diff_hunks)
+        .unwrap_or_default();
+    lazybox_ipc::DiffFileDto {
+        // An added file has no pre-image, matching what the local
+        // parser reads out of `--- /dev/null`.
+        old_path: match file.change {
+            PullRequestFileChange::Added => None,
+            _ => Some(file.previous_path.unwrap_or_else(|| file.path.clone())),
+        },
+        path: file.path,
+        headers,
+        hunks: hunks.into_iter().map(hunk_to_dto).collect(),
+    }
+}
+
+fn hunk_to_dto(hunk: lazybox_git_ops::DiffHunk) -> lazybox_ipc::DiffHunkDto {
+    lazybox_ipc::DiffHunkDto {
+        header: hunk.header,
+        old_start: hunk.old_start,
+        new_start: hunk.new_start,
+        lines: hunk.lines.into_iter().map(diff_line_to_dto).collect(),
+    }
+}
+
 fn pr_diff_to_dto(
     diff: lazybox_gh::PullRequestDiff,
     divergence: Option<lazybox_ipc::WorkspaceDiffDivergenceDto>,
@@ -2821,11 +2830,36 @@ fn pr_diff_to_dto(
         truncated: diff.truncated,
         head_sha: Some(diff.head_sha.clone()),
         divergence,
-        files: lazybox_git_ops::parse_unified_diff(&pr_diff_document(&diff.files))
-            .into_iter()
-            .map(diff_file_to_dto)
-            .collect(),
+        files: diff.files.into_iter().map(pr_file_to_dto).collect(),
     }
+}
+
+/// Project a checkout comparison onto the wire, dropping it entirely
+/// when nothing about the checkout could be read. A banner assembled
+/// from two failed probes says only that both probes failed, and a
+/// warning that fires every time is one nobody reads when it matters.
+fn divergence_to_dto(
+    divergence: lazybox_git_ops::CheckoutDivergence,
+) -> Option<lazybox_ipc::WorkspaceDiffDivergenceDto> {
+    use lazybox_git_ops::CommitComparison;
+
+    if divergence.is_unknown() {
+        return None;
+    }
+    Some(lazybox_ipc::WorkspaceDiffDivergenceDto {
+        dirty_files: divergence.dirty_files.map(|files| files as u32),
+        commits: match divergence.commits {
+            CommitComparison::Counted {
+                local_only,
+                reference_only,
+            } => lazybox_ipc::CommitComparisonDto::Counted(lazybox_ipc::CommitSpreadDto {
+                local_only,
+                pr_only: reference_only,
+            }),
+            CommitComparison::ReferenceAbsent => lazybox_ipc::CommitComparisonDto::ReferenceAbsent,
+            CommitComparison::Unknown => lazybox_ipc::CommitComparisonDto::Unknown,
+        },
+    })
 }
 
 /// The workspace's checkout — the newest session's worktree, else a
@@ -2868,17 +2902,9 @@ async fn inspect_pull_request_diff(
         .map_err(|error| error.to_string())?;
     let divergence = match workspace_checkout(&workspace) {
         Some(path) => {
-            let divergence = lazybox_git_ops::checkout_divergence(&path, &diff.head_sha).await;
-            Some(lazybox_ipc::WorkspaceDiffDivergenceDto {
-                dirty_files: divergence.dirty_files as u32,
-                commits: divergence.commits.map(|(local_only, pr_only)| {
-                    lazybox_ipc::CommitSpreadDto {
-                        local_only,
-                        pr_only,
-                    }
-                }),
-            })
+            divergence_to_dto(lazybox_git_ops::checkout_divergence(&path, &diff.head_sha).await)
         }
+        // No checkout at all — a PR row the reviewer never checked out.
         None => None,
     };
     Ok(pr_diff_to_dto(diff, divergence))
@@ -2973,7 +2999,7 @@ pub async fn handle_submit_pull_request_review(
                 // The PR's own review state just changed; pull it back
                 // rather than leaving the row stale for a poll cycle.
                 config.poll.wake(true);
-                (Some(url), None)
+                (url, None)
             }
             Err(error) => {
                 tracing::warn!("submit review {workspace_key}: {error}");
@@ -2996,7 +3022,7 @@ async fn submit_pull_request_review(
     summary: &str,
     verdict: lazybox_ipc::ReviewVerdictDto,
     comments: &[lazybox_ipc::ReviewCommentDto],
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let workspace =
         load_workspace(config, workspace_key).ok_or_else(|| "workspace not found".to_string())?;
     let pr = workspace
@@ -4256,10 +4282,10 @@ mod pr_diff_tests {
         }
     }
 
-    /// GitHub serves hunks with no `diff --git` preamble and no
-    /// `---` / `+++` markers. Without them the parser has no file
-    /// boundary to split on and no path to hang a hunk from, so every
-    /// file in a PR would collapse into one.
+    /// GitHub serves hunks with no `diff --git` preamble, so each
+    /// file's patch is parsed on its own and the paths come across as
+    /// data — which is what keeps two files from collapsing into one
+    /// and keeps a line's numbers attached to the right side.
     #[test]
     fn github_patches_become_per_file_hunks_with_line_numbers() {
         let files = vec![
@@ -4281,7 +4307,6 @@ mod pr_diff_tests {
         let dto = pr_diff_to_dto(
             PullRequestDiff {
                 head_sha: "feedface".into(),
-                base_sha: "0ff1ce".into(),
                 files,
                 truncated: false,
             },
@@ -4302,14 +4327,7 @@ mod pr_diff_tests {
             (None, Some(41)),
             "the addition keeps the new-side number a RIGHT comment anchors to",
         );
-        assert!(
-            dto.files[1]
-                .headers
-                .iter()
-                .any(|header| header == "--- /dev/null"),
-            "an added file has no pre-image: {:?}",
-            dto.files[1].headers,
-        );
+        assert_eq!(dto.files[1].path, "src/new.rs");
     }
 
     /// A pull request has no working tree, so there is no porcelain
@@ -4319,7 +4337,6 @@ mod pr_diff_tests {
         let dto = pr_diff_to_dto(
             PullRequestDiff {
                 head_sha: "feedface".into(),
-                base_sha: "0ff1ce".into(),
                 files: vec![file(
                     "src/lib.rs",
                     PullRequestFileChange::Modified,
@@ -4345,19 +4362,18 @@ mod pr_diff_tests {
     /// PR does not touch it.
     #[test]
     fn a_file_without_a_patch_still_gets_a_header() {
-        let document = pr_diff_document(&[PullRequestDiffFile {
+        let dto = pr_file_to_dto(PullRequestDiffFile {
             path: "logo.png".into(),
             previous_path: None,
             change: PullRequestFileChange::Modified,
             additions: 0,
             deletions: 0,
             patch: None,
-        }]);
+        });
 
-        assert_eq!(
-            document,
-            "diff --git a/logo.png b/logo.png\n--- a/logo.png\n+++ b/logo.png\n"
-        );
+        assert_eq!(dto.path, "logo.png");
+        assert!(dto.hunks.is_empty());
+        assert_eq!(dto.headers[0], "diff --git a/logo.png b/logo.png");
     }
 
     /// A rename's pre-image lives at the old path. Pointing both
@@ -4365,18 +4381,60 @@ mod pr_diff_tests {
     /// as though it had been edited in place.
     #[test]
     fn a_rename_keeps_its_old_path_on_the_pre_image_side() {
-        let document = pr_diff_document(&[PullRequestDiffFile {
+        let dto = pr_file_to_dto(PullRequestDiffFile {
             path: "src/new.rs".into(),
             previous_path: Some("src/old.rs".into()),
             change: PullRequestFileChange::Modified,
             additions: 0,
             deletions: 0,
             patch: None,
-        }]);
+        });
 
-        assert!(document.starts_with("diff --git a/src/old.rs b/src/new.rs\n"));
-        assert!(document.contains("--- a/src/old.rs\n"));
-        assert!(document.contains("+++ b/src/new.rs\n"));
+        assert_eq!(dto.path, "src/new.rs");
+        assert_eq!(dto.old_path.as_deref(), Some("src/old.rs"));
+        assert_eq!(dto.headers[1], "--- a/src/old.rs");
+        assert_eq!(dto.headers[2], "+++ b/src/new.rs");
+    }
+
+    /// An added file has no pre-image — the same thing the local
+    /// parser reads out of a `--- /dev/null` marker, so both sources
+    /// hand the viewer the same shape.
+    #[test]
+    fn an_added_file_has_no_pre_image() {
+        let dto = pr_file_to_dto(PullRequestDiffFile {
+            path: "src/new.rs".into(),
+            previous_path: None,
+            change: PullRequestFileChange::Added,
+            additions: 1,
+            deletions: 0,
+            patch: Some("@@ -0,0 +1 @@\n+fresh();".into()),
+        });
+
+        assert_eq!(dto.old_path, None);
+        assert_eq!(dto.headers[1], "--- /dev/null");
+    }
+
+    /// The path a review comment posts against comes from GitHub's own
+    /// field, not from re-reading a marker line this code wrote.
+    ///
+    /// Regression for the round-trip: the diff document was assembled
+    /// as text and parsed back, and `+++ b/<path>` is split on a TAB —
+    /// so a path holding one (git quotes it, hand-written markers do
+    /// not) came back truncated, and the review comment carried a
+    /// path GitHub would reject or, worse, match to another file.
+    #[test]
+    fn a_path_holding_a_tab_survives_intact() {
+        let dto = pr_file_to_dto(PullRequestDiffFile {
+            path: "src/od\td.rs".into(),
+            previous_path: None,
+            change: PullRequestFileChange::Modified,
+            additions: 1,
+            deletions: 0,
+            patch: Some("@@ -1 +1,2 @@\n keep();\n+fix();".into()),
+        });
+
+        assert_eq!(dto.path, "src/od\td.rs");
+        assert_eq!(dto.old_path.as_deref(), Some("src/od\td.rs"));
     }
 }
 

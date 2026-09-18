@@ -32578,6 +32578,99 @@ mod diff_review_source_tests {
         );
     }
 
+    /// `p` must land on the SAME checkout `g v` resolved. A workspace
+    /// can run several agents; switching to "the newest session"
+    /// silently showed a different agent's worktree while looking
+    /// exactly like the one the reviewer had been reading.
+    #[test]
+    fn switching_the_source_keeps_the_session_the_reviewer_focused() {
+        use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
+
+        let (client, mut server) = channel::pair();
+        let mut model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model init");
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let mut workspace = Workspace::empty(workspace_key.clone(), "review", Utc::now());
+        workspace.pr = Some(pr_task());
+        let older = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            "/tmp/review-older".into(),
+            Utc::now() - chrono::Duration::hours(1),
+        );
+        let older_id = older.id;
+        workspace.sessions.push(older);
+        workspace.sessions.push(WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            "/tmp/review-newer".into(),
+            Utc::now(),
+        ));
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        assert!(
+            model.sidebar.focus_session_id(older_id),
+            "focus the OLDER session — the one `default_session` would not pick"
+        );
+        while server.rx.try_recv().is_ok() {}
+
+        model.update(Msg::DiffReviewSourceSwitched {
+            workspace_key: workspace_key.clone(),
+            showing: WorkspaceDiffTarget::PullRequest,
+        });
+
+        assert_eq!(
+            model.pending_diff_session.as_ref(),
+            Some(&(workspace_key, WorkspaceDiffTarget::Session(older_id))),
+            "the switch must read the focused session's worktree, not the newest"
+        );
+    }
+
+    /// Closing the viewer abandons the read still in flight. The source
+    /// switch waits on a GitHub round-trip, so a late reply would
+    /// otherwise re-mount a viewer the reviewer had deliberately shut.
+    #[test]
+    fn closing_the_viewer_abandons_an_in_flight_read() {
+        let (mut model, mut server, workspace_key, session_id) = build(true);
+        model.dispatch_action(&Action::ViewDiff);
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key: workspace_key.clone(),
+            target: WorkspaceDiffTarget::PullRequest,
+            agent_terminal_ids: vec![],
+            diff: Some(empty_diff(Some("f00d"))),
+            error: None,
+        });
+        model.update(Msg::DiffReviewSourceSwitched {
+            workspace_key: workspace_key.clone(),
+            showing: WorkspaceDiffTarget::PullRequest,
+        });
+        while server.rx.try_recv().is_ok() {}
+
+        model.update(Msg::ModalDismissed);
+        assert!(model.modal_stack.is_empty());
+        assert!(
+            model.pending_diff_session.is_none(),
+            "the abandoned read must stop correlating"
+        );
+
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key,
+            target: WorkspaceDiffTarget::Session(session_id),
+            agent_terminal_ids: vec![],
+            diff: Some(empty_diff(None)),
+            error: None,
+        });
+        assert!(
+            model.modal_stack.is_empty(),
+            "a late reply must not reopen a viewer the reviewer closed"
+        );
+    }
+
     /// A PR diff that will not load (offline, no credential, a repo the
     /// token cannot see) must not leave the reviewer with nothing.
     #[test]
@@ -32646,6 +32739,45 @@ mod diff_review_source_tests {
             }
             other => panic!("expected exactly one review command, got {other:?}"),
         }
-        assert!(model.modal_stack.is_empty(), "submitting closes the viewer");
+        assert_eq!(
+            model.modal_stack,
+            vec![Id::DiffReview],
+            "the viewer holds the comments until GitHub answers"
+        );
+    }
+
+    /// The reply decides the viewer's fate: success closes it, a
+    /// refusal leaves it open with the drafted comments intact.
+    ///
+    /// Closing on submit destroyed them — a stale `commit_id` after
+    /// someone pushed to the PR is enough to trigger it, and the
+    /// comments exist nowhere else.
+    #[test]
+    fn a_refused_review_leaves_the_viewer_open_and_a_posted_one_closes_it() {
+        let (mut model, _server, workspace_key, _) = build(true);
+        model.modal_stack.push(Id::DiffReview);
+
+        model.handle_daemon_event(lazybox_ipc::Event::PullRequestReviewSubmitted {
+            workspace_key: workspace_key.clone(),
+            comments: 2,
+            url: None,
+            error: Some("422 commit_id is not part of the pull request".into()),
+        });
+        assert_eq!(
+            model.modal_stack,
+            vec![Id::DiffReview],
+            "a refusal must not take the viewer — and the comments — with it"
+        );
+
+        model.handle_daemon_event(lazybox_ipc::Event::PullRequestReviewSubmitted {
+            workspace_key,
+            comments: 2,
+            url: None,
+            error: None,
+        });
+        assert!(
+            model.modal_stack.is_empty(),
+            "a post that succeeded without a parseable URL is still a post"
+        );
     }
 }

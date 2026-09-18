@@ -1044,12 +1044,26 @@ pub struct WorkspaceDiffDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct WorkspaceDiffDivergenceDto {
-    /// Files with uncommitted changes in the checkout.
-    pub dirty_files: u32,
-    /// Commit counts either side of the checkout's `HEAD` and the PR's
-    /// head commit. `None` when that commit is not present locally —
-    /// itself divergence, which no count can express.
-    pub commits: Option<CommitSpreadDto>,
+    /// Files with uncommitted changes in the checkout, or `None` when
+    /// git could not say. Never `Some(0)` for a checkout that was not
+    /// read: a warning that reports an unreadable worktree as clean is
+    /// worse than no warning.
+    pub dirty_files: Option<u32>,
+    pub commits: CommitComparisonDto,
+}
+
+/// Where the checkout's `HEAD` stands relative to the pull request's
+/// head commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum CommitComparisonDto {
+    Counted(CommitSpreadDto),
+    /// The PR's head commit is not in the checkout — usually because it
+    /// was never fetched, which is the ordinary case when reviewing
+    /// someone else's branch. Not a count, and not "in sync".
+    ReferenceAbsent,
+    /// The comparison could not be made.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -4338,17 +4338,25 @@ impl Sidebar {
             return;
         }
         let workspaces = &self.workspaces;
+        // A key inside its post-removal grace window is absent from the
+        // map because this client is holding it out, not because the
+        // daemon says it is gone — and the removal may still roll back.
+        // Treating that absence as stale would unstar it (and persist
+        // that) behind the user's back, which is exactly what
+        // `forget_focused_workspace` refuses to do off the optimistic
+        // half. The authoritative `WorkspaceRemoved` forgets the star.
+        let held = &self.recently_removed;
+        let live = |k: &SessionKey| workspaces.contains_key(k) || held.contains_key(k);
         let stale: Vec<SessionKey> = self
             .focused_workspaces
             .iter()
-            .filter(|k| !workspaces.contains_key(*k))
+            .filter(|k| !live(k))
             .cloned()
             .collect();
         if stale.is_empty() {
             return;
         }
-        self.focused_workspaces
-            .retain(|k| workspaces.contains_key(k));
+        self.focused_workspaces.retain(live);
         for key in stale {
             Self::persist_focus_edit(lazybox_config::UiListOp::Remove(key.as_str().to_string()));
         }

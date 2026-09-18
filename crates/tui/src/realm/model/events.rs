@@ -2254,8 +2254,10 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::WorkspaceUpserted(ws) = &event {
             // The daemon's fresh copy is authoritative — reconcile any
             // optimistic chip edit (reviewers/assignees/labels) on this
-            // workspace (#476).
-            self.reconcile_optimistic(ws.key.as_str());
+            // workspace (#476). Edits only: a pending removal's echo is
+            // `WorkspaceRemoved`, and dropping its stash here would strand
+            // a refused delete with nothing to roll back (#1788).
+            self.reconcile_optimistic_edit(ws.key.as_str());
             // An open issue browser (#1436) holds a mount-time snapshot;
             // rebuild it from the now-updated workspace so a label change
             // (this client's edit reconciled, or a background poll) is

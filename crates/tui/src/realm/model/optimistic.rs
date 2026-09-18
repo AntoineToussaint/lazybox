@@ -121,6 +121,19 @@ impl<T: TerminalAdapter> Model<T> {
         self.pending_mutations.retain(|m| m.key != key);
     }
 
+    /// Reconcile only the optimistic *edits* for `key`.
+    ///
+    /// `WorkspaceUpserted` is the success echo for a chip edit, never for
+    /// a removal — a removal's echo is `WorkspaceRemoved`. A poll reply
+    /// still in flight when the user archived the row would otherwise
+    /// discard the removal's rollback stash, so a delete the daemon then
+    /// refuses (the worktree safety gate preserving uncommitted work)
+    /// would have nothing left to restore and would pass silently.
+    pub(super) fn reconcile_optimistic_edit(&mut self, key: &str) {
+        self.pending_mutations
+            .retain(|m| m.key != key || m.source == "store");
+    }
+
     /// Roll back the oldest optimistic chip edit for `source` when its
     /// round-trip was rejected (`ProviderError` with that source).
     /// Returns true when one was reverted so the caller can flash.

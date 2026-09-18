@@ -28994,6 +28994,52 @@ mod optimistic_mutation_tests {
         );
     }
 
+    /// #1788 follow-on: the guard that keeps an in-flight upsert from
+    /// resurrecting an archived row must not also disarm the rollback.
+    /// `WorkspaceUpserted` is the echo for a chip edit, not for a
+    /// removal — if it reconciled the removal's stash, a delete the
+    /// daemon then REFUSES (worktree safety gate: uncommitted local
+    /// work) would have nothing to restore, and the refusal carries no
+    /// user-visible notice of its own, so the row would simply vanish
+    /// until the next poll.
+    #[test]
+    fn a_refused_delete_still_rolls_back_after_a_suppressed_upsert() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#77");
+        let sk: SessionKey = (&ws_key).into();
+        let stale = Workspace::from_task(pr_task("github:owner/repo#77"), Utc::now());
+        assert_eq!(stale.key, ws_key);
+
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert_eq!(m.pending_mutations.len(), 1, "stash armed");
+
+        // The in-flight poll reply the sidebar guard suppresses.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(stale)));
+        assert!(m.sidebar.workspace_by_key(&sk).is_none(), "still archived");
+        assert_eq!(
+            m.pending_mutations.len(),
+            1,
+            "an upsert is not a removal's echo — the stash must survive it"
+        );
+
+        m.handle_daemon_event(provider_error(
+            "store",
+            &format!(
+                "workspace {ws_key} was not deleted because local work must be \
+                 preserved: uncommitted changes"
+            ),
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_some(),
+            "a refused delete must restore the row"
+        );
+        let n = m.status.notice.as_ref().expect("rollback flashes an error");
+        assert!(n.message.contains("delete failed"), "got {:?}", n.message);
+    }
+
     #[test]
     fn archive_rolls_back_on_store_failure() {
         let mut m = build_model();

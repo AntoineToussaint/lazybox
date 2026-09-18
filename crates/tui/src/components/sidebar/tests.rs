@@ -4260,6 +4260,22 @@ mod archived_row_stays_gone_tests {
         }
     }
 
+    /// The `Snapshot` half of the same race, during the OPTIMISTIC
+    /// window — before the daemon has echoed anything.
+    #[test]
+    fn snapshot_during_the_optimistic_window_does_not_reintroduce_the_key() {
+        let workspace = issue_ws("1");
+        let (mut sidebar, key) = sidebar_with(&workspace);
+        sidebar.take_workspace(&key).expect("row present");
+
+        sidebar.on_event(&snapshot_of(vec![workspace.clone()]));
+
+        assert!(
+            sidebar.workspace_by_key(&key).is_none(),
+            "a snapshot mid-archive must not undo the optimistic removal"
+        );
+    }
+
     /// The optimistic half of the archive has run but the daemon's echo
     /// has not arrived yet. A poll reply that was already in flight must
     /// not put the row back.

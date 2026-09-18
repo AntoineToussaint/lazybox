@@ -3286,3 +3286,44 @@ fn lens_round_trips_through_restart() {
         "an unknown sort token leaves the default"
     );
 }
+
+/// #1788 follow-on: the archive guard holds a removed key out of the
+/// workspace map, but `prune_focused_workspaces` reads "absent from the
+/// map" as "genuinely gone" and PERSISTS the unstar. During the
+/// optimistic window the removal is unconfirmed and may still roll back,
+/// so a snapshot landing in it must not erase the user's star — the
+/// authoritative `WorkspaceRemoved` is what forgets it.
+#[test]
+fn a_snapshot_mid_archive_keeps_the_star_a_rollback_will_need() {
+    let home = ConfigHome::sandbox();
+    let now = Utc::now();
+    let w = make_workspace("owner/probe", "probe#1", now);
+    let key = ws_key(&w);
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut s, Vec::new(), Vec::new());
+    s.on_event(&snapshot_of(vec![w.clone()]));
+    assert!(s.focus_workspace_key(&key));
+    s.toggle_focus_at_cursor();
+    assert!(s.is_focused(&key), "starred");
+
+    // Optimistic archive only — the daemon has confirmed nothing.
+    let stashed = s.take_workspace(&key).expect("row present");
+
+    // A subscription-refresh / lag-recovery snapshot arrives while the
+    // delete is still in flight, so it still lists the row.
+    s.on_event(&snapshot_of(vec![w.clone()]));
+    assert_eq!(s.workspace_count(), 0, "the row stays archived on screen");
+    assert_eq!(
+        home.reload().ui.focused_workspaces,
+        vec![key.as_str().to_string()],
+        "an unconfirmed removal must not persist an unstar",
+    );
+
+    // The daemon then REFUSES the delete and the row rolls back.
+    s.restore_workspace(stashed);
+    assert!(
+        s.is_focused(&key),
+        "a rolled-back archive must keep the star"
+    );
+}

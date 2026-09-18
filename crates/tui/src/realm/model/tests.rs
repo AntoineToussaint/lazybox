@@ -925,7 +925,7 @@ mod effects_tests {
             .expect("standing indicator asserted");
         assert_eq!(
             behind.label(),
-            "discovery behind 7m · needs 900 pts, have 120 · Shift-R",
+            "discovery behind · Shift-R · 7m, needs 900 pts vs 120",
             "the advisory prints the governor's own refusal, not a count that can read 0 (#1806)"
         );
         assert!(

@@ -415,9 +415,21 @@ impl BackgroundSweepForecast {
     }
 
     /// How many roster members `allowance` admits this tick, capped at
-    /// `limit`.
+    /// `limit`. Windowed pricing — the rotation's per-member cost.
     pub fn repo_sweep_capacity(self, allowance: u32, limit: usize) -> usize {
-        let per_member = self.repo_sweep_member_points();
+        self.capacity_at(self.repo_sweep_member_points(), allowance, limit)
+    }
+
+    /// [`repo_sweep_capacity`](Self::repo_sweep_capacity) for an
+    /// UNWINDOWED batch, whose members each pay the extra open-set PR
+    /// query. Sizing a reconcile batch with the windowed price
+    /// over-selects by up to 2×, so the batch spends more than the tick
+    /// allowance it was selected against.
+    pub fn repo_sweep_reconcile_capacity(self, allowance: u32, limit: usize) -> usize {
+        self.capacity_at(self.repo_sweep_reconcile_points(1), allowance, limit)
+    }
+
+    fn capacity_at(self, per_member: u32, allowance: u32, limit: usize) -> usize {
         if per_member == 0 {
             return limit;
         }

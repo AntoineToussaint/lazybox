@@ -291,6 +291,42 @@ mod full_sweep_commit_tests {
         assert!(full_sweep_admitted(true, &plan, 40));
     }
 
+    /// Regression (#1806): a reconcile batch must be SIZED at the price it
+    /// will pay. Its members are fetched unwindowed — an open-set PR query
+    /// on top of the rotation's windowed pair — so sizing the batch with
+    /// the windowed per-member price over-selects and the tick spends more
+    /// than the allowance it was selected against. Pricing admission at
+    /// one member is what exposed this: before, seeding required the whole
+    /// roster to fit, which left the batch capped by the fan-out and never
+    /// by the allowance, so the mis-pricing could not bite.
+    #[test]
+    fn a_reconcile_batch_is_sized_at_the_unwindowed_price_it_pays() {
+        let forecast = lazybox_gh::BackgroundSweepForecast {
+            global_points: 8,
+            repo_base_points: 3,
+            per_repo_points: 4,
+            per_repo_issue_points: 2,
+        };
+        // 30 points on the tick; a reconcile member costs 2×4 + 2 = 10.
+        let allowance = 30;
+        assert_eq!(
+            forecast.repo_sweep_reconcile_capacity(allowance, 6),
+            3,
+            "three members is what 30 points actually buys"
+        );
+        assert_eq!(
+            forecast.repo_sweep_capacity(allowance, 6),
+            5,
+            "the windowed price would have selected five — a 50-point batch"
+        );
+        assert!(
+            forecast
+                .repo_sweep_reconcile_points(forecast.repo_sweep_reconcile_capacity(allowance, 6))
+                <= allowance,
+            "a batch never costs more than the allowance it was selected against"
+        );
+    }
+
     /// Regression (#1806): a repo-first reconcile's admission price must
     /// not scale with the roster. It drains one governor-sized batch per
     /// tick, so pricing the gate at the whole roster refused — forever,
@@ -1044,16 +1080,21 @@ impl GhSource {
             "notification heartbeat / hot targets".to_string()
         } else if !self.full_sweep_admitted {
             // A sweep is DUE but the budget can't cover it. Name the
-            // numbers and the lever: with many `watch:` repos the
-            // required points can exceed the allowance on EVERY tick,
-            // and reconcile then never runs — the "sync silently
-            // stopped" failure (#scale). Shift-R still forces it.
+            // numbers and the lever; reconcile then never runs — the
+            // "sync silently stopped" failure (#scale). Shift-R still
+            // forces it.
+            //
+            // No watched-repo count here: this branch is only reachable
+            // with `repo_sweep` unset, i.e. an EMPTY roster, i.e. no
+            // scopes and no `watch:` filters — so the count is
+            // structurally always zero and printing it told the user
+            // that nothing was over budget while saying discovery had
+            // stopped (#1806).
             format!(
-                "full sweep DEFERRED — needs {} pts, allowance {} ({} watched repos); \
-                 fewer `watch:` filters or a higher background_budget_share would unblock it",
+                "full sweep DEFERRED — needs {} pts, allowance {}; \
+                 a higher background_budget_share would unblock it",
                 self.required_sweep_points(),
                 self.governor_plan.graphql_points,
-                self.watch_repos.len(),
             )
         } else if self.scheduling.run_global {
             "global reconcile".to_string()
@@ -5437,7 +5478,13 @@ async fn push_github_source(
                 roster.len(),
                 rotation_target_ticks(repo_refresh_interval, poll_interval),
             ),
-            |limit| forecast.repo_sweep_capacity(governor_plan.graphql_points, limit),
+            |limit, reconcile| {
+                if reconcile {
+                    forecast.repo_sweep_reconcile_capacity(governor_plan.graphql_points, limit)
+                } else {
+                    forecast.repo_sweep_capacity(governor_plan.graphql_points, limit)
+                }
+            },
             now,
         );
         tracing::info!(
@@ -5603,7 +5650,7 @@ mod repo_first_tests {
             false,
             true,
             2,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(plan.reconcile && !plan.reconcile_final);
@@ -5630,7 +5677,7 @@ mod repo_first_tests {
             false,
             true,
             2,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(plan.reconcile && plan.reconcile_final);
@@ -5665,7 +5712,8 @@ mod repo_first_tests {
             true,
             true,
             3,
-            |limit| {
+            |limit, reconcile| {
+                assert!(reconcile, "a reconcile batch is priced unwindowed");
                 assert_eq!(limit, 6);
                 5
             },
@@ -5692,7 +5740,7 @@ mod repo_first_tests {
             false,
             true,
             3,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(plan.reconcile && plan.reconcile_final);
@@ -5716,7 +5764,7 @@ mod repo_first_tests {
             false,
             false,
             3,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(!plan.reconcile);
@@ -5745,7 +5793,8 @@ mod repo_first_tests {
             false,
             true,
             2,
-            |limit| {
+            |limit, reconcile| {
+                assert!(!reconcile, "a rotation slice is priced windowed");
                 assert_eq!(limit, 2 + 1 + 1);
                 2
             },
@@ -5779,7 +5828,7 @@ mod repo_first_tests {
                 false,
                 true,
                 rotation_fanout(members.len(), 3),
-                |limit| limit,
+                |limit, _| limit,
                 Instant::now(),
             );
             seen.extend(plan.members);
@@ -5811,7 +5860,10 @@ pub(super) fn rotation_target_ticks(
 ///   then repos with a LIVE agent (forced every tick), then the `fanout`
 ///   stalest members (idle session-bearing repos rotate here like any
 ///   other, so 20 open worktrees don't cost 20 query pairs a minute) —
-///   capped by what the governor allowance admits (`capacity_for(limit)`).
+///   capped by what the governor allowance admits
+///   (`capacity_for(limit, reconcile)` — the flag picks the windowed or
+///   the unwindowed per-member price, which differ by the reconcile's
+///   extra open-set PR query).
 ///   Members that don't fit keep their cursor age and lead the next tick.
 /// - Hot-only tick: nothing (hot targets are fetched by the caller).
 #[allow(clippy::too_many_arguments)]
@@ -5825,7 +5877,7 @@ pub(super) fn plan_repo_first_tick(
     manual_refresh: bool,
     poll_notifications: bool,
     fanout: usize,
-    capacity_for: impl Fn(usize) -> usize,
+    capacity_for: impl Fn(usize, bool) -> usize,
     now: std::time::Instant,
 ) -> RepoSweepPlan {
     let roster_len = roster.len();
@@ -5866,6 +5918,7 @@ pub(super) fn plan_repo_first_tick(
             fanout
                 .max(1)
                 .saturating_mul(if manual_refresh { 2 } else { 1 }),
+            true,
         )
         .max(1)
         .min(reconcile_pending.len());
@@ -5915,7 +5968,7 @@ pub(super) fn plan_repo_first_tick(
         &eligible,
         live_agent_repos,
         fanout,
-        capacity_for(limit),
+        capacity_for(limit, false),
         now,
     );
     RepoSweepPlan {

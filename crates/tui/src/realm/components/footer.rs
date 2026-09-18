@@ -743,6 +743,34 @@ mod tests {
         assert!(row.find("work on this") < row.find("quit"));
     }
 
+    /// Regression (#1806): the discovery-behind advisory names `Shift-R`
+    /// as the remedy, so the remedy must reach the row — at every width,
+    /// not just a wide one. The slot is ~40% of the row and tail-
+    /// truncated, so the fix is ordering, not brevity: the lever sits
+    /// ahead of the figures. The pre-fix label put it last and lost it to
+    /// the ellipsis even at 120 columns.
+    #[test]
+    fn discovery_behind_advisory_keeps_its_remedy_at_every_width() {
+        let label = crate::realm::status_ctx::DiscoveryBehind {
+            deferred_secs: 420,
+            required_points: 900,
+            allowance: 120,
+        }
+        .label();
+        let globals = [binding("q q", "quit")];
+        for width in [200, 120, 100, 80] {
+            let row = render_row_at(width, &[], &globals, Some(("⚠", &label)), None);
+            assert!(
+                row.contains("Shift-R"),
+                "the remedy was truncated away at {width} cols: {row}"
+            );
+        }
+        // At a wide terminal the governor's own figures land too.
+        let row = render_row_at(200, &[], &globals, Some(("⚠", &label)), None);
+        assert!(row.contains("900"), "required points missing: {row}");
+        assert!(row.contains("120"), "allowance missing: {row}");
+    }
+
     #[test]
     fn globals_render_with_no_contextual_hints() {
         // Empty-inbox / first-run case: no workspace selected means a

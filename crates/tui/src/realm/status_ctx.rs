@@ -325,12 +325,16 @@ pub(crate) struct DiscoveryBehind {
 }
 
 impl DiscoveryBehind {
-    /// Compact footer-slot label — short enough that the remedy survives
-    /// the slot's truncation (#1806), and every figure it prints is a
-    /// number the stall is actually made of.
+    /// Compact footer-slot label, ordered by what the user loses first.
+    /// The slot is ~40% of the row and tail-truncated, so anything past
+    /// the cap is gone: the lever sits ahead of the figures rather than
+    /// after them (#1806 — the old label spent its width on a repo count
+    /// and lost `Shift-R` to the ellipsis at every terminal size). What
+    /// survives, narrowest first: the fault, the remedy, how long, then
+    /// the governor's numbers.
     pub fn label(&self) -> String {
         format!(
-            "discovery behind {} · needs {} pts, have {} · Shift-R",
+            "discovery behind · Shift-R · {}, needs {} pts vs {}",
             self.stalled_for(),
             self.required_points,
             self.allowance

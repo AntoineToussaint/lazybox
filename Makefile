@@ -46,7 +46,7 @@ LOCAL_ZIG_DIR := vendor/zig/$(ZIG_SLUG)
 ZIG_DIR := $(if $(wildcard $(LOCAL_ZIG_DIR)/zig),$(LOCAL_ZIG_DIR),$(CACHE_ZIG_DIR))
 PINNED_PATH := $(abspath $(ZIG_DIR)):$(PATH)
 
-.PHONY: all setup build release run run-perf run-fresh run-test run-connect dev dev-fresh desktop desktop-deps desktop-preview desktop-build desktop-test desktop-contract web-control-contract contracts rebase-main test lint clean distclean install install-hooks help
+.PHONY: all setup build release release-gates cut-release run run-perf run-fresh run-test run-connect dev dev-fresh desktop desktop-deps desktop-preview desktop-build desktop-test desktop-contract web-control-contract contracts rebase-main test lint clean distclean install install-hooks help
 
 # Side-by-side dev profile root. Picked up by `lazybox_core::paths`
 # everywhere — independent state.db, worktrees, daemon socket, tmux
@@ -71,6 +71,23 @@ build: ## Build lazybox (debug). Uses pinned zig.
 
 release: ## Build lazybox optimized, strictly offline (run `make setup` once first).
 	@PATH="$(PINNED_PATH)" LAZYBOX_GHOSTTY_CACHE="$(GHOSTTY_CACHE)" LAZYBOX_OFFLINE=1 CARGO_NET_OFFLINE=true cargo build --offline --locked -p lazybox-tui-boot --release
+
+release-gates: ## Run every automatable source/web gate required before a release.
+	@$(MAKE) fmt-check
+	@$(MAKE) pre-commit
+	@PATH="$(PINNED_PATH)" cargo nextest run --workspace --profile ci
+	@PATH="$(PINNED_PATH)" cargo deny check advisories bans licenses sources
+	@PATH="$(PINNED_PATH)" cargo check --manifest-path $(DESKTOP_MANIFEST) --all-targets --locked
+	@npm --prefix web ci
+	@npm --prefix web run check
+	@npm --prefix web run build
+	@npm --prefix web run lighthouse
+
+cut-release: ## Validate a release; publish with PUBLISH=1 MANUAL_CHECKS_CONFIRMED=1.
+	@test -n "$(VERSION)" || { echo "Error: VERSION=x.y.z is required"; exit 1; }
+	@./scripts/cut-release.sh "$(VERSION)" \
+		$(if $(filter 1,$(PUBLISH)),--publish,) \
+		$(if $(filter 1,$(MANUAL_CHECKS_CONFIRMED)),--manual-checks-confirmed,)
 
 # `make run` accepts args via ARGS=... (`make run ARGS="--fresh"`).
 # Convenience targets below shorten the common cases.

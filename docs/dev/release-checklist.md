@@ -1,6 +1,18 @@
 # Release-candidate checklist
 
 Run this checklist from the exact commit that will receive the release tag.
+The operator entry point is:
+
+```bash
+make cut-release VERSION=0.1.15
+# Only after completing the real-provider and dogfood checks below:
+make cut-release VERSION=0.1.15 PUBLISH=1 MANUAL_CHECKS_CONFIRMED=1
+```
+
+The first form runs every automatable gate without publishing. The second
+repeats those gates, requires the explicit manual-check attestation, creates an
+annotated tag at the current `origin/main` tip, pushes only that tag, waits for
+the tag-triggered workflows, and verifies that the GitHub Release exists.
 
 ## Automated gates
 

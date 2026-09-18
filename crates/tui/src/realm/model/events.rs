@@ -1072,6 +1072,28 @@ impl<T: TerminalAdapter> Model<T> {
             );
             self.redraw = true;
         }
+        // Spooled agent artifacts (#1822): the daemon owns the spool and
+        // pushes the set here (seeded on connect, refreshed whenever a file
+        // appears or goes). The model keeps the documents for the `a A`
+        // reader; the sidebar keeps the count for the row's `▤N` badge.
+        if let IpcEvent::WorkspaceArtifacts {
+            workspace_key,
+            artifacts,
+            hidden,
+        } = &event
+        {
+            self.sidebar.set_artifact_count(
+                lazybox_core::SessionKey::from(workspace_key.as_str()),
+                artifacts.len(),
+            );
+            if artifacts.is_empty() {
+                self.artifacts.remove(workspace_key);
+            } else {
+                self.artifacts
+                    .insert(workspace_key.clone(), (artifacts.clone(), *hidden));
+            }
+            self.redraw = true;
+        }
         if let IpcEvent::EpicGone { key } = &event {
             self.epic_snapshots.remove(key);
             self.sidebar.forget_epic(key);
@@ -1393,6 +1415,9 @@ impl<T: TerminalAdapter> Model<T> {
                 // consumed earlier in this function.
                 | IpcEvent::AgentRequestReplied { .. }
                 | IpcEvent::AgentRequestsOpen { .. }
+                // Spooled artifacts (#1822) are read off the worktree, not a
+                // provider poll, and are consumed earlier in this function.
+                | IpcEvent::WorkspaceArtifacts { .. }
                 // `task_status` (#1785) is request/response: the daemon answers
                 // on the asking connection, so this never reaches a TUI client.
                 // The arm exists because `Event` is one shared exhaustive enum.
@@ -2566,6 +2591,9 @@ impl<T: TerminalAdapter> Model<T> {
             // the coordination bus, not a provider poll.
             | IpcEvent::AgentRequestReplied { .. }
             | IpcEvent::AgentRequestsOpen { .. }
+            // Spooled artifacts (#1822) are read off the worktree, not a
+            // provider poll, and are consumed earlier in this function.
+            | IpcEvent::WorkspaceArtifacts { .. }
             // `task_status` (#1785) is request/response: the daemon answers
             // on the asking connection, so this never reaches a TUI client.
             // The arm exists because `Event` is one shared exhaustive enum.
@@ -2945,6 +2973,9 @@ impl<T: TerminalAdapter> Model<T> {
                 // poll-indicator / mutation-failure semantics either.
                 | IpcEvent::AgentRequestReplied { .. }
                 | IpcEvent::AgentRequestsOpen { .. }
+                // Spooled artifacts (#1822) are read off the worktree, not a
+                // provider poll, and are consumed earlier in this function.
+                | IpcEvent::WorkspaceArtifacts { .. }
                 // `task_status` (#1785) is request/response: the daemon answers
                 // on the asking connection, so this never reaches a TUI client.
                 // The arm exists because `Event` is one shared exhaustive enum.

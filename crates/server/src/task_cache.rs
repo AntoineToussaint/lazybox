@@ -20,12 +20,15 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use lazybox_core::{
-    Activity, RECORD_CONTENT_WARNING, TASK_FILE_RELATIVE_PATH, Task, TaskRecord,
-    WORKSPACE_RECORD_FILE_SCHEMA, Workspace, WorkspaceKey, WorkspaceRecordFile,
+    ARTIFACT_SPOOL_RELATIVE_PATH, Activity, RECORD_CONTENT_WARNING, TASK_FILE_RELATIVE_PATH, Task,
+    TaskRecord, WORKSPACE_RECORD_FILE_SCHEMA, Workspace, WorkspaceKey, WorkspaceRecordFile,
 };
 use lazybox_store::StoreError;
 
 use crate::ServerConfig;
+
+/// Per-call half of [`write_atomically`]'s temp-file name — see its docs.
+static TMP_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// When each workspace's tasks last came off a provider, as
 /// [`crate::registries::PollState`] recorded it. A workspace absent from the
@@ -265,8 +268,14 @@ fn git_common_dir(worktree: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Hide the record file from git by naming that one path in the checkout's
-/// `info/exclude`, idempotently.
+/// Hide lazybox's own two paths inside `<worktree>/.lazybox/` from git by
+/// naming them in the checkout's `info/exclude`, idempotently: the record
+/// file [`TASK_FILE_RELATIVE_PATH`] and the artifact spool
+/// [`ARTIFACT_SPOOL_RELATIVE_PATH`] (#1822).
+///
+/// Both land in one pass because the spool is written by the *agent*, at a
+/// time the daemon does not choose — so its exclusion has to be in place
+/// before the session starts, not added the first time an artifact appears.
 ///
 /// Deliberately NOT a `.gitignore` in `.lazybox/`. That directory belongs to
 /// the repository, not to lazybox — `<repo>/.lazybox/snippets.yaml` is a
@@ -282,16 +291,23 @@ fn git_common_dir(worktree: &Path) -> Option<PathBuf> {
 /// `info/exclude` is the mechanism git provides for exactly this — local,
 /// never committed — and naming the single path leaves the rest of
 /// `.lazybox/` addable.
-fn exclude_record_file(worktree: &Path) -> std::io::Result<()> {
+pub(crate) fn exclude_lazybox_paths(worktree: &Path) -> std::io::Result<()> {
     let Some(common) = git_common_dir(worktree) else {
         // Not a git checkout (a scratch directory, a vanished worktree).
         // Nothing to exclude from, and nothing to fail about.
         return Ok(());
     };
-    let pattern = format!("/{TASK_FILE_RELATIVE_PATH}");
+    let patterns = [
+        format!("/{TASK_FILE_RELATIVE_PATH}"),
+        format!("/{ARTIFACT_SPOOL_RELATIVE_PATH}/"),
+    ];
     let exclude = common.join("info").join("exclude");
     let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if existing.lines().any(|line| line.trim() == pattern) {
+    let missing: Vec<&String> = patterns
+        .iter()
+        .filter(|pattern| !existing.lines().any(|line| line.trim() == pattern.as_str()))
+        .collect();
+    if missing.is_empty() {
         return Ok(());
     }
     std::fs::create_dir_all(exclude.parent().expect("info/exclude has a parent"))?;
@@ -299,8 +315,10 @@ fn exclude_record_file(worktree: &Path) -> std::io::Result<()> {
     if !body.is_empty() && !body.ends_with('\n') {
         body.push('\n');
     }
-    body.push_str(&pattern);
-    body.push('\n');
+    for pattern in missing {
+        body.push_str(pattern);
+        body.push('\n');
+    }
     write_atomically(&exclude, body.as_bytes())
 }
 
@@ -313,13 +331,22 @@ fn exclude_record_file(worktree: &Path) -> std::io::Result<()> {
 /// record while a second spawn rewrites it — and truncated JSON parses as
 /// nothing rather than as an obvious error. Mirrors the tmp+rename the
 /// config writer already uses (`lazybox_config`).
+///
+/// The temp name carries a per-process, per-call nonce because one of the
+/// targets is **not** per-worktree: every worktree of a repo shares one
+/// `info/exclude`, so a fixed `.exclude.tmp` beside it is a shared name two
+/// concurrent spawns both write and both rename. The second rename then
+/// fails `ENOENT` (the first already moved the file) and the spawn logs a
+/// write failure for a file it wrote correctly.
 fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let tmp = dir.join(format!(
-        ".{}.tmp",
+        ".{}.{}.{}.tmp",
         path.file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "lazybox".into())
+            .unwrap_or_else(|| "lazybox".into()),
+        std::process::id(),
+        TMP_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     std::fs::write(&tmp, bytes)?;
     match std::fs::rename(&tmp, path) {
@@ -344,7 +371,7 @@ pub(crate) fn write_record_file(
         .parent()
         .expect("TASK_FILE_RELATIVE_PATH always has a parent directory");
     std::fs::create_dir_all(dir)?;
-    exclude_record_file(worktree)?;
+    exclude_lazybox_paths(worktree)?;
     let json = serde_json::to_string_pretty(file)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     write_atomically(&path, json.as_bytes())
@@ -798,6 +825,69 @@ mod tests {
             1,
             "re-spawning must not append the pattern again: {body}"
         );
+    }
+
+    #[test]
+    fn the_artifact_spool_is_excluded_alongside_the_record() {
+        // #1822: the spool is written by the *agent*, whenever it likes, so
+        // its exclusion has to be in place before the session starts. Every
+        // artifact would otherwise dirty the worktree and trip the
+        // dirty-worktree delete refusal.
+        let dir = git_checkout();
+        let ws = issue_workspace("a", "acme/widget#7");
+        write_record_file(dir.path(), &record_file_for(&ws, None, &[])).expect("write");
+
+        std::fs::create_dir_all(dir.path().join(ARTIFACT_SPOOL_RELATIVE_PATH)).expect("mkdir");
+        std::fs::write(
+            dir.path()
+                .join(ARTIFACT_SPOOL_RELATIVE_PATH)
+                .join("plan.md"),
+            "# Plan\n",
+        )
+        .expect("spool a file");
+
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+        let out = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            !out.contains(".lazybox"),
+            "neither the record nor the spool may dirty the worktree: {out}"
+        );
+    }
+
+    #[test]
+    fn a_second_worktree_of_the_same_repo_can_exclude_concurrently() {
+        // Every worktree of a repo shares ONE `info/exclude` in the git
+        // common dir, so two spawns racing there both read-modify-write the
+        // same file. With a fixed temp name beside it the second rename hit
+        // `ENOENT` — the first had already moved the file — and the spawn
+        // logged a write failure for a file it had written correctly.
+        let dir = git_checkout();
+        let worktree = dir.path().to_path_buf();
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let worktree = worktree.clone();
+                std::thread::spawn(move || exclude_lazybox_paths(&worktree))
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread").expect("exclude succeeds");
+        }
+
+        let body = std::fs::read_to_string(dir.path().join(".git/info/exclude")).expect("read");
+        for pattern in [
+            format!("/{TASK_FILE_RELATIVE_PATH}"),
+            format!("/{ARTIFACT_SPOOL_RELATIVE_PATH}/"),
+        ] {
+            assert_eq!(
+                body.lines().filter(|l| l.trim() == pattern).count(),
+                1,
+                "`{pattern}` must appear exactly once: {body}"
+            );
+        }
     }
 
     #[test]

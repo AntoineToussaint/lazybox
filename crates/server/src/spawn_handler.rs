@@ -2389,6 +2389,13 @@ async fn handle_spawn_inner(
         )
         .await;
     }
+    // #1822: watch this worktree's `.lazybox/artifacts/` spool, and exclude
+    // it from git while we are here. Every session kind, not agents only —
+    // an agent started by hand inside a shell session writes to the same
+    // spool, and an unexcluded spool dirties the worktree.
+    config
+        .artifacts
+        .watch(&WorkspaceKey::new(session_key.as_str()), &agent_worktree);
     // #1420: provision the cross-agent coordination MCP for a supporting
     // agent spawn (Claude). Mints + registers a per-session token and writes
     // the agent's `--mcp-config` file; `None` for shells, unsupported agents,

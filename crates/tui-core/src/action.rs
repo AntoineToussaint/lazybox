@@ -257,6 +257,9 @@ pub enum Action {
     /// a free-form local scratchpad that never syncs to a provider
     /// (issue #458). Pre-filled with the current note; submit persists.
     EditNotes,
+    /// Open the markdown artifacts this workspace's agents spooled into
+    /// `.lazybox/artifacts/` (#1822) in the description reader.
+    OpenArtifacts,
 
     // ── Sidebar list management ────────────────────────────────────
     // These act on the sidebar's list/view rather than a single
@@ -641,6 +644,7 @@ pub enum ActionKind {
     ConvertToDraft,
     MarkReady,
     EditNotes,
+    OpenArtifacts,
     // Sidebar list management
     OpenFilterMenu,
     CycleSort,
@@ -832,6 +836,7 @@ impl ActionKind {
         Self::ViewDiff,
         Self::Reply,
         Self::EditNotes,
+        Self::OpenArtifacts,
         Self::SetRole,
         Self::SpawnPlanner,
         Self::SpawnCoordinator,
@@ -992,6 +997,7 @@ impl Action {
             Action::ActivityBottom => ActionKind::ActivityBottom,
             Action::Reply => ActionKind::Reply,
             Action::EditNotes => ActionKind::EditNotes,
+            Action::OpenArtifacts => ActionKind::OpenArtifacts,
             Action::SelectRow => ActionKind::SelectRow,
             Action::ToggleDescription => ActionKind::ToggleDescription,
             Action::UndoMarkRead => ActionKind::UndoMarkRead,
@@ -1929,6 +1935,17 @@ impl ActionDef {
                 describe: "Edit this workspace's local scratchpad — a private note that never syncs to a provider.",
                 section: Section::Workspace,
             },
+            ActionKind::OpenArtifacts => &Self {
+                kind: ActionKind::OpenArtifacts,
+                // Under the agent leader (#1822): artifacts are what the
+                // agent handed you. Uppercase like `a R` / `a K`, because
+                // the lowercase half of that leader is generated per agent
+                // id and a new agent must not collide with this row.
+                default_keys: "a A",
+                label: "artifacts",
+                describe: "Read the markdown artifacts this workspace's agents wrote to `.lazybox/artifacts/` — a plan, a findings write-up, anything a paragraph in the terminal could not carry. Opens in the description reader.",
+                section: Section::Workspace,
+            },
             ActionKind::SelectRow => &Self {
                 kind: ActionKind::SelectRow,
                 default_keys: "Space",
@@ -2535,6 +2552,7 @@ impl ActionKind {
             ActionKind::ActivityBottom => "activity_bottom",
             ActionKind::Reply => "reply",
             ActionKind::EditNotes => "edit_notes",
+            ActionKind::OpenArtifacts => "open_artifacts",
             ActionKind::SelectRow => "select_row",
             ActionKind::ToggleDescription => "toggle_description",
             ActionKind::UndoMarkRead => "undo_mark_read",
@@ -2784,6 +2802,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ViewDiff => Some("github"),
         ActionKind::SpawnAgent
         | ActionKind::RecoverAllAgentCredit
+        | ActionKind::OpenArtifacts
         | ActionKind::RestartRateLimited => Some("agent"),
         ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
@@ -3530,6 +3549,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // Notes attach to any workspace — even a session-less/empty
         // one — so gate purely on a workspace being under the cursor.
         | ActionKind::EditNotes
+        // Artifacts hang off the workspace, not a live session — an agent
+        // that exited still leaves its spool behind. The dispatcher says so
+        // when the workspace has none; the catalog cannot see the spool.
+        | ActionKind::OpenArtifacts
         // Role attaches to any workspace under the cursor — the Choice
         // modal picks one of five roles or clears it (#1523). Gate on
         // the workspace's existence like EditNotes/RenameWorkspace.

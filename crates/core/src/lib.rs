@@ -4,6 +4,7 @@
 //! GitHub, Linear, or any specific provider.
 
 pub mod agent;
+pub mod artifact;
 pub mod autofix;
 pub mod branch_namespace;
 pub mod branch_template;
@@ -32,6 +33,10 @@ pub mod time;
 mod workspace;
 
 pub use agent::{AgentConfig, AgentModels, CapabilityAliases, ModelChoice, ModelTier};
+pub use artifact::{
+    ARTIFACT_EXTENSION, ARTIFACT_MAX_BYTES, ARTIFACT_MAX_PER_WORKSPACE,
+    ARTIFACT_SPOOL_RELATIVE_PATH, Artifact, artifact_document,
+};
 pub use autofix::{
     AutoFixKind, AutoFixSettings, auto_fix_candidate, auto_fix_enabled_and_permitted,
     evaluate_auto_fix, is_auto_fix_opted_out, resolve_auto_fix,

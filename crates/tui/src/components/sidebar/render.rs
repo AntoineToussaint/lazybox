@@ -2121,6 +2121,7 @@ impl Sidebar {
                 // Questions a sibling agent has asked this session and it
                 // has not answered yet (#1653), pushed by the daemon.
                 inbound_requests: self.open_requests(key),
+                artifacts: self.artifact_count(key),
                 model_shorts: &self.model_shorts,
                 highlight_query,
                 // Focused rows are lifted out of their repo group, so name

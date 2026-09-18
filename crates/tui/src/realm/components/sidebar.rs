@@ -711,10 +711,21 @@ impl Sidebar {
         self.inner.set_open_requests(key, open);
     }
 
+    /// See `Sidebar::set_artifact_count` — how many markdown artifacts a
+    /// workspace's agents have spooled (#1822), for the row's `▤N` badge.
+    pub fn set_artifact_count(&mut self, key: lazybox_core::SessionKey, count: usize) {
+        self.inner.set_artifact_count(key, count);
+    }
+
     /// See `Sidebar::open_requests` — open inbound requests for one
     /// workspace (#1653).
     pub fn open_requests(&self, key: &lazybox_core::SessionKey) -> usize {
         self.inner.open_requests(key)
+    }
+
+    /// See `Sidebar::artifact_count` — spooled artifacts for one workspace.
+    pub fn artifact_count(&self, key: &lazybox_core::SessionKey) -> usize {
+        self.inner.artifact_count(key)
     }
 
     /// See `Sidebar::forget_epic` — drop an archived / deleted epic (#1517).

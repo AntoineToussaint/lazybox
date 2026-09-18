@@ -1490,7 +1490,7 @@ impl ActionDef {
                 kind: ActionKind::ViewDiff,
                 default_keys: "g v",
                 label: "review diff",
-                describe: "Review the worktree's staged, unstaged, and untracked changes; search or annotate lines and send the draft to the running agent.",
+                describe: "Review the worktree's staged, unstaged, and untracked changes in a full-screen viewer — file tree beside side-by-side hunks, `t` and `s` toggle either; search or annotate lines and send the draft to the running agent.",
                 section: Section::Workspace,
             },
             ActionKind::NewWorkspace => &Self {

@@ -150,6 +150,48 @@ Cache age lives in `PollState`, not on the persisted `Workspace`: the commit
 path skips a byte-identical row to avoid a write and a broadcast, so a stamp
 inside the row would re-broadcast every row on every tick.
 
+## A session's `gh` runs through the daemon
+
+The record cache only helps an agent that chooses to read it. `gh_shim.rs`
+covers the rest (#1801): `<home>/shims/gh` goes on every spawn's PATH ahead of
+the real binary, and asks the daemon before it spends
+(`Command::GhAdmit`) and reports after (`Command::GhCompleted`).
+
+- **The read cache stores `gh`'s own bytes, keyed by repo scope + argv** — not
+  a re-rendering of the cached `Task`. Agents parse that output; a lookalike
+  would diverge from it silently. A key resolves to `None` (uncached) whenever
+  the repo scope is ambiguous, so a key can never span two repositories.
+- **A cache hit spends no quota token.** Charging for it would throttle the
+  behaviour the cache exists to reward.
+- **Reads yield at the governor's reserve; mutations do not.** The governor
+  lets *interactive* work spend past the reserve on purpose. Agent `gh` is the
+  background burn that emptied the budget, so its reads wait — but refusing
+  `gh pr merge` strands the task rather than delaying it.
+- **The change signal is the half that works at zero budget.** A mutation's
+  outcome is already known locally, so `apply_known_record_state` writes it
+  onto the row with no GitHub call. It must decide the one-shot terminal
+  cleanup from the row *before* the flip persists: `closed_issue_transition`
+  requires a non-terminal predecessor, so writing the state first silently
+  costs the workspace its reap.
+- **Everything degrades toward plain `gh`.** No daemon, a slow answer, an
+  unrecognised subcommand, `LAZYBOX_GH_SHIM=0`, or `gh.real` — each runs
+  exactly what the agent typed. The shim may pace `gh`; it may never break it.
+- **Three independent guards against the shim resolving `gh` to itself**, because
+  each alone has a hole. Path equality fails when `LAZYBOX_GH_SHIM_DIR` is
+  stripped and `LAZYBOX_HOME` names another profile; the `SHIM_MARKER` content
+  check covers that but not a hand-edited script; `SHIM_DEPTH_ENV` identifies
+  nothing and so bounds recursion whatever else missed. A `gh` extension calls
+  `gh` again, which is why the depth cap is 4 and not 1.
+- **The shim is dispatched before `init_tracing()`** (`tui-boot/src/main.rs`).
+  Tracing redirects OS stderr into the log file, and the shim runs `gh` with
+  inherited stdio — on the wrong side of that call, `gh`'s own errors go to
+  /tmp/lazybox.log and the agent gets a bare non-zero exit.
+- **The read-cache key leads with host + credential fingerprint.** `owner/repo`
+  is not unique across GitHub hosts, and `normalize_remote` discards the host,
+  so repo+argv alone let an enterprise issue be answered with github.com's.
+- **The cache is bounded three ways** — clamped TTL, entry count, total bytes.
+  Age alone bounds nothing when the arrival rate scales with the fleet.
+
 ## The metering / context-hygiene proxy
 
 `proxy/` sits between an agent and its provider. Two facts live at different

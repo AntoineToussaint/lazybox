@@ -183,6 +183,7 @@ pub mod context_tag;
 pub mod epics;
 pub mod error_inbox;
 pub mod event_forward;
+pub mod gh_shim;
 pub mod keep_awake;
 pub mod lifecycle;
 pub mod local_gateway;
@@ -1346,6 +1347,8 @@ impl Server {
                         lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::SetTrackMain { .. } => "SetTrackMain",
                         lazybox_ipc::Command::QueryTaskStatus { .. } => "QueryTaskStatus",
+                        lazybox_ipc::Command::GhAdmit { .. } => "GhAdmit",
+                        lazybox_ipc::Command::GhCompleted { .. } => "GhCompleted",
                         lazybox_ipc::Command::SetMetered { .. } => "SetMetered",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
                         lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
@@ -2802,6 +2805,36 @@ pub async fn dispatch_command(
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::set_track_main(config, &key, enabled).await;
+        }
+        lazybox_ipc::Command::GhAdmit {
+            session_key,
+            kind,
+            read_key,
+            client_request_id,
+        } => {
+            let verdict = gh_shim::admit(config, session_key.as_ref(), kind, read_key.as_deref());
+            // Answered on the asking connection, not the bus: this reply belongs
+            // to one `gh` invocation, and a lagging subscriber's dropped event
+            // would stall that command for its whole timeout.
+            let _ = tx.send(lazybox_ipc::Event::GhShimReply {
+                client_request_id,
+                reply: lazybox_ipc::gh_shim::GhReply::Admission(verdict),
+            });
+        }
+        lazybox_ipc::Command::GhCompleted {
+            session_key: _,
+            read_key,
+            stdout,
+            change,
+            client_request_id,
+        } => {
+            gh_shim::completed(config, read_key, stdout, change).await;
+            // Acked before the shim exits: the report is filed, and the shim
+            // is free to stop holding the socket open for it.
+            let _ = tx.send(lazybox_ipc::Event::GhShimReply {
+                client_request_id,
+                reply: lazybox_ipc::gh_shim::GhReply::Recorded,
+            });
         }
         lazybox_ipc::Command::QueryTaskStatus {
             reference,

@@ -3841,6 +3841,9 @@ pub struct GithubConfig {
     /// ```
     #[serde(default)]
     pub app: Option<GithubAppConfig>,
+    /// How a session's `gh` is routed through the daemon (#1801).
+    #[serde(default)]
+    pub gh_shim: GhShimConfig,
 }
 
 /// A registered GitHub App the daemon authenticates its poller as.
@@ -3854,6 +3857,62 @@ pub struct GithubAppConfig {
     /// when the App has exactly one installation.
     #[serde(default)]
     pub installation_id: Option<u64>,
+}
+
+/// The `gh` shim lazybox puts on every spawned session's PATH.
+///
+/// ```yaml
+/// providers:
+///   github:
+///     gh_shim:
+///       enabled: true
+///       read_cache_ttl: 90s
+///       session_burst: 20
+///       session_refill_per_min: 10
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GhShimConfig {
+    /// Whether spawned sessions get the shim on PATH at all. Off means every
+    /// session reaches real `gh` directly, exactly as before #1801.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// How long one read's output answers an identical read from another
+    /// session. Short by design: the point is collapsing a fleet's duplicate
+    /// reads of the same record, not pretending GitHub is static.
+    #[serde(with = "duration_secs", default = "GhShimConfig::default_ttl")]
+    pub read_cache_ttl: Duration,
+    /// Calls one session may make back-to-back before its bucket empties.
+    #[serde(default = "GhShimConfig::default_burst")]
+    pub session_burst: u32,
+    /// Tokens one session's bucket regains per minute — its sustained rate.
+    /// Ten a minute is 600/hour, so a session fanning out hundreds of reads
+    /// paces itself well inside the shared 5,000/hour budget instead of
+    /// racing the poller for it.
+    #[serde(default = "GhShimConfig::default_refill")]
+    pub session_refill_per_min: f64,
+}
+
+impl GhShimConfig {
+    fn default_ttl() -> Duration {
+        Duration::from_secs(90)
+    }
+    fn default_burst() -> u32 {
+        20
+    }
+    fn default_refill() -> f64 {
+        10.0
+    }
+}
+
+impl Default for GhShimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            read_cache_ttl: Self::default_ttl(),
+            session_burst: Self::default_burst(),
+            session_refill_per_min: Self::default_refill(),
+        }
+    }
 }
 
 impl GithubConfig {
@@ -3879,6 +3938,7 @@ impl Default for GithubConfig {
             host: None,
             pr_trailers: lazybox_core::TrailerPolicy::default(),
             app: None,
+            gh_shim: GhShimConfig::default(),
         }
     }
 }

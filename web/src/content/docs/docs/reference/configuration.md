@@ -528,6 +528,7 @@ booleans all default to `true`.
 | `background_budget_share` | float | `0.55` | Maximum share of each observed GitHub primary rate-limit budget that scheduled polling may consume; the remainder stays available to interactive `gh`, agents, and bursts. |
 | `include_accessible_repos` | bool | `false` | Widen the inbox scope to every repo you can reach — owned, org-member, and direct-collaborator — not just the scopes you ticked in setup. Involved PRs/issues in any of those surface without a manual tick; repos you can't access stay hidden. |
 | `app` | map | unset | A GitHub App registration giving the status sweep its own rate-limit budget. See [`providers.github.app`](#providersgithubapp). |
+| `gh_shim` | map | on | How a session's `gh` is routed through the daemon. See [`providers.github.gh_shim`](#providersgithubgh_shim). |
 
 Each `filters` entry has exactly one of:
 
@@ -536,6 +537,34 @@ Each `filters` entry has exactly one of:
 | `org` | PRs involving you in this org |
 | `repo` | PRs involving you in `owner/name` |
 | `watch` | All open PRs in `owner/name`, regardless of involvement |
+
+#### `providers.github.gh_shim`
+
+lazybox puts a `gh` shim on every spawned session's PATH so the agents it
+starts share one GitHub budget instead of racing each other for it. Reads are
+deduplicated across sessions, each session is paced by its own quota, and a
+mutation tells the daemon what changed — so an issue closed with `gh` inside a
+workspace flips its row within seconds, with no sweep and no budget spent.
+
+Anything the shim does not recognise is passed through to real `gh` unchanged.
+To bypass it entirely, run `gh.real`, or set `LAZYBOX_GH_SHIM=0`.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Put the shim on spawned sessions' PATH. Off removes it, so sessions reach real `gh` directly. |
+| `read_cache_ttl` | seconds | `90s` | How long one read's output answers an identical read from another session |
+| `session_burst` | int | `20` | Calls one session may make back-to-back before its bucket empties |
+| `session_refill_per_min` | float | `10` | Tokens one session's bucket regains per minute — its sustained rate |
+
+```yaml
+providers:
+  github:
+    gh_shim:
+      enabled: true
+      read_cache_ttl: 90s
+      session_burst: 20
+      session_refill_per_min: 10
+```
 
 ### `providers.github.app`
 

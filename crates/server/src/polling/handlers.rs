@@ -1210,6 +1210,67 @@ fn closed_issue_cleanup(config: &ServerConfig, ws: &Workspace) -> Option<super::
     Some(super::TerminalCleanup::ClosedIssue(n))
 }
 
+/// Write a tracker record's new lifecycle state onto the stored row, and fire
+/// the one-shot terminal cleanup the transition earns (#1801).
+///
+/// The caller already knows the outcome — it just ran the mutation — so
+/// nothing here reads the provider. That is the point: a row flips even with
+/// the GitHub budget at zero, which is the state the fleet actually leaves it
+/// in.
+///
+/// The cleanup has to be decided from the row *before* the flip persists.
+/// `closed_issue_transition` and `merged_transition_pr_number` (in
+/// [`super::upsert`]) both require a non-terminal predecessor, so cleanup is
+/// offered exactly once per close. Writing the terminal state first would make
+/// the poll path — and this one — see an already-closed predecessor and reap
+/// nothing, which is how a local state flip quietly costs a workspace its
+/// cleanup.
+pub async fn apply_known_record_state(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+    id: &lazybox_core::TaskId,
+    state: lazybox_core::TaskState,
+) {
+    let Some(ws) = load_workspace(config, workspace_key) else {
+        return;
+    };
+    // Already there: no transition happened, so there is nothing to persist
+    // and nothing to clean up. Re-firing would double-prompt on a retry.
+    if ws.task_by_id(id).map(|task| task.state) == Some(state) {
+        return;
+    }
+    let cleanup = match state {
+        lazybox_core::TaskState::Closed
+            if ws.gh_issues.first().is_some_and(|task| &task.id == id) =>
+        {
+            closed_issue_cleanup(config, &ws)
+        }
+        lazybox_core::TaskState::Merged if ws.pr.as_ref().is_some_and(|task| &task.id == id) => {
+            merged_pr_cleanup(&ws)
+        }
+        _ => None,
+    };
+    let terminal = matches!(
+        state,
+        lazybox_core::TaskState::Closed | lazybox_core::TaskState::Merged
+    );
+    apply_and_commit(config, workspace_key, |ws| {
+        if let Some(task) = ws.task_by_id_mut(id) {
+            task.state = state;
+            task.updated_at = chrono::Utc::now();
+            if terminal {
+                task.closed_at.get_or_insert_with(chrono::Utc::now);
+            } else {
+                task.closed_at = None;
+            }
+        }
+    })
+    .await;
+    if let Some(cleanup) = cleanup {
+        on_terminal_transition(config, workspace_key, cleanup).await;
+    }
+}
+
 /// Handle `Command::DeleteOrClose`: remove the workspace's primary
 /// upstream item, resolved by kind.
 ///

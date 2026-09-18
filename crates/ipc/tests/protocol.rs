@@ -623,6 +623,23 @@ fn all_commands() -> Vec<Command> {
             on_main: false,
             resolution: lazybox_ipc::BranchConflictResolution::UseBranch("deps-grouping".into()),
         },
+        Command::GhAdmit {
+            session_key: Some(lazybox_core::SessionKey::from("github-acme-widget-7")),
+            kind: lazybox_ipc::gh_shim::GhCallKind::Read,
+            read_key: Some("o/r\u{1f}issue\u{1f}view\u{1f}12".into()),
+            client_request_id: "req-1".into(),
+        },
+        Command::GhCompleted {
+            session_key: None,
+            read_key: Some("o/r\u{1f}issue\u{1f}view\u{1f}12".into()),
+            stdout: Some("title: hello\n".into()),
+            change: Some(lazybox_ipc::gh_shim::GhRecordChange {
+                reference: "o/r#12".into(),
+                repo: Some("o/r".into()),
+                kind: lazybox_ipc::gh_shim::GhChangeKind::Closed,
+            }),
+            client_request_id: "req-2".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -1483,6 +1500,20 @@ fn all_events() -> Vec<Event> {
                 detail: "read workspaces: disk".into(),
             }),
         },
+        Event::GhShimReply {
+            client_request_id: "req-1".into(),
+            reply: lazybox_ipc::gh_shim::GhReply::Admission(
+                lazybox_ipc::gh_shim::GhVerdict::Throttle {
+                    wait_secs: 4,
+                    reason: "session quota".into(),
+                },
+            ),
+        },
+        // Same tag as the row above, so the ack half round-trips too.
+        Event::GhShimReply {
+            client_request_id: "req-2".into(),
+            reply: lazybox_ipc::gh_shim::GhReply::Recorded,
+        },
     ]
 }
 
@@ -1594,6 +1625,8 @@ fn command_tag(command: &Command) -> &'static str {
         Command::DecideToolUse { .. } => "DecideToolUse",
         Command::SetContextCompaction { .. } => "SetContextCompaction",
         Command::ResolveBranchConflict { .. } => "ResolveBranchConflict",
+        Command::GhAdmit { .. } => "GhAdmit",
+        Command::GhCompleted { .. } => "GhCompleted",
     }
 }
 
@@ -1715,6 +1748,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentRequestReplied { .. } => "AgentRequestReplied",
         Event::AgentRequestsOpen { .. } => "AgentRequestsOpen",
         Event::TaskStatus { .. } => "TaskStatus",
+        Event::GhShimReply { .. } => "GhShimReply",
     }
 }
 
@@ -1726,12 +1760,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        103,
+        105,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        111,
+        112,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

@@ -348,6 +348,34 @@ reads a failed lookup as "no worker".
 
 The same report is available to a wired agent as the `task_status` MCP tool.
 
+## `lazybox gh`
+
+The `gh` shim lazybox installs at `~/.lazybox/shims/gh` and puts on every
+spawned session's PATH. It runs real `gh` for everything; what it adds is
+routing through the daemon, so a fleet of agents shares one GitHub budget
+rather than racing each other for it:
+
+- an identical read from another session is answered from the daemon's cache,
+  costing nothing upstream;
+- each session is paced by its own quota, and reads stand down while the
+  budget is into the reserve the poller depends on;
+- a mutation tells the daemon what it changed, so an issue closed with `gh`
+  inside a workspace flips its row within seconds — no sweep, no budget.
+
+You normally never type this. A session's `gh` already *is* this.
+
+Anything the shim does not recognise is passed through untouched, and it
+degrades to plain `gh` whenever the daemon is unreachable or slow. Two escape
+hatches take it out of the path entirely:
+
+```bash
+gh.real pr list              # the real binary, beside the shim
+LAZYBOX_GH_SHIM=0 gh pr list # opt one command (or a whole session) out
+```
+
+Configure it under [`providers.github.gh_shim`](/docs/reference/configuration/),
+where `enabled: false` removes the shim instead of leaving it on PATH.
+
 ## Environment variables
 
 | Variable | Effect |
@@ -357,6 +385,9 @@ The same report is available to a wired agent as the `task_status` MCP tool.
 | `SLACK_BOT_TOKEN` | Slack bot credential; overrides `slack.bot_token` |
 | `SLACK_APP_TOKEN` | Slack Socket Mode app credential; overrides `slack.app_token` |
 | `RUST_LOG` | Log filter, e.g. `RUST_LOG=lazybox=debug` for verbose logs |
+| `LAZYBOX_GH_SHIM` | Set to `0` to bypass the `gh` shim and run the real binary directly |
+| `LAZYBOX_GH_SHIM_DIR` | Directory holding the shim; set on every spawn so the shim can resolve past itself |
+| `LAZYBOX_GH_SHIM_DEPTH` | How many shim invocations deep this process is. The shim stamps it on each `gh` it runs and refuses past 4, so a misidentified shim bounds instead of recursing |
 | `LAZYBOX_HOME` | Overrides every path lazybox writes under `~/.lazybox`: state, config, worktrees, runtime dir, tmux socket. Logs are separate — they default to `/tmp/lazybox.log` (override with `ui.log_path`) |
 | `LAZYBOX_RUNTIME_DIR` | Overrides just the daemon runtime directory (`daemon.sock` / `daemon.pid`); wins over `LAZYBOX_HOME`'s default `<home>/run/` |
 | `LAZYBOX_API_TOKEN` | Bearer token for `lazybox server api` (required unless `--insecure-no-auth`) |

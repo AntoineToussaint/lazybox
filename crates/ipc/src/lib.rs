@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod channel;
+pub mod gh_shim;
 pub mod pairing;
 pub mod port_forward;
 pub mod socket;
@@ -2256,6 +2257,43 @@ pub enum Command {
         on_main: bool,
         resolution: BranchConflictResolution,
     },
+    /// Ask permission to run one `gh` invocation from inside a session
+    /// (#1801). Answered on the asking connection as [`Event::GhShimReply`].
+    ///
+    /// `read_key` is the shim's canonical spelling of a *read* — the resolved
+    /// repo plus the argv — and is `None` for a mutation or anything the shim
+    /// does not recognise. A key that matches a recent identical read is
+    /// answered from the daemon's response cache, so the second session pays
+    /// nothing. Either way the session spends one token from its own bucket,
+    /// which is what stops a fan-out from reaching the poller's reserve.
+    ///
+    /// `session_key` is `None` when `gh` is run outside a lazybox session; all
+    /// such callers share one bucket. Appended last (bincode is
+    /// ordinal-sensitive).
+    GhAdmit {
+        session_key: Option<SessionKey>,
+        kind: gh_shim::GhCallKind,
+        read_key: Option<String>,
+        client_request_id: String,
+    },
+    /// Report what a `gh` invocation admitted by [`Command::GhAdmit`] did
+    /// (#1801). Fire-and-forget: the shim has already printed `gh`'s output
+    /// and is about to exit with its status, so nothing here can fail the
+    /// session's command.
+    ///
+    /// `stdout` fills the read cache for `read_key`; `change` is what the
+    /// mutation did, which the daemon writes straight onto its cached row —
+    /// no sweep, no budget, which is why a closed issue's row flips even with
+    /// the GitHub budget at zero. Appended last.
+    GhCompleted {
+        session_key: Option<SessionKey>,
+        read_key: Option<String>,
+        stdout: Option<String>,
+        change: Option<gh_shim::GhRecordChange>,
+        /// Correlates the [`gh_shim::GhReply::Recorded`] acknowledgement the
+        /// shim waits for before exiting.
+        client_request_id: String,
+    },
 }
 
 /// How a branch-namespace collision should be cleared (#1742). Both arms
@@ -3778,6 +3816,15 @@ pub enum Event {
     TaskStatus {
         client_request_id: Option<String>,
         result: Result<task_status::TaskStatusReport, task_status::TaskStatusError>,
+    },
+    /// Reply to [`Command::GhAdmit`] or [`Command::GhCompleted`] (#1801).
+    /// Sent on the asking connection,
+    /// not the bus: it belongs to one `gh` invocation, and a lagging
+    /// subscriber's dropped event would stall that command for its whole
+    /// timeout. Appended last (bincode is ordinal-sensitive).
+    GhShimReply {
+        client_request_id: String,
+        reply: gh_shim::GhReply,
     },
 }
 

@@ -1627,7 +1627,17 @@ impl GhSource {
         // `polled_scope` can retire within them even on a PARTIAL reconcile
         // (a single truncating/erroring member no longer vetoes retirement
         // for the whole inbox).
-        *self.last_reconcile_completed.lock() = outcome.completed.clone();
+        //
+        // A member whose PR walk needed more than one `updated:<=` window
+        // is deliberately NOT on that list. Its rows are upserted and its
+        // floor advances, but the walk spans several requests over seconds
+        // against a newest-first order, so a PR touched mid-walk rises
+        // above every later ceiling and is never returned — present and
+        // open, merely unseen. Retiring on that set deletes live rows, so
+        // such a member is fetched but not authoritative
+        // (`RepoSweepOutcome::rewindowed`).
+        *self.last_reconcile_completed.lock() =
+            super::retirement_authority(&outcome.completed, &outcome.rewindowed);
         if !outcome.failed.is_empty() {
             let failed = outcome
                 .failed

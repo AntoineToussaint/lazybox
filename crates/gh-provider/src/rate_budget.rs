@@ -464,6 +464,33 @@ const SECONDARY_INTERACTIVE_GAP: Duration = Duration::from_secs(20);
 /// whole; the gap still spaces successive actions.
 pub(crate) const SECONDARY_INTERACTIVE_BURST: u32 = 4;
 
+/// Minimum spacing between [`RequestPriority::Focused`] requests that
+/// pass a SELF-IMPOSED refusal — the local token bucket or this tick's
+/// scheduled allowance (issue #1803).
+///
+/// Those two gates are lazybox's own pacing, not GitHub's limit, and
+/// while they were empty the focused row could not be refreshed at all:
+/// a user staring at one PR got whatever the last successful sweep left
+/// behind, with no way to ask. One targeted read per window is a
+/// rounding error against a 5000-point hour and is what makes the row
+/// the user is looking at answerable. The gates GitHub actually imposes
+/// — remaining-low, the reserve, an open circuit — are untouched: the
+/// reserve exists so the user's own merges and replies still fit, and
+/// spending it on a background refresh would defeat it.
+const FOCUSED_RESERVE_GAP: Duration = Duration::from_secs(30);
+
+/// Focused requests admitted per [`FOCUSED_RESERVE_GAP`] window.
+///
+/// One refresh of the focused row is NOT one request: `fetch_hot_tasks`
+/// is two tiers — a lean freshness probe, then the full detail fetch for
+/// whatever moved — and each tier chunks at 100 node ids. A one-request
+/// reserve was spent by the probe and the detail fetch was refused, so
+/// the row refreshed only while nothing had changed, which is precisely
+/// the case nobody is waiting on. The burst covers both tiers of a
+/// two-chunk hot set; the gap still spaces successive refreshes. Same
+/// shape, and the same reason, as [`SECONDARY_INTERACTIVE_BURST`].
+const FOCUSED_RESERVE_BURST: u32 = 4;
+
 #[derive(Debug, Clone)]
 struct CircuitState {
     reason: String,
@@ -502,6 +529,12 @@ pub struct RateBudget {
     /// [`SECONDARY_INTERACTIVE_GAP`] window (see
     /// [`SECONDARY_INTERACTIVE_BURST`]).
     secondary_interactive_used: u32,
+    /// Start of the current [`FOCUSED_RESERVE_GAP`] window for
+    /// [`RequestPriority::Focused`] pass-throughs of a self-imposed refusal.
+    focused_reserve_next: Option<Instant>,
+    /// Focused requests admitted in the current window (see
+    /// [`FOCUSED_RESERVE_BURST`]).
+    focused_reserve_used: u32,
     primary_circuits: HashMap<String, CircuitState>,
     secondary_failures: u32,
     min_request_gap: Duration,
@@ -533,6 +566,8 @@ impl RateBudget {
             secondary_circuit: None,
             secondary_interactive_next: None,
             secondary_interactive_used: 0,
+            focused_reserve_next: None,
+            focused_reserve_used: 0,
             primary_circuits: HashMap::new(),
             secondary_failures: 0,
             min_request_gap: DEFAULT_MIN_REQUEST_GAP,
@@ -804,6 +839,30 @@ impl RateBudget {
         .map(|_| ())
     }
 
+    /// Take a slot from the focused reserve if `priority` is entitled to
+    /// it and the window has one left. A whole refresh of the focused row
+    /// is several requests back to back, so the allowance is
+    /// [`FOCUSED_RESERVE_BURST`] per [`FOCUSED_RESERVE_GAP`] — enough for
+    /// one refresh to go through intact, not enough for a starved
+    /// governor's backlog to drain through it.
+    fn claim_focused_reserve(&mut self, priority: RequestPriority, mono_now: Instant) -> bool {
+        if priority != RequestPriority::Focused {
+            return false;
+        }
+        if self
+            .focused_reserve_next
+            .is_none_or(|next| mono_now >= next)
+        {
+            self.focused_reserve_next = Some(mono_now + FOCUSED_RESERVE_GAP);
+            self.focused_reserve_used = 0;
+        }
+        if self.focused_reserve_used >= FOCUSED_RESERVE_BURST {
+            return false;
+        }
+        self.focused_reserve_used += 1;
+        true
+    }
+
     pub fn admit(
         &mut self,
         resource: ApiResource,
@@ -898,6 +957,10 @@ impl RateBudget {
                 }
             }
         }
+        // One reserved slot per window carries a focused refresh past the
+        // self-imposed gates below. Claimed at most once per admission,
+        // so a request refused by both gates still costs one slot.
+        let mut reserved = false;
         if priority.is_scheduled() {
             // No tick allowance means this resource's window was never observed
             // (an expired window is still present in `self.resources` and gets
@@ -916,12 +979,15 @@ impl RateBudget {
                 .copied()
                 .unwrap_or(0);
             if spent.saturating_add(forecast) > allowance {
-                return Err(AcquireError::TickAllowanceExhausted {
-                    resource: resource.key().to_string(),
-                    allowance,
-                    spent,
-                    wait_secs: self.tick_interval.as_secs().max(1),
-                });
+                reserved = self.claim_focused_reserve(priority, mono_now);
+                if !reserved {
+                    return Err(AcquireError::TickAllowanceExhausted {
+                        resource: resource.key().to_string(),
+                        allowance,
+                        spent,
+                        wait_secs: self.tick_interval.as_secs().max(1),
+                    });
+                }
             }
         }
 
@@ -932,7 +998,11 @@ impl RateBudget {
         // it by delaying the next scheduled admits — the exact priority
         // inversion we want. Only scheduled traffic waits here (#1249;
         // mirrors the secondary-circuit interactive pass above).
-        if self.available < 1.0 && priority != RequestPriority::Interactive {
+        if self.available < 1.0
+            && priority != RequestPriority::Interactive
+            && !reserved
+            && !self.claim_focused_reserve(priority, mono_now)
+        {
             let needed = 1.0 - self.available;
             let wait_secs = if self.refill_per_sec > 0.0 {
                 (needed / self.refill_per_sec).ceil() as u64
@@ -1565,6 +1635,8 @@ impl RateBudget {
             secondary_circuit: self.secondary_circuit.clone(),
             secondary_interactive_next: self.secondary_interactive_next,
             secondary_interactive_used: self.secondary_interactive_used,
+            focused_reserve_next: self.focused_reserve_next,
+            focused_reserve_used: self.focused_reserve_used,
             primary_circuits: self.primary_circuits.clone(),
             secondary_failures: self.secondary_failures,
             min_request_gap: self.min_request_gap,
@@ -2476,6 +2548,123 @@ mod tests {
                 .expect("graphql snapshot")
                 .scheduled,
             4
+        );
+    }
+
+    /// #1803: an empty local bucket used to refuse a targeted refresh
+    /// along with everything else, so a user staring at one row could not
+    /// get truth from it. One `Focused` request per `FOCUSED_RESERVE_GAP`
+    /// now passes that SELF-imposed gate — and only that one.
+    #[test]
+    fn a_focused_refresh_passes_an_empty_local_bucket_once_per_window() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        // Capacity 1, no refill: the bucket is empty after one request.
+        let mut budget = RateBudget::new(1, 0.0);
+        budget.min_request_gap = Duration::ZERO;
+        let mut admit = |priority, mono_now| {
+            budget.admit_at(
+                ApiResource::Graphql,
+                "hot-target batch query",
+                priority,
+                1,
+                wall_now,
+                mono_now,
+            )
+        };
+
+        assert!(
+            admit(RequestPriority::Recent, mono_now).is_ok(),
+            "seeds spend"
+        );
+        assert!(
+            matches!(
+                admit(RequestPriority::Recent, mono_now),
+                Err(AcquireError::LocalBudgetExhausted { .. })
+            ),
+            "background work still waits out the empty bucket"
+        );
+        // A refresh of the focused row is `fetch_hot_tasks`: a lean
+        // freshness probe, then the full detail fetch for whatever moved.
+        // Admitting only the probe refreshes the row exactly when nothing
+        // changed — the one case nobody is waiting on — so the whole
+        // refresh must go through.
+        for request in 0..FOCUSED_RESERVE_BURST {
+            assert!(
+                admit(
+                    RequestPriority::Focused,
+                    mono_now + Duration::from_millis(u64::from(request))
+                )
+                .is_ok(),
+                "request {request} of one focused refresh must pass an empty bucket"
+            );
+        }
+        assert!(
+            matches!(
+                admit(RequestPriority::Focused, mono_now + Duration::from_secs(1)),
+                Err(AcquireError::LocalBudgetExhausted { .. })
+            ),
+            "past the burst the reserve is spent, not a standing bypass"
+        );
+        assert!(
+            admit(RequestPriority::Focused, mono_now + FOCUSED_RESERVE_GAP).is_ok(),
+            "the reserve re-arms on its own window"
+        );
+    }
+
+    /// The reserve is for lazybox's OWN pacing. GitHub's limits are not
+    /// negotiable, and the action reserve exists so the user's merges and
+    /// replies still fit — spending it on a background refresh would
+    /// defeat the thing it protects.
+    #[test]
+    fn the_focused_reserve_never_passes_a_github_imposed_refusal() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let mut budget = RateBudget::new(100, 6000.0);
+        budget.observe_graphql_response(
+            "bootstrap",
+            RemoteRateLimit {
+                remaining: 2260,
+                limit: 5000,
+                reset_at: wall_now + chrono::Duration::minutes(30),
+                observed_at: mono_now,
+            },
+            2740,
+            1,
+            200,
+            0,
+            Duration::ZERO,
+        );
+
+        assert!(
+            matches!(
+                budget.admit_at(
+                    ApiResource::Graphql,
+                    "hot-target batch query",
+                    RequestPriority::Focused,
+                    50,
+                    wall_now,
+                    mono_now,
+                ),
+                Err(AcquireError::ReserveProtected { .. })
+            ),
+            "the action reserve outranks the focused allowance"
+        );
+
+        budget.observe_secondary_limit(None, wall_now);
+        assert!(
+            matches!(
+                budget.admit_at(
+                    ApiResource::Graphql,
+                    "hot-target batch query",
+                    RequestPriority::Focused,
+                    1,
+                    wall_now,
+                    mono_now,
+                ),
+                Err(AcquireError::CircuitOpen { .. })
+            ),
+            "an open secondary cooldown outranks it too"
         );
     }
 

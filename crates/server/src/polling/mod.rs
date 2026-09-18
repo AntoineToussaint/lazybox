@@ -1413,6 +1413,25 @@ pub fn gh_polled_scope(
     }
 }
 
+/// The members a reconcile may retire rows within: the ones it fetched
+/// in full, minus the ones whose PR walk needed more than one
+/// `updated:<=` window.
+///
+/// A multi-window walk is several requests spread over seconds against a
+/// newest-first order, so a PR that receives activity mid-walk rises
+/// above the ceiling every later window carries and is never returned —
+/// present and open, merely unseen. Its rows are still upserted and its
+/// floor still advances; only deletion authority is withheld, which is
+/// what the member had before re-windowing existed (it simply failed,
+/// and a failed member was preserved).
+pub fn retirement_authority(completed: &[String], rewindowed: &[String]) -> Vec<String> {
+    completed
+        .iter()
+        .filter(|member| !rewindowed.contains(member))
+        .cloned()
+        .collect()
+}
+
 /// Repo-first equivalent of [`gh_polled_scope`]. Deletion authority
 /// belongs only to a reconcile pass (unwindowed over the roster):
 ///

@@ -81,13 +81,29 @@ and the local decision. Responses record status, conditional result,
 actual cost, bytes, duration, and forecast error. The governor retains
 p50/p95/p99 request latency and per-tick plus process totals. A
 material GraphQL forecast miss raises that operation's conservative
-forecast and emits a `gh_governor` warning.
+forecast and emits a `gh_governor` warning. A refusal logs at most once
+per operation per minute, carrying the count it swallowed: a starved
+governor refuses every request of every operation for as long as it
+stays starved, and one 2026-09-17 outage wrote ~35,000 identical
+`repo-sweep blocked by rate budget` lines.
 
 The tick allowance is:
 
 1. remaining capacity above the configured reserve;
 2. less projected external consumption through reset;
 3. divided over the ticks remaining in the window.
+
+A small burst of `Focused` requests per 30 s may pass a **self-imposed**
+refusal — an empty local token bucket or a spent tick allowance — so a
+targeted refresh of the row the user is looking at still returns current
+state while the background sweep is paced out (#1803). The allowance is a
+burst, not a single request, because one refresh is not one call: the hot
+fetch is a freshness probe followed by a detail fetch for whatever moved,
+and admitting only the probe refreshes the row exactly when nothing
+changed. It never passes the
+gates GitHub itself imposes: remaining-low, the action reserve, and an
+open circuit still refuse it, because the reserve exists so the user's
+own merges and replies fit.
 
 A complete fixed full-sweep unit is reserved before repository fan-out
 is selected. Focused work comes first. Session-bearing repositories

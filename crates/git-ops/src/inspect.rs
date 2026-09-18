@@ -1330,6 +1330,84 @@ pub async fn inspect_worktree_diff(worktree: &Path) -> Result<WorktreeDiff, GitE
     inspect_worktree_diff_with(default_git_runner(), worktree).await
 }
 
+/// How a checkout stands against one reference commit — the drift that
+/// makes a diff on screen a different document from the one being
+/// merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CheckoutDivergence {
+    /// Paths `git status --porcelain` reports as changed.
+    pub dirty_files: usize,
+    /// `(commits only here, commits only there)` between `HEAD` and the
+    /// reference. `None` when the reference commit is not present in
+    /// the checkout, which is itself divergence no count can express.
+    pub commits: Option<(u32, u32)>,
+}
+
+/// Compare the checkout against `reference` (any revision the checkout
+/// can resolve — typically a pull request's head SHA).
+///
+/// Every probe is best-effort: a checkout that is gone, not a
+/// repository, or missing the reference reports what it could read
+/// rather than failing, because this only ever annotates a diff that
+/// has already been produced.
+pub async fn checkout_divergence(worktree: &Path, reference: &str) -> CheckoutDivergence {
+    checkout_divergence_with(default_git_runner(), worktree, reference).await
+}
+
+async fn checkout_divergence_with(
+    git: &dyn GitRunner,
+    worktree: &Path,
+    reference: &str,
+) -> CheckoutDivergence {
+    let dirty_files = git
+        .run(Some(worktree), &["status", "--porcelain"], &[])
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+        })
+        .unwrap_or_default();
+    CheckoutDivergence {
+        dirty_files,
+        commits: rev_list_left_right(git, worktree, reference).await,
+    }
+}
+
+/// `git rev-list --left-right --count <reference>...HEAD`, which answers
+/// both directions in one process. `None` when either side does not
+/// resolve.
+async fn rev_list_left_right(
+    git: &dyn GitRunner,
+    worktree: &Path,
+    reference: &str,
+) -> Option<(u32, u32)> {
+    let output = git
+        .run(
+            Some(worktree),
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{reference}...HEAD"),
+            ],
+            &[],
+        )
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut counts = text.split_whitespace();
+    let reference_only = counts.next()?.parse().ok()?;
+    let local_only = counts.next()?.parse().ok()?;
+    Some((local_only, reference_only))
+}
+
 const DIFF_STATUS_BYTES: usize = 512 * 1024;
 const DIFF_PATCH_BYTES: usize = 4 * 1024 * 1024;
 const DIFF_STAT_BYTES: usize = 512 * 1024;
@@ -1516,7 +1594,12 @@ fn parse_status_porcelain(bytes: &[u8]) -> Vec<String> {
     rows
 }
 
-fn parse_unified_diff(source: &str) -> Vec<DiffFile> {
+/// Parse a unified diff document into per-file hunks.
+///
+/// `source` is a full `diff --git` stream: the same shape `git diff`
+/// emits, and the shape a caller holding only GitHub's per-file patches
+/// assembles so both diff sources render through one parser.
+pub fn parse_unified_diff(source: &str) -> Vec<DiffFile> {
     let mut files = Vec::new();
     let mut file: Option<DiffFile> = None;
     let mut hunk: Option<DiffHunk> = None;
@@ -2164,6 +2247,92 @@ mod tests {
         assert!(!inspections[0].status_verified);
         assert!(!inspections[0].is_safe_to_delete);
         assert!(!worktree_is_pristine_with(git.as_ref(), &worktree, Some(&bare), None).await);
+    }
+
+    /// The divergence notice is only as good as this probe: a reviewer
+    /// reading the PR diff needs to know their checkout carries work
+    /// the PR does not, and vice versa.
+    #[tokio::test]
+    async fn checkout_divergence_counts_both_directions_and_dirty_files() {
+        fn git(repo: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(repo)
+                .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        fn head(repo: &Path) -> String {
+            let output = std::process::Command::new("git")
+                .current_dir(repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("rev-parse");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-q"]);
+        git(tmp.path(), &["config", "user.name", "Lazybox Test"]);
+        git(
+            tmp.path(),
+            &["config", "user.email", "lazybox@example.invalid"],
+        );
+        std::fs::write(tmp.path().join("a.txt"), "one\n").expect("seed");
+        git(tmp.path(), &["add", "a.txt"]);
+        git(tmp.path(), &["commit", "-qm", "seed"]);
+        let base = head(tmp.path());
+
+        // The commit that stands in for the pull request's head.
+        git(tmp.path(), &["checkout", "-q", "-b", "pr"]);
+        std::fs::write(tmp.path().join("b.txt"), "pr\n").expect("pr file");
+        git(tmp.path(), &["add", "b.txt"]);
+        git(tmp.path(), &["commit", "-qm", "on the PR"]);
+        let pr_head = head(tmp.path());
+
+        // The checkout: one commit of its own off the shared base, plus
+        // an uncommitted edit.
+        git(tmp.path(), &["checkout", "-q", &base]);
+        git(tmp.path(), &["checkout", "-q", "-b", "local"]);
+        std::fs::write(tmp.path().join("c.txt"), "local\n").expect("local file");
+        git(tmp.path(), &["add", "c.txt"]);
+        git(tmp.path(), &["commit", "-qm", "only here"]);
+        std::fs::write(tmp.path().join("a.txt"), "edited\n").expect("dirty edit");
+
+        let divergence = checkout_divergence(tmp.path(), &pr_head).await;
+        assert_eq!(divergence.commits, Some((1, 1)));
+        assert_eq!(divergence.dirty_files, 1);
+
+        // A checkout sitting exactly on the PR's head with nothing
+        // uncommitted has not diverged — and must not be told it has.
+        git(tmp.path(), &["checkout", "-q", "--", "a.txt"]);
+        git(tmp.path(), &["checkout", "-q", "pr"]);
+        let in_sync = checkout_divergence(tmp.path(), &pr_head).await;
+        assert_eq!(in_sync.commits, Some((0, 0)));
+        assert_eq!(in_sync.dirty_files, 0);
+    }
+
+    /// A PR head the checkout has never fetched leaves no counts to
+    /// report — but the absence is itself divergence, so it must be
+    /// distinguishable from "in sync", never reported as zero.
+    #[tokio::test]
+    async fn an_unfetched_reference_reports_no_counts_rather_than_zero() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::process::Command::new("git")
+            .current_dir(tmp.path())
+            .args(["init", "-q"])
+            .output()
+            .expect("init");
+
+        let divergence =
+            checkout_divergence(tmp.path(), "0000000000000000000000000000000000000000").await;
+        assert_eq!(divergence.commits, None);
     }
 
     #[tokio::test]

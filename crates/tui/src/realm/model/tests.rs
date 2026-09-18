@@ -641,6 +641,8 @@ mod effects_tests {
                 stat: Vec::new(),
                 files: Vec::new(),
                 truncated: false,
+                head_sha: None,
+                divergence: None,
             }),
             error: None,
         });
@@ -25313,6 +25315,8 @@ mod pr_chat_tests {
                 }],
             }],
             truncated: false,
+            head_sha: None,
+            divergence: None,
         }
     }
 
@@ -32367,5 +32371,281 @@ mod follow_up_chain_tests {
             2,
             "a no-op bulk run leaves the marks for a retry",
         );
+    }
+}
+
+#[cfg(test)]
+mod diff_review_source_tests {
+    //! Which diff `g v` opens, how `p` moves between the two, and what
+    //! the GitHub review verb sends (#1808).
+    //!
+    //! The PR diff and the worktree diff are different documents — the
+    //! PR carries other people's commits and none of your unpushed work
+    //! — so "which one is this" is a correctness question, not a
+    //! cosmetic one, and these tests pin the answer at every hop.
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::{
+        CiStatus, Mergeable, ReviewStatus, SessionKind, Task, TaskId, TaskKind, TaskRole,
+        TaskState, Workspace, WorkspaceKey, WorkspaceSession,
+    };
+    use lazybox_ipc::{
+        Command as IpcCommand, DiffSideDto, ReviewCommentDto, ReviewVerdictDto, WorkspaceDiffDto,
+        WorkspaceDiffTarget, channel,
+    };
+    use lazybox_tui_core::action::Action;
+
+    fn pr_task() -> Task {
+        Task {
+            author: "octocat".into(),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "Add retry to the poller".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Reviewer,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat/retry".into()),
+            base_branch: Some("main".into()),
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Unknown,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 4,
+            deletions: 0,
+            changed_files: 1,
+            kind: Some(TaskKind::Pr),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+            blocked_by: vec![],
+            merge_after: vec![],
+            contracts: vec![],
+            blocked_on: None,
+        }
+    }
+
+    fn empty_diff(head_sha: Option<&str>) -> WorkspaceDiffDto {
+        WorkspaceDiffDto {
+            status: Vec::new(),
+            stat: Vec::new(),
+            files: Vec::new(),
+            truncated: false,
+            head_sha: head_sha.map(str::to_string),
+            divergence: None,
+        }
+    }
+
+    /// A workspace whose PR is the thing under review, with a worktree
+    /// beside it so both sources exist and the choice is a real one.
+    fn build(
+        with_pr: bool,
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+        WorkspaceKey,
+        lazybox_core::SessionId,
+    ) {
+        let (client, mut server) = channel::pair();
+        let mut model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model init");
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let mut workspace = Workspace::empty(workspace_key.clone(), "review", Utc::now());
+        if with_pr {
+            workspace.pr = Some(pr_task());
+        }
+        let session = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            "/tmp/review-pr".into(),
+            Utc::now(),
+        );
+        let session_id = session.id;
+        workspace.sessions.push(session);
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        while server.rx.try_recv().is_ok() {}
+        (model, server, workspace_key, session_id)
+    }
+
+    /// The PR wins the default: it is what reviewers see, the document
+    /// being merged, and the only one a GitHub comment can attach to.
+    #[test]
+    fn view_diff_defaults_to_the_pull_request_when_the_workspace_has_one() {
+        let (mut model, _server, workspace_key, _) = build(true);
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [IpcCommand::InspectWorkspaceDiff {
+                    workspace_key: key,
+                    target: WorkspaceDiffTarget::PullRequest,
+                }] if key == &workspace_key
+            ),
+            "expected a PR-diff read, got {commands:?}"
+        );
+    }
+
+    /// Without a PR there is nothing to read but the checkout — which
+    /// is also the only diff that exists before a branch is pushed.
+    #[test]
+    fn view_diff_falls_to_the_checkout_when_there_is_no_pull_request() {
+        let (mut model, _server, _, session_id) = build(false);
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [IpcCommand::InspectWorkspaceDiff {
+                    target: WorkspaceDiffTarget::Session(id),
+                    ..
+                }] if id == &session_id
+            ),
+            "expected a worktree read, got {commands:?}"
+        );
+    }
+
+    /// `p` re-reads the OTHER source and remounts on it. The two are
+    /// different documents, so the switch is a fetch — and the viewer
+    /// it replaces is a legitimate mount site, not "a modal is open".
+    #[test]
+    fn switching_the_source_refetches_and_replaces_the_open_viewer() {
+        let (mut model, mut server, workspace_key, session_id) = build(true);
+        model.dispatch_action(&Action::ViewDiff);
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key: workspace_key.clone(),
+            target: WorkspaceDiffTarget::PullRequest,
+            agent_terminal_ids: vec![],
+            diff: Some(empty_diff(Some("f00d"))),
+            error: None,
+        });
+        assert_eq!(model.modal_stack, vec![Id::DiffReview]);
+        while server.rx.try_recv().is_ok() {}
+
+        model.update(Msg::DiffReviewSourceSwitched {
+            workspace_key: workspace_key.clone(),
+            showing: WorkspaceDiffTarget::PullRequest,
+        });
+        let sent: Vec<IpcCommand> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        assert!(
+            sent.iter().any(|command| matches!(
+                command,
+                IpcCommand::InspectWorkspaceDiff {
+                    target: WorkspaceDiffTarget::Session(id),
+                    ..
+                } if id == &session_id
+            )),
+            "the switch must ask the daemon for the checkout, got {sent:?}"
+        );
+
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key,
+            target: WorkspaceDiffTarget::Session(session_id),
+            agent_terminal_ids: vec![],
+            diff: Some(empty_diff(None)),
+            error: None,
+        });
+        assert_eq!(
+            model.modal_stack,
+            vec![Id::DiffReview],
+            "the reply replaces the open viewer, it does not stack a second one"
+        );
+    }
+
+    /// A PR diff that will not load (offline, no credential, a repo the
+    /// token cannot see) must not leave the reviewer with nothing.
+    #[test]
+    fn a_failed_pull_request_read_falls_back_to_the_checkout() {
+        let (mut model, mut server, workspace_key, session_id) = build(true);
+        model.dispatch_action(&Action::ViewDiff);
+        while server.rx.try_recv().is_ok() {}
+
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key: workspace_key.clone(),
+            target: WorkspaceDiffTarget::PullRequest,
+            agent_terminal_ids: vec![],
+            diff: None,
+            error: Some("github credentials: none".into()),
+        });
+        assert_eq!(
+            model.pending_diff_session.as_ref(),
+            Some(&(workspace_key, WorkspaceDiffTarget::Session(session_id))),
+            "the failure must re-aim at the local checkout"
+        );
+    }
+
+    /// The batch goes out as ONE command carrying every comment — the
+    /// whole point of the verb is one review thread, not N of them.
+    #[test]
+    fn posting_a_review_sends_one_command_for_the_whole_batch() {
+        let (mut model, mut server, workspace_key, _) = build(true);
+        model.modal_stack.push(Id::DiffReview);
+
+        model.update(Msg::DiffReviewPosted {
+            workspace_key,
+            head_sha: "f00d".into(),
+            summary: "two nits".into(),
+            verdict: ReviewVerdictDto::RequestChanges,
+            comments: vec![
+                ReviewCommentDto {
+                    path: "src/lib.rs".into(),
+                    line: 12,
+                    side: DiffSideDto::Right,
+                    body: "drops the error".into(),
+                },
+                ReviewCommentDto {
+                    path: "src/lib.rs".into(),
+                    line: 30,
+                    side: DiffSideDto::Left,
+                    body: "why remove this?".into(),
+                },
+            ],
+        });
+
+        let sent: Vec<IpcCommand> = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .filter(|command| matches!(command, IpcCommand::SubmitPullRequestReview { .. }))
+            .collect();
+        match sent.as_slice() {
+            [
+                IpcCommand::SubmitPullRequestReview {
+                    head_sha,
+                    verdict,
+                    comments,
+                    ..
+                },
+            ] => {
+                assert_eq!(head_sha, "f00d");
+                assert_eq!(*verdict, ReviewVerdictDto::RequestChanges);
+                assert_eq!(comments.len(), 2);
+            }
+            other => panic!("expected exactly one review command, got {other:?}"),
+        }
+        assert!(model.modal_stack.is_empty(), "submitting closes the viewer");
     }
 }

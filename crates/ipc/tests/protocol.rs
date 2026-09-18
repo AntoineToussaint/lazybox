@@ -466,6 +466,22 @@ fn all_commands() -> Vec<Command> {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             target: lazybox_ipc::WorkspaceDiffTarget::Session(sample_session_id(21)),
         },
+        Command::InspectWorkspaceDiff {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            target: lazybox_ipc::WorkspaceDiffTarget::PullRequest,
+        },
+        Command::SubmitPullRequestReview {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            head_sha: "0ff1ce0ff1ce0ff1ce0ff1ce0ff1ce0ff1ce0ff1".into(),
+            summary: "one nit".into(),
+            verdict: lazybox_ipc::ReviewVerdictDto::RequestChanges,
+            comments: vec![lazybox_ipc::ReviewCommentDto {
+                path: "src/lib.rs".into(),
+                line: 12,
+                side: lazybox_ipc::DiffSideDto::Right,
+                body: "this drops the error".into(),
+            }],
+        },
         Command::KeepMergedWorkspace { session_key: key },
         Command::FetchScrollback {
             terminal_id: TerminalId(12),
@@ -1162,6 +1178,8 @@ fn all_events() -> Vec<Event> {
                 status: vec![" M src/lib.rs".into()],
                 stat: vec![" src/lib.rs | 1 +".into()],
                 truncated: false,
+                head_sha: None,
+                divergence: None,
                 files: vec![lazybox_ipc::DiffFileDto {
                     old_path: Some("src/lib.rs".into()),
                     path: "src/lib.rs".into(),
@@ -1179,6 +1197,32 @@ fn all_events() -> Vec<Event> {
                     }],
                 }],
             }),
+            error: None,
+        },
+        Event::WorkspaceDiffInspected {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            target: lazybox_ipc::WorkspaceDiffTarget::PullRequest,
+            agent_terminal_ids: vec![],
+            diff: Some(lazybox_ipc::WorkspaceDiffDto {
+                status: vec![],
+                stat: vec![" src/lib.rs | +1 -0".into()],
+                truncated: false,
+                head_sha: Some("0ff1ce0ff1ce0ff1ce0ff1ce0ff1ce0ff1ce0ff1".into()),
+                divergence: Some(lazybox_ipc::WorkspaceDiffDivergenceDto {
+                    dirty_files: 2,
+                    commits: Some(lazybox_ipc::CommitSpreadDto {
+                        local_only: 1,
+                        pr_only: 0,
+                    }),
+                }),
+                files: vec![],
+            }),
+            error: None,
+        },
+        Event::PullRequestReviewSubmitted {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            comments: 3,
+            url: Some("https://github.com/o/r/pull/2#pullrequestreview-1".into()),
             error: None,
         },
         Event::CheckoutsDiscovered { checkouts: vec![] },
@@ -1577,6 +1621,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::CleanWorktrees => "CleanWorktrees",
         Command::InspectWorktrees => "InspectWorktrees",
         Command::InspectWorkspaceDiff { .. } => "InspectWorkspaceDiff",
+        Command::SubmitPullRequestReview { .. } => "SubmitPullRequestReview",
         Command::ScanCheckouts { .. } => "ScanCheckouts",
         Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
         Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
@@ -1693,6 +1738,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::CleanWorktreesCompleted { .. } => "CleanWorktreesCompleted",
         Event::WorktreesInspected { .. } => "WorktreesInspected",
         Event::WorkspaceDiffInspected { .. } => "WorkspaceDiffInspected",
+        Event::PullRequestReviewSubmitted { .. } => "PullRequestReviewSubmitted",
         Event::CheckoutsDiscovered { .. } => "CheckoutsDiscovered",
         Event::OrphanedWorktreeDeleted { .. } => "OrphanedWorktreeDeleted",
         Event::AgentRunStarted { .. } => "AgentRunStarted",
@@ -1760,12 +1806,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        105,
+        106,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        112,
+        113,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

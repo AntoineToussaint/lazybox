@@ -1490,7 +1490,7 @@ impl ActionDef {
                 kind: ActionKind::ViewDiff,
                 default_keys: "g v",
                 label: "review diff",
-                describe: "Review the worktree's staged, unstaged, and untracked changes in a full-screen viewer — file tree beside side-by-side hunks, `t` and `s` toggle either; search or annotate lines and send the draft to the running agent.",
+                describe: "Review a diff in a full-screen viewer — file tree beside side-by-side hunks, `t` and `s` toggle either. Opens on the PR's diff when the workspace has one and the worktree's otherwise; `p` switches, and the header names the source and any drift between them. Annotate lines with `c`, then `Shift-S` submits them to GitHub as one review on the PR source, or sends them to the running agent on the local one.",
                 section: Section::Workspace,
             },
             ActionKind::NewWorkspace => &Self {

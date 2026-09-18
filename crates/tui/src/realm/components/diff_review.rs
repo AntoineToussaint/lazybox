@@ -2,16 +2,21 @@
 //! tree on the left and the changes on the right, side by side where the
 //! pane is wide enough and unified where it is not.
 //!
-//! The source is the local checkout (worktree or linked), which is the
-//! only diff that exists before a branch is pushed; the header names it
-//! so a later PR source can never be confused for it.
+//! Two sources feed it, and `p` switches between them. The pull
+//! request's diff is what reviewers see and the only document a GitHub
+//! comment can anchor to; the local checkout is the only diff that
+//! exists before a branch is pushed. They are different documents — the
+//! PR carries other people's commits and none of your unpushed work —
+//! so the header names the one on screen and says how far the checkout
+//! has drifted from it.
 
 use crate::components::scrollbar;
 use crate::realm::components::scrollable::{centered_rect, draw_frame};
 use crate::realm::{Msg, UserEvent};
 use lazybox_core::WorkspaceKey;
 use lazybox_ipc::{
-    DiffFileDto, DiffLineKindDto, TerminalId, WorkspaceDiffDto, WorkspaceDiffTarget,
+    DiffFileDto, DiffLineKindDto, DiffSideDto, ReviewCommentDto, ReviewVerdictDto, TerminalId,
+    WorkspaceDiffDivergenceDto, WorkspaceDiffDto, WorkspaceDiffTarget,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -63,6 +68,9 @@ enum RowKind {
     StatusHeader,
     Status(usize),
     Clean,
+    /// The one-line notice that the checkout no longer matches the pull
+    /// request on screen. Present only when it has something to say.
+    Divergence,
     Truncated,
     Spacer,
     StatHeader,
@@ -84,6 +92,10 @@ enum VisualKind {
     Context,
     Addition,
     Deletion,
+    /// A statement about the diff rather than a line of it: truncation,
+    /// divergence. Reserved for facts that change how the diff should
+    /// be read.
+    Warning,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +118,13 @@ enum InputMode {
     Normal,
     Search(String),
     Comment(String),
+    /// Composing the body of a GitHub review. Required: GitHub refuses
+    /// a `COMMENT` or `REQUEST_CHANGES` review without one.
+    ReviewSummary(String),
+    /// Choosing what the review says about the PR as a whole. The
+    /// keypress that picks a verdict is also the confirmation — posting
+    /// to GitHub is public and must not ride a single stray `S`.
+    ReviewVerdict(String),
 }
 
 /// One row of the file tree: a directory (with its collapsed chain of
@@ -427,13 +446,69 @@ impl DiffReview {
         })
     }
 
+    /// The source-line numbers an anchor resolves to. A hunk-header
+    /// anchor borrows the first numbered line of its hunk.
+    fn anchor_lines(&self, anchor: CommentAnchor) -> (Option<u32>, Option<u32>) {
+        let hunk = &self.diff.files[anchor.file].hunks[anchor.hunk];
+        match anchor.line.map(|index| &hunk.lines[index]) {
+            Some(line) => (line.old_line, line.new_line),
+            None => (
+                hunk.lines.iter().find_map(|line| line.old_line),
+                hunk.lines.iter().find_map(|line| line.new_line),
+            ),
+        }
+    }
+
+    /// Where GitHub would hang a comment written at `anchor`: a line
+    /// number in the pull request's diff and the side it sits on. An
+    /// addition exists only on the right, a deletion only on the left,
+    /// and a context line on both — where the right wins, because the
+    /// post-image is the file as merged and what GitHub's own UI
+    /// anchors a comment on a context line to.
+    ///
+    /// `None` for a line GitHub cannot address at all — the `\ No
+    /// newline at end of file` marker carries no number on either side.
+    fn github_anchor(&self, anchor: CommentAnchor) -> Option<(u32, DiffSideDto)> {
+        match self.anchor_lines(anchor) {
+            (_, Some(new)) => Some((new, DiffSideDto::Right)),
+            (Some(old), None) => Some((old, DiffSideDto::Left)),
+            (None, None) => None,
+        }
+    }
+
     /// Open the comment input only where a comment can actually land.
     /// Sharing the predicate with `save_comment` is what stops an input
     /// opening on a row whose save would silently drop what was typed.
+    ///
+    /// On the pull-request source the bar is higher: a line GitHub
+    /// cannot address is one the review would have to drop at submit
+    /// time, and refusing at the input is the only refusal that costs
+    /// the reviewer nothing.
     fn begin_comment(&mut self) {
-        if self.cursor_anchor().is_some() {
-            self.mode = InputMode::Comment(String::new());
+        let Some(anchor) = self.cursor_anchor() else {
+            return;
+        };
+        if self.is_pull_request() && self.github_anchor(anchor).is_none() {
+            return;
         }
+        self.mode = InputMode::Comment(String::new());
+    }
+
+    /// The drafted comments as GitHub review comments. Every one of
+    /// them anchors — `begin_comment` refuses the rows that would not.
+    fn review_comments(&self) -> Vec<ReviewCommentDto> {
+        self.comments
+            .iter()
+            .filter_map(|comment| {
+                let (line, side) = self.github_anchor(comment.anchor)?;
+                Some(ReviewCommentDto {
+                    path: comment.path.clone(),
+                    line,
+                    side,
+                    body: comment.body.clone(),
+                })
+            })
+            .collect()
     }
 
     fn save_comment(&mut self) {
@@ -447,16 +522,10 @@ impl DiffReview {
         let Some(anchor) = self.cursor_anchor() else {
             return;
         };
+        let (old_line, new_line) = self.anchor_lines(anchor);
         let file = &self.diff.files[anchor.file];
         let hunk = &file.hunks[anchor.hunk];
         let line = anchor.line.map(|index| &hunk.lines[index]);
-        let (old_line, new_line) = match line {
-            Some(line) => (line.old_line, line.new_line),
-            None => (
-                hunk.lines.iter().find_map(|line| line.old_line),
-                hunk.lines.iter().find_map(|line| line.new_line),
-            ),
-        };
         let context = match anchor.line {
             Some(index) => {
                 let start = index.saturating_sub(2);
@@ -529,6 +598,12 @@ impl DiffReview {
             RowKind::StatusHeader => Cow::Borrowed("STATUS"),
             RowKind::Status(index) => Cow::Borrowed(&self.diff.status[index]),
             RowKind::Clean => Cow::Borrowed("clean worktree"),
+            RowKind::Divergence => {
+                Cow::Owned(divergence_notice(self.diff.divergence.as_ref()).unwrap_or_default())
+            }
+            RowKind::Truncated if self.is_pull_request() => Cow::Borrowed(
+                "this pull request is too large to read in full; the rest is on GitHub",
+            ),
             RowKind::Truncated => Cow::Borrowed(
                 "diff output was truncated; review the checkout directly for omitted changes",
             ),
@@ -579,7 +654,7 @@ impl DiffReview {
         match kind {
             RowKind::StatusHeader | RowKind::StatHeader | RowKind::File(_) => VisualKind::File,
             RowKind::Status(_) => VisualKind::Context,
-            RowKind::Truncated => VisualKind::Deletion,
+            RowKind::Divergence | RowKind::Truncated => VisualKind::Warning,
             RowKind::Clean | RowKind::Spacer | RowKind::Stat(_) | RowKind::Header(..) => {
                 VisualKind::Dim
             }
@@ -592,21 +667,54 @@ impl DiffReview {
         }
     }
 
-    fn handle_input(&mut self, event: &Event<UserEvent>) -> bool {
+    /// Drive the open prompt. Returns whether the event belonged to it
+    /// — and, when a verdict was picked, the review to submit, because
+    /// that is the one prompt whose completion leaves the component.
+    fn handle_input(&mut self, event: &Event<UserEvent>) -> (bool, Option<Msg>) {
         if matches!(self.mode, InputMode::Normal) {
-            return false;
+            return (false, None);
         }
         if let Event::Paste(text) = event {
             let input = match &mut self.mode {
-                InputMode::Search(input) | InputMode::Comment(input) => input,
-                InputMode::Normal => return false,
+                InputMode::Search(input)
+                | InputMode::Comment(input)
+                | InputMode::ReviewSummary(input) => input,
+                InputMode::Normal | InputMode::ReviewVerdict(_) => return (true, None),
             };
             input.extend(text.chars().filter(|character| !character.is_control()));
-            return true;
+            return (true, None);
         }
         let Event::Keyboard(key) = event else {
-            return true;
+            return (true, None);
         };
+        // The verdict prompt is a choice, not a field: every key means
+        // something other than "type that character".
+        if let InputMode::ReviewVerdict(summary) = &self.mode {
+            let verdict = match key.code {
+                Key::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(ReviewVerdictDto::Comment)
+                }
+                Key::Char('a') => Some(ReviewVerdictDto::Approve),
+                Key::Char('r') => Some(ReviewVerdictDto::RequestChanges),
+                _ => None,
+            };
+            let Some(verdict) = verdict else {
+                if matches!(key.code, Key::Esc) {
+                    self.mode = InputMode::Normal;
+                }
+                return (true, None);
+            };
+            let summary = summary.trim().to_string();
+            let message = self.review_head().map(|head_sha| Msg::DiffReviewPosted {
+                workspace_key: self.workspace_key.clone(),
+                head_sha: head_sha.to_string(),
+                summary,
+                verdict,
+                comments: self.review_comments(),
+            });
+            self.mode = InputMode::Normal;
+            return (true, message);
+        }
         match key.code {
             Key::Esc => {
                 self.mode = InputMode::Normal;
@@ -618,32 +726,54 @@ impl DiffReview {
                     self.find_match(true);
                 }
                 InputMode::Comment(_) => self.save_comment(),
-                InputMode::Normal => {}
+                // An empty body is not a review GitHub will take, so
+                // Enter on one holds the prompt open rather than
+                // advancing to a verdict that cannot be submitted.
+                InputMode::ReviewSummary(summary) if !summary.trim().is_empty() => {
+                    self.mode = InputMode::ReviewVerdict(summary.clone());
+                }
+                InputMode::ReviewSummary(_) | InputMode::Normal | InputMode::ReviewVerdict(_) => {}
             },
             Key::Backspace => match &mut self.mode {
-                InputMode::Search(input) | InputMode::Comment(input) => {
+                InputMode::Search(input)
+                | InputMode::Comment(input)
+                | InputMode::ReviewSummary(input) => {
                     input.pop();
                 }
-                InputMode::Normal => {}
+                InputMode::Normal | InputMode::ReviewVerdict(_) => {}
             },
             Key::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 match &mut self.mode {
-                    InputMode::Search(input) | InputMode::Comment(input) => {
+                    InputMode::Search(input)
+                    | InputMode::Comment(input)
+                    | InputMode::ReviewSummary(input) => {
                         input.push(character);
                     }
-                    InputMode::Normal => {}
+                    InputMode::Normal | InputMode::ReviewVerdict(_) => {}
                 }
             }
             _ => {}
         }
-        true
+        (true, None)
     }
 
     fn source_label(&self) -> &'static str {
         match self.target {
             WorkspaceDiffTarget::Session(_) => "local worktree",
             WorkspaceDiffTarget::LinkedCheckout => "local checkout",
+            WorkspaceDiffTarget::PullRequest => "pull request",
         }
+    }
+
+    fn is_pull_request(&self) -> bool {
+        matches!(self.target, WorkspaceDiffTarget::PullRequest)
+    }
+
+    /// The commit a review raised here pins its comments to. Always
+    /// present on a pull-request diff — it is what the daemon read the
+    /// diff at.
+    fn review_head(&self) -> Option<&str> {
+        self.diff.head_sha.as_deref()
     }
 
     fn render_tree(&self, frame: &mut Frame, area: Rect, theme: &crate::theme::Theme) {
@@ -938,12 +1068,23 @@ impl Component for DiffReview {
                 "c comment · / search · [/] hunks · {/} files · h/l side then scroll".to_string()
             }
             InputMode::Normal => format!(
-                "{} comment{} drafted · Shift-S send · x remove here",
+                "{} comment{} drafted · Shift-S {} · x remove here",
                 self.comments.len(),
-                if self.comments.len() == 1 { "" } else { "s" }
+                if self.comments.len() == 1 { "" } else { "s" },
+                if self.is_pull_request() {
+                    "submit as a GitHub review"
+                } else {
+                    "send to the agent"
+                },
             ),
             InputMode::Search(input) => format!("/{input}█"),
             InputMode::Comment(input) => format!("Comment: {input}█"),
+            InputMode::ReviewSummary(input) => format!("Review summary: {input}█"),
+            InputMode::ReviewVerdict(_) => format!(
+                "Post {} comment{} to GitHub — c comment · a approve · r request changes · Esc cancel",
+                self.comments.len(),
+                if self.comments.len() == 1 { "" } else { "s" },
+            ),
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(input, theme.hint()))),
@@ -961,8 +1102,16 @@ impl Component for DiffReview {
             (true, Focus::Tree) => "Tab focus changes · t hide tree",
             (true, Focus::Diff) => "Tab focus tree · t hide tree",
         };
-        let hint =
-            format!("j/k · PgUp/PgDn navigate · {tree_hint} · {layout} · n/N search · Esc close");
+        // Name the source `p` would move TO, not the one already on
+        // screen — the title bar says where you are.
+        let source_hint = match (self.is_pull_request(), self.comments.is_empty()) {
+            (_, false) => "p blocked by drafted comments",
+            (true, true) => "p read the local diff",
+            (false, true) => "p read the PR diff",
+        };
+        let hint = format!(
+            "j/k · PgUp/PgDn navigate · {tree_hint} · {layout} · {source_hint} · n/N search · Esc close"
+        );
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 crate::util::truncate_ellipsis(&hint, hint_area.width as usize).into_owned(),
@@ -989,8 +1138,9 @@ impl Component for DiffReview {
 
 impl AppComponent<Msg, UserEvent> for DiffReview {
     fn on(&mut self, event: &Event<UserEvent>) -> Option<Msg> {
-        if self.handle_input(event) {
-            return None;
+        let (consumed, message) = self.handle_input(event);
+        if consumed {
+            return message;
         }
         match event {
             Event::Keyboard(key) => {
@@ -1066,6 +1216,27 @@ impl AppComponent<Msg, UserEvent> for DiffReview {
                     Key::Char('N') => self.find_match(false),
                     Key::Char('c') if !ctrl => self.begin_comment(),
                     Key::Char('x') if !ctrl => self.remove_comments_at_cursor(),
+                    // Switching source rebuilds the viewer from the
+                    // other document, and a drafted comment's anchor
+                    // does not survive the trip — a worktree line has
+                    // no counterpart on GitHub, and vice versa. Refuse
+                    // rather than silently reinterpret or drop them.
+                    Key::Char('p') if !ctrl && self.comments.is_empty() => {
+                        return Some(Msg::DiffReviewSourceSwitched {
+                            workspace_key: self.workspace_key.clone(),
+                            showing: self.target.clone(),
+                        });
+                    }
+                    // One key, two verbs, chosen by the source on
+                    // screen: the local diff's comments can only go to
+                    // the agent working in that checkout, and the PR's
+                    // can only go to GitHub.
+                    Key::Char('S') if !self.comments.is_empty() && self.is_pull_request() => {
+                        // Composing first, rather than posting on the
+                        // keypress: publishing to a PR is public and
+                        // must not ride a stray `S`.
+                        self.mode = InputMode::ReviewSummary(String::new());
+                    }
                     Key::Char('S') if !self.comments.is_empty() => {
                         return Some(Msg::DiffReviewSubmitted {
                             workspace_key: self.workspace_key.clone(),
@@ -1125,6 +1296,7 @@ fn row_file(kind: RowKind) -> Option<usize> {
         RowKind::StatusHeader
         | RowKind::Status(_)
         | RowKind::Clean
+        | RowKind::Divergence
         | RowKind::Truncated
         | RowKind::Spacer
         | RowKind::StatHeader
@@ -1152,6 +1324,7 @@ fn row_anchor(kind: RowKind) -> Option<CommentAnchor> {
         RowKind::StatusHeader
         | RowKind::Status(_)
         | RowKind::Clean
+        | RowKind::Divergence
         | RowKind::Truncated
         | RowKind::Spacer
         | RowKind::StatHeader
@@ -1176,6 +1349,7 @@ fn row_covers(kind: RowKind, anchor: CommentAnchor) -> bool {
         RowKind::StatusHeader
         | RowKind::Status(_)
         | RowKind::Clean
+        | RowKind::Divergence
         | RowKind::Truncated
         | RowKind::Spacer
         | RowKind::StatHeader
@@ -1200,6 +1374,7 @@ fn visual_color(visual: VisualKind, theme: &crate::theme::Theme) -> Color {
         VisualKind::Context => theme.text_strong,
         VisualKind::Addition => theme.success,
         VisualKind::Deletion => theme.error,
+        VisualKind::Warning => theme.warn,
     }
 }
 
@@ -1259,6 +1434,45 @@ struct DirNode {
     files: BTreeMap<String, usize>,
 }
 
+/// What to say about a checkout that has drifted from the pull request
+/// on screen. `None` when it has not: an in-sync checkout earns no row.
+///
+/// The counts are the whole point — "your checkout differs" is a shrug,
+/// "2 commits of yours are not in this PR" is a reason to stop.
+fn divergence_notice(divergence: Option<&WorkspaceDiffDivergenceDto>) -> Option<String> {
+    let divergence = divergence?;
+    let mut parts = Vec::new();
+    match divergence.commits {
+        Some(spread) => {
+            if spread.local_only > 0 {
+                parts.push(format!(
+                    "{} local commit{} not in this PR",
+                    spread.local_only,
+                    if spread.local_only == 1 { "" } else { "s" },
+                ));
+            }
+            if spread.pr_only > 0 {
+                parts.push(format!(
+                    "{} PR commit{} not checked out",
+                    spread.pr_only,
+                    if spread.pr_only == 1 { "" } else { "s" },
+                ));
+            }
+        }
+        // The PR's head commit is not in the checkout at all, so no
+        // count exists — but that absence is itself the divergence.
+        None => parts.push("checkout is on an unrelated commit".to_string()),
+    }
+    if divergence.dirty_files > 0 {
+        parts.push(format!(
+            "{} uncommitted file{}",
+            divergence.dirty_files,
+            if divergence.dirty_files == 1 { "" } else { "s" },
+        ));
+    }
+    (!parts.is_empty()).then(|| format!("DIVERGED — {}", parts.join(" · ")))
+}
+
 fn build_tree(files: &[DiffFileDto]) -> Vec<TreeNode> {
     let mut root = DirNode::default();
     for (index, file) in files.iter().enumerate() {
@@ -1314,14 +1528,27 @@ fn flatten_tree(node: &DirNode, depth: usize, files: &[DiffFileDto], out: &mut V
 }
 
 fn build_rows(diff: &WorkspaceDiffDto, split: bool) -> Vec<RowKind> {
-    let mut rows = vec![RowKind::StatusHeader];
+    // A pull request has no working tree, so its diff opens on the
+    // divergence notice instead of a porcelain status block — "clean
+    // worktree" under a PR diff would be answering a question nobody
+    // asked with a fact about somewhere else.
+    let local = diff.head_sha.is_none();
+    let mut rows = Vec::new();
+    if local {
+        rows.push(RowKind::StatusHeader);
+    }
     if diff.truncated {
         rows.push(RowKind::Truncated);
     }
-    if diff.status.is_empty() {
-        rows.push(RowKind::Clean);
-    } else {
-        rows.extend((0..diff.status.len()).map(RowKind::Status));
+    if divergence_notice(diff.divergence.as_ref()).is_some() {
+        rows.push(RowKind::Divergence);
+    }
+    if local {
+        if diff.status.is_empty() {
+            rows.push(RowKind::Clean);
+        } else {
+            rows.extend((0..diff.status.len()).map(RowKind::Status));
+        }
     }
     if !diff.stat.is_empty() {
         rows.push(RowKind::Spacer);
@@ -1404,6 +1631,8 @@ mod tests {
             status: vec![" M src/lib.rs".into()],
             stat: vec![" src/lib.rs | 2 +".into()],
             truncated: false,
+            head_sha: None,
+            divergence: None,
             files: vec![DiffFileDto {
                 old_path: Some("src/lib.rs".into()),
                 path: "src/lib.rs".into(),
@@ -1600,6 +1829,8 @@ mod tests {
             status: Vec::new(),
             stat: Vec::new(),
             truncated: false,
+            head_sha: None,
+            divergence: None,
             files: vec![
                 file(
                     "crates/tui/src/a.rs",
@@ -1646,6 +1877,8 @@ mod tests {
             status: Vec::new(),
             stat: Vec::new(),
             truncated: false,
+            head_sha: None,
+            divergence: None,
             files: vec![file(
                 "src/lib.rs",
                 vec![
@@ -1739,6 +1972,8 @@ mod tests {
             status: Vec::new(),
             stat: Vec::new(),
             truncated: false,
+            head_sha: None,
+            divergence: None,
             files: vec![
                 file(
                     "src/a.rs",
@@ -1790,6 +2025,8 @@ mod tests {
             status: vec![" M src/lib.rs".into()],
             stat: vec![" src/lib.rs | 2 +-".into()],
             truncated: false,
+            head_sha: None,
+            divergence: None,
             files: vec![
                 file(
                     "src/lib.rs",
@@ -1962,6 +2199,8 @@ mod tests {
             status: Vec::new(),
             stat: Vec::new(),
             truncated: false,
+            head_sha: None,
+            divergence: None,
             files,
         });
         render(&mut review);
@@ -2068,6 +2307,8 @@ mod tests {
             status: Vec::new(),
             stat: Vec::new(),
             truncated: false,
+            head_sha: None,
+            divergence: None,
             files: vec![file(
                 "src/lib.rs",
                 vec![
@@ -2086,5 +2327,303 @@ mod tests {
             "the line-number gutter is searchable; landed on {:?}",
             review.row_text(review.cursor),
         );
+    }
+
+    fn pull_request_review(diff: WorkspaceDiffDto) -> DiffReview {
+        DiffReview::new(
+            WorkspaceKey::new("w"),
+            WorkspaceDiffTarget::PullRequest,
+            Vec::new(),
+            diff,
+        )
+    }
+
+    /// The PR diff is a different document from the worktree's, so the
+    /// header has to say which one is on screen — reading one and
+    /// merging the other is the mistake this whole source split exists
+    /// to prevent.
+    #[test]
+    fn the_header_names_the_pull_request_as_the_source() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        let mut review = pull_request_review(diff);
+
+        assert!(
+            render(&mut review).contains("Review · pull request ·"),
+            "the PR source must be named in the title"
+        );
+    }
+
+    /// A checkout that has drifted from the PR is the case that causes
+    /// real mistakes, so it earns a row of its own — with the counts,
+    /// because "your checkout differs" is a shrug.
+    #[test]
+    fn a_diverged_checkout_is_called_out_with_its_counts() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        diff.divergence = Some(WorkspaceDiffDivergenceDto {
+            dirty_files: 2,
+            commits: Some(lazybox_ipc::CommitSpreadDto {
+                local_only: 1,
+                pr_only: 3,
+            }),
+        });
+        let mut review = pull_request_review(diff);
+
+        // Wide enough that the whole notice fits: the assertion is
+        // about what it says, not about where the pane clips it.
+        let rendered = render_sized(&mut review, 200, 30);
+        assert!(
+            rendered.contains("1 local commit not in this PR"),
+            "unpushed work must be named: {rendered}"
+        );
+        assert!(
+            rendered.contains("3 PR commits not checked out"),
+            "commits only on the PR must be named: {rendered}"
+        );
+        assert!(
+            rendered.contains("2 uncommitted files"),
+            "a dirty worktree must be named: {rendered}"
+        );
+    }
+
+    /// An in-sync checkout earns no row — a notice that fires every
+    /// time is one nobody reads when it matters.
+    #[test]
+    fn an_in_sync_checkout_gets_no_divergence_row() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        diff.divergence = Some(WorkspaceDiffDivergenceDto {
+            dirty_files: 0,
+            commits: Some(lazybox_ipc::CommitSpreadDto {
+                local_only: 0,
+                pr_only: 0,
+            }),
+        });
+        let mut review = pull_request_review(diff);
+
+        assert!(!render(&mut review).contains("DIVERGED"));
+        assert!(!review.rows.contains(&RowKind::Divergence));
+    }
+
+    /// A PR has no working tree, so the porcelain status block is
+    /// answering a question nobody asked — and "clean worktree" under a
+    /// PR diff is an answer about somewhere else entirely.
+    #[test]
+    fn the_pull_request_view_drops_the_worktree_status_block() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        diff.status = Vec::new();
+        let mut review = pull_request_review(diff);
+
+        let rendered = render(&mut review);
+        assert!(!rendered.contains("clean worktree"), "{rendered}");
+        assert!(!rendered.contains("STATUS"), "{rendered}");
+    }
+
+    /// `p` asks the model for the other document. It never mutates the
+    /// viewer in place — the PR's diff lives on GitHub and the
+    /// worktree's on disk, and neither is derivable from the other.
+    #[test]
+    fn p_asks_for_the_other_source() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        let mut review = pull_request_review(diff);
+        render(&mut review);
+
+        assert!(matches!(
+            review.on(&key(Key::Char('p'))),
+            Some(Msg::DiffReviewSourceSwitched {
+                showing: WorkspaceDiffTarget::PullRequest,
+                ..
+            })
+        ));
+    }
+
+    /// A drafted comment anchors into the document it was written on; a
+    /// worktree line has no counterpart on GitHub and vice versa. So
+    /// the switch is refused rather than silently dropping or
+    /// reinterpreting what was typed.
+    #[test]
+    fn p_is_refused_while_comments_are_drafted() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        let mut review = pull_request_review(diff);
+        render(&mut review);
+        comment_on(&mut review, "fix();", "this needs a test");
+
+        assert!(review.on(&key(Key::Char('p'))).is_none());
+        assert!(
+            render(&mut review).contains("p blocked by drafted comments"),
+            "the refusal must say why"
+        );
+    }
+
+    /// `Shift-S` is one key with two verbs, chosen by the source: the
+    /// local diff's comments can only reach the agent working in it,
+    /// and the PR's can only reach GitHub. On the PR it opens the
+    /// review prompts rather than posting on the keypress — publishing
+    /// must not ride a single stray `S`.
+    #[test]
+    fn the_pull_request_send_composes_a_review_instead_of_prompting_an_agent() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        let mut review = pull_request_review(diff);
+        render(&mut review);
+        comment_on(&mut review, "fix();", "this needs a test");
+
+        assert!(review.on(&key(Key::Char('S'))).is_none());
+        assert!(matches!(review.mode, InputMode::ReviewSummary(_)));
+        assert!(render(&mut review).contains("Review summary:"));
+    }
+
+    /// The whole batch becomes one review, anchored the way GitHub
+    /// anchors comments: an added line on the RIGHT at its new number,
+    /// a deleted one on the LEFT at its old number.
+    #[test]
+    fn a_submitted_review_carries_every_comment_with_its_github_anchor() {
+        let diff = WorkspaceDiffDto {
+            status: Vec::new(),
+            stat: Vec::new(),
+            truncated: false,
+            head_sha: Some("f00dcafe".into()),
+            divergence: None,
+            files: vec![file(
+                "src/lib.rs",
+                vec![
+                    line(DiffLineKindDto::Deletion, "-gone();", Some(41), None),
+                    line(DiffLineKindDto::Addition, "+fix();", None, Some(41)),
+                ],
+            )],
+        };
+        let mut review = pull_request_review(diff);
+        render(&mut review);
+        // Side by side, the deletion and its replacement share a row,
+        // so each comment is written on the half the cursor addresses.
+        review.cursor = (0..review.rows.len())
+            .position(|index| review.row_text(index).contains("-gone();"))
+            .expect("the replacement row");
+        review.on(&key(Key::Char('h')));
+        review.mode = InputMode::Comment("why remove this?".into());
+        review.save_comment();
+        review.on(&key(Key::Char('l')));
+        review.mode = InputMode::Comment("drops the error".into());
+        review.save_comment();
+
+        review.mode = InputMode::ReviewSummary("two nits".into());
+        review.handle_input(&key(Key::Enter));
+        assert!(matches!(review.mode, InputMode::ReviewVerdict(_)));
+        let submitted = review.handle_input(&key(Key::Char('r'))).1;
+
+        let Some(Msg::DiffReviewPosted {
+            head_sha,
+            summary,
+            verdict,
+            comments,
+            ..
+        }) = submitted
+        else {
+            panic!("the verdict keypress must submit, got {submitted:?}");
+        };
+        assert_eq!(head_sha, "f00dcafe");
+        assert_eq!(summary, "two nits");
+        assert_eq!(verdict, ReviewVerdictDto::RequestChanges);
+        assert_eq!(
+            comments,
+            vec![
+                ReviewCommentDto {
+                    path: "src/lib.rs".into(),
+                    line: 41,
+                    side: DiffSideDto::Left,
+                    body: "why remove this?".into(),
+                },
+                ReviewCommentDto {
+                    path: "src/lib.rs".into(),
+                    line: 41,
+                    side: DiffSideDto::Right,
+                    body: "drops the error".into(),
+                },
+            ]
+        );
+        assert!(matches!(review.mode, InputMode::Normal));
+    }
+
+    /// GitHub refuses a comment or request-changes review with no body,
+    /// so Enter on an empty summary holds the prompt open rather than
+    /// walking the reviewer to a verdict that cannot be submitted.
+    #[test]
+    fn an_empty_review_summary_does_not_advance_to_a_verdict() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        let mut review = pull_request_review(diff);
+        render(&mut review);
+        comment_on(&mut review, "fix();", "this needs a test");
+
+        review.mode = InputMode::ReviewSummary("   ".into());
+        review.handle_input(&key(Key::Enter));
+
+        assert!(matches!(review.mode, InputMode::ReviewSummary(_)));
+    }
+
+    /// Esc at the verdict abandons the review without posting. The
+    /// comments survive — the reviewer backed out of publishing, not
+    /// out of the work.
+    #[test]
+    fn escaping_the_verdict_posts_nothing_and_keeps_the_comments() {
+        let mut diff = sample();
+        diff.head_sha = Some("f00dcafe".into());
+        let mut review = pull_request_review(diff);
+        render(&mut review);
+        comment_on(&mut review, "fix();", "this needs a test");
+        review.mode = InputMode::ReviewVerdict("a nit".into());
+
+        assert!(review.handle_input(&key(Key::Esc)).1.is_none());
+        assert!(matches!(review.mode, InputMode::Normal));
+        assert_eq!(review.comments.len(), 1);
+    }
+
+    /// `\ No newline at end of file` carries no line number on either
+    /// side, so GitHub cannot address it. Refusing the input is the
+    /// only refusal that costs the reviewer nothing — refusing at
+    /// submit time would throw away what they had already typed.
+    #[test]
+    fn a_line_github_cannot_address_refuses_the_comment_input() {
+        let diff = WorkspaceDiffDto {
+            status: Vec::new(),
+            stat: Vec::new(),
+            truncated: false,
+            head_sha: Some("f00dcafe".into()),
+            divergence: None,
+            files: vec![file(
+                "src/lib.rs",
+                vec![
+                    line(DiffLineKindDto::Addition, "+fix();", None, Some(41)),
+                    line(
+                        DiffLineKindDto::Meta,
+                        "\\ No newline at end of file",
+                        None,
+                        None,
+                    ),
+                ],
+            )],
+        };
+        let mut on_github = pull_request_review(diff);
+        render(&mut on_github);
+        on_github.cursor = (0..on_github.rows.len())
+            .position(|index| on_github.row_text(index).contains("No newline"))
+            .expect("the meta row");
+
+        on_github.begin_comment();
+        assert!(matches!(on_github.mode, InputMode::Normal));
+
+        // The same row on the local source still takes a comment: it
+        // goes to an agent that can read the worktree, not to GitHub.
+        let mut local = review(sample());
+        render(&mut local);
+        local.cursor = (0..local.rows.len())
+            .position(|index| local.row_text(index).contains("fix();"))
+            .expect("the added row");
+        local.begin_comment();
+        assert!(matches!(local.mode, InputMode::Comment(_)));
     }
 }

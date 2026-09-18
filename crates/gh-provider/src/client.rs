@@ -1356,6 +1356,13 @@ fn request_profile(
         | "create working claim label"
         | "add working claim label"
         | "delete working claim label" => (ApiResource::rest("core"), RequestPriority::Cold),
+        // The review reader and its verb (#1808). REST `core`, and
+        // `Interactive` because a user is sitting in front of the
+        // modal waiting: classified `Recent` they would be refused
+        // exactly when the background allowance is spent.
+        "read PR diff head" | "list PR diff files" | "submit PR review" => {
+            (ApiResource::rest("core"), RequestPriority::Interactive)
+        }
         operation
             if operation.starts_with("list ")
                 || operation == "post issue comment"
@@ -1445,6 +1452,78 @@ pub struct RepoMergeSettings {
     /// The repo's `viewerDefaultMergeMethod` (`MERGE` / `SQUASH` / `REBASE`).
     pub method: String,
     pub is_private: bool,
+}
+
+/// A pull request's diff as GitHub serves it, plus the commits that
+/// bound it. Deliberately not `lazybox_git_ops`' `WorktreeDiff` — this
+/// crate may not depend on git-ops, and the caller that can parse the
+/// patches owns the conversion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestDiff {
+    /// The commit the diff was read at. Anchors both the divergence
+    /// notice and the review the reviewer posts back.
+    pub head_sha: String,
+    pub base_sha: String,
+    pub files: Vec<PullRequestDiffFile>,
+    /// The file list or its patch text ran past what one read returns.
+    pub truncated: bool,
+}
+
+/// One changed file in a pull request's diff. `patch` is GitHub's own
+/// unified-diff body — hunks only, with no `diff --git` preamble — and
+/// is absent for a file too large to patch or with no textual change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestDiffFile {
+    pub path: String,
+    pub previous_path: Option<String>,
+    pub change: PullRequestFileChange,
+    pub additions: u64,
+    pub deletions: u64,
+    pub patch: Option<String>,
+}
+
+/// Whether a file exists on both sides of a pull request's diff. Only
+/// the three-way distinction survives the trip: a rename, a copy and an
+/// ordinary edit all have both a pre-image and a post-image, which is
+/// the one thing a caller assembling `---` / `+++` markers needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestFileChange {
+    Added,
+    Removed,
+    Modified,
+}
+
+/// One review submitted as a unit: a summary, a verdict, and every
+/// inline comment, all pinned to one commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestReview<'a> {
+    pub commit_id: &'a str,
+    pub summary: &'a str,
+    pub verdict: ReviewVerdict,
+    pub comments: &'a [ReviewComment],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+/// One inline comment, anchored the way GitHub anchors them: a path, a
+/// line number in the pull request's diff, and the side that line is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewComment {
+    pub path: String,
+    pub line: u32,
+    pub side: DiffSide,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffSide {
+    Left,
+    Right,
 }
 
 /// What the merge mutation left for its caller to finish, trailer-wise.
@@ -3093,6 +3172,16 @@ impl GhClient {
     /// call per repo-refresh cycle; a `force_full_sweep` clears the cache
     /// outright.
     pub const ISSUE_DEPS_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+    /// Files per page of [`fetch_pr_diff`](Self::fetch_pr_diff)'s file
+    /// list — GitHub's maximum, so an ordinary PR costs one request.
+    const PR_DIFF_PAGE_SIZE: usize = 100;
+    /// Page ceiling for that list. A PR past it is truncated rather
+    /// than paged forever; GitHub itself stops at 3000 files.
+    const PR_DIFF_MAX_PAGES: usize = 10;
+    /// Patch-text ceiling, matching the local reader's own cap so a
+    /// giant PR cannot make the viewer the thing that falls over.
+    const PR_DIFF_MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 
     /// Should the next sync cycle run a heavy full sweep, or is the
     /// notifications-driven incremental path safe to use? Returns true
@@ -6257,6 +6346,215 @@ impl GhClient {
             return Ok(None);
         };
         Ok(Some(graphql::pr_details_to_details(&node, &self.user)))
+    }
+
+    /// Read a pull request's diff as GitHub renders it: the patch
+    /// against the merge base, carrying every commit on the branch —
+    /// including other people's — and none of the reviewer's unpushed
+    /// work. A different document from the local worktree diff, and the
+    /// only one a review comment can anchor to.
+    ///
+    /// Two REST reads: the pull request itself for its head commit (the
+    /// anchor a divergence notice and a review's `commit_id` need), then
+    /// its file list, paged at 100. Both enter the shared governor.
+    ///
+    /// `truncated` is set when the file list runs past the page
+    /// ceiling or the accumulated patch text past the byte one; the
+    /// caller shows what it got and says so, rather than presenting a
+    /// partial diff as whole.
+    pub async fn fetch_pr_diff(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<PullRequestDiff, GhError> {
+        const HEAD_OPERATION: &str = "read PR diff head";
+        const FILES_OPERATION: &str = "list PR diff files";
+
+        self.acquire_or_block(HEAD_OPERATION)?;
+        let permit = self.request_permit().await?;
+        let started = std::time::Instant::now();
+        let pull: octocrab::models::pulls::PullRequest = self
+            .inner
+            .get(format!("/repos/{owner}/{repo}/pulls/{number}"), None::<&()>)
+            .await
+            .inspect_err(|_| {
+                self.observe_unreported_response(
+                    HEAD_OPERATION,
+                    crate::rate_budget::ApiResource::rest("core"),
+                    started,
+                    false,
+                )
+            })?;
+        self.observe_unreported_response(
+            HEAD_OPERATION,
+            crate::rate_budget::ApiResource::rest("core"),
+            started,
+            true,
+        );
+        drop(permit);
+        let head_sha = pull.head.sha;
+        let base_sha = pull.base.sha;
+
+        let mut files: Vec<PullRequestDiffFile> = Vec::new();
+        let mut patch_bytes = 0usize;
+        let mut truncated = false;
+        for page in 1..=Self::PR_DIFF_MAX_PAGES {
+            self.acquire_or_block(FILES_OPERATION)?;
+            let permit = self.request_permit().await?;
+            let started = std::time::Instant::now();
+            let entries: octocrab::Page<octocrab::models::repos::DiffEntry> = self
+                .inner
+                .get(
+                    format!(
+                        "/repos/{owner}/{repo}/pulls/{number}/files?per_page={}&page={page}",
+                        Self::PR_DIFF_PAGE_SIZE,
+                    ),
+                    None::<&()>,
+                )
+                .await
+                .inspect_err(|_| {
+                    self.observe_unreported_response(
+                        FILES_OPERATION,
+                        crate::rate_budget::ApiResource::rest("core"),
+                        started,
+                        false,
+                    )
+                })?;
+            self.observe_unreported_response(
+                FILES_OPERATION,
+                crate::rate_budget::ApiResource::rest("core"),
+                started,
+                true,
+            );
+            drop(permit);
+            let count = entries.items.len();
+            for entry in entries.items {
+                patch_bytes += entry.patch.as_ref().map_or(0, String::len);
+                if patch_bytes > Self::PR_DIFF_MAX_PATCH_BYTES {
+                    truncated = true;
+                    break;
+                }
+                files.push(PullRequestDiffFile {
+                    path: entry.filename,
+                    previous_path: entry.previous_filename,
+                    change: match entry.status {
+                        octocrab::models::repos::DiffEntryStatus::Added => {
+                            PullRequestFileChange::Added
+                        }
+                        octocrab::models::repos::DiffEntryStatus::Removed => {
+                            PullRequestFileChange::Removed
+                        }
+                        _ => PullRequestFileChange::Modified,
+                    },
+                    additions: entry.additions,
+                    deletions: entry.deletions,
+                    patch: entry.patch,
+                });
+            }
+            if truncated {
+                break;
+            }
+            if count < Self::PR_DIFF_PAGE_SIZE {
+                return Ok(PullRequestDiff {
+                    head_sha,
+                    base_sha,
+                    files,
+                    truncated,
+                });
+            }
+            if page == Self::PR_DIFF_MAX_PAGES {
+                truncated = true;
+            }
+        }
+        if truncated {
+            tracing::info!(
+                "fetch_pr_diff {owner}/{repo}#{number}: truncated at {} files",
+                files.len(),
+            );
+        }
+        Ok(PullRequestDiff {
+            head_sha,
+            base_sha,
+            files,
+            truncated,
+        })
+    }
+
+    /// Post the reviewer's inline comments as **one** pending review,
+    /// with an optional verdict — a single
+    /// `POST /repos/{o}/{r}/pulls/{n}/reviews` carrying a `comments[]`
+    /// array, not N standalone comments, so the PR gains one review
+    /// thread rather than N notifications.
+    ///
+    /// `commit_id` pins the review to the commit whose diff the
+    /// reviewer actually read; GitHub would otherwise default to the
+    /// PR's latest commit and re-anchor every comment onto lines the
+    /// reviewer never saw.
+    ///
+    /// Returns the review's URL on github.com.
+    pub async fn submit_pr_review(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        review: &PullRequestReview<'_>,
+    ) -> Result<String, GhError> {
+        const OPERATION: &str = "submit PR review";
+        let payload = serde_json::json!({
+            "commit_id": review.commit_id,
+            "body": review.summary,
+            "event": match review.verdict {
+                ReviewVerdict::Comment => "COMMENT",
+                ReviewVerdict::Approve => "APPROVE",
+                ReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+            },
+            "comments": review
+                .comments
+                .iter()
+                .map(|comment| {
+                    serde_json::json!({
+                        "path": comment.path,
+                        "line": comment.line,
+                        "side": match comment.side {
+                            DiffSide::Left => "LEFT",
+                            DiffSide::Right => "RIGHT",
+                        },
+                        "body": comment.body,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        });
+        self.acquire_or_block(OPERATION)?;
+        let _permit = self.request_permit().await?;
+        let _mutation_guard = self.mutation_gate.lock().await;
+        let started = std::time::Instant::now();
+        let posted: serde_json::Value = self
+            .inner
+            .post(
+                format!("/repos/{owner}/{repo}/pulls/{number}/reviews"),
+                Some(&payload),
+            )
+            .await
+            .inspect_err(|_| {
+                self.observe_unreported_response(
+                    OPERATION,
+                    crate::rate_budget::ApiResource::rest("core"),
+                    started,
+                    false,
+                )
+            })?;
+        self.observe_unreported_response(
+            OPERATION,
+            crate::rate_budget::ApiResource::rest("core"),
+            started,
+            true,
+        );
+        Ok(posted
+            .get("html_url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string())
     }
 
     /// Resolve a GitHub login to its node ID via GraphQL. Used as
@@ -13907,6 +14205,160 @@ mod tests {
             2,
             "a zero TTL re-probes rather than reusing a stale cache entry"
         );
+    }
+
+    const PR_HEAD_RESPONSE: &str = r#"{
+        "url": "https://api.github.com/repos/o/r/pulls/7",
+        "id": 1,
+        "node_id": "PR_1",
+        "html_url": "https://github.com/o/r/pull/7",
+        "number": 7,
+        "state": "open",
+        "title": "t",
+        "head": {"label": "o:feat", "ref": "feat", "sha": "feedface"},
+        "base": {"label": "o:main", "ref": "main", "sha": "0ff1ce"}
+    }"#;
+
+    const PR_FILES_RESPONSE: &str = r#"[
+        {
+            "sha": "abc",
+            "filename": "src/lib.rs",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 1,
+            "changes": 2,
+            "blob_url": "https://github.com/o/r/blob/feedface/src/lib.rs",
+            "raw_url": "https://github.com/o/r/raw/feedface/src/lib.rs",
+            "contents_url": "https://api.github.com/repos/o/r/contents/src/lib.rs",
+            "patch": "@@ -41,2 +41,2 @@\n-gone();\n+fix();"
+        },
+        {
+            "sha": "def",
+            "filename": "src/new.rs",
+            "status": "added",
+            "additions": 1,
+            "deletions": 0,
+            "changes": 1,
+            "blob_url": "https://github.com/o/r/blob/feedface/src/new.rs",
+            "raw_url": "https://github.com/o/r/raw/feedface/src/new.rs",
+            "contents_url": "https://api.github.com/repos/o/r/contents/src/new.rs",
+            "patch": "@@ -0,0 +1 @@\n+fresh();"
+        }
+    ]"#;
+
+    /// The PR diff is a different document from the worktree's, and
+    /// this is where it comes from: GitHub's own patches, plus the head
+    /// commit that anchors both the divergence notice and any review
+    /// posted back.
+    #[tokio::test]
+    async fn fetch_pr_diff_reads_the_head_commit_and_every_patch() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(
+            vec![PR_HEAD_RESPONSE, PR_FILES_RESPONSE],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+
+        let diff = client.fetch_pr_diff("o", "r", 7).await.expect("diff");
+
+        assert_eq!(diff.head_sha, "feedface");
+        assert_eq!(diff.base_sha, "0ff1ce");
+        assert!(!diff.truncated);
+        assert_eq!(diff.files.len(), 2);
+        assert_eq!(diff.files[0].path, "src/lib.rs");
+        assert_eq!(diff.files[0].change, PullRequestFileChange::Modified);
+        assert!(diff.files[0].patch.as_deref().unwrap().contains("-gone();"));
+        // The added file must survive as *added*: it is what decides
+        // whether the assembled diff's `---` marker says `/dev/null`.
+        assert_eq!(diff.files[1].change, PullRequestFileChange::Added);
+
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests[1].contains("per_page=100"),
+            "the file list must be paged at GitHub's maximum, got {}",
+            requests[1],
+        );
+    }
+
+    /// One page short of the ceiling is the whole list — a second
+    /// request would spend a rate-limit point to learn nothing.
+    #[tokio::test]
+    async fn fetch_pr_diff_stops_on_a_short_page() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(
+            vec![PR_HEAD_RESPONSE, PR_FILES_RESPONSE],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+
+        client.fetch_pr_diff("o", "r", 7).await.expect("diff");
+
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "one PR read plus one file page"
+        );
+    }
+
+    /// The verb's entire point: N comments become ONE review, so the
+    /// PR gains one thread instead of N notifications. Pinned to the
+    /// commit the reviewer read, not to whatever HEAD has become.
+    #[tokio::test]
+    async fn submit_pr_review_posts_the_whole_batch_as_one_request() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(
+            vec![r#"{"html_url":"https://github.com/o/r/pull/7#pullrequestreview-9"}"#],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+
+        let comments = vec![
+            ReviewComment {
+                path: "src/lib.rs".into(),
+                line: 41,
+                side: DiffSide::Left,
+                body: "why remove this?".into(),
+            },
+            ReviewComment {
+                path: "src/lib.rs".into(),
+                line: 41,
+                side: DiffSide::Right,
+                body: "drops the error".into(),
+            },
+        ];
+        let url = client
+            .submit_pr_review(
+                "o",
+                "r",
+                7,
+                &PullRequestReview {
+                    commit_id: "feedface",
+                    summary: "two nits",
+                    verdict: ReviewVerdict::RequestChanges,
+                    comments: &comments,
+                },
+            )
+            .await
+            .expect("review posted");
+
+        assert_eq!(url, "https://github.com/o/r/pull/7#pullrequestreview-9");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "one review, not one request per comment");
+        let request = &requests[0];
+        assert!(
+            request.contains("POST /repos/o/r/pulls/7/reviews"),
+            "{request}"
+        );
+        assert!(
+            request.contains(r#""event":"REQUEST_CHANGES""#),
+            "{request}"
+        );
+        assert!(request.contains(r#""commit_id":"feedface""#), "{request}");
+        assert!(request.contains(r#""side":"LEFT""#), "{request}");
+        assert!(request.contains(r#""side":"RIGHT""#), "{request}");
     }
 }
 

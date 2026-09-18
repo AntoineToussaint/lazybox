@@ -2,6 +2,6 @@
 import type { SessionId } from "./SessionId";
 
 /**
- * Exact checkout whose local changes should be reviewed.
+ * Which document `Command::InspectWorkspaceDiff` should read.
  */
-export type WorkspaceDiffTarget = { "Session": SessionId } | "LinkedCheckout";
+export type WorkspaceDiffTarget = { "Session": SessionId } | "LinkedCheckout" | "PullRequest";

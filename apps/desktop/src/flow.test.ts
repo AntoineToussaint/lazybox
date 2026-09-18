@@ -566,6 +566,8 @@ describe("credential-free desktop workflow", () => {
               },
             ],
             truncated: false,
+            head_sha: null,
+            divergence: null,
           },
           error: null,
         },

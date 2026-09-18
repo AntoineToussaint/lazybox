@@ -2705,48 +2705,39 @@ fn to_dto(row: lazybox_git_ops::WorktreeInspection) -> lazybox_ipc::WorktreeInsp
     }
 }
 
-fn diff_to_dto(diff: lazybox_git_ops::WorktreeDiff) -> lazybox_ipc::WorkspaceDiffDto {
-    lazybox_ipc::WorkspaceDiffDto {
-        status: diff.status,
-        stat: diff.stat,
-        truncated: diff.truncated,
-        files: diff
-            .files
+fn diff_file_to_dto(file: lazybox_git_ops::DiffFile) -> lazybox_ipc::DiffFileDto {
+    lazybox_ipc::DiffFileDto {
+        old_path: file.old_path,
+        path: file.path,
+        headers: file.headers,
+        hunks: file
+            .hunks
             .into_iter()
-            .map(|file| lazybox_ipc::DiffFileDto {
-                old_path: file.old_path,
-                path: file.path,
-                headers: file.headers,
-                hunks: file
-                    .hunks
+            .map(|hunk| lazybox_ipc::DiffHunkDto {
+                header: hunk.header,
+                old_start: hunk.old_start,
+                new_start: hunk.new_start,
+                lines: hunk
+                    .lines
                     .into_iter()
-                    .map(|hunk| lazybox_ipc::DiffHunkDto {
-                        header: hunk.header,
-                        old_start: hunk.old_start,
-                        new_start: hunk.new_start,
-                        lines: hunk
-                            .lines
-                            .into_iter()
-                            .map(|line| lazybox_ipc::DiffLineDto {
-                                kind: match line.kind {
-                                    lazybox_git_ops::DiffLineKind::Context => {
-                                        lazybox_ipc::DiffLineKindDto::Context
-                                    }
-                                    lazybox_git_ops::DiffLineKind::Addition => {
-                                        lazybox_ipc::DiffLineKindDto::Addition
-                                    }
-                                    lazybox_git_ops::DiffLineKind::Deletion => {
-                                        lazybox_ipc::DiffLineKindDto::Deletion
-                                    }
-                                    lazybox_git_ops::DiffLineKind::Meta => {
-                                        lazybox_ipc::DiffLineKindDto::Meta
-                                    }
-                                },
-                                text: line.text,
-                                old_line: line.old_line,
-                                new_line: line.new_line,
-                            })
-                            .collect(),
+                    .map(|line| lazybox_ipc::DiffLineDto {
+                        kind: match line.kind {
+                            lazybox_git_ops::DiffLineKind::Context => {
+                                lazybox_ipc::DiffLineKindDto::Context
+                            }
+                            lazybox_git_ops::DiffLineKind::Addition => {
+                                lazybox_ipc::DiffLineKindDto::Addition
+                            }
+                            lazybox_git_ops::DiffLineKind::Deletion => {
+                                lazybox_ipc::DiffLineKindDto::Deletion
+                            }
+                            lazybox_git_ops::DiffLineKind::Meta => {
+                                lazybox_ipc::DiffLineKindDto::Meta
+                            }
+                        },
+                        text: line.text,
+                        old_line: line.old_line,
+                        new_line: line.new_line,
                     })
                     .collect(),
             })
@@ -2754,44 +2745,196 @@ fn diff_to_dto(diff: lazybox_git_ops::WorktreeDiff) -> lazybox_ipc::WorkspaceDif
     }
 }
 
-/// Read one workspace checkout's worktree diff and emit it to clients.
+fn diff_to_dto(diff: lazybox_git_ops::WorktreeDiff) -> lazybox_ipc::WorkspaceDiffDto {
+    lazybox_ipc::WorkspaceDiffDto {
+        status: diff.status,
+        stat: diff.stat,
+        truncated: diff.truncated,
+        head_sha: None,
+        divergence: None,
+        files: diff.files.into_iter().map(diff_file_to_dto).collect(),
+    }
+}
+
+/// Assemble the unified-diff document GitHub's per-file patches belong
+/// to, so a pull request's diff reaches the viewer through the same
+/// parser the local one does.
+///
+/// GitHub serves hunks with no `diff --git` preamble and no `---` /
+/// `+++` markers; without them the parser has no file boundary to split
+/// on and no path to attach a hunk to.
+fn pr_diff_document(files: &[lazybox_gh::PullRequestDiffFile]) -> String {
+    use lazybox_gh::PullRequestFileChange;
+
+    let mut document = String::new();
+    for file in files {
+        let old_path = file.previous_path.as_deref().unwrap_or(&file.path);
+        document.push_str(&format!("diff --git a/{old_path} b/{}\n", file.path));
+        match file.change {
+            PullRequestFileChange::Added => document.push_str("--- /dev/null\n"),
+            _ => document.push_str(&format!("--- a/{old_path}\n")),
+        }
+        match file.change {
+            PullRequestFileChange::Removed => document.push_str("+++ /dev/null\n"),
+            _ => document.push_str(&format!("+++ b/{}\n", file.path)),
+        }
+        if let Some(patch) = &file.patch {
+            document.push_str(patch);
+            if !patch.ends_with('\n') {
+                document.push('\n');
+            }
+        }
+    }
+    document
+}
+
+/// `git diff --stat`'s job for a document git never produced. Not git's
+/// own format — the scaled bar chart would be a fiction here — but the
+/// same three facts, so the viewer's STAT block reads the same.
+fn pr_diff_stat(files: &[lazybox_gh::PullRequestDiffFile]) -> Vec<String> {
+    let mut lines: Vec<String> = files
+        .iter()
+        .map(|file| format!(" {} | +{} -{}", file.path, file.additions, file.deletions))
+        .collect();
+    let additions: u64 = files.iter().map(|file| file.additions).sum();
+    let deletions: u64 = files.iter().map(|file| file.deletions).sum();
+    lines.push(format!(
+        " {} file{} changed, {additions} insertion{}(+), {deletions} deletion{}(-)",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        if additions == 1 { "" } else { "s" },
+        if deletions == 1 { "" } else { "s" },
+    ));
+    lines
+}
+
+fn pr_diff_to_dto(
+    diff: lazybox_gh::PullRequestDiff,
+    divergence: Option<lazybox_ipc::WorkspaceDiffDivergenceDto>,
+) -> lazybox_ipc::WorkspaceDiffDto {
+    lazybox_ipc::WorkspaceDiffDto {
+        // A pull request has no working tree, so there is no porcelain
+        // status to report; the viewer shows the divergence notice in
+        // that block's place.
+        status: Vec::new(),
+        stat: pr_diff_stat(&diff.files),
+        truncated: diff.truncated,
+        head_sha: Some(diff.head_sha.clone()),
+        divergence,
+        files: lazybox_git_ops::parse_unified_diff(&pr_diff_document(&diff.files))
+            .into_iter()
+            .map(diff_file_to_dto)
+            .collect(),
+    }
+}
+
+/// The workspace's checkout — the newest session's worktree, else a
+/// linked checkout. This is what a pull request's diff is compared
+/// against; which *session* asked does not change the answer.
+fn workspace_checkout(workspace: &lazybox_core::Workspace) -> Option<std::path::PathBuf> {
+    workspace
+        .default_session()
+        .map(|session| session.worktree_path.clone())
+        .or_else(|| workspace.linked_checkout.clone())
+}
+
+/// Read the pull request's diff from GitHub, annotated with how far the
+/// local checkout has drifted from the commit it was read at.
+async fn inspect_pull_request_diff(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+) -> Result<lazybox_ipc::WorkspaceDiffDto, String> {
+    let workspace =
+        load_workspace(config, workspace_key).ok_or_else(|| "workspace not found".to_string())?;
+    let pr = workspace
+        .pr
+        .as_ref()
+        .ok_or_else(|| "this workspace has no pull request".to_string())?;
+    let repo = pr
+        .repo
+        .as_deref()
+        .ok_or_else(|| "pull request has no repo".to_string())?;
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| format!("can't parse owner/name from `{repo}`"))?;
+    let number = pr
+        .id
+        .number()
+        .ok_or_else(|| format!("can't parse PR number from `{}`", pr.id.key))?;
+    let client = resolve_gh_client_result(config).await?;
+    let diff = client
+        .fetch_pr_diff(owner, name, number)
+        .await
+        .map_err(|error| error.to_string())?;
+    let divergence = match workspace_checkout(&workspace) {
+        Some(path) => {
+            let divergence = lazybox_git_ops::checkout_divergence(&path, &diff.head_sha).await;
+            Some(lazybox_ipc::WorkspaceDiffDivergenceDto {
+                dirty_files: divergence.dirty_files as u32,
+                commits: divergence.commits.map(|(local_only, pr_only)| {
+                    lazybox_ipc::CommitSpreadDto {
+                        local_only,
+                        pr_only,
+                    }
+                }),
+            })
+        }
+        None => None,
+    };
+    Ok(pr_diff_to_dto(diff, divergence))
+}
+
+/// Read the diff the client asked for — a checkout's working tree, or
+/// the workspace's pull request as GitHub renders it — and emit it.
 pub async fn handle_inspect_workspace_diff(
     config: &ServerConfig,
     workspace_key: WorkspaceKey,
     target: lazybox_ipc::WorkspaceDiffTarget,
 ) {
-    let result = load_workspace(config, &workspace_key)
-        .ok_or_else(|| "workspace not found".to_string())
-        .and_then(|workspace| match &target {
-            lazybox_ipc::WorkspaceDiffTarget::Session(session_id) => workspace
-                .sessions
-                .iter()
-                .find(|session| session.id == *session_id)
-                .map(|session| session.worktree_path.clone())
-                .ok_or_else(|| "session worktree not found".to_string()),
-            lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout => workspace
-                .linked_checkout
-                .clone()
-                .ok_or_else(|| "linked checkout not found".to_string()),
-        });
     let session_key: lazybox_core::SessionKey = workspace_key.as_str().into();
     let session_id = match &target {
         lazybox_ipc::WorkspaceDiffTarget::Session(session_id) => Some(*session_id),
-        lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout => None,
+        lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout
+        | lazybox_ipc::WorkspaceDiffTarget::PullRequest => None,
     };
     let agent_terminal_ids = config
         .terminal
         .agent_terminals_for_review(&session_key, session_id)
         .await;
-    let (diff, error) = match result {
-        Ok(path) => match lazybox_git_ops::inspect_worktree_diff(&path).await {
-            Ok(diff) => (Some(diff_to_dto(diff)), None),
-            Err(error) => {
-                tracing::warn!(workspace = %workspace_key, "inspect workspace diff failed: {error}");
-                (None, Some(error.to_string()))
+    let result = match &target {
+        lazybox_ipc::WorkspaceDiffTarget::PullRequest => {
+            inspect_pull_request_diff(config, &workspace_key).await
+        }
+        local => {
+            let path = load_workspace(config, &workspace_key)
+                .ok_or_else(|| "workspace not found".to_string())
+                .and_then(|workspace| match local {
+                    lazybox_ipc::WorkspaceDiffTarget::Session(session_id) => workspace
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == *session_id)
+                        .map(|session| session.worktree_path.clone())
+                        .ok_or_else(|| "session worktree not found".to_string()),
+                    _ => workspace
+                        .linked_checkout
+                        .clone()
+                        .ok_or_else(|| "linked checkout not found".to_string()),
+                });
+            match path {
+                Ok(path) => lazybox_git_ops::inspect_worktree_diff(&path)
+                    .await
+                    .map(diff_to_dto)
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
             }
-        },
-        Err(error) => (None, Some(error)),
+        }
+    };
+    let (diff, error) = match result {
+        Ok(diff) => (Some(diff), None),
+        Err(error) => {
+            tracing::warn!(workspace = %workspace_key, "inspect workspace diff failed: {error}");
+            (None, Some(error))
+        }
     };
     let _ = config.bus.send(Event::WorkspaceDiffInspected {
         workspace_key,
@@ -2800,6 +2943,110 @@ pub async fn handle_inspect_workspace_diff(
         diff,
         error,
     });
+}
+
+/// Handle `Command::SubmitPullRequestReview`: post the drafted inline
+/// comments to the workspace's pull request as one review.
+pub async fn handle_submit_pull_request_review(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    head_sha: String,
+    summary: String,
+    verdict: lazybox_ipc::ReviewVerdictDto,
+    comments: Vec<lazybox_ipc::ReviewCommentDto>,
+) {
+    let config = config.clone();
+    detach_mutation(async move {
+        let count = comments.len() as u32;
+        let result = submit_pull_request_review(
+            &config,
+            &workspace_key,
+            &head_sha,
+            &summary,
+            verdict,
+            &comments,
+        )
+        .await;
+        let (url, error) = match result {
+            Ok(url) => {
+                tracing::info!("submitted a {count}-comment review on {workspace_key}");
+                // The PR's own review state just changed; pull it back
+                // rather than leaving the row stale for a poll cycle.
+                config.poll.wake(true);
+                (Some(url), None)
+            }
+            Err(error) => {
+                tracing::warn!("submit review {workspace_key}: {error}");
+                (None, Some(error))
+            }
+        };
+        let _ = config.bus.send(Event::PullRequestReviewSubmitted {
+            workspace_key,
+            comments: count,
+            url,
+            error,
+        });
+    });
+}
+
+async fn submit_pull_request_review(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+    head_sha: &str,
+    summary: &str,
+    verdict: lazybox_ipc::ReviewVerdictDto,
+    comments: &[lazybox_ipc::ReviewCommentDto],
+) -> Result<String, String> {
+    let workspace =
+        load_workspace(config, workspace_key).ok_or_else(|| "workspace not found".to_string())?;
+    let pr = workspace
+        .pr
+        .as_ref()
+        .ok_or_else(|| "this workspace has no pull request".to_string())?;
+    let repo = pr
+        .repo
+        .as_deref()
+        .ok_or_else(|| "pull request has no repo".to_string())?;
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| format!("can't parse owner/name from `{repo}`"))?;
+    let number = pr
+        .id
+        .number()
+        .ok_or_else(|| format!("can't parse PR number from `{}`", pr.id.key))?;
+    let client = resolve_gh_client_result(config).await?;
+    let comments = comments
+        .iter()
+        .map(|comment| lazybox_gh::ReviewComment {
+            path: comment.path.clone(),
+            line: comment.line,
+            side: match comment.side {
+                lazybox_ipc::DiffSideDto::Left => lazybox_gh::DiffSide::Left,
+                lazybox_ipc::DiffSideDto::Right => lazybox_gh::DiffSide::Right,
+            },
+            body: comment.body.clone(),
+        })
+        .collect::<Vec<_>>();
+    client
+        .submit_pr_review(
+            owner,
+            name,
+            number,
+            &lazybox_gh::PullRequestReview {
+                commit_id: head_sha,
+                summary,
+                verdict: match verdict {
+                    lazybox_ipc::ReviewVerdictDto::Comment => lazybox_gh::ReviewVerdict::Comment,
+                    lazybox_ipc::ReviewVerdictDto::Approve => lazybox_gh::ReviewVerdict::Approve,
+                    lazybox_ipc::ReviewVerdictDto::RequestChanges => {
+                        lazybox_gh::ReviewVerdict::RequestChanges
+                    }
+                },
+                comments: &comments,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Run the worktree inspector and emit the result on the bus.
@@ -3981,6 +4228,155 @@ mod prefetch_score_tests {
         noisy.unread_count = 5;
         let warm = prefetch_rank_score(&noisy, EngagementSignals::default(), EngagementTier::Warm);
         assert!(hot > warm);
+    }
+}
+
+#[cfg(test)]
+mod pr_diff_tests {
+    //! GitHub's per-file patches become the same document the local
+    //! reader produces (#1808), so one viewer renders both sources.
+
+    use super::*;
+    use lazybox_gh::{PullRequestDiff, PullRequestDiffFile, PullRequestFileChange};
+
+    fn file(
+        path: &str,
+        change: PullRequestFileChange,
+        patch: &str,
+        additions: u64,
+        deletions: u64,
+    ) -> PullRequestDiffFile {
+        PullRequestDiffFile {
+            path: path.into(),
+            previous_path: None,
+            change,
+            additions,
+            deletions,
+            patch: Some(patch.into()),
+        }
+    }
+
+    /// GitHub serves hunks with no `diff --git` preamble and no
+    /// `---` / `+++` markers. Without them the parser has no file
+    /// boundary to split on and no path to hang a hunk from, so every
+    /// file in a PR would collapse into one.
+    #[test]
+    fn github_patches_become_per_file_hunks_with_line_numbers() {
+        let files = vec![
+            file(
+                "src/lib.rs",
+                PullRequestFileChange::Modified,
+                "@@ -41,2 +41,2 @@\n-gone();\n+fix();",
+                1,
+                1,
+            ),
+            file(
+                "src/new.rs",
+                PullRequestFileChange::Added,
+                "@@ -0,0 +1 @@\n+fresh();",
+                1,
+                0,
+            ),
+        ];
+        let dto = pr_diff_to_dto(
+            PullRequestDiff {
+                head_sha: "feedface".into(),
+                base_sha: "0ff1ce".into(),
+                files,
+                truncated: false,
+            },
+            None,
+        );
+
+        assert_eq!(dto.head_sha.as_deref(), Some("feedface"));
+        assert_eq!(dto.files.len(), 2, "each file must stay its own file");
+        let hunk = &dto.files[0].hunks[0];
+        assert_eq!(hunk.old_start, 41);
+        assert_eq!(
+            (hunk.lines[0].old_line, hunk.lines[0].new_line),
+            (Some(41), None),
+            "the deletion keeps the old-side number a LEFT comment anchors to",
+        );
+        assert_eq!(
+            (hunk.lines[1].old_line, hunk.lines[1].new_line),
+            (None, Some(41)),
+            "the addition keeps the new-side number a RIGHT comment anchors to",
+        );
+        assert!(
+            dto.files[1]
+                .headers
+                .iter()
+                .any(|header| header == "--- /dev/null"),
+            "an added file has no pre-image: {:?}",
+            dto.files[1].headers,
+        );
+    }
+
+    /// A pull request has no working tree, so there is no porcelain
+    /// status to report — the stat block carries the summary instead.
+    #[test]
+    fn the_stat_block_summarizes_what_git_would_have_counted() {
+        let dto = pr_diff_to_dto(
+            PullRequestDiff {
+                head_sha: "feedface".into(),
+                base_sha: "0ff1ce".into(),
+                files: vec![file(
+                    "src/lib.rs",
+                    PullRequestFileChange::Modified,
+                    "@@ -1 +1 @@\n-a\n+b",
+                    1,
+                    1,
+                )],
+                truncated: false,
+            },
+            None,
+        );
+
+        assert!(dto.status.is_empty());
+        assert_eq!(dto.stat[0], " src/lib.rs | +1 -1");
+        assert_eq!(
+            dto.stat[1],
+            " 1 file changed, 1 insertion(+), 1 deletion(-)"
+        );
+    }
+
+    /// A file with no patch (too large, or a pure mode change) must
+    /// still appear: silently dropping it would tell the reviewer the
+    /// PR does not touch it.
+    #[test]
+    fn a_file_without_a_patch_still_gets_a_header() {
+        let document = pr_diff_document(&[PullRequestDiffFile {
+            path: "logo.png".into(),
+            previous_path: None,
+            change: PullRequestFileChange::Modified,
+            additions: 0,
+            deletions: 0,
+            patch: None,
+        }]);
+
+        assert_eq!(
+            document,
+            "diff --git a/logo.png b/logo.png\n--- a/logo.png\n+++ b/logo.png\n"
+        );
+    }
+
+    /// A rename's pre-image lives at the old path. Pointing both
+    /// markers at the new one would render every line of a moved file
+    /// as though it had been edited in place.
+    #[test]
+    fn a_rename_keeps_its_old_path_on_the_pre_image_side() {
+        let document = pr_diff_document(&[PullRequestDiffFile {
+            path: "src/new.rs".into(),
+            previous_path: Some("src/old.rs".into()),
+            change: PullRequestFileChange::Modified,
+            additions: 0,
+            deletions: 0,
+            patch: None,
+        }]);
+
+        assert!(document.starts_with("diff --git a/src/old.rs b/src/new.rs\n"));
+        assert!(document.contains("--- a/src/old.rs\n"));
+        assert!(document.contains("+++ b/src/new.rs\n"));
     }
 }
 

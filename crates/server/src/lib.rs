@@ -1388,6 +1388,9 @@ impl Server {
                         lazybox_ipc::Command::InspectWorkspaceDiff { .. } => {
                             "InspectWorkspaceDiff"
                         }
+                        lazybox_ipc::Command::SubmitPullRequestReview { .. } => {
+                            "SubmitPullRequestReview"
+                        }
                         lazybox_ipc::Command::ScanCheckouts { .. } => "ScanCheckouts",
                         lazybox_ipc::Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
@@ -3052,6 +3055,23 @@ pub async fn dispatch_command(
             target,
         } => {
             polling::handle_inspect_workspace_diff(config, workspace_key, target).await;
+        }
+        lazybox_ipc::Command::SubmitPullRequestReview {
+            workspace_key,
+            head_sha,
+            summary,
+            verdict,
+            comments,
+        } => {
+            polling::handle_submit_pull_request_review(
+                config,
+                workspace_key,
+                head_sha,
+                summary,
+                verdict,
+                comments,
+            )
+            .await;
         }
         lazybox_ipc::Command::ScanCheckouts { roots } => {
             polling::handle_scan_checkouts(config, roots).await;

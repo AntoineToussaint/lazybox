@@ -74,6 +74,7 @@ impl<T: TerminalAdapter> Model<T> {
             let checkout = match target {
                 lazybox_ipc::WorkspaceDiffTarget::Session(_) => "worktree",
                 lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout => "linked checkout",
+                lazybox_ipc::WorkspaceDiffTarget::PullRequest => "pull request",
             };
             if agent_terminal_ids.is_empty() {
                 self.flash_hint(format!(
@@ -105,6 +106,73 @@ impl<T: TerminalAdapter> Model<T> {
             if comments.len() == 1 { "" } else { "s" }
         ));
         commands
+    }
+
+    /// `p` in the review modal: re-read the workspace's *other* diff
+    /// source and remount the viewer on it.
+    ///
+    /// The two are different documents, so this is a fresh read rather
+    /// than a local toggle — the PR's diff lives on GitHub and the
+    /// worktree's on disk, and neither is derivable from the other.
+    pub(super) fn switch_diff_review_source(
+        &mut self,
+        workspace_key: lazybox_core::WorkspaceKey,
+        showing: lazybox_ipc::WorkspaceDiffTarget,
+    ) {
+        let session_key: lazybox_core::SessionKey = workspace_key.as_str().into();
+        let Some(workspace) = self.sidebar.workspace_by_key(&session_key) else {
+            self.flash_hint("this workspace is gone");
+            return;
+        };
+        let showing_pull_request = matches!(showing, lazybox_ipc::WorkspaceDiffTarget::PullRequest);
+        let target = if showing_pull_request {
+            local_diff_target(workspace, None)
+        } else {
+            workspace
+                .pr
+                .as_ref()
+                .map(|_| lazybox_ipc::WorkspaceDiffTarget::PullRequest)
+        };
+        let Some(target) = target else {
+            self.flash_hint(if showing_pull_request {
+                "no local checkout to read — this workspace has no worktree"
+            } else {
+                "no PR diff to read — this workspace has no pull request"
+            });
+            return;
+        };
+        self.pending_diff_session = Some((workspace_key.clone(), target.clone()));
+        self.flash_hint(if showing_pull_request {
+            "reading worktree diff…"
+        } else {
+            "reading the PR diff…"
+        });
+        self.send_cmd(IpcCommand::InspectWorkspaceDiff {
+            workspace_key,
+            target,
+        });
+    }
+
+    /// Re-aim a failed pull-request read at the workspace's checkout.
+    /// Returns whether there was one to aim at.
+    pub(super) fn fall_back_to_local_diff(
+        &mut self,
+        workspace_key: lazybox_core::WorkspaceKey,
+    ) -> bool {
+        let session_key: lazybox_core::SessionKey = workspace_key.as_str().into();
+        let Some(target) = self
+            .sidebar
+            .workspace_by_key(&session_key)
+            .and_then(|workspace| local_diff_target(workspace, None))
+        else {
+            return false;
+        };
+        self.pending_diff_session = Some((workspace_key.clone(), target.clone()));
+        self.send_cmd(IpcCommand::InspectWorkspaceDiff {
+            workspace_key,
+            target,
+        });
+        true
     }
 
     /// Reply textarea submit. Build a `PostReply` for the
@@ -2336,6 +2404,41 @@ pub(super) fn format_scope_removal_prompt(repos: &[(String, usize)], total: usiz
         prompt.push_str(&format!("  +{} more\n", repos.len() - CAP));
     }
     prompt
+}
+
+/// The local diff a workspace can show: the named session's worktree,
+/// else its newest session's, else a linked checkout.
+pub(super) fn local_diff_target(
+    workspace: &lazybox_core::Workspace,
+    session_id: Option<lazybox_core::SessionId>,
+) -> Option<lazybox_ipc::WorkspaceDiffTarget> {
+    session_id
+        .or_else(|| workspace.default_session().map(|session| session.id))
+        .map(lazybox_ipc::WorkspaceDiffTarget::Session)
+        .or_else(|| {
+            workspace
+                .linked_checkout
+                .as_ref()
+                .map(|_| lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout)
+        })
+}
+
+/// The source the review modal opens on.
+///
+/// A workspace with a pull request opens on the PR: it is the diff
+/// reviewers see, the one being merged, and the only one a GitHub
+/// comment can attach to. Without a PR there is nothing to read but the
+/// checkout — which is also the only diff that exists before a branch
+/// is pushed.
+pub(super) fn default_diff_target(
+    workspace: &lazybox_core::Workspace,
+    session_id: Option<lazybox_core::SessionId>,
+) -> Option<lazybox_ipc::WorkspaceDiffTarget> {
+    workspace
+        .pr
+        .as_ref()
+        .map(|_| lazybox_ipc::WorkspaceDiffTarget::PullRequest)
+        .or_else(|| local_diff_target(workspace, session_id))
 }
 
 fn format_diff_review_prompt(

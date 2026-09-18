@@ -15,8 +15,10 @@ pub use app_auth::{
     AppCredentials, InstallationCoverage, InstallationTokenProvider, is_installation_source,
 };
 pub use client::{
-    BackgroundSweepForecast, BranchMergeGate, GateShortfall, GhClient, GhError, HotFetch,
-    RepoSweepOutcome, RepoSweepSpec, SelectedFetchOutcome, credential_fingerprint,
+    BackgroundSweepForecast, BranchMergeGate, DiffSide, GateShortfall, GhClient, GhError, HotFetch,
+    PullRequestDiff, PullRequestDiffFile, PullRequestFileChange, PullRequestReview,
+    RepoSweepOutcome, RepoSweepSpec, ReviewComment, ReviewVerdict, SelectedFetchOutcome,
+    credential_fingerprint,
 };
 pub use graphql::{
     CiFailureRecheck, PrDetails, RoleQualifier, repo_sweep_issue_query, repo_sweep_pr_query,

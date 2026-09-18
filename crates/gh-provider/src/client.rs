@@ -92,7 +92,9 @@ pub enum GhError {
 }
 
 impl GhError {
-    fn retry_after_secs(&self) -> Option<u64> {
+    /// How long the caller was told to wait, when this is a rate-limit
+    /// refusal. `None` for every other failure.
+    pub fn retry_after_secs(&self) -> Option<u64> {
         match self {
             Self::RateLimited {
                 retry_after_secs, ..
@@ -513,6 +515,56 @@ pub struct RepoSweepOutcome {
 impl RepoSweepOutcome {
     pub fn is_complete(&self) -> bool {
         self.failed.is_empty()
+    }
+
+    /// A complete sweep of no members: what a caller that partitions the
+    /// roster gets back for a partition that turned out to be empty.
+    pub fn empty() -> Self {
+        Self {
+            tasks: Vec::new(),
+            mentions: Vec::new(),
+            completed: Vec::new(),
+            failed: Vec::new(),
+            retry_after_secs: None,
+            unwindowed: Vec::new(),
+            rewindowed: Vec::new(),
+        }
+    }
+
+    /// The outcome of a sweep whose every member failed as a unit — the
+    /// shape [`GhClient::fetch_repo_sweep`] reports by erroring out rather
+    /// than returning. A caller that runs the sweep in partitions (one
+    /// credential per partition) folds an erroring partition back in with
+    /// this, so the partition that succeeded keeps its own completed set
+    /// and its retirement authority.
+    pub fn all_failed(members: impl IntoIterator<Item = String>, error: &GhError) -> Self {
+        let reason = error.to_string();
+        Self {
+            failed: members
+                .into_iter()
+                .map(|member| (member, reason.clone()))
+                .collect(),
+            retry_after_secs: error.retry_after_secs(),
+            ..Self::empty()
+        }
+    }
+
+    /// Fold another partition's outcome into this one.
+    ///
+    /// The per-member lists concatenate — the partitions are disjoint
+    /// member sets, so neither `completed` nor `failed` can double-count —
+    /// and the retry hint keeps the longest wait either side asked for.
+    /// Tasks still dedup by key: an org member and a repo under it can
+    /// return the same row, and nothing guarantees the two land on the
+    /// same side of the split.
+    pub fn merge(&mut self, other: Self) {
+        merge_unseen(&mut self.tasks, other.tasks);
+        self.mentions.extend(other.mentions);
+        self.completed.extend(other.completed);
+        self.failed.extend(other.failed);
+        self.unwindowed.extend(other.unwindowed);
+        self.rewindowed.extend(other.rewindowed);
+        self.retry_after_secs = self.retry_after_secs.max(other.retry_after_secs);
     }
 }
 
@@ -11790,6 +11842,60 @@ mod tests {
         let t2 = chrono::Utc::now();
         client.record_pr_sweep_window(t2, false);
         assert_eq!(client.next_pr_sweep_window(), Some(t2));
+    }
+
+    /// A sweep run in partitions — one credential per partition — folds
+    /// back into one outcome. The member lists concatenate, the retry hint
+    /// keeps the longer wait, and a row both sides returned (an org member
+    /// and a repo under it can land on different credentials) is kept once.
+    #[test]
+    fn repo_sweep_outcomes_fold_into_one() {
+        let mut covered = RepoSweepOutcome {
+            tasks: vec![task_without_node_id(TaskKind::Pr)],
+            completed: vec!["acme/widget".to_string()],
+            retry_after_secs: Some(10),
+            unwindowed: vec!["acme/widget".to_string()],
+            ..RepoSweepOutcome::empty()
+        };
+        covered.merge(RepoSweepOutcome {
+            tasks: vec![
+                task_without_node_id(TaskKind::Pr),
+                task_without_node_id(TaskKind::Issue),
+            ],
+            completed: vec!["otherorg/api".to_string()],
+            rewindowed: vec!["otherorg/api".to_string()],
+            retry_after_secs: Some(60),
+            ..RepoSweepOutcome::empty()
+        });
+        assert_eq!(covered.tasks.len(), 2, "the duplicate row is kept once");
+        assert_eq!(
+            covered.completed,
+            vec!["acme/widget".to_string(), "otherorg/api".to_string()],
+        );
+        assert_eq!(covered.unwindowed, vec!["acme/widget".to_string()]);
+        assert_eq!(covered.rewindowed, vec!["otherorg/api".to_string()]);
+        assert_eq!(covered.retry_after_secs, Some(60));
+        assert!(covered.is_complete());
+    }
+
+    /// `fetch_repo_sweep` reports "every member failed" by erroring out, so
+    /// a partitioned caller needs that shape back as failed members —
+    /// otherwise one dead partition would look like a clean sweep of none.
+    #[test]
+    fn an_all_failed_partition_reports_its_members() {
+        let outcome = RepoSweepOutcome::all_failed(
+            ["acme/widget".to_string(), "otherorg/api".to_string()],
+            &GhError::RateLimited {
+                retry_after_secs: 45,
+                reason: "primary budget exhausted".into(),
+                self_throttle: false,
+            },
+        );
+        assert!(!outcome.is_complete());
+        assert_eq!(outcome.failed.len(), 2);
+        assert!(outcome.failed[0].1.contains("primary budget exhausted"));
+        assert_eq!(outcome.retry_after_secs, Some(45));
+        assert!(outcome.completed.is_empty());
     }
 
     /// Regression for the 2026-09-05 stuck-`Shift-R` loop: a failed

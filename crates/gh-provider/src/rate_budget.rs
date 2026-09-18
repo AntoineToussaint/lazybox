@@ -1804,6 +1804,55 @@ mod tests {
         ));
     }
 
+    /// A budget only clears its per-tick scheduled accounting in
+    /// `begin_background_tick`. A client that does scheduled work without
+    /// one — which the user client did while a GitHub App carried the sweep
+    /// — accrues spend against an allowance nobody granted, until every
+    /// scheduled request it makes is refused for good.
+    #[test]
+    fn a_budget_that_never_begins_a_tick_eventually_refuses_everything_scheduled() {
+        let mut budget = RateBudget::new(1000, 1000.0);
+        let wall = Utc::now();
+        let mono = Instant::now();
+        let reset = wall + chrono::Duration::hours(1);
+        let heartbeat = |budget: &mut RateBudget| {
+            budget.admit_at(
+                ApiResource::rest("core"),
+                "notifications heartbeat",
+                RequestPriority::Recent,
+                1,
+                wall,
+                mono,
+            )?;
+            budget.observe_rest_response(
+                "core",
+                "notifications heartbeat",
+                5000,
+                4000,
+                1000,
+                reset,
+                200,
+                false,
+                0,
+                Duration::from_millis(1),
+            );
+            Ok(())
+        };
+        for tick in 0..MIN_BACKGROUND_TICK_ALLOWANCE {
+            heartbeat(&mut budget).unwrap_or_else(|e| panic!("heartbeat {tick} refused: {e:?}"));
+        }
+        assert!(
+            matches!(
+                heartbeat(&mut budget),
+                Err(AcquireError::TickAllowanceExhausted { .. })
+            ),
+            "the default allowance is spent and never replenished",
+        );
+
+        budget.begin_background_tick(Duration::from_secs(60), wall, mono);
+        heartbeat(&mut budget).expect("a governor pass clears the tick's accounting");
+    }
+
     #[test]
     fn full_refresh_finishes_beyond_tick_grant_without_spending_reserve() {
         let mut budget = RateBudget::new(100, 60.0);

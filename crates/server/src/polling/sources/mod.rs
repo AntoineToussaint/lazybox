@@ -427,12 +427,19 @@ pub struct GhSource {
     /// everything downstream. `None` when the sweep is already the user's.
     user_client: Option<GhClient>,
     /// What `client` can actually see, when it is a GitHub App installation
-    /// client. `polled_scope` withholds retirement authority for any swept
-    /// member outside it — a member the credential cannot see answers the
-    /// sweep with zero rows and no error, which would otherwise read as
-    /// "these rows are gone". `None` for the user token, which sees
-    /// everything the user does.
+    /// client. Every read is routed through [`GhSource::client_for`] against
+    /// it, so a repo the installation cannot see is read by the user token
+    /// instead of answering with zero rows and no error — which rescope
+    /// would have read as "these rows are gone". `None` for the user token,
+    /// which sees everything the user does.
     poll_coverage: Option<lazybox_gh::InstallationCoverage>,
+    /// Everything this tick queries that `poll_coverage` does not reach —
+    /// roster members and the repos the scheduler adds on top of them.
+    /// Non-empty means the sweep is split: these run on `user_client` while
+    /// the rest run on the installation's own budget, in the same tick
+    /// (#1807). It doubles as the flag for "a global search must run as the
+    /// user" — the installation would answer one with silently fewer rows.
+    uncovered_members: std::collections::BTreeSet<String>,
     filter: ProviderConfig,
     scopes: std::collections::BTreeSet<String>,
     watch_repos: std::collections::BTreeSet<String>,
@@ -808,6 +815,76 @@ pub(super) fn partition_targeted_requests(
     (batched, individual)
 }
 
+/// Split a repo-first sweep into the members the poll credential reaches
+/// and the members it does not, so each set runs on the token that can see
+/// it (#1807). `None` — the user token — reaches everything the user does,
+/// so nothing is split off.
+pub(super) fn partition_sweep_specs(
+    specs: Vec<lazybox_gh::RepoSweepSpec>,
+    coverage: Option<&lazybox_gh::InstallationCoverage>,
+) -> (
+    Vec<lazybox_gh::RepoSweepSpec>,
+    Vec<lazybox_gh::RepoSweepSpec>,
+) {
+    specs
+        .into_iter()
+        .partition(|spec| coverage.is_none_or(|coverage| coverage.covers(&spec.member)))
+}
+
+/// Fold the two partitions of a split repo-first sweep into one outcome.
+///
+/// Each side carries the members it was asked to sweep, so a side that
+/// failed outright — [`GhClient::fetch_repo_sweep`] errors only when *every*
+/// member failed — can be folded back in as failed members. That is what
+/// keeps a failure on one partition from marking the other incomplete: the
+/// side that ran keeps its own `completed` set, and with it its retirement
+/// authority. Only when both sides fail does the sweep fail, carrying the
+/// longer retry hint.
+pub(super) fn combine_sweep_partitions(
+    covered: (
+        Vec<lazybox_gh::RepoSweepSpec>,
+        Result<lazybox_gh::RepoSweepOutcome, lazybox_gh::GhError>,
+    ),
+    uncovered: (
+        Vec<lazybox_gh::RepoSweepSpec>,
+        Result<lazybox_gh::RepoSweepOutcome, lazybox_gh::GhError>,
+    ),
+) -> Result<lazybox_gh::RepoSweepOutcome, lazybox_gh::GhError> {
+    let members = |specs: Vec<lazybox_gh::RepoSweepSpec>| {
+        specs
+            .into_iter()
+            .map(|spec| spec.member)
+            .collect::<Vec<_>>()
+    };
+    match (covered, uncovered) {
+        ((_, Ok(mut covered)), (specs, Err(error))) => {
+            covered.merge(lazybox_gh::RepoSweepOutcome::all_failed(
+                members(specs),
+                &error,
+            ));
+            Ok(covered)
+        }
+        ((specs, Err(error)), (_, Ok(mut uncovered))) => {
+            uncovered.merge(lazybox_gh::RepoSweepOutcome::all_failed(
+                members(specs),
+                &error,
+            ));
+            Ok(uncovered)
+        }
+        ((_, Ok(mut covered)), (_, Ok(uncovered))) => {
+            covered.merge(uncovered);
+            Ok(covered)
+        }
+        ((_, Err(covered)), (_, Err(uncovered))) => Err(
+            if uncovered.retry_after_secs() > covered.retry_after_secs() {
+                uncovered
+            } else {
+                covered
+            },
+        ),
+    }
+}
+
 fn merge_targeted_tasks(base: &mut Vec<Task>, targeted: Vec<Task>) {
     let positions: std::collections::HashMap<lazybox_core::TaskId, usize> = base
         .iter()
@@ -900,6 +977,63 @@ impl GhSource {
     /// The client to act as the human with — see the `user_client` field.
     fn as_user(&self) -> &GhClient {
         self.user_client.as_ref().unwrap_or(&self.client)
+    }
+
+    /// The credential that can actually see `repo` (`owner/name`, or a bare
+    /// `owner` org member).
+    ///
+    /// An installation token asked about a repository outside its
+    /// installation does not fail — it answers a search with no rows and a
+    /// node read with "not visible". Routing per repo is what keeps the
+    /// split honest: the covered majority spends the App's budget, and the
+    /// rest is read by the token that can read it.
+    fn client_for(&self, repo: &str) -> &GhClient {
+        if self.is_uncovered(repo) {
+            self.as_user()
+        } else {
+            &self.client
+        }
+    }
+
+    /// Whether the poll credential is a GitHub App installation that does
+    /// not reach `repo`.
+    fn is_uncovered(&self, repo: &str) -> bool {
+        self.poll_coverage
+            .as_ref()
+            .is_some_and(|coverage| !coverage.covers(repo))
+    }
+
+    /// One partition of a repo-first sweep. An empty partition is a
+    /// complete sweep of nothing — no request, no log line.
+    async fn sweep_partition(
+        &self,
+        client: &GhClient,
+        specs: &[lazybox_gh::RepoSweepSpec],
+        want_prs: bool,
+        scan_issues: bool,
+    ) -> Result<lazybox_gh::RepoSweepOutcome, lazybox_gh::GhError> {
+        if specs.is_empty() {
+            return Ok(lazybox_gh::RepoSweepOutcome::empty());
+        }
+        client
+            .fetch_repo_sweep(specs, want_prs, scan_issues, &self.mention_allowed_logins)
+            .await
+    }
+
+    /// Whether this tick's sweep is split across two credentials.
+    fn poll_split(&self) -> bool {
+        !self.uncovered_members.is_empty()
+    }
+
+    /// The client a *global* (non-repo-scoped) search must run on. Under a
+    /// split that is the user token: the installation would answer an
+    /// `involves:`/`author:` search with silently fewer rows.
+    fn search_client(&self) -> &GhClient {
+        if self.poll_split() {
+            self.as_user()
+        } else {
+            &self.client
+        }
     }
 
     async fn persist_sync_cursors(&self) {
@@ -1398,12 +1532,24 @@ impl GhSource {
             partition_targeted_requests(requests, &hot_node_ids, !self.client.hot_batch_rejected());
 
         let mut tasks = Vec::new();
-        if !batched.is_empty() {
+        // One batch per credential. A node the installation cannot see
+        // comes back `Missing` rather than as an error, so a mixed batch
+        // would drop the uncovered rows with nothing but a debug line.
+        let (covered_batch, uncovered_batch): (Vec<_>, Vec<_>) = batched
+            .into_iter()
+            .partition(|(request, _)| !self.is_uncovered(&request.target.repo_slug()));
+        for (client, batched) in [
+            (&self.client, covered_batch),
+            (self.as_user(), uncovered_batch),
+        ] {
+            if batched.is_empty() {
+                continue;
+            }
             let node_ids = batched
                 .iter()
                 .map(|(_, node_id)| node_id.clone())
                 .collect::<Vec<_>>();
-            match self.client.fetch_hot_tasks(&node_ids).await {
+            match client.fetch_hot_tasks(&node_ids).await {
                 Ok(results) => {
                     for ((request, _), outcome) in batched.into_iter().zip(results) {
                         match outcome {
@@ -1441,9 +1587,10 @@ impl GhSource {
 
         let results: Vec<_> = stream::iter(individual)
             .map(|request| async move {
+                let client = self.client_for(&request.target.repo_slug());
                 let result = match request.target.kind {
                     lazybox_gh::NotificationTargetKind::PullRequest => {
-                        self.client
+                        client
                             .fetch_single_pr(
                                 &request.target.owner,
                                 &request.target.repo,
@@ -1452,7 +1599,7 @@ impl GhSource {
                             .await
                     }
                     lazybox_gh::NotificationTargetKind::Issue => {
-                        self.client
+                        client
                             .fetch_single_issue(
                                 &request.target.owner,
                                 &request.target.repo,
@@ -1579,25 +1726,44 @@ impl GhSource {
             },
         ));
         for spec in &specs {
-            let mut query = self.client.repo_sweep_pr_query(&spec.member, spec.since);
-            if let Some(companion) = self
-                .client
-                .repo_sweep_reviewer_query(&spec.member, spec.since)
-            {
+            let client = self.client_for(&spec.member);
+            let mut query = client.repo_sweep_pr_query(&spec.member, spec.since);
+            if let Some(companion) = client.repo_sweep_reviewer_query(&spec.member, spec.since) {
                 query.push_str(" + ");
                 query.push_str(&companion);
             }
             self.emit_progress(format!("repo query: {query}"));
         }
-        let outcome = match self
-            .client
-            .fetch_repo_sweep(&specs, want_prs, scan_issues, &self.mention_allowed_logins)
-            .await
-        {
+        // Sweep each partition on the credential that can see it, in the
+        // same tick. Repo-first discovery is a per-member fan-out, so this
+        // splits the member list and nothing else — a member's queries are
+        // identical whichever token carries them.
+        let swept_members = specs.len();
+        let (covered, uncovered) = partition_sweep_specs(specs, self.poll_coverage.as_ref());
+        if !uncovered.is_empty() {
+            self.emit_progress(format!(
+                "{} outside the GitHub App installation — sweeping on your token: {}",
+                uncovered.len(),
+                uncovered
+                    .iter()
+                    .map(|spec| spec.member.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+        let (covered_result, uncovered_result) = tokio::join!(
+            self.sweep_partition(&self.client, &covered, want_prs, scan_issues),
+            self.sweep_partition(self.as_user(), &uncovered, want_prs, scan_issues),
+        );
+        let outcome = match combine_sweep_partitions(
+            (covered, covered_result),
+            (uncovered, uncovered_result),
+        ) {
             Ok(outcome) => outcome,
             Err(error) => {
-                // Total failure — EVERY member's query errored (e.g. a
-                // revoked token 401ing the whole roster). A reconcile that
+                // Total failure — EVERY member's query errored on every
+                // credential the sweep is split across (e.g. a revoked
+                // token 401ing the whole roster). A reconcile that
                 // erred out entirely must still re-arm the timer, exactly
                 // like a partial one does below: otherwise `force_full_sweep`
                 // / the due-timer stay set and the full-roster reconcile
@@ -1650,7 +1816,7 @@ impl GhSource {
                 message: format!(
                     "partial sync — {} of {} repos failed: {failed}",
                     outcome.failed.len(),
-                    specs.len()
+                    swept_members
                 ),
                 detail: "see /tmp/lazybox.log for the full error".into(),
                 kind: ProviderErrorKind::Retryable.as_str().to_string(),
@@ -2227,14 +2393,7 @@ impl TaskSource for GhSource {
             // preserved. A rotation slice / windowed pass has no deletion
             // authority. See `PolledScope::Reconcile`.
             let completed = self.last_reconcile_completed.lock();
-            let authoritative =
-                reconcile_swept_under_coverage(&completed, self.poll_coverage.as_ref());
-            return repo_first_polled_scope(
-                plan.reconcile,
-                windowed,
-                &authoritative,
-                &plan.in_scope,
-            );
+            return repo_first_polled_scope(plan.reconcile, windowed, &completed, &plan.in_scope);
         }
         gh_polled_scope(
             self.scheduling.run_global,
@@ -2392,7 +2551,11 @@ impl TaskSource for GhSource {
                 // two. Full is already comprehensive, so skip it there.
                 if !is_full_plan && self.client.authored_probe_due() {
                     let since = chrono::Utc::now() - chrono::Duration::minutes(10);
-                    match self.client.fetch_recently_authored_prs(since).await {
+                    match self
+                        .search_client()
+                        .fetch_recently_authored_prs(since)
+                        .await
+                    {
                         Ok(authored) if !authored.is_empty() => {
                             let authored = apply_needs_reply_toggle(
                                 filter_github_tasks_with_watches(
@@ -2423,7 +2586,11 @@ impl TaskSource for GhSource {
                 // issue display is off.
                 if !is_full_plan && self.filter.issue_enabled() && self.client.issue_probe_due() {
                     let since = chrono::Utc::now() - chrono::Duration::minutes(10);
-                    match self.client.fetch_recently_involved_issues(since).await {
+                    match self
+                        .search_client()
+                        .fetch_recently_involved_issues(since)
+                        .await
+                    {
                         Ok(issues) if !issues.is_empty() => {
                             let issues = apply_needs_reply_toggle(
                                 filter_github_tasks_with_watches(
@@ -4150,16 +4317,22 @@ pub(super) async fn sources_for_with_engagement(
                             &gh_client_cache,
                         )
                         .await;
-                        let (poll_client, poll_restore, user_client, poll_coverage) = match poll {
-                            Some((poll_client, restore, coverage)) => {
-                                (poll_client, restore, Some(client), Some(coverage))
-                            }
-                            None => (client, restore_sync_cursors, None, None),
-                        };
+                        let (poll_client, poll_restore, user_client, poll_coverage, uncovered) =
+                            match poll {
+                                Some(poll) => (
+                                    poll.client,
+                                    poll.restore_sync_cursors,
+                                    Some(client),
+                                    Some(poll.coverage),
+                                    poll.uncovered,
+                                ),
+                                None => (client, restore_sync_cursors, None, None, Vec::new()),
+                            };
                         push_github_source(
                             poll_client,
                             poll_restore,
                             poll_coverage,
+                            uncovered,
                             user_client,
                             setup,
                             bus.clone(),
@@ -4205,6 +4378,7 @@ pub(super) async fn sources_for_with_engagement(
                         existing,
                         false,
                         None,
+                        Vec::new(),
                         None,
                         setup,
                         bus.clone(),
@@ -4414,51 +4588,71 @@ pub(super) fn github_poll_scopes(
         .collect()
 }
 
-/// The members a reconcile batch may retire rows for, given what the
-/// sweeping credential can actually see.
+/// The scope set and (unmuted) watch list the GitHub sweep runs against,
+/// before the optional `include_accessible_repos` widening.
 ///
-/// A reconcile's `completed` list confers deletion authority, under an
-/// invariant that was unstated until a GitHub App credential broke it: the
-/// sweeping credential can see every member it swept. A member outside the
-/// installation answers the sweep's `search` with zero rows and no error, so
-/// it "completes" empty and its rows read as retired. Treat such a member
-/// exactly as a *failed* member is treated — drop it from the authoritative
-/// set so its rows are preserved. `None` (the user token) sees everything the
-/// user does, which is the premise rescope was written under.
-pub(super) fn reconcile_swept_under_coverage(
-    completed: &[String],
-    coverage: Option<&lazybox_gh::InstallationCoverage>,
-) -> Vec<String> {
-    let Some(coverage) = coverage else {
-        return completed.to_vec();
-    };
-    completed
-        .iter()
-        .filter(|member| {
-            if coverage.covers(member) {
-                return true;
-            }
-            tracing::warn!(
-                member = member.as_str(),
-                installation = coverage.installation_id,
-                "repo-sweep member is outside the GitHub App installation — \
-                 withholding retirement authority so its rows are preserved"
-            );
-            false
-        })
+/// Shared by the credential decision and the sweep itself so both derive
+/// the same [`repo_roster`]: the split below is only safe while the sweep
+/// really is repo-first, and two independent readings of config could
+/// disagree about that.
+fn github_configured_scopes(
+    setup: &lazybox_core::PersistedSetup,
+    cfg: Option<&lazybox_config::Config>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let github_cfg = cfg.map(|c| &c.providers.github);
+    let mut scopes = setup
+        .selected_scopes
+        .get("github")
         .cloned()
-        .collect()
+        .unwrap_or_default();
+    if let Some(github) = github_cfg {
+        scopes.extend(github_scopes_from_filters(&github.filters));
+    }
+    let mut watch_repos = github_cfg
+        .map(|github| github_watch_repos_from_filters(&github.filters))
+        .unwrap_or_default();
+    if let Some(cfg) = cfg {
+        retain_unmuted_watches(&mut watch_repos, cfg, now);
+    }
+    (scopes, watch_repos)
 }
 
-/// Why the App installation cannot carry the whole sweep, phrased for the
-/// user. `None` means it can.
-pub(super) fn app_coverage_gap(
+/// How much of the sweep a resolved GitHub App installation can carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PollCredentialPlan {
+    /// The installation reaches everything the sweep queries.
+    Whole,
+    /// It reaches part of what the sweep queries. What it does not reach
+    /// runs on the user token in the same tick, so the covered majority
+    /// still runs on the App's own budget (#1807).
+    Split { uncovered: Vec<String> },
+    /// It cannot carry the sweep at all; the user token takes every bit of
+    /// it, for the reason named here.
+    Fallback { reason: String },
+}
+
+/// Decide how the App installation and the user token divide this sweep.
+///
+/// A split is only offered when discovery is *repo-first* — one windowed
+/// query pair per roster member, which partitions cleanly by credential.
+/// With no roster the sweep is a single global `involves:` search, and a
+/// search issued under a credential that cannot see a scoped repo returns
+/// fewer rows and no error: the inbox would quietly lose a project rather
+/// than merely poll it more slowly. That case still steps the whole sweep
+/// back onto the user token.
+pub(super) fn poll_credential_plan(
     coverage: &lazybox_gh::InstallationCoverage,
     scopes: &[String],
+    roster: &[String],
     include_accessible_repos: bool,
-) -> Option<String> {
+) -> PollCredentialPlan {
+    let fallback = |reason: String| PollCredentialPlan::Fallback { reason };
     if include_accessible_repos {
-        return Some(
+        return fallback(
             "`providers.github.include_accessible_repos` polls every repo you can reach, \
              which no App installation is scoped to"
                 .to_string(),
@@ -4468,31 +4662,47 @@ pub(super) fn app_coverage_gap(
         // No scopes, no filters: the inbox is every repo the token can see
         // (`involves:me` everywhere). An installation would narrow that to
         // its own repos, and the rows it dropped would just stop appearing.
-        return Some(
+        return fallback(
             "no GitHub scopes are selected, so the inbox is every repo your token can see"
                 .to_string(),
         );
     }
     let uncovered = coverage.uncovered(scopes.iter().map(String::as_str));
     if uncovered.is_empty() {
-        return None;
+        return PollCredentialPlan::Whole;
     }
-    Some(format!("not in the installation: {}", uncovered.join(", ")))
+    if roster.is_empty() {
+        return fallback(format!("not in the installation: {}", uncovered.join(", ")));
+    }
+    PollCredentialPlan::Split { uncovered }
+}
+
+/// The credential the status sweep polls through, when a GitHub App
+/// installation carries some or all of it.
+pub(super) struct PollCredential {
+    pub client: GhClient,
+    /// The client was built fresh this tick and wants its persisted
+    /// cursors / rate state restored.
+    pub restore_sync_cursors: bool,
+    pub coverage: lazybox_gh::InstallationCoverage,
+    /// Everything the sweep queries that the installation cannot see.
+    /// Non-empty means the sweep is split: these run on the user token in
+    /// the same tick.
+    pub uncovered: Vec<String>,
 }
 
 /// Pick the client the status sweep polls through.
 ///
-/// Returns `Some(poll_client)` when a GitHub App installation credential
-/// resolves AND covers everything the sweep queries — the sweep then runs on
-/// the App's own 5,000/hour, which no agent session can spend. `None` keeps
-/// the sweep on `user_client`, exactly as before this existed.
+/// Returns `Some(..)` when a GitHub App installation credential resolves and
+/// can carry the sweep, in whole or in part — what it carries runs on the
+/// App's own 5,000/hour, which no agent session can spend. `None` keeps the
+/// sweep on `user_client`, exactly as before this existed.
 ///
-/// Falling back is all-or-nothing on purpose. The sweep's discovery side is a
-/// GraphQL *search*, not a per-repo fan-out: run under a credential that
-/// cannot see one of the scoped repos, it returns fewer rows with no error to
-/// notice. Polling everything on the user token is the only way an uncovered
-/// repo keeps appearing at all — so the gap is reported and the whole sweep
-/// steps back, rather than half the inbox going quietly dark.
+/// A partial installation splits the roster rather than surrendering the
+/// whole sweep (#1807): the members it reaches run on its budget and the
+/// rest run on the user token, in the same tick. The all-or-nothing
+/// fallback remains for the shapes a split cannot cover — see
+/// [`poll_credential_plan`].
 #[allow(clippy::too_many_arguments)]
 async fn github_poll_client(
     user_client: &GhClient,
@@ -4503,7 +4713,7 @@ async fn github_poll_client(
     state: &mut TickState,
     bus: &tokio::sync::broadcast::Sender<Event>,
     gh_client_cache: &crate::registries::GithubClientCache,
-) -> Option<(GhClient, bool, lazybox_gh::InstallationCoverage)> {
+) -> Option<PollCredential> {
     let app = github_app_credentials(cfg).await?;
 
     // Re-read coverage every tick. The verdict decides whether a sweep may
@@ -4532,11 +4742,25 @@ async fn github_poll_client(
     let focused = state.round_robin.focused_repo.clone();
     let scopes = github_poll_scopes(setup, cfg, engagement, focused.as_deref());
     let include_accessible = cfg.is_some_and(|c| c.providers.github.include_accessible_repos);
-    if let Some(gap) = app_coverage_gap(&coverage, &scopes, include_accessible) {
-        note_app_coverage_gap(state, bus, Some(gap));
-        gh_client_cache.clear_poll();
-        return None;
-    }
+    let (configured_scopes, watch_repos) = github_configured_scopes(setup, cfg, chrono::Utc::now());
+    let roster = repo_roster(&configured_scopes, &watch_repos);
+    let uncovered = match poll_credential_plan(&coverage, &scopes, &roster, include_accessible) {
+        PollCredentialPlan::Whole => Vec::new(),
+        PollCredentialPlan::Split { uncovered } => {
+            tracing::info!(
+                installation = coverage.installation_id,
+                uncovered = uncovered.join(", "),
+                "github sweep is split: the installation carries what it reaches, \
+                 the user token carries the rest"
+            );
+            uncovered
+        }
+        PollCredentialPlan::Fallback { reason } => {
+            note_app_coverage_gap(state, bus, Some(reason));
+            gh_client_cache.clear_poll();
+            return None;
+        }
+    };
 
     let cred = match lazybox_gh::poller_credential_chain(app, host)
         .resolve(&lazybox_gh::poller_credential_scope(host))
@@ -4570,7 +4794,12 @@ async fn github_poll_client(
     });
     if let Some(client) = cached {
         note_app_coverage_gap(state, bus, None);
-        return Some((client, false, coverage));
+        return Some(PollCredential {
+            client,
+            restore_sync_cursors: false,
+            coverage,
+            uncovered,
+        });
     }
     // The viewer is the human whose inbox this is; an installation token has
     // no user of its own, so it is carried over from the user client rather
@@ -4587,7 +4816,12 @@ async fn github_poll_client(
             // sweep. Clearing the memo before the outcome was known made a
             // persistently failing build re-notify on every tick.
             note_app_coverage_gap(state, bus, None);
-            Some((client, true, coverage))
+            Some(PollCredential {
+                client,
+                restore_sync_cursors: true,
+                coverage,
+                uncovered,
+            })
         }
         Err(e) => {
             note_app_coverage_gap(
@@ -4675,6 +4909,25 @@ mod github_app_budget_tests {
         }
     }
 
+    /// The credential plan for a setup, as `github_poll_client` computes
+    /// it: the required reach on one side, the repo-first roster on the
+    /// other.
+    fn plan_for(
+        coverage: &InstallationCoverage,
+        setup: &lazybox_core::PersistedSetup,
+        cfg: Option<&lazybox_config::Config>,
+        engagement: &EngagementSnapshot,
+        include_accessible: bool,
+    ) -> PollCredentialPlan {
+        let (scopes, watch_repos) = github_configured_scopes(setup, cfg, chrono::Utc::now());
+        poll_credential_plan(
+            coverage,
+            &github_poll_scopes(setup, cfg, engagement, None),
+            &repo_roster(&scopes, &watch_repos),
+            include_accessible,
+        )
+    }
+
     fn setup_with_scopes(scopes: &[&str]) -> lazybox_core::PersistedSetup {
         let mut setup = lazybox_core::PersistedSetup {
             enabled_providers: ["github".to_string()].into_iter().collect(),
@@ -4708,63 +4961,98 @@ mod github_app_budget_tests {
     }
 
     #[test]
-    fn a_covering_installation_reports_no_gap() {
+    fn a_covering_installation_carries_the_whole_sweep() {
         let setup = setup_with_scopes(&["github:acme/widget"]);
         assert_eq!(
-            app_coverage_gap(
+            plan_for(
                 &coverage(false, &["acme/widget"]),
-                &github_poll_scopes(&setup, None, &EngagementSnapshot::default(), None),
+                &setup,
+                None,
+                &EngagementSnapshot::default(),
                 false,
             ),
-            None,
+            PollCredentialPlan::Whole,
         );
     }
 
     #[test]
-    fn a_repo_outside_the_installation_is_named_in_the_gap() {
-        // The sweep's discovery side is a GraphQL search: under a
-        // credential that cannot see `other/thing` it just returns fewer
-        // rows. The gap must name the repo so the fallback is legible
-        // rather than an inbox quietly missing a project.
+    fn a_repo_outside_the_installation_splits_the_sweep_rather_than_surrendering_it() {
+        // One uncovered repo used to put the WHOLE inbox back on the
+        // budget agent sessions share. Repo-first discovery is a per-member
+        // fan-out, so only that repo needs the user token.
         let setup = setup_with_scopes(&["github:acme/widget", "github:other/thing"]);
-        let gap = app_coverage_gap(
-            &coverage(false, &["acme/widget"]),
-            &github_poll_scopes(&setup, None, &EngagementSnapshot::default(), None),
-            false,
-        )
-        .expect("an uncovered repo is a gap");
-        assert!(gap.contains("other/thing"), "{gap}");
-        assert!(!gap.contains("acme/widget"), "{gap}");
+        assert_eq!(
+            plan_for(
+                &coverage(false, &["acme/widget"]),
+                &setup,
+                None,
+                &EngagementSnapshot::default(),
+                false,
+            ),
+            PollCredentialPlan::Split {
+                uncovered: vec!["other/thing".to_string()]
+            },
+        );
     }
 
     #[test]
-    fn an_unscoped_inbox_is_itself_a_gap() {
+    fn an_unscoped_inbox_cannot_be_split() {
         // Empty scopes means `involves:me` everywhere — unbounded, so an
         // "All repositories" installation on one org still would not cover
-        // it, and the repos it dropped would just stop appearing.
+        // it, and the repos it dropped would just stop appearing. There is
+        // no roster to partition either, so the whole sweep steps back.
         let setup = setup_with_scopes(&[]);
-        let gap = app_coverage_gap(
+        let PollCredentialPlan::Fallback { reason } = plan_for(
             &coverage(true, &[]),
-            &github_poll_scopes(&setup, None, &EngagementSnapshot::default(), None),
+            &setup,
+            None,
+            &EngagementSnapshot::default(),
             false,
-        )
-        .expect("an unscoped inbox is a gap");
-        assert!(gap.contains("no GitHub scopes"), "{gap}");
+        ) else {
+            panic!("an unscoped inbox has no roster to split");
+        };
+        assert!(reason.contains("no GitHub scopes"), "{reason}");
     }
 
     #[test]
-    fn widening_the_inbox_to_every_reachable_repo_is_itself_a_gap() {
+    fn widening_the_inbox_to_every_reachable_repo_cannot_be_split() {
         // `include_accessible_repos` makes the roster open-ended — repos
         // the user joins tomorrow are in scope — so no installation can
         // be proven to cover it.
         let setup = setup_with_scopes(&["github:acme/widget"]);
-        let gap = app_coverage_gap(
+        let PollCredentialPlan::Fallback { reason } = plan_for(
             &coverage(true, &[]),
-            &github_poll_scopes(&setup, None, &EngagementSnapshot::default(), None),
+            &setup,
+            None,
+            &EngagementSnapshot::default(),
             true,
-        )
-        .expect("an open-ended roster is a gap");
-        assert!(gap.contains("include_accessible_repos"), "{gap}");
+        ) else {
+            panic!("an open-ended roster cannot be partitioned");
+        };
+        assert!(reason.contains("include_accessible_repos"), "{reason}");
+    }
+
+    /// The split rides on repo-first discovery. Without a roster the sweep
+    /// is one global `involves:` search, and a search issued under a
+    /// credential that cannot see a repo returns fewer rows and no error —
+    /// so that shape still steps the whole sweep back onto the user token,
+    /// naming the repos it could not reach.
+    /// The split rides on repo-first discovery. With no roster the sweep is
+    /// one global `involves:` search, and a search issued under a
+    /// credential that cannot see a repo returns fewer rows and no error —
+    /// so that shape still steps the whole sweep back, naming what it
+    /// could not reach.
+    #[test]
+    fn a_global_search_sweep_falls_back_whole_rather_than_splitting() {
+        let PollCredentialPlan::Fallback { reason } = poll_credential_plan(
+            &coverage(true, &[]),
+            &["acme/widget".to_string(), "otherorg/api".to_string()],
+            &[],
+            false,
+        ) else {
+            panic!("a rosterless sweep cannot be partitioned");
+        };
+        assert!(reason.contains("otherorg/api"), "{reason}");
     }
 
     /// Authoring must stay the user's. With the poller on an App
@@ -4820,38 +5108,133 @@ mod github_app_budget_tests {
     }
 
     #[test]
-    fn a_session_bearing_repo_outside_the_installation_is_a_gap() {
+    fn a_session_bearing_repo_outside_the_installation_is_swept_as_the_user() {
         // "All repositories on acme" covers every configured scope, but the
-        // user holds a session on otherorg/api. Before this was checked, the
-        // App carried the sweep and otherorg/api's session-less rows were
-        // silently retired.
+        // user holds a session on otherorg/api, which the scheduler sweeps
+        // as a reconcile member. It belongs on the token that can see it.
         let setup = setup_with_scopes(&["github:acme"]);
         let engagement = engagement_with(&["otherorg/api"], &[]);
-        let gap = app_coverage_gap(
-            &coverage(true, &[]),
-            &github_poll_scopes(&setup, None, &engagement, None),
-            false,
-        )
-        .expect("a session-bearing repo outside the installation is a gap");
-        assert!(gap.contains("otherorg/api"), "{gap}");
+        assert_eq!(
+            plan_for(&coverage(true, &[]), &setup, None, &engagement, false),
+            PollCredentialPlan::Split {
+                uncovered: vec!["otherorg/api".to_string()]
+            },
+        );
     }
 
-    /// Defence in depth for the same hazard at the site that actually
-    /// confers deletion authority: a swept member the credential cannot see
-    /// must be treated exactly like a member whose queries failed.
+    fn spec(member: &str) -> lazybox_gh::RepoSweepSpec {
+        lazybox_gh::RepoSweepSpec {
+            member: member.to_string(),
+            since: None,
+        }
+    }
+
+    fn members(specs: &[lazybox_gh::RepoSweepSpec]) -> Vec<&str> {
+        specs.iter().map(|spec| spec.member.as_str()).collect()
+    }
+
+    /// The heart of the split: each member goes to the credential that can
+    /// see it, including members the scheduler added on top of the roster.
     #[test]
-    fn retirement_authority_is_withheld_for_members_outside_the_installation() {
-        let completed = vec!["acme/widget".to_string(), "otherorg/api".to_string()];
+    fn a_sweep_partitions_by_what_the_installation_reaches() {
+        let specs = vec![spec("acme/widget"), spec("otherorg/api"), spec("acme")];
+        let (covered, uncovered) =
+            partition_sweep_specs(specs.clone(), Some(&coverage(false, &["acme/widget"])));
+        assert_eq!(members(&covered), ["acme/widget"]);
         assert_eq!(
-            reconcile_swept_under_coverage(&completed, Some(&coverage(false, &["acme/widget"]))),
-            vec!["acme/widget".to_string()],
-            "an unseeable member must not confer retirement authority",
+            members(&uncovered),
+            ["otherorg/api", "acme"],
+            "a bare org member is only covered by an All-repositories install",
         );
+
+        let (covered, uncovered) = partition_sweep_specs(specs, None);
+        assert_eq!(covered.len(), 3, "the user token sees what the user sees");
+        assert!(uncovered.is_empty());
+    }
+
+    fn outcome_of(completed: &[&str], failed: &[&str]) -> lazybox_gh::RepoSweepOutcome {
+        lazybox_gh::RepoSweepOutcome {
+            completed: completed.iter().map(|m| (*m).to_string()).collect(),
+            failed: failed
+                .iter()
+                .map(|m| ((*m).to_string(), "boom".to_string()))
+                .collect(),
+            ..lazybox_gh::RepoSweepOutcome::empty()
+        }
+    }
+
+    #[test]
+    fn the_two_partitions_fold_into_one_outcome() {
+        let combined = combine_sweep_partitions(
+            (
+                vec![spec("acme/widget")],
+                Ok(outcome_of(&["acme/widget"], &[])),
+            ),
+            (
+                vec![spec("otherorg/api")],
+                Ok(outcome_of(&["otherorg/api"], &[])),
+            ),
+        )
+        .expect("both sides ran");
         assert_eq!(
-            reconcile_swept_under_coverage(&completed, None),
-            completed,
-            "the user token sees what the user sees; authority is unchanged",
+            combined.completed,
+            vec!["acme/widget".to_string(), "otherorg/api".to_string()],
         );
+        assert!(combined.is_complete());
+    }
+
+    /// A failure on one partition must not mark the other incomplete — the
+    /// side that ran keeps its own `completed` set, and with it its
+    /// retirement authority.
+    #[test]
+    fn one_failed_partition_leaves_the_others_authority_intact() {
+        let error = lazybox_gh::GhError::RateLimited {
+            retry_after_secs: 90,
+            reason: "primary budget exhausted".into(),
+            self_throttle: false,
+        };
+        let combined = combine_sweep_partitions(
+            (
+                vec![spec("acme/widget")],
+                Ok(outcome_of(&["acme/widget"], &[])),
+            ),
+            (vec![spec("otherorg/api")], Err(error)),
+        )
+        .expect("the covered partition still ran");
+        assert_eq!(combined.completed, vec!["acme/widget".to_string()]);
+        assert_eq!(
+            combined
+                .failed
+                .iter()
+                .map(|(m, _)| m.as_str())
+                .collect::<Vec<_>>(),
+            ["otherorg/api"],
+            "the failed partition's members are reported, not silently dropped",
+        );
+        assert!(!combined.is_complete(), "the sweep as a whole is partial");
+        assert_eq!(combined.retry_after_secs, Some(90));
+    }
+
+    /// Only when neither partition ran does the sweep itself fail, and it
+    /// carries the longer of the two retry hints.
+    #[test]
+    fn both_partitions_failing_fails_the_sweep_with_the_longer_wait() {
+        let short = lazybox_gh::GhError::RateLimited {
+            retry_after_secs: 10,
+            reason: "covered".into(),
+            self_throttle: false,
+        };
+        let long = lazybox_gh::GhError::RateLimited {
+            retry_after_secs: 300,
+            reason: "uncovered".into(),
+            self_throttle: false,
+        };
+        let error = combine_sweep_partitions(
+            (vec![spec("acme/widget")], Err(short)),
+            (vec![spec("otherorg/api")], Err(long)),
+        )
+        .expect_err("nothing was swept");
+        assert_eq!(error.retry_after_secs(), Some(300));
     }
 
     /// The notice fires when the gap appears and when its reason changes,
@@ -4911,8 +5294,11 @@ async fn push_github_source(
     client: GhClient,
     restore_sync_cursors: bool,
     // What `client` can see, when the sweep moved onto an App installation
-    // credential. Gates the reconcile's retirement authority.
+    // credential. Routes each read to the token that can see its repo.
     poll_coverage: Option<lazybox_gh::InstallationCoverage>,
+    // What `poll_coverage` does not reach. Swept on `user_client` in the
+    // same tick as the covered members (#1807).
+    poll_uncovered: Vec<String>,
     // The user-token client, when the poller is NOT running on it — i.e.
     // when `client` above is a GitHub App installation client with its own
     // rate-limit budget. It is what the shared cache keeps serving to
@@ -4936,15 +5322,8 @@ async fn push_github_source(
     // documented `providers.github.*` section.
     let cfg = lazybox_config::Config::load().ok();
     let github_cfg = cfg.as_ref().map(|c| &c.providers.github);
-    let config_scopes = github_cfg
-        .map(|g| github_scopes_from_filters(&g.filters))
-        .unwrap_or_default();
-    let mut watch_repos = github_cfg
-        .map(|g| github_watch_repos_from_filters(&g.filters))
-        .unwrap_or_default();
-    if let Some(cfg) = cfg.as_ref() {
-        retain_unmuted_watches(&mut watch_repos, cfg, chrono::Utc::now());
-    }
+    let (mut scopes, watch_repos) =
+        github_configured_scopes(setup, cfg.as_ref(), chrono::Utc::now());
     let detect_needs_reply = github_cfg.map(|g| g.detect_needs_reply).unwrap_or(true);
     let poll_interval = github_cfg
         .map(|g| g.poll_interval)
@@ -4955,12 +5334,6 @@ async fn push_github_source(
     let background_budget_share = github_cfg
         .map(|g| g.background_budget_share)
         .unwrap_or(lazybox_gh::rate_budget::DEFAULT_BACKGROUND_SHARE);
-    let mut scopes = setup
-        .selected_scopes
-        .get("github")
-        .cloned()
-        .unwrap_or_default();
-    scopes.extend(config_scopes);
     // Opt-in (`providers.github.include_accessible_repos`):
     // widen the allowlist to every repo the user can reach
     // (owned / org-member / direct-collaborator), so an
@@ -5003,7 +5376,7 @@ async fn push_github_source(
     // sync with what GhSource holds.
     let client = client
         .with_background_share(background_budget_share)
-        .with_filters(pr_qualifiers, issue_qualifiers)
+        .with_filters(pr_qualifiers.clone(), issue_qualifiers.clone())
         .with_watch_repos(watch_repos.iter().cloned().collect())
         .with_needs_reply(detect_needs_reply)
         // Native `blocked_by` edges refresh on the same cadence as the row:
@@ -5012,8 +5385,18 @@ async fn push_github_source(
     // The heartbeat runs on the user client while the sweep runs on the App
     // client, so they must agree on the notification cursor and the sweep
     // clocks. Adopt before caching, so the copy handlers reach for is
-    // coherent too.
-    let user_client = user_client.map(|user| user.sharing_sync_state_with(&client));
+    // coherent too. The search qualifiers come with it: once the user token
+    // sweeps the uncovered half of a split roster, the two clients must
+    // build the same queries, and giving both the same filters is what
+    // makes either one substitutable for a search.
+    let user_client = user_client.map(|user| {
+        user.with_background_share(background_budget_share)
+            .with_filters(pr_qualifiers, issue_qualifiers)
+            .with_watch_repos(watch_repos.iter().cloned().collect())
+            .with_needs_reply(detect_needs_reply)
+            .with_repo_refresh_interval(repo_refresh_interval)
+            .sharing_sync_state_with(&client)
+    });
     if restore_sync_cursors && let Some(store) = cursor_store.clone() {
         let key = gh_state_key("github:sync-cursors:v1", &client);
         match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {
@@ -5137,6 +5520,17 @@ async fn push_github_source(
     let sessioned_repos = engagement.sessioned_repos();
     let governor_interval = super::background_tick_interval(poll_interval, engagement.hot_count());
     let governor_plan = client.begin_background_tick(governor_interval);
+    // The user client owns a second `RateBudget`, and a budget that never
+    // begins a tick never clears its per-tick scheduled accounting: its
+    // spend accrues until every scheduled request it makes — the
+    // notifications heartbeat, and the uncovered half of a split sweep — is
+    // refused for exhausting an allowance nobody granted. Give it its own
+    // governor pass. The sweep's admission math still runs off the poll
+    // client's plan, which forecasts the whole roster and so over-states
+    // what the covered partition will actually spend.
+    if let Some(user) = &user_client {
+        user.begin_background_tick(governor_interval);
+    }
     let want_prs = filter.pr_enabled();
     let scan_issues = filter.issue_enabled() || !mention_allowed.is_empty();
     let forecast = client.background_sweep_forecast(want_prs, scan_issues);
@@ -5302,6 +5696,7 @@ async fn push_github_source(
     sources.push(Box::new(GhSource {
         user_client,
         poll_coverage,
+        uncovered_members: poll_uncovered.into_iter().collect(),
         client,
         filter,
         scopes,

@@ -28959,6 +28959,41 @@ mod optimistic_mutation_tests {
         assert!(m.sidebar.workspace_by_key(&sk).is_none());
     }
 
+    /// #1788: the archive's optimistic half drops the row on the
+    /// keystroke, but a poll reply built before the `Kill` landed is
+    /// still in flight. Re-inserting it silently undoes the archive —
+    /// the row "comes back a second later".
+    #[test]
+    fn archive_survives_a_poll_reply_already_in_flight() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#3");
+        let sk: SessionKey = (&ws_key).into();
+        // The copy a poll built before the archive: same row, same key.
+        let stale = Workspace::from_task(pr_task("github:owner/repo#3"), Utc::now());
+        assert_eq!(stale.key, ws_key, "the stale copy must name the same row");
+
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
+            stale.clone(),
+        )));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_none(),
+            "an in-flight upsert must not resurrect the archived row"
+        );
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(ws_key));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(stale)));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_none(),
+            "nor one landing behind the daemon's removal echo"
+        );
+    }
+
     #[test]
     fn archive_rolls_back_on_store_failure() {
         let mut m = build_model();

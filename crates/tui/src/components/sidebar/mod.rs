@@ -34,6 +34,20 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// animation only nudges the render loop a few times a second while
 /// an agent is busy (and never when nothing is working).
 const WORKING_SPIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+/// How long a removed workspace key stays untouchable by an incoming
+/// `WorkspaceUpserted` / `Snapshot`.
+///
+/// Removing a row is not instantaneous end to end: the optimistic half
+/// drops it on the keystroke, the daemon's `WorkspaceRemoved` echo
+/// follows a round trip later, and a poll reply or subscription refresh
+/// read that was already in flight carries the pre-removal copy of the
+/// row. Re-inserting that copy silently undoes a destructive action the
+/// user confirmed (#1788), so the key is held out for a window an order
+/// of magnitude above the round trip and an order of magnitude below the
+/// 60s poll cadence — a genuinely re-created row (a non-archiving delete
+/// the next poll legitimately rediscovers, or an unarchive) still lands
+/// on the following tick.
+const REMOVED_WORKSPACE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// Backstop for the per-row "spawning" arc: if no terminating event
 /// (a live `AgentState`, `TerminalSpawned`, a `Failed` step, or a
 /// `spawn*` `ProviderError`) clears it within this window, the arc
@@ -129,6 +143,14 @@ pub enum WorkTarget {
 pub struct Sidebar {
     id: PaneId,
     workspaces: HashMap<SessionKey, Workspace>,
+    /// Keys whose row was just removed, with the instant it happened.
+    /// Suppresses re-insertion by an `Upserted` / `Snapshot` built
+    /// before the removal but delivered after it — see
+    /// [`REMOVED_WORKSPACE_GRACE`]. Entries are written by both halves
+    /// of a removal (the optimistic `take_workspace` and the
+    /// authoritative `WorkspaceRemoved`) and dropped by
+    /// `restore_workspace`, so a rolled-back delete re-shows at once.
+    recently_removed: HashMap<SessionKey, std::time::Instant>,
     /// Derived view: workspaces filtered by mailbox, grouped by repo,
     /// each group sorted by updated_at desc. Headers are interleaved
     /// with workspace rows in render order; the cursor navigates
@@ -663,6 +685,7 @@ impl Sidebar {
         Self {
             id,
             workspaces: HashMap::new(),
+            recently_removed: HashMap::new(),
             visible: Vec::new(),
             collapsed_repos: BTreeSet::new(),
             pinned_repos: Vec::new(),
@@ -2010,9 +2033,34 @@ impl Sidebar {
         if removed.is_some() {
             self.broadcast_selected.remove(key);
             self.agents.remove(key);
+            self.note_workspace_removed(key);
             self.recompute_after_workspace_removed(key);
         }
         removed
+    }
+
+    /// Hold `key` out of the workspace map for [`REMOVED_WORKSPACE_GRACE`],
+    /// so an in-flight upsert or snapshot can't put the row back.
+    fn note_workspace_removed(&mut self, key: &SessionKey) {
+        self.recently_removed
+            .insert(key.clone(), std::time::Instant::now());
+    }
+
+    /// Whether `key` is still inside its post-removal grace window.
+    /// Prunes expired entries as it goes — removals are rare and the map
+    /// is only read on the paths that would re-insert a row, so there is
+    /// nothing to sweep on a timer.
+    fn workspace_recently_removed(&mut self, key: &SessionKey) -> bool {
+        let now = std::time::Instant::now();
+        self.recently_removed
+            .retain(|_, at| now.duration_since(*at) < REMOVED_WORKSPACE_GRACE);
+        let held = self.recently_removed.contains_key(key);
+        if held {
+            // Named in the client log so the next report of a row coming
+            // back can be told apart from one this guard already caught.
+            tracing::info!(%key, "sidebar: dropped a row update for a just-removed workspace");
+        }
+        held
     }
 
     /// Re-insert (or replace) a workspace optimistically edited or
@@ -2021,6 +2069,9 @@ impl Sidebar {
     /// notification — it restores state the user already saw.
     pub fn restore_workspace(&mut self, workspace: Workspace) {
         let key: SessionKey = (&workspace.key).into();
+        // The removal is off — lift its grace window so the very next
+        // upsert for this key is honoured instead of being swallowed.
+        self.recently_removed.remove(&key);
         self.workspaces.insert(key, workspace);
         self.recompute_visible();
     }

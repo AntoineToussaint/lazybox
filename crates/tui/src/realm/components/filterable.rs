@@ -53,6 +53,23 @@ pub fn subsequence_icase(haystack: &str, needle: &str) -> bool {
     true
 }
 
+/// Case-insensitive substring test, allocation-free. The right matcher
+/// for a long body: [`subsequence_icase`] allows gaps, which over a
+/// paragraph matches nearly everything (`tin` hits any body with a `t`,
+/// an `i` and an `n` in that order), so it discriminates only over short
+/// labels and keys. Same rule the snippet picker already applies to its
+/// bodies.
+pub fn contains_icase(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
 /// The contract every filter-as-you-type picker implements. The provided
 /// [`FilterableList::dispatch_key`] is the single home of the common key
 /// protocol; everything above it is per-picker data the protocol needs.
@@ -186,6 +203,88 @@ pub struct FilterModalChrome<'a> {
     pub modal_w: u16,
     pub empty: &'a str,
     pub help: Vec<Span<'static>>,
+    /// Full text of the highlighted row, shown beside (or under) the
+    /// list so the row's one-line summary is never the only thing the
+    /// user can read before acting on it (#1733). `None` keeps the
+    /// original single-column chrome.
+    pub preview: Option<PreviewPane>,
+    /// Help spans that describe the reader pane (its scroll keys). Shown
+    /// only when a reader is actually laid out: a modal too small to
+    /// carry one must not advertise keys that move nothing, which is how
+    /// a reader that silently vanished still looked available (#1733).
+    pub preview_help: Vec<Span<'static>>,
+}
+
+/// The highlighted row's complete content, for the reader pane
+/// [`render_filter_modal`] lays out. The picker owns `scroll` (the keys
+/// that move it are its own), and [`wrapped_window`](crate::realm::components::scrollable::wrapped_window) clamps
+/// it against the laid-out viewport on each render.
+pub struct PreviewPane {
+    pub lines: Vec<Line<'static>>,
+    pub scroll: u16,
+}
+
+/// Below this inner width a side-by-side reader would leave both halves
+/// too narrow to read, so the preview moves under the list instead.
+const SIDE_PREVIEW_MIN_W: u16 = 72;
+
+/// Rows the bottom preview takes when it can't sit beside the list —
+/// enough for a couple of wrapped lines plus its position cue. It shrinks
+/// (never below [`MIN_PREVIEW_H`]) rather than disappearing when the modal
+/// is short.
+const BOTTOM_PREVIEW_H: u16 = 6;
+
+/// Floor for the stacked reader: two content rows plus the position cue.
+/// Below this the pane cannot show enough to be read, and no preview is
+/// laid out at all — which the caller must reflect in its help line rather
+/// than advertise keys that now do nothing.
+const MIN_PREVIEW_H: u16 = 3;
+
+/// Rows the list keeps for itself before the reader takes any. A picker
+/// that can't show a few candidates has stopped being a picker.
+const MIN_LIST_H: u16 = 3;
+
+/// Split the picker body into `(list, preview)` rects, side-by-side on a
+/// wide modal and stacked on a narrow one. Returns `(list, None)` when
+/// there is no preview, or when the body is too small to divide without
+/// starving the list.
+fn split_preview(body: Rect, has_preview: bool) -> (Rect, Option<Rect>) {
+    if !has_preview {
+        return (body, None);
+    }
+    if body.width >= SIDE_PREVIEW_MIN_W {
+        let list_w = body.width / 2;
+        let list = Rect {
+            width: list_w,
+            ..body
+        };
+        let preview = Rect {
+            x: body.x + list_w + 1,
+            width: body.width - list_w - 1,
+            ..body
+        };
+        return (list, Some(preview));
+    }
+    // Stacked. The reader takes what is left once the list has its floor,
+    // capped at its usual height — so a short modal shrinks the reader
+    // instead of dropping it, and the text stays reachable at sizes where
+    // a fixed split would have left no way to read it at all.
+    let spare = body.height.saturating_sub(MIN_LIST_H + 1);
+    if spare < MIN_PREVIEW_H {
+        return (body, None);
+    }
+    let preview_h = spare.min(BOTTOM_PREVIEW_H);
+    let list_h = body.height - preview_h - 1;
+    let list = Rect {
+        height: list_h,
+        ..body
+    };
+    let preview = Rect {
+        y: body.y + list_h + 1,
+        height: preview_h,
+        ..body
+    };
+    (list, Some(preview))
 }
 
 /// Draw the shared single-column picker chrome: a centered rounded modal
@@ -200,12 +299,14 @@ pub fn render_filter_modal<P: FilterableList>(
     theme: &crate::theme::Theme,
     chrome: FilterModalChrome<'_>,
     mut render_row: impl FnMut(usize, bool) -> Line<'static>,
-) {
+) -> Option<u16> {
     let FilterModalChrome {
         title,
         modal_w,
         empty,
         help,
+        preview_help,
+        mut preview,
     } = chrome;
     let modal_w = modal_w.min(area.width.saturating_sub(4));
     let modal_h = 24u16.min(area.height.saturating_sub(4));
@@ -223,7 +324,7 @@ pub fn render_filter_modal<P: FilterableList>(
     frame.render_widget(block, modal);
 
     if inner.height < 4 {
-        return;
+        return None;
     }
     let filter_rect = Rect {
         x: inner.x,
@@ -268,6 +369,17 @@ pub fn render_filter_modal<P: FilterableList>(
         div_rect,
     );
 
+    let (body_rect, preview_rect) = split_preview(body_rect, preview.is_some());
+    // The clamped offset goes back to the caller: the picker owns the
+    // field, and `wrapped_window` is the only place that knows the real
+    // viewport. Without the write-back an overscrolled picker keeps a
+    // runaway offset and its next PageUp moves nothing on screen.
+    let mut clamped = None;
+    if let (Some(pane), Some(rect)) = (preview.as_mut(), preview_rect) {
+        render_preview(frame, rect, pane, theme);
+        clamped = Some(pane.scroll);
+    }
+
     // Scroll the visible window so the cursor stays on screen.
     let rows = body_rect.height as usize;
     let cursor = picker.cursor().unwrap_or(0);
@@ -285,7 +397,52 @@ pub fn render_filter_modal<P: FilterableList>(
     }
     frame.render_widget(Paragraph::new(body), body_rect);
 
+    let mut help = help;
+    if clamped.is_some() {
+        help.extend(preview_help);
+    }
     frame.render_widget(Paragraph::new(Line::from(help)), help_rect);
+    clamped
+}
+
+/// Draw the reader pane: the highlighted row's full text, wrapped to the
+/// pane and windowed at its scroll offset, with the last row reserved
+/// for the position cue whenever anything is out of sight (#1733).
+fn render_preview(
+    frame: &mut Frame,
+    rect: Rect,
+    pane: &mut PreviewPane,
+    theme: &crate::theme::Theme,
+) {
+    let body_h = rect.height.saturating_sub(1).max(1);
+    let (lines, cue) = crate::realm::components::scrollable::wrapped_window(
+        std::mem::take(&mut pane.lines),
+        rect.width,
+        body_h,
+        &mut pane.scroll,
+    );
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect {
+            height: body_h,
+            ..rect
+        },
+    );
+    if let Some(cue) = cue
+        && rect.height > body_h
+    {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                cue,
+                Style::default().fg(theme.text_dim).italic(),
+            ))),
+            Rect {
+                y: rect.y + body_h,
+                height: 1,
+                ..rect
+            },
+        );
+    }
 }
 
 #[cfg(test)]

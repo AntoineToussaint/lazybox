@@ -949,8 +949,14 @@ impl Sidebar {
             .and_then(|quota| lazybox_tui_core::usage::quota_headroom(&quota, now_unix))
             .map(|(label, left)| format!("{label} {left}% left"));
         let cost_micros = self.usage.cost_micros_for_session(session_key);
-        let cost =
-            (cost_micros > 0).then(|| lazybox_tui_core::usage::format_cost_micros(cost_micros));
+        // The tab is the other width-scarce surface, so it takes the
+        // compact rule. Saturating rather than wrapping the cast: a
+        // wrapped u64 would render a negative cost out of a huge one.
+        let cost = (cost_micros > 0).then(|| {
+            lazybox_tui_core::usage::format_cost_micros(
+                i64::try_from(cost_micros).unwrap_or(i64::MAX),
+            )
+        });
         (headroom.is_some() || cost.is_some()).then_some(UsageBadge { headroom, cost })
     }
 

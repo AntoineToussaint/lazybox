@@ -129,7 +129,7 @@ impl Component for JumpPicker {
             Span::styled("Esc", Style::default().fg(theme.error).bold()),
             Span::raw(" cancel"),
         ];
-        render_filter_modal(
+        let _ = render_filter_modal(
             self,
             frame,
             area,
@@ -139,6 +139,8 @@ impl Component for JumpPicker {
                 modal_w: 80,
                 empty,
                 help,
+                preview_help: Vec::new(),
+                preview: None,
             },
             |row_idx, is_cursor| {
                 let caret = if is_cursor { "▸ " } else { "  " };

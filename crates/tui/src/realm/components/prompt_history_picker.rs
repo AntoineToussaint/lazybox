@@ -4,9 +4,16 @@
 //! Lists every prompt the user has sent to the focused agent this
 //! session, newest-first and timestamped, with snippet-sourced entries
 //! tagged so it's obvious which came from the `]]s` picker. Typing
-//! fuzzy-filters the rows (a case-insensitive subsequence match over the
-//! prompt text + snippet tag); ↑/↓ navigate; Enter re-sends the chosen
+//! fuzzy-filters the rows; ↑/↓ navigate; Enter re-sends the chosen
 //! prompt into the session.
+//!
+//! A row is a one-line summary of something that can run to paragraphs,
+//! so the summary is never the only thing on offer (#1733): the
+//! highlighted prompt's FULL text sits in a reader pane beside the list
+//! (under it on a narrow terminal), scrollable to its final character
+//! with PageUp/PageDown and Ctrl-u/Ctrl-d — reading never re-sends, which
+//! stays deliberate on Enter. The filter matches that full text too, so a
+//! word only present past the summary still finds its prompt.
 //!
 //! Modal returns:
 //! - `Msg::ChoicePicked(vec![ChoicePayload::Text(text)])` — the full
@@ -23,8 +30,9 @@ use crate::realm::ChoicePayload;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use crate::realm::components::filterable::{
-    FilterModalChrome, FilterableList, render_filter_modal, subsequence_icase,
+    FilterModalChrome, FilterableList, PreviewPane, contains_icase, render_filter_modal,
 };
+use crate::realm::components::scrollable::handle_scroll_key;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, KeyEvent};
@@ -47,6 +55,12 @@ pub struct PromptRow {
     pub text: String,
 }
 
+/// Lines a PageUp/PageDown moves the reader pane. A fixed page (rather
+/// than the laid-out height) keeps key handling independent of render;
+/// `wrapped_window` clamps whatever it produces to the real viewport, so
+/// paging past the end lands on the last screenful either way.
+const PREVIEW_PAGE: u16 = 8;
+
 pub struct PromptHistoryPicker {
     /// Display rows, index-aligned with [`Self::texts`]. Built together
     /// and never re-ordered, so the filtered display can't desync them.
@@ -62,6 +76,9 @@ pub struct PromptHistoryPicker {
     cursor: Option<usize>,
     /// Indices into `rows` matching the filter, in display order.
     visible_indices: Vec<usize>,
+    /// Topmost visible line of the reader pane, reset whenever the
+    /// highlighted row changes so a new prompt opens at its first line.
+    preview_scroll: u16,
 }
 
 impl PromptHistoryPicker {
@@ -76,13 +93,27 @@ impl PromptHistoryPicker {
             filter: String::new(),
             cursor: None,
             visible_indices: Vec::new(),
+            preview_scroll: 0,
         };
         picker.refilter();
         picker
     }
 
     pub fn on_key(&mut self, key: &KeyEvent) -> Option<Msg> {
-        self.dispatch_key(key)
+        let before = self.selected();
+        let msg = self.dispatch_key(key);
+        if self.selected() != before {
+            self.preview_scroll = 0;
+        }
+        msg
+    }
+
+    /// The highlighted prompt in full — what the reader pane shows, and
+    /// the text Enter would re-send.
+    fn selected_text(&self) -> Option<&str> {
+        self.selected()
+            .and_then(|i| self.texts.get(i))
+            .map(String::as_str)
     }
 }
 
@@ -92,15 +123,19 @@ impl FilterableList for PromptHistoryPicker {
         if q.is_empty() {
             (0..self.rows.len()).collect()
         } else {
+            // Matched against the FULL prompt, not the row's one-line
+            // summary (#1733) — a word that only appears in the third
+            // paragraph still finds it. Substring, not subsequence: over a
+            // multi-paragraph body a gapped match returns almost every row,
+            // so widening the corpus would have cost the filter the
+            // selectivity it exists for. Neither side is copied.
             self.rows
                 .iter()
                 .enumerate()
                 .filter_map(|(i, r)| {
-                    let hay = match &r.tag {
-                        Some(tag) => format!("{} {}", tag, r.text),
-                        None => r.text.clone(),
-                    };
-                    subsequence_icase(&hay, q).then_some(i)
+                    let body = self.texts.get(i).map_or(r.text.as_str(), String::as_str);
+                    let tag_hit = r.tag.as_deref().is_some_and(|t| contains_icase(t, q));
+                    (tag_hit || contains_icase(body, q)).then_some(i)
                 })
                 .collect()
         }
@@ -129,6 +164,19 @@ impl FilterableList for PromptHistoryPicker {
     fn set_visible(&mut self, visible: Vec<usize>) {
         self.visible_indices = visible;
     }
+
+    /// Page the reader pane. Only the keys the list protocol doesn't
+    /// already claim reach here — PageUp/PageDown and Ctrl-u/Ctrl-d —
+    /// so plain typing still filters and ↑/↓ still move the cursor.
+    /// Scrolling is pure reading: it returns no message, so it can never
+    /// re-send the prompt.
+    fn custom_key(&mut self, key: &KeyEvent) -> Option<Msg> {
+        let mut scroll = self.preview_scroll;
+        if handle_scroll_key(&mut scroll, PREVIEW_PAGE, key) {
+            self.preview_scroll = scroll;
+        }
+        None
+    }
 }
 
 impl Component for PromptHistoryPicker {
@@ -139,6 +187,13 @@ impl Component for PromptHistoryPicker {
         } else {
             "  (no matches)"
         };
+        // The reading keys are advertised by the chrome only when it
+        // actually lays a reader out (#1733) — on a modal too short for
+        // one they would name keys that move nothing.
+        let preview_help = vec![
+            Span::styled("PgUp/PgDn", Style::default().fg(theme.accent).bold()),
+            Span::raw(" read"),
+        ];
         let help = vec![
             Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
             Span::raw(" navigate  "),
@@ -147,9 +202,23 @@ impl Component for PromptHistoryPicker {
             Span::styled("Type", Style::default().fg(theme.accent).bold()),
             Span::raw(" filter  "),
             Span::styled("Esc", Style::default().fg(theme.error).bold()),
-            Span::raw(" cancel"),
+            Span::raw(" cancel  "),
         ];
-        render_filter_modal(
+        // The reader pane: the highlighted prompt in full, so the row's
+        // summary is never the last word on what Enter would send.
+        let preview = self.selected_text().map(|text| PreviewPane {
+            lines: text
+                .lines()
+                .map(|l| {
+                    Line::from(Span::styled(
+                        l.to_string(),
+                        Style::default().fg(theme.text_strong),
+                    ))
+                })
+                .collect(),
+            scroll: self.preview_scroll,
+        });
+        let clamped = render_filter_modal(
             self,
             frame,
             area,
@@ -159,6 +228,8 @@ impl Component for PromptHistoryPicker {
                 modal_w: 88,
                 empty,
                 help,
+                preview_help,
+                preview,
             },
             |row_idx, is_cursor| {
                 let row = &self.rows[row_idx];
@@ -194,6 +265,12 @@ impl Component for PromptHistoryPicker {
                 Line::from(spans)
             },
         );
+        // Adopt the offset the reader actually settled on, so paging past
+        // the end doesn't bank a runaway scroll that swallows the next
+        // several PageUps.
+        if let Some(scroll) = clamped {
+            self.preview_scroll = scroll;
+        }
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -311,6 +388,200 @@ mod tests {
         let mut p = PromptHistoryPicker::new(rows());
         let ev = KeyEvent::new(Key::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(p.on_key(&ev), Some(Msg::ModalDismissed)));
+    }
+
+    /// #1733: a word present only past the one-line summary still finds
+    /// its prompt — the filter reads the full text, not the display row.
+    #[test]
+    fn filter_searches_past_the_summary() {
+        let mut p = PromptHistoryPicker::new(rows());
+        for c in "lease".chars() {
+            assert!(p.on_key(&ke(c)).is_none());
+        }
+        // "force-push with lease" lives only in row 1's full text.
+        assert_eq!(p.visible_indices, vec![1]);
+        assert_eq!(
+            p.selected_text(),
+            Some("rebase onto main and force-push with lease"),
+        );
+    }
+
+    /// Reading is not sending: paging through a long prompt moves the
+    /// reader and emits nothing, and the payload is untouched.
+    #[test]
+    fn scrolling_the_preview_never_resends() {
+        let long = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut p = PromptHistoryPicker::new(vec![(
+            PromptRow {
+                when: "now".into(),
+                tag: None,
+                text: "line 0 …".into(),
+            },
+            long.clone(),
+        )]);
+
+        assert!(p.on_key(&key(Key::PageDown)).is_none());
+        assert!(p.preview_scroll > 0, "PageDown pages the reader");
+        assert!(p.on_key(&key(Key::PageUp)).is_none());
+        assert_eq!(p.preview_scroll, 0);
+        assert!(
+            p.on_key(&KeyEvent::new(Key::Char('d'), KeyModifiers::CONTROL))
+                .is_none()
+        );
+        assert!(p.preview_scroll > 0, "Ctrl-d pages the reader");
+
+        // The prompt itself is unchanged, and Enter still sends it whole.
+        assert_eq!(p.selected_text(), Some(long.as_str()));
+        assert!(matches!(
+            p.on_key(&key(Key::Enter)),
+            Some(Msg::ChoicePicked(_))
+        ));
+    }
+
+    /// Moving the cursor opens the next prompt at its first line rather
+    /// than inheriting the previous one's scroll position.
+    #[test]
+    fn moving_the_cursor_resets_the_reader() {
+        let mut p = PromptHistoryPicker::new(rows());
+        let _ = p.on_key(&key(Key::PageDown));
+        assert!(p.preview_scroll > 0);
+        let _ = p.on_key(&key(Key::Down));
+        assert_eq!(p.preview_scroll, 0);
+    }
+
+    /// Paging past the end must not bank a runaway offset: the reader
+    /// clamps to the last screenful, and the picker adopts that clamped
+    /// value, so the very next PageUp moves the view. Before the
+    /// write-back, ten PageDowns on a short prompt left `preview_scroll`
+    /// at 80 and swallowed the next nine PageUps.
+    #[test]
+    fn overscrolling_does_not_swallow_the_next_page_up() {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let body = (0..30)
+            .map(|i| format!("L{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut p = PromptHistoryPicker::new(vec![(
+            PromptRow {
+                when: "now".into(),
+                tag: None,
+                text: "L0 …".into(),
+            },
+            body,
+        )]);
+        let render = |p: &mut PromptHistoryPicker| {
+            let mut t = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+            t.draw(|f| p.view(f, Rect::new(0, 0, 100, 30)))
+                .expect("draw");
+            let buf = t.backend().buffer().clone();
+            (0..30)
+                .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        for _ in 0..10 {
+            let _ = p.on_key(&key(Key::PageDown));
+        }
+        let bottom = render(&mut p);
+        assert!(bottom.contains("L29"), "never reached the end:\n{bottom}");
+        let settled = p.preview_scroll;
+        assert!(settled < 30, "runaway offset banked: {settled}");
+
+        let _ = p.on_key(&key(Key::PageUp));
+        let after = render(&mut p);
+        assert_ne!(bottom, after, "one PageUp moved nothing:\n{after}");
+    }
+
+    /// #1733 asks for a reading path on a small terminal, and an 80x20
+    /// one is small: the modal's body is 11 rows there. A fixed split
+    /// dropped the reader entirely at that size — silently, while the
+    /// help line went on naming its scroll keys. The reader now shrinks
+    /// to fit, and the hint appears only when one is laid out.
+    #[test]
+    fn a_small_terminal_still_gets_a_reader_and_an_honest_help_line() {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let body = (0..30)
+            .map(|i| format!("body line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut p = PromptHistoryPicker::new(vec![(
+            PromptRow {
+                when: "now".into(),
+                tag: None,
+                text: "body line 0 …".into(),
+            },
+            body,
+        )]);
+        let render = |p: &mut PromptHistoryPicker, w: u16, h: u16| {
+            let mut t = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+            t.draw(|f| p.view(f, Rect::new(0, 0, w, h))).expect("draw");
+            let buf = t.backend().buffer().clone();
+            (0..h)
+                .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let small = render(&mut p, 80, 20);
+        assert!(
+            small.contains("body line 0"),
+            "no reader on a small terminal:\n{small}",
+        );
+        assert!(small.contains("read"), "reader hint missing:\n{small}");
+        // …and it still reaches the end from there.
+        for _ in 0..10 {
+            let _ = p.on_key(&key(Key::PageDown));
+        }
+        let paged = render(&mut p, 80, 20);
+        assert!(paged.contains("body line 29"), "tail unreachable:\n{paged}");
+
+        // A modal with no room for a reader says so by omission: the
+        // scroll keys are not advertised.
+        let tiny = render(&mut p, 60, 12);
+        assert!(!tiny.contains("read"), "hint outlived the reader:\n{tiny}");
+    }
+
+    /// Widening the corpus to the full prompt must not cost the filter its
+    /// selectivity: a gapped (subsequence) match over paragraphs hits
+    /// almost everything, so the match is a substring.
+    #[test]
+    fn full_text_search_still_discriminates() {
+        let mut p = PromptHistoryPicker::new(vec![
+            (
+                PromptRow {
+                    when: "a".into(),
+                    tag: None,
+                    text: "Please rebase…".into(),
+                },
+                "Please rebase onto main and resolve the conflicts in the parser".into(),
+            ),
+            (
+                PromptRow {
+                    when: "b".into(),
+                    tag: None,
+                    text: "Investigate…".into(),
+                },
+                "Investigate the flaky test under load and report what you find".into(),
+            ),
+        ]);
+        // `tin` is a subsequence of BOTH bodies and a substring of neither.
+        for c in "tin".chars() {
+            let _ = p.on_key(&ke(c));
+        }
+        assert!(p.visible_indices.is_empty(), "gapped match resurfaced");
+        for _ in 0..3 {
+            let _ = p.on_key(&key(Key::Backspace));
+        }
+        for c in "parser".chars() {
+            let _ = p.on_key(&ke(c));
+        }
+        assert_eq!(p.visible_indices, vec![0], "a real word past the summary");
     }
 
     #[test]

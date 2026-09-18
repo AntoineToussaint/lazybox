@@ -53,6 +53,47 @@ pub fn max_scroll(total_lines: usize, body_height: u16) -> u16 {
     (total_lines as u16).saturating_sub(body_height.max(1))
 }
 
+/// Wrap `lines` to `width` and return the `height` rows starting at
+/// `scroll`, clamped so the last line can always be reached, together
+/// with a one-line position cue (`↓ 12 more`, `↑ 4 · ↓ 8`) or `None`
+/// when everything fits.
+///
+/// This is the escape hatch for text a compact surface had to summarize
+/// (#1733): a reader that shows a truncated row must be able to hand the
+/// whole thing to this and let the user read to its final character.
+/// `scroll` is clamped in place, so a caller that pages past the bottom
+/// (or shrinks its viewport) lands on the last screenful rather than on
+/// blank rows.
+pub fn wrapped_window(
+    lines: Vec<ratatui::text::Line<'static>>,
+    width: u16,
+    height: u16,
+    scroll: &mut u16,
+) -> (Vec<ratatui::text::Line<'static>>, Option<String>) {
+    let wrapped: Vec<ratatui::text::Line<'static>> = lines
+        .into_iter()
+        .flat_map(|line| crate::components::comment_render::wrap_one(line, width.max(1)))
+        .collect();
+    let height = height.max(1);
+    *scroll = (*scroll).min(max_scroll(wrapped.len(), height));
+    let start = *scroll as usize;
+    let shown: Vec<_> = wrapped
+        .iter()
+        .skip(start)
+        .take(height as usize)
+        .cloned()
+        .collect();
+    let above = start;
+    let below = wrapped.len().saturating_sub(start + shown.len());
+    let cue = match (above, below) {
+        (0, 0) => None,
+        (0, b) => Some(format!("↓ {b} more")),
+        (a, 0) => Some(format!("↑ {a}")),
+        (a, b) => Some(format!("↑ {a} · ↓ {b}")),
+    };
+    (shown, cue)
+}
+
 /// Center a modal of size `w × h` within `area`.
 pub fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
     let x = area.x + area.width.saturating_sub(w) / 2;
@@ -161,6 +202,55 @@ mod tests {
         assert_eq!(max_scroll(40, 10), 30);
         // A zero viewport is treated as one row.
         assert_eq!(max_scroll(3, 0), 2);
+    }
+
+    /// #1733: a body taller than its viewport is reachable to its last
+    /// line, and says how much is out of sight in each direction.
+    #[test]
+    fn wrapped_window_pages_to_the_final_line_and_reports_overflow() {
+        let body: Vec<ratatui::text::Line<'static>> = (0..10)
+            .map(|i| ratatui::text::Line::from(format!("line {i}")))
+            .collect();
+
+        let mut scroll = 0u16;
+        let (shown, cue) = wrapped_window(body.clone(), 20, 4, &mut scroll);
+        assert_eq!(shown.len(), 4);
+        assert_eq!(shown[0].to_string(), "line 0");
+        assert_eq!(cue.as_deref(), Some("↓ 6 more"));
+
+        scroll = 3;
+        let (shown, cue) = wrapped_window(body.clone(), 20, 4, &mut scroll);
+        assert_eq!(shown[0].to_string(), "line 3");
+        assert_eq!(cue.as_deref(), Some("↑ 3 · ↓ 3"));
+
+        // Paging past the end lands on the last screenful — the final
+        // line is always readable, never scrolled off the top.
+        scroll = u16::MAX;
+        let (shown, cue) = wrapped_window(body.clone(), 20, 4, &mut scroll);
+        assert_eq!(scroll, 6);
+        assert_eq!(
+            shown.last().map(|l| l.to_string()).as_deref(),
+            Some("line 9")
+        );
+        assert_eq!(cue.as_deref(), Some("↑ 6"));
+
+        // A body that fits says nothing.
+        let (shown, cue) = wrapped_window(body, 20, 20, &mut scroll);
+        assert_eq!(shown.len(), 10);
+        assert_eq!(cue, None);
+    }
+
+    /// Long unbroken text is wrapped to the viewport, so its tail is
+    /// reachable by scrolling rather than clipped at the right edge.
+    #[test]
+    fn wrapped_window_wraps_before_it_windows() {
+        let long = "x".repeat(50);
+        let mut scroll = 0u16;
+        let (shown, cue) =
+            wrapped_window(vec![ratatui::text::Line::from(long)], 10, 3, &mut scroll);
+        assert_eq!(shown.len(), 3);
+        assert!(shown.iter().all(|l| l.to_string().len() <= 10));
+        assert_eq!(cue.as_deref(), Some("↓ 2 more"));
     }
 
     #[test]

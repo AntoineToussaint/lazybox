@@ -3183,14 +3183,15 @@ mod search_tests {
         let row = today_row(&mut sb, 80);
         assert!(row.contains("3 sessions"), "{row:?}");
         assert!(row.contains("4 merged"), "{row:?}");
-        assert!(row.contains("$2.14"), "{row:?}");
+        // Whole dollars at a dollar and up (#1746).
+        assert!(row.contains("$2"), "{row:?}");
         assert!(
             !row.contains("today"),
             "no heading on the chip row: {row:?}"
         );
         assert!(row.contains("filter"), "chips share the row: {row:?}");
         assert!(
-            row.trim_end().ends_with("$2.14"),
+            row.trim_end().ends_with("$2"),
             "strip is right-aligned: {row:?}"
         );
         assert_eq!(
@@ -3237,12 +3238,12 @@ mod search_tests {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         set_today(&mut sb, 3, 4, 2_140_000);
         // Room for `3 sessions · 4 merged` (21 cells) but not the trailing
-        // ` · $2.14` (+8).
+        // ` · $2` (+5).
         let width = pane_width_for_room(&mut sb, 24);
         let row = today_row(&mut sb, width);
         assert!(row.contains("3 sessions"), "{row:?}");
         assert!(row.contains("4 merged"), "{row:?}");
-        assert!(!row.contains("$2.14"), "{row:?}");
+        assert!(!row.contains("$2"), "{row:?}");
     }
 
     /// Priority is contiguous: once a higher-priority group doesn't fit,
@@ -3255,7 +3256,7 @@ mod search_tests {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         set_today(&mut sb, 3, 4, 2_140_000);
         // `3 sessions` = 10, `3 sessions · 4 merged` = 21, `3 sessions ·
-        // $2.14` = 18: room 19 fits sessions and would fit cost, not merged.
+        // $2` = 15: room 19 fits sessions and would fit cost, not merged.
         let width = pane_width_for_room(&mut sb, 19);
         let row = today_row(&mut sb, width);
         assert!(
@@ -3263,7 +3264,7 @@ mod search_tests {
             "keeps the headline count: {row:?}"
         );
         assert!(
-            !row.contains("$2.14"),
+            !row.contains("$2"),
             "cost must not jump the dropped merged: {row:?}"
         );
         assert!(!row.contains("merged"), "merged did not fit: {row:?}");
@@ -6481,8 +6482,8 @@ mod rebadge_attention_tests {
             .find(|line| line.contains("Transferred PR"))
             .expect("transferred PR row");
         assert!(
-            row.contains(" 1CX"),
-            "transferred PR row must visibly render its jump number and both agents: {row:?}",
+            row.contains(" CX"),
+            "transferred PR row must visibly render both agents: {row:?}",
         );
     }
 

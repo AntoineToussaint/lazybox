@@ -54,6 +54,10 @@ use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
+/// Lines a PageUp/PageDown moves the preview pane; `wrapped_window`
+/// clamps the result to the pane's real height.
+const PREVIEW_PAGE: u16 = 8;
+
 /// The picker's row view-model, category grouping, filter, recent-float,
 /// and the unique-prefix auto-submit are the client-free
 /// [`lazybox_tui_core::snippets`] algorithm (#734) so the TUI and desktop
@@ -114,6 +118,12 @@ pub struct SnippetPicker {
     /// Topmost visible list line (headers + rows), kept in step with
     /// the cursor in `view`.
     list_scroll: usize,
+    /// Topmost visible line of the preview pane (#1733). The body wraps
+    /// but used to have no way to scroll, so a snippet longer than the
+    /// pane hid its tail — including, for a long built-in, the part that
+    /// says what it will actually do. Reset whenever the highlighted row
+    /// changes.
+    preview_scroll: u16,
     /// Modal-border title override. `None` renders the default
     /// " Snippets "; the broadcast flow names its targets here.
     title: Option<String>,
@@ -145,6 +155,7 @@ impl SnippetPicker {
             recent_rows: Vec::new(),
             recent_count: 0,
             list_scroll: 0,
+            preview_scroll: 0,
             title: None,
             offer_free_text: false,
             insert_without_submit: false,
@@ -404,7 +415,7 @@ impl SnippetPicker {
     /// identical for all of them and documented once in `docs/snippets.md`,
     /// so previewing it here would cost ~19 lines per row to tell the user
     /// nothing that distinguishes this snippet from the next.
-    fn render_preview(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    fn render_preview(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let Some(c) = self.cursor else {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -491,7 +502,41 @@ impl SnippetPicker {
                 area.width,
             ));
         }
-        frame.render_widget(Paragraph::new(lines), area);
+        // Window the (already wrapped) preview at its scroll offset and
+        // keep the last row for the position cue, so a body taller than
+        // the pane can be read to its end instead of stopping wherever
+        // the pane happens to (#1733).
+        let body_h = area.height.saturating_sub(1).max(1);
+        let mut scroll = self.preview_scroll;
+        let (shown, cue) = crate::realm::components::scrollable::wrapped_window(
+            lines,
+            area.width,
+            body_h,
+            &mut scroll,
+        );
+        self.preview_scroll = scroll;
+        frame.render_widget(
+            Paragraph::new(shown),
+            Rect {
+                height: body_h,
+                ..area
+            },
+        );
+        if let Some(cue) = cue
+            && area.height > body_h
+        {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    cue,
+                    Style::default().fg(theme.text_dim).italic(),
+                ))),
+                Rect {
+                    y: area.y + body_h,
+                    height: 1,
+                    ..area
+                },
+            );
+        }
     }
 
     /// The key of the row under the cursor, resolving through the visible
@@ -564,6 +609,9 @@ impl FilterableList for SnippetPicker {
         self.cursor
     }
     fn set_cursor(&mut self, cursor: Option<usize>) {
+        if self.cursor != cursor {
+            self.preview_scroll = 0;
+        }
         self.cursor = cursor;
     }
     fn visible(&self) -> &[usize] {
@@ -595,6 +643,20 @@ impl FilterableList for SnippetPicker {
     ///   is actually an override and flashes otherwise, since only it knows
     ///   the shadowed built-in body.
     fn custom_key(&mut self, key: &KeyEvent) -> Option<Msg> {
+        // Page the preview (#1733). Unmodified, because every Ctrl-letter
+        // here is already spoken for — and reading is not picking, so it
+        // returns no message.
+        if matches!(key.code, Key::PageDown | Key::PageUp) {
+            let mut scroll = self.preview_scroll;
+            if crate::realm::components::scrollable::handle_scroll_key(
+                &mut scroll,
+                PREVIEW_PAGE,
+                key,
+            ) {
+                self.preview_scroll = scroll;
+            }
+            return None;
+        }
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             return None;
         }
@@ -1355,6 +1417,44 @@ mod tests {
             out.contains("review please") || out.contains("open pr"),
             "preview body: {out}"
         );
+    }
+
+    /// #1733: a body taller than the preview pane is readable to its last
+    /// line. Before, the pane wrapped but never scrolled, so the tail was
+    /// simply unreachable — and it says how much is still below.
+    #[test]
+    fn a_long_preview_body_can_be_read_to_its_last_line() {
+        let mut rows = make_rows();
+        let body = (0..60)
+            .map(|i| format!("body line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The cursor opens on `]rev` (first display row, Review first),
+        // so that is the row whose body must overflow the pane.
+        rows.iter_mut()
+            .find(|r| r.key == "rev")
+            .expect("rev row")
+            .body = body;
+        let mut picker = SnippetPicker::new(rows, String::new());
+
+        let first = render(&mut picker, 92, 20);
+        assert!(first.contains("body line 0"), "opens at the top: {first}");
+        assert!(!first.contains("body line 59"), "tail is off-pane: {first}");
+        assert!(first.contains("more"), "says what is below: {first}");
+
+        for _ in 0..20 {
+            assert!(picker.custom_key(&key(Key::PageDown)).is_none());
+        }
+        let last = render(&mut picker, 92, 20);
+        assert!(
+            last.contains("body line 59"),
+            "paging must reach the final line: {last}",
+        );
+
+        // Moving the cursor opens the next snippet at its own first line.
+        picker.set_cursor(Some(1));
+        let moved = render(&mut picker, 92, 20);
+        assert!(!moved.contains("body line 59"), "reader reset: {moved}");
     }
 
     /// #1671: a skill that bundles `scripts/` carries its `⚠ runs code`

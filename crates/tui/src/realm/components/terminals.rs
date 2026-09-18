@@ -107,6 +107,14 @@ impl Terminals {
         self.inner.set_layout(layout);
     }
 
+    /// Replace the `agent_id → default tier label` map (#1745).
+    pub fn set_default_model_labels(
+        &mut self,
+        defaults: std::collections::HashMap<String, String>,
+    ) {
+        self.inner.set_default_model_labels(defaults);
+    }
+
     /// Currently active terminal id (the one keys route to).
     pub fn active_terminal_id(&self) -> Option<TerminalId> {
         self.inner.active_terminal_id()

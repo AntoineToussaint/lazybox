@@ -116,9 +116,11 @@ fn header_breakdown(
         .collect()
 }
 
-/// USD micros (millionths of a dollar) → `$1.23`.
+/// USD micros (millionths of a dollar) → `$9` / `$0.42`, through the
+/// shared compact cost rule — the chip row is the width-scarce surface
+/// that rule is for (#1746).
 fn fmt_cost_micros(micros: i64) -> String {
-    format!("${:.2}", micros as f64 / 1_000_000.0)
+    lazybox_tui_core::usage::format_cost_micros(micros)
 }
 
 /// Style + width-gate the always-visible "today" stats strip (#1344): a

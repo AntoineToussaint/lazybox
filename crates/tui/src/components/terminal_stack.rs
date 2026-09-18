@@ -665,6 +665,13 @@ pub(crate) struct RenderedClickTarget {
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
+    /// `agent_id → label of that agent's DEFAULT model tier`
+    /// (`agents.<id>.models.default`, else the built-in default), fed by
+    /// [`Self::set_default_model_labels`]. A tab running its agent's
+    /// default tier renders no `◆` badge — the badge marks a deliberate
+    /// deviation, the same rule the sidebar row follows (#1502/#1745).
+    /// An agent with no resolvable default is absent, so its runs badge.
+    default_model_labels: HashMap<String, String>,
     /// Bumped whenever the visible-set inputs change (slot
     /// membership / kinds / active session) — invalidates
     /// `visible_cache` (#1237): `visible_terminals` used to rebuild
@@ -1680,6 +1687,7 @@ impl TerminalStack {
         Self {
             id,
             terminals: HashMap::new(),
+            default_model_labels: HashMap::new(),
             slots_rev: std::cell::Cell::new(0),
             visible_cache: std::cell::RefCell::new(None),
             active_session: None,
@@ -2001,6 +2009,30 @@ impl TerminalStack {
     pub fn set_collapsed(&mut self, collapsed: bool) {
         self.collapsed = collapsed;
         self.collapse_user_set = true;
+    }
+
+    /// Replace the `agent_id → default tier label` map that hides the `◆`
+    /// badge on tabs running their agent's default tier (#1745).
+    pub fn set_default_model_labels(&mut self, defaults: HashMap<String, String>) {
+        self.default_model_labels = defaults;
+    }
+
+    /// The tab's model label when it is worth a badge — i.e. when the
+    /// session runs something OTHER than its agent's default tier. A bare
+    /// spawn reports "normal" by saying nothing (#1745). A shell, an
+    /// unlabelled session, or an agent whose default can't be resolved
+    /// falls through to whatever label the slot carries.
+    fn deviating_model_label<'a>(
+        slot: &'a TerminalSlot,
+        defaults: &HashMap<String, String>,
+    ) -> Option<&'a str> {
+        let label = slot.model_label.as_deref()?;
+        if let TerminalKind::Agent(agent_id) = &slot.kind
+            && defaults.get(agent_id.as_str()).is_some_and(|d| d == label)
+        {
+            return None;
+        }
+        Some(label)
     }
 
     /// Re-apply the empty-aware default unless the user has already
@@ -2982,6 +3014,19 @@ impl TerminalStack {
         let slot = self.terminals.get(&id)?;
         if !matches!(slot.kind, TerminalKind::Agent(_)) {
             return None;
+        }
+        // A focus-mode pane is the exception to #1745's silent `Working`.
+        // That state is unremarkable on the tab strip and the tile headers
+        // because the sidebar row's spinner is on screen beside them; in a
+        // multi-pane focus layout the sidebar is gone and this header is
+        // the only place the state can appear, so "running" and "idle"
+        // would otherwise look identical across the grid.
+        if slot.exited.is_none() && matches!(slot.agent_state, lazybox_ipc::AgentState::Working) {
+            let tone = crate::components::sidebar::agent_state_tone(
+                theme,
+                &lazybox_ipc::AgentState::Working,
+            );
+            return Some(("· working", Style::default().fg(tone)));
         }
         Self::agent_state_badge(slot.agent_state, slot.exited.is_some(), true, theme)
     }
@@ -4800,17 +4845,16 @@ impl TerminalStack {
         // inactive is dim grey. Two-tab common case looks like a tab
         // strip; single-terminal shows just one entry.
         //
-        // When the pane has focus the label becomes an explicit
-        // "▶ typing to" pointer (#1110): co-located with the tab strip,
-        // it makes the focused terminal unmistakable so a user can't
-        // mistake navigation mode for "typing to the agent". Unfocused
-        // it reads as the quiet "Terminals" heading. The two forms are
-        // padded to the same width so the tab strip doesn't jump.
-        let title_prefix = if focused {
-            "▶ typing to  "
-        } else {
-            "Terminals    "
-        };
+        // When the pane has focus a `▶` points at the tab strip (#1110):
+        // co-located with the tabs, it makes the focused terminal
+        // unmistakable so a user can't mistake navigation mode for
+        // "typing to the agent". The words it used to carry — "typing to",
+        // and the "Terminals" heading in the unfocused form — said what
+        // the arrow, the accented tab and the pane border already say, at
+        // thirteen columns of the row where the usage badge runs out of
+        // room (#1745). Both forms keep the same width so the tab strip
+        // doesn't jump as focus moves.
+        let title_prefix = if focused { "▶  " } else { "   " };
         let mut title_spans: Vec<Span<'static>> =
             vec![Span::styled(title_prefix, theme.title(focused))];
         // Cursor in cells — used to compute the column range each
@@ -4835,7 +4879,8 @@ impl TerminalStack {
                         Some(s.agent_state),
                         s.no_permission,
                         s.on_main,
-                        s.model_label.clone(),
+                        Self::deviating_model_label(s, &self.default_model_labels)
+                            .map(str::to_owned),
                     )
                 })
                 .unwrap_or((
@@ -4915,9 +4960,10 @@ impl TerminalStack {
                 ));
                 cursor = cursor.saturating_add(main_text.chars().count() as u16);
             }
-            // Model tier: the session was launched at a non-default
-            // model via a `w S` / `a S` chord — show which one so the
-            // user remembers what's running behind this tab.
+            // Model tier: the session runs something other than its
+            // agent's default — show which one so the user remembers
+            // what's behind this tab. A default-tier spawn badges
+            // nothing (#1745).
             if let Some(tier) = &model_label {
                 let tier_text = format!(" ◆ {tier}");
                 let width = tier_text.chars().count() as u16;
@@ -6158,7 +6204,7 @@ impl TerminalStack {
             spans.push(Span::styled(chip, style));
         }
 
-        if let Some(tier) = &slot.model_label {
+        if let Some(tier) = Self::deviating_model_label(slot, &self.default_model_labels) {
             let badge = format!("◆ {tier} ");
             used += badge.chars().count();
             spans.push(Span::styled(
@@ -6256,12 +6302,16 @@ impl TerminalStack {
                 },
                 bold,
             )),
-            AgentState::Working => Some(("· working", Style::default().fg(tone))),
             AgentState::Done => Some(("✓ done", bold)),
             // A provider usage / rate-limit block (#847) — the agent is
             // parked waiting on the user just like `InputNeeded`, so it
             // gets the same attention treatment, with the `⧗` glyph the
             // sidebar pill already uses for it.
+            //
+            // `Working` is deliberately absent alongside `Idle`: a running
+            // agent is the unremarkable case, and the word was a third
+            // rendering of what the tab's own live output and the sidebar
+            // row's spinner already say (#1745).
             AgentState::LimitReached => Some(("⧗ limited", bold)),
             AgentState::CreditExhausted => Some(("¢ no credit", bold)),
             // The turn ended on an infrastructure failure (#1782) rather
@@ -6280,10 +6330,10 @@ impl TerminalStack {
             // do — so it gets a quiet ☾ in the dim text color, NOT the
             // alerting bold `warn` the two blocks above use.
             AgentState::AwaitingReset => Some(("☾ waiting", Style::default().fg(tone))),
-            // Idle has nothing to act on; `Exited` is surfaced by the
-            // `exited` flag above (the process-ended pill lives on the
-            // slot, not the live state).
-            AgentState::Idle | AgentState::Exited { .. } => None,
+            // Idle and Working have nothing to act on; `Exited` is
+            // surfaced by the `exited` flag above (the process-ended pill
+            // lives on the slot, not the live state).
+            AgentState::Idle | AgentState::Working | AgentState::Exited { .. } => None,
         }
     }
 
@@ -14125,6 +14175,134 @@ mod zoom_and_tile_header_tests {
             .collect()
     }
 
+    /// #1745: the header spends width on deviations only. A tab on its
+    /// agent's default tier renders no `◆` segment at all; the same tab
+    /// on another tier still names it, on both the tab strip and the
+    /// tile header.
+    #[test]
+    fn model_badge_marks_a_deviation_not_the_default_tier() {
+        let spawn = |stack: &mut TerminalStack, sk: &SessionKey, label: &str| {
+            stack.on_event(&Event::TerminalSpawned {
+                model_label: Some(label.to_string()),
+                terminal_id: TerminalId(1),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+                agent_state: None,
+            });
+            stack.set_active_session(Some(sk.clone()));
+        };
+        let defaults: HashMap<String, String> = [("claude".to_string(), "Opus 5".to_string())]
+            .into_iter()
+            .collect();
+
+        let sk = SessionKey::new("github:o/r#1");
+        let mut on_default = TerminalStack::new(PaneId::new(0));
+        on_default.set_default_model_labels(defaults.clone());
+        spawn(&mut on_default, &sk, "Opus 5");
+        let header = rows(&mut on_default).join("\n");
+        assert!(
+            !header.contains('◆') && !header.contains("Opus 5"),
+            "a default-tier spawn must not pay for a badge: {header:?}",
+        );
+        assert!(
+            !on_default
+                .tile_header_line(TerminalId(1), true, false, 60)
+                .to_string()
+                .contains('◆'),
+            "the tile header follows the same rule",
+        );
+
+        let mut deviating = TerminalStack::new(PaneId::new(0));
+        deviating.set_default_model_labels(defaults);
+        spawn(&mut deviating, &sk, "Sonnet");
+        let header = rows(&mut deviating).join("\n");
+        assert!(
+            header.contains("◆ Sonnet"),
+            "a non-default tier still names itself: {header:?}",
+        );
+        assert!(
+            deviating
+                .tile_header_line(TerminalId(1), true, false, 60)
+                .to_string()
+                .contains("◆ Sonnet"),
+        );
+    }
+
+    /// #1745 quieted `· working` because the tab strip and tile headers
+    /// sit beside a sidebar row that already spins. A focus-mode pane has
+    /// neither, so the word stays there — otherwise a grid of panes can't
+    /// tell a running agent from an idle one.
+    #[test]
+    fn a_focus_pane_still_names_the_working_state() {
+        let (mut stack, _sk) = two_tile_grid();
+        let theme = crate::theme::current();
+        let label =
+            |stack: &TerminalStack| stack.pane_state_badge(TerminalId(1), theme).map(|(l, _)| l);
+
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().agent_state =
+            lazybox_ipc::AgentState::Working;
+        assert_eq!(label(&stack), Some("· working"));
+        // The surfaces that DO have a sibling indicator stay quiet.
+        assert_eq!(
+            TerminalStack::agent_state_badge(lazybox_ipc::AgentState::Working, false, true, theme),
+            None
+        );
+
+        // Idle is still silent here, so the word means something.
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().agent_state =
+            lazybox_ipc::AgentState::Idle;
+        assert_eq!(label(&stack), None);
+
+        // An exited pane reports the process, not a stale "working".
+        let slot = stack.terminals.get_mut(&TerminalId(1)).unwrap();
+        slot.agent_state = lazybox_ipc::AgentState::Working;
+        slot.exited = Some(TerminalExit {
+            code: Some(1),
+            dead_on_arrival: false,
+            last_output: None,
+        });
+        assert_eq!(label(&stack), Some("✗ exited"));
+    }
+
+    /// #1745: the focus pointer is the arrow alone — the words it used to
+    /// carry said what the arrow and the accented tab already say — and
+    /// both forms keep one width so the tab strip doesn't shift as focus
+    /// moves.
+    #[test]
+    fn focus_pointer_is_the_arrow_alone_and_does_not_shift_the_tabs() {
+        let (mut stack, _sk) = two_tile_grid();
+        let header_at = |stack: &mut TerminalStack, focused: bool| {
+            let backend = TestBackend::new(W, H);
+            let mut term = Terminal::new(backend).unwrap();
+            term.draw(|f| stack.render(Rect::new(0, 0, W, H), f, focused))
+                .unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..W).map(|x| buf[(x, 0)].symbol()).collect::<String>()
+        };
+
+        let focused = header_at(&mut stack, true);
+        let unfocused = header_at(&mut stack, false);
+        assert!(focused.contains('▶'), "focused header points: {focused:?}");
+        for gone in ["typing to", "Terminals"] {
+            assert!(
+                !focused.contains(gone) && !unfocused.contains(gone),
+                "{gone:?} should be gone from the header: {focused:?} / {unfocused:?}",
+            );
+        }
+        // By rendered column, not byte offset — the arrow is multi-byte.
+        let tab_x = |line: &str| {
+            let at = line.find("claude").expect("a claude tab");
+            crate::util::visual_width(&line[..at])
+        };
+        assert_eq!(
+            tab_x(&focused),
+            tab_x(&unfocused),
+            "the tab strip must not shift with focus",
+        );
+    }
+
     #[test]
     fn zoom_toggles_only_in_a_multi_tile_grid() {
         // Tabs (single terminal): nothing to zoom.
@@ -14359,12 +14537,8 @@ mod zoom_and_tile_header_tests {
         );
 
         for compact in [true, false] {
-            // Working / Done / blocked states are identical across both
-            // surfaces (only the asking label differs).
-            assert_eq!(
-                label(AgentState::Working, false, compact),
-                Some("· working")
-            );
+            // Done / blocked states are identical across both surfaces
+            // (only the asking label differs).
             assert_eq!(label(AgentState::Done, false, compact), Some("✓ done"));
             // A rate-limited agent needs you too — it shows the `⧗` pill
             // on both surfaces, not a blank slot.
@@ -14377,8 +14551,11 @@ mod zoom_and_tile_header_tests {
                 Some("¢ no credit")
             );
             // Silent states render nothing on BOTH surfaces — no
-            // per-surface drift.
+            // per-surface drift. `Working` is one of them (#1745): a
+            // running agent is the unremarkable case, and its own live
+            // output already says so.
             assert_eq!(label(AgentState::Idle, false, compact), None);
+            assert_eq!(label(AgentState::Working, false, compact), None);
             assert_eq!(
                 label(AgentState::Exited { code: Some(0) }, false, compact),
                 None

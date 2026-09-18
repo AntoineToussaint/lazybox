@@ -58,6 +58,12 @@ jobs:
           tool: customSmallerIsBetter
           output-file-path: benchmark-output.json
           external-data-json-path: .benchmark-cache/benchmark-data.json
+          # `workflow_dispatch` has no `head_commit` payload. The release gate
+          # deliberately dispatches this workflow for an exact candidate SHA,
+          # so give the action the read token + ref it needs to resolve commit
+          # metadata through the API instead of crashing after benchmarks run.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.sha }}
           alert-threshold: "150%"
           fail-threshold: "200%"
           fail-on-alert: true

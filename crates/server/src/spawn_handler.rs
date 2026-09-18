@@ -2287,6 +2287,23 @@ async fn handle_spawn_inner(
     let hook_settings = exe.as_deref().and_then(|exe| {
         write_hook_settings(config, &kind, terminal_id, &hook_command_placeholder(exe))
     });
+    // A prompt-carrying agent spawn is the unattended/headless PTY path. If
+    // this adapter cannot receive the briefing from a context-capable
+    // SessionStart hook (Codex, Cursor, GenericCli, or Claude when hook setup
+    // failed), put the exact same briefing in front of its task. Previously
+    // only hooked Claude learned that `lazybox log` and the coordination
+    // contracts existed; every other autonomous backend started blind.
+    if matches!(kind, TerminalKind::Agent(_))
+        && hook_settings.is_none()
+        && let Some(prompt) = initial_prompt.take()
+    {
+        initial_prompt = Some(lazybox_agents::lazybox_session_prompt(&prompt));
+        tracing::info!(
+            ?terminal_id,
+            ?kind,
+            "agent spawn: injected lazybox session briefing into first prompt"
+        );
+    }
     // Correlated hook command for an argv-hooked agent (Codex). Reads its
     // backend key from a per-terminal file written post-spawn — argv is
     // fixed at launch, so the key can't be embedded inline like Claude's

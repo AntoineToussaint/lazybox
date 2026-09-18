@@ -2,14 +2,16 @@
 //! so every agent — in any repo, with no `CLAUDE.md`/`AGENTS.md` blurb —
 //! learns what lazybox lets it do beyond plain `git`/`gh`.
 //!
-//! It is delivered through the agent's own `SessionStart` lifecycle hook
-//! (see `lazybox_server::lifecycle::ingest_hook_from_stdio`), which is the
-//! spawn-intrinsic, repo-free channel lazybox already owns. One function so
-//! Claude and (later) Codex say the exact same thing.
+//! Interactive Claude sessions receive it through their `SessionStart`
+//! lifecycle hook (see `lazybox_server::lifecycle::ingest_hook_from_stdio`).
+//! Headless structured runs and unattended PTY agents without a context-capable
+//! hook receive the same text in front of their first task prompt. Both are
+//! spawn-intrinsic, repo-free channels owned by lazybox.
 
-/// The `SessionStart` context lazybox teaches every spawned agent — the
-/// "always" half of what an agent is told, riding the spawn-intrinsic hook
-/// so `a c`/`s` get it as surely as a `w w` work prompt does. It carries
+/// The spawn context lazybox teaches every task-carrying agent — the "always"
+/// half of what an agent is told, riding either the spawn-intrinsic hook or
+/// the first task prompt so `a c`/`s` get it as surely as a `w w` work prompt
+/// does. It carries
 /// lazybox's *mechanics* (the load-bearing labels an agent must not strip,
 /// the policies that can act on a PR without it, the `@lazybox` trigger and
 /// its hazard, and the extra handles beyond `git`/`gh`), not the per-task
@@ -69,6 +71,14 @@ you.\n\
 you; a prompt you did not type yourself may have come from one.\n\
   - Work on the branch lazybox checked out for you; if you create another one, lazybox \
 adopts it on the next spawn — do not switch back to `main` inside the worktree."
+}
+
+/// Put the base lazybox briefing and a caller's task in one prompt. This is
+/// the fallback for headless runtimes and PTY agents whose lifecycle hooks
+/// cannot add stdout to model context. Keeping the separator here prevents
+/// those two spawn paths from drifting into subtly different briefings.
+pub fn lazybox_session_prompt(prompt: &str) -> String {
+    format!("{}\n\n---\n\n{prompt}", lazybox_session_context())
 }
 
 /// The cross-agent coordination paragraph. Appended to

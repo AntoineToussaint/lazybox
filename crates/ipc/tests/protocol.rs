@@ -1350,7 +1350,7 @@ fn all_events() -> Vec<Event> {
         },
         Event::GithubDiscoveryBehind {
             behind: true,
-            watched_repos: 30,
+            deferred_secs: 420,
             required_points: 900,
             allowance: 120,
         },

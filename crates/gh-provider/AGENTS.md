@@ -11,9 +11,15 @@ Read [`AGENTS.md`](../../AGENTS.md) first; this file only adds provider depth.
 With scoped or watched repos, the daemon sweeps every roster member with one
 windowed PR query plus one issue query, on a rotation sized by
 `providers.github.repo_refresh_interval`. A periodic unwindowed reconcile
-sweeps the whole roster and is the only pass allowed to retire rows. The
-user-centric `involves:USER` global sweep runs only when no scopes are
-configured.
+sweeps the whole roster and is the only pass allowed to retire a row by its
+ABSENCE — a windowed pass drops `is:open`, so it observes a close or a merge
+directly and retires that row itself. The user-centric `involves:USER` global
+sweep runs only when no scopes are configured.
+
+The reconcile drains one governor-sized batch per tick, so its admission is
+priced at a single roster member (`RECONCILE_ADMISSION_MEMBERS`). Pricing it
+at the whole roster is what starved it — and absence-based retirement with it
+— past ~25 repos (#1806).
 
 A rotation batch is preceded by one batched freshness probe: GraphQL has no
 ETag, so a watermark stands in for `If-None-Match`, and a member whose newest

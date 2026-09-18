@@ -415,9 +415,21 @@ impl BackgroundSweepForecast {
     }
 
     /// How many roster members `allowance` admits this tick, capped at
-    /// `limit`.
+    /// `limit`. Windowed pricing — the rotation's per-member cost.
     pub fn repo_sweep_capacity(self, allowance: u32, limit: usize) -> usize {
-        let per_member = self.repo_sweep_member_points();
+        self.capacity_at(self.repo_sweep_member_points(), allowance, limit)
+    }
+
+    /// [`repo_sweep_capacity`](Self::repo_sweep_capacity) for an
+    /// UNWINDOWED batch, whose members each pay the extra open-set PR
+    /// query. Sizing a reconcile batch with the windowed price
+    /// over-selects by up to 2×, so the batch spends more than the tick
+    /// allowance it was selected against.
+    pub fn repo_sweep_reconcile_capacity(self, allowance: u32, limit: usize) -> usize {
+        self.capacity_at(self.repo_sweep_reconcile_points(1), allowance, limit)
+    }
+
+    fn capacity_at(self, per_member: u32, allowance: u32, limit: usize) -> usize {
         if per_member == 0 {
             return limit;
         }
@@ -9804,6 +9816,48 @@ mod tests {
         assert!(
             q.contains("-involves:test-user"),
             "watched query must negate the user's involvement: {q}"
+        );
+    }
+
+    /// Regression (#1806, directive 3): a pending manual refresh must reach
+    /// `begin_full_refresh_tick`, whose grant is the remaining non-reserved
+    /// window rather than one tick's sustainable share.
+    ///
+    /// That routing is the ONLY thing that gives `Shift-R` force. The
+    /// scheduler's admission gate reads `graphql_points` and nothing else —
+    /// it cannot tell a forced tick from a background one — so if this
+    /// branch were dropped, `force_full_sweep` would merely re-assert that
+    /// the sweep is due, which it already is while the "discovery behind"
+    /// advisory is showing. The key the footer names would do nothing, and
+    /// no other test would notice: `full_refresh_protects_action_reserve`
+    /// exercises `acquire_or_block`, not the plan.
+    #[tokio::test]
+    async fn manual_refresh_widens_the_tick_grant() {
+        let client = GhClient::stub_with_rate_limit_for_tests(
+            "test",
+            "fp",
+            4_000,
+            5_000,
+            chrono::Utc::now() + chrono::Duration::minutes(50),
+        )
+        .expect("stub client");
+        let interval = std::time::Duration::from_secs(60);
+
+        let paced = client.begin_background_tick(interval).graphql_points;
+
+        client.force_full_sweep();
+        let forced = client.begin_background_tick(interval).graphql_points;
+
+        assert!(
+            forced > paced,
+            "a forced sweep must draw on the window, not a tick's share \
+             (forced={forced}, paced={paced})"
+        );
+        // Still bounded by the window minus the reserve held for merges
+        // and replies — a refresh gets more room, never the reserve.
+        assert!(
+            forced < 4_000,
+            "the action reserve must survive a forced sweep (forced={forced})"
         );
     }
 

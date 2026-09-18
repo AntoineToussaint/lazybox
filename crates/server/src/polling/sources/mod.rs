@@ -46,6 +46,45 @@ fn full_sweep_admitted(
     will_full_sweep && governor_plan.admits_complete_graphql_unit(required_points)
 }
 
+/// Whether this tick's failure to run a full sweep counts toward the
+/// "discovery behind" streak.
+///
+/// Only a *known* budget can defer: while the GraphQL budget isn't current
+/// (startup bootstrap, an expired window) the sweep is briefly not-admitted
+/// for a reason that self-heals in a tick or two — normal warm-up, not the
+/// stall the advisory is about — so this keeps it from firing on every
+/// fresh daemon start.
+///
+/// And a reconcile with members still queued is IN FLIGHT, not stalled: the
+/// sweep stays "due" until its last batch re-arms the timer, and those
+/// batches drain whether or not a fresh seeding would be admitted. Only the
+/// ticks that fail to *start* a reconcile are deferrals — counting the drain
+/// would raise "discovery behind" over a sweep running exactly as designed,
+/// which is the common shape now that seeding no longer waits for the whole
+/// roster to fit one tick (#1806).
+fn sweep_deferrable(
+    will_full_sweep: bool,
+    graphql_budget_current: bool,
+    reconcile_in_flight: bool,
+) -> bool {
+    will_full_sweep && graphql_budget_current && !reconcile_in_flight
+}
+
+/// Roster members a repo-first reconcile's ADMISSION is priced at.
+///
+/// [`plan_repo_first_tick`] drains a reconcile one governor-sized batch
+/// per tick and floors that batch at a single member, so the points the
+/// tick that *seeds* the reconcile can actually spend are one member's
+/// unwindowed query set — never the whole roster's. Pricing admission at
+/// the roster instead is what made the sweep unadmittable past ~25 repos
+/// (#1806): the forecast grew with the roster while the spend never did,
+/// so the governor refused, every tick and forever, a sweep that would
+/// have cost one member — and since a reconcile batch is the only pass
+/// that reports [`PolledScope::Reconcile`], the retirement of a row that
+/// simply stopped appearing stopped with it. Seeding costs one member;
+/// the queue then drains at whatever rate the allowance affords.
+pub(super) const RECONCILE_ADMISSION_MEMBERS: usize = 1;
+
 /// Consecutive due-but-deferred full-sweep ticks before the daemon raises
 /// the user-visible "discovery behind" advisory (#1391). A single deferred
 /// tick is normal governor pacing and stays quiet; a persistent stall
@@ -64,8 +103,10 @@ pub(super) enum DeferralSignal {
     /// LEVEL, not a one-shot edge) so a client that subscribes mid-stall
     /// still learns the state within one tick instead of waiting for a
     /// rising edge it already missed. The client dedupes the attention
-    /// flash to the moment it first sees the level.
-    Behind,
+    /// flash to the moment it first sees the level. `deferred_secs` is how
+    /// long this episode has been stalled, so the advisory can say how
+    /// stale discovery actually is.
+    Behind { deferred_secs: u32 },
     /// A previously-asserted stall recovered (sweep admitted or no longer
     /// due): retract the indicator. Emitted once, on
     /// the falling edge.
@@ -79,18 +120,24 @@ pub(super) enum DeferralSignal {
 ///
 /// [`DeferralSignal::Behind`] is a LEVEL — returned on every deferred tick
 /// once the streak crosses [`DISCOVERY_BEHIND_TICKS`], so late-subscribing
-/// clients converge on the state rather than missing a one-shot edge.
+/// clients converge on the state rather than missing a one-shot edge. It
+/// carries how long the current episode has been stalled, measured from
+/// the first refused tick rather than derived from the streak — the
+/// governor interval moves with engagement, so ticks are not a duration.
 /// [`DeferralSignal::Recovered`] is the single falling edge when a
 /// previously-asserted stall clears (admitted or not due),
 /// re-arming for a later re-stall.
 fn note_full_sweep_deferral(
     streak: &mut u32,
+    since: &mut Option<std::time::Instant>,
     notified: &mut bool,
     sweep_due: bool,
     admitted: bool,
+    now: std::time::Instant,
 ) -> DeferralSignal {
     if !sweep_due || admitted {
         *streak = 0;
+        *since = None;
         if *notified {
             *notified = false;
             return DeferralSignal::Recovered;
@@ -98,9 +145,13 @@ fn note_full_sweep_deferral(
         return DeferralSignal::None;
     }
     *streak = streak.saturating_add(1);
+    let started = *since.get_or_insert(now);
     if *streak >= DISCOVERY_BEHIND_TICKS {
         *notified = true;
-        return DeferralSignal::Behind;
+        return DeferralSignal::Behind {
+            deferred_secs: u32::try_from(now.saturating_duration_since(started).as_secs())
+                .unwrap_or(u32::MAX),
+        };
     }
     DeferralSignal::None
 }
@@ -240,6 +291,108 @@ mod full_sweep_commit_tests {
         assert!(full_sweep_admitted(true, &plan, 40));
     }
 
+    /// Regression (#1806): a reconcile batch must be SIZED at the price it
+    /// will pay. Its members are fetched unwindowed — an open-set PR query
+    /// on top of the rotation's windowed pair — so sizing the batch with
+    /// the windowed per-member price over-selects and the tick spends more
+    /// than the allowance it was selected against. Pricing admission at
+    /// one member is what exposed this: before, seeding required the whole
+    /// roster to fit, which left the batch capped by the fan-out and never
+    /// by the allowance, so the mis-pricing could not bite.
+    #[test]
+    fn a_reconcile_batch_is_sized_at_the_unwindowed_price_it_pays() {
+        let forecast = lazybox_gh::BackgroundSweepForecast {
+            global_points: 8,
+            repo_base_points: 3,
+            per_repo_points: 4,
+            per_repo_issue_points: 2,
+        };
+        // 30 points on the tick; a reconcile member costs 2×4 + 2 = 10.
+        let allowance = 30;
+        assert_eq!(
+            forecast.repo_sweep_reconcile_capacity(allowance, 6),
+            3,
+            "three members is what 30 points actually buys"
+        );
+        assert_eq!(
+            forecast.repo_sweep_capacity(allowance, 6),
+            5,
+            "the windowed price would have selected five — a 50-point batch"
+        );
+        assert!(
+            forecast
+                .repo_sweep_reconcile_points(forecast.repo_sweep_reconcile_capacity(allowance, 6))
+                <= allowance,
+            "a batch never costs more than the allowance it was selected against"
+        );
+    }
+
+    /// Regression (#1806): a repo-first reconcile's admission price must
+    /// not scale with the roster. It drains one governor-sized batch per
+    /// tick, so pricing the gate at the whole roster refused — forever,
+    /// past ~25 repos — a sweep that only ever costs a batch. And because
+    /// a reconcile is the only pass that may retire a row it no longer
+    /// sees, that refusal stranded every row whose close the windowed
+    /// rotation had missed — Shift-R included, since a manual refresh is
+    /// admitted through this same gate.
+    #[test]
+    fn a_reconcile_is_priced_at_the_batch_it_runs_not_the_whole_roster() {
+        let forecast = lazybox_gh::BackgroundSweepForecast {
+            global_points: 8,
+            repo_base_points: 3,
+            per_repo_points: 4,
+            per_repo_issue_points: 2,
+        };
+        // A 28-repo install, and a tick allowance that comfortably covers a
+        // fan-out batch but not the roster.
+        let plan = lazybox_gh::BackgroundPlan {
+            graphql_points: 120,
+            rest_core_points: 1,
+            graphql_budget_current: true,
+            pressure: false,
+            next_eligible_at: None,
+            tick_interval: Duration::from_secs(60),
+        };
+        assert!(
+            !full_sweep_admitted(true, &plan, forecast.repo_sweep_reconcile_points(28)),
+            "the pre-fix whole-roster price is exactly what the governor refuses here"
+        );
+        assert!(
+            full_sweep_admitted(
+                true,
+                &plan,
+                forecast.repo_sweep_reconcile_points(RECONCILE_ADMISSION_MEMBERS)
+            ),
+            "seeding the reconcile costs one member, so it must be admitted"
+        );
+        // The price no longer moves with the roster, so there is no size at
+        // which the sweep — or the Shift-R that forces it — stops fitting.
+        assert_eq!(
+            forecast.repo_sweep_reconcile_points(RECONCILE_ADMISSION_MEMBERS),
+            forecast.per_repo_points * 2 + forecast.per_repo_issue_points,
+        );
+    }
+
+    /// Regression (#1806): a reconcile draining its queue must not read as
+    /// a stall. It stays sweep-"due" across every batch, so counting those
+    /// ticks would raise the advisory over a sweep that is working.
+    #[test]
+    fn a_draining_reconcile_is_in_flight_not_deferred() {
+        assert!(
+            !sweep_deferrable(true, true, true),
+            "batches still queued means the reconcile is running, not refused"
+        );
+        assert!(
+            sweep_deferrable(true, true, false),
+            "a due sweep with nothing queued is the tick that can actually stall"
+        );
+        assert!(
+            !sweep_deferrable(true, false, false),
+            "an unknown budget is warm-up, not a stall"
+        );
+        assert!(!sweep_deferrable(false, true, false));
+    }
+
     #[test]
     fn an_unknown_graphql_budget_only_admits_the_bootstrap_request() {
         let plan = lazybox_gh::BackgroundPlan {
@@ -281,23 +434,47 @@ mod heartbeat_promote_tests {
 mod discovery_behind_tests {
     use super::*;
 
-    fn run(
-        sweep_due: bool,
-        admitted: bool,
-        streak: &mut u32,
-        notified: &mut bool,
-    ) -> DeferralSignal {
-        note_full_sweep_deferral(streak, notified, sweep_due, admitted)
+    /// The deferral state plus a fake clock that advances one 60s poll
+    /// interval per tick, so the episode duration the advisory reports is
+    /// exercised alongside the level transitions.
+    struct Deferral {
+        streak: u32,
+        since: Option<std::time::Instant>,
+        notified: bool,
+        now: std::time::Instant,
+    }
+
+    impl Deferral {
+        fn new() -> Self {
+            Self {
+                streak: 0,
+                since: None,
+                notified: false,
+                now: std::time::Instant::now(),
+            }
+        }
+
+        fn tick(&mut self, sweep_due: bool, admitted: bool) -> DeferralSignal {
+            self.now += Duration::from_secs(60);
+            note_full_sweep_deferral(
+                &mut self.streak,
+                &mut self.since,
+                &mut self.notified,
+                sweep_due,
+                admitted,
+                self.now,
+            )
+        }
     }
 
     #[test]
     fn behind_asserts_at_the_threshold_then_holds_the_level() {
-        let (mut streak, mut notified) = (0, false);
+        let mut d = Deferral::new();
         // A due sweep the governor keeps refusing: quiet until the
         // threshold.
         for tick in 1..DISCOVERY_BEHIND_TICKS {
             assert_eq!(
-                run(true, false, &mut streak, &mut notified),
+                d.tick(true, false),
                 DeferralSignal::None,
                 "tick {tick} is still within the quiet window"
             );
@@ -305,11 +482,14 @@ mod discovery_behind_tests {
         // The threshold tick asserts Behind, and — crucially — it stays
         // asserted every deferred tick after, so a client that subscribes
         // mid-stall still learns the state (no missed one-shot edge). No
-        // Recovered is emitted while still deferred.
-        for tick in 0..3 {
+        // Recovered is emitted while still deferred. The reported stall
+        // grows with the episode, measured from the FIRST refused tick.
+        for tick in 0..3u32 {
             assert_eq!(
-                run(true, false, &mut streak, &mut notified),
-                DeferralSignal::Behind,
+                d.tick(true, false),
+                DeferralSignal::Behind {
+                    deferred_secs: 60 * (tick + DISCOVERY_BEHIND_TICKS - 1)
+                },
                 "deferred tick {tick} past threshold re-asserts the level"
             );
         }
@@ -317,88 +497,129 @@ mod discovery_behind_tests {
 
     #[test]
     fn a_single_deferred_tick_stays_quiet() {
-        let (mut streak, mut notified) = (0, false);
-        assert_eq!(
-            run(true, false, &mut streak, &mut notified),
-            DeferralSignal::None
-        );
-        assert_eq!(streak, 1);
+        let mut d = Deferral::new();
+        assert_eq!(d.tick(true, false), DeferralSignal::None);
+        assert_eq!(d.streak, 1);
     }
 
     #[test]
     fn admission_after_behind_emits_exactly_one_recovered() {
-        let (mut streak, mut notified) = (0, false);
+        let mut d = Deferral::new();
         for _ in 0..DISCOVERY_BEHIND_TICKS {
-            run(true, false, &mut streak, &mut notified);
+            d.tick(true, false);
         }
-        assert!(notified);
+        assert!(d.notified);
         // The sweep finally lands → one Recovered edge, streak reset, latch re-armed.
-        assert_eq!(
-            run(true, true, &mut streak, &mut notified),
-            DeferralSignal::Recovered
+        assert_eq!(d.tick(true, true), DeferralSignal::Recovered);
+        assert_eq!(d.streak, 0);
+        assert!(!d.notified);
+        assert!(
+            d.since.is_none(),
+            "a recovered episode must not carry its old start into the next stall"
         );
-        assert_eq!(streak, 0);
-        assert!(!notified);
         // A second admitted tick is a no-op — Recovered fires ONCE, not every tick.
-        assert_eq!(
-            run(true, true, &mut streak, &mut notified),
-            DeferralSignal::None
-        );
-        // A later re-stall asserts Behind again at the threshold.
+        assert_eq!(d.tick(true, true), DeferralSignal::None);
+        // A later re-stall asserts Behind again at the threshold, timed from
+        // the new episode rather than the old one.
         for tick in 1..DISCOVERY_BEHIND_TICKS {
             assert_eq!(
-                run(true, false, &mut streak, &mut notified),
+                d.tick(true, false),
                 DeferralSignal::None,
                 "re-stall tick {tick}"
             );
         }
         assert_eq!(
-            run(true, false, &mut streak, &mut notified),
-            DeferralSignal::Behind
+            d.tick(true, false),
+            DeferralSignal::Behind {
+                deferred_secs: 60 * (DISCOVERY_BEHIND_TICKS - 1)
+            }
         );
     }
 
     #[test]
     fn recovery_before_the_threshold_never_emits_recovered() {
-        let (mut streak, mut notified) = (0, false);
+        let mut d = Deferral::new();
         // Deferred once (below threshold, so never asserted Behind) then
         // admitted: resetting an un-asserted streak must NOT emit a
         // spurious Recovered.
-        assert_eq!(
-            run(true, false, &mut streak, &mut notified),
-            DeferralSignal::None
-        );
-        assert_eq!(
-            run(true, true, &mut streak, &mut notified),
-            DeferralSignal::None
-        );
+        assert_eq!(d.tick(true, false), DeferralSignal::None);
+        assert_eq!(d.tick(true, true), DeferralSignal::None);
     }
 
     #[test]
     fn a_not_due_tick_never_counts_as_deferral() {
-        let (mut streak, mut notified) = (0, false);
+        let mut d = Deferral::new();
         // Most ticks take the incremental path and aren't sweep-due; they
         // must not accumulate toward the advisory.
         for _ in 0..10 {
-            assert_eq!(
-                run(false, false, &mut streak, &mut notified),
-                DeferralSignal::None
-            );
+            assert_eq!(d.tick(false, false), DeferralSignal::None);
         }
-        assert_eq!(streak, 0);
+        assert_eq!(d.streak, 0);
+    }
+
+    /// Regression (#1806, directive 3): the advisory tells the user to
+    /// press Shift-R, so the forced sweep must clear the very stall the
+    /// advisory is made of — end to end, from the refusal that raised it
+    /// to the recovery that retracts it.
+    ///
+    /// The force comes from the ALLOWANCE, not from this gate: a pending
+    /// manual refresh makes `GhClient::begin_background_tick` hand back a
+    /// `begin_full_refresh_tick` plan, whose grant is the remaining
+    /// non-reserved window rather than one tick's sustainable share
+    /// (pinned in `lazybox_gh`'s `manual_refresh_widens_the_tick_grant`).
+    /// So the tick that follows Shift-R evaluates the same gate against a
+    /// much larger number. Modelled here as the two plans the scheduler
+    /// actually sees on consecutive ticks.
+    #[test]
+    fn a_forced_sweep_clears_the_stall_the_advisory_was_raised_by() {
+        let forecast = lazybox_gh::BackgroundSweepForecast {
+            global_points: 8,
+            repo_base_points: 3,
+            per_repo_points: 4,
+            per_repo_issue_points: 2,
+        };
+        let required = forecast.repo_sweep_reconcile_points(RECONCILE_ADMISSION_MEMBERS);
+        // The stalling plan: one tick's share, short of even one member's
+        // reconcile price (2x4 + 2 = 10).
+        let paced = lazybox_gh::BackgroundPlan {
+            graphql_points: 6,
+            rest_core_points: 1,
+            graphql_budget_current: true,
+            pressure: false,
+            next_eligible_at: None,
+            tick_interval: Duration::from_secs(60),
+        };
+        let mut d = Deferral::new();
+        for _ in 0..50 {
+            let admitted = full_sweep_admitted(true, &paced, required);
+            assert!(!admitted, "this allowance is what keeps the sweep refused");
+            d.tick(true, admitted);
+        }
+        assert!(d.notified, "so the advisory is standing");
+
+        // The user presses the key the advisory names: the next tick's
+        // plan is drawn from the remaining non-reserved window instead.
+        let forced = lazybox_gh::BackgroundPlan {
+            graphql_points: 900,
+            ..paced
+        };
+        let admitted = full_sweep_admitted(true, &forced, required);
+        assert!(admitted, "the refresh grant must cover the sweep");
+        assert_eq!(
+            d.tick(true, admitted),
+            DeferralSignal::Recovered,
+            "and the forced sweep retracts the advisory it was raised by"
+        );
     }
 
     #[test]
     fn manual_refresh_does_not_hide_a_deferred_sweep() {
-        let (mut streak, mut notified) = (0, false);
+        let mut d = Deferral::new();
         // Requesting a refresh does not prove that it was admitted.
-        run(true, false, &mut streak, &mut notified);
-        assert_eq!(streak, 1);
-        assert_eq!(
-            run(true, false, &mut streak, &mut notified),
-            DeferralSignal::None
-        );
-        assert_eq!(streak, 2);
+        d.tick(true, false);
+        assert_eq!(d.streak, 1);
+        assert_eq!(d.tick(true, false), DeferralSignal::None);
+        assert_eq!(d.streak, 2);
     }
 }
 
@@ -870,16 +1091,21 @@ impl GhSource {
             "notification heartbeat / hot targets".to_string()
         } else if !self.full_sweep_admitted {
             // A sweep is DUE but the budget can't cover it. Name the
-            // numbers and the lever: with many `watch:` repos the
-            // required points can exceed the allowance on EVERY tick,
-            // and reconcile then never runs — the "sync silently
-            // stopped" failure (#scale). Shift-R still forces it.
+            // numbers and the lever; reconcile then never runs — the
+            // "sync silently stopped" failure (#scale). Shift-R still
+            // forces it.
+            //
+            // No watched-repo count here: this branch is only reachable
+            // with `repo_sweep` unset, i.e. an EMPTY roster, i.e. no
+            // scopes and no `watch:` filters — so the count is
+            // structurally always zero and printing it told the user
+            // that nothing was over budget while saying discovery had
+            // stopped (#1806).
             format!(
-                "full sweep DEFERRED — needs {} pts, allowance {} ({} watched repos); \
-                 fewer `watch:` filters or a higher background_budget_share would unblock it",
+                "full sweep DEFERRED — needs {} pts, allowance {}; \
+                 a higher background_budget_share would unblock it",
                 self.required_sweep_points(),
                 self.governor_plan.graphql_points,
-                self.watch_repos.len(),
             )
         } else if self.scheduling.run_global {
             "global reconcile".to_string()
@@ -2962,12 +3188,17 @@ pub fn github_watch_repos_from_filters(
 }
 
 /// Source-attention ladder (#scale): Muted (or source-snoozed)
-/// `watch:` repos leave the watched fan-out entirely — each entry
-/// costs 2 unrotated queries per sweep AND inflates the governor's
-/// required-points forecast (the ~25-repo cliff where full sweeps
-/// stop being admitted). Muting is the lever that buys that budget
-/// back; unmuting restores the entry on the next tick, because the
+/// `watch:` repos leave the watched fan-out entirely — each entry costs
+/// 2 unrotated queries per sweep, so muting cuts real work off every
+/// tick; unmuting restores the entry on the next tick, because the
 /// watch list is rebuilt from config every `sources_for`.
+///
+/// It no longer moves the repo-first admission gate, though: that is
+/// priced per member ([`RECONCILE_ADMISSION_MEMBERS`]) and carries no
+/// roster term, so the "~25-repo cliff where full sweeps stop being
+/// admitted" this used to buy back is gone (#1806). Muting buys
+/// throughput, not admission — do not offer it to a user whose sweep is
+/// being refused.
 fn retain_unmuted_watches(
     watch_repos: &mut std::collections::BTreeSet<String>,
     cfg: &lazybox_config::Config,
@@ -5177,7 +5408,7 @@ async fn push_github_source(
                 DEFAULT_ROUND_ROBIN_N,
             ));
     let required_sweep_points = if repo_first {
-        forecast.repo_sweep_reconcile_points(roster.len() + sessioned_repos.len())
+        forecast.repo_sweep_reconcile_points(RECONCILE_ADMISSION_MEMBERS)
     } else {
         forecast.required_points(global_due, want_prs)
     };
@@ -5194,29 +5425,31 @@ async fn push_github_source(
     // stalled; raise one dismissable advisory that names the numbers and
     // the levers instead of burying it in the `Shift-D` sync string.
     //
-    // Only count a deferral against a *known* budget: while the GraphQL
-    // budget isn't current (startup bootstrap, an expired window) the sweep
-    // is briefly not-admitted for a reason that self-heals in a tick or
-    // two, which is normal warm-up rather than the scale stall this notice
-    // is about. Gating on `graphql_budget_current` keeps the advisory from
-    // firing on every fresh daemon start.
-    let sweep_deferrable = will_full_sweep && governor_plan.graphql_budget_current;
+    let sweep_deferrable = sweep_deferrable(
+        will_full_sweep,
+        governor_plan.graphql_budget_current,
+        repo_first && !state.reconcile_pending.is_empty(),
+    );
     match note_full_sweep_deferral(
         &mut state.full_sweep_deferral_streak,
+        &mut state.full_sweep_deferral_since,
         &mut state.discovery_behind_notified,
         sweep_deferrable,
         full_sweep_admitted,
+        now,
     ) {
         // A DEDICATED standing signal, not a `ProviderError`: the client
         // holds it as a persistent, self-retracting indicator (so it can't
         // be missed the way a one-shot toast can), it never registers a
         // phantom failing provider in the sync summary, and it never
-        // cross-leaks to other clients as a bare error. The figures name the
-        // lever the user can pull (`Shift-R`, or fewer `watch:` filters).
-        DeferralSignal::Behind => {
+        // cross-leaks to other clients as a bare error. The figures are the
+        // governor's own refusal — what the sweep costs against what this
+        // tick affords — plus how long it has been refused, so the advisory
+        // explains the stall instead of merely asserting it (#1806).
+        DeferralSignal::Behind { deferred_secs } => {
             let _ = bus.send(Event::GithubDiscoveryBehind {
                 behind: true,
-                watched_repos: watch_repos.len() as u32,
+                deferred_secs,
                 required_points: required_sweep_points,
                 allowance: governor_plan.graphql_points,
             });
@@ -5225,7 +5458,7 @@ async fn push_github_source(
         DeferralSignal::Recovered => {
             let _ = bus.send(Event::GithubDiscoveryBehind {
                 behind: false,
-                watched_repos: 0,
+                deferred_secs: 0,
                 required_points: 0,
                 allowance: 0,
             });
@@ -5261,7 +5494,13 @@ async fn push_github_source(
                 roster.len(),
                 rotation_target_ticks(repo_refresh_interval, poll_interval),
             ),
-            |limit| forecast.repo_sweep_capacity(governor_plan.graphql_points, limit),
+            |limit, reconcile| {
+                if reconcile {
+                    forecast.repo_sweep_reconcile_capacity(governor_plan.graphql_points, limit)
+                } else {
+                    forecast.repo_sweep_capacity(governor_plan.graphql_points, limit)
+                }
+            },
             now,
         );
         tracing::info!(
@@ -5427,7 +5666,7 @@ mod repo_first_tests {
             false,
             true,
             2,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(plan.reconcile && !plan.reconcile_final);
@@ -5454,7 +5693,7 @@ mod repo_first_tests {
             false,
             true,
             2,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(plan.reconcile && plan.reconcile_final);
@@ -5489,7 +5728,8 @@ mod repo_first_tests {
             true,
             true,
             3,
-            |limit| {
+            |limit, reconcile| {
+                assert!(reconcile, "a reconcile batch is priced unwindowed");
                 assert_eq!(limit, 6);
                 5
             },
@@ -5516,7 +5756,7 @@ mod repo_first_tests {
             false,
             true,
             3,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(plan.reconcile && plan.reconcile_final);
@@ -5540,7 +5780,7 @@ mod repo_first_tests {
             false,
             false,
             3,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(!plan.reconcile);
@@ -5569,7 +5809,8 @@ mod repo_first_tests {
             false,
             true,
             2,
-            |limit| {
+            |limit, reconcile| {
+                assert!(!reconcile, "a rotation slice is priced windowed");
                 assert_eq!(limit, 2 + 1 + 1);
                 2
             },
@@ -5603,7 +5844,7 @@ mod repo_first_tests {
                 false,
                 true,
                 rotation_fanout(members.len(), 3),
-                |limit| limit,
+                |limit, _| limit,
                 Instant::now(),
             );
             seen.extend(plan.members);
@@ -5635,7 +5876,10 @@ pub(super) fn rotation_target_ticks(
 ///   then repos with a LIVE agent (forced every tick), then the `fanout`
 ///   stalest members (idle session-bearing repos rotate here like any
 ///   other, so 20 open worktrees don't cost 20 query pairs a minute) —
-///   capped by what the governor allowance admits (`capacity_for(limit)`).
+///   capped by what the governor allowance admits
+///   (`capacity_for(limit, reconcile)` — the flag picks the windowed or
+///   the unwindowed per-member price, which differ by the reconcile's
+///   extra open-set PR query).
 ///   Members that don't fit keep their cursor age and lead the next tick.
 /// - Hot-only tick: nothing (hot targets are fetched by the caller).
 #[allow(clippy::too_many_arguments)]
@@ -5649,7 +5893,7 @@ pub(super) fn plan_repo_first_tick(
     manual_refresh: bool,
     poll_notifications: bool,
     fanout: usize,
-    capacity_for: impl Fn(usize) -> usize,
+    capacity_for: impl Fn(usize, bool) -> usize,
     now: std::time::Instant,
 ) -> RepoSweepPlan {
     let roster_len = roster.len();
@@ -5690,6 +5934,7 @@ pub(super) fn plan_repo_first_tick(
             fanout
                 .max(1)
                 .saturating_mul(if manual_refresh { 2 } else { 1 }),
+            true,
         )
         .max(1)
         .min(reconcile_pending.len());
@@ -5739,7 +5984,7 @@ pub(super) fn plan_repo_first_tick(
         &eligible,
         live_agent_repos,
         fanout,
-        capacity_for(limit),
+        capacity_for(limit, false),
         now,
     );
     RepoSweepPlan {

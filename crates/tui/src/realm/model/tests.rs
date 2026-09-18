@@ -914,7 +914,7 @@ mod effects_tests {
         // Rising edge: indicator asserted + a one-shot attention flash.
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: true,
-            watched_repos: 30,
+            deferred_secs: 420,
             required_points: 900,
             allowance: 120,
         });
@@ -923,11 +923,30 @@ mod effects_tests {
             .discovery_behind
             .as_ref()
             .expect("standing indicator asserted");
-        assert_eq!(behind.watched_repos, 30);
+        assert_eq!(
+            behind.label(),
+            "discovery behind · Shift-R · 7m, needs 900 pts vs 120",
+            "the advisory prints the governor's own refusal, not a count that can read 0 (#1806)"
+        );
         assert!(
             m.status.notice.is_some(),
             "rising edge raises an attention flash"
         );
+        // Regression (#1806): the flash must name only levers that move
+        // the refused number. The sweep is priced per member now, so its
+        // required points carry no roster term and muting repos cannot
+        // change admission by a single point — offering it sends the user
+        // to do work that provably does nothing, the same dead end as the
+        // "0 watched repos over budget" line. What moves it is the
+        // allowance: Shift-R's widened refresh grant, or a larger
+        // background share.
+        let flash = m.status.notice.as_ref().unwrap().message.clone();
+        assert!(
+            !flash.contains("mute"),
+            "muting no longer lowers the required points: {flash}"
+        );
+        assert!(flash.contains("Shift-R"), "{flash}");
+        assert!(flash.contains("background_budget_share"), "{flash}");
 
         // The daemon re-sends the level every deferred tick. The indicator
         // must persist, and the flash must NOT re-fire — otherwise the
@@ -935,7 +954,7 @@ mod effects_tests {
         m.status.notice = None;
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: true,
-            watched_repos: 31,
+            deferred_secs: 480,
             required_points: 930,
             allowance: 120,
         });
@@ -944,8 +963,8 @@ mod effects_tests {
             "the level keeps the indicator standing"
         );
         assert_eq!(
-            m.status.discovery_behind.as_ref().unwrap().watched_repos,
-            31,
+            m.status.discovery_behind.as_ref().unwrap().required_points,
+            930,
             "the standing figures refresh from the latest level"
         );
         assert!(
@@ -956,7 +975,7 @@ mod effects_tests {
         // Recovery retracts the standing indicator.
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: false,
-            watched_repos: 0,
+            deferred_secs: 0,
             required_points: 0,
             allowance: 0,
         });
@@ -971,7 +990,7 @@ mod effects_tests {
         // daemon re-asserts the level within a tick if still behind.
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: true,
-            watched_repos: 30,
+            deferred_secs: 420,
             required_points: 900,
             allowance: 120,
         });

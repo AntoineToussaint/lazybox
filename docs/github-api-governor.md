@@ -106,7 +106,11 @@ open circuit still refuse it, because the reserve exists so the user's
 own merges and replies fit.
 
 A complete fixed full-sweep unit is reserved before repository fan-out
-is selected. Focused work comes first. Session-bearing repositories
+is selected. That unit is priced at the batch the sweep will actually
+run — a repo-first reconcile drains one governor-sized batch per tick,
+so its admission costs one roster member, not the roster. Pricing it at
+the roster made the sweep unadmittable past ~25 repositories, which took
+row retirement with it (#1806). Focused work comes first. Session-bearing repositories
 then rotate stale-first; if all cannot fit, the ones not selected keep
 their old cursor and lead a later tick. Recently active repositories
 use the remaining round-robin slots. Cold repositories leave the

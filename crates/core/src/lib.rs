@@ -21,6 +21,7 @@ pub mod pricing;
 pub mod project;
 pub mod prompts;
 pub mod provider;
+pub mod provider_ops;
 pub mod scope;
 mod session_key;
 pub mod slug;
@@ -70,6 +71,10 @@ pub use provider::{
     DEFAULT_MAX_PAGES, FetchCoverage, FetchOutcome, FetchPage, FetchPageInfo, GITHUB_SOURCE,
     LINEAR_SOURCE, MergeOptions, MergeOutcome, MergeProgress, PaginationOutcome, PaginationStop,
     ProviderError, TaskProvider, TrailerOutcome, is_already_in_merge_queue, paginate,
+};
+pub use provider_ops::{
+    DesiredFields, FailureClass, MutationField, OpEffect, OpEvent, OpPhase, OperationId,
+    PendingMutation, ProviderOps, StateWrite,
 };
 pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};
 pub use session_key::SessionKey;

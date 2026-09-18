@@ -251,10 +251,15 @@
             "url": "https://github.com/o/r/pull/42"
           },
           "project_key": "github-o-r",
+          "provider_ops": {
+            "generations": {},
+            "next_id": 0,
+            "pending": []
+          },
           "read_indices": [],
           "remote": null,
           "role": null,
-          "schema": 13,
+          "schema": 14,
           "seen_count": 0,
           "sent_snippets": {
             "recent": [],

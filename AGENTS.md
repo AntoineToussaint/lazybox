@@ -158,5 +158,11 @@ lazybox spawns reads — `.claude/skills` is Claude Code's alone
 (`crates/config/src/skills.rs`), and a repo whose guidance is agent-agnostic
 should not hide its procedures behind one agent.
 
+Cross-cutting notes that are not one area's alone:
+
+- [`docs/provider-state-machines.md`](docs/provider-state-machines.md) —
+  how a write to GitHub or Linear is recorded, retried, reconciled and
+  shown; read it before adding a provider mutation or touching ingest.
+
 Design notes live in [`DESIGN.md`](DESIGN.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 and [`docs/`](docs/); contributor process in [`CONTRIBUTING.md`](CONTRIBUTING.md).

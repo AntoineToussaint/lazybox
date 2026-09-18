@@ -412,6 +412,31 @@ fn tasks_without_dependency_edges_deserialize_as_unblocked() {
     assert!(ws.linear_issues.iter().all(unblocked));
 }
 
+/// Rows written before #1736 carry no provider-ops ledger. They must read
+/// back with an empty one — nothing was in flight, and inventing a claim
+/// would overlay intent the user never expressed.
+#[test]
+fn v13_workspaces_without_provider_ops_deserialize_with_an_empty_ledger() {
+    let mut legacy = serde_json::to_value(maximal_workspace()).expect("serialize fixture");
+    legacy["schema"] = serde_json::json!(13);
+    legacy
+        .as_object_mut()
+        .expect("workspace object")
+        .remove("provider_ops");
+
+    let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
+        .expect("a v13 row must decode");
+    assert!(
+        ws.provider_ops.is_empty(),
+        "an absent ledger reads back as nothing in flight"
+    );
+    // And the tasks it carries are untouched by the empty ledger.
+    assert_eq!(
+        ws.primary_task().expect("pr").assignees,
+        vec!["alice".to_string()]
+    );
+}
+
 /// The checked-in current-schema fixture must keep deserializing, and
 /// through the strict (schema-checked) decode path.
 #[test]

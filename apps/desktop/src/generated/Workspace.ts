@@ -4,6 +4,7 @@ import type { AutomationPolicies } from "./AutomationPolicies";
 import type { CleanupPrompt } from "./CleanupPrompt";
 import type { HopperMeta } from "./HopperMeta";
 import type { ProjectKey } from "./ProjectKey";
+import type { ProviderOps } from "./ProviderOps";
 import type { Role } from "./Role";
 import type { Session } from "./Session";
 import type { SnippetDeliveryLog } from "./SnippetDeliveryLog";
@@ -81,6 +82,14 @@ sessions: Array<Session>,
  * At most one PR.
  */
 pr: Task | null, gh_issues: Array<Task>, linear_issues: Array<Task>,
+/**
+ * In-flight provider intent for this row's tasks (#1736). The tasks
+ * above hold the last *observation*; this holds what the user asked
+ * for and the provider has not yet confirmed. The projection the UI
+ * renders is one laid over the other, so a rejected write needs no
+ * rollback — dropping the operation uncovers the observed value.
+ */
+provider_ops: ProviderOps,
 /**
  * Merged activity from every linked task, sorted newest-first.
  */

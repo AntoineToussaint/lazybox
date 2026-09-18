@@ -249,6 +249,17 @@ impl ProviderHandle {
     }
 }
 
+/// The provider prefix of a workspace key (`"github-acme-widget-186"` →
+/// `"github"`). Credential-free, so a caller that only needs a provider's
+/// *rules* doesn't pay a token resolve to learn which one it is.
+pub(super) fn workspace_source(workspace_key: &WorkspaceKey) -> &str {
+    workspace_key
+        .as_str()
+        .split_once('-')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or("")
+}
+
 /// Build a provider handle for the workspace that owns this
 /// mutation. Routes on the workspace key's `<source>-<rest>`
 /// prefix — `"github-acme-widget-186"` → github,
@@ -262,15 +273,11 @@ impl ProviderHandle {
 ///
 /// Errors come back as `String` ready for the handler's
 /// `emit_err` callback.
-async fn build_provider_for_workspace(
+pub(super) async fn build_provider_for_workspace(
     config: &ServerConfig,
     workspace_key: &WorkspaceKey,
 ) -> Result<ProviderHandle, String> {
-    let source = workspace_key
-        .as_str()
-        .split_once('-')
-        .map(|(p, _)| p)
-        .unwrap_or("");
+    let source = workspace_source(workspace_key);
     match source {
         s if s == lazybox_gh::SOURCE => resolve_gh_client_result(config)
             .await
@@ -1130,29 +1137,38 @@ async fn close_issue_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
         .map(|i| i.id.key.clone())
         .unwrap_or_else(|| workspace_key.as_str().to_string());
 
-    let provider = match build_provider_for_workspace(config, &workspace_key).await {
-        Ok(p) => p,
-        Err(e) => {
-            emit_err(&e);
+    // The destination state is the provider's to choose — GitHub closes
+    // the issue, Linear moves it to a cancelled workflow state resolved
+    // from the issue's own team — so the claim names the canonical state
+    // and lets the adapter decide how to reach it.
+    let outcome = super::ops::request(
+        config,
+        &workspace_key,
+        lazybox_core::DesiredFields::state(lazybox_core::TaskState::Closed, None),
+        "close-issue",
+    )
+    .await;
+    match outcome {
+        super::ops::RequestOutcome::Failed(reason) => {
+            let _ = config.bus.send(Event::IssueCloseFailed {
+                workspace_key: workspace_key.clone(),
+                issue_label,
+                reason,
+            });
             return;
         }
-    };
-    if let Err(e) =
-        run_mutation_with_retry(&config.bus, "close-issue", || provider.close_issue(&ws)).await
-    {
-        tracing::warn!("close-issue {workspace_key}: {e:?}");
-        let _ = config.bus.send(Event::IssueCloseFailed {
-            workspace_key: workspace_key.clone(),
-            issue_label,
-            reason: humanize_mutation_failure("close-issue", &e),
-        });
-        return;
+        // Superseded or withdrawn while in flight: whatever the user did
+        // instead now owns the row, and announcing this close would
+        // describe state nobody asked for.
+        super::ops::RequestOutcome::Quiet => return,
+        super::ops::RequestOutcome::Acked => {}
     }
     tracing::info!("closed issue for workspace {workspace_key}");
 
-    // Local Task still reads `Open` until the next poll reconciles.
-    // Broadcast `IssueClosed` so the TUI flashes a footer notice and
-    // the user doesn't think the keypress did nothing.
+    // The row already reads CLOSED — the coordinator lays the accepted
+    // state over the last observation until the provider confirms it.
+    // `IssueClosed` still flashes the footer notice so the keypress has
+    // a visible acknowledgement of its own.
     let _ = config.bus.send(Event::IssueClosed {
         workspace_key: workspace_key.clone(),
         issue_label,
@@ -1551,43 +1567,26 @@ async fn request_reviewers_task(
     workspace_key: WorkspaceKey,
     logins: Vec<String>,
 ) {
-    let emit_err = |msg: &str| {
-        let _ = config
-            .bus
-            .send(Event::provider_error_retryable("reviewers", msg));
-    };
     if logins.is_empty() {
         return;
     }
-    let Some(ws) = load_workspace(config, &workspace_key) else {
-        emit_err(&format!(
-            "request_reviewers: workspace {workspace_key} not found"
-        ));
-        return;
-    };
-    let provider = match build_provider_for_workspace(config, &workspace_key).await {
-        Ok(p) => p,
-        Err(e) => {
-            emit_err(&e);
-            return;
-        }
-    };
-    if let Err(e) = run_mutation_with_retry(&config.bus, "reviewers", || {
-        provider.request_reviewers(&ws, &logins)
-    })
-    .await
-    {
-        tracing::warn!("request_reviewers {workspace_key} {logins:?}: {e:?}");
-        emit_err(&format!(
-            "request reviewers failed: {}",
-            humanize_mutation_failure("reviewers", &e)
-        ));
-    } else {
-        tracing::info!("requested reviewers {logins:?} on workspace {workspace_key}");
-        // Wake the poll loop so the reviewer chip on the row
-        // updates immediately. Without this the sidebar lags 60s.
-        config.poll.wake(true);
-    }
+    // `requestReviews` unions rather than replaces, so the resulting set
+    // is what the row already has plus the newly picked logins. Recording
+    // the picked set alone would blank the reviewers already requested.
+    let merged = union_with_current(
+        config,
+        &workspace_key,
+        |task| task.reviewers.clone(),
+        logins,
+    );
+    let outcome = super::ops::request(
+        config,
+        &workspace_key,
+        lazybox_core::DesiredFields::reviewers(merged),
+        "reviewers",
+    )
+    .await;
+    super::ops::report(config, "reviewers", outcome);
 }
 
 /// Handle `Command::AddAssignees`: add the given logins as
@@ -1604,46 +1603,54 @@ pub async fn handle_add_assignees(
     detach_mutation(async move { add_assignees_task(&config, workspace_key, logins).await });
 }
 
+/// The set an additive write (`addAssignees`, `requestReviews` with
+/// `union: true`) will leave behind: what the row holds now, plus the
+/// picked logins it doesn't.
+///
+/// The coordinator records what a write *results in*, not the delta that
+/// gets it there — that is what lets a transient failure be replayed, and
+/// what makes the value it paints on the row the one the provider will
+/// end up holding. `current` reads off the stored row, which already
+/// carries any write still in flight, so two adds in a row compose.
+fn union_with_current(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+    current: impl Fn(&lazybox_core::Task) -> Vec<String>,
+    picked: Vec<String>,
+) -> Vec<String> {
+    let mut merged = load_workspace(config, workspace_key)
+        .and_then(|ws| ws.primary_task().map(&current))
+        .unwrap_or_default();
+    for login in picked {
+        if !merged.iter().any(|held| held.eq_ignore_ascii_case(&login)) {
+            merged.push(login);
+        }
+    }
+    merged
+}
+
 async fn add_assignees_task(
     config: &ServerConfig,
     workspace_key: WorkspaceKey,
     logins: Vec<String>,
 ) {
-    let emit_err = |msg: &str| {
-        let _ = config
-            .bus
-            .send(Event::provider_error_retryable("assignees", msg));
-    };
     if logins.is_empty() {
         return;
     }
-    let Some(ws) = load_workspace(config, &workspace_key) else {
-        emit_err(&format!(
-            "add_assignees: workspace {workspace_key} not found"
-        ));
-        return;
-    };
-    let provider = match build_provider_for_workspace(config, &workspace_key).await {
-        Ok(p) => p,
-        Err(e) => {
-            emit_err(&e);
-            return;
-        }
-    };
-    if let Err(e) = run_mutation_with_retry(&config.bus, "assignees", || {
-        provider.add_assignees(&ws, &logins)
-    })
-    .await
-    {
-        tracing::warn!("add_assignees {workspace_key} {logins:?}: {e:?}");
-        emit_err(&format!(
-            "add assignees failed: {}",
-            humanize_mutation_failure("assignees", &e)
-        ));
-    } else {
-        tracing::info!("added assignees {logins:?} on workspace {workspace_key}");
-        config.poll.wake(true);
-    }
+    let merged = union_with_current(
+        config,
+        &workspace_key,
+        |task| task.assignees.clone(),
+        logins,
+    );
+    let outcome = super::ops::request(
+        config,
+        &workspace_key,
+        lazybox_core::DesiredFields::assignees(merged),
+        "assignees",
+    )
+    .await;
+    super::ops::report(config, "assignees", outcome);
 }
 
 /// Handle `Command::SetAssignees`: replace the workspace's assignee
@@ -1666,41 +1673,14 @@ async fn set_assignees_task(
     workspace_key: WorkspaceKey,
     logins: Vec<String>,
 ) {
-    let emit_err = |msg: &str| {
-        let _ = config
-            .bus
-            .send(Event::provider_error_retryable("assignees", msg));
-    };
-    let Some(ws) = load_workspace(config, &workspace_key) else {
-        emit_err(&format!(
-            "set_assignees: workspace {workspace_key} not found"
-        ));
-        return;
-    };
-    let provider = match build_provider_for_workspace(config, &workspace_key).await {
-        Ok(p) => p,
-        Err(e) => {
-            emit_err(&e);
-            return;
-        }
-    };
-    if let Err(e) = run_mutation_with_retry(&config.bus, "assignees", || {
-        provider.set_assignees(&ws, &logins)
-    })
-    .await
-    {
-        tracing::warn!("set_assignees {workspace_key} {logins:?}: {e:?}");
-        emit_err(&format!(
-            "update assignees failed: {}",
-            humanize_mutation_failure("assignees", &e)
-        ));
-        return;
-    }
-    tracing::info!("set assignees to {logins:?} on workspace {workspace_key}");
-    // Wake the poll loop so the task row picks up the new assignee
-    // set immediately — without this the row stays stale for up to
-    // a full interval (60s default).
-    config.poll.wake(true);
+    let outcome = super::ops::request(
+        config,
+        &workspace_key,
+        lazybox_core::DesiredFields::assignees(logins),
+        "assignees",
+    )
+    .await;
+    super::ops::report(config, "assignees", outcome);
 }
 
 /// Handle `Command::SetLabels`: replace the workspace's label set
@@ -1719,34 +1699,14 @@ pub async fn handle_set_labels(
 }
 
 async fn set_labels_task(config: &ServerConfig, workspace_key: WorkspaceKey, names: Vec<String>) {
-    let emit_err = |msg: &str| {
-        let _ = config
-            .bus
-            .send(Event::provider_error_retryable("labels", msg));
-    };
-    let Some(ws) = load_workspace(config, &workspace_key) else {
-        emit_err(&format!("set_labels: workspace {workspace_key} not found"));
-        return;
-    };
-    let provider = match build_provider_for_workspace(config, &workspace_key).await {
-        Ok(p) => p,
-        Err(e) => {
-            emit_err(&e);
-            return;
-        }
-    };
-    if let Err(e) =
-        run_mutation_with_retry(&config.bus, "labels", || provider.set_labels(&ws, &names)).await
-    {
-        tracing::warn!("set_labels {workspace_key} {names:?}: {e:?}");
-        emit_err(&format!(
-            "update labels failed: {}",
-            humanize_mutation_failure("labels", &e)
-        ));
-        return;
-    }
-    tracing::info!("set labels to {names:?} on workspace {workspace_key}");
-    config.poll.wake(true);
+    let outcome = super::ops::request(
+        config,
+        &workspace_key,
+        lazybox_core::DesiredFields::labels(names),
+        "labels",
+    )
+    .await;
+    super::ops::report(config, "labels", outcome);
 }
 
 /// Handle `Command::FetchRepoLabels`: pull the workspace repo's full

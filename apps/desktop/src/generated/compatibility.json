@@ -288,10 +288,15 @@
               "url": "https://github.com/o/r/pull/42"
             },
             "project_key": "github-o-r",
+            "provider_ops": {
+              "generations": {},
+              "next_id": 0,
+              "pending": []
+            },
             "read_indices": [],
             "remote": null,
             "role": null,
-            "schema": 13,
+            "schema": 14,
             "seen_count": 0,
             "sent_snippets": {
               "recent": [],
@@ -381,10 +386,15 @@
           "url": "https://github.com/o/r/pull/42"
         },
         "project_key": "github-o-r",
+        "provider_ops": {
+          "generations": {},
+          "next_id": 0,
+          "pending": []
+        },
         "read_indices": [],
         "remote": null,
         "role": null,
-        "schema": 13,
+        "schema": 14,
         "seen_count": 0,
         "sent_snippets": {
           "recent": [],
@@ -567,6 +577,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 1581303740,
+  "protocol_fingerprint": 3420510662,
   "protocol_version": 4
 }

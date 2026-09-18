@@ -41,6 +41,21 @@ Duplicate spawns are collapsed by the SpawnCoordinator rather than by the
 callers, so a double-fire or an issue→PR rebadge never forks two backends.
 Explicit spawn keys still force a new agent deliberately.
 
+## Provider writes go through one coordinator
+
+Assignees, labels, reviewers and issue close all enter through
+`polling::ops::request`, which persists the accepted write on the
+workspace's `ProviderOps` ledger *before* issuing it and returns a
+`RequestOutcome` for the caller to surface. Nothing else may write those
+fields: the row a client renders is the last observation with the pending
+write laid over it, so a second owner could only disagree with it.
+
+A poll reply older than an acknowledged write cannot undo it, and a
+verdict belonging to intent the user has already replaced never reaches
+the screen. The rules, the transition table and the list of writers still
+outside the coordinator are in
+[`docs/provider-state-machines.md`](../../docs/provider-state-machines.md).
+
 ## Merge has two call sites
 
 `polling/handlers.rs` (the interactive merge) and `polling/auto_merge.rs`

@@ -2254,12 +2254,6 @@ impl<T: TerminalAdapter> Model<T> {
         // triggers merges, so a headless daemon fires it and N attached
         // clients can't double-fire it.
         if let IpcEvent::WorkspaceUpserted(ws) = &event {
-            // The daemon's fresh copy is authoritative — reconcile any
-            // optimistic chip edit (reviewers/assignees/labels) on this
-            // workspace (#476). Edits only: a pending removal's echo is
-            // `WorkspaceRemoved`, and dropping its stash here would strand
-            // a refused delete with nothing to roll back (#1788).
-            self.reconcile_optimistic_edit(ws.key.as_str());
             // An open issue browser (#1436) holds a mount-time snapshot;
             // rebuild it from the now-updated workspace so a label change
             // (this client's edit reconciled, or a background poll) is
@@ -2719,10 +2713,6 @@ impl<T: TerminalAdapter> Model<T> {
                         } else {
                             self.flash_error(format!("✗ {action} failed — {message}"));
                         }
-                        // Revert the optimistic chip edit (#476). No-op
-                        // for sources that don't carry one (reply / merge
-                        // / close-issue), so the flash above still stands.
-                        self.rollback_optimistic_chip(source);
                     } else if is_removal_failure_source(source)
                         && self.rollback_optimistic_removal(message)
                     {

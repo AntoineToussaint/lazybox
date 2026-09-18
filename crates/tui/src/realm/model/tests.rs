@@ -29482,8 +29482,12 @@ mod optimistic_mutation_tests {
         assert_eq!(m.pending_mutations.len(), 1, "stash still armed");
     }
 
+    /// A chip pick ships the command and nothing else. The row is what
+    /// the daemon last sent — the daemon applies the accepted write to it
+    /// (`lazybox_core::ProviderOps`) and broadcasts, so a second, local
+    /// copy of the same intent could only ever disagree with it (#1736).
     #[test]
-    fn reviewers_update_chip_instantly_then_reconcile() {
+    fn a_reviewer_pick_ships_the_command_without_editing_the_row() {
         let mut m = build_model();
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#3");
         let sk: SessionKey = (&ws_key).into();
@@ -29500,44 +29504,53 @@ mod optimistic_mutation_tests {
             cmds.as_slice(),
             [IpcCommand::RequestReviewers { .. }]
         ));
-        assert_eq!(
-            reviewers_of(&m, &sk),
-            vec!["alice".to_string(), "bob".to_string()]
+        assert!(
+            reviewers_of(&m, &sk).is_empty(),
+            "the client must not write provider fields itself"
         );
-        assert_eq!(m.pending_mutations.len(), 1);
+        assert!(
+            m.pending_mutations.is_empty(),
+            "no client-side rollback stash for a provider field"
+        );
 
-        // The daemon's fresh copy reconciles the stash.
+        // The daemon's copy — carrying the accepted write — is what the
+        // row shows.
         let mut updated = Workspace::from_task(pr_task("github:owner/repo#3"), Utc::now());
         updated.pr.as_mut().unwrap().reviewers = vec!["alice".into(), "bob".into()];
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(updated)));
-        assert!(m.pending_mutations.is_empty());
         assert_eq!(
             reviewers_of(&m, &sk),
             vec!["alice".to_string(), "bob".to_string()]
         );
     }
 
+    /// A rejected provider write still flashes. What it must NOT do any
+    /// more is edit rows: the client cannot tell a failure belonging to
+    /// the edit on screen from one belonging to an edit the user has
+    /// already replaced, which is precisely why that verdict is now
+    /// filtered by generation on the daemon side before it is sent.
     #[test]
-    fn reviewers_roll_back_on_failure() {
+    fn a_rejected_provider_write_flashes_without_touching_rows() {
         let mut m = build_model();
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#4");
         let sk: SessionKey = (&ws_key).into();
-        m.modal_flow = Some(super::super::ModalFlow::ReviewRequest {
-            workspace: ws_key.clone(),
-        });
-        m.modal_stack.push(Id::RequestReviewers);
-        m.handle_choice_picked(vec![ChoicePayload::Text("alice".into())]);
+        let mut daemon_copy = Workspace::from_task(pr_task("github:owner/repo#4"), Utc::now());
+        daemon_copy.key = ws_key.clone();
+        daemon_copy.pr.as_mut().unwrap().reviewers = vec!["alice".into()];
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
+            daemon_copy,
+        )));
         assert_eq!(reviewers_of(&m, &sk), vec!["alice".to_string()]);
 
         m.handle_daemon_event(provider_error(
             "reviewers",
             "request reviewers failed: nope",
         ));
-        assert!(
-            reviewers_of(&m, &sk).is_empty(),
-            "a rejected reviewer request must roll the chip back"
+        assert_eq!(
+            reviewers_of(&m, &sk),
+            vec!["alice".to_string()],
+            "the daemon owns the row; a failure notice must not rewrite it"
         );
-        assert!(m.pending_mutations.is_empty());
         let n = m.status.notice.as_ref().expect("failure flashes");
         assert_eq!(n.severity, NoticeSeverity::Permanent);
         assert!(
@@ -29547,31 +29560,20 @@ mod optimistic_mutation_tests {
         );
     }
 
+    /// The same for labels and assignees: the pick is a command, not a
+    /// local edit.
     #[test]
-    fn labels_apply_then_roll_back_on_failure() {
+    fn label_and_assignee_picks_ship_commands_without_editing_the_row() {
         let mut m = build_model();
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#5");
         let sk: SessionKey = (&ws_key).into();
         m.awaiting_repo_labels = Some(ws_key.clone());
         m.modal_stack.push(Id::ManageLabels);
-        m.handle_choice_picked(vec![
+        let cmds = m.handle_choice_picked(vec![
             ChoicePayload::Text("bug".into()),
             ChoicePayload::Text("urgent".into()),
         ]);
-        let names: Vec<String> = m
-            .sidebar
-            .workspace_by_key(&sk)
-            .unwrap()
-            .pr
-            .as_ref()
-            .unwrap()
-            .labels
-            .iter()
-            .map(|l| l.name.clone())
-            .collect();
-        assert_eq!(names, vec!["bug".to_string(), "urgent".to_string()]);
-
-        m.handle_daemon_event(provider_error("labels", "update labels failed: boom"));
+        assert!(matches!(cmds.as_slice(), [IpcCommand::SetLabels { .. }]));
         assert!(
             m.sidebar
                 .workspace_by_key(&sk)
@@ -29581,33 +29583,14 @@ mod optimistic_mutation_tests {
                 .unwrap()
                 .labels
                 .is_empty(),
-            "a rejected label set must roll back"
         );
-        assert!(m.pending_mutations.is_empty());
-    }
 
-    #[test]
-    fn assignees_apply_then_roll_back_on_failure() {
-        let mut m = build_model();
-        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#6");
-        let sk: SessionKey = (&ws_key).into();
         m.modal_flow = Some(super::super::ModalFlow::AssigneesRequest {
             workspace: ws_key.clone(),
         });
         m.modal_stack.push(Id::AddAssignees);
-        m.handle_choice_picked(vec![ChoicePayload::Text("alice".into())]);
-        assert_eq!(
-            m.sidebar
-                .workspace_by_key(&sk)
-                .unwrap()
-                .pr
-                .as_ref()
-                .unwrap()
-                .assignees,
-            vec!["alice".to_string()]
-        );
-
-        m.handle_daemon_event(provider_error("assignees", "update assignees failed: no"));
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("alice".into())]);
+        assert!(matches!(cmds.as_slice(), [IpcCommand::SetAssignees { .. }]));
         assert!(
             m.sidebar
                 .workspace_by_key(&sk)
@@ -29617,7 +29600,6 @@ mod optimistic_mutation_tests {
                 .unwrap()
                 .assignees
                 .is_empty(),
-            "a rejected assignee set must roll back"
         );
         assert!(m.pending_mutations.is_empty());
     }

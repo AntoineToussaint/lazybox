@@ -642,15 +642,6 @@ impl<T: TerminalAdapter> Model<T> {
                 logins,
             } => {
                 let count = logins.len();
-                self.optimistic_chip_edit(&workspace_key, "reviewers", |workspace| {
-                    if let Some(pr) = workspace.pr.as_mut() {
-                        for login in &logins {
-                            if !pr.reviewers.contains(login) {
-                                pr.reviewers.push(login.clone());
-                            }
-                        }
-                    }
-                });
                 cmds.push(IpcCommand::RequestReviewers {
                     workspace_key,
                     logins,
@@ -675,33 +666,6 @@ impl<T: TerminalAdapter> Model<T> {
                 names,
             } => {
                 let count = names.len();
-                self.optimistic_chip_edit(&workspace_key, "labels", |workspace| {
-                    let known: std::collections::HashMap<String, String> = workspace
-                        .pr
-                        .iter()
-                        .flat_map(|pr| pr.labels.iter())
-                        .chain(
-                            workspace
-                                .gh_issues
-                                .first()
-                                .into_iter()
-                                .flat_map(|issue| issue.labels.iter()),
-                        )
-                        .map(|label| (label.name.clone(), label.color.clone()))
-                        .collect();
-                    let next = names
-                        .iter()
-                        .map(|name| lazybox_core::Label {
-                            name: name.clone(),
-                            color: known.get(name).cloned().unwrap_or_default(),
-                        })
-                        .collect();
-                    if let Some(pr) = workspace.pr.as_mut() {
-                        pr.labels = next;
-                    } else if let Some(issue) = workspace.gh_issues.first_mut() {
-                        issue.labels = next;
-                    }
-                });
                 cmds.push(IpcCommand::SetLabels {
                     workspace_key,
                     names,
@@ -717,21 +681,6 @@ impl<T: TerminalAdapter> Model<T> {
                 logins,
             } => {
                 let count = logins.len();
-                self.optimistic_chip_edit(&workspace_key, "assignees", |workspace| {
-                    if let Some(pr) = workspace.pr.as_mut() {
-                        pr.assignees = logins.clone();
-                    } else if let Some(issue) = workspace.gh_issues.first_mut() {
-                        issue.assignees = logins.clone();
-                    } else if let Some(issue) = workspace.linear_issues.first_mut() {
-                        // Linear issues hold a single assignee; the
-                        // provider keeps the LAST login (see
-                        // LinearClient::set_assignees). Mirror that so the
-                        // optimistic chips don't briefly show an
-                        // impossible two-assignee state before the poll
-                        // reconciles.
-                        issue.assignees = logins.last().cloned().into_iter().collect();
-                    }
-                });
                 cmds.push(IpcCommand::SetAssignees {
                     workspace_key,
                     logins,
@@ -785,7 +734,7 @@ impl<T: TerminalAdapter> Model<T> {
 }
 
 #[cfg(test)]
-mod optimistic_assignee_tests {
+mod assignee_pick_tests {
     use crate::realm::Model;
     use chrono::Utc;
     use lazybox_core::{
@@ -863,54 +812,41 @@ mod optimistic_assignee_tests {
         (m, key)
     }
 
-    /// Linear issues hold a single assignee. When the picker submits the
-    /// existing assignee (listed first) plus a newly-ticked one, the
-    /// optimistic chips must show the last-wins single assignee — not an
-    /// impossible two-assignee state that only self-corrects on the next
-    /// poll.
+    /// The picker's full selection ships verbatim; the client no longer
+    /// mirrors provider semantics locally. Linear's single-assignee rule
+    /// now lives with Linear (`lazybox_linear::narrow_assignees`), which
+    /// the daemon applies to the intent it records — so what the row
+    /// shows mid-flight is what the write will do, and there is only one
+    /// copy of the rule to keep correct (#1736).
     #[test]
-    fn linear_assignee_optimistic_edit_reflects_single_last_login() {
-        let (mut m, key) = model_with(issue_task(
-            "linear",
-            "https://linear.app/acme/issue/ENG-1",
-            vec!["Alice".into()],
-        ));
+    fn an_assignee_pick_ships_the_selection_without_editing_the_row() {
+        for (source, url) in [
+            ("linear", "https://linear.app/acme/issue/ENG-1"),
+            ("github", "https://github.com/o/r/issues/1"),
+        ] {
+            let (mut m, key) = model_with(issue_task(source, url, vec!["Alice".into()]));
 
-        let _ = m.apply_pick_outcome(PickOutcome::Assignees {
-            workspace_key: key.clone(),
-            logins: vec!["Alice".into(), "Bob".into()],
-        });
+            let cmds = m.apply_pick_outcome(PickOutcome::Assignees {
+                workspace_key: key.clone(),
+                logins: vec!["Alice".into(), "Bob".into()],
+            });
+            assert!(
+                cmds.iter().any(|c| matches!(
+                    c,
+                    lazybox_ipc::Command::SetAssignees { logins, .. }
+                        if logins == &["Alice".to_string(), "Bob".to_string()]
+                )),
+                "{source}: the full selection reaches the daemon, got {cmds:?}"
+            );
 
-        let session_key: SessionKey = (&key).into();
-        let ws = m.sidebar.workspace_by_key(&session_key).expect("workspace");
-        assert_eq!(
-            ws.linear_issues[0].assignees,
-            vec!["Bob".to_string()],
-            "single-assignee Linear issue reflects last-wins, not a 2-assignee state",
-        );
-    }
-
-    /// GitHub issues are multi-assignee; splitting the Linear branch out
-    /// must not regress that — the full selected set is reflected.
-    #[test]
-    fn github_issue_assignee_optimistic_edit_keeps_all_logins() {
-        let (mut m, key) = model_with(issue_task(
-            "github",
-            "https://github.com/o/r/issues/1",
-            vec![],
-        ));
-
-        let _ = m.apply_pick_outcome(PickOutcome::Assignees {
-            workspace_key: key.clone(),
-            logins: vec!["Alice".into(), "Bob".into()],
-        });
-
-        let session_key: SessionKey = (&key).into();
-        let ws = m.sidebar.workspace_by_key(&session_key).expect("workspace");
-        assert_eq!(
-            ws.gh_issues[0].assignees,
-            vec!["Alice".to_string(), "Bob".to_string()],
-            "GitHub issue keeps the full multi-assignee set",
-        );
+            let session_key: SessionKey = (&key).into();
+            let ws = m.sidebar.workspace_by_key(&session_key).expect("workspace");
+            let task = ws.primary_task().expect("task");
+            assert_eq!(
+                task.assignees,
+                vec!["Alice".to_string()],
+                "{source}: the row still shows the daemon's copy"
+            );
+        }
     }
 }

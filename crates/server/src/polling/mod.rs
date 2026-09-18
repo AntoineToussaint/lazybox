@@ -26,6 +26,7 @@ pub mod auto_merge;
 pub(crate) mod autofix;
 mod handlers;
 mod mutate;
+pub mod ops;
 mod scheduler;
 mod sources;
 mod upsert;
@@ -3076,6 +3077,11 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 "polling: config — could not load ~/.lazybox/config.yaml; falling back to defaults"
             );
         }
+
+        // Re-adopt provider intent that was in flight when this daemon
+        // last stopped, before the first tick can observe those entities
+        // (#1736). A restart must not leave a user's write half-issued.
+        ops::recover(&config).await;
 
         // `next_due` starts in the past so the first iteration ticks
         // immediately (matches the previous loop's "first run is

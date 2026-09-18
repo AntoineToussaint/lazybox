@@ -324,7 +324,11 @@ pub enum CleanupPrompt {
 ///   canary). Optional with `#[serde(default)]`, so older records read
 ///   back cleanly as not opted in — the canary is never inherited, only
 ///   chosen.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 13;
+/// - 14: `Workspace::provider_ops` (in-flight provider intent, #1736).
+///   Optional with `#[serde(default)]`, so older records read back with
+///   an empty ledger — nothing was in flight across an upgrade that
+///   restarted the daemon anyway.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 14;
 
 /// How long a workspace counts as "recently woken" after an
 /// event-conditional snooze fires (#scale): within this window the row
@@ -584,6 +588,13 @@ pub struct Workspace {
     pub pr: Option<Task>,
     pub gh_issues: Vec<Task>,
     pub linear_issues: Vec<Task>,
+    /// In-flight provider intent for this row's tasks (#1736). The tasks
+    /// above hold the last *observation*; this holds what the user asked
+    /// for and the provider has not yet confirmed. The projection the UI
+    /// renders is one laid over the other, so a rejected write needs no
+    /// rollback — dropping the operation uncovers the observed value.
+    #[serde(default)]
+    pub provider_ops: crate::ProviderOps,
     /// Merged activity from every linked task, sorted newest-first.
     pub activity: Vec<Activity>,
     pub seen_count: usize,
@@ -749,6 +760,7 @@ impl Workspace {
             pr: None,
             gh_issues: Vec::new(),
             linear_issues: Vec::new(),
+            provider_ops: crate::ProviderOps::default(),
             activity: Vec::new(),
             seen_count: 0,
             read_indices: HashSet::new(),
@@ -923,6 +935,17 @@ impl Workspace {
     /// Activity from `task.recent_activity` is merged into the
     /// workspace's feed and de-duplicated.
     pub fn attach_task(&mut self, task: Task) {
+        self.attach_task_at(task, Utc::now());
+    }
+
+    /// [`Self::attach_task`] with the reconciliation clock supplied.
+    ///
+    /// Folding an observation through the provider-ops ledger needs to
+    /// know how long an unconfirmed write has been waiting
+    /// ([`crate::provider_ops::SETTLE_DEADLINE`]). Core stays clock-free,
+    /// so the instant is an argument; `attach_task` is the ambient-clock
+    /// convenience the poll path uses.
+    pub fn attach_task_at(&mut self, task: Task, now: DateTime<Utc>) {
         let was_empty = self.activity.is_empty();
         match classify(&task) {
             TaskSlot::Pr => {
@@ -947,6 +970,15 @@ impl Workspace {
             TaskSlot::LinearIssue => upsert_by_id(&mut self.linear_issues, task.clone()),
             TaskSlot::Unknown => return,
         }
+        // The slot now holds the observation. Settle whatever intent this
+        // read has caught up with, and keep the rest laid over it — a
+        // reply that left the provider before our write must not undo it
+        // (#1736).
+        let mut ops = std::mem::take(&mut self.provider_ops);
+        if let Some(stored) = self.task_by_id_mut(&task.id) {
+            ops.reconcile_observation(stored, now);
+        }
+        self.provider_ops = ops;
         self.merge_activity(&task.recent_activity);
         if was_empty {
             self.baseline_first_activity_as_seen();
@@ -1247,6 +1279,12 @@ impl Workspace {
             pr: _,
             gh_issues: _,
             linear_issues: _,
+            // In-flight provider intent belongs to the row that issued
+            // it and to the tasks it names. A fold moves the tasks, and
+            // the destination re-reads them from the provider; carrying
+            // a source row's ledger would overlay a write onto an entity
+            // the destination is not waiting on.
+            provider_ops: _,
             // Carried by `absorb_activity_from` (remaps read/seen too).
             activity: _,
             seen_count: _,

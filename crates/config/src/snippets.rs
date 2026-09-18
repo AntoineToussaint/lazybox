@@ -80,6 +80,21 @@ const BANNED_DISMISSALS: &[&str] = &[
     "left as an exercise",
 ];
 
+/// The four statuses paired with the glyph that leads each one (#1817).
+///
+/// The tests' mirror of the vocabulary written into `CONTRACT_ENDING`, the
+/// same way `BANNED_DISMISSALS` mirrors the bodies' standard: the contract
+/// is one literal string, so building it from this list would only move
+/// the text, while a separate oracle catches a glyph gone missing from one
+/// of the three places the contract spells a status.
+#[cfg(test)]
+const STATUS_GLYPHS: [(char, &str); 4] = [
+    ('🟢', "DONE"),
+    ('🔴', "ACTION NEEDED"),
+    ('❓', "NEED CONTEXT"),
+    ('🟡', "UNSURE"),
+];
+
 /// The contract's first line — the banner every delivered built-in carries.
 const CONTRACT_HEADER: &str = "OUTPUT CONTRACT (final ending only)";
 
@@ -101,25 +116,54 @@ const CONTRACT_HEADER: &str = "OUTPUT CONTRACT (final ending only)";
 const CONTRACT_UNBOUNDED_PREAMBLE: &str = "Explore, use tools, and give full findings before this ending without a length or format limit.";
 
 /// Everything from "Close each snippet…" down — the ending's shape, the
-/// status vocabulary, and the `report_blocker` routing. Always delivered.
+/// status vocabulary, its presentation, and the `report_blocker` routing.
+/// Always delivered.
+///
+/// The presentation half is #1817. #1697 decided the ending's *structure*
+/// and merged as bare uppercase text; the call recorded on it was to keep
+/// the 🟢/🟡/🔴/❓ glyphs, because a ten-second summary the eye has to read
+/// word by word is the thing the contract was meant to replace.
+///
+/// lazybox renders none of this — the agent writes into a PTY and the
+/// daemon forwards the bytes — so every presentation rule here is a rule
+/// about what the *model* emits, and each one is chosen to degrade rather
+/// than break. A glyph is colour with no escape sequence, identical on
+/// both themes, where ANSI would fight whichever one the reader picked. A
+/// forty-column rule has nothing to line up with, where a `┌─┐` frame has
+/// four corners an agent gets wrong. Two-space columns stay readable at
+/// any width; a 100-column table wraps into noise in a split pane.
 const CONTRACT_ENDING: &str =
     "Close each snippet, including each step in a next chain, with a ten-second summary:
 exactly one STATUS line, one prose verdict sentence carrying the reason, and at most five
 short detail lines only if they change what the reader does next. Hard cap: 7 lines total.
 Use bullets only for genuinely enumerable findings, never for the verdict. No fences.
 Choose exactly one status; do not manufacture confidence:
-DONE — finished, nothing needed from you.
-ACTION NEEDED — you must do something; name the exact action. Known blockers take priority.
-NEED CONTEXT — blocked on information only you have; ask the one question. A status line is
+🟢 DONE — finished, nothing needed from you.
+🔴 ACTION NEEDED — you must do something; name the exact action. Known blockers take priority.
+❓ NEED CONTEXT — blocked on information only you have; ask the one question. A status line is
 prose nobody polls, so if you have the lazybox `report_blocker` tool, call it with that same
 question — that is what puts the block on the epic readouts and the `E j` jump.
-UNSURE — done, but low confidence; name exactly what to verify.
+🟡 UNSURE — done, but low confidence; name exactly what to verify.
+The ending is read at a glance, so it looks the same every time.
+Open it with a rule on its own line — exactly forty ─ characters, nothing else. The rule is
+the frame rather than content, so it alone does not count against the seven.
+Lead the STATUS line with its glyph, then the word: the glyph is what the eye lands on, the
+word is what survives a terminal that renders emoji poorly. Never emit ANSI escapes — the
+glyph carries the colour and cannot clash with the reader's theme.
+Where a detail line has a natural key — wanted/found, before/after, file/line — write the key,
+then the value, every value starting at the same column two spaces past the longest key.
+Use a table only for several comparable items; one item is never a table. Align it the same
+way, never with box-drawing frames, and keep every line under 60 columns — when it does not
+fit, drop the least decision-changing column rather than wrapping it.
 Example ending:
-STATUS: UNSURE
+────────────────────────────────────────
+🟡 UNSURE
 The fix passes locally, but timing under production load remains unverified.
-Verify latency with the production workload before deploying.
-Close with exactly this shape, at most 7 lines, and nothing after it:
-STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
+wanted  p99 under 200ms on the production workload
+found   unmeasured
+Close with exactly this shape, at most 7 lines after the rule, and nothing after it:
+────────────────────────────────────────
+<🟢 DONE | 🔴 ACTION NEEDED | ❓ NEED CONTEXT | 🟡 UNSURE>
 <verdict — one sentence, prose>
 <up to 5 short lines of actionable detail, optional>";
 
@@ -2374,18 +2418,32 @@ exactly one STATUS line, one prose verdict sentence carrying the reason, and at 
 short detail lines only if they change what the reader does next. Hard cap: 7 lines total.
 Use bullets only for genuinely enumerable findings, never for the verdict. No fences.
 Choose exactly one status; do not manufacture confidence:
-DONE — finished, nothing needed from you.
-ACTION NEEDED — you must do something; name the exact action. Known blockers take priority.
-NEED CONTEXT — blocked on information only you have; ask the one question. A status line is
+🟢 DONE — finished, nothing needed from you.
+🔴 ACTION NEEDED — you must do something; name the exact action. Known blockers take priority.
+❓ NEED CONTEXT — blocked on information only you have; ask the one question. A status line is
 prose nobody polls, so if you have the lazybox `report_blocker` tool, call it with that same
 question — that is what puts the block on the epic readouts and the `E j` jump.
-UNSURE — done, but low confidence; name exactly what to verify.
+🟡 UNSURE — done, but low confidence; name exactly what to verify.
+The ending is read at a glance, so it looks the same every time.
+Open it with a rule on its own line — exactly forty ─ characters, nothing else. The rule is
+the frame rather than content, so it alone does not count against the seven.
+Lead the STATUS line with its glyph, then the word: the glyph is what the eye lands on, the
+word is what survives a terminal that renders emoji poorly. Never emit ANSI escapes — the
+glyph carries the colour and cannot clash with the reader's theme.
+Where a detail line has a natural key — wanted/found, before/after, file/line — write the key,
+then the value, every value starting at the same column two spaces past the longest key.
+Use a table only for several comparable items; one item is never a table. Align it the same
+way, never with box-drawing frames, and keep every line under 60 columns — when it does not
+fit, drop the least decision-changing column rather than wrapping it.
 Example ending:
-STATUS: UNSURE
+────────────────────────────────────────
+🟡 UNSURE
 The fix passes locally, but timing under production load remains unverified.
-Verify latency with the production workload before deploying.
-Close with exactly this shape, at most 7 lines, and nothing after it:
-STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
+wanted  p99 under 200ms on the production workload
+found   unmeasured
+Close with exactly this shape, at most 7 lines after the rule, and nothing after it:
+────────────────────────────────────────
+<🟢 DONE | 🔴 ACTION NEEDED | ❓ NEED CONTEXT | 🟡 UNSURE>
 <verdict — one sentence, prose>
 <up to 5 short lines of actionable detail, optional>";
         assert_eq!(output_contract(false), SHIPPED);
@@ -2399,6 +2457,174 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
             output_contract(false).lines().count(),
             output_contract(true).lines().count() + 1
         );
+    }
+
+    /// Every status the contract spells leads with its glyph (#1817).
+    ///
+    /// #1697 settled the ending's *structure*; the call recorded on it was
+    /// to keep the 🟢/🟡/🔴/❓ vocabulary, because the point of a
+    /// ten-second summary is that a human places it before reading a word,
+    /// and #1728 merged the bare-uppercase form anyway. The guard is
+    /// quantified over every *occurrence*, not just the vocabulary block:
+    /// the contract names each status in up to three places — the
+    /// vocabulary, the example, the closing shape — and one of them
+    /// reverting to a bare word is exactly the half-landing this fixes.
+    /// The word stays beside the glyph so the status is still greppable
+    /// and still legible where emoji render as tofu.
+    #[test]
+    fn every_status_in_the_contract_leads_with_its_glyph() {
+        for (glyph, word) in STATUS_GLYPHS {
+            let led = format!("{glyph} {word}");
+            assert!(
+                CONTRACT_ENDING.contains(&led),
+                "the contract never spells `{led}`",
+            );
+            for (idx, _) in CONTRACT_ENDING.match_indices(word) {
+                assert!(
+                    CONTRACT_ENDING[..idx].ends_with(&format!("{glyph} ")),
+                    "`{word}` appears at byte {idx} of the contract without its \
+                     {glyph} — the reader has to read the word to tell this status \
+                     from the other three",
+                );
+            }
+        }
+        // Both delivered variants carry all four. The ending-only opt-out
+        // (#1769) withholds the unbounded-output clause, never the status
+        // vocabulary, so `catchup` and `clarify` are as scannable as the
+        // other 59.
+        for delivered in [output_contract(false), output_contract(true)] {
+            for (glyph, word) in STATUS_GLYPHS {
+                assert!(delivered.contains(&format!("{glyph} {word}")), "{word}");
+            }
+        }
+    }
+
+    /// Colour rides the glyph, never an escape sequence (#1817).
+    ///
+    /// lazybox renders none of this: the agent writes into a PTY and the
+    /// daemon forwards the bytes, so nothing downstream can re-theme what
+    /// the model emitted. A hardcoded bright colour that reads on the dark
+    /// theme is noise on the light one, which is why the contract asks for
+    /// a glyph — colour with no escape sequence, identical on both — and
+    /// forbids ANSI outright rather than defining a palette.
+    #[test]
+    fn the_contract_carries_colour_with_the_glyph_and_never_ansi() {
+        assert!(CONTRACT_ENDING.contains("Never emit ANSI escapes"));
+        for (key, snippet) in Snippets::builtin().all() {
+            let delivered = snippet.delivery_body();
+            assert!(
+                !delivered.contains('\u{1b}'),
+                "built-in `{key}` ships a literal escape byte",
+            );
+            for literal in ["\\033[", "\\x1b[", "\\e[", "\\u{1b}"] {
+                assert!(
+                    !delivered.contains(literal),
+                    "built-in `{key}` spells the escape sequence {literal:?} — the \
+                     glyph is the only colour the contract asks for",
+                );
+            }
+        }
+    }
+
+    /// A rule frames the ending; its columns are spaces, not a box (#1817).
+    ///
+    /// The rule is the one piece of chrome the ending gets, and it is the
+    /// reason the summary reads as a lazybox artifact rather than more
+    /// scrollback — a fixed forty columns, so every agent's ending opens
+    /// identically. A horizontal rule is the only box-drawing character
+    /// the contract may ask for: it has nothing to line up with, whereas a
+    /// `┌─┐` frame has four corners an agent gets wrong, and a misaligned
+    /// frame reads worse than no table at all. Width is unknown to the
+    /// agent — a 100-column table wraps into noise in a split pane — so
+    /// the contract also names a target and what to drop first.
+    #[test]
+    fn the_contract_frames_the_ending_with_a_rule_and_never_a_box() {
+        const RULE: &str = "────────────────────────────────────────";
+        assert_eq!(RULE.chars().count(), 40);
+        assert!(CONTRACT_ENDING.contains("exactly forty ─ characters"));
+        assert!(
+            CONTRACT_ENDING.lines().filter(|line| *line == RULE).count() == 2,
+            "the example and the closing shape must each open with the rule, \
+             spelled at its stated width",
+        );
+        // The rule is chrome, so it is carved out of the seven rather than
+        // silently overrunning a cap every other guard reads as absolute.
+        assert!(CONTRACT_ENDING.contains("does not count against the seven"));
+        assert!(CONTRACT_ENDING.contains("Hard cap: 7 lines total."));
+
+        assert!(CONTRACT_ENDING.contains("never with box-drawing frames"));
+        assert!(CONTRACT_ENDING.contains("one item is never a table"));
+        assert!(CONTRACT_ENDING.contains("under 60 columns"));
+        assert!(CONTRACT_ENDING.contains("drop the least decision-changing column"));
+        for (key, snippet) in Snippets::builtin().all() {
+            assert!(
+                !snippet
+                    .delivery_body()
+                    .contains(['┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '│']),
+                "built-in `{key}` shows a box-drawn frame the agent would copy",
+            );
+        }
+    }
+
+    /// The example obeys the rules it teaches (#1817).
+    ///
+    /// A model copies the sample far more reliably than it applies the
+    /// sentence, so an example whose values did not line up would teach
+    /// the opposite of the paragraph above it. Checked structurally rather
+    /// than as a string, so re-wording the example keeps the guard.
+    #[test]
+    fn the_contracts_example_opens_with_its_rule_and_aligns_its_pairs() {
+        let example: Vec<&str> = CONTRACT_ENDING
+            .lines()
+            .skip_while(|line| *line != "Example ending:")
+            .skip(1)
+            .take_while(|line| !line.starts_with("Close with exactly this shape"))
+            .collect();
+        assert!(
+            (4..=8).contains(&example.len()),
+            "the example must fit the 7-line cap plus its rule: {example:?}",
+        );
+        assert!(
+            example[0].chars().all(|c| c == '─'),
+            "the example must open with the rule: {:?}",
+            example[0],
+        );
+        let (glyph, word) = STATUS_GLYPHS
+            .iter()
+            .find(|(glyph, _)| example[1].starts_with(*glyph))
+            .unwrap_or_else(|| panic!("example status line `{}` leads with no glyph", example[1]));
+        assert_eq!(example[1], format!("{glyph} {word}"));
+
+        // Every key/value detail line puts its value in the same column,
+        // two past the longest key — the rule the paragraph states.
+        let pairs: Vec<(&str, usize)> = example[3..]
+            .iter()
+            .filter_map(|line| {
+                let gutter = line.find("  ")?;
+                let value = line[gutter..].trim_start();
+                Some((
+                    &line[..gutter],
+                    line.chars().count() - value.chars().count(),
+                ))
+            })
+            .collect();
+        assert!(
+            pairs.len() >= 2,
+            "the example must show the pairing: {example:?}",
+        );
+        let widest = pairs
+            .iter()
+            .map(|(key, _)| key.chars().count())
+            .max()
+            .expect("at least two pairs");
+        for (key, value_col) in &pairs {
+            assert_eq!(
+                *value_col,
+                widest + 2,
+                "`{key}` starts its value at column {value_col}, not {}",
+                widest + 2,
+            );
+        }
     }
 
     /// `catchup` caps its whole answer at six lines, so the contract's

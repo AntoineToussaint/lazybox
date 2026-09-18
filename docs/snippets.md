@@ -523,27 +523,65 @@ User-defined bodies and overrides are delivered exactly as authored — the
 contract is lazybox's house style for its own built-ins, not a rewrite
 imposed on your file.
 
-The ending takes at most **7 lines**: exactly one `STATUS:` line, a one-sentence
+The ending takes at most **7 lines**: exactly one status line, a one-sentence
 prose verdict explaining why, and up to five short detail lines only when they
 change what the reader does next. Nothing follows it. Bullets are reserved for
 enumerable findings, not the verdict. The four statuses are:
 
-- `DONE`: finished, nothing needed from you.
-- `ACTION NEEDED`: you must act; the ending names the exact action. Known blockers take priority.
-- `NEED CONTEXT`: blocked on information only you have; asks one question. A
+- 🟢 `DONE`: finished, nothing needed from you.
+- 🔴 `ACTION NEEDED`: you must act; the ending names the exact action. Known blockers take priority.
+- ❓ `NEED CONTEXT`: blocked on information only you have; asks one question. A
   status line is prose nobody polls, so the contract also asks the agent to
   call `report_blocker` when it has that tool — that is what surfaces the
   block on `epic_status` and the `E j` jump instead of leaving it in
   scrollback.
-- `UNSURE`: finished with low confidence; names what to verify.
+- 🟡 `UNSURE`: finished with low confidence; names what to verify.
 
 For example:
 
 ```text
-STATUS: UNSURE
+────────────────────────────────────────
+🟡 UNSURE
 The fix passes locally, but timing under production load remains unverified.
-Verify latency with the production workload before deploying.
+wanted  p99 under 200ms on the production workload
+found   unmeasured
 ```
+
+### How the ending looks, and why the contract says so (#1817)
+
+A ten-second summary has to be *scannable*, not merely short — structure
+without presentation still reads as a wall, and bare uppercase text is the
+thing the contract replaced. So the contract also fixes what the ending looks
+like:
+
+- **A forty-column rule opens it.** It is the ending's only chrome, and the
+  reason a closing summary reads as a lazybox artifact rather than as more
+  scrollback. Being chrome, it is the one line that does not count against
+  the seven.
+- **A glyph leads the status line, with its word beside it.** The eye lands
+  on the colour before it reads anything; the word keeps the status greppable
+  and legible where a terminal renders emoji as tofu.
+- **Naturally paired details are aligned key/value** — `wanted`/`found`,
+  `before`/`after`, `file`/`line` — every value starting two columns past the
+  longest key. Alignment does the work a sentence would otherwise do.
+- **A table only for several comparable items.** One item is never a table.
+
+The shape of those rules follows from one fact: **lazybox does not render
+this.** The agent writes into a PTY and the daemon forwards the bytes, so
+every rule above is a rule about what the *model emits*, and each is picked to
+degrade rather than break.
+
+- Colour rides the glyph, never ANSI. A glyph needs no escape sequence,
+  survives copy/paste, and reads identically on the light and dark themes,
+  where a hardcoded bright colour would fight whichever one you chose. Red
+  stays reserved for a real blocker, consistent with the rest of lazybox.
+- Columns are two spaces, never `┌─┐` framing. Agents misalign borders, and a
+  misaligned border looks worse than no table; two-space columns degrade
+  gracefully at any width. A single horizontal rule is the exception — it has
+  nothing to line up with.
+- Width is unknown to the agent, so the contract names a target (under 60
+  columns) and what to drop first (the least decision-changing column) rather
+  than letting a 100-column table wrap into noise in a split pane.
 
 **What the verdict names is per-snippet, not per-category.** Each body ends by
 stating it — `push` names the pushed SHA, `ready` names the resulting draft
@@ -643,6 +681,12 @@ value and 2–7 lines from there to the end, including blank lines. Status
 semantics were assessed separately against the expected disposition above;
 before the change, this was inferred from prose rather than requiring the
 new vocabulary.
+
+**The scored shape is no longer the shipped one.** #1817 replaced the
+`STATUS: UNSURE` prefix with the glyph-led `🟡 UNSURE` and added the opening
+rule, so the literal this replay counted is not what the contract now asks
+for. The structure it measured — one status line, then 2–7 lines to the end —
+is unchanged, but the presentation half has not been replayed.
 
 | Agent | Format before → after | Correct disposition before → after | After ending lines (table order) |
 | --- | --- | --- | --- |

@@ -68,10 +68,14 @@ The tick allowance is:
 2. less projected external consumption through reset;
 3. divided over the ticks remaining in the window.
 
-One `Focused` request per 30 s may pass a **self-imposed** refusal — an
-empty local token bucket or a spent tick allowance — so a targeted
-refresh of the row the user is looking at still returns current state
-while the background sweep is paced out (#1803). It never passes the
+A small burst of `Focused` requests per 30 s may pass a **self-imposed**
+refusal — an empty local token bucket or a spent tick allowance — so a
+targeted refresh of the row the user is looking at still returns current
+state while the background sweep is paced out (#1803). The allowance is a
+burst, not a single request, because one refresh is not one call: the hot
+fetch is a freshness probe followed by a detail fetch for whatever moved,
+and admitting only the probe refreshes the row exactly when nothing
+changed. It never passes the
 gates GitHub itself imposes: remaining-low, the action reserve, and an
 open circuit still refuse it, because the reserve exists so the user's
 own merges and replies fit.

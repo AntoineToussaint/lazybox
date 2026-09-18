@@ -496,12 +496,40 @@ pub struct RepoSweepOutcome {
     pub retry_after_secs: Option<u64>,
     /// Members that were fetched unwindowed this pass.
     pub unwindowed: Vec<String>,
+    /// Members whose PR walk needed more than one `updated:<=` window.
+    ///
+    /// Such a member is fetched in full and its floor advances, but its
+    /// set is NOT authoritative for retirement. A multi-window walk is
+    /// several requests spread over seconds, and GitHub sorts the result
+    /// newest-first: a PR that receives activity mid-walk jumps above the
+    /// ceiling every later window carries, so it is never returned. It is
+    /// present and open, merely unseen — and treating the walk's output as
+    /// exhaustive would retire its row. Before re-windowing existed the
+    /// same member simply failed, which preserved its rows; this keeps
+    /// that guarantee while still delivering the data.
+    pub rewindowed: Vec<String>,
 }
 
 impl RepoSweepOutcome {
     pub fn is_complete(&self) -> bool {
         self.failed.is_empty()
     }
+}
+
+/// One member's PR set plus whether reaching it needed more than one
+/// `updated:<=` window — see [`RepoSweepOutcome::rewindowed`] for why the
+/// caller must not treat a re-windowed set as exhaustive.
+struct SweptPrs {
+    tasks: Vec<Task>,
+    rewindowed: bool,
+}
+
+/// One freshness-probe request: the `search` aliases it sends, and the
+/// members they answer for, in alias order. Owned rather than borrowed
+/// from the spec list so the probe futures capture nothing but `self`.
+struct ProbeChunk {
+    queries: Vec<String>,
+    members: Vec<(String, chrono::DateTime<chrono::Utc>)>,
 }
 
 #[derive(Debug)]
@@ -4911,7 +4939,7 @@ impl GhClient {
     /// re-asking with `updated:<=` that watermark resumes exactly where
     /// the walk stopped. The bound is inclusive, so the boundary items
     /// come back a second time and the dedup below drops them.
-    async fn sweep_prs_windowed<F>(&self, build: F) -> Result<Vec<Task>, GhError>
+    async fn sweep_prs_windowed<F>(&self, build: F) -> Result<SweptPrs, GhError>
     where
         F: Fn(Option<chrono::DateTime<chrono::Utc>>) -> String,
     {
@@ -4919,8 +4947,9 @@ impl GhClient {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut ceiling: Option<chrono::DateTime<chrono::Utc>> = None;
         for _ in 0..REPO_SWEEP_MAX_WINDOWS {
+            let query = build(ceiling);
             let (page, stop) = self
-                .fetch_pr_pages("repo-sweep", &build(ceiling), REPO_SWEEP_MAX_PAGES)
+                .fetch_pr_pages("repo-sweep", &query, REPO_SWEEP_MAX_PAGES)
                 .await?;
             let oldest = page.iter().map(|task| task.updated_at).min();
             for task in page {
@@ -4929,12 +4958,28 @@ impl GhClient {
                 }
             }
             let Some(stop) = stop else {
-                return Ok(tasks);
+                return Ok(SweptPrs {
+                    tasks,
+                    rewindowed: ceiling.is_some(),
+                });
             };
             // Only the page cap is resumable. A mid-walk error or a
             // missing cursor says nothing about where the set continues,
             // so those stay the truncation they always were.
             if !matches!(stop, PaginationStop::PageLimit { .. }) {
+                return Err(incomplete_pagination_error("repo-sweep", tasks.len(), stop));
+            }
+            // The ceiling is only meaningful over a newest-first page
+            // order: under relevance order the fetched prefix is an
+            // arbitrary subset, so its oldest timestamp bounds nothing
+            // and `updated:<=` would exclude unfetched items that happen
+            // to be newer. A builder that forgot the sort must report the
+            // truncation it always did, never silently drop rows.
+            if !graphql::query_is_newest_first(&query) {
+                debug_assert!(
+                    false,
+                    "a re-windowed sweep query must be sorted newest-first: {query}"
+                );
                 return Err(incomplete_pagination_error("repo-sweep", tasks.len(), stop));
             }
             // No watermark to advance to, or a whole capped walk sharing
@@ -4971,7 +5016,7 @@ impl GhClient {
         &self,
         member: &str,
         since: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<Vec<Task>, GhError> {
+    ) -> Result<SweptPrs, GhError> {
         let primary =
             self.sweep_prs_windowed(|until| self.repo_sweep_pr_query_until(member, since, until));
         let reviewer_role = self.repo_sweep_reviewer_role(member);
@@ -4983,13 +5028,21 @@ impl GhClient {
                     })
                     .await
                 }
-                None => Ok(Vec::new()),
+                None => Ok(SweptPrs {
+                    tasks: Vec::new(),
+                    rewindowed: false,
+                }),
             }
         };
         let (primary, companion) = tokio::join!(primary, companion);
-        let mut tasks = primary?;
-        merge_unseen(&mut tasks, companion?);
-        Ok(tasks)
+        let primary = primary?;
+        let companion = companion?;
+        let mut tasks = primary.tasks;
+        merge_unseen(&mut tasks, companion.tasks);
+        Ok(SweptPrs {
+            tasks,
+            rewindowed: primary.rewindowed || companion.rewindowed,
+        })
     }
 
     /// Members of `specs` whose windowed sweep provably has nothing to
@@ -5018,84 +5071,117 @@ impl GhClient {
         want_prs: bool,
         want_issues: bool,
     ) -> std::collections::HashSet<String> {
+        use futures::stream::{self, StreamExt};
+        const PROBE_CONCURRENCY: usize = 4;
+
         let started = std::time::Instant::now();
-        let mut metrics = BranchMetrics::new("repo-sweep probe");
-        let mut unchanged = std::collections::HashSet::new();
+        let metrics = parking_lot::Mutex::new(BranchMetrics::new("repo-sweep probe"));
         let kinds: Vec<&str> = [("is:pr", want_prs), ("is:issue", want_issues)]
             .into_iter()
             .filter_map(|(kind, wanted)| wanted.then_some(kind))
             .collect();
         let windowed: Vec<&RepoSweepSpec> =
             specs.iter().filter(|spec| spec.since.is_some()).collect();
-        if kinds.is_empty() || windowed.len() < 2 {
-            // One member is not worth a round trip: probing it costs the
-            // same single request its sweep would have spent.
-            return unchanged;
+        // The probe pays for itself only if it can replace more than the
+        // one request it costs. That is the count of member QUERIES it
+        // stands in for — a single member with both kinds enabled is
+        // already two — not the member count.
+        if windowed.len().saturating_mul(kinds.len()) < 2 {
+            return std::collections::HashSet::new();
         }
-        for chunk in windowed.chunks(REPO_SWEEP_PROBE_CHUNK) {
-            let queries: Vec<String> = chunk
-                .iter()
-                .flat_map(|spec| {
-                    kinds
-                        .iter()
-                        .map(|kind| graphql::repo_sweep_probe_query(kind, &spec.member))
-                })
-                .collect();
-            if self.acquire_paced("repo-sweep probe").await.is_err() {
-                return unchanged;
-            }
-            let body = graphql::repo_sweep_probe_body(&queries);
-            let (response, bytes): (graphql::GqlSweepProbeResponse, usize) = match self
-                .post_graphql_with_retry_measured("repo-sweep probe", &body)
-                .await
-            {
-                Ok(measured) => measured,
-                Err(error) => {
-                    tracing::debug!("repo-sweep probe failed, sweeping in full: {error}");
-                    return unchanged;
+        // Chunks are independent, so they go out together: serialising
+        // them put a full round trip per chunk in front of a fan-out that
+        // has not started yet. Each chunk carries owned data so the
+        // futures borrow nothing but `self`.
+        let chunks: Vec<ProbeChunk> = windowed
+            .chunks(REPO_SWEEP_PROBE_CHUNK)
+            .map(|chunk| {
+                let mut queries = Vec::with_capacity(chunk.len() * kinds.len());
+                let mut members = Vec::with_capacity(chunk.len());
+                for spec in chunk {
+                    let Some(since) = spec.since else { continue };
+                    for kind in &kinds {
+                        queries.push(graphql::repo_sweep_probe_query(kind, &spec.member));
+                    }
+                    members.push((spec.member.clone(), since));
                 }
-            };
-            metrics.requests += 1;
-            metrics.resp_bytes += bytes;
-            if let Some(errors) = &response.errors
-                && !errors.is_empty()
-            {
-                tracing::debug!(
-                    "repo-sweep probe reported errors, sweeping in full: {}",
-                    errors
-                        .iter()
-                        .map(|error| error.full())
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                );
-                return unchanged;
-            }
-            let Some(data) = response.data else {
-                return unchanged;
-            };
-            if let Some(rate_limit) = &data.rate_limit {
-                metrics.graphql_cost += rate_limit.cost.unwrap_or(0);
-            }
-            for (position, spec) in chunk.iter().enumerate() {
-                let Some(since) = spec.since else { continue };
-                // EVERY kind must have reported, and every one of them
-                // must sit below the floor. A slot the probe could not
-                // read is unknown, not quiet, and skipping the member on
-                // its siblings' silence would drop real rows.
-                let watermarks: Option<Vec<_>> = (0..kinds.len())
-                    .map(|kind| data.watermark(position * kinds.len() + kind))
-                    .collect();
-                if watermarks.is_some_and(|watermarks| {
-                    watermarks
-                        .iter()
-                        .all(|watermark| watermark.is_none_or(|watermark| watermark < since))
-                }) {
-                    unchanged.insert(spec.member.clone());
+                ProbeChunk { queries, members }
+            })
+            .collect();
+        let kind_count = kinds.len();
+        let metrics = &metrics;
+        let per_chunk = stream::iter(chunks)
+            .map(|ProbeChunk { queries, members }| async move {
+                // A chunk that cannot be probed simply yields no skips:
+                // its members sweep in full, and the other chunks keep
+                // whatever they proved quiet.
+                if self.acquire_paced("repo-sweep probe").await.is_err() {
+                    return Vec::new();
                 }
-            }
+                let body = graphql::repo_sweep_probe_body(&queries);
+                let (response, bytes): (graphql::GqlSweepProbeResponse, usize) = match self
+                    .post_graphql_with_retry_measured("repo-sweep probe", &body)
+                    .await
+                {
+                    Ok(measured) => measured,
+                    Err(error) => {
+                        tracing::debug!("repo-sweep probe failed, sweeping in full: {error}");
+                        return Vec::new();
+                    }
+                };
+                {
+                    let mut metrics = metrics.lock();
+                    metrics.requests += 1;
+                    metrics.resp_bytes += bytes;
+                }
+                if let Some(errors) = &response.errors
+                    && !errors.is_empty()
+                {
+                    tracing::debug!(
+                        "repo-sweep probe reported errors, sweeping in full: {}",
+                        errors
+                            .iter()
+                            .map(|error| error.full())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
+                    return Vec::new();
+                }
+                let Some(data) = response.data else {
+                    return Vec::new();
+                };
+                if let Some(rate_limit) = &data.rate_limit {
+                    metrics.lock().graphql_cost += rate_limit.cost.unwrap_or(0);
+                }
+                let mut quiet = Vec::new();
+                for (position, (member, since)) in members.into_iter().enumerate() {
+                    // EVERY kind must have reported, and every one of them
+                    // must sit below the floor. A slot the probe could not
+                    // read is unknown, not quiet, and skipping the member on
+                    // its siblings' silence would drop real rows.
+                    let watermarks: Option<Vec<_>> = (0..kind_count)
+                        .map(|kind| data.watermark(position * kind_count + kind))
+                        .collect();
+                    if watermarks.is_some_and(|watermarks| {
+                        watermarks
+                            .iter()
+                            .all(|watermark| watermark.is_none_or(|watermark| watermark < since))
+                    }) {
+                        quiet.push(member);
+                    }
+                }
+                quiet
+            })
+            .buffer_unordered(PROBE_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let unchanged: std::collections::HashSet<String> =
+            per_chunk.into_iter().flatten().collect();
+        {
+            let mut metrics = metrics.lock();
+            metrics.elapsed_ms = started.elapsed().as_millis();
+            metrics.emit();
         }
-        metrics.elapsed_ms = started.elapsed().as_millis();
-        metrics.emit();
         unchanged
     }
 
@@ -5133,11 +5219,18 @@ impl GhClient {
         let results = stream::iter(specs.iter().cloned())
             .map(|spec| async move {
                 if quiet.contains(&spec.member) {
-                    return (spec, Ok(Vec::new()), Ok((Vec::new(), Vec::new())));
+                    let empty = SweptPrs {
+                        tasks: Vec::new(),
+                        rewindowed: false,
+                    };
+                    return (spec, Ok(empty), Ok((Vec::new(), Vec::new())));
                 }
                 let pr_fut = async {
                     if !want_prs {
-                        return Ok(Vec::new());
+                        return Ok(SweptPrs {
+                            tasks: Vec::new(),
+                            rewindowed: false,
+                        });
                     }
                     if spec.since.is_some() {
                         return self.fetch_member_prs(&spec.member, spec.since).await;
@@ -5155,9 +5248,14 @@ impl GhClient {
                         self.fetch_member_prs(&spec.member, None),
                         self.fetch_member_prs(&spec.member, Some(recent_since)),
                     );
-                    let mut tasks = open?;
-                    merge_unseen(&mut tasks, recent?);
-                    Ok(tasks)
+                    let open = open?;
+                    let recent = recent?;
+                    let mut tasks = open.tasks;
+                    merge_unseen(&mut tasks, recent.tasks);
+                    Ok(SweptPrs {
+                        tasks,
+                        rewindowed: open.rewindowed || recent.rewindowed,
+                    })
                 };
                 let issue_fut = async {
                     if want_issues {
@@ -5186,13 +5284,17 @@ impl GhClient {
             failed: Vec::new(),
             retry_after_secs: None,
             unwindowed: Vec::new(),
+            rewindowed: Vec::new(),
         };
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut errors: Vec<GhError> = Vec::new();
         for (spec, prs, issues) in results {
             match (prs, issues) {
                 (Ok(prs), Ok((issues, mut mentions))) => {
-                    for task in prs.into_iter().chain(issues) {
+                    if prs.rewindowed {
+                        outcome.rewindowed.push(spec.member.clone());
+                    }
+                    for task in prs.tasks.into_iter().chain(issues) {
                         if seen.insert(task.id.key.clone()) {
                             outcome.tasks.push(task);
                         }
@@ -5232,6 +5334,14 @@ impl GhClient {
             outcome.unwindowed.len(),
             unchanged.len(),
         );
+        if !outcome.rewindowed.is_empty() {
+            tracing::info!(
+                "fetch_repo_sweep: {} member(s) needed more than one updated:<= window — \
+                 fetched in full, withheld from retirement authority: {}",
+                outcome.rewindowed.len(),
+                outcome.rewindowed.join(", "),
+            );
+        }
         if !specs.is_empty() && outcome.completed.is_empty() {
             let details = outcome
                 .failed
@@ -8676,6 +8786,17 @@ mod tests {
             2,
             "both windows' PRs land, deduped across the inclusive boundary"
         );
+        // The walk is several requests over seconds against a
+        // newest-first order, so a PR touched mid-walk rises above every
+        // later ceiling and is never returned. Before re-windowing, such a
+        // member simply failed and its rows were preserved; the set must
+        // not now be treated as exhaustive, or that PR's row is retired
+        // while it is open and active.
+        assert_eq!(
+            outcome.rewindowed,
+            vec!["acme/widgets".to_string()],
+            "a re-windowed member is fetched but never authoritative"
+        );
         let bodies = requests.lock().unwrap().clone();
         assert!(
             bodies.iter().any(|body| body.contains("sort:updated-desc")),
@@ -8731,6 +8852,38 @@ mod tests {
         );
     }
 
+    /// The withholding in
+    /// [`RepoSweepOutcome::rewindowed`] must be surgical: a member that
+    /// fits one window is still authoritative, or the reconcile would
+    /// stop retiring anything at all.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_member_that_fits_one_window_keeps_its_authority() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_matching_response_server(
+            vec![],
+            pr_search_page(1, Some((false, None))),
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        *client.budget.lock() = crate::rate_budget::RateBudget::unpaced();
+        let specs = vec![RepoSweepSpec {
+            member: "acme/widgets".to_string(),
+            since: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+        }];
+
+        let outcome = client
+            .fetch_repo_sweep(&specs, true, false, &std::collections::BTreeSet::new())
+            .await
+            .expect("one page is a complete sweep");
+
+        assert_eq!(outcome.completed, vec!["acme/widgets".to_string()]);
+        assert!(
+            outcome.rewindowed.is_empty(),
+            "one window is one consistent snapshot — authority is retained"
+        );
+    }
+
     fn probe_slots(watermarks: &[&str]) -> String {
         let slots = watermarks
             .iter()
@@ -8778,9 +8931,53 @@ mod tests {
             .expect("a quiet roster is a complete sweep");
 
         assert_eq!(outcome.completed.len(), 2, "quiet members still complete");
+        assert!(
+            outcome.rewindowed.is_empty(),
+            "a member that never paged out keeps its retirement authority"
+        );
         assert!(outcome.tasks.is_empty());
         let bodies = requests.lock().unwrap().clone();
         assert_eq!(bodies.len(), 1, "the probe was the whole pass: {bodies:?}");
+    }
+
+    /// The probe pays for itself on QUERY count, not member count: one
+    /// member with both kinds enabled already costs two sweep queries, so
+    /// a one-request probe is worth it. Guarding on member count alone
+    /// left that case unprobed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_lone_member_with_both_kinds_is_still_worth_probing() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_matching_response_server(
+            vec![(
+                "p0: search",
+                probe_slots(&["2026-09-17T09:00:00Z", "2026-09-17T09:15:00Z"]),
+            )],
+            pr_search_page(1, Some((false, None))),
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        *client.budget.lock() = crate::rate_budget::RateBudget::unpaced();
+        let floor = chrono::DateTime::parse_from_rfc3339("2026-09-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let specs = vec![RepoSweepSpec {
+            member: "acme/widgets".to_string(),
+            since: Some(floor),
+        }];
+
+        let outcome = client
+            .fetch_repo_sweep(&specs, true, true, &std::collections::BTreeSet::new())
+            .await
+            .expect("a quiet member is a complete sweep");
+
+        assert_eq!(outcome.completed, vec!["acme/widgets".to_string()]);
+        let bodies = requests.lock().unwrap().clone();
+        assert_eq!(
+            bodies.len(),
+            1,
+            "one probe replaced the member's PR and issue queries: {bodies:?}"
+        );
     }
 
     /// A member whose newest item is at or past the floor is swept, and

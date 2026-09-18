@@ -887,7 +887,11 @@ pub fn repo_sweep_pr_query(
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
 ) -> String {
-    build_query(&repo_sweep_qualifiers("is:pr", member, role, since, until))
+    let mut quals = repo_sweep_qualifiers("is:pr", member, role, since, until);
+    // Only the PR half re-windows, so only the PR half needs the order
+    // that makes a `updated:<=` ceiling meaningful.
+    quals.push(SWEEP_SORT.to_string());
+    build_query(&quals)
 }
 
 /// Issue counterpart of [`repo_sweep_pr_query`]: same window semantics,
@@ -923,7 +927,6 @@ fn repo_sweep_qualifiers(
     if let Some(until) = until {
         quals.push(updated_until_qualifier(until));
     }
-    quals.push(SWEEP_SORT.to_string());
     quals
 }
 
@@ -933,6 +936,16 @@ fn repo_sweep_qualifiers(
 /// would drop the unfetched items that happen to be newer. Newest-first
 /// makes the oldest item fetched a true watermark.
 const SWEEP_SORT: &str = "sort:updated-desc";
+
+/// Whether `query` asks GitHub for newest-updated results first.
+///
+/// The `updated:<=` re-window is only sound over this order, and the
+/// walker checks rather than trusts: a builder that dropped the sort
+/// would otherwise silently exclude unfetched items newer than the
+/// ceiling it took from an arbitrary prefix.
+pub fn query_is_newest_first(query: &str) -> bool {
+    query.split_whitespace().any(|term| term == SWEEP_SORT)
+}
 
 /// `updated:<=<until>` — the ceiling half of a re-windowed sweep walk,
 /// the mirror of [`updated_since_qualifier`]. Inclusive, like the floor,
@@ -4868,13 +4881,23 @@ mod tests {
         );
         assert_eq!(
             repo_sweep_issue_query("acme", None),
-            "is:open is:issue archived:false org:acme sort:updated-desc"
+            "is:open is:issue archived:false org:acme",
+            "the issue half never re-windows, so it carries no sort"
         );
         assert_eq!(
             repo_sweep_issue_query("acme", Some(since)),
-            "is:issue archived:false org:acme updated:>=2026-09-05T12:00:00+00:00 \
-             sort:updated-desc"
+            "is:issue archived:false org:acme updated:>=2026-09-05T12:00:00+00:00"
         );
+        assert!(query_is_newest_first(&repo_sweep_pr_query(
+            "acme/widgets",
+            None,
+            Some(since),
+            None
+        )));
+        assert!(!query_is_newest_first(&repo_sweep_issue_query(
+            "acme",
+            Some(since)
+        )));
     }
 
     /// The re-windowed walk that replaces the old page-cap failure: the

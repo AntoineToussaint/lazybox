@@ -7574,3 +7574,37 @@ async fn rescope_preserves_manual_workspace_that_gained_a_pr(/* issue #87 */) {
         "manual workspace (with PR) must survive refresh; got: {after:?}"
     );
 }
+
+/// A member whose PR walk needed more than one `updated:<=` window is
+/// fetched in full but must NOT gain deletion authority (#1803 review).
+/// The walk spans several requests over seconds against a newest-first
+/// order, so a PR touched mid-walk rises above every later ceiling and is
+/// never returned — open, active, and absent from the set. Retiring on
+/// that set deletes its live workspace row. Before re-windowing existed
+/// the member simply failed, and a failed member was preserved; this
+/// keeps that guarantee.
+#[test]
+fn a_rewindowed_member_is_fetched_but_never_gains_deletion_authority() {
+    let completed = vec![
+        "acme/widgets".to_string(),
+        "acme/gadgets".to_string(),
+        "acme/sprockets".to_string(),
+    ];
+    let rewindowed = vec!["acme/gadgets".to_string()];
+
+    let authoritative = polling::retirement_authority(&completed, &rewindowed);
+
+    assert_eq!(
+        authoritative,
+        vec!["acme/widgets".to_string(), "acme/sprockets".to_string()],
+        "only the member that paged out loses authority"
+    );
+    assert!(
+        polling::retirement_authority(&completed, &[]).len() == 3,
+        "withholding must be surgical — a clean reconcile still retires"
+    );
+    assert!(
+        polling::retirement_authority(&completed, &completed).is_empty(),
+        "an all-rewindowed reconcile retires nothing rather than guessing"
+    );
+}

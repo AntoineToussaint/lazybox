@@ -479,6 +479,18 @@ pub(crate) const SECONDARY_INTERACTIVE_BURST: u32 = 4;
 /// spending it on a background refresh would defeat it.
 const FOCUSED_RESERVE_GAP: Duration = Duration::from_secs(30);
 
+/// Focused requests admitted per [`FOCUSED_RESERVE_GAP`] window.
+///
+/// One refresh of the focused row is NOT one request: `fetch_hot_tasks`
+/// is two tiers — a lean freshness probe, then the full detail fetch for
+/// whatever moved — and each tier chunks at 100 node ids. A one-request
+/// reserve was spent by the probe and the detail fetch was refused, so
+/// the row refreshed only while nothing had changed, which is precisely
+/// the case nobody is waiting on. The burst covers both tiers of a
+/// two-chunk hot set; the gap still spaces successive refreshes. Same
+/// shape, and the same reason, as [`SECONDARY_INTERACTIVE_BURST`].
+const FOCUSED_RESERVE_BURST: u32 = 4;
+
 #[derive(Debug, Clone)]
 struct CircuitState {
     reason: String,
@@ -517,9 +529,12 @@ pub struct RateBudget {
     /// [`SECONDARY_INTERACTIVE_GAP`] window (see
     /// [`SECONDARY_INTERACTIVE_BURST`]).
     secondary_interactive_used: u32,
-    /// Earliest instant the next [`RequestPriority::Focused`] request may
-    /// pass a self-imposed refusal ([`FOCUSED_RESERVE_GAP`]).
+    /// Start of the current [`FOCUSED_RESERVE_GAP`] window for
+    /// [`RequestPriority::Focused`] pass-throughs of a self-imposed refusal.
     focused_reserve_next: Option<Instant>,
+    /// Focused requests admitted in the current window (see
+    /// [`FOCUSED_RESERVE_BURST`]).
+    focused_reserve_used: u32,
     primary_circuits: HashMap<String, CircuitState>,
     secondary_failures: u32,
     min_request_gap: Duration,
@@ -552,6 +567,7 @@ impl RateBudget {
             secondary_interactive_next: None,
             secondary_interactive_used: 0,
             focused_reserve_next: None,
+            focused_reserve_used: 0,
             primary_circuits: HashMap::new(),
             secondary_failures: 0,
             min_request_gap: DEFAULT_MIN_REQUEST_GAP,
@@ -823,21 +839,27 @@ impl RateBudget {
         .map(|_| ())
     }
 
-    /// Take the focused reserve if `priority` is entitled to it and the
-    /// window has re-armed. Consuming it arms the next window, so the
-    /// allowance is one request per [`FOCUSED_RESERVE_GAP`] no matter how
-    /// many focused refreshes queue up behind a starved governor.
+    /// Take a slot from the focused reserve if `priority` is entitled to
+    /// it and the window has one left. A whole refresh of the focused row
+    /// is several requests back to back, so the allowance is
+    /// [`FOCUSED_RESERVE_BURST`] per [`FOCUSED_RESERVE_GAP`] — enough for
+    /// one refresh to go through intact, not enough for a starved
+    /// governor's backlog to drain through it.
     fn claim_focused_reserve(&mut self, priority: RequestPriority, mono_now: Instant) -> bool {
         if priority != RequestPriority::Focused {
             return false;
         }
         if self
             .focused_reserve_next
-            .is_some_and(|next| mono_now < next)
+            .is_none_or(|next| mono_now >= next)
         {
+            self.focused_reserve_next = Some(mono_now + FOCUSED_RESERVE_GAP);
+            self.focused_reserve_used = 0;
+        }
+        if self.focused_reserve_used >= FOCUSED_RESERVE_BURST {
             return false;
         }
-        self.focused_reserve_next = Some(mono_now + FOCUSED_RESERVE_GAP);
+        self.focused_reserve_used += 1;
         true
     }
 
@@ -1614,6 +1636,7 @@ impl RateBudget {
             secondary_interactive_next: self.secondary_interactive_next,
             secondary_interactive_used: self.secondary_interactive_used,
             focused_reserve_next: self.focused_reserve_next,
+            focused_reserve_used: self.focused_reserve_used,
             primary_circuits: self.primary_circuits.clone(),
             secondary_failures: self.secondary_failures,
             min_request_gap: self.min_request_gap,
@@ -2561,16 +2584,27 @@ mod tests {
             ),
             "background work still waits out the empty bucket"
         );
-        assert!(
-            admit(RequestPriority::Focused, mono_now).is_ok(),
-            "the focused row is answerable with the bucket empty"
-        );
+        // A refresh of the focused row is `fetch_hot_tasks`: a lean
+        // freshness probe, then the full detail fetch for whatever moved.
+        // Admitting only the probe refreshes the row exactly when nothing
+        // changed — the one case nobody is waiting on — so the whole
+        // refresh must go through.
+        for request in 0..FOCUSED_RESERVE_BURST {
+            assert!(
+                admit(
+                    RequestPriority::Focused,
+                    mono_now + Duration::from_millis(u64::from(request))
+                )
+                .is_ok(),
+                "request {request} of one focused refresh must pass an empty bucket"
+            );
+        }
         assert!(
             matches!(
                 admit(RequestPriority::Focused, mono_now + Duration::from_secs(1)),
                 Err(AcquireError::LocalBudgetExhausted { .. })
             ),
-            "the reserve is one request, not a bypass"
+            "past the burst the reserve is spent, not a standing bypass"
         );
         assert!(
             admit(RequestPriority::Focused, mono_now + FOCUSED_RESERVE_GAP).is_ok(),

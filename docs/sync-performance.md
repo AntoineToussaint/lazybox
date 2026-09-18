@@ -203,8 +203,19 @@ watched repos (the *roster*):
   rows went stale regardless of budget. The bound is inclusive and the
   walk dedupes, so nothing is lost at a window boundary; a capped walk
   whose items all share one timestamp cannot be split by time and still
-  reports truncation. The issue half keeps the flat cap (400 per
-  window).
+  reports truncation. The issue half keeps the flat cap (400) and carries
+  no sort: it never re-windows, so it has nothing to order for.
+
+  **A re-windowed member is fetched but not authoritative.** The walk is
+  several requests over seconds against a newest-first order, so a PR
+  that receives activity mid-walk rises above every later window's
+  ceiling and is never returned — open, active, and absent from the set.
+  Treating that set as exhaustive would retire its row, so such a member
+  is reported in `RepoSweepOutcome::rewindowed` and subtracted from the
+  reconcile's retirement list (`polling::retirement_authority`). Its rows
+  still upsert and its floor still advances. This preserves exactly what
+  the old page-cap failure gave for free: a member that could not be read
+  exhaustively never deleted anything.
 - **A row that never names the viewer is `TaskRole::Observer`** (#1760).
   Whole-repo queries (a watched member, the issue query, `g s`) return
   PRs and issues with no per-viewer signal, and before this they fell

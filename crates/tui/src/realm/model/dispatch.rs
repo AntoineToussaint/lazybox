@@ -1653,26 +1653,26 @@ impl<T: TerminalAdapter> Model<T> {
             Action::ViewDiff => {
                 if let Some((workspace_key, target)) =
                     self.sidebar.selected_workspace().and_then(|workspace| {
-                        let target = session_id
-                            .or_else(|| workspace.default_session().map(|session| session.id))
-                            .map(lazybox_ipc::WorkspaceDiffTarget::Session)
-                            .or_else(|| {
-                                workspace
-                                    .linked_checkout
-                                    .as_ref()
-                                    .map(|_| lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout)
-                            })?;
+                        let target = crate::realm::model::inputs::default_diff_target(
+                            workspace, session_id,
+                        )?;
                         Some((workspace.key.clone(), target))
                     })
                 {
+                    let pull_request =
+                        matches!(target, lazybox_ipc::WorkspaceDiffTarget::PullRequest);
                     self.pending_diff_session = Some((workspace_key.clone(), target.clone()));
-                    self.flash_hint("reading worktree diff…");
+                    self.flash_hint(if pull_request {
+                        "reading the PR diff…"
+                    } else {
+                        "reading worktree diff…"
+                    });
                     cmds.push(IpcCommand::InspectWorkspaceDiff {
                         workspace_key,
                         target,
                     });
                 } else {
-                    self.flash_hint("this workspace has no worktree to review");
+                    self.flash_hint("this workspace has no PR or worktree to review");
                 }
             }
             Action::NewWorkspace => {

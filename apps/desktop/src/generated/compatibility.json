@@ -516,6 +516,7 @@
     {
       "WorkspaceDiffInspected": {
         "diff": {
+          "divergence": null,
           "files": [
             {
               "headers": [
@@ -540,6 +541,7 @@
               "path": "src/main.rs"
             }
           ],
+          "head_sha": null,
           "stat": [
             " src/main.rs | 2 +-"
           ],
@@ -567,6 +569,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 1204297635,
+  "protocol_fingerprint": 1935952131,
   "protocol_version": 4
 }

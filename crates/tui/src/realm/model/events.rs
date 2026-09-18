@@ -1327,6 +1327,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
                 | IpcEvent::WorkspaceDiffInspected { .. }
+                | IpcEvent::PullRequestReviewSubmitted { .. }
                 | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
@@ -2505,6 +2506,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::CleanWorktreesCompleted { .. }
             | IpcEvent::WorktreesInspected { .. }
             | IpcEvent::WorkspaceDiffInspected { .. }
+            | IpcEvent::PullRequestReviewSubmitted { .. }
             | IpcEvent::CheckoutsDiscovered { .. }
             | IpcEvent::OrphanedWorktreeDeleted { .. }
             | IpcEvent::AgentRunStarted { .. }
@@ -2886,6 +2888,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
                 | IpcEvent::WorkspaceDiffInspected { .. }
+                | IpcEvent::PullRequestReviewSubmitted { .. }
                 | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
@@ -3100,8 +3103,16 @@ impl<T: TerminalAdapter> Model<T> {
             && self.pending_diff_session.as_ref() == Some(&(workspace_key.clone(), target.clone()))
         {
             self.pending_diff_session = None;
+            // A source switch (`p`) is a fresh read for a viewer that
+            // is already open, so the review modal is a mount site as
+            // much as an empty stack is — anything else on top still
+            // owns the screen.
+            let reviewing = self.modal_stack.last() == Some(&Id::DiffReview);
             match (diff, error) {
-                (Some(diff), _) if self.modal_stack.is_empty() => {
+                (Some(diff), _) if reviewing || self.modal_stack.is_empty() => {
+                    if reviewing {
+                        self.pop_modal();
+                    }
                     self.mount_modal(
                         Id::DiffReview,
                         crate::realm::components::diff_review::DiffReview::new(
@@ -3115,8 +3126,61 @@ impl<T: TerminalAdapter> Model<T> {
                 (Some(_), _) => {
                     self.flash_hint("diff is ready — close the current modal and reopen review");
                 }
-                (None, Some(error)) => self.flash_error(format!("couldn't read diff: {error}")),
-                (None, None) => self.flash_error("couldn't read diff"),
+                (None, error) => {
+                    // A PR diff that will not load (offline, no
+                    // credential, a repo the token cannot see) must not
+                    // leave the reviewer with nothing: fall back to the
+                    // checkout, which is at least a diff, and say what
+                    // happened so the substitution is never silent.
+                    let fell_back = matches!(target, lazybox_ipc::WorkspaceDiffTarget::PullRequest)
+                        && self.fall_back_to_local_diff(workspace_key.clone());
+                    let reason = error
+                        .as_ref()
+                        .map(|error| format!(" ({error})"))
+                        .unwrap_or_default();
+                    if fell_back {
+                        self.flash_error(format!(
+                            "couldn't read the PR diff{reason} — showing the checkout"
+                        ));
+                    } else {
+                        self.flash_error(format!("couldn't read diff{reason}"));
+                    }
+                }
+            }
+        }
+        // The GitHub review landed, or GitHub refused it. Success closes
+        // the viewer; a refusal releases it with every drafted comment
+        // still in place, because the viewer is the only place they
+        // exist and the reviewer's next move is to fix one and retry.
+        //
+        // `error` is the discriminator, never `url`: a post that
+        // succeeds without a parseable URL is still a post, and reading
+        // success off `url` reported it as a failure.
+        if let IpcEvent::PullRequestReviewSubmitted {
+            comments,
+            url,
+            error,
+            ..
+        } = &event
+        {
+            match error {
+                Some(error) => {
+                    self.release_diff_review();
+                    self.flash_error(format!("review not posted: {error}"));
+                }
+                None => {
+                    if self.modal_stack.last() == Some(&Id::DiffReview) {
+                        self.pop_modal();
+                    }
+                    let posted = format!(
+                        "posted {comments} comment{} as one review",
+                        if *comments == 1 { "" } else { "s" }
+                    );
+                    self.flash_info(match url {
+                        Some(url) => format!("{posted} — {url}"),
+                        None => posted,
+                    });
+                }
             }
         }
         // Dev-folder scan replied. Swap the loading placeholder for the

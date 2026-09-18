@@ -1467,6 +1467,22 @@ pub enum Msg {
         agent_terminal_ids: Vec<lazybox_ipc::TerminalId>,
         comments: Vec<crate::realm::components::diff_review::DiffReviewComment>,
     },
+    /// `p` in the review modal — read the other source. `showing` is
+    /// what is on screen now; the model owns which checkout the local
+    /// side resolves to, so the component never has to.
+    DiffReviewSourceSwitched {
+        workspace_key: lazybox_core::WorkspaceKey,
+        showing: lazybox_ipc::WorkspaceDiffTarget,
+    },
+    /// The review modal's drafted comments, submitted to GitHub as one
+    /// pending review on the PR they were read from.
+    DiffReviewPosted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        head_sha: String,
+        summary: String,
+        verdict: lazybox_ipc::ReviewVerdictDto,
+        comments: Vec<lazybox_ipc::ReviewCommentDto>,
+    },
     /// Sidebar / Right / Terminals routes — kept in case a future
     /// pane goes through tuirealm. Today panes drain themselves
     /// directly inside the orchestrator's pane-dispatch path.
@@ -7813,6 +7829,35 @@ impl<T: TerminalAdapter> Model<T> {
                 let commands =
                     self.dispatch_diff_review(workspace_key, target, agent_terminal_ids, comments);
                 self.dispatch_cmds(commands);
+            }
+            Msg::DiffReviewSourceSwitched {
+                workspace_key,
+                showing,
+            } => self.switch_diff_review_source(workspace_key, showing),
+            Msg::DiffReviewPosted {
+                workspace_key,
+                head_sha,
+                summary,
+                verdict,
+                comments,
+            } => {
+                let count = comments.len();
+                self.dispatch_cmds(vec![IpcCommand::SubmitPullRequestReview {
+                    workspace_key,
+                    head_sha,
+                    summary,
+                    verdict,
+                    comments,
+                }]);
+                // The viewer stays mounted until GitHub answers. It is
+                // the only place the drafted comments exist, so closing
+                // it here turned every refusal — a stale `commit_id`, a
+                // 403, a 502 — into an unrecoverable loss of everything
+                // the reviewer had written.
+                self.flash_info(format!(
+                    "submitting {count} comment{} as one review…",
+                    if count == 1 { "" } else { "s" }
+                ));
             }
             Msg::OpenSnippetsFile => {
                 // `e` in the browser: drop the modal, then open the YAML

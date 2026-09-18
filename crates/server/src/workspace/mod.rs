@@ -1241,6 +1241,10 @@ fn archived_row_key(key: &str) -> String {
     format!("{}{}", lazybox_core::KV_PREFIX_ARCHIVED, key)
 }
 
+/// The value an archived-key row held before it carried a record, and
+/// still holds whenever the archived row absorbed nothing.
+const ARCHIVED_FLAG: &str = "1";
+
 /// The value stored in an archived-key row.
 ///
 /// A row is a *record*, not a flag, because a PR workspace absorbs the
@@ -1266,9 +1270,18 @@ struct ArchiveRecord {
     absorbed_by: Option<String>,
 }
 
-/// Read `key`'s archive record. A missing row and the legacy `"1"` flag
-/// both read as the default record; `Err` means the row exists but could
-/// not be read, which a write path must not treat as "nothing folded in".
+/// Read `key`'s archive record. A missing row and the legacy flag
+/// [`ARCHIVED_FLAG`] both read as the default record; `Err` means the row
+/// exists but could not be read or parsed, which a write path must not
+/// treat as "nothing folded in".
+///
+/// The legacy flag is matched exactly rather than by "whatever fails to
+/// parse", because those two cases need opposite handling. A row holding
+/// a truncated or otherwise corrupt record still OWNS absorbed rows that
+/// name it in `absorbed_by`; reading it as the empty record would make
+/// [`unarchive_workspace_key`] drop the owner alone and strand every
+/// tombstone it wrote, permanently and invisibly — nothing else ever
+/// revisits an absorbed row. Failing loudly keeps the set recoverable.
 fn read_archive_record(config: &ServerConfig, key: &str) -> Result<ArchiveRecord, String> {
     let Some(raw) = config
         .store
@@ -1277,17 +1290,38 @@ fn read_archive_record(config: &ServerConfig, key: &str) -> Result<ArchiveRecord
     else {
         return Ok(ArchiveRecord::default());
     };
-    Ok(serde_json::from_str(&raw).unwrap_or_default())
+    if raw == ARCHIVED_FLAG {
+        return Ok(ArchiveRecord::default());
+    }
+    serde_json::from_str(&raw).map_err(|e| format!("parse failed: {e}"))
 }
 
 /// The standalone workspace keys `workspace` is standing in for: one per
 /// attached task other than the row's own. A PR row that collapsed
 /// `Closes #40` into itself yields issue #40's key, which is the key a
 /// later poll of that issue would build a fresh row under.
+///
+/// Restricted to tasks from the row's OWN provider. A same-provider link
+/// is declared by the record — GitHub's `closingIssuesReferences`, or a
+/// closing keyword in the PR's own title — and names the issue outright,
+/// including cross-repo (`owner/repo#N`). A CROSS-provider link never is:
+/// a Linear ticket joins a GitHub PR's row only because
+/// `extract_linear_refs` matched `<TEAM>-<number>` against the PR's
+/// branch name or title, so lazybox's own `issue-1816-…` branches mint
+/// `ISSUE-1816` on sight. Letting that inference write a permanent
+/// tombstone in another provider's namespace means deleting one GitHub
+/// project (`WorkspaceRemovalReason::ProjectCascade`) can silently
+/// retire a Linear ticket the project never owned. The ticket loses its
+/// fold and returns to the inbox as its own row, which is the recoverable
+/// failure; a tombstone is not.
 fn absorbed_archive_keys(workspace: &Workspace, key: &str) -> Vec<String> {
+    let Some(source) = workspace.primary_task().map(|task| task.id.source.clone()) else {
+        return Vec::new();
+    };
     workspace
         .linked_task_ids()
         .iter()
+        .filter(|id| id.source == source)
         .map(lazybox_core::workspace_key_for_id)
         .filter(|absorbed| absorbed != key)
         .collect::<std::collections::BTreeSet<_>>()
@@ -1389,7 +1423,7 @@ pub fn archive_workspace_key_with_absorbed(
     absorbed: &[String],
 ) -> bool {
     if absorbed.is_empty() {
-        if let Err(e) = config.store.set_kv(&archived_row_key(key), "1") {
+        if let Err(e) = config.store.set_kv(&archived_row_key(key), ARCHIVED_FLAG) {
             tracing::warn!("archive_workspace_key: set_kv failed: {e}");
             return false;
         }
@@ -1462,7 +1496,7 @@ pub(crate) fn migrate_legacy_archived_set(config: &ServerConfig) {
         .iter()
         .map(|k| StoreMutation::SetKv {
             key: archived_row_key(k),
-            value: "1".to_string(),
+            value: ARCHIVED_FLAG.to_string(),
         })
         .collect();
     batch.push(StoreMutation::DeleteKv {
@@ -1493,6 +1527,15 @@ pub(crate) fn migrate_legacy_archived_set(config: &ServerConfig) {
 /// run, so this delete always sees a real row to remove.
 #[must_use]
 pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
+    // Reading the owner record, then each absorbed row, then deleting the
+    // lot is a read-modify-write ACROSS KEYS — the precise cycle
+    // `archive_updates` exists to serialize. #1496 made a single archive
+    // one atomic row write and left only the migrations holding this lock;
+    // absorbed keys put a multi-key cycle back. Without it, an archive of
+    // another row that absorbs one of our keys can land between our read
+    // and our batch, and we delete the tombstone it just wrote — the very
+    // resurrection this function's own feature prevents.
+    let _update_guard = config.archive_updates.lock();
     let record = match read_archive_record(config, key) {
         Ok(record) => record,
         Err(e) => {
@@ -1503,8 +1546,11 @@ pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
     let mut also_drop = Vec::new();
     for folded in &record.absorbed {
         // Only the tombstones this key's own archive wrote come back out.
-        // A key archived separately since the fold carries a different
-        // owner (or none), and that archive is the user's, not ours.
+        // A folded key normally has no row of its own to archive, so this
+        // looks unreachable — but `load_archived_set` degrades to EMPTY on
+        // a read error, which lets a tombstoned issue upsert a standalone
+        // row that the user can then archive in its own right. That
+        // archive is theirs; ours must not undo it.
         match read_archive_record(config, folded) {
             Ok(folded_record) if folded_record.absorbed_by.as_deref() == Some(key) => {
                 also_drop.push(archived_row_key(folded));
@@ -3638,6 +3684,7 @@ impl<'a> WorkspaceLifecycle<'a> {
         // a key the user never archived (#1816).
         let absorbed = workspace_snapshot
             .as_ref()
+            .filter(|_| archive)
             .map(|workspace| absorbed_archive_keys(workspace, key_str))
             .unwrap_or_default();
         if archive && !archive_workspace_key_with_absorbed(config, key_str, &absorbed) {
@@ -4401,6 +4448,35 @@ mod archived_set_tests {
         assert_eq!(
             crate::workspace::load_archived_set_strict(&config).unwrap(),
             ["github-o-r-40"].into_iter().map(String::from).collect(),
+        );
+    }
+
+    #[test]
+    fn a_corrupt_record_fails_the_unarchive_instead_of_stranding_its_tombstones() {
+        // Regression: reading a corrupt owner row as the empty record made
+        // unarchive drop the owner alone and strand every absorbed
+        // tombstone it had written — permanently, and invisibly, since
+        // nothing else ever revisits an absorbed row.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &["github-o-r-40".to_string()],
+        ));
+        store
+            .set_kv(&archived_row_key("github-o-r-42"), r#"{"absorbed":["#)
+            .unwrap();
+
+        assert!(
+            !crate::workspace::unarchive_workspace_key(&config, "github-o-r-42"),
+            "a record that cannot be parsed must fail the unarchive, not read as empty"
+        );
+        assert!(
+            crate::workspace::load_archived_set_strict(&config)
+                .unwrap()
+                .contains("github-o-r-40"),
+            "the absorbed tombstone stays recoverable rather than being stranded"
         );
     }
 

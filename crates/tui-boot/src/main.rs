@@ -48,6 +48,7 @@ mod account_cli;
 mod auth_cli;
 mod build_guard;
 mod device_cli;
+mod gh_cli;
 mod practice;
 mod relay_e2e;
 mod remote_box;
@@ -652,6 +653,7 @@ async fn main() -> anyhow::Result<()> {
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("workspace") => workspace_subcommand(&args[1..]).await,
         Some("task") => task_status_cli::task_subcommand(&args[1..]).await,
+        Some("gh") => gh_cli::gh_subcommand(&args[1..]).await,
         Some("log") => log_subcommand(&args[1..]).await,
         Some("device") => device_cli::device_subcommand(&args[1..]).await,
         Some("auth") => auth_cli::auth_subcommand(&args[1..]).await,
@@ -2153,6 +2155,9 @@ async fn run_embedded_realm(
     // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
     // once, before any spawn — never on the per-spawn hot path (#856).
     lazybox_server::spawn_handler::ensure_stable_hook_exe();
+    // Same reasoning for the `gh` shim (#1801): installed once here, only read
+    // on the spawn path.
+    lazybox_server::gh_shim::install_for_daemon();
     let update_check = tokio::spawn(build_guard::available_update(Some(config.store.clone())));
 
     let client_runtime = ClientRuntime::start(
@@ -2858,6 +2863,9 @@ async fn server_start() -> anyhow::Result<()> {
     // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
     // once, before any spawn — never on the per-spawn hot path (#856).
     lazybox_server::spawn_handler::ensure_stable_hook_exe();
+    // Same reasoning for the `gh` shim (#1801): installed once here, only read
+    // on the spawn path.
+    lazybox_server::gh_shim::install_for_daemon();
     let client_runtime = ClientRuntime::start(
         config.clone(),
         ClientRuntimeOptions {
@@ -2965,6 +2973,9 @@ async fn server_api(args: &[String]) -> anyhow::Result<()> {
     // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
     // once, before any spawn — never on the per-spawn hot path (#856).
     lazybox_server::spawn_handler::ensure_stable_hook_exe();
+    // Same reasoning for the `gh` shim (#1801): installed once here, only read
+    // on the spawn path.
+    lazybox_server::gh_shim::install_for_daemon();
     let client_runtime = ClientRuntime::start(
         config.clone(),
         ClientRuntimeOptions {

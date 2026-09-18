@@ -1462,6 +1462,10 @@ pub struct PollState {
     /// (`forget_tasks_fetched`), so the map tracks live workspaces rather
     /// than every key the poller has ever seen.
     tasks_fetched: Arc<parking_lot::RwLock<HashMap<lazybox_core::WorkspaceKey, DateTime<Utc>>>>,
+    /// Per-session `gh` quota and the cross-session read cache (#1801). Its
+    /// own lock domain: the shim's admission call is on the critical path of
+    /// every `gh` a session runs, and must never queue behind a poll tick.
+    pub(crate) gh_shim: Arc<parking_lot::Mutex<crate::gh_shim::GhShimState>>,
 }
 
 impl PollState {

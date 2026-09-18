@@ -567,6 +567,12 @@
       }
     }
   ],
+<<<<<<< HEAD
   "protocol_fingerprint": 2722111364,
+||||||| parent of f8008be2a (feat(server): route a session's `gh` through the daemon (#1801))
+  "protocol_fingerprint": 11917308,
+=======
+  "protocol_fingerprint": 2584376033,
+>>>>>>> f8008be2a (feat(server): route a session's `gh` through the daemon (#1801))
   "protocol_version": 4
 }

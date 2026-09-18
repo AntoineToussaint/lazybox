@@ -289,9 +289,24 @@ pub(crate) fn build_spawn_plan(
     // discards the error. Prepended (not appended) so lazybox's launcher wins
     // over any stale `lazybox` elsewhere; deduped so repeated segments don't
     // accrete. Based on the daemon's own PATH, which the PTY child inherits.
+    //
+    // The `gh` shim (#1801) rides the same mechanism: its directory goes on
+    // PATH ahead of the real `gh`, so a session's `gh issue view` reaches
+    // lazybox's read cache and its `gh issue close` tells the daemon what
+    // changed. It is prepended too, and the shim is handed its own directory
+    // so it can drop it when resolving the real binary — the one thing that
+    // makes re-entry structurally impossible rather than merely unlikely.
     {
-        let bin_dir = lazybox_core::paths::bin_dir();
-        let bin_dir = bin_dir.to_string_lossy();
+        let shim_dir = crate::gh_shim::installed_shim();
+        let mut prepend: Vec<String> = Vec::with_capacity(2);
+        prepend.push(
+            lazybox_core::paths::bin_dir()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        if let Some(dir) = &shim_dir {
+            prepend.push(dir.to_string_lossy().into_owned());
+        }
         let slot = env.iter().position(|(key, _)| key == "PATH");
         let current = match slot {
             Some(index) => env[index].1.clone(),
@@ -301,16 +316,26 @@ pub(crate) fn build_spawn_plan(
         // doesn't accrete across the daemon's own PATH or a re-spawn.
         let rest: Vec<&str> = current
             .split(':')
-            .filter(|segment| *segment != bin_dir.as_ref())
+            .filter(|segment| !prepend.iter().any(|dir| dir == segment))
             .collect();
-        let combined = if current.is_empty() || rest.is_empty() {
-            bin_dir.to_string()
+        let combined = if rest.is_empty() {
+            prepend.join(":")
         } else {
-            format!("{bin_dir}:{}", rest.join(":"))
+            format!("{}:{}", prepend.join(":"), rest.join(":"))
         };
         match slot {
             Some(index) => env[index].1 = combined,
             None => env.push(("PATH".to_string(), combined)),
+        }
+        if let Some(dir) = shim_dir
+            && !env
+                .iter()
+                .any(|(key, _)| key == lazybox_ipc::gh_shim::SHIM_DIR_ENV)
+        {
+            env.push((
+                lazybox_ipc::gh_shim::SHIM_DIR_ENV.to_string(),
+                dir.to_string_lossy().into_owned(),
+            ));
         }
     }
     let env = with_agent_spawn_defaults(env, agent.as_deref());
@@ -866,6 +891,51 @@ mod tests {
                 1,
                 "{kind:?} spawn must not duplicate the launcher dir; PATH = {path}",
             );
+        }
+    }
+
+    #[test]
+    fn the_gh_shim_leads_path_and_names_its_own_directory() {
+        // The shim only works if a session's bare `gh` resolves to it rather
+        // than to the real binary further along PATH — and the shim only
+        // resolves the real binary by dropping its own directory, which it
+        // learns from this variable. A spawn that sets one without the other
+        // either bypasses lazybox or re-enters itself.
+        let cfg = lazybox_config::Config::default();
+        let mut input = input(TerminalKind::Agent("claude".into()));
+        input.shell_command = "/bin/sh".into();
+        let plan = build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("plan");
+        let path = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.as_str())
+            .expect("PATH");
+        let announced = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == lazybox_ipc::gh_shim::SHIM_DIR_ENV)
+            .map(|(_, v)| v.as_str());
+
+        // Whether a shim is installed depends on the box having `gh` at all,
+        // so both halves are asserted against the same fact rather than
+        // against an assumption about this machine.
+        match crate::gh_shim::installed_shim() {
+            Some(dir) => {
+                let dir = dir.to_string_lossy().into_owned();
+                assert_eq!(announced, Some(dir.as_str()));
+                let head: Vec<&str> = path.split(':').take(2).collect();
+                assert!(head.contains(&dir.as_str()), "shim must lead PATH: {path}");
+                assert_eq!(
+                    path.split(':').filter(|s| *s == dir).count(),
+                    1,
+                    "the shim dir must not accrete across re-spawns; PATH = {path}",
+                );
+            }
+            None => assert_eq!(
+                announced, None,
+                "with no shim installed the spawn must not claim one",
+            ),
         }
     }
 

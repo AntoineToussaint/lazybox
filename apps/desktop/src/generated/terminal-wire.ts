@@ -1,5 +1,11 @@
 export const DESKTOP_PROTOCOL_VERSION = 4 as const;
+<<<<<<< HEAD
 export const DESKTOP_PROTOCOL_FINGERPRINT = 2722111364 as const;
+||||||| parent of f8008be2a (feat(server): route a session's `gh` through the daemon (#1801))
+export const DESKTOP_PROTOCOL_FINGERPRINT = 11917308 as const;
+=======
+export const DESKTOP_PROTOCOL_FINGERPRINT = 2584376033 as const;
+>>>>>>> f8008be2a (feat(server): route a session's `gh` through the daemon (#1801))
 export const TERMINAL_SERVER_FRAME_HEADER_BYTES = 25 as const;
 export const TERMINAL_CLIENT_FRAME_HEADER_BYTES = 9 as const;
 export const TERMINAL_SERVER_FRAME_LAYOUT = {

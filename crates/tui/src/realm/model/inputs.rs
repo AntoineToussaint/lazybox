@@ -1905,6 +1905,7 @@ showing keybinding search only",
                     skill: None,
                     provider: None,
                     next: Vec::new(),
+                    action: None,
                     answer_is_the_ending: false,
                     origin: Default::default(),
                 };

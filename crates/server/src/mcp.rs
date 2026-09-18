@@ -37,6 +37,19 @@
 //! newest comment), and `list_issues` returns summaries so a survey cannot
 //! blow the context it exists to protect. See [`crate::task_cache`].
 //!
+//! #1732 adds **review artifacts** — the durable handoff from a review to a
+//! fixer, which until then was the reviewing agent's own conversation:
+//!
+//! - `submit_review` — persist a review's findings, evidence and scope.
+//! - `list_reviews` — what this workspace holds, plus the one binding
+//!   decision a fixer should obey (bound / ambiguous / missing).
+//! - `get_review` — one report in full.
+//! - `submit_review_result` — per-finding outcomes, bound to that report.
+//!
+//! The artifacts live in the daemon's store (see [`crate::review_store`]), so
+//! they outlive the session, the worktree and a daemon restart; the domain —
+//! validation, freshness, selection — is `lazybox_core::review`.
+//!
 //! Phase 2 (#1420) adds the **push** side, closing the two-way bus:
 //!
 //! - `notify_session` — actively poke another session, delivering text through
@@ -72,6 +85,7 @@ use rmcp::{
 
 use crate::ServerConfig;
 use crate::api_gateway;
+use crate::review_store;
 
 /// Maps a per-session bearer token to the [`SessionKey`] of the agent that
 /// owns it. A token is registered when a session spawns and forgotten when it
@@ -162,6 +176,11 @@ pub struct McpRuntime {
     /// is a compare-and-set against the row as it stands *now* rather than as
     /// the caller last saw it.
     requests_write: tokio::sync::Mutex<()>,
+    /// Serializes review-artifact id allocation, for the same reason
+    /// [`McpRuntime::notes_write`] exists: two concurrent submissions that
+    /// both read the highest sequence in use would compute the same id, and
+    /// the second insert would silently replace the first report.
+    reviews_write: tokio::sync::Mutex<()>,
     /// In-flight `ask_session` waiters (#1653), so `reply_request` wakes the
     /// asker directly instead of having it poll the store.
     requests: RequestRegistry,
@@ -181,6 +200,11 @@ impl McpRuntime {
     /// The lock guarding request read-modify-write (see the field docs).
     fn requests_write(&self) -> &tokio::sync::Mutex<()> {
         &self.requests_write
+    }
+
+    /// The lock guarding review-artifact id allocation (see the field docs).
+    fn reviews_write(&self) -> &tokio::sync::Mutex<()> {
+        &self.reviews_write
     }
 
     /// The in-flight request waiters shared by `ask_session` and
@@ -458,6 +482,171 @@ struct ReportBlockerArgs {
     /// review, merge-order, contract, cycle, other. Defaults to `decision`.
     #[serde(default)]
     kind: Option<String>,
+}
+
+// ── review artifacts (#1732) ────────────────────────────────────────────
+//
+// The wire shapes below mirror `lazybox_core::review`'s submission types
+// rather than reusing them: `schemars::JsonSchema` is what publishes a tool's
+// argument schema to the agent, and that is an MCP-transport concern, not one
+// the domain crate should take a dependency for.
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+struct ReviewScopeArgs {
+    /// What was reviewed, in words — "diff vs main", "PR #1732 head". Two
+    /// reports whose labels differ describe different work, which is what
+    /// makes a later selection ambiguous rather than a guess.
+    #[serde(default)]
+    label: String,
+    /// The base commit the diff was taken against.
+    #[serde(default)]
+    base_sha: Option<String>,
+    /// `git rev-parse HEAD` at review time. Required for a submitted review:
+    /// without it nothing can tell whether the findings still describe the
+    /// tree.
+    #[serde(default)]
+    head_sha: Option<String>,
+    /// A digest of the uncommitted diff (e.g. `git diff HEAD | shasum`) when
+    /// the worktree is dirty, so a review of code that exists in no commit is
+    /// not silently re-bound to a different dirty tree. Omit on a clean tree.
+    #[serde(default)]
+    dirty_digest: Option<String>,
+}
+
+impl From<ReviewScopeArgs> for lazybox_core::ReviewScope {
+    fn from(args: ReviewScopeArgs) -> Self {
+        Self {
+            label: args.label,
+            base_sha: args.base_sha,
+            head_sha: args.head_sha,
+            dirty_digest: args.dirty_digest,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct FindingArgs {
+    /// Your own stable id for this finding. Omit and it is numbered `f1`, `f2`
+    /// … in submission order; whatever it ends up as is the handle a result
+    /// refers back to.
+    #[serde(default)]
+    id: Option<String>,
+    /// One line naming the defect.
+    title: String,
+    /// `blocker`, `major` or `minor`. Anything else is a defect, never a
+    /// silent downgrade to a nit.
+    severity: String,
+    /// `file:line` anchors, at least one — a finding a fixer cannot locate is
+    /// not actionable.
+    #[serde(default)]
+    anchors: Vec<String>,
+    /// Why this is real: the concrete input or state that produces the wrong
+    /// result. This is the reasoning that would otherwise die with your
+    /// session, so write it for a reader who never saw the review.
+    evidence: String,
+    /// What you suggest doing about it. Advisory — the fixer owns the real
+    /// cause.
+    #[serde(default)]
+    remediation: String,
+    /// What should pass once it is fixed (a test name, a command).
+    #[serde(default)]
+    checks: Vec<String>,
+}
+
+impl From<FindingArgs> for lazybox_core::FindingInput {
+    fn from(args: FindingArgs) -> Self {
+        Self {
+            id: args.id,
+            title: args.title,
+            severity: args.severity,
+            anchors: args.anchors,
+            evidence: args.evidence,
+            remediation: args.remediation,
+            checks: args.checks,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SubmitReviewArgs {
+    /// The readable review, verbatim. Kept alongside the structured findings,
+    /// never in place of them: a summary that loses your argument is the
+    /// failure this tool exists to prevent.
+    report: String,
+    /// One entry per finding. An empty list is a complete, clean review.
+    #[serde(default)]
+    findings: Vec<FindingArgs>,
+    /// The tree you reviewed.
+    #[serde(default)]
+    scope: Option<ReviewScopeArgs>,
+    /// Validation the review expects to pass once its findings are addressed.
+    #[serde(default)]
+    checks: Vec<String>,
+    /// What you could not settle, for whoever picks this up.
+    #[serde(default)]
+    open_questions: Vec<String>,
+    /// True when you are capturing findings from an earlier in-conversation
+    /// review rather than reporting one you just performed. An import needs no
+    /// `head_sha` and always binds as needing revalidation.
+    #[serde(default)]
+    imported: bool,
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+struct ListReviewsArgs {
+    /// The tree as it is NOW (`head_sha`, plus `dirty_digest` when dirty), so
+    /// each report's freshness is answerable. Omit it and every report reads
+    /// as unknown freshness, which is treated as needing revalidation.
+    #[serde(default)]
+    scope: Option<ReviewScopeArgs>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetReviewArgs {
+    /// The report id `list_reviews` bound (`r3`).
+    report_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct OutcomeArgs {
+    /// The finding's id, as `get_review` gave it.
+    finding_id: String,
+    /// `fixed`, `already_resolved`, `blocked` or `refuted`.
+    disposition: String,
+    /// What backs the claim: the change you made, or the concrete, falsifiable
+    /// reason the finding does not hold.
+    evidence: String,
+    #[serde(default)]
+    commits: Vec<String>,
+    #[serde(default)]
+    checks: Vec<String>,
+}
+
+impl From<OutcomeArgs> for lazybox_core::OutcomeInput {
+    fn from(args: OutcomeArgs) -> Self {
+        Self {
+            finding_id: args.finding_id,
+            disposition: args.disposition,
+            evidence: args.evidence,
+            commits: args.commits,
+            checks: args.checks,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SubmitReviewResultArgs {
+    /// The report you bound and worked from.
+    report_id: String,
+    /// One per finding in that report.
+    #[serde(default)]
+    outcomes: Vec<OutcomeArgs>,
+    /// The checks you ran over the whole run (`make test`, a CI run).
+    #[serde(default)]
+    checks: Vec<String>,
+    /// Anything the report missed that you noticed.
+    #[serde(default)]
+    notes: String,
 }
 
 // ── agent-to-agent request/response (#1653) ─────────────────────────────
@@ -2395,6 +2584,328 @@ impl LazyboxMcp {
                 .await?,
         ))
     }
+
+    /// The repo and agent the daemon knows for `key`, from the live agent
+    /// snapshot. Never taken from the submission: a review is stamped with the
+    /// identity the daemon observed, not the one the agent claims.
+    async fn caller_identity(&self, key: &SessionKey) -> (Option<String>, Option<String>) {
+        let Ok(resp) = api_gateway::agents_response(&self.config).await else {
+            return (None, None);
+        };
+        resp.agents
+            .into_iter()
+            .find(|agent| agent.workspace_key == key.as_str())
+            .map_or((None, None), |agent| (agent.repo, Some(agent.agent)))
+    }
+
+    /// The run that is submitting — the caller's live agent terminal, so a
+    /// report traces back to the session that produced it.
+    async fn caller_run_id(&self, key: &SessionKey) -> String {
+        match self.config.terminal.running_agent_terminal(key).await {
+            Some(id) => format!("terminal:{}", id.0),
+            None => String::new(),
+        }
+    }
+
+    /// Ingest a review submission, persist it, and report what it became.
+    ///
+    /// Always persists: an invalid submission becomes a draft carrying its
+    /// defects, so the agent is told exactly what to fix and the prose it
+    /// already wrote is not lost. The caller learns `bindable` — the only
+    /// thing a fixer acts on.
+    async fn submit_review_payload(
+        &self,
+        caller: &SessionKey,
+        args: SubmitReviewArgs,
+        now_ms: i64,
+    ) -> Result<serde_json::Value, McpError> {
+        if args.report.len() > review_store::MAX_REPORT_BYTES {
+            return Err(McpError::invalid_request(
+                format!(
+                    "report exceeds {} bytes — submit the review, not the transcript",
+                    review_store::MAX_REPORT_BYTES
+                ),
+                None,
+            ));
+        }
+        if args.findings.len() > review_store::MAX_FINDINGS {
+            return Err(McpError::invalid_request(
+                format!("more than {} findings", review_store::MAX_FINDINGS),
+                None,
+            ));
+        }
+        let (repo, agent) = self.caller_identity(caller).await;
+        let run_id = self.caller_run_id(caller).await;
+        let workspace = caller.as_str().to_string();
+        let submission = lazybox_core::ReviewSubmission {
+            report: args.report,
+            findings: args.findings.into_iter().map(Into::into).collect(),
+            scope: args.scope.map(Into::into).unwrap_or_default(),
+            checks: args.checks,
+            open_questions: args.open_questions,
+        };
+        let origin = if args.imported {
+            lazybox_core::ReviewOrigin::Imported
+        } else {
+            lazybox_core::ReviewOrigin::Submitted
+        };
+        // Serialize id allocation against the read-then-write, for the reason
+        // `notes_write` exists: two concurrent submissions must not both read
+        // the same highest sequence and have the second overwrite the first.
+        let _guard = self.config.mcp.reviews_write().lock().await;
+        let ws = workspace.clone();
+        let id = crate::store_blocking(&self.config.store, move |store| {
+            review_store::next_report_id(store, &ws)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("allocate review id: {error}"), None))?;
+        let artifact = submission.into_artifact(lazybox_core::ReviewIngest {
+            id,
+            workspace,
+            repo,
+            run_id,
+            agent,
+            origin,
+            created_at_ms: now_ms,
+        });
+        let to_save = artifact.clone();
+        crate::store_blocking(&self.config.store, move |store| {
+            review_store::save_report(store, &to_save)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("persist review: {error}"), None))?;
+        tracing::info!(
+            workspace = %artifact.workspace,
+            report = %artifact.id,
+            findings = artifact.findings.len(),
+            bindable = artifact.is_bindable(),
+            "mcp: ingested a review artifact"
+        );
+        Ok(serde_json::json!({
+            "report_id": artifact.id,
+            "status": if artifact.is_bindable() { "completed" } else { "draft" },
+            "bindable": artifact.is_bindable(),
+            "findings": artifact.findings.len(),
+            "defects": artifact.defects,
+            "note": if artifact.is_bindable() {
+                "Ingested. A fixer can now bind this report by id."
+            } else {
+                "Kept as a DRAFT — not usable by a fixer. Fix the defects above and submit again; the review is not complete until it ingests cleanly."
+            },
+        }))
+    }
+
+    /// Every report this workspace holds, plus the binding decision a fixer
+    /// should obey.
+    ///
+    /// The decision is computed here, once, rather than left to the caller to
+    /// re-derive: a fixer that picks "latest" for itself is exactly how a PR
+    /// review gets applied to an unrelated branch.
+    async fn list_reviews_payload(
+        &self,
+        caller: &SessionKey,
+        args: ListReviewsArgs,
+    ) -> Result<serde_json::Value, McpError> {
+        let workspace = caller.as_str().to_string();
+        let ws = workspace.clone();
+        let reports = crate::store_blocking(&self.config.store, move |store| {
+            review_store::list_reports(store, &ws)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("read reviews: {error}"), None))?;
+        let current: lazybox_core::ReviewScope = args.scope.map(Into::into).unwrap_or_default();
+        let selection = lazybox_core::select_report(&reports, &current);
+        let summaries: Vec<serde_json::Value> =
+            reports.iter().map(review_store::report_summary).collect();
+        Ok(serde_json::json!({
+            "workspace": workspace,
+            "reports": summaries,
+            "selection": selection,
+            "note": selection_guidance(&selection),
+        }))
+    }
+
+    /// One report in full — every finding with its evidence and remediation.
+    async fn get_review_payload(
+        &self,
+        caller: &SessionKey,
+        report_id: &str,
+    ) -> Result<serde_json::Value, McpError> {
+        let workspace = caller.as_str().to_string();
+        let id = report_id.trim().to_string();
+        let ws = workspace.clone();
+        let wanted = id.clone();
+        let report = crate::store_blocking(&self.config.store, move |store| {
+            review_store::get_report(store, &ws, &wanted)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("read review: {error}"), None))?
+        .ok_or_else(|| {
+            McpError::invalid_request(
+                format!("workspace {workspace} has no review report {id:?}"),
+                None,
+            )
+        })?;
+        Ok(serde_json::json!({
+            "report": report,
+            "bindable": report.is_bindable(),
+        }))
+    }
+
+    /// Ingest a fixer's per-finding outcomes against the report it bound.
+    async fn submit_review_result_payload(
+        &self,
+        caller: &SessionKey,
+        args: SubmitReviewResultArgs,
+        now_ms: i64,
+    ) -> Result<serde_json::Value, McpError> {
+        let workspace = caller.as_str().to_string();
+        let report_id = args.report_id.trim().to_string();
+        let ws = workspace.clone();
+        let wanted = report_id.clone();
+        let report = crate::store_blocking(&self.config.store, move |store| {
+            review_store::get_report(store, &ws, &wanted)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("read review: {error}"), None))?
+        .ok_or_else(|| {
+            McpError::invalid_request(
+                format!("workspace {workspace} has no review report {report_id:?}"),
+                None,
+            )
+        })?;
+        let (_, agent) = self.caller_identity(caller).await;
+        let run_id = self.caller_run_id(caller).await;
+        let _guard = self.config.mcp.reviews_write().lock().await;
+        let ws = workspace.clone();
+        let id = crate::store_blocking(&self.config.store, move |store| {
+            review_store::next_result_id(store, &ws)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("allocate result id: {error}"), None))?;
+        let result = lazybox_core::ReviewResultSubmission {
+            report_id: report.id.clone(),
+            outcomes: args.outcomes.into_iter().map(Into::into).collect(),
+            checks: args.checks,
+            notes: args.notes,
+        }
+        .into_artifact(
+            &report,
+            lazybox_core::ResultIngest {
+                id,
+                run_id,
+                agent,
+                created_at_ms: now_ms,
+            },
+        );
+        let to_save = result.clone();
+        crate::store_blocking(&self.config.store, move |store| {
+            review_store::save_result(store, &to_save)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("persist result: {error}"), None))?;
+        let complete = result.status == lazybox_core::ArtifactStatus::Completed;
+        Ok(serde_json::json!({
+            "result_id": result.id,
+            "report_id": result.report_id,
+            "status": if complete { "completed" } else { "draft" },
+            "outcomes": result.outcomes.len(),
+            "uncovered": result.uncovered,
+            "defects": result.defects,
+            "note": if complete {
+                "Recorded against the report, which is unchanged."
+            } else {
+                "Kept as a DRAFT — the report is not fully answered. Give every listed finding an outcome and submit again."
+            },
+        }))
+    }
+
+    #[tool(
+        description = "Persist the review you just produced so a fixer — a fresh session, another agent, days later — can work from it. A review is not finished until this call succeeds: nothing else survives your session. Pass the readable `report` verbatim, `scope` (`base_sha` / `head_sha` from `git rev-parse`, plus `dirty_digest` when the worktree has uncommitted changes, and a `label` naming what you reviewed), and one `findings` entry per finding with its severity, `file:line` anchors, the evidence that makes it real, and the remediation you suggest. ZERO findings is a complete review — submit the empty list rather than skipping the call, so a fixer can tell a clean tree from a review that never ran. A malformed or incomplete submission is kept as a DRAFT that no fixer will bind; the reply names each defect, so fix them and submit again."
+    )]
+    async fn submit_review(
+        &self,
+        Parameters(args): Parameters<SubmitReviewArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        Ok(json_result(
+            self.submit_review_payload(&caller, args, now_ms).await?,
+        ))
+    }
+
+    #[tool(
+        description = "Bind a review report before fixing anything. Returns this workspace's persisted reports and — in `selection` — the one decision to obey: `bound` with a report id and its freshness, `ambiguous` with the candidates to choose between, or `missing`. Pass the current `scope` (`head_sha`, and `dirty_digest` when the tree is dirty) so freshness is answerable: a report whose head has moved still binds, but every finding must be revalidated against the code as it is now. `missing` means STOP and run a deep review first — never start a fixer with no findings. A bound report with zero findings is a clean review, not missing data."
+    )]
+    async fn list_reviews(
+        &self,
+        Parameters(args): Parameters<ListReviewsArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(self.list_reviews_payload(&caller, args).await?))
+    }
+
+    #[tool(
+        description = "Read one review report in full by the id `list_reviews` bound: every finding with its stable id, severity, `file:line` anchors, the reviewer's evidence, and the suggested remediation, plus the readable report. This is the reviewer's reasoning, not yours — treat a finding as real until you refute it with a concrete, falsifiable failure scenario."
+    )]
+    async fn get_review(
+        &self,
+        Parameters(args): Parameters<GetReviewArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(
+            self.get_review_payload(&caller, &args.report_id).await?,
+        ))
+    }
+
+    #[tool(
+        description = "Record what you did about each finding of the report you bound. One outcome per finding — `fixed`, `already_resolved`, `blocked` or `refuted` — each with the evidence behind it (the change you made, or the concrete reason the finding does not hold) and the commits and checks that back it. Every finding needs one, including the ones you refute: a result that skips a finding is kept as a DRAFT naming it, because silence is not a disposition. The original report is never modified."
+    )]
+    async fn submit_review_result(
+        &self,
+        Parameters(args): Parameters<SubmitReviewResultArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        Ok(json_result(
+            self.submit_review_result_payload(&caller, args, now_ms)
+                .await?,
+        ))
+    }
+}
+
+/// The one instruction that goes with a [`lazybox_core::ReportSelection`].
+///
+/// Rendered here rather than left to the fixer to infer, because each outcome
+/// has exactly one correct next move and the wrong one is silent: a missing
+/// report that reads as "nothing to fix" produces a fixer that finishes green
+/// having done nothing, and an ambiguous one picked by recency applies a PR
+/// review to an unrelated branch.
+fn selection_guidance(selection: &lazybox_core::ReportSelection) -> String {
+    match selection {
+        lazybox_core::ReportSelection::Missing => "No completed review report for this workspace. STOP — do not fix from memory or scrollback. Run a deep review first, or capture an earlier one with submit_review (imported: true)."
+            .to_string(),
+        lazybox_core::ReportSelection::Ambiguous { candidates } => format!(
+            "Several reports describe different work ({}). Ask which one to use; do not pick the newest yourself.",
+            candidates.join(", ")
+        ),
+        lazybox_core::ReportSelection::Bound { id, freshness } => {
+            if freshness.requires_revalidation() {
+                format!(
+                    "Bound {id}, but the tree has moved ({}). Read it with get_review, then revalidate each finding against the code as it is now before fixing it — record one that no longer holds as `already_resolved` or `refuted` rather than dropping it.",
+                    freshness.label()
+                )
+            } else {
+                format!(
+                    "Bound {id}, taken against this exact tree. Read it with get_review and work from its findings."
+                )
+            }
+        }
+    }
 }
 
 /// The `notify_session` success payload. `handle_inject_prompt` returns once
@@ -2534,7 +3045,15 @@ impl ServerHandler for LazyboxMcp {
                  record lazybox polls — is already cached here: read it with \
                  task / get_issue / get_pr / list_issues instead of spending \
                  GitHub API budget on `gh issue view`, which the daemon's own \
-                 poller shares. For cross-repo epics: epic_status is the live \
+                 poller shares. A review's findings are persisted, not \
+                 remembered: a deep review ends with submit_review, and a \
+                 fixer starts with list_reviews — which returns the one \
+                 report to bind, or says the report is missing or \
+                 ambiguous — then get_review for its full findings and \
+                 submit_review_result for what it did about each one. Never \
+                 fix from a review you only remember; a fixer with no \
+                 findings finishes green having done nothing. \
+                 For cross-repo epics: epic_status is the live \
                  plan of record (each member's derived status, blockers, and the \
                  ready/blocked rollup) and epic_ready is the ranked queue of \
                  what's workable now — answer epic questions from these rather \
@@ -4668,6 +5187,400 @@ mod tests {
         assert_eq!(note_seq(&k10), Some(10));
         // Zero-padding makes lexical order == insertion order.
         assert!(k9 < k10, "{k9} !< {k10}");
+    }
+
+    // ── review artifacts (#1732) ────────────────────────────────────────
+
+    fn review_scope_args(head: &str, dirty: Option<&str>) -> ReviewScopeArgs {
+        ReviewScopeArgs {
+            label: "diff vs main".to_string(),
+            base_sha: Some("base0".to_string()),
+            head_sha: Some(head.to_string()),
+            dirty_digest: dirty.map(str::to_string),
+        }
+    }
+
+    fn finding_args(title: &str) -> FindingArgs {
+        FindingArgs {
+            id: None,
+            title: title.to_string(),
+            severity: "blocker".to_string(),
+            anchors: vec!["crates/server/src/poll.rs:88".to_string()],
+            evidence: "a 500 from the provider returns Ok(vec![]), archiving the row".to_string(),
+            remediation: "propagate the error".to_string(),
+            checks: vec!["cargo test -p lazybox-server".to_string()],
+        }
+    }
+
+    fn submit_args(head: &str, findings: Vec<FindingArgs>) -> SubmitReviewArgs {
+        SubmitReviewArgs {
+            report: "## Findings\n1. drops the error".to_string(),
+            findings,
+            scope: Some(review_scope_args(head, None)),
+            checks: vec!["make test".to_string()],
+            open_questions: vec![],
+            imported: false,
+        }
+    }
+
+    /// The acceptance case: a review submitted by one session is bound and
+    /// read in full by another — a different agent, a different session key
+    /// for the run, nothing shared but the workspace and the store.
+    #[tokio::test]
+    async fn a_review_submitted_by_one_session_is_bound_by_a_fresh_fixer() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+
+        let submitted = handler
+            .submit_review_payload(
+                &workspace,
+                submit_args("head1", vec![finding_args("a")]),
+                1_000,
+            )
+            .await
+            .expect("submit");
+        assert_eq!(submitted["status"], "completed");
+        assert_eq!(submitted["bindable"], true);
+        assert_eq!(submitted["findings"], 1);
+        let report_id = submitted["report_id"].as_str().expect("id").to_string();
+
+        // The fixer is a separate call with no memory of the review: it asks
+        // what to bind, at the tree as it is now.
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "bound");
+        assert_eq!(listed["selection"]["id"], report_id.as_str());
+        assert_eq!(listed["selection"]["freshness"]["state"], "current");
+
+        let full = handler
+            .get_review_payload(&workspace, &report_id)
+            .await
+            .expect("get");
+        // The reasoning survives the handoff, not just the headline.
+        assert_eq!(full["report"]["findings"][0]["id"], "f1");
+        assert_eq!(
+            full["report"]["findings"][0]["evidence"],
+            "a 500 from the provider returns Ok(vec![]), archiving the row"
+        );
+        assert_eq!(full["report"]["findings"][0]["anchors"][0]["line"], 88);
+        assert_eq!(full["report"]["report"], "## Findings\n1. drops the error");
+
+        let result = handler
+            .submit_review_result_payload(
+                &workspace,
+                SubmitReviewResultArgs {
+                    report_id: report_id.clone(),
+                    outcomes: vec![OutcomeArgs {
+                        finding_id: "f1".to_string(),
+                        disposition: "fixed".to_string(),
+                        evidence: "propagated the provider error".to_string(),
+                        commits: vec!["abc1234".to_string()],
+                        checks: vec!["cargo test".to_string()],
+                    }],
+                    checks: vec!["make test".to_string()],
+                    notes: String::new(),
+                },
+                2_000,
+            )
+            .await
+            .expect("result");
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["report_id"], report_id.as_str());
+        assert!(result["uncovered"].as_array().expect("array").is_empty());
+
+        // The report is untouched by the result written against it.
+        let after = handler
+            .get_review_payload(&workspace, &report_id)
+            .await
+            .expect("get");
+        assert_eq!(after["report"], full["report"]);
+    }
+
+    /// No report means STOP, and the reply says so. A fixer that reads
+    /// "nothing to fix" here finishes green having done nothing.
+    #[tokio::test]
+    async fn listing_with_no_report_says_missing_and_stop() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        let listed = handler
+            .list_reviews_payload(&workspace, ListReviewsArgs::default())
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "missing");
+        assert!(listed["reports"].as_array().expect("array").is_empty());
+        assert!(
+            listed["note"].as_str().expect("note").contains("STOP"),
+            "{}",
+            listed["note"]
+        );
+    }
+
+    /// A clean review binds like any other, and is not confusable with a
+    /// missing one.
+    #[tokio::test]
+    async fn a_zero_finding_review_binds_rather_than_reading_as_missing() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        handler
+            .submit_review_payload(&workspace, submit_args("head1", vec![]), 1_000)
+            .await
+            .expect("submit");
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "bound");
+        assert_eq!(listed["reports"][0]["findings"], 0);
+    }
+
+    /// An incomplete submission is kept, named as a draft, and refused to any
+    /// fixer — "the agent stopped typing" is not "the review is done".
+    #[tokio::test]
+    async fn an_incomplete_submission_is_a_draft_no_fixer_will_bind() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        let mut bad = finding_args("a");
+        bad.anchors.clear();
+        let submitted = handler
+            .submit_review_payload(&workspace, submit_args("head1", vec![bad]), 1_000)
+            .await
+            .expect("submit");
+        assert_eq!(submitted["status"], "draft");
+        assert_eq!(submitted["bindable"], false);
+        assert!(!submitted["defects"].as_array().expect("array").is_empty());
+
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "missing");
+        // Still retained and visible — the prose is not thrown away.
+        assert_eq!(listed["reports"][0]["status"], "draft");
+    }
+
+    /// A moved head still binds — the findings are the expensive part — but
+    /// the reply demands revalidation rather than blind fixing.
+    #[tokio::test]
+    async fn a_moved_head_binds_stale_and_demands_revalidation() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        handler
+            .submit_review_payload(
+                &workspace,
+                submit_args("head1", vec![finding_args("a")]),
+                1_000,
+            )
+            .await
+            .expect("submit");
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head2", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "bound");
+        assert_eq!(listed["selection"]["freshness"]["state"], "head_moved");
+        assert!(
+            listed["note"]
+                .as_str()
+                .expect("note")
+                .contains("revalidate each finding"),
+            "{}",
+            listed["note"]
+        );
+    }
+
+    /// Two reports describing different work are not resolved by recency.
+    #[tokio::test]
+    async fn two_scopes_at_one_head_are_ambiguous() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        handler
+            .submit_review_payload(
+                &workspace,
+                submit_args("head1", vec![finding_args("a")]),
+                1_000,
+            )
+            .await
+            .expect("submit");
+        let mut other = submit_args("head1", vec![finding_args("b")]);
+        other.scope = Some(ReviewScopeArgs {
+            label: "PR #1732 head".to_string(),
+            ..review_scope_args("head1", None)
+        });
+        handler
+            .submit_review_payload(&workspace, other, 2_000)
+            .await
+            .expect("submit");
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "ambiguous");
+        assert_eq!(
+            listed["selection"]["candidates"]
+                .as_array()
+                .expect("array")
+                .len(),
+            2
+        );
+    }
+
+    /// One workspace's findings never reach another's fixer.
+    #[tokio::test]
+    async fn a_report_is_scoped_to_the_workspace_that_submitted_it() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let mine = SessionKey::from("github:acme/widget#1");
+        let theirs = SessionKey::from("github:other/thing#7");
+        handler
+            .submit_review_payload(&mine, submit_args("head1", vec![finding_args("a")]), 1_000)
+            .await
+            .expect("submit");
+        let listed = handler
+            .list_reviews_payload(
+                &theirs,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "missing");
+        assert!(handler.get_review_payload(&theirs, "r1").await.is_err());
+    }
+
+    /// A result that answers only some findings is a draft naming the rest:
+    /// silence is not a disposition.
+    #[tokio::test]
+    async fn a_partial_result_is_a_draft_naming_the_uncovered_findings() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        handler
+            .submit_review_payload(
+                &workspace,
+                submit_args("head1", vec![finding_args("a"), finding_args("b")]),
+                1_000,
+            )
+            .await
+            .expect("submit");
+        let result = handler
+            .submit_review_result_payload(
+                &workspace,
+                SubmitReviewResultArgs {
+                    report_id: "r1".to_string(),
+                    outcomes: vec![OutcomeArgs {
+                        finding_id: "f1".to_string(),
+                        disposition: "fixed".to_string(),
+                        evidence: "propagated the error".to_string(),
+                        commits: vec![],
+                        checks: vec![],
+                    }],
+                    checks: vec![],
+                    notes: String::new(),
+                },
+                2_000,
+            )
+            .await
+            .expect("result");
+        assert_eq!(result["status"], "draft");
+        assert_eq!(result["uncovered"][0], "f2");
+    }
+
+    /// A result against a report this workspace does not hold is refused,
+    /// rather than persisted as an orphan.
+    #[tokio::test]
+    async fn a_result_for_an_unknown_report_is_refused() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        assert!(
+            handler
+                .submit_review_result_payload(
+                    &workspace,
+                    SubmitReviewResultArgs {
+                        report_id: "r9".to_string(),
+                        outcomes: vec![],
+                        checks: vec![],
+                        notes: String::new(),
+                    },
+                    1,
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    /// An import needs no head SHA and is flagged as needing revalidation —
+    /// a legacy in-conversation review is captured deliberately, never
+    /// assumed to describe the current tree.
+    #[tokio::test]
+    async fn an_imported_review_completes_without_a_head_sha() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        let submitted = handler
+            .submit_review_payload(
+                &workspace,
+                SubmitReviewArgs {
+                    scope: None,
+                    imported: true,
+                    ..submit_args("unused", vec![finding_args("a")])
+                },
+                1_000,
+            )
+            .await
+            .expect("submit");
+        assert_eq!(submitted["status"], "completed");
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "bound");
+        assert_eq!(listed["selection"]["freshness"]["state"], "unknown");
+        assert_eq!(listed["reports"][0]["origin"], "imported");
+    }
+
+    /// An oversized report is refused at the boundary rather than persisted.
+    #[tokio::test]
+    async fn an_oversized_report_is_refused() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        let mut args = submit_args("head1", vec![]);
+        args.report = "x".repeat(review_store::MAX_REPORT_BYTES + 1);
+        assert!(
+            handler
+                .submit_review_payload(&workspace, args, 1)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

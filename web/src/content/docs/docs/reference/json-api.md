@@ -166,6 +166,11 @@ connection *is* the session, so no tool takes a "who am I" argument.
 | `reply_request(request_id, text)` | Answers a request; only the session it was asked of may. Wakes a waiting asker and emits `AgentRequestReplied` |
 | `poll_request(request_id)` | The request row plus the target's live agent state, so "pending" can be told from "parked at a prompt" |
 | `task_status(task, repo?)` | "Is anyone working on `owner/repo#N`?" — the record's workspace(s), live agent turn, working-claim, blocker and tracker state as separate facts, plus a verdict with its evidence. Resolves an issue through the PR workspace it folded into. Read-only. Same report as `lazybox task status` |
+| `task()` / `get_issue(repo, number)` / `get_pr(repo, number)` / `list_issues(repo, state?, limit?)` | Tracker records already held by the daemon. These never fall back to a provider fetch, so agent reconnaissance cannot spend the poller's shared quota |
+| `epic_status(epic?)` | The live epic snapshot: members, derived state, done/total, blockers, and critical path |
+| `epic_ready(epic?)` | Only unblocked, unclaimed epic members that can start now |
+| `report_blocker(reason, kind?)` / `clear_blocker()` | Add or lift the caller's durable blocker and recompute epic status |
+| `spawn_worker(task? \| create_issue?, brief, agent?)` | Coordinator-only. Resolve or create an issue in the caller's epic, attach its one existing workspace, set Worker, and spawn there. Refuses duplicate live work and the `agent.max_epic_workers` cap |
 
 An unanswered request does not hang the asker: when the target ends a turn
 without replying, the tail of its output is captured as the answer with
@@ -175,6 +180,8 @@ Bearers are revoked when a session's last agent terminal ends and persist with
 the bound port across a daemon restart, so a tmux-surviving agent keeps
 working. How agents use it: [Orchestrate multiple agents → the MCP
 bus](/docs/how-to/orchestrate-multiple-agents/#let-agents-coordinate-themselves-the-mcp-bus).
+For the epic workflow, see [Run a cross-repo
+epic](/docs/how-to/run-cross-repo-epic/).
 
 ## Example
 

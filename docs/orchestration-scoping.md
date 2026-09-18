@@ -492,7 +492,7 @@ framing while the separate command still persists the role for the badge and
 label projection. The MCP `spawn_worker` tool (`server/src/mcp.rs`) is
 Coordinator-only: it creates a workspace, assigns it to the caller's epic as a
 Worker, and spawns an agent on a brief, refusing off-role or past the epic's
-worker cap (`agents.max_epic_workers`, default 6). Labels are written on
+worker cap (`agent.max_epic_workers`, default 6). Labels are written on
 set/clear via `sync_role_label_target` (single `role:*` label converged, never
 wholesale-replaced). Roles are advisory except the `spawn_worker` gate — merge
 gating/ordering is P3 and automatic dispatch is P4. The epic-header

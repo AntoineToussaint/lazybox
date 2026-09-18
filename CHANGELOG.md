@@ -6,67 +6,7 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
-### Added
-
-- **One supported answer to "are we working on `owner/repo#N`?"** (#1785). A
-  `task_status` MCP tool — wired into every Claude session by default and named
-  in its `SessionStart` briefing — plus `lazybox task status <ref> [--json]` for
-  a shell, or for an agent that gets no MCP tools (Codex, `--strict-mcp-config`,
-  a restricted profile). Both go through the daemon's one derivation, so a
-  person and an agent cannot be told different things. It takes
-  `owner/repo#N`, a GitHub issue/PR URL, a Linear key, or `#N` beside `--repo`,
-  and an **issue still resolves after its PR has taken over its row**. The
-  report keeps apart the facts that previously got conflated — tracker
-  lifecycle, working-claim (with whether this box actually holds it), session,
-  live agent turn, and review/CI — and the compact verdict carries its reason
-  and evidence. A finished agent turn is never reported as a finished task, an
-  unexpired claim is never reported as a running worker, and contradictory or
-  missing evidence reports `unknown` rather than a guess. Read-only: the lookup
-  never spawns, resumes, claims or mutates anything. An unresolvable reference
-  exits `2` and an unreachable daemon exits `1`, so a failed lookup is never
-  read as "nobody is working on it".
-
-### Changed
-
-- **`best`/`high`/`medium`/`low` labels are model tiers, not priorities**
-  (#1598). They only ever chose which model a spawned agent runs on, but the
-  naming said otherwise and readers — humans and agents alike — kept inventing
-  a ranking lazybox does not have. The concept is now named for what it does:
-  `CapabilityTier` in the code, and `agents.<id>.models.capability` in YAML.
-  The old `agents.<id>.models.priority` key still parses, loses to
-  `capability` where both map the same tier, and warns at daemon start naming
-  the rename. `Task.priority` (Linear's genuine ranking field) is untouched,
-  and the labels themselves are unchanged.
-
-### Fixed
-
-- **A model tier that buys nothing now says so** (#1598). A declared tier this
-  agent routes nowhere — `best`, which the built-in Claude menu deliberately
-  leaves unmapped — used to fall back to the default model with only a debug
-  log to show for it, indistinguishable from a label that worked. It now names
-  the label and what ran instead, in the footer and in the `Shift-M` log.
-- **Daemon notices survive long enough to read** (#1598). Every daemon-pushed
-  notice — a branch adopted, worktrees cleaned, a session reaped, an agent CLI
-  updated — arrived as an ephemeral *hint*: it faded in three seconds, was
-  displaced by the next message of any kind, and was the one severity the
-  `Shift-M` log deliberately drops. They are now recorded like every other
-  notice.
-- **A capability mapping can no longer route a coding task to Fable** (#1598).
-  Fable was already excluded from *default* resolution, but a
-  `capability.high: <fable tier>` mapping walked straight past that guard, and
-  config load now says so rather than leaving the refusal to spawn time. The
-  tier stays reachable through an explicit chord.
-- **A tier is judged Fable by the model it names, not by its whole argv**
-  (#1598). The old substring scan read any tier with `fable` anywhere in its
-  arguments — a `--settings /home/me/fable/x.json` on an Opus tier — as a
-  writing model, and silently dropped both its default eligibility and its
-  capability mapping.
-- **An unrecognized key under `agents.<id>.models` is named at startup**
-  (#1598). A misspelling (`capabilty:`) parses fine and does nothing, silently
-  reverting that part of the menu to built-in routing — the sharp edge of a
-  release that asks you to rename a key by hand.
-
-## [0.1.15] - 2026-09-07
+## [0.1.15] - 2026-09-18
 
 The onboarding and coordination release. Lazybox stops explaining itself in a
 slide deck and starts teaching in the live UI — a sandboxed practice world you
@@ -76,13 +16,25 @@ about each other, too: a coordination server lets sessions read, notify, and
 leave notes for one another, and every spawn is now told lazybox's own
 mechanics so it stops treating live coordination state as junk. The agents it
 runs are priced *in view* rather than in a report, triage keeps scaling, and
-the terminal finally selects text the way every other terminal does.
+the terminal finally selects text the way every other terminal does. Epics are
+now live execution graphs rather than labels: dependencies, blockers, roles,
+merge order, and an explicit autonomy dial stay visible and actionable from
+the inbox.
 
 **Licensing:** lazybox is now proprietary — all rights reserved. A Contributor
 License Agreement accompanies the change.
 
 ### Highlights
 
+- **Run a cross-repository epic from the inbox.** Parent issues and their
+  dependencies form a live DAG with blocked/ready state, a header summary, an
+  overview, and a navigable graph. Declared blockers lead the status instead
+  of disappearing into agent prose; `E j` walks them, `epic_status` returns the
+  same snapshot to coordinators, and GitHub labels remain a projection rather
+  than a second source of truth. Roles are visible and durable, coordinators
+  can `spawn_worker` only onto the tracker record that owns the work, merge
+  order holds successors until predecessors land, and the three automation
+  switches independently govern dispatch, review, and ordered merge.
 - **Learn lazybox by using it.** A sandboxed, reactive practice simulator boots
   a living inbox — PRs arriving, agents working, CI flipping — with no
   credentials, no network, and no writes to your real state, so every key is
@@ -128,6 +80,29 @@ License Agreement accompanies the change.
 
 ### Also
 
+- **One supported answer to "are we working on `owner/repo#N`?"** (#1785).
+  The read-only `task_status` MCP tool and `lazybox task status <ref> [--json]`
+  CLI share the daemon's derivation of tracker lifecycle, claim ownership,
+  session, live turn, and review/CI. Issue references still resolve after a PR
+  absorbs their row, and missing or contradictory evidence reports `unknown`
+  rather than guessing.
+- **Model labels are capability tiers, not priorities** (#1598).
+  `agents.<id>.models.capability` replaces the misleading `priority` name; the
+  old key still parses with a migration warning. Invalid keys and mappings are
+  rejected or surfaced, Fable cannot be selected for coding through a mapping,
+  unmapped tiers name the fallback that actually ran, and daemon notices now
+  persist in the message log long enough to read.
+- **Agent answers keep their evidence instead of ending in a fake status
+  card** (#1817). The shared snippet contract no longer forces a glyph, rule,
+  aligned key/value projection, arbitrary line cap, or elapsed-time footer.
+  It leads with the concrete result, preserves named blockers and supporting
+  evidence, and uses `report_blocker` only for a specific question that really
+  needs the operator.
+- **The tracker record is the workspace.** Issue-anchored worker spawns reuse
+  the issue's existing row, branch adoption keeps agent-created branches and
+  dirty tracked work, and issue-to-PR collapse preserves identity, archived
+  keys, blockers, costs, and status lookups instead of creating a second unit
+  of work or resurrecting the first.
 - **Jira rows are real rows, with roles and hierarchy.** Jira tasks were dropped
   at the workspace door, leaving title-only rows with no key, role, or status.
   They now attach like any issue; the sidebar's identifier column shows the

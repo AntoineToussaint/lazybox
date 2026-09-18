@@ -161,6 +161,13 @@ them at session start.
 | `read_session` | The tail of another session's recent output |
 | `post_note` / `read_notes` | A persistent, cross-repo **blackboard** for distilled context — decisions, interfaces, findings |
 | `notify_session` | Push an instruction into another agent (the same delivery path as `x s`) |
+| `send_snippet` / `ask_session` | Send a catalog workflow or ask a tracked question and wait for the answer |
+| `reply_request` / `poll_request` | Answer an inbound question or poll an asynchronous one without scraping terminal output |
+| `task_status` | Resolve a tracker reference to its workspace, claim, live turn, blocker, and tracker state without conflating them |
+| `task` / `get_issue` / `get_pr` / `list_issues` | Read the daemon's cached tracker records without spending the poller's provider quota |
+| `epic_status` / `epic_ready` | Read the live dependency snapshot or only the unblocked, unclaimed work |
+| `report_blocker` / `clear_blocker` | Publish or lift a concrete blocker that survives the current agent turn |
+| `spawn_worker` | As a Coordinator, start a Worker on an existing epic issue (or create the issue first), never in a side workspace |
 
 The blackboard is the primary medium: a note outlives the session that wrote
 it, and the default read scope is `global` plus the reader's own session, so a
@@ -173,6 +180,7 @@ Because agents already know the bus, plain-language instructions work:
 - "Before you start, read the blackboard for anything about the auth API."
 - "Post the endpoint contract you settled on as a global note, tagged `auth`."
 - "Tell the `web` session the token field was renamed, and ask it to update."
+- "Give me the epic status, then start a worker on the highest-ranked ready issue."
 
 Two contracts to keep in mind:
 
@@ -191,6 +199,8 @@ the server is loopback-only and bearer-gated.
 
 ## See also
 
+- [Run a cross-repo epic](/docs/how-to/run-cross-repo-epic/) — dependency
+  status, roles, blockers, worker dispatch, and ordered merge.
 - [Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/) — spawn
   the agents you'll be orchestrating.
 - [Use snippets](/docs/how-to/use-snippets/) — the reusable prompts a broadcast

@@ -16,7 +16,8 @@ the tag-triggered workflows, and verifies that the GitHub Release exists.
 
 ## Automated gates
 
-- [ ] `make setup` completes once online and verifies the pinned Zig archive.
+- [ ] `make setup` completes once online, verifies the pinned Zig archive, and
+      provisions the pinned `cargo-deny` release gate.
 - [ ] Disconnect networking and run `make release` successfully.
 - [ ] `cargo nextest run --workspace --profile ci` passes.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.

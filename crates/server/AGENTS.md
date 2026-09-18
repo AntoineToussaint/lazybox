@@ -94,6 +94,33 @@ so a failed lookup can never read as "no worker". The same derivation backs
 `lazybox task status <ref>` over `Command::QueryTaskStatus`, which is the
 documented fallback for a session that gets no MCP tools.
 
+## Two GitHub clients: who authors, who polls
+
+Registering a GitHub App (`providers.github.app`) gives the status sweep an
+*installation* credential with its own 5,000/hour, so agent sessions can no
+longer starve the inbox (#1802). That splits one client into two, and the
+split is easy to get wrong in a way nothing fails loudly about:
+
+- `PollState::cached_gh_client()` is the **user** client. Mutations, reads and
+  anything authored on the user's behalf go through it — a comment, merge or
+  👀 reaction posted on the App client is attributed to the bot.
+- `PollState::polling_gh_client()` is whatever the sweep is **actually
+  running on**. Everything that asks about polling reads this: the rate-limit
+  wait event, `Shift-R`'s force-full-sweep, the background PR-details
+  prefetch. Reading the user client instead reports the wrong budget, or
+  forces a sweep on a client that is not running one.
+
+An installation token has no user, so three calls stay on the user client:
+`GET /user` (the viewer login is carried in at construction instead),
+GraphQL `viewer` (the budget bootstrap drops it), and `GET /notifications`
+(the REST heartbeat — it is the user's own feed). The heartbeat and the sweep
+share one cursor + sweep-clock state via `GhClient::sharing_sync_state_with`.
+
+Coverage is all-or-nothing on purpose. Discovery is a GraphQL *search*, not a
+per-repo fan-out, so a credential that cannot see a scoped repo returns fewer
+rows and no error. One uncovered scope puts the whole sweep back on the user
+token with a notice naming it; #1807 tracks partitioning instead.
+
 ## The tracker-record cache handed to sessions
 
 The daemon already pays GitHub for every record it shows, and the token's

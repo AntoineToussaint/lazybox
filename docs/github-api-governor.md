@@ -23,11 +23,36 @@ the last 100 emergency points,
 provided their forecast fits the remaining quota. Actual primary
 exhaustion still blocks requests until reset.
 
+## A separate budget for the sweep
+
+The share above divides **one** budget. Registering a GitHub App
+(`providers.github.app`) instead gives the status sweep an installation
+credential with a 5,000/hour of its own, so agent traffic and scheduled
+polling stop competing at all — the reserve then protects interactive
+actions from the sweep rather than the sweep from agents.
+
+Two governors then exist, one per client, each observing its own limit
+headers. `PollState::polling_gh_client()` names the one the sweep is running
+on; `cached_gh_client()` stays the user's, for mutations and reads. Without
+an App, both are the same client and the share above is the whole story.
+
+That splits the per-client gates too: two clients means two eight-request
+concurrency gates (up to sixteen in flight to GitHub) and two secondary-limit
+circuit breakers that do not observe each other's backoff. They are separate
+actors to GitHub — the installation and the user each have their own primary
+and secondary limits — so the split is correct, but a reader reasoning about
+total in-flight requests must count both.
+
+The sweep only moves onto the App budget when the installation reaches every
+scoped repo, org and `watch:` entry: discovery is a GraphQL search, so a
+credential missing one of them returns fewer rows and no error. A gap puts
+the whole sweep back on the user token with a notice naming it.
+
 ## Admission and accounting
 
-Every `GhClient` clone shares the same governor, eight-request
-concurrency gate, and mutation mutex. Parallel search, notification,
-detail, and mutation branches therefore cannot each spend the full
+Every clone of *one* `GhClient` shares that client's governor,
+eight-request concurrency gate, and mutation mutex. Parallel search,
+notification, detail, and mutation branches therefore cannot each spend the full
 observed budget.
 
 GitHub's secondary (abuse) limit keys on burst rate and concurrency

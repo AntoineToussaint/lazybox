@@ -184,8 +184,25 @@ query {
 }
 "#;
 
-pub fn rate_budget_body() -> serde_json::Value {
-    serde_json::json!({ "query": RATE_BUDGET_QUERY })
+/// The same probe without `viewer`, for a credential that has no user —
+/// a GitHub App installation token, whose `viewer` is the App's bot rather
+/// than the human whose inbox it polls.
+const RATE_LIMIT_ONLY_QUERY: &str = r#"
+query {
+  rateLimit { cost limit remaining resetAt used }
+}
+"#;
+
+/// `with_viewer` asks GitHub to echo the authenticated login back, which the
+/// caller compares against the login it believes it holds. Pass `false` for a
+/// credential whose viewer is carried rather than derived.
+pub fn rate_budget_body(with_viewer: bool) -> serde_json::Value {
+    let query = if with_viewer {
+        RATE_BUDGET_QUERY
+    } else {
+        RATE_LIMIT_ONLY_QUERY
+    };
+    serde_json::json!({ "query": query })
 }
 
 #[derive(Deserialize, Debug)]
@@ -196,7 +213,10 @@ pub struct GqlRateBudgetResponse {
 
 #[derive(Deserialize, Debug)]
 pub struct GqlRateBudgetData {
-    pub viewer: GqlRateBudgetViewer,
+    /// Absent when the probe was sent without `viewer` — see
+    /// [`rate_budget_body`].
+    #[serde(default)]
+    pub viewer: Option<GqlRateBudgetViewer>,
     #[serde(rename = "rateLimit")]
     pub rate_limit: GqlRateLimit,
 }

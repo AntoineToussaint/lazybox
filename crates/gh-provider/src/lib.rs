@@ -3,6 +3,7 @@
 //! GitHub event provider for lazybox. Uses a single GraphQL query per poll
 //! cycle to fetch all PRs with comments, threads, and review status.
 
+pub mod app_auth;
 mod client;
 mod graphql;
 pub mod mentions;
@@ -10,6 +11,9 @@ mod notifications;
 pub mod oauth;
 pub mod rate_budget;
 
+pub use app_auth::{
+    AppCredentials, InstallationCoverage, InstallationTokenProvider, is_installation_source,
+};
 pub use client::{
     BackgroundSweepForecast, BranchMergeGate, GateShortfall, GhClient, GhError, HotFetch,
     RepoSweepOutcome, RepoSweepSpec, SelectedFetchOutcome, credential_fingerprint,
@@ -82,6 +86,32 @@ pub fn credential_chain(host: Option<&str>) -> CredentialChain {
         .with(oauth::OAuthTokenProvider)
 }
 
+/// Credential chain the **daemon's poller** resolves, and nothing else.
+///
+/// It holds a single provider: the GitHub App installation token
+/// ([`InstallationTokenProvider`]). Agent sessions, mutations and the setup
+/// wizard keep resolving [`credential_chain`], so the poller's budget is not
+/// something an agent can spend — which is the whole point. Callers with no
+/// App registered never build this chain; they use [`credential_chain`]
+/// directly, leaving the single-token behaviour exactly as it was.
+///
+/// Kept separate from [`credential_chain`] rather than prepended to it: a
+/// combined chain would hand the installation token to every consumer,
+/// re-attributing the user's comments and merges to the App.
+pub fn poller_credential_chain(app: AppCredentials, host: Option<&str>) -> CredentialChain {
+    CredentialChain::new().with(InstallationTokenProvider::new(app, host))
+}
+
+/// Scope key to pass to `poller_credential_chain(..).resolve(..)`. Distinct
+/// from [`credential_scope`] so the chain's process-global cache never serves
+/// an installation token to a user-token resolve, or the reverse.
+pub fn poller_credential_scope(host: Option<&str>) -> String {
+    match host {
+        Some(host) => format!("{SOURCE}-app:{host}"),
+        None => format!("{SOURCE}-app"),
+    }
+}
+
 /// Scope key to pass to `credential_chain(host).resolve(..)`, in place of
 /// the bare [`SOURCE`] constant.
 ///
@@ -144,6 +174,48 @@ impl ScopeSource for GhScopes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of #1802: the poller has a credential agents cannot
+    /// spend. That only holds while the installation provider lives in the
+    /// poller's chain ALONE — folded into `credential_chain` it would hand
+    /// the App token to agent sessions, mutations and the setup wizard too,
+    /// re-attributing the user's comments and merges to the App and putting
+    /// both consumers back on one budget.
+    #[test]
+    fn only_the_poller_chain_carries_the_installation_provider() {
+        let app = AppCredentials {
+            app_id: 42,
+            private_key_pem: "pem".into(),
+            installation_id: Some(7),
+        };
+        assert_eq!(
+            poller_credential_chain(app, None).provider_names(),
+            vec!["github-app"],
+        );
+        assert!(
+            !credential_chain(None)
+                .provider_names()
+                .contains(&"github-app"),
+            "the user chain must never resolve an App installation token",
+        );
+    }
+
+    /// `CredentialChain` caches process-globally by scope string alone. A
+    /// shared key would let whichever chain resolved first serve its token
+    /// to the other — the poller authoring as the user, or every agent
+    /// session silently running on the App's budget.
+    #[test]
+    fn the_poller_scope_key_never_collides_with_the_user_scope_key() {
+        assert_ne!(poller_credential_scope(None), credential_scope(None));
+        assert_ne!(
+            poller_credential_scope(Some("ghe.example.com")),
+            credential_scope(Some("ghe.example.com")),
+        );
+        assert_ne!(
+            poller_credential_scope(None),
+            poller_credential_scope(Some("ghe.example.com")),
+        );
+    }
 
     #[test]
     fn lazybox_credential_override_precedes_standard_gh_token() {

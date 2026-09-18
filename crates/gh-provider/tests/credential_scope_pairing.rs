@@ -60,6 +60,22 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The LAST top-level argument of a call whose argument list is `args` —
+/// where `poller_credential_chain(app, host)` keeps its host.
+fn last_argument(args: &str) -> &str {
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, ch) in args.char_indices() {
+        match ch {
+            '(' | '[' | '<' => depth += 1,
+            ')' | ']' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => start = i + 1,
+            _ => {}
+        }
+    }
+    args[start..].trim()
+}
+
 /// The host expression inside a `credential_chain(...)` call — the text
 /// between the outermost parentheses.
 fn call_argument(after: &str) -> Option<&str> {
@@ -141,6 +157,74 @@ fn every_gh_credential_chain_call_resolves_with_a_matching_credential_scope() {
         "every `credential_chain(host)` must resolve with `credential_scope(host)` \
          for the SAME host expression, or two hosts share one cache entry and \
          cross-serve each other's tokens:\n  {}",
+        offenders.join("\n  "),
+    );
+}
+
+/// The poller's chain carries the same hazard, one helper along: it takes
+/// the host as its *last* argument and must resolve with
+/// `poller_credential_scope` on that same host. Resolving it with the plain
+/// `credential_scope` would be worse than a cross-host mix-up — the two
+/// chains would share one cache entry, so whichever resolved first would
+/// serve an App installation token to the user's mutations, or the user's
+/// token to the poller, defeating the budget separation entirely.
+#[test]
+fn every_poller_credential_chain_call_resolves_with_a_matching_poller_scope() {
+    let root = workspace_root();
+    let skip = [
+        root.join("crates/gh-provider/src/lib.rs"),
+        root.join(file!()),
+    ];
+    let mut offenders: Vec<String> = Vec::new();
+
+    for path in rust_sources() {
+        if skip.contains(&path) {
+            continue;
+        }
+        let Ok(src) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for (lineno, line) in src.lines().enumerate() {
+            let Some(idx) = line.find("gh::poller_credential_chain(") else {
+                continue;
+            };
+            let after = &line[idx + "gh::poller_credential_chain".len()..];
+            let Some(host) = call_argument(after).map(last_argument) else {
+                continue;
+            };
+            let window: String = src
+                .lines()
+                .skip(lineno)
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let Some(scope_idx) = window.find("poller_credential_scope(") else {
+                offenders.push(format!(
+                    "{}:{} — poller_credential_chain(.., {host}) resolves without \
+                     poller_credential_scope",
+                    path.display(),
+                    lineno + 1,
+                ));
+                continue;
+            };
+            let scope_arg = call_argument(&window[scope_idx + "poller_credential_scope".len()..])
+                .map(str::trim)
+                .unwrap_or_default();
+            if scope_arg != host {
+                offenders.push(format!(
+                    "{}:{} — poller_credential_chain(.., {host}) paired with \
+                     poller_credential_scope({scope_arg})",
+                    path.display(),
+                    lineno + 1,
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "every `poller_credential_chain(app, host)` must resolve with \
+         `poller_credential_scope(host)` for the SAME host expression:\n  {}",
         offenders.join("\n  "),
     );
 }

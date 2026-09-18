@@ -46,6 +46,26 @@ can see that from inside. Text that promises a workspace for a filed issue is
 wrong, and `crates/core/tests/agent_work_preamble.rs` enforces that it is
 never written.
 
+## Two credential chains
+
+`credential_chain(host)` is the **user's** token — env vars, `gh auth token`,
+then the stored OAuth login. Everything that authors as the user resolves it,
+and so does every agent session.
+
+`poller_credential_chain(app, host)` is the daemon poller's alone: a single
+`InstallationTokenProvider` (`app_auth.rs`) minting a GitHub App installation
+token, which carries its own rate-limit budget so agents cannot starve the
+inbox (#1802). It is deliberately NOT prepended to the user chain — a
+combined chain would hand the App token to agents and mutations, putting both
+back on one budget and attributing the user's comments to the bot. Each chain
+has its own cache scope helper; `tests/credential_scope_pairing.rs` pins both
+pairings in source.
+
+An installation token has no user. `GET /user` and `GET /notifications` both
+fail for it, and GraphQL `viewer` resolves to the App's bot — so
+`from_credential_with_host_as` takes the viewer login instead of asking, and
+the budget bootstrap sends a `rateLimit`-only probe.
+
 ## Rate budget
 
 `rate_budget.rs` governs request spend against GitHub's limits. A sweep that

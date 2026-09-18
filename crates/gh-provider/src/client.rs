@@ -1585,6 +1585,23 @@ impl GhClient {
         cred: Credential,
         host: Option<&str>,
     ) -> Result<Self, GhError> {
+        Self::from_credential_with_host_as(cred, host, None).await
+    }
+
+    /// Like [`Self::from_credential_with_host`], but taking the viewer login
+    /// instead of asking GitHub for it.
+    ///
+    /// The viewer is who the inbox is *about* — it fills the `involves:`
+    /// search qualifiers and decides whether a PR is yours. With a user token
+    /// that is simply whoever the token belongs to, so `None` resolves it
+    /// with a `/user` call. A **GitHub App installation token has no user**:
+    /// `/user` answers 403 for it, and the inbox it polls is still the
+    /// human's. `Some(login)` supplies that login and skips the call.
+    pub async fn from_credential_with_host_as(
+        cred: Credential,
+        host: Option<&str>,
+        viewer: Option<&str>,
+    ) -> Result<Self, GhError> {
         let source = cred.source.clone();
         let fingerprint = credential_fingerprint(cred.token());
         let token = cred.into_token();
@@ -1627,7 +1644,10 @@ impl GhClient {
                 (inner, gql)
             }
         };
-        let user = inner.current().user().await.map_err(GhError::Api)?.login;
+        let user = match viewer {
+            Some(login) => login.to_string(),
+            None => inner.current().user().await.map_err(GhError::Api)?.login,
+        };
         Ok(Self {
             inner,
             gql,
@@ -1788,8 +1808,15 @@ impl GhClient {
 
     pub async fn bootstrap_graphql_budget(&self) -> Result<(), GhError> {
         self.acquire_or_block("budget-bootstrap")?;
+        // A GitHub App installation token's GraphQL `viewer` is the App's
+        // bot, not the human whose inbox this polls — the login was carried
+        // in at construction, so there is nothing for GitHub to confirm.
+        let derives_viewer = !crate::is_installation_source(&self.credential_source);
         let response: graphql::GqlRateBudgetResponse = self
-            .post_graphql_with_retry("budget-bootstrap", &graphql::rate_budget_body())
+            .post_graphql_with_retry(
+                "budget-bootstrap",
+                &graphql::rate_budget_body(derives_viewer),
+            )
             .await?;
         if let Some(errors) = response.errors {
             let joined = errors
@@ -1804,7 +1831,9 @@ impl GhClient {
         let data = response
             .data
             .ok_or_else(|| GhError::Graphql("GraphQL budget bootstrap returned no data".into()))?;
-        if data.viewer.login != self.user {
+        if let Some(viewer) = &data.viewer
+            && viewer.login != self.user
+        {
             return Err(GhError::Graphql(
                 "GraphQL budget bootstrap returned a different viewer".into(),
             ));
@@ -2846,6 +2875,21 @@ impl GhClient {
             }
         }
         Ok(scopes)
+    }
+
+    /// Adopt `other`'s notifications + sweep-scheduling state, so two
+    /// clients built from *different credentials* share one cursor set.
+    ///
+    /// The poller needs this because the two halves of a tick cannot run on
+    /// the same credential once a GitHub App carries the sweep: `/notifications`
+    /// is the user's own feed and an installation token cannot read it, while
+    /// everything else belongs on the App's independent budget. Sharing the
+    /// state keeps one `Last-Modified` cursor and one set of sweep clocks
+    /// across both, so the client that persists them sees what the other
+    /// committed.
+    pub fn sharing_sync_state_with(mut self, other: &GhClient) -> Self {
+        self.notifications_state = other.notifications_state.clone();
+        self
     }
 
     pub fn with_needs_reply(self, _enabled: bool) -> Self {
@@ -9615,6 +9659,27 @@ mod tests {
             !a.contains("ghp_tokenA") && a.len() == 16,
             "fingerprint is a short hash, never the raw secret: {a}"
         );
+    }
+
+    /// A GitHub App installation token has no user: `/user` answers 403
+    /// for it. Supplying the viewer must therefore build the client
+    /// without asking GitHub — this test would hang or fail on a network
+    /// call, since the token is nonsense and nothing is listening.
+    #[tokio::test]
+    async fn a_supplied_viewer_builds_the_client_without_asking_github_who_it_is() {
+        let client = GhClient::from_credential_with_host_as(
+            Credential::new("not-a-real-token", "github-app:42/installation:7"),
+            None,
+            Some("octocat"),
+        )
+        .await
+        .expect("an installation client builds offline when the viewer is supplied");
+        assert_eq!(
+            client.username(),
+            "octocat",
+            "the inbox stays the human's, not the App's",
+        );
+        assert_eq!(client.credential_source(), "github-app:42/installation:7");
     }
 
     /// Like `spawn_canned_response_server`, but serves a SEQUENCE of

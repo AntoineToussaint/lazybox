@@ -1364,6 +1364,12 @@ impl TerminalRegistry {
 #[derive(Clone, Default)]
 pub struct GithubClientCache {
     client: Arc<parking_lot::Mutex<Option<lazybox_gh::GhClient>>>,
+    /// The client the status sweep polls through, when it is NOT the user
+    /// client — i.e. when a GitHub App installation credential gives the
+    /// poller its own rate-limit budget (#1802). Separate slot because the
+    /// two carry different budgets and different identities: mutations must
+    /// keep going out as the user, so `client` above stays the user's.
+    poll_client: Arc<parking_lot::Mutex<Option<lazybox_gh::GhClient>>>,
     initialization: Arc<Mutex<()>>,
 }
 
@@ -1376,8 +1382,25 @@ impl GithubClientCache {
         *self.client.lock() = Some(client);
     }
 
+    /// The cached App-installation polling client, if one is in use.
+    pub(crate) fn cached_poll(&self) -> Option<lazybox_gh::GhClient> {
+        self.poll_client.lock().clone()
+    }
+
+    pub(crate) fn store_poll(&self, client: lazybox_gh::GhClient) {
+        *self.poll_client.lock() = Some(client);
+    }
+
+    /// Stop polling through an App installation client — the App stopped
+    /// resolving, or stopped covering the inbox, so the next tick rebuilds
+    /// on the user token rather than reusing a client that no longer applies.
+    pub(crate) fn clear_poll(&self) {
+        *self.poll_client.lock() = None;
+    }
+
     pub(crate) fn clear(&self) {
         *self.client.lock() = None;
+        *self.poll_client.lock() = None;
     }
 
     pub(crate) async fn lock_initialization(&self) -> tokio::sync::OwnedMutexGuard<()> {
@@ -1538,6 +1561,18 @@ impl PollState {
     /// Replace the cached GitHub client used across polling ticks.
     pub fn cache_gh_client(&self, client: lazybox_gh::GhClient) {
         self.gh_client_cache.store(client);
+    }
+
+    /// The client the status sweep is actually running on — the GitHub App
+    /// installation client when one is carrying the sweep (#1802), else the
+    /// user client. Callers that ask about *polling* (its rate budget, its
+    /// sweep clocks, its background prefetch) must read this rather than
+    /// [`Self::cached_gh_client`], which is the authoring identity and can
+    /// be on an entirely different budget.
+    pub fn polling_gh_client(&self) -> Option<lazybox_gh::GhClient> {
+        self.gh_client_cache
+            .cached_poll()
+            .or_else(|| self.gh_client_cache.cached())
     }
 
     /// Report whether a reusable GitHub client is currently cached.

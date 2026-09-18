@@ -1547,6 +1547,18 @@ pub struct TickState {
     /// stall sets in rather than every tick. Cleared when a sweep is
     /// admitted (or isn't due), re-arming the notice for a later re-stall.
     pub(crate) discovery_behind_notified: bool,
+    /// The last GitHub App installation coverage answer (#1802) — which
+    /// repos the installation token can actually reach. Re-established every
+    /// tick rather than trusted for a while: the verdict decides whether a
+    /// sweep may retire rows, and a stale "covered" answer retires rows for
+    /// a repo that has since left the installation. Held only so an
+    /// unchanged installation can skip re-walking its repository list.
+    pub(crate) gh_app_coverage: Option<lazybox_gh::InstallationCoverage>,
+    /// Why the App installation could not carry the sweep, as last reported
+    /// to the user. Held so the "polling on your personal token" notice
+    /// fires when the gap appears or its reason changes — never every tick,
+    /// and never silently.
+    pub(crate) gh_app_gap_notified: Option<String>,
 }
 
 impl Default for TickState {
@@ -1568,6 +1580,8 @@ impl Default for TickState {
             linear_schedule: Default::default(),
             full_sweep_deferral_streak: Default::default(),
             discovery_behind_notified: Default::default(),
+            gh_app_coverage: None,
+            gh_app_gap_notified: None,
         }
     }
 }
@@ -2469,7 +2483,7 @@ pub async fn tick_with_state(
                     let now = Utc::now();
                     let rate_limit_wait = config
                         .poll
-                        .cached_gh_client()
+                        .polling_gh_client()
                         .and_then(|client| github_rate_limit_wait(&client.rate_snapshot(), now));
                     if let Some(wait) = rate_limit_wait {
                         let secs = wait.retry_after_secs(now);
@@ -2538,7 +2552,7 @@ pub async fn tick_with_state(
                 }
                 let now = Utc::now();
                 let rate_limit_wait = if source.name() == lazybox_gh::SOURCE {
-                    config.poll.cached_gh_client().and_then(|client| {
+                    config.poll.polling_gh_client().and_then(|client| {
                         let snapshot = client.rate_snapshot();
                         // A remote-budget exhaustion / API 403 is an honest
                         // wait; a governor self-throttle (still well above the

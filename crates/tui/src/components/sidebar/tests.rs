@@ -4224,6 +4224,251 @@ mod workspace_removal_cursor_tests {
 }
 
 #[cfg(test)]
+mod archived_row_stays_gone_tests {
+    //! #1788: `x x` archived a row and it came back about a second
+    //! later. The daemon's archived-set guard holds, so the resurrection
+    //! is the client re-inserting the row from an `Upserted` / `Snapshot`
+    //! that was built before the removal and delivered after it. These
+    //! assert the ordering guarantee at the client's own event handler.
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use std::time::{Duration, Instant};
+
+    fn issue_ws(key: &str) -> Workspace {
+        let mut task = base_task();
+        task.id.key = key.into();
+        task.title = key.into();
+        task.url = format!("https://github.com/o/r/issues/{key}");
+        Workspace::from_task(task, chrono::Utc::now())
+    }
+
+    fn sidebar_with(workspace: &Workspace) -> (Sidebar, SessionKey) {
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        let key = SessionKey::from(&workspace.key);
+        sidebar.workspaces.insert(key.clone(), workspace.clone());
+        sidebar.recompute_visible();
+        (sidebar, key)
+    }
+
+    fn snapshot_of(workspaces: Vec<Workspace>) -> Event {
+        Event::Snapshot {
+            workspaces,
+            terminals: Vec::new(),
+            projects: Vec::new(),
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        }
+    }
+
+    /// The `Snapshot` half of the same race, during the OPTIMISTIC
+    /// window — before the daemon has echoed anything.
+    #[test]
+    fn snapshot_during_the_optimistic_window_does_not_reintroduce_the_key() {
+        let workspace = issue_ws("1");
+        let (mut sidebar, key) = sidebar_with(&workspace);
+        sidebar.take_workspace(&key).expect("row present");
+
+        sidebar.on_event(&snapshot_of(vec![workspace.clone()]));
+
+        assert!(
+            sidebar.workspace_by_key(&key).is_none(),
+            "a snapshot mid-archive must not undo the optimistic removal"
+        );
+    }
+
+    /// The optimistic half of the archive has run but the daemon's echo
+    /// has not arrived yet. A poll reply that was already in flight must
+    /// not put the row back.
+    #[test]
+    fn upsert_in_flight_during_the_optimistic_window_does_not_resurrect() {
+        let workspace = issue_ws("1");
+        let (mut sidebar, key) = sidebar_with(&workspace);
+
+        sidebar.take_workspace(&key).expect("row was present");
+        sidebar.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace.clone(),
+        )));
+
+        assert!(
+            sidebar.workspace_by_key(&key).is_none(),
+            "a poll reply in flight when the archive landed must not undo it"
+        );
+    }
+
+    /// Same race, one step later: the daemon already confirmed the
+    /// removal and a stale upsert lands behind it.
+    #[test]
+    fn upsert_after_the_daemon_removal_does_not_resurrect() {
+        let workspace = issue_ws("1");
+        let (mut sidebar, key) = sidebar_with(&workspace);
+
+        sidebar.on_event(&Event::WorkspaceRemoved(workspace.key.clone()));
+        sidebar.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace.clone(),
+        )));
+
+        assert!(
+            sidebar.workspace_by_key(&key).is_none(),
+            "an upsert behind the removal echo must not undo it"
+        );
+        assert!(
+            !visible_workspace_keys(&sidebar).contains(&key),
+            "and the row must stay out of the rendered projection"
+        );
+    }
+
+    /// A subscription refresh / lag-recovery `Snapshot` whose store read
+    /// began before the delete committed still lists the archived row.
+    #[test]
+    fn snapshot_built_before_the_archive_does_not_reintroduce_the_key() {
+        let archived = issue_ws("1");
+        let other = issue_ws("2");
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        for w in [&archived, &other] {
+            sidebar
+                .workspaces
+                .insert(SessionKey::from(&w.key), w.clone());
+        }
+        sidebar.recompute_visible();
+        let archived_key = SessionKey::from(&archived.key);
+        let other_key = SessionKey::from(&other.key);
+
+        sidebar.on_event(&Event::WorkspaceRemoved(archived.key.clone()));
+        sidebar.on_event(&snapshot_of(vec![archived.clone(), other.clone()]));
+
+        assert!(
+            sidebar.workspace_by_key(&archived_key).is_none(),
+            "a stale snapshot must not reintroduce an archived key"
+        );
+        assert!(
+            sidebar.workspace_by_key(&other_key).is_some(),
+            "and it must still rebuild every other row"
+        );
+    }
+
+    /// The guard is scoped to the removed key — an unrelated row
+    /// upserted in the same window is unaffected.
+    #[test]
+    fn an_unrelated_workspace_still_upserts_during_the_window() {
+        let archived = issue_ws("1");
+        let (mut sidebar, _) = sidebar_with(&archived);
+        sidebar.on_event(&Event::WorkspaceRemoved(archived.key.clone()));
+
+        let other = issue_ws("2");
+        sidebar.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+            other.clone(),
+        )));
+
+        assert!(
+            sidebar
+                .workspace_by_key(&SessionKey::from(&other.key))
+                .is_some()
+        );
+    }
+
+    /// A delete the daemon refused rolls back through `restore_workspace`,
+    /// which must lift the guard immediately — otherwise the restored row
+    /// would be dropped again by the next upsert.
+    #[test]
+    fn a_rolled_back_removal_accepts_the_next_upsert() {
+        let workspace = issue_ws("1");
+        let (mut sidebar, key) = sidebar_with(&workspace);
+
+        let stashed = sidebar.take_workspace(&key).expect("row was present");
+        sidebar.restore_workspace(stashed);
+        sidebar.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace.clone(),
+        )));
+
+        assert!(
+            sidebar.workspace_by_key(&key).is_some(),
+            "a rolled-back removal must not keep swallowing upserts"
+        );
+    }
+
+    /// A row the daemon re-created under the same key carries a fresh
+    /// `created_at`, so it is a different incarnation and must appear at
+    /// once — waiting out the window is not self-healing for every row.
+    /// A local workspace re-created after a delete broadcasts its
+    /// `WorkspaceUpserted` exactly once and is never polled, so swallowing
+    /// that one event would hide the row until the client restarted.
+    #[test]
+    fn a_workspace_re_created_under_the_same_key_appears_immediately() {
+        let workspace = issue_ws("1");
+        let (mut sidebar, key) = sidebar_with(&workspace);
+        sidebar.on_event(&Event::WorkspaceRemoved(workspace.key.clone()));
+
+        let mut recreated = workspace.clone();
+        recreated.created_at = workspace.created_at + chrono::Duration::seconds(1);
+        sidebar.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(recreated)));
+
+        assert!(
+            sidebar.workspace_by_key(&key).is_some(),
+            "a newer incarnation of the key is not the row we removed"
+        );
+    }
+
+    /// ...while the stale copy of the row that WAS removed — same
+    /// `created_at` — is still held, even though it arrives after it.
+    #[test]
+    fn the_same_incarnation_is_still_held_inside_the_window() {
+        let workspace = issue_ws("1");
+        let (mut sidebar, key) = sidebar_with(&workspace);
+        sidebar.on_event(&Event::WorkspaceRemoved(workspace.key.clone()));
+
+        let mut stale = workspace.clone();
+        stale.seen_count += 1;
+        assert_eq!(stale.created_at, workspace.created_at);
+        sidebar.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(stale)));
+
+        assert!(sidebar.workspace_by_key(&key).is_none());
+    }
+
+    /// The guard is a window, not a permanent tombstone: a genuinely
+    /// re-created row (a non-archiving delete the next poll rediscovers,
+    /// or an unarchive) comes back once it lapses.
+    #[test]
+    fn a_re_created_workspace_returns_once_the_window_lapses() {
+        let workspace = issue_ws("1");
+        let (mut sidebar, key) = sidebar_with(&workspace);
+        sidebar.on_event(&Event::WorkspaceRemoved(workspace.key.clone()));
+
+        let aged = Instant::now()
+            .checked_sub(REMOVED_WORKSPACE_GRACE + Duration::from_secs(1))
+            .expect("monotonic clock older than the grace window");
+        sidebar
+            .recently_removed
+            .get_mut(&key)
+            .expect("tombstone recorded")
+            .at = aged;
+
+        sidebar.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace.clone(),
+        )));
+
+        assert!(
+            sidebar.workspace_by_key(&key).is_some(),
+            "the guard must expire so a re-created row can return"
+        );
+        assert!(
+            sidebar.recently_removed.is_empty(),
+            "and the lapsed entry is pruned rather than accumulating"
+        );
+    }
+
+    fn visible_workspace_keys(sidebar: &Sidebar) -> Vec<SessionKey> {
+        sidebar
+            .visible
+            .iter()
+            .filter_map(|row| match row {
+                VisibleRow::Workspace(key) => Some(key.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
 mod broadcast_select_tests {
     use super::super::*;
     use super::status_pill_tests::base_task;

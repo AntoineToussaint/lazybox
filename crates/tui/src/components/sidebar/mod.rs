@@ -34,6 +34,43 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// animation only nudges the render loop a few times a second while
 /// an agent is busy (and never when nothing is working).
 const WORKING_SPIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+/// How long a removed workspace key stays untouchable by an incoming
+/// `WorkspaceUpserted` / `Snapshot` carrying the SAME incarnation of the
+/// row.
+///
+/// Removing a row is not instantaneous end to end: the optimistic half
+/// drops it on the keystroke, the daemon's `WorkspaceRemoved` echo
+/// follows a round trip later, and a poll reply or subscription refresh
+/// read that was already in flight carries the pre-removal copy of the
+/// row. Re-inserting that copy silently undoes a destructive action the
+/// user confirmed (#1788), so the key is held out for a window an order
+/// of magnitude above the round trip and an order of magnitude below the
+/// 60s poll cadence.
+///
+/// The window alone is not the whole test — see [`RemovedRow`]. A row
+/// the daemon genuinely re-created is let through immediately, however
+/// fresh the removal, because waiting it out is not always self-healing:
+/// a local workspace re-created under the same key broadcasts once and
+/// is never polled, so a swallowed create would leave the row missing
+/// until the client restarted.
+const REMOVED_WORKSPACE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A key held out of the workspace map just after its row was removed.
+struct RemovedRow {
+    /// When the removal happened, for the [`REMOVED_WORKSPACE_GRACE`] window.
+    at: std::time::Instant,
+    /// `created_at` of the row that was removed, when this client had it.
+    ///
+    /// This is what separates "the stale copy of the row I just removed"
+    /// from "a different row that now holds this key". `created_at` is
+    /// carried across every upsert of a row and minted fresh when one is
+    /// built, so a strictly newer value can only be a re-creation — which
+    /// must be shown at once, not held. `None` when the removal named a
+    /// key this client never had a row for, leaving nothing to compare:
+    /// the window then holds any update, which is the safe direction
+    /// because there was no row on screen to keep alive.
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
 /// Backstop for the per-row "spawning" arc: if no terminating event
 /// (a live `AgentState`, `TerminalSpawned`, a `Failed` step, or a
 /// `spawn*` `ProviderError`) clears it within this window, the arc
@@ -129,6 +166,14 @@ pub enum WorkTarget {
 pub struct Sidebar {
     id: PaneId,
     workspaces: HashMap<SessionKey, Workspace>,
+    /// Keys whose row was just removed, with the instant it happened.
+    /// Suppresses re-insertion by an `Upserted` / `Snapshot` built
+    /// before the removal but delivered after it — see
+    /// [`REMOVED_WORKSPACE_GRACE`]. Entries are written by both halves
+    /// of a removal (the optimistic `take_workspace` and the
+    /// authoritative `WorkspaceRemoved`) and dropped by
+    /// `restore_workspace`, so a rolled-back delete re-shows at once.
+    recently_removed: HashMap<SessionKey, RemovedRow>,
     /// Derived view: workspaces filtered by mailbox, grouped by repo,
     /// each group sorted by updated_at desc. Headers are interleaved
     /// with workspace rows in render order; the cursor navigates
@@ -663,6 +708,7 @@ impl Sidebar {
         Self {
             id,
             workspaces: HashMap::new(),
+            recently_removed: HashMap::new(),
             visible: Vec::new(),
             collapsed_repos: BTreeSet::new(),
             pinned_repos: Vec::new(),
@@ -2007,12 +2053,63 @@ impl Sidebar {
     /// `WorkspaceRemoved` event handler does so a later echo is a no-op.
     pub fn take_workspace(&mut self, key: &SessionKey) -> Option<Workspace> {
         let removed = self.workspaces.remove(key);
-        if removed.is_some() {
+        if let Some(workspace) = &removed {
             self.broadcast_selected.remove(key);
             self.agents.remove(key);
+            self.note_workspace_removed(key, Some(workspace.created_at));
             self.recompute_after_workspace_removed(key);
         }
         removed
+    }
+
+    /// Hold `key` out of the workspace map for [`REMOVED_WORKSPACE_GRACE`],
+    /// so an in-flight upsert or snapshot can't put the row back.
+    /// `created_at` is the removed row's, when this client had it.
+    ///
+    /// Re-noting a key keeps the `created_at` already recorded: the
+    /// authoritative `WorkspaceRemoved` lands after the optimistic
+    /// `take_workspace` has already emptied the map, so the first note is
+    /// the one that saw the row.
+    fn note_workspace_removed(
+        &mut self,
+        key: &SessionKey,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        let at = std::time::Instant::now();
+        self.recently_removed
+            .entry(key.clone())
+            .and_modify(|held| {
+                held.at = at;
+                held.created_at = held.created_at.or(created_at);
+            })
+            .or_insert(RemovedRow { at, created_at });
+    }
+
+    /// Whether an incoming copy of `key` is the row this client just
+    /// removed, still inside its grace window — the one case where the
+    /// update must be dropped rather than applied.
+    ///
+    /// Prunes expired entries as it goes: removals are rare and the map
+    /// is only read on the paths that would re-insert a row, so there is
+    /// nothing to sweep on a timer.
+    fn workspace_update_is_stale(
+        &mut self,
+        key: &SessionKey,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let now = std::time::Instant::now();
+        self.recently_removed
+            .retain(|_, held| now.duration_since(held.at) < REMOVED_WORKSPACE_GRACE);
+        let stale = self
+            .recently_removed
+            .get(key)
+            .is_some_and(|held| held.created_at.is_none_or(|was| created_at <= was));
+        if stale {
+            // Named in the client log so the next report of a row coming
+            // back can be told apart from one this guard already caught.
+            tracing::info!(%key, "sidebar: dropped a row update for a just-removed workspace");
+        }
+        stale
     }
 
     /// Re-insert (or replace) a workspace optimistically edited or
@@ -2021,6 +2118,9 @@ impl Sidebar {
     /// notification — it restores state the user already saw.
     pub fn restore_workspace(&mut self, workspace: Workspace) {
         let key: SessionKey = (&workspace.key).into();
+        // The removal is off — lift its grace window so the very next
+        // upsert for this key is honoured instead of being swallowed.
+        self.recently_removed.remove(&key);
         self.workspaces.insert(key, workspace);
         self.recompute_visible();
     }
@@ -4287,17 +4387,25 @@ impl Sidebar {
             return;
         }
         let workspaces = &self.workspaces;
+        // A key inside its post-removal grace window is absent from the
+        // map because this client is holding it out, not because the
+        // daemon says it is gone — and the removal may still roll back.
+        // Treating that absence as stale would unstar it (and persist
+        // that) behind the user's back, which is exactly what
+        // `forget_focused_workspace` refuses to do off the optimistic
+        // half. The authoritative `WorkspaceRemoved` forgets the star.
+        let held = &self.recently_removed;
+        let live = |k: &SessionKey| workspaces.contains_key(k) || held.contains_key(k);
         let stale: Vec<SessionKey> = self
             .focused_workspaces
             .iter()
-            .filter(|k| !workspaces.contains_key(*k))
+            .filter(|k| !live(k))
             .cloned()
             .collect();
         if stale.is_empty() {
             return;
         }
-        self.focused_workspaces
-            .retain(|k| workspaces.contains_key(k));
+        self.focused_workspaces.retain(live);
         for key in stale {
             Self::persist_focus_edit(lazybox_config::UiListOp::Remove(key.as_str().to_string()));
         }

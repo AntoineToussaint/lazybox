@@ -249,6 +249,12 @@ impl Sidebar {
                 self.workspaces.clear();
                 for w in workspaces {
                     let key: SessionKey = (&w.key).into();
+                    // A snapshot read that began before a removal
+                    // committed still lists the row; taking it would
+                    // undo the removal (#1788).
+                    if self.workspace_update_is_stale(&key, w.created_at) {
+                        continue;
+                    }
                     self.workspaces.insert(key, w.clone());
                 }
                 // The workspace map is now the daemon's authoritative full
@@ -340,6 +346,13 @@ impl Sidebar {
             }
             Event::WorkspaceUpserted(workspace) => {
                 let key: SessionKey = (&workspace.key).into();
+                // A poll reply already in flight when the row was
+                // removed carries its pre-removal copy. Re-inserting it
+                // resurrects a workspace the user just archived (#1788),
+                // so that copy stays out for its grace window.
+                if self.workspace_update_is_stale(&key, workspace.created_at) {
+                    return;
+                }
                 // Rising-edge desktop notifications. When a workspace
                 // we already track gains an attention signal it
                 // didn't have last poll — CI started failing, a
@@ -372,7 +385,11 @@ impl Sidebar {
             }
             Event::WorkspaceRemoved(key) => {
                 let session_key: SessionKey = key.into();
-                self.workspaces.remove(&session_key);
+                let created_at = self
+                    .workspaces
+                    .remove(&session_key)
+                    .map(|workspace| workspace.created_at);
+                self.note_workspace_removed(&session_key, created_at);
                 self.broadcast_selected.remove(&session_key);
                 self.agents.remove(&session_key);
                 self.spawning.remove(&session_key);

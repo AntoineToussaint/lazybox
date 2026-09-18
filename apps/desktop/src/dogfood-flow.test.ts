@@ -83,9 +83,11 @@ describe("desktop inbox-to-terminal workflow mapping", () => {
       ...workspace!,
       seen_count: workspace!.activity.length,
     };
-    const next = applyWorkspaceEvent(fixture.workspaces, {
-      WorkspaceUpserted: updated,
-    });
+    const next = applyWorkspaceEvent(
+      fixture.workspaces,
+      { WorkspaceUpserted: updated },
+      new Map<string, number>(),
+    );
     expect(next.get(key)?.seen_count).toBe(workspace!.activity.length);
   });
 });

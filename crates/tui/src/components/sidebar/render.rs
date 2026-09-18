@@ -206,6 +206,7 @@ pub(crate) struct HeaderCounters {
     pub(crate) review_pending: usize,
     pub(crate) selected: usize,
     pub(crate) limited: usize,
+    pub(crate) stalled: usize,
 }
 
 /// One-shot `DefaultHasher` over a single `Hash` value — a building block
@@ -243,6 +244,7 @@ fn agent_state_code(s: &lazybox_ipc::AgentState) -> u64 {
         LimitReached => 6,
         CreditExhausted => 7,
         AwaitingReset => 8,
+        Stalled => 9,
     }
 }
 
@@ -523,12 +525,18 @@ impl Sidebar {
         // never wraps onto its own row (#1502). Keep-awake is daemon
         // status, not attention, and lives in the footer now.
         let limited = counters.limited;
+        let stalled = counters.stalled;
         let bold =
             |color: ratatui::style::Color| Style::default().fg(color).add_modifier(Modifier::BOLD);
-        let counters_spec: [(&str, usize, &str, ratatui::style::Color); 5] = [
+        let counters_spec: [(&str, usize, &str, ratatui::style::Color); 6] = [
             ("●", unread, "new", theme.hover),
             ("?", input_pending, "input", theme.warn),
             ("⧗", limited, "limited", theme.warn),
+            // Agents that stopped on an infrastructure failure (#1782).
+            // Its own counter rather than folded into `limited`: both are
+            // fixed by the same two keys but they are not the same fault,
+            // and a stall shown as a rate limit sends you looking at quota.
+            ("↯", stalled, "stopped", theme.warn),
             ("✗", ci_failing, "CI", theme.error),
             ("◔", review_pending, "review", theme.accent),
         ];
@@ -1643,6 +1651,7 @@ impl Sidebar {
             }
         }
         c.limited = self.limit_reached_workspace_count();
+        c.stalled = self.stalled_workspace_count();
         c
     }
 
@@ -2041,6 +2050,8 @@ impl Sidebar {
                 limit_reached: workspace.is_some_and(|w| {
                     crate::agent_attention::workspace_is_limit_reached(w, &self.agents)
                 }),
+                stalled: workspace
+                    .is_some_and(|w| crate::agent_attention::workspace_is_stalled(w, &self.agents)),
                 awaiting_reset: workspace.is_some_and(|w| {
                     crate::agent_attention::workspace_is_awaiting_reset(w, &self.agents)
                 }),

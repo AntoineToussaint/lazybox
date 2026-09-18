@@ -6264,6 +6264,17 @@ impl TerminalStack {
             // sidebar pill already uses for it.
             AgentState::LimitReached => Some(("⧗ limited", bold)),
             AgentState::CreditExhausted => Some(("¢ no credit", bold)),
+            // The turn ended on an infrastructure failure (#1782) rather
+            // than a result — alerting like the blocks above, since the
+            // work is stopped until someone resumes or restarts it.
+            AgentState::Stalled => Some((
+                if compact {
+                    "↯ stalled"
+                } else {
+                    "↯ stopped on error"
+                },
+                bold,
+            )),
             // The calm sibling of `LimitReached`: auto-wait pressed Wait and
             // the agent is parked until reset — handled, nothing for you to
             // do — so it gets a quiet ☾ in the dim text color, NOT the

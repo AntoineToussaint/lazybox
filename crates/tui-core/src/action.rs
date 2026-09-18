@@ -437,9 +437,11 @@ pub enum Action {
     /// Jump the sidebar cursor to the next workspace whose PR has
     /// failing / mixed CI (`Shift-F`). Wraps around.
     JumpToFailingCi,
-    /// Jump the sidebar cursor to the next workspace whose agent is
-    /// blocked on a provider usage / rate limit (`Shift-L`, #847). Wraps
-    /// around. The rate-limited analog of [`Action::JumpToAsking`].
+    /// Jump the sidebar cursor to the next workspace whose agent has
+    /// stopped and needs you — a provider usage / rate limit (`Shift-L`,
+    /// #847) or an infrastructure failure (#1782). Wraps around. The
+    /// stopped-agent analog of [`Action::JumpToAsking`]. The `ActionKind`
+    /// keeps its `jump_to_limited` config key so a user remap survives.
     JumpToLimited,
     /// Jump the sidebar cursor to the next workspace with unread
     /// activity (`Shift-N`, #1502). Wraps around.
@@ -1221,8 +1223,8 @@ impl ActionDef {
             ActionKind::JumpToLimited => &Self {
                 kind: ActionKind::JumpToLimited,
                 default_keys: "Shift-L",
-                label: "next rate-limited",
-                describe: "Jump the cursor to the next workspace whose agent hit its provider usage / rate limit (#847). Pair with Shift-K to resume them all after re-authing.",
+                label: "next stopped agent",
+                describe: "Jump the cursor to the next workspace whose agent has stopped and needs you — blocked on its provider usage / rate limit (#847), or stopped on an infrastructure failure such as a 502 or a refused gateway connection (#1782). The calm parked-on-auto-continue state is skipped: it is handled. Pair with Shift-K to resume them all.",
                 section: Section::Global,
             },
             ActionKind::JumpToUnread => &Self {
@@ -1312,8 +1314,8 @@ impl ActionDef {
             ActionKind::ResumeRateLimited => &Self {
                 kind: ActionKind::ResumeRateLimited,
                 default_keys: "Shift-K",
-                label: "resume rate-limited",
-                describe: "Resume every rate-limited agent at once — a settle-gated 'continue' injected into each one, the blocked (⧗) and the parked-on-auto-continue (☾) alike. An agent whose account is still limited simply parks again and says so. If you switched Claude account / API key, `a R` (restart rate-limited) also swaps in the fresh credentials: a running process never re-reads them.",
+                label: "resume stopped agents",
+                describe: "Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike. An agent whose account is still limited simply parks again and says so. If you switched Claude account / API key, `a R` (restart stopped agents) also swaps in the fresh credentials: a running process never re-reads them.",
                 section: Section::Global,
             },
             ActionKind::RestartRateLimited => &Self {
@@ -1321,8 +1323,8 @@ impl ActionDef {
                 // Under the agent leader like `a K`: a direct modifier chord
                 // would need the kitty keyboard protocol most emulators lack.
                 default_keys: "a R",
-                label: "restart rate-limited",
-                describe: "Restart every agent currently blocked or parked on a usage / rate limit so it picks up fresh credentials: stop its process, respawn the same conversation in the same pane (--resume), then submit the configured continuation prompt. Use after switching Claude account / API key externally; a plain 'continue' (Shift-K) would only hit the limit again.",
+                label: "restart stopped agents",
+                describe: "Restart every agent that has stopped — blocked or parked on a usage / rate limit, or stopped on an infrastructure failure (↯) — so it picks up fresh credentials: stop its process, respawn the same conversation in the same pane (--resume), then submit the configured continuation prompt. Use after switching Claude account / API key externally; a plain 'continue' (Shift-K) would only hit the limit again.",
                 section: Section::Global,
             },
             ActionKind::RecoverAgentCredit => &Self {

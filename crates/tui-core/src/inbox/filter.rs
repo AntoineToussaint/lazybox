@@ -104,8 +104,11 @@ pub enum Filter {
     Unread,
     /// An agent in this workspace is waiting on input.
     Asking,
-    /// An agent in this workspace is blocked on a provider usage / rate
-    /// limit (#847).
+    /// An agent in this workspace stopped in a shape one of the two
+    /// recovery actions restarts: a provider usage / rate limit (#847),
+    /// parked or alerting, or a turn that died on an infrastructure
+    /// failure (`Stalled`, #1782). Named for the limit it originally
+    /// covered; the label reads `needs-recovery` because it is now both.
     RateLimited,
     /// A reviewer is requested, or a review is pending / changes-requested.
     ReviewRequested,
@@ -252,7 +255,7 @@ impl Filter {
             Filter::Conflict => "conflict",
             Filter::Unread => "unread",
             Filter::Asking => "asking",
-            Filter::RateLimited => "rate-limited",
+            Filter::RateLimited => "needs-recovery",
             Filter::ReviewRequested => "review-requested",
             Filter::AutoMerge => "auto-merge",
             Filter::Draft => "draft",
@@ -297,10 +300,11 @@ impl Filter {
             Filter::Conflict => task.is_some_and(|t| t.mergeable.is_conflicting()),
             Filter::Unread => w.unread_count() > 0,
             Filter::Asking => crate::agent_attention::workspace_is_asking(w, ctx.agents),
-            // Both limit states: the alerting `⧗ LimitReached` block AND the
-            // parked `☾ AwaitingReset` auto-continue wait. Counting only the
-            // former showed `rate-limited (0)` over eight parked agents.
-            Filter::RateLimited => crate::agent_attention::workspace_is_limited(w, ctx.agents),
+            // Every stopped shape the recovery actions reach: the alerting
+            // `⧗ LimitReached` block, the parked `☾ AwaitingReset` wait, and
+            // the `↯ Stalled` infrastructure failure. Counting only the first
+            // showed `(0)` over eight parked agents.
+            Filter::RateLimited => crate::agent_attention::workspace_needs_recovery(w, ctx.agents),
             Filter::ReviewRequested => task.is_some_and(|t| {
                 matches!(
                     t.review,
@@ -853,16 +857,22 @@ mod tests {
         }
     }
 
-    /// The `rate-limited` axis counts BOTH limit shapes: an agent parked on
-    /// the auto-continue wait (`AwaitingReset`) is as rate-limited as one
-    /// alerting on the block (`LimitReached`). Counting only the latter
-    /// showed `rate-limited (0)` in the filter menu over eight parked agents.
+    /// The `needs-recovery` axis counts every stopped shape the two
+    /// recovery keys reach: an agent parked on the auto-continue wait
+    /// (`AwaitingReset`) is as held as one alerting on the block
+    /// (`LimitReached`), and so is one that stopped on an infrastructure
+    /// failure (`Stalled`, #1782). Counting only the alerting limit showed
+    /// `(0)` in the filter menu over eight parked agents.
     #[test]
     fn rate_limited_matches_parked_agents_as_well_as_blocked_ones() {
         use lazybox_ipc::AgentState;
         let ws = workspace_with("owner/repo#1", |_| {});
         let sk = lazybox_core::SessionKey::from(&ws.key);
-        for state in [AgentState::LimitReached, AgentState::AwaitingReset] {
+        for state in [
+            AgentState::LimitReached,
+            AgentState::AwaitingReset,
+            AgentState::Stalled,
+        ] {
             let m = HashMap::from([(sk.clone(), state)]);
             assert!(
                 Filter::RateLimited.matches(&FilterCtx {
@@ -870,7 +880,7 @@ mod tests {
                     agents: &m,
                     now: now()
                 }),
-                "{state:?} is rate-limited"
+                "{state:?} needs recovery"
             );
         }
         for state in [

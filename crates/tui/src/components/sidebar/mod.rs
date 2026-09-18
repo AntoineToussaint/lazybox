@@ -594,6 +594,8 @@ pub enum NotificationKind {
     Done,
     /// An agent hit a usage / rate limit.
     LimitReached,
+    /// An agent stopped on an infrastructure failure (`Stalled`, #1782).
+    Stalled,
     /// A workspace gained a non-agent attention signal (CI failing,
     /// review requested, new activity, mention).
     Activity,
@@ -2226,10 +2228,10 @@ impl Sidebar {
     /// a usage / rate limit, starting AFTER the current row and wrapping
     /// (`Shift-L`, #847) — the rate-limited analog of
     /// [`Self::focus_next_asking_workspace`].
-    pub fn focus_next_limit_reached_workspace(&mut self) -> bool {
+    pub fn focus_next_stopped_workspace(&mut self) -> bool {
         let keys_order = self.visible_workspace_keys();
         let current = self.selected_session_key().cloned();
-        let Some(target) = crate::agent_attention::next_limit_reached_workspace(
+        let Some(target) = crate::agent_attention::next_stopped_workspace(
             &self.agents,
             &keys_order,
             current.as_ref(),
@@ -2259,11 +2261,6 @@ impl Sidebar {
         ids
     }
 
-    /// Every agent terminal in the usage-limit block, alerting
-    /// (`LimitReached`) or parked (`AwaitingReset`) — the target set both
-    /// the plain resume (`Shift-K`, a settle-gated `continue` into each) and
-    /// the restart with fresh credentials (`a R`, stop + `--resume`) apply
-    /// to. Sorted like [`Self::limit_reached_terminals`].
     /// Every terminal the daemon currently reports as live. Used to prune a
     /// standing set (auth-failed terminals, #1719) against reality before
     /// issuing a kill+respawn, so an entry for a pane that has since exited
@@ -2272,14 +2269,25 @@ impl Sidebar {
         self.running_terminals.keys().copied().collect()
     }
 
-    pub fn limited_terminals(&self) -> Vec<TerminalId> {
+    /// Every agent terminal a recovery action can restart: the usage-limit
+    /// block, alerting (`LimitReached`) or parked (`AwaitingReset`), and a
+    /// turn that stopped on an infrastructure failure (`Stalled`, #1782).
+    /// The target set both the plain resume (`Shift-K`, a settle-gated
+    /// `continue` into each) and the restart with fresh credentials (`a R`,
+    /// stop + `--resume`) apply to — a stall is in both because the two
+    /// shapes are exactly its two cures: a `continue` past a transient 502,
+    /// a respawn for a wedged process. Sorted like
+    /// [`Self::limit_reached_terminals`].
+    pub fn recoverable_terminals(&self) -> Vec<TerminalId> {
         let mut ids: Vec<TerminalId> = self
             .agent_terminal_states
             .iter()
             .filter(|(_, (_, state))| {
                 matches!(
                     state,
-                    lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset
+                    lazybox_ipc::AgentState::LimitReached
+                        | lazybox_ipc::AgentState::AwaitingReset
+                        | lazybox_ipc::AgentState::Stalled
                 )
             })
             .map(|(id, _)| *id)
@@ -2294,7 +2302,7 @@ impl Sidebar {
     /// account simply parks again); this set is counted separately so the
     /// resume notice can call out how many were parked and point at `a R`
     /// for the fresh-credentials restart. Counted directly rather than
-    /// derived from [`Self::limited_terminals`] minus
+    /// derived from [`Self::recoverable_terminals`] minus
     /// [`Self::limit_reached_terminals`], so the count says what it means
     /// regardless of what else is limited. Sorted like
     /// [`Self::limit_reached_terminals`].
@@ -2342,6 +2350,19 @@ impl Sidebar {
         self.agent_terminal_states
             .values()
             .filter(|(_, state)| *state == lazybox_ipc::AgentState::LimitReached)
+            .map(|(sk, _)| sk)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
+    /// Number of distinct workspaces with at least one agent terminal in
+    /// `Stalled` — the `↯ N stopped` header count (#1782). Counts
+    /// workspaces like [`Self::limit_reached_workspace_count`], for the
+    /// same reason.
+    pub fn stalled_workspace_count(&self) -> usize {
+        self.agent_terminal_states
+            .values()
+            .filter(|(_, state)| *state == lazybox_ipc::AgentState::Stalled)
             .map(|(sk, _)| sk)
             .collect::<std::collections::HashSet<_>>()
             .len()

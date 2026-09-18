@@ -351,10 +351,16 @@ fn aggregate_agent_state(states: impl Iterator<Item = AgentState>) -> Option<Age
     states.max_by_key(|state| match state {
         // Credit exhaustion outranks everything — nothing moves until
         // the account is topped up or the agent is recovered (#1179).
-        AgentState::CreditExhausted => 8,
+        AgentState::CreditExhausted => 9,
         // A usage-limit block outranks even `InputNeeded` — the most
         // urgent "act externally before this moves" state (#847).
-        AgentState::LimitReached => 7,
+        AgentState::LimitReached => 8,
+        // Stopped on an infrastructure failure (#1782) — with the limit
+        // block, just under it. Ranks are DISTINCT on purpose: `max_by_key`
+        // returns the last maximum, so a tie would let iteration order pick
+        // the workspace's glyph. Mirrors `agent_state_rank` in
+        // `crates/tui/src/components/sidebar/handlers.rs`.
+        AgentState::Stalled => 7,
         AgentState::InputNeeded => 6,
         AgentState::Working => 5,
         // The calm auto-waiting block surfaces over a resting `Done`, but

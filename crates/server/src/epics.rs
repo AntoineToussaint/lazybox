@@ -759,7 +759,12 @@ fn member_status(
     }
     if matches!(
         agent,
-        Some(AgentState::InputNeeded | AgentState::LimitReached | AgentState::CreditExhausted)
+        Some(
+            AgentState::InputNeeded
+                | AgentState::LimitReached
+                | AgentState::CreditExhausted
+                | AgentState::Stalled
+        )
     ) {
         return EpicMemberStatus::Asking;
     }

@@ -46,12 +46,12 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `` ` `` | jump to workspace | Open a fuzzy picker over every workspace (across repos) and jump to the one you pick. |
 | `!` | next asking | Jump the cursor to the next workspace whose agent is waiting on input (a quick jump; the workspace picker `` ` `` reaches any workspace). |
 | `Shift-F` | next failing | Jump the cursor to the next PR whose CI is failing (a quick jump; the workspace picker `` ` `` reaches any workspace). |
-| `Shift-L` | next rate-limited | Jump the cursor to the next workspace whose agent hit its provider usage / rate limit (#847). |
+| `Shift-L` | next stopped agent | Jump the cursor to the next workspace whose agent has stopped and needs you — blocked on its provider usage / rate limit (#847), or stopped on an infrastructure failure such as a 502 or a refused gateway connection (#1782). |
 | `Shift-N` | next unread | Jump the cursor to the next workspace with unread activity, wrapping around (#1502). |
 | `.` | focus mode | Maximize the focused workspace's terminal to near-fullscreen behind a slim event header, hiding the sidebar and activity pane. |
 | `Shift-W` | start work | Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane. |
 | `Shift-C` | connect box | Connect to (or disconnect from) the remote box on demand. |
-| `Shift-K` | resume rate-limited | Resume every rate-limited agent at once — a settle-gated 'continue' injected into each one, the blocked (⧗) and the parked-on-auto-continue (☾) alike. |
+| `Shift-K` | resume stopped agents | Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike. |
 | `Ctrl-k` | recover credit | Select the provider's Wait for credit option for the focused blocked agent, wait for its composer, and submit the configured continuation prompt. |
 | `Shift-P` | activity pane | Cycle the activity pane: full feed → one-line summary (new-activity / failing-CI counts) → hidden → full. |
 | `F8 \| Alt-s \| Ctrl-Alt-s` | text selection | Toggle lazybox's mouse capture so the host terminal regains native text selection (trackpad-select + Cmd-C in agent scrollback). |
@@ -179,7 +179,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 
 | Chord | Action |
 | --- | --- |
-| `a R` | restart rate-limited |
+| `a R` | restart stopped agents |
 | `a K` | recover all credit |
 | `a c` | spawn claude |
 | `a x` | spawn codex |

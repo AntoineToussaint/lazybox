@@ -107,7 +107,8 @@ async fn seed_persisted_state(
         AgentState::Idle
         | AgentState::Exited { .. }
         | AgentState::LimitReached
-        | AgentState::AwaitingReset => {
+        | AgentState::AwaitingReset
+        | AgentState::Stalled => {
             panic!("test helper only seeds hook-driven live-turn states")
         }
     }

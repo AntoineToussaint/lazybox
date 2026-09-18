@@ -261,7 +261,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Resume every workspace currently held by a provider usage / rate
     /// limit (`Shift-K`, #847) — in either shape: the alerting
     /// `⧗ LimitReached` block AND the parked `☾ AwaitingReset` auto-continue
-    /// wait (the set [`crate::components::Sidebar::limited_terminals`]
+    /// wait (the set [`crate::components::Sidebar::recoverable_terminals`]
     /// returns). A one-shot inject fan-out of a "continue" prompt across
     /// that set — the bulk companion to re-authing with another account, so
     /// the user doesn't visit each terminal. Reuses the broadcast
@@ -280,11 +280,11 @@ impl<T: TerminalAdapter> Model<T> {
         // and submit `continue`. If the account is still limited, Claude
         // parks again and says so; if credentials changed or the window
         // reset, it works. The key does the thing; the agent reports.
-        let terminals = self.sidebar.limited_terminals();
+        let terminals = self.sidebar.recoverable_terminals();
         // Named in the notice so the count on screen matches the ☾ badges.
         let parked = self.sidebar.awaiting_reset_terminals().len();
         if terminals.is_empty() {
-            self.flash_hint("no rate-limited agents to resume");
+            self.flash_hint("no stopped agents to resume");
             return Vec::new();
         }
         let mut cmds = Vec::new();
@@ -303,7 +303,7 @@ impl<T: TerminalAdapter> Model<T> {
         let resumed = terminals.len();
         let plural = if resumed == 1 { "" } else { "s" };
         if parked == 0 {
-            self.flash_info(format!("resuming {resumed} rate-limited agent{plural}"));
+            self.flash_info(format!("resuming {resumed} stopped agent{plural}"));
         } else {
             // The restart key is remappable (`ui.action_keys.restart_rate_limited`);
             // resolve the effective chord so the notice never names a key the
@@ -313,7 +313,7 @@ impl<T: TerminalAdapter> Model<T> {
             )
             .effective_keys_display(&self.action_key_overrides);
             self.flash_info(format!(
-                "resuming {resumed} rate-limited agent{plural} ({parked} parked on the \
+                "resuming {resumed} stopped agent{plural} ({parked} parked on the \
                  auto-continue wait got `continue` too; {restart_keys} restarts them with \
                  fresh credentials if they park again)"
             ));
@@ -345,7 +345,7 @@ impl<T: TerminalAdapter> Model<T> {
         // Pruned against live terminals so a stale entry for a pane that has
         // since exited can't issue a kill+respawn against a dead id.
         let live = self.sidebar.running_terminal_ids();
-        let mut terminals = self.sidebar.limited_terminals();
+        let mut terminals = self.sidebar.recoverable_terminals();
         let extra: Vec<_> = self
             .auth_failed_terminals
             .iter()
@@ -355,7 +355,7 @@ impl<T: TerminalAdapter> Model<T> {
         terminals.extend(extra);
         terminals.sort_by_key(|id| id.0);
         if terminals.is_empty() {
-            self.flash_hint("no rate-limited or signed-out agents to restart");
+            self.flash_hint("no stopped or signed-out agents to restart");
             return Vec::new();
         }
         let cmds: Vec<IpcCommand> = terminals
@@ -377,7 +377,7 @@ impl<T: TerminalAdapter> Model<T> {
         // promise all N will restart — this is a kill+respawn, and claiming a
         // destructive action happened when it was refused is the worse error.
         self.flash_info(format!(
-            "restarting up to {restarted} rate-limited agent{plural} with fresh credentials"
+            "restarting up to {restarted} stopped agent{plural} with fresh credentials"
         ));
         self.redraw = true;
         cmds
@@ -465,7 +465,12 @@ impl<T: TerminalAdapter> Model<T> {
         let signed_out = self.auth_failed_terminals.contains(&terminal_id);
         let continue_work = match state {
             _ if signed_out => true,
-            Some(AgentState::LimitReached | AgentState::AwaitingReset) => true,
+            // `Stalled` joins the blocked pair: the turn is already lost to
+            // the failure, so `--resume` destroys nothing, and the nudge is
+            // what gets the agent moving again (#1782).
+            Some(AgentState::LimitReached | AgentState::AwaitingReset | AgentState::Stalled) => {
+                true
+            }
             Some(AgentState::Idle | AgentState::Done) => false,
             state => {
                 let what = match state {

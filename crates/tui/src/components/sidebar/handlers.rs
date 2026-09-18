@@ -544,12 +544,38 @@ impl Sidebar {
                         crate::util::notice_slug(&workspace.name)
                     ));
                 }
-                // Only a change in asking-ness or rate-limited-ness can
-                // change the visible set (both feed their own attention
-                // axis); a done- or working-only change reads fresh at
-                // render time, and the daemon-event path forces the redraw
-                // via `displays_agent_state`.
-                if change.asking_changed || change.limit_changed {
+                // An agent that stopped because something broke (#1782).
+                // Alerts unconditionally — unlike the limit above there is
+                // no policy that handles it, and the whole cost of the bug
+                // is the hours between the failure and someone noticing.
+                if change.now_stalled
+                    && let Some(workspace) = self.workspaces.get(session_key)
+                {
+                    if self.attention.desktop_notify {
+                        let title = format!("lazybox — {} stopped on an error", workspace.name);
+                        let body = workspace
+                            .primary_task()
+                            .map(|t| t.title.clone())
+                            .unwrap_or_else(|| workspace.name.clone());
+                        self.pending_notifications.push(PendingNotification {
+                            title,
+                            body,
+                            workspace_key: session_key.clone(),
+                            name: workspace.name.clone(),
+                            kind: NotificationKind::Stalled,
+                        });
+                    }
+                    self.pending_asking_notices.push(format!(
+                        "{} stopped on an error — Shift-L to jump, Shift-K to resume all",
+                        crate::util::notice_slug(&workspace.name)
+                    ));
+                }
+                // Only a change in asking-ness, rate-limited-ness or
+                // stalled-ness can change the visible set (each feeds its
+                // own attention axis); a done- or working-only change reads
+                // fresh at render time, and the daemon-event path forces the
+                // redraw via `displays_agent_state`.
+                if change.asking_changed || change.limit_changed || change.stall_changed {
                     self.recompute_visible();
                 }
             }
@@ -791,15 +817,33 @@ impl Sidebar {
     }
 }
 
-fn aggregate_agent_state(
+pub(super) fn aggregate_agent_state(
     states: impl Iterator<Item = lazybox_ipc::AgentState>,
 ) -> Option<lazybox_ipc::AgentState> {
-    states.max_by_key(|state| match state {
+    states.max_by_key(|state| agent_state_rank(*state))
+}
+
+/// The per-terminal priority [`aggregate_agent_state`] folds a workspace's
+/// terminals with. **Every variant must map to a DISTINCT rank**:
+/// `max_by_key` returns the LAST maximum on a tie and the caller iterates a
+/// `HashMap`, so two states sharing a rank make the projected state — and
+/// therefore the row glyph — depend on hash order. That is not merely a
+/// flicker: each flip writes a different value into `self.agents`, so
+/// `state_change` reports a rising edge for a state that never changed and
+/// re-fires its desktop notification. `agent_state_ranks_are_distinct`
+/// fails the build on a collision.
+pub(super) fn agent_state_rank(state: lazybox_ipc::AgentState) -> u8 {
+    match state {
         // A usage-limit block outranks even `InputNeeded`: it's the most
         // urgent "you must act (externally) before this agent moves" state
         // across a workspace's terminals (#847).
-        lazybox_ipc::AgentState::CreditExhausted => 8,
-        lazybox_ipc::AgentState::LimitReached => 7,
+        lazybox_ipc::AgentState::CreditExhausted => 9,
+        lazybox_ipc::AgentState::LimitReached => 8,
+        // Stopped on an infrastructure failure (#1782): the workspace is
+        // stopped and only an external act moves it, so it sits with the
+        // limit block — just below it, since a dead credential is the more
+        // specific diagnosis when one workspace reports both.
+        lazybox_ipc::AgentState::Stalled => 7,
         lazybox_ipc::AgentState::InputNeeded => 6,
         lazybox_ipc::AgentState::Working => 5,
         // The calm auto-waiting block: notable enough to surface over a
@@ -810,7 +854,7 @@ fn aggregate_agent_state(
         lazybox_ipc::AgentState::Done => 3,
         lazybox_ipc::AgentState::Exited { .. } => 2,
         lazybox_ipc::AgentState::Idle => 1,
-    })
+    }
 }
 
 /// Build the desktop notification for a newly-risen attention signal,

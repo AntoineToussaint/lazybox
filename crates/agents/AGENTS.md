@@ -28,6 +28,18 @@ in only one of the two disagrees with itself.
 Treat a detection change as behaviour, not heuristics tuning: it needs a
 regression test over the real byte stream that fooled it.
 
+A **sticky** state has a second half that is easy to miss: add it to
+`is_blocked` in `state_machine.rs`, or the end-of-turn settle rule rewrites a
+clear reading arriving from `Working` straight back to `Done`. That is what
+made `Stalled` (#1782) necessary in the first place — `Done` meant both
+"finished the task" and "gave up after a 502", so a turn that died on a
+gateway failure rendered exactly like one that succeeded.
+
+Anchor a new screen marker on a machine-rendered result cell — line-leading,
+after the agent's own cell glyph (Claude `⏺`, Codex `■`), outside any markdown
+fence. Agents here routinely print, diff and quote error strings, so a bare
+substring table has them classifying each other as broken.
+
 ## Model tiers
 
 Tiers are declared per agent under `agents.<id>.models` in YAML — an ordered

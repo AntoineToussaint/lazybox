@@ -47,13 +47,27 @@ use AgentState::{Done, Idle, InputNeeded, Working};
 const EXITED: AgentState = AgentState::Exited { code: Some(0) };
 
 /// Every state a terminal's cache can hold.
-const STATES: [AgentState; 5] = [Working, InputNeeded, Idle, Done, EXITED];
+const STATES: [AgentState; 6] = [
+    Working,
+    InputNeeded,
+    Idle,
+    Done,
+    EXITED,
+    AgentState::Stalled,
+];
 
 /// The states a PTY *reading* can carry. A detector reports Working /
 /// InputNeeded / Idle, and the quiet timer surfaces a bare `Done`; a
 /// reading never carries `Exited` (that is teardown-only, committed
 /// through `transition` directly).
-const READING_STATES: [AgentState; 4] = [Working, InputNeeded, Idle, Done];
+const READING_STATES: [AgentState; 5] = [
+    Working,
+    InputNeeded,
+    Idle,
+    Done,
+    // The classifier reports it off the screen like any other reading.
+    AgentState::Stalled,
+];
 
 const FRESH: Duration = Duration::from_secs(1);
 const STALE: Duration = HOOK_STALENESS; // exactly at the threshold counts as stale
@@ -126,13 +140,14 @@ fn reading(
 
 /// The current-state axis for single-step enumeration: every cache value,
 /// plus the never-reported `None`.
-const CURRENTS: [Option<AgentState>; 6] = [
+const CURRENTS: [Option<AgentState>; 7] = [
     None,
     Some(Working),
     Some(InputNeeded),
     Some(Idle),
     Some(Done),
     Some(EXITED),
+    Some(AgentState::Stalled),
 ];
 
 const LIVENESSES: [Liveness; 4] = [
@@ -189,7 +204,10 @@ fn every_single_pty_fold_is_a_legal_move() {
         }
     }
     // Guard against the loop silently collapsing to nothing.
-    assert_eq!(folds, 6 * 4 * 2 * 2 * 4 * 2 * 3 * 2 * 2);
+    assert_eq!(
+        folds,
+        (CURRENTS.len() * READING_STATES.len()) as u64 * 2 * 2 * 4 * 2 * 3 * 2 * 2,
+    );
 }
 
 /// **Exhaustive check of the direct `transition` table.**

@@ -191,6 +191,11 @@ pub fn agent_state_doc(state: &AgentState) -> MarkerDoc {
             "The provider account is out of credit and the agent is waiting for recovery.",
             "Shows until Wait for credit and the continuation prompt both succeed.",
         ),
+        AgentState::Stalled => doc(
+            "↯ Stalled",
+            "The agent stopped because something broke — a 502 from the provider, a refused connection to its inference gateway, a failed background command — not because it finished. Usually transient: resume it with the resume-stopped-agents key, or restart it if its credentials went stale.",
+            "Shows once a turn ended on an infrastructure error instead of a result.",
+        ),
         AgentState::AwaitingReset => doc(
             "☾ AwaitingReset",
             "The agent hit its usage limit and lazybox auto-pressed Wait — it's now parked, sleeping until the limit resets, then picks the work back up on its own. Nothing for you to do.",

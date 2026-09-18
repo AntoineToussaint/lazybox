@@ -856,8 +856,8 @@ impl Sidebar {
     /// Move the cursor onto the next workspace whose agent is blocked on
     /// a usage / rate limit, wrapping around. Returns true when a target
     /// was found. Backs the `Shift-L` global key (#847).
-    pub fn focus_next_limit_reached_workspace(&mut self) -> bool {
-        self.inner.focus_next_limit_reached_workspace()
+    pub fn focus_next_stopped_workspace(&mut self) -> bool {
+        self.inner.focus_next_stopped_workspace()
     }
 
     /// Move the cursor onto the next workspace with unread activity,
@@ -889,14 +889,19 @@ impl Sidebar {
         self.inner.running_terminal_ids()
     }
 
-    /// See `Sidebar::limited_terminals`.
-    pub fn limited_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
-        self.inner.limited_terminals()
+    /// See `Sidebar::recoverable_terminals`.
+    pub fn recoverable_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.recoverable_terminals()
     }
 
     /// See `Sidebar::awaiting_reset_terminals`.
     pub fn awaiting_reset_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
         self.inner.awaiting_reset_terminals()
+    }
+
+    /// See `Sidebar::stalled_workspace_count`.
+    pub fn stalled_workspace_count(&self) -> usize {
+        self.inner.stalled_workspace_count()
     }
 
     /// See `Sidebar::limit_reached_workspace_count`.

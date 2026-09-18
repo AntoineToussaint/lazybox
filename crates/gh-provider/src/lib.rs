@@ -91,14 +91,14 @@ pub fn credential_chain(host: Option<&str>) -> CredentialChain {
 /// It holds a single provider: the GitHub App installation token
 /// ([`InstallationTokenProvider`]). Agent sessions, mutations and the setup
 /// wizard keep resolving [`credential_chain`], so the poller's budget is not
-/// something an agent can spend — which is the whole point. When no App is
-/// registered the provider declines and the caller falls back to the user
-/// chain, leaving the single-token behaviour exactly as it was.
+/// something an agent can spend — which is the whole point. Callers with no
+/// App registered never build this chain; they use [`credential_chain`]
+/// directly, leaving the single-token behaviour exactly as it was.
 ///
 /// Kept separate from [`credential_chain`] rather than prepended to it: a
 /// combined chain would hand the installation token to every consumer,
 /// re-attributing the user's comments and merges to the App.
-pub fn poller_credential_chain(app: Option<AppCredentials>, host: Option<&str>) -> CredentialChain {
+pub fn poller_credential_chain(app: AppCredentials, host: Option<&str>) -> CredentialChain {
     CredentialChain::new().with(InstallationTokenProvider::new(app, host))
 }
 
@@ -183,8 +183,13 @@ mod tests {
     /// both consumers back on one budget.
     #[test]
     fn only_the_poller_chain_carries_the_installation_provider() {
+        let app = AppCredentials {
+            app_id: 42,
+            private_key_pem: "pem".into(),
+            installation_id: Some(7),
+        };
         assert_eq!(
-            poller_credential_chain(None, None).provider_names(),
+            poller_credential_chain(app, None).provider_names(),
             vec!["github-app"],
         );
         assert!(

@@ -1547,12 +1547,13 @@ pub struct TickState {
     /// stall sets in rather than every tick. Cleared when a sweep is
     /// admitted (or isn't due), re-arming the notice for a later re-stall.
     pub(crate) discovery_behind_notified: bool,
-    /// Memoized GitHub App installation coverage (#1802) — which repos the
-    /// installation token can actually reach — with the instant it was
-    /// fetched. Re-listing it every tick would spend a request a minute on
-    /// an answer that only changes when someone edits the installation, so
-    /// it is refreshed on [`sources::APP_COVERAGE_TTL`].
-    pub(crate) gh_app_coverage: Option<(std::time::Instant, lazybox_gh::InstallationCoverage)>,
+    /// The last GitHub App installation coverage answer (#1802) — which
+    /// repos the installation token can actually reach. Re-established every
+    /// tick rather than trusted for a while: the verdict decides whether a
+    /// sweep may retire rows, and a stale "covered" answer retires rows for
+    /// a repo that has since left the installation. Held only so an
+    /// unchanged installation can skip re-walking its repository list.
+    pub(crate) gh_app_coverage: Option<lazybox_gh::InstallationCoverage>,
     /// Why the App installation could not carry the sweep, as last reported
     /// to the user. Held so the "polling on your personal token" notice
     /// fires when the gap appears or its reason changes — never every tick,

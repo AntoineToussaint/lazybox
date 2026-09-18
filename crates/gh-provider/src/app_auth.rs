@@ -155,6 +155,12 @@ pub struct InstallationCoverage {
     /// Lowercased `owner/repo` for each repository the installation reaches.
     /// Empty and meaningless when `all_repositories` is set.
     pub repositories: BTreeSet<String>,
+    /// The installation record's `updated_at`, which GitHub bumps whenever
+    /// the installation changes — including when a repository is added to
+    /// or removed from it. [`fetch_coverage`] re-walks the repository list
+    /// only when this moves, so freshness costs one request rather than a
+    /// pagination walk per poll tick.
+    pub updated_at: Option<String>,
 }
 
 impl InstallationCoverage {
@@ -191,19 +197,20 @@ impl InstallationCoverage {
 
 /// Resolves a GitHub App installation token through the credential chain.
 ///
-/// Declines with [`CredentialError::NotFound`] when no App is registered, so
-/// a chain containing it falls through to the user providers untouched. A
-/// registered-but-broken App (bad key, revoked installation) is a
+/// Constructed only with a registration the caller has already resolved —
+/// "no App configured" is answered before a chain is built, not by a
+/// provider that declines. A registered-but-broken App (bad key, revoked
+/// installation, several installations and no id) is a
 /// [`CredentialError::Provider`] failure, which the chain surfaces rather
-/// than masking — an App that has stopped working must not read as one that
+/// than masking: an App that has stopped working must not read as one that
 /// was never configured.
 pub struct InstallationTokenProvider {
-    app: Option<AppCredentials>,
+    app: AppCredentials,
     host: Option<String>,
 }
 
 impl InstallationTokenProvider {
-    pub fn new(app: Option<AppCredentials>, host: Option<&str>) -> Self {
+    pub fn new(app: AppCredentials, host: Option<&str>) -> Self {
         Self {
             app,
             host: host.map(str::to_string),
@@ -217,9 +224,7 @@ impl CredentialProvider for InstallationTokenProvider {
     }
 
     async fn resolve(&self, _scope: &str) -> Result<Credential, CredentialError> {
-        let Some(app) = &self.app else {
-            return Err(CredentialError::NotFound("no GitHub App registered".into()));
-        };
+        let app = &self.app;
         let handle = installation_handle(app, self.host.as_deref()).await?;
         let token = handle
             .installation
@@ -239,15 +244,25 @@ impl CredentialProvider for InstallationTokenProvider {
 }
 
 /// Fetch which repositories `app`'s installation reaches.
+///
+/// Always re-reads the installation record, because the caller uses the
+/// answer to decide whether a sweep may *retire* rows — acting on a stale
+/// "covered" verdict deletes rows for a repository that has since left the
+/// installation. `previous` is the last answer: when GitHub reports the same
+/// `updated_at`, the enumerated repository list is reused instead of walked
+/// again, so the freshness guarantee costs one request per call rather than
+/// a pagination pass.
 pub async fn fetch_coverage(
     app: &AppCredentials,
     host: Option<&str>,
+    previous: Option<&InstallationCoverage>,
 ) -> Result<InstallationCoverage, CredentialError> {
     let handle = installation_handle(app, host).await?;
 
-    // `/app/installations/{id}` is the authoritative answer for the account
-    // and the selection mode; the repository list alone cannot name the
-    // account of an installation that happens to hold no repositories.
+    // `/app/installations/{id}` is the authoritative answer for the account,
+    // the selection mode and the change stamp; the repository list alone
+    // cannot name the account of an installation that happens to hold no
+    // repositories.
     let installation = handle
         .app
         .apps()
@@ -259,6 +274,7 @@ pub async fn fetch_coverage(
         .repository_selection
         .as_deref()
         .is_some_and(|s| s.eq_ignore_ascii_case("all"));
+    let updated_at = installation.updated_at.map(|at| at.to_rfc3339());
 
     if all_repositories {
         return Ok(InstallationCoverage {
@@ -266,6 +282,24 @@ pub async fn fetch_coverage(
             account,
             all_repositories: true,
             repositories: BTreeSet::new(),
+            updated_at,
+        });
+    }
+
+    // An unchanged stamp means the installation's repository selection has
+    // not moved, so the list we already hold is still exact.
+    if let Some(prev) = previous
+        && !prev.all_repositories
+        && prev.installation_id == handle.installation_id
+        && prev.updated_at.is_some()
+        && prev.updated_at == updated_at
+    {
+        return Ok(InstallationCoverage {
+            installation_id: handle.installation_id,
+            account,
+            all_repositories: false,
+            repositories: prev.repositories.clone(),
+            updated_at,
         });
     }
 
@@ -319,6 +353,7 @@ pub async fn fetch_coverage(
         account,
         all_repositories,
         repositories,
+        updated_at,
     })
 }
 
@@ -439,6 +474,7 @@ mod tests {
             account: "acme".into(),
             all_repositories: all,
             repositories: repos.iter().map(|r| r.to_string()).collect(),
+            updated_at: None,
         }
     }
 
@@ -539,25 +575,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unregistered_app_declines_as_absence() {
-        let provider = InstallationTokenProvider::new(None, None);
-        assert!(matches!(
-            provider.resolve("github-app").await,
-            Err(CredentialError::NotFound(_))
-        ));
-    }
-
-    #[tokio::test]
     async fn a_malformed_private_key_is_a_failure_not_an_absence() {
         // A registered App that cannot sign must NOT read as "no App
         // configured" — the chain would silently fall through and the
         // budget separation would be gone with nothing said about it.
         let provider = InstallationTokenProvider::new(
-            Some(AppCredentials {
+            AppCredentials {
                 app_id: 42,
                 private_key_pem: "not a pem".into(),
                 installation_id: Some(7),
-            }),
+            },
             None,
         );
         match provider.resolve("github-app").await {

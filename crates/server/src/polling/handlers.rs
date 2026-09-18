@@ -3579,9 +3579,8 @@ pub async fn prefetch_top_pr_details(
     const PREFETCH_CONCURRENCY: usize = 3;
 
     // Reuse the persistent GhClient cache. If absent (linear-only
-    // setup, or auth failed earlier), prefetch is a no-op. This is
-    // background poll work, so it rides the polling budget.
-    let Some(client) = config.poll.polling_gh_client() else {
+    // setup, or auth failed earlier), prefetch is a no-op.
+    let Some(client) = config.poll.cached_gh_client() else {
         return;
     };
 

@@ -125,7 +125,11 @@ make release-gates
 
 step "building the exact release artifact offline"
 make release
-./target/release/lazybox --version | grep -F "$version" >/dev/null \
+target_directory="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.target_directory')"
+[[ -n "$target_directory" && "$target_directory" != "null" ]] \
+	|| die "cargo metadata did not report a target directory"
+release_binary="${target_directory}/release/lazybox"
+"$release_binary" --version | grep -F "$version" >/dev/null \
 	|| die "release binary does not report version $version"
 
 [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] \

@@ -28,3 +28,10 @@ help="$(bash "$SCRIPT" --help)" || fail "help exited non-zero"
 printf '%s\n' "$help" | grep -F -- '--manual-checks-confirmed' >/dev/null \
 	|| fail "help omits the manual-check attestation"
 echo "PASS help documents the manual-check boundary"
+
+grep -F 'target_directory="$(cargo metadata --locked --no-deps --format-version 1' "$SCRIPT" >/dev/null \
+	|| fail "release artifact check does not resolve Cargo's target directory"
+if grep -F './target/release/lazybox' "$SCRIPT" >/dev/null; then
+	fail "release artifact check hardcodes a worktree-local target directory"
+fi
+echo "PASS release artifact follows Cargo target directory"

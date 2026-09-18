@@ -523,10 +523,10 @@ User-defined bodies and overrides are delivered exactly as authored — the
 contract is lazybox's house style for its own built-ins, not a rewrite
 imposed on your file.
 
-The ending takes at most **8 lines**: an opening rule, exactly one status line,
-a one-sentence prose verdict explaining why, and up to five short detail lines
-only when they change what the reader does next. Nothing follows it. Bullets
-are reserved for enumerable findings, not the verdict. The four statuses are:
+The ending takes at most **7 lines**: exactly one status line, a one-sentence
+prose verdict explaining why, and up to five short detail lines only when they
+change what the reader does next. Nothing follows it. Bullets are reserved for
+enumerable findings, not the verdict. The four statuses are:
 
 - 🟢 `DONE`: finished, nothing needed from you.
 - 🔴 `ACTION NEEDED`: you must act; the ending names the exact action. Known blockers take priority.
@@ -540,7 +540,6 @@ are reserved for enumerable findings, not the verdict. The four statuses are:
 For example:
 
 ```text
-────────────────────────────────────────
 🟡 UNSURE
 The fix passes locally, but timing under production load remains unverified.
 wanted  p99 under 200ms on the production workload
@@ -549,42 +548,35 @@ found   unmeasured
 
 ### How the ending looks, and why the contract says so (#1817)
 
-A ten-second summary has to be *scannable*, not merely short — structure
-without presentation still reads as a wall, and bare uppercase text is the
-thing the contract replaced. So the contract also fixes what the ending looks
-like:
+A ten-second summary has to be *scannable*, not merely short — bare uppercase
+text is what it replaced. So the contract also fixes its presentation:
 
-- **A forty-column rule opens it.** It is the reason a closing summary reads
-  as a lazybox artifact rather than as more scrollback. It is counted as one
-  of the eight rather than carved out as chrome: a carve-out would let
-  `catchup` promise six lines and emit seven, and would leave
-  `no_builtin_declares_a_line_budget_above_the_contracts_own` measuring
-  bodies against a cap the ending no longer obeyed. The rule is why the cap
-  moved from seven to eight.
-- **A glyph leads the status line, with its word beside it.** The eye lands
-  on the colour before it reads anything; the word keeps the status greppable
-  and legible where a terminal renders emoji as tofu.
+- **A glyph leads the status line, with its word beside it.** The eye lands on
+  the colour before it reads anything; the word keeps the status greppable and
+  legible where a terminal renders emoji as tofu.
 - **Naturally paired details are aligned key/value** — `wanted`/`found`,
   `before`/`after`, `file`/`line` — every value starting two columns past the
   longest key. Alignment does the work a sentence would otherwise do.
 - **A table only for several comparable items.** One item is never a table.
 
-The shape of those rules follows from one fact: **lazybox does not render
-this.** The agent writes into a PTY and the daemon forwards the bytes, so
-every rule above is a rule about what the *model emits*, and each is picked to
-degrade rather than break.
+All three follow from one fact: **lazybox does not render this.** The agent
+writes into a PTY and the daemon forwards the bytes, so each rule governs what
+the *model emits*, and each is picked to degrade rather than break.
 
 - Colour rides the glyph, never ANSI. A glyph needs no escape sequence,
-  survives copy/paste, and reads identically on the light and dark themes,
-  where a hardcoded bright colour would fight whichever one you chose. Red
-  stays reserved for a real blocker, consistent with the rest of lazybox.
+  survives copy/paste, and reads identically on both themes, where a hardcoded
+  bright colour would fight whichever one you chose. Red stays reserved for a
+  real blocker, as everywhere else in lazybox.
 - Columns are two spaces, never `┌─┐` framing. Agents misalign borders, and a
-  misaligned border looks worse than no table; two-space columns degrade
-  gracefully at any width. A single horizontal rule is the exception — it has
-  nothing to line up with.
-- Width is unknown to the agent, so the contract names a target (under 60
-  columns) and what to drop first (the least decision-changing column) rather
-  than letting a 100-column table wrap into noise in a split pane.
+  misaligned border looks worse than no table.
+- **Nothing has a fixed width**, and that is deliberate. An opening rule of a
+  stated width was tried and removed: the agent cannot see the pane, and the
+  pane can be 16 columns — `SPLIT_MAX` lets a drag-resized sidebar take 80% of
+  an 80-column host — so fixed-width chrome renders as a broken two-row stub
+  exactly where a one-glance summary matters most. No narrower constant fixes
+  it, because the pane has no floor. The glyph at column 0 is the anchor
+  instead; it is one cell wide and cannot wrap. The same reasoning caps table
+  lines at 60 columns and says to drop a column rather than wrap one.
 
 **What the verdict names is per-snippet, not per-category.** Each body ends by
 stating it — `push` names the pushed SHA, `ready` names the resulting draft
@@ -686,10 +678,10 @@ before the change, this was inferred from prose rather than requiring the
 new vocabulary.
 
 **The scored shape is no longer the shipped one.** #1817 replaced the
-`STATUS: UNSURE` prefix with the glyph-led `🟡 UNSURE` and added the opening
-rule, so the literal this replay counted is not what the contract now asks
-for. The structure it measured — one status line, then 2–7 lines to the end —
-is unchanged, but the presentation half has not been replayed.
+`STATUS: UNSURE` prefix with the glyph-led `🟡 UNSURE`, so the literal this
+replay counted is not what the contract now asks for. The structure it
+measured — one status line, then 2–7 lines to the end — is unchanged, but the
+presentation half has not been replayed.
 
 | Agent | Format before → after | Correct disposition before → after | After ending lines (table order) |
 | --- | --- | --- | --- |

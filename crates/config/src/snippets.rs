@@ -128,14 +128,21 @@ const CONTRACT_UNBOUNDED_PREAMBLE: &str = "Explore, use tools, and give full fin
 /// daemon forwards the bytes — so every presentation rule here is a rule
 /// about what the *model* emits, and each one is chosen to degrade rather
 /// than break. A glyph is colour with no escape sequence, identical on
-/// both themes, where ANSI would fight whichever one the reader picked. A
-/// forty-column rule has nothing to line up with, where a `┌─┐` frame has
-/// four corners an agent gets wrong. Two-space columns stay readable at
-/// any width; a 100-column table wraps into noise in a split pane.
+/// both themes, where ANSI would fight whichever one the reader picked.
+/// Two-space columns stay readable at any width; a `┌─┐` frame has four
+/// corners an agent gets wrong, and a misaligned frame reads worse than no
+/// table at all.
+///
+/// Nothing here has a fixed width, and that is deliberate. An opening rule
+/// of a stated width was tried and removed: the agent cannot see the pane,
+/// and the pane can be 16 columns — `SPLIT_MAX` lets a resized sidebar take
+/// 80% of an 80-column host — so any fixed-width chrome renders as a broken
+/// two-row stub exactly where a one-glance summary matters most. The glyph
+/// at column 0 is the anchor instead; it is one cell wide and cannot wrap.
 const CONTRACT_ENDING: &str =
     "Close each snippet, including each step in a next chain, with a ten-second summary:
-a rule, exactly one STATUS line, one prose verdict sentence carrying the reason, and at most
-five short detail lines only if they change what the reader does next. Hard cap: 8 lines total.
+exactly one status line, one prose verdict sentence carrying the reason, and at most five
+short detail lines only if they change what the reader does next. Hard cap: 7 lines total.
 Use bullets only for genuinely enumerable findings, never for the verdict. No fences.
 Choose exactly one status; do not manufacture confidence:
 🟢 DONE — finished, nothing needed from you.
@@ -144,25 +151,20 @@ Choose exactly one status; do not manufacture confidence:
 prose nobody polls, so if you have the lazybox `report_blocker` tool, call it with that same
 question — that is what puts the block on the epic readouts and the `E j` jump.
 🟡 UNSURE — done, but low confidence; name exactly what to verify.
-The ending is read at a glance, so it looks the same every time.
-Open it with a rule on its own line — exactly forty ─ characters, nothing else, and count it
-as one of the eight.
-Lead the STATUS line with its glyph, then the word: the glyph is what the eye lands on, the
+Lead the status line with its glyph, then the word: the glyph is what the eye lands on, the
 word is what survives a terminal that renders emoji poorly. Never emit ANSI escapes — the
 glyph carries the colour and cannot clash with the reader's theme.
 Where a detail line has a natural key — wanted/found, before/after, file/line — write the key,
 then the value, every value starting at the same column two spaces past the longest key.
 Use a table only for several comparable items; one item is never a table. Align it the same
-way, never with box-drawing frames, and keep every line under 60 columns — when it does not
-fit, drop the least decision-changing column rather than wrapping it.
+way, never with box-drawing characters, and keep every line under 60 columns — the pane can be
+narrower still, so when it does not fit, drop the least decision-changing column, never wrap it.
 Example ending:
-────────────────────────────────────────
 🟡 UNSURE
 The fix passes locally, but timing under production load remains unverified.
 wanted  p99 under 200ms on the production workload
 found   unmeasured
-Close with exactly this shape, at most 8 lines, and nothing after it:
-────────────────────────────────────────
+Close with exactly this shape, at most 7 lines, and nothing after it:
 <🟢 DONE | 🔴 ACTION NEEDED | ❓ NEED CONTEXT | 🟡 UNSURE>
 <verdict — one sentence, prose>
 <up to 5 short lines of actionable detail, optional>";
@@ -1679,8 +1681,8 @@ impl Snippets {
                      picture: what you did, what you learned that was surprising, and \
                      what is now different about the plan. Skip the narration of steps \
                      that went as expected; a step that worked is not news. If you are \
-                     blocked or need a decision from me, the STATUS line says so and the \
-                     decision leads the detail, never trails it. STATUS reports this \
+                     blocked or need a decision from me, the status line says so and the \
+                     decision leads the detail, never trails it. The status reports this \
                      catch-up, not the underlying work — DONE means you need nothing \
                      from me, not that the work is finished. Name files and identifiers \
                      concretely rather than describing them. No preamble, no restating \
@@ -2414,8 +2416,8 @@ snippets:
         const SHIPPED: &str = "OUTPUT CONTRACT (final ending only)
 Explore, use tools, and give full findings before this ending without a length or format limit.
 Close each snippet, including each step in a next chain, with a ten-second summary:
-a rule, exactly one STATUS line, one prose verdict sentence carrying the reason, and at most
-five short detail lines only if they change what the reader does next. Hard cap: 8 lines total.
+exactly one status line, one prose verdict sentence carrying the reason, and at most five
+short detail lines only if they change what the reader does next. Hard cap: 7 lines total.
 Use bullets only for genuinely enumerable findings, never for the verdict. No fences.
 Choose exactly one status; do not manufacture confidence:
 🟢 DONE — finished, nothing needed from you.
@@ -2424,25 +2426,20 @@ Choose exactly one status; do not manufacture confidence:
 prose nobody polls, so if you have the lazybox `report_blocker` tool, call it with that same
 question — that is what puts the block on the epic readouts and the `E j` jump.
 🟡 UNSURE — done, but low confidence; name exactly what to verify.
-The ending is read at a glance, so it looks the same every time.
-Open it with a rule on its own line — exactly forty ─ characters, nothing else, and count it
-as one of the eight.
-Lead the STATUS line with its glyph, then the word: the glyph is what the eye lands on, the
+Lead the status line with its glyph, then the word: the glyph is what the eye lands on, the
 word is what survives a terminal that renders emoji poorly. Never emit ANSI escapes — the
 glyph carries the colour and cannot clash with the reader's theme.
 Where a detail line has a natural key — wanted/found, before/after, file/line — write the key,
 then the value, every value starting at the same column two spaces past the longest key.
 Use a table only for several comparable items; one item is never a table. Align it the same
-way, never with box-drawing frames, and keep every line under 60 columns — when it does not
-fit, drop the least decision-changing column rather than wrapping it.
+way, never with box-drawing characters, and keep every line under 60 columns — the pane can be
+narrower still, so when it does not fit, drop the least decision-changing column, never wrap it.
 Example ending:
-────────────────────────────────────────
 🟡 UNSURE
 The fix passes locally, but timing under production load remains unverified.
 wanted  p99 under 200ms on the production workload
 found   unmeasured
-Close with exactly this shape, at most 8 lines, and nothing after it:
-────────────────────────────────────────
+Close with exactly this shape, at most 7 lines, and nothing after it:
 <🟢 DONE | 🔴 ACTION NEEDED | ❓ NEED CONTEXT | 🟡 UNSURE>
 <verdict — one sentence, prose>
 <up to 5 short lines of actionable detail, optional>";
@@ -2473,6 +2470,22 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
     /// and still legible where emoji render as tofu.
     #[test]
     fn every_status_in_the_contract_leads_with_its_glyph() {
+        /// True when `word` at `idx` is the whole word rather than a run
+        /// inside a longer one — `ABANDONED` contains `DONE`, and failing
+        /// on that would be a spurious failure the next editor has to
+        /// decode before learning it was never about a status at all.
+        fn stands_alone(text: &str, idx: usize, word: &str) -> bool {
+            let before = text[..idx].chars().next_back();
+            let after = text[idx + word.len()..].chars().next();
+            !before.is_some_and(char::is_alphabetic) && !after.is_some_and(char::is_alphabetic)
+        }
+
+        // The boundary check earns its keep only if it separates the two
+        // cases: always-true reintroduces the spurious failure, and
+        // always-false skips every real check below.
+        assert!(stands_alone("🟢 DONE — finished", "🟢 ".len(), "DONE"));
+        assert!(!stands_alone("ABANDONED", 4, "DONE"));
+
         for (glyph, word) in STATUS_GLYPHS {
             let led = format!("{glyph} {word}");
             assert!(
@@ -2480,6 +2493,9 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
                 "the contract never spells `{led}`",
             );
             for (idx, _) in CONTRACT_ENDING.match_indices(word) {
+                if !stands_alone(CONTRACT_ENDING, idx, word) {
+                    continue;
+                }
                 assert!(
                     CONTRACT_ENDING[..idx].ends_with(&format!("{glyph} ")),
                     "`{word}` appears at byte {idx} of the contract without its \
@@ -2509,7 +2525,13 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
     /// forbids ANSI outright rather than defining a palette.
     #[test]
     fn the_contract_carries_colour_with_the_glyph_and_never_ansi() {
-        assert!(CONTRACT_ENDING.contains("Never emit ANSI escapes"));
+        // Pinned on the DELIVERED text of both variants, not on
+        // `CONTRACT_ENDING` alone: the #1769 ending-only opt-out withholds
+        // one clause by construction, so "the rule is in the constant" is
+        // not evidence that every snippet is handed it.
+        for delivered in [output_contract(false), output_contract(true)] {
+            assert!(delivered.contains("Never emit ANSI escapes"));
+        }
         for (key, snippet) in Snippets::builtin().all() {
             let delivered = snippet.delivery_body();
             assert!(
@@ -2526,46 +2548,65 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
         }
     }
 
-    /// A rule frames the ending; its columns are spaces, not a box (#1817).
+    /// Nothing the contract asks for has a fixed width (#1817).
     ///
-    /// The rule is the one piece of chrome the ending gets, and it is the
-    /// reason the summary reads as a lazybox artifact rather than more
-    /// scrollback — a fixed forty columns, so every agent's ending opens
-    /// identically. A horizontal rule is the only box-drawing character
-    /// the contract may ask for: it has nothing to line up with, whereas a
-    /// `┌─┐` frame has four corners an agent gets wrong, and a misaligned
-    /// frame reads worse than no table at all. Width is unknown to the
-    /// agent — a 100-column table wraps into noise in a split pane — so
-    /// the contract also names a target and what to drop first.
+    /// An opening rule of a stated width shipped first and was removed:
+    /// the agent cannot see the pane, and the pane can be 16 columns —
+    /// `SPLIT_MAX` lets a drag-resized sidebar take 80% of an 80-column
+    /// host — so a forty-column rule renders as a 16-column row plus a
+    /// 16-column row plus an 8-column stub, exactly where a one-glance
+    /// summary matters most. No narrower constant fixes it either, because
+    /// the pane has no floor; the only safe chrome is none. A run of
+    /// repeated characters is how that mistake comes back, so this catches
+    /// the shape rather than the one width that was tried.
+    ///
+    /// Box-drawing is out for the related reason: agents misalign a `┌─┐`
+    /// frame's four corners, and a misaligned frame reads worse than no
+    /// table at all.
     #[test]
-    fn the_contract_frames_the_ending_with_a_rule_and_never_a_box() {
-        const RULE: &str = "────────────────────────────────────────";
-        assert_eq!(RULE.chars().count(), 40);
-        assert!(CONTRACT_ENDING.contains("exactly forty ─ characters"));
-        assert!(
-            CONTRACT_ENDING.lines().filter(|line| *line == RULE).count() == 2,
-            "the example and the closing shape must each open with the rule, \
-             spelled at its stated width",
-        );
-        // The rule is one of the eight, not chrome carved out of them: a
-        // carve-out let `catchup` promise six lines and emit seven, and
-        // left `no_builtin_declares_a_line_budget_above_the_contracts_own`
-        // reading a cap the ending no longer obeyed.
-        assert!(CONTRACT_ENDING.contains("count it\nas one of the eight"));
-        assert!(CONTRACT_ENDING.contains("Hard cap: 8 lines total."));
+    fn the_contract_asks_for_no_fixed_width_or_box_drawn_chrome() {
+        /// The longest run of one repeated non-space character in `s`.
+        /// A rule, a `====` underline and an `...` ellipsis all show up
+        /// here; ordinary prose does not.
+        fn longest_run(s: &str) -> (usize, char) {
+            let mut best = (0, ' ');
+            let mut run = (0, '\0');
+            for c in s.chars() {
+                run = if c == run.1 { (run.0 + 1, c) } else { (1, c) };
+                if c != ' ' && run.0 > best.0 {
+                    best = run;
+                }
+            }
+            best
+        }
 
-        assert!(CONTRACT_ENDING.contains("never with box-drawing frames"));
-        assert!(CONTRACT_ENDING.contains("one item is never a table"));
-        assert!(CONTRACT_ENDING.contains("under 60 columns"));
-        assert!(CONTRACT_ENDING.contains("drop the least decision-changing column"));
         for (key, snippet) in Snippets::builtin().all() {
+            let delivered = snippet.delivery_body();
+            let (run, c) = longest_run(&delivered);
             assert!(
-                !snippet
-                    .delivery_body()
-                    .contains(['┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '│']),
+                run < 4,
+                "built-in `{key}` asks for {run}× `{c}` in a row — fixed-width chrome \
+                 wraps into a broken stub in a narrow pane, which the agent cannot see",
+            );
+            assert!(
+                !delivered.contains(['┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '│', '─']),
                 "built-in `{key}` shows a box-drawn frame the agent would copy",
             );
         }
+        assert!(CONTRACT_ENDING.contains("never with box-drawing characters"));
+        assert!(CONTRACT_ENDING.contains("one item is never a table"));
+        assert!(CONTRACT_ENDING.contains("under 60 columns"));
+        assert!(CONTRACT_ENDING.contains("drop the least decision-changing column"));
+
+        // The detector earns its keep only if it actually fires on the
+        // chrome that shipped: a `longest_run` that always returned 0 would
+        // pass the loop above vacuously, and the rule would come straight
+        // back. This is the exact line #1817 first delivered.
+        assert_eq!(longest_run(&"\u{2500}".repeat(40)), (40, '\u{2500}'));
+        // …and stays quiet on real content, whose runs are short: the
+        // longest in the shipped example is the `99` of `p99`, which is
+        // why the threshold sits at four rather than two.
+        assert_eq!(longest_run("wanted  p99\nfound   unmeasured"), (2, '9'));
     }
 
     /// The example obeys the rules it teaches (#1817).
@@ -2575,7 +2616,7 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
     /// the opposite of the paragraph above it. Checked structurally rather
     /// than as a string, so re-wording the example keeps the guard.
     #[test]
-    fn the_contracts_example_opens_with_its_rule_and_aligns_its_pairs() {
+    fn the_contracts_example_leads_with_a_glyph_and_aligns_its_pairs() {
         let example: Vec<&str> = CONTRACT_ENDING
             .lines()
             .skip_while(|line| *line != "Example ending:")
@@ -2583,23 +2624,18 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
             .take_while(|line| !line.starts_with("Close with exactly this shape"))
             .collect();
         assert!(
-            (4..=8).contains(&example.len()),
-            "the example must fit the 7-line cap plus its rule: {example:?}",
-        );
-        assert!(
-            example[0].chars().all(|c| c == '─'),
-            "the example must open with the rule: {:?}",
-            example[0],
+            (3..=7).contains(&example.len()),
+            "the example must itself fit the 7-line cap: {example:?}",
         );
         let (glyph, word) = STATUS_GLYPHS
             .iter()
-            .find(|(glyph, _)| example[1].starts_with(*glyph))
-            .unwrap_or_else(|| panic!("example status line `{}` leads with no glyph", example[1]));
-        assert_eq!(example[1], format!("{glyph} {word}"));
+            .find(|(glyph, _)| example[0].starts_with(*glyph))
+            .unwrap_or_else(|| panic!("example status line `{}` leads with no glyph", example[0]));
+        assert_eq!(example[0], format!("{glyph} {word}"));
 
         // Every key/value detail line puts its value in the same column,
         // two past the longest key — the rule the paragraph states.
-        let pairs: Vec<(&str, usize)> = example[3..]
+        let pairs: Vec<(&str, usize)> = example[2..]
             .iter()
             .filter_map(|line| {
                 let gutter = line.find("  ")?;
@@ -2653,7 +2689,7 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
         assert!(!delivered.contains("without a length or format limit"));
         // The rest of the contract still rides: shape, statuses, routing.
         assert!(delivered.contains(CONTRACT_HEADER));
-        assert!(delivered.contains("Hard cap: 8 lines total."));
+        assert!(delivered.contains("Hard cap: 7 lines total."));
         assert!(delivered.contains("`report_blocker`"));
 
         // …and the opt-out is confined to `ENDING_ONLY_BUILTINS`. The rule
@@ -2736,7 +2772,7 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
 
     /// `catchup`'s verdict fact must not re-home the decision (#1767 review).
     ///
-    /// The body pins a needed decision to the STATUS line and the first
+    /// The body pins a needed decision to the status line and the first
     /// detail line; the contract pins the verdict to the close, "nothing
     /// after it". A verdict that also claimed to name the decision asked
     /// for it in both places at once, inside a six-line budget. The
@@ -2756,16 +2792,16 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
         assert!(body.contains("so say so rather than reporting work"));
 
         // The verdict names where things stand — and NOT the decision,
-        // which the body routes to the STATUS line instead.
+        // which the body routes to the status line instead.
         assert!(body.contains("The verdict names where things stand"));
         assert!(
             !body.contains("the decision you need from me, and changes nothing"),
-            "the verdict must not also claim the decision the STATUS line carries",
+            "the verdict must not also claim the decision the status line carries",
         );
-        assert!(body.contains("the STATUS line says so"));
+        assert!(body.contains("the status line says so"));
 
         // `DONE` on a mid-flight session must not read as "work finished".
-        assert!(body.contains("STATUS reports this catch-up, not the underlying work"));
+        assert!(body.contains("The status reports this catch-up, not the underlying work"));
 
         // The lead is not stated twice: with no body before the ending,
         // "Lead with …" and "The verdict names …" were the same line.
@@ -2782,8 +2818,8 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
     /// one key over — "First line: what is TRUE NOW that was not true
     /// before" *and* "The verdict names what is true now that was not true
     /// before", i.e. the same sentence demanded at the top and at the
-    /// bottom of a short capped answer, burning two of its lines on one
-    /// claim.
+    /// bottom of an answer the contract caps at seven lines, burning two of
+    /// them on one claim.
     ///
     /// The fact an ending-only body assigns to its verdict is stated once,
     /// in the verdict, because there is no body before the ending to state
@@ -2894,17 +2930,17 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
 
     /// A body may not promise a longer answer than the contract allows
     /// (#1796). `clarify` shipped "AT MOST 8 lines total" under a contract
-    /// whose own words were "Hard cap: 7 lines total … and nothing after
+    /// whose own words are "Hard cap: 7 lines total … and nothing after
     /// it"; for an ending-only snippet the whole answer *is* that ending,
     /// so the eighth line the body explicitly invited ("CI that is not
-    /// green yet") was a line the contract forbade. On any red-CI PR the
-    /// two instructions could not both be obeyed.
+    /// green yet") is a line the contract forbids. On any red-CI PR the two
+    /// instructions could not both be obeyed.
     ///
     /// The cap is read off the shipped text rather than typed again here,
-    /// which is what let #1817 move it from seven to eight — the opening
-    /// rule is one of the eight, not chrome carved out of them — without
-    /// this guard silently measuring bodies against a number the contract
-    /// had stopped stating.
+    /// so a contract that re-tunes it re-tunes this guard. #1817 briefly
+    /// raised it to eight to carry an opening rule; removing the rule
+    /// returned it to seven without this guard ever measuring bodies
+    /// against a number the contract had stopped stating.
     ///
     /// Quantified over every built-in, not just the ending-only ones: a
     /// body that caps itself at all must be ending-only
@@ -2933,8 +2969,8 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
 
         // The contract's own cap, read off the shipped text rather than
         // typed again, so re-tuning the contract re-tunes this guard.
-        assert!(CONTRACT_ENDING.contains("Hard cap: 8 lines total."));
-        const CONTRACT_CAP: usize = 8;
+        assert!(CONTRACT_ENDING.contains("Hard cap: 7 lines total."));
+        const CONTRACT_CAP: usize = 7;
 
         for (key, snippet) in Snippets::builtin().all() {
             let Some(budget) = declared_line_budget(&snippet.body) else {

@@ -4386,6 +4386,44 @@ mod archived_row_stays_gone_tests {
         );
     }
 
+    /// A row the daemon re-created under the same key carries a fresh
+    /// `created_at`, so it is a different incarnation and must appear at
+    /// once — waiting out the window is not self-healing for every row.
+    /// A local workspace re-created after a delete broadcasts its
+    /// `WorkspaceUpserted` exactly once and is never polled, so swallowing
+    /// that one event would hide the row until the client restarted.
+    #[test]
+    fn a_workspace_re_created_under_the_same_key_appears_immediately() {
+        let workspace = issue_ws("1");
+        let (mut sidebar, key) = sidebar_with(&workspace);
+        sidebar.on_event(&Event::WorkspaceRemoved(workspace.key.clone()));
+
+        let mut recreated = workspace.clone();
+        recreated.created_at = workspace.created_at + chrono::Duration::seconds(1);
+        sidebar.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(recreated)));
+
+        assert!(
+            sidebar.workspace_by_key(&key).is_some(),
+            "a newer incarnation of the key is not the row we removed"
+        );
+    }
+
+    /// ...while the stale copy of the row that WAS removed — same
+    /// `created_at` — is still held, even though it arrives after it.
+    #[test]
+    fn the_same_incarnation_is_still_held_inside_the_window() {
+        let workspace = issue_ws("1");
+        let (mut sidebar, key) = sidebar_with(&workspace);
+        sidebar.on_event(&Event::WorkspaceRemoved(workspace.key.clone()));
+
+        let mut stale = workspace.clone();
+        stale.seen_count += 1;
+        assert_eq!(stale.created_at, workspace.created_at);
+        sidebar.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(stale)));
+
+        assert!(sidebar.workspace_by_key(&key).is_none());
+    }
+
     /// The guard is a window, not a permanent tombstone: a genuinely
     /// re-created row (a non-archiving delete the next poll rediscovers,
     /// or an unarchive) comes back once it lapses.
@@ -4398,7 +4436,11 @@ mod archived_row_stays_gone_tests {
         let aged = Instant::now()
             .checked_sub(REMOVED_WORKSPACE_GRACE + Duration::from_secs(1))
             .expect("monotonic clock older than the grace window");
-        sidebar.recently_removed.insert(key.clone(), aged);
+        sidebar
+            .recently_removed
+            .get_mut(&key)
+            .expect("tombstone recorded")
+            .at = aged;
 
         sidebar.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
             workspace.clone(),

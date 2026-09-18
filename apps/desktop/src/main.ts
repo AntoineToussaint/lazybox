@@ -485,6 +485,9 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   const inputCancel = element<HTMLButtonElement>("input-cancel");
 
   let workspaces = new Map<string, Workspace>();
+  // Keys archived within the last `REMOVED_WORKSPACE_GRACE_MS`, so a poll
+  // reply built before the removal can't put the row back (#1788).
+  const recentlyRemovedWorkspaces = new Map<string, number>();
   let terminals = new Map<number, TerminalRecord>();
   let selectedKey: string | null = null;
   const selectedWorkspaces = new Set<string>(); // Multi-select set for bulk actions
@@ -1328,7 +1331,11 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
       "AgentState" in event;
     if (workspaceChanged) {
       synchronizeSelectedNotes(event);
-      workspaces = applyWorkspaceEvent(workspaces, event);
+      workspaces = applyWorkspaceEvent(
+        workspaces,
+        event,
+        recentlyRemovedWorkspaces,
+      );
       workspaceRevision += 1;
       for (const key of [...markedWorkspaces]) {
         if (!workspaces.has(key)) {
@@ -2262,7 +2269,10 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     button.className = "workspace-row";
     button.dataset.key = workspace.key;
     button.classList.toggle("selected", workspace.key === selectedKey);
-    button.classList.toggle("multi-selected", selectedWorkspaces.has(workspace.key));
+    button.classList.toggle(
+      "multi-selected",
+      selectedWorkspaces.has(workspace.key),
+    );
     button.classList.toggle("marked", markedWorkspaces.has(workspace.key));
     button.type = "button";
     button.setAttribute(
@@ -2336,7 +2346,10 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     if (workspace.auto_merge_on_green) {
       automationPills.push({ label: "AUTO", tone: "success" });
     }
-    if (workspace.policies.auto_fix_ci !== "None" || workspace.policies.auto_fix_conflict !== "None") {
+    if (
+      workspace.policies.auto_fix_ci !== "None" ||
+      workspace.policies.auto_fix_conflict !== "None"
+    ) {
       automationPills.push({ label: "ARM", tone: "attention" });
     }
     if (workspace.track_main) {
@@ -4876,13 +4889,16 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     const affectedList = eligible
       .map((key) => {
         const workspace = workspaces.get(key);
-        return workspace ? `${workspace.name} (${taskReference(primaryTask(workspace))})` : key;
+        return workspace
+          ? `${workspace.name} (${taskReference(primaryTask(workspace))})`
+          : key;
       })
       .join("\n");
 
-    const message = skipped > 0
-      ? `Merge ${eligible.length} of ${targets.length} PRs?\n\nSkipped: ${skipped} (not mergeable or draft)`
-      : `Merge ${eligible.length} PR${eligible.length === 1 ? "" : "s"}?`;
+    const message =
+      skipped > 0
+        ? `Merge ${eligible.length} of ${targets.length} PRs?\n\nSkipped: ${skipped} (not mergeable or draft)`
+        : `Merge ${eligible.length} PR${eligible.length === 1 ? "" : "s"}?`;
 
     const accepted = await confirmUserAction(
       `Merge ${eligible.length} PR${eligible.length === 1 ? "" : "s"}`,
@@ -4937,7 +4953,9 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   /**
    * Perform bulk snooze on selected workspaces.
    */
-  async function performBulkSnooze(preset: (typeof SNOOZE_PRESETS)[number]): Promise<void> {
+  async function performBulkSnooze(
+    preset: (typeof SNOOZE_PRESETS)[number],
+  ): Promise<void> {
     const targets = Array.from(selectedWorkspaces);
     const affectedList = targets
       .map((key) => {
@@ -4958,7 +4976,9 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
       return;
     }
 
-    const commands = targets.map((key) => snoozeCommand(key, preset.until(new Date())));
+    const commands = targets.map((key) =>
+      snoozeCommand(key, preset.until(new Date())),
+    );
     await runCommands(
       commands,
       `Snoozed ${targets.length} workspace${targets.length === 1 ? "" : "s"} for ${preset.label}…`,
@@ -6053,7 +6073,11 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
       editable || document.querySelector("dialog[open]") !== null;
     // Guard single-letter keys with modifiers to prevent accidental actions
     // (e.g., Cmd+A should not spawn an agent).
-    if ((event.metaKey || event.ctrlKey || event.altKey) && event.key.length === 1 && /^[a-z]$/i.test(event.key)) {
+    if (
+      (event.metaKey || event.ctrlKey || event.altKey) &&
+      event.key.length === 1 &&
+      /^[a-z]$/i.test(event.key)
+    ) {
       // Alt+digit is an explicitly-assigned shortcut, so allow it through.
       if (!event.altKey || !/^[1-9]$/.test(event.key)) {
         return;

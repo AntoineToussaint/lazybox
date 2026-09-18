@@ -4,6 +4,7 @@ import {
   InboxConnection,
   ReplyDrafts,
   applyWorkspaceEvent,
+  REMOVED_WORKSPACE_GRACE_MS,
   activityFingerprint,
   broadcastDisposition,
   canReplyToTask,
@@ -383,6 +384,7 @@ describe("workspace model", () => {
   it("replaces the baseline and then applies live upserts and removals", () => {
     const first = workspace("first", task("first"));
     const second = workspace("second", task("second"));
+    const removed = new Map<string, number>();
     let state = applyWorkspaceEvent(
       new Map([["stale", workspace("stale", null)]]),
       {
@@ -392,10 +394,80 @@ describe("workspace model", () => {
           recent_snippets: [],
         },
       },
+      removed,
     );
-    state = applyWorkspaceEvent(state, { WorkspaceUpserted: second });
-    state = applyWorkspaceEvent(state, { WorkspaceRemoved: "first" });
+    state = applyWorkspaceEvent(state, { WorkspaceUpserted: second }, removed);
+    state = applyWorkspaceEvent(state, { WorkspaceRemoved: "first" }, removed);
     expect([...state.keys()]).toEqual(["second"]);
+  });
+
+  // #1788: the daemon's archived-set guard stops it RE-CREATING the row,
+  // but a poll reply or subscription-refresh read that was already in
+  // flight when the archive committed carries the pre-removal copy. The
+  // desktop client has no optimistic removal, so its exposure is the
+  // update that lands behind `WorkspaceRemoved`.
+  it("does not resurrect an archived workspace from an in-flight upsert", () => {
+    const archived = workspace("archived", task("archived"));
+    const removed = new Map<string, number>();
+    let state = applyWorkspaceEvent(
+      new Map([["archived", archived]]),
+      { WorkspaceRemoved: "archived" },
+      removed,
+    );
+    expect([...state.keys()]).toEqual([]);
+
+    state = applyWorkspaceEvent(
+      state,
+      { WorkspaceUpserted: archived },
+      removed,
+    );
+    expect([...state.keys()]).toEqual([]);
+  });
+
+  it("does not let a stale snapshot reintroduce an archived workspace", () => {
+    const archived = workspace("archived", task("archived"));
+    const kept = workspace("kept", task("kept"));
+    const removed = new Map<string, number>();
+    let state = applyWorkspaceEvent(
+      new Map([
+        ["archived", archived],
+        ["kept", kept],
+      ]),
+      { WorkspaceRemoved: "archived" },
+      removed,
+    );
+
+    // A snapshot whose store read began before the delete committed.
+    state = applyWorkspaceEvent(
+      state,
+      {
+        Snapshot: {
+          workspaces: [archived, kept],
+          terminals: [],
+          recent_snippets: [],
+        },
+      },
+      removed,
+    );
+    expect([...state.keys()]).toEqual(["kept"]);
+  });
+
+  it("lets a genuinely re-created workspace back once the window lapses", () => {
+    const gone = workspace("gone", task("gone"));
+    const removed = new Map<string, number>();
+    let state = applyWorkspaceEvent(
+      new Map([["gone", gone]]),
+      { WorkspaceRemoved: "gone" },
+      removed,
+    );
+
+    // Age the tombstone past the grace window, as a non-archiving delete
+    // rediscovered by the next poll (or an unarchive) would.
+    removed.set("gone", Date.now() - REMOVED_WORKSPACE_GRACE_MS - 1);
+
+    state = applyWorkspaceEvent(state, { WorkspaceUpserted: gone }, removed);
+    expect([...state.keys()]).toEqual(["gone"]);
+    expect(removed.size).toBe(0);
   });
 
   it("prefers the newest live terminal over stale exited records", () => {

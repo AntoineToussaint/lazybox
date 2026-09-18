@@ -28968,8 +28968,16 @@ mod optimistic_mutation_tests {
         let mut m = build_model();
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#3");
         let sk: SessionKey = (&ws_key).into();
-        // The copy a poll built before the archive: same row, same key.
-        let stale = Workspace::from_task(pr_task("github:owner/repo#3"), Utc::now());
+        // The copy a poll built before the archive: the SAME row, so it
+        // carries the row's original `created_at` — the daemon preserves
+        // it across every upsert. A fresh one would describe a
+        // re-creation, which is a different event the client must show.
+        let mut stale = Workspace::from_task(pr_task("github:owner/repo#3"), Utc::now());
+        stale.created_at = m
+            .sidebar
+            .workspace_by_key(&sk)
+            .expect("seeded row")
+            .created_at;
         assert_eq!(stale.key, ws_key, "the stale copy must name the same row");
 
         m.dispatch_action_confirmed(
@@ -29007,7 +29015,12 @@ mod optimistic_mutation_tests {
         let mut m = build_model();
         let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#77");
         let sk: SessionKey = (&ws_key).into();
-        let stale = Workspace::from_task(pr_task("github:owner/repo#77"), Utc::now());
+        let mut stale = Workspace::from_task(pr_task("github:owner/repo#77"), Utc::now());
+        stale.created_at = m
+            .sidebar
+            .workspace_by_key(&sk)
+            .expect("seeded row")
+            .created_at;
         assert_eq!(stale.key, ws_key);
 
         m.dispatch_action_confirmed(

@@ -603,20 +603,57 @@ export function resolveDesktopShortcut(
   return shortcuts[event.key] ?? null;
 }
 
+/**
+ * How long a removed workspace key stays untouchable by an incoming
+ * `WorkspaceUpserted` / `Snapshot`, in milliseconds.
+ *
+ * A poll reply or subscription-refresh read that was already in flight
+ * when the row was archived carries its pre-removal copy, and delivering
+ * it after `WorkspaceRemoved` puts the row back — silently undoing a
+ * destructive action the user confirmed (#1788). The window sits an order
+ * of magnitude above the round trip and an order of magnitude below the
+ * 60s poll cadence, so a genuinely re-created row (a non-archiving delete
+ * the next poll rediscovers, or an unarchive) still lands on the
+ * following tick. Mirrors the TUI's `REMOVED_WORKSPACE_GRACE`.
+ */
+export const REMOVED_WORKSPACE_GRACE_MS = 5_000;
+
+/**
+ * Fold a daemon event into the workspace map.
+ *
+ * `recentlyRemoved` is the caller-owned tombstone map (key → removal
+ * timestamp) that keeps a just-archived row from being re-inserted by an
+ * update built before the removal and delivered after it. It is a
+ * required parameter rather than an optional one on purpose: defaulting
+ * it would let a call site silently opt out of the guard.
+ */
 export function applyWorkspaceEvent(
   workspaces: Map<string, Workspace>,
   event: LazyboxEvent,
+  recentlyRemoved: Map<string, number>,
 ): Map<string, Workspace> {
+  const now = Date.now();
+  for (const [key, at] of [...recentlyRemoved]) {
+    if (now - at >= REMOVED_WORKSPACE_GRACE_MS) {
+      recentlyRemoved.delete(key);
+    }
+  }
   const next = new Map(workspaces);
   if ("Snapshot" in event) {
     next.clear();
     for (const workspace of event.Snapshot.workspaces) {
+      if (recentlyRemoved.has(workspace.key)) {
+        continue;
+      }
       next.set(workspace.key, workspace);
     }
   } else if ("WorkspaceUpserted" in event) {
-    next.set(event.WorkspaceUpserted.key, event.WorkspaceUpserted);
+    if (!recentlyRemoved.has(event.WorkspaceUpserted.key)) {
+      next.set(event.WorkspaceUpserted.key, event.WorkspaceUpserted);
+    }
   } else if ("WorkspaceRemoved" in event) {
     next.delete(event.WorkspaceRemoved);
+    recentlyRemoved.set(event.WorkspaceRemoved, now);
   }
   return next;
 }

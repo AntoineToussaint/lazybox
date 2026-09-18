@@ -76,6 +76,10 @@ export default defineConfig({
               slug: 'docs/how-to/orchestrate-multiple-agents',
             },
             {
+              label: 'Run a cross-repo epic',
+              slug: 'docs/how-to/run-cross-repo-epic',
+            },
+            {
               label: 'Manage automation policies',
               slug: 'docs/how-to/manage-automation-policies',
             },

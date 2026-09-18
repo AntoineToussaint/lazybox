@@ -197,7 +197,7 @@ names say *when* to do the work but decide *what runs it*, so they are
 deprecated in favour of `model:*` — a `high` label changes nothing about
 ordering or pickup, which is the opposite of what it reads like.
 
-They still work. Each routes through the target agent's `models.priority`
+They still work. Each routes through the target agent's `models.capability`
 table, which for Claude maps `best` → Fable (`XL`), `high` → Opus (`L`),
 `medium` → Sonnet (`M`), `low` → Haiku (`S`). A spawn that resolves through
 one logs a deprecation naming the `model:` label that replaces it. Other
@@ -207,7 +207,7 @@ agents can remap them:
 agents:
   codex:
     models:
-      priority:
+      capability:
         low: S
         medium: M
         high: L

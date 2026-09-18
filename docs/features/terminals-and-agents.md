@@ -688,7 +688,7 @@ before any multi-user or remote exposure (design doc §7b).
 (`workspace/mod.rs` `set_role`, `spawn_handler.rs` injection, `mcp.rs`
 `spawn_worker`, `gh-provider` `sync_role_label_target`), `tui`
 (`E r` picker + sidebar badge)
-**Config / flags:** `agents.max_epic_workers` (default 6) caps a Coordinator's
+**Config / flags:** `agent.max_epic_workers` (default 6) caps a Coordinator's
 `spawn_worker` fan-out
 **Key bindings:** `E r` set/clear the cursor workspace's role · `E p` spawn a
 Planner · `E c` spawn a Coordinator

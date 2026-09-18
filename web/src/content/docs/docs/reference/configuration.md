@@ -110,6 +110,8 @@ agent:
   # Point every spawned agent at your own LLM gateway (injected as
   # ANTHROPIC_BASE_URL / OPENAI_BASE_URL depending on the agent).
   llm_gateway_url: "http://gateway.internal"
+  # Hard per-epic cap for Coordinator spawn_worker calls; 0 disables them.
+  max_epic_workers: 6
 
 # ── agents (per-agent overrides) ─────────────────────────────────────
 # Model-tier menu the `w S`/`w M`/`w L` and `a S`/`a M`/`a L` chords and
@@ -309,6 +311,7 @@ hand.
 | `quiet_classify_secs` | int | `5` | Quiet-timer window: seconds of PTY silence before a `Working` turn settles to `Done`. Cannot be disabled (`0` falls back to 5); raise it to be less eager to call a turn finished. |
 | `metering_proxy` | bool | `false` | Route every spawned agent's LLM traffic through lazybox's local metering proxy — the real data source behind the header's usage summary. The proxy forwards each request to the true upstream (or `llm_gateway_url` when set) and reads token counts off the response, so both Claude and Codex (and interactive terminal sessions) report real per-provider quota. Opt-in: it inserts a loopback hop in front of every agent API call. |
 | `max_live_agents` | int | `32` | Advisory ceiling on concurrently live agent terminals across all workspaces. Over the cap, spawns and startup recovery **warn** (a footer notice naming `]]x`) but are never refused — lazybox advises, it does not forbid. `0` disables the warnings. |
+| `max_epic_workers` | int | `6` | Hard per-epic ceiling on Worker sessions a Coordinator may create through `spawn_worker`. Unlike `max_live_agents`, the tool refuses over the cap. `0` disables Coordinator worker spawning. |
 | `nice` | int | `10` | Scheduling niceness for spawned agent processes and their children, so a large fleet yields under contention and never starves the interactive UI (liveness over throughput). `0` disables (agents run at normal priority). Clamped to `0..=20`. |
 | `strict_mcp` | bool | `false` | Launch unattended (skip-permissions) Claude spawns with `--strict-mcp-config`, disabling every ambient MCP server you configured. Default `false`: autonomous agents inherit your normal MCP setup. Read-only reviewer spawns stay strict regardless. |
 | `reap_closed_after` | duration | `48h` | How long after a workspace's PR/issue merges or closes its persistent sessions may keep running before the daemon reaps them (an idle agent is a ~110 MB memory ratchet). Reaped sessions stop being restored at startup; `w w` respawns one fresh and prompt history persists. `0s` disables reaping entirely. |
@@ -335,7 +338,7 @@ other agents have no built-in menu.
 | `asking_patterns` | list of string | `[]` | Output markers that classify the custom agent as **Input Needed** |
 | `models.default` | string | unset | Alias of the tier a bare spawn uses; unset → the agent's own default model |
 | `models.tiers` | list | `[]` | Ordered tier menu. Each entry: `alias` (the chord key — a single uppercase letter binds as `Shift`, e.g. `S` → `w S`), `label` (shown in the popup and the `◆` tab badge), `args` (appended to the spawn argv) |
-| `models.priority` | map | `{}` | Deprecated `best` / `high` / `medium` / `low` task keys → tier alias, used when a spawn declares no explicit tier and the task carries one of them. The current spelling, a `model:<tier>` label, names a `models.tiers` entry directly and needs no map |
+| `models.capability` | map | `{}` | `best` / `high` / `medium` / `low` capability labels → tier alias, used when a spawn declares no explicit tier. The deprecated `models.priority` spelling still parses and is rewritten on save. A `model:<tier>` label names a `models.tiers` entry directly and needs no map |
 | `auto_update` | bool | `false` | Let lazybox apply this agent's CLI updates automatically when the scheduled out-of-band check finds a newer version. Off by default: the check still runs and surfaces "update available", but installing waits for the manual "update agent CLIs" action. |
 
 ## `worktree`

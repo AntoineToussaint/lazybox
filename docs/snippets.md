@@ -502,89 +502,27 @@ they do too:
   glance in the preview pane.
 
 Every built-in is **delivered** with the same output contract. It is appended
-by `Snippet::delivery_body()` at the moment the snippet is sent — it is not
-part of the authored `body`, and that distinction is load-bearing rather than
-cosmetic. The contract closes the turn ("nothing after it"), which is only
-true where the snippet *is* the turn: `]]s`, `]]n`, `Shift-B` broadcast, and
-the `send_snippet` MCP tool. Three surfaces embed or display a body where that
-claim would be false, and they carry the authored text alone:
+by `Snippet::delivery_body()` when the snippet is sent; exported skills, role
+preambles, and catalog previews carry only the authored body because they are
+not terminal turns. User-defined bodies and overrides are also delivered
+exactly as authored.
 
-- **An exported `SKILL.md`** (#1672). A skill can be invoked by the model
-  *mid-task* (see [snippets-vs-skills.md](snippets-vs-skills.md)), so a
-  turn-ending trailer would truncate whatever turn it was invoked from.
-- **The Planner role preamble** (#1523), which folds the `carve` and
-  `designissues` briefs in *ahead of* the real work prompt.
-- **The `]` catalog browser and the picker preview**, which render bodies to
-  be read, not sent; repeating one constant 61 times buries what differs.
+The contract governs the handoff, not its visual shape. It asks for the
+concrete outcome first, preserves the evidence and named blockers that support
+it, and names who must do what when action remains. A question that needs a
+human answer is also sent through `report_blocker` when that tool is available.
 
-It constrains only the ending: exploration, tool use, and detailed findings
-before it remain unrestricted. Each `next:` step gets its own ending.
-User-defined bodies and overrides are delivered exactly as authored — the
-contract is lazybox's house style for its own built-ins, not a rewrite
-imposed on your file.
+The contract explicitly forbids a second summary, status banners, glyphs,
+dividers, aligned key/value projection, runtime footers, and arbitrary line
+caps. Those rules were tried and rejected after they turned specific findings
+into generic labels and discarded the evidence a reviewer needed. The agent
+stops when the direct handoff is complete; it does not append a presentation
+template to an answer that already said the useful thing.
 
-The ending takes at most **7 lines**: exactly one status line, a one-sentence
-prose verdict explaining why, and up to five short detail lines only when they
-change what the reader does next. Nothing follows it. Bullets are reserved for
-enumerable findings, not the verdict. The four statuses are:
-
-- 🟢 `DONE`: finished, nothing needed from you.
-- 🔴 `ACTION NEEDED`: you must act; the ending names the exact action. Known blockers take priority.
-- ❓ `NEED CONTEXT`: blocked on information only you have; asks one question. A
-  status line is prose nobody polls, so the contract also asks the agent to
-  call `report_blocker` when it has that tool — that is what surfaces the
-  block on `epic_status` and the `E j` jump instead of leaving it in
-  scrollback.
-- 🟡 `UNSURE`: finished with low confidence; names what to verify.
-
-For example:
-
-```text
-🟡 UNSURE
-The fix passes locally, but timing under production load remains unverified.
-wanted  p99 under 200ms on the production workload
-found   unmeasured
-```
-
-### How the ending looks, and why the contract says so (#1817)
-
-A ten-second summary has to be *scannable*, not merely short — bare uppercase
-text is what it replaced. So the contract also fixes its presentation:
-
-- **A glyph leads the status line, with its word beside it.** The eye lands on
-  the colour before it reads anything; the word keeps the status greppable and
-  legible where a terminal renders emoji as tofu.
-- **Naturally paired details are aligned key/value** — `wanted`/`found`,
-  `before`/`after`, `file`/`line` — every value starting two columns past the
-  longest key. Alignment does the work a sentence would otherwise do.
-- **A table only for several comparable items.** One item is never a table.
-
-All three follow from one fact: **lazybox does not render this.** The agent
-writes into a PTY and the daemon forwards the bytes, so each rule governs what
-the *model emits*, and each is picked to degrade rather than break.
-
-- Colour rides the glyph, never ANSI. A glyph needs no escape sequence,
-  survives copy/paste, and reads identically on both themes, where a hardcoded
-  bright colour would fight whichever one you chose. Red stays reserved for a
-  real blocker, as everywhere else in lazybox.
-- Columns are two spaces, never `┌─┐` framing. Agents misalign borders, and a
-  misaligned border looks worse than no table.
-- **Nothing has a fixed width**, and that is deliberate. An opening rule of a
-  stated width was tried and removed: the agent cannot see the pane, and the
-  pane can be 16 columns — `SPLIT_MAX` lets a drag-resized sidebar take 80% of
-  an 80-column host — so fixed-width chrome renders as a broken two-row stub
-  exactly where a one-glance summary matters most. No narrower constant fixes
-  it, because the pane has no floor. The glyph at column 0 is the anchor
-  instead; it is one cell wide and cannot wrap. The same reasoning caps table
-  lines at 60 columns and says to drop a column rather than wrap one.
-
-**What the verdict names is per-snippet, not per-category.** Each body ends by
-stating it — `push` names the pushed SHA, `ready` names the resulting draft
-state *and* that it pushed nothing, `whyci` names how many checks fail and that
-it changed nothing, `nit` names the nit count and that a nit is not a blocker.
-An earlier pass keyed these off `category`, which told `ready` to report a
-pushed SHA and `whyci` to report what it created; a category is not a
-description of what a snippet does.
+Each built-in still states the concrete fact its handoff leads with. For
+example, `push` names the pushed SHA, `ready` names the resulting draft state
+and that it pushed nothing, and `whyci` names the failing checks and that it
+changed nothing. That fact is per snippet, never inferred from its category.
 
 The complete authored built-in `rev` body (the contract is appended at
 delivery, so it is not part of what you would write):
@@ -649,65 +587,14 @@ patterns behind that house style, and
 text lives in one place rather than being split between a snippet and a
 skill.
 
-### Output contract evaluation
+### Rejected status-template experiment
 
-A fixed final-emission replay compared five snippets on Claude Code 2.1.269
-(default model) and Codex CLI 0.154.0 (gpt-6-astra), using built-ins before
-this change (`b9b139e7`) and at revision `1030f948`. Each of the 20 fresh sessions received
-the same synthetic diff, replacing `return a / b` with `return a // b` in
-`divide.py`, plus the same completed-execution evidence for that snippet:
-
-| Snippet | Execution evidence | Expected status |
-| --- | --- | --- |
-| `deepreview` | One confirmed blocker: `divide(3, 2)` returns 1 instead of the documented 1.5; review complete, fix requires user action. | ACTION NEEDED |
-| `fixall` | Restored `/`, regression added, 4 tests and lint pass, committed `abc1234` on `fix/division` and pushed; no remaining findings. | DONE |
-| `bug` | Root cause confirmed; only the user knows whether integer or float behavior is intended; no edits. | NEED CONTEXT |
-| `commit` | Only staged `divide.py` committed as `abc1234` on `fix/division`; clean tree; push was not requested. | DONE |
-| `triage` | Issue #42 reproduced, repair/test plan posted; one issue updated, none created, no unknowns; no coding requested. | DONE |
-
-The replay instruction stated that execution was complete, prohibited more
-tool use, and asked for the closing response using only that evidence and
-the snippet. Claude ran with `-p --tools '' --no-session-persistence`;
-Codex used `exec --ignore-user-config --ephemeral --skip-git-repo-check
---sandbox read-only` in separate temporary directories.
-
-Format scoring counted exactly one literal `STATUS:` line with an allowed
-value and 2–7 lines from there to the end, including blank lines. Status
-semantics were assessed separately against the expected disposition above;
-before the change, this was inferred from prose rather than requiring the
-new vocabulary.
-
-**The scored shape is no longer the shipped one.** #1817 replaced the
-`STATUS: UNSURE` prefix with the glyph-led `🟡 UNSURE`, so the literal this
-replay counted is not what the contract now asks for. The structure it
-measured — one status line, then 2–7 lines to the end — is unchanged, but the
-presentation half has not been replayed.
-
-| Agent | Format before → after | Correct disposition before → after | After ending lines (table order) |
-| --- | --- | --- | --- |
-| Claude Code | 0/5 → 5/5 | 5/5 → 5/5 | 5, 2, 6, 4, 5 |
-| Codex | 0/5 → 5/5 | 5/5 → 5/5 | 6, 2, 4, 2, 6 |
-
-Two additional after-change `bug` replays supplied a completed fix and four
-passing tests, but low confidence because production inputs had not been
-validated. Both agents chose `UNSURE` and named production-input verification;
-the endings were four lines for Claude and three for Codex.
-
-This small replay supports improved ending consistency, not better task
-correctness. It does not exercise live tool execution, and it is not a
-statistical benchmark. A verdict fact can still land in a detail line instead
-of the verdict sentence; a prompt contract is not a runtime output validator.
-Full end-to-end before/after agent runs remain unverified.
-
-**The measured revision is not the shipped one.** At `1030f948` the contract
-was appended to bodies that still ended with their own competing "close with
-a human-readable summary: …" — 46 of 61 did. The shipped bodies no longer do,
-and the contract now rides `delivery_body()` rather than `body`. The format
-scoring above counted only the `STATUS:` line and the lines after it, so it
-was blind to the redundant summary a competing instruction produces *above*
-the ending; removing that instruction can only reduce divergence, which makes
-the 10/10 figure a lower bound rather than a result invalidated by the change.
-It has not been re-measured against the shipped bodies.
+An earlier replay measured whether agents obeyed a fixed status/glyph/line-count
+template. It measured format compliance, not usefulness. Real output then showed
+the failure that synthetic scoring missed: the template appended a redundant
+ending and compressed concrete findings into vague labels. The shipped contract
+therefore preserves evidence and forbids that projection rather than optimizing
+for identical-looking tails.
 
 > **Not yet supported:** placeholder / variable interpolation in bodies
 > (e.g. injecting the selected file or a typed argument). Bodies are

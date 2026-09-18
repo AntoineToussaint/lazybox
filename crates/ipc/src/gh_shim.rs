@@ -40,6 +40,37 @@ pub const SHIM_DIR_ENV: &str = "LAZYBOX_GH_SHIM_DIR";
 /// bypass lazybox entirely; `gh.real` in the shim directory is the other.
 pub const SHIM_OPT_OUT_ENV: &str = "LAZYBOX_GH_SHIM";
 
+/// How many shim invocations deep this process is. Incremented for each child
+/// the shim runs, so recursion is bounded even when the shim fails to
+/// recognise itself.
+///
+/// [`SHIM_DIR_ENV`] plus [`SHIM_MARKER`] should make that recognition
+/// reliable, but both can be defeated: the directory variable can be stripped
+/// by a wrapper that sanitises the environment while keeping `PATH`, and a
+/// hand-edited or truncated script can lose the marker. Path equality alone
+/// once left a fork bomb one missing variable away — a `LAZYBOX_HOME` pointing
+/// at a different profile than the shim on `PATH` makes every guard that
+/// derives the shim's location from configuration resolve to the wrong
+/// directory. This counter does not depend on identifying anything, so it
+/// bounds the damage regardless of why identification failed.
+pub const SHIM_DEPTH_ENV: &str = "LAZYBOX_GH_SHIM_DEPTH";
+
+/// Nesting allowed before the shim refuses to run another `gh`.
+///
+/// Not 1: a `gh` extension is a script that legitimately calls `gh` again, and
+/// through the shimmed `PATH` those nested calls are shim invocations too.
+/// Four leaves real nesting room while turning unbounded recursion into four
+/// processes and an error.
+pub const MAX_SHIM_DEPTH: u32 = 4;
+
+/// First-line marker written into the generated `gh` shim, and the string the
+/// shim looks for when deciding whether a candidate on `PATH` is itself.
+///
+/// Content beats location: this identifies the shim wherever it sits, under
+/// any profile, whatever `LAZYBOX_HOME` says — so recognition no longer
+/// depends on two independently-derived paths agreeing.
+pub const SHIM_MARKER: &str = "lazybox-gh-shim-v1";
+
 /// What the shim made of the invocation's subcommand.
 ///
 /// The distinction that matters is deferrability. A read can wait — the agent

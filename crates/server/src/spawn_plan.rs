@@ -314,8 +314,13 @@ pub(crate) fn build_spawn_plan(
         };
         // Prepend the launcher dir, dropping any existing occurrence so it
         // doesn't accrete across the daemon's own PATH or a re-spawn.
+        // Empty segments are dropped, not just deduped: POSIX reads an empty
+        // `PATH` entry as the current directory, and the spawn's cwd is the
+        // worktree. An unset or empty inherited `PATH` otherwise renders as a
+        // trailing `:` here and puts `.` on every agent's search path.
         let rest: Vec<&str> = current
             .split(':')
+            .filter(|segment| !segment.is_empty())
             .filter(|segment| !prepend.iter().any(|dir| dir == segment))
             .collect();
         let combined = if rest.is_empty() {
@@ -890,6 +895,32 @@ mod tests {
                 path.split(':').filter(|s| *s == bin_dir.as_str()).count(),
                 1,
                 "{kind:?} spawn must not duplicate the launcher dir; PATH = {path}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_spawn_path_never_carries_an_empty_segment() {
+        // The regression: an empty inherited PATH left one empty segment that
+        // survived the dedupe filter, so the result ended in `:` — and POSIX
+        // reads an empty PATH entry as the current directory, which for a
+        // spawn is the worktree. A `./gh` committed to a repo would then be
+        // on every agent's search path.
+        let cfg = lazybox_config::Config::default();
+        for inherited in ["", "::", "/usr/bin::/bin"] {
+            let mut input = input(TerminalKind::Agent("claude".into()));
+            input.shell_command = "/bin/sh".into();
+            input.repo_env = vec![("PATH".to_string(), inherited.to_string())];
+            let plan = build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("plan");
+            let path = plan
+                .env
+                .iter()
+                .find(|(k, _)| k == "PATH")
+                .map(|(_, v)| v.as_str())
+                .expect("PATH");
+            assert!(
+                !path.split(':').any(str::is_empty),
+                "PATH from {inherited:?} has an empty segment: {path:?}",
             );
         }
     }

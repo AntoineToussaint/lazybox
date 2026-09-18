@@ -46,6 +46,24 @@ const UNSESSIONED: &str = "-";
 /// escape hatch named.
 const MAX_THROTTLE_WAIT: u64 = 300;
 
+/// Ceiling on [`lazybox_config::GhShimConfig::read_cache_ttl`].
+///
+/// The config value is user-supplied and the cache evicts by age, so an
+/// unclamped TTL is an unbounded retention window: `read_cache_ttl: 24h`
+/// keeps every distinct read of a whole fleet-day resident in the daemon.
+/// Ten minutes is already far past the point where serving a cached answer is
+/// defensible for a record that changes.
+const MAX_READ_CACHE_TTL: Duration = Duration::from_secs(600);
+
+/// Hard caps on the read cache, independent of the TTL.
+///
+/// Age alone bounds nothing when the arrival rate is the variable: the fleet's
+/// read rate scales with how many agents are running, and the per-entry cap
+/// is 128 KiB. These two make the cache's worst case a number that can be
+/// stated (~32 MB) rather than one that depends on how busy the box is.
+const MAX_CACHE_ENTRIES: usize = 512;
+const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
 /// One session's token bucket over `gh` invocations.
 #[derive(Debug)]
 struct Bucket {
@@ -111,7 +129,35 @@ impl GhShimState {
     fn store(&mut self, key: String, stdout: String, ttl: Duration, now: Instant) {
         self.cache
             .retain(|_, entry| now.saturating_duration_since(entry.at) <= ttl);
-        self.cache.insert(key, CachedRead { stdout, at: now });
+        self.cache
+            .insert(key.clone(), CachedRead { stdout, at: now });
+        self.evict_to_capacity(&key);
+    }
+
+    /// Drop the oldest entries until the cache is inside both caps. Oldest
+    /// first because the newest answer is the one the fleet is most likely to
+    /// ask for again, and the oldest is closest to expiring anyway.
+    ///
+    /// `keep` is the entry the caller just stored, and it is never the one
+    /// evicted. Without that, two stores landing on the same `Instant` tie on
+    /// the eviction key and `min_by_key` may pick either — so a store could
+    /// discard the very answer it had just paid a GitHub call for, at random.
+    fn evict_to_capacity(&mut self, keep: &str) {
+        let mut bytes: usize = self.cache.values().map(|entry| entry.stdout.len()).sum();
+        while self.cache.len() > MAX_CACHE_ENTRIES || bytes > MAX_CACHE_BYTES {
+            let Some(oldest) = self
+                .cache
+                .iter()
+                .filter(|(key, _)| key.as_str() != keep)
+                .min_by_key(|(_, entry)| entry.at)
+                .map(|(key, _)| key.clone())
+            else {
+                return;
+            };
+            if let Some(evicted) = self.cache.remove(&oldest) {
+                bytes = bytes.saturating_sub(evicted.stdout.len());
+            }
+        }
     }
 
     /// Drop every cached read scoped to `repo` — or every read at all when the
@@ -192,7 +238,7 @@ pub fn admit(
     // A cache hit spends no token: it costs neither GitHub nor the poller, so
     // charging for it would throttle the very behaviour this exists to reward.
     if let Some(key) = read_key
-        && let Some(stdout) = state.cached(key, cfg.read_cache_ttl, now)
+        && let Some(stdout) = state.cached(key, cfg.read_cache_ttl.min(MAX_READ_CACHE_TTL), now)
     {
         return GhVerdict::Cached { stdout };
     }
@@ -243,7 +289,8 @@ pub async fn completed(
             .providers
             .github
             .gh_shim
-            .read_cache_ttl;
+            .read_cache_ttl
+            .min(MAX_READ_CACHE_TTL);
         config
             .poll
             .gh_shim
@@ -292,13 +339,17 @@ async fn apply_change(config: &ServerConfig, change: &GhRecordChange) {
 
     let store = config.store.clone();
     let wanted = id.clone();
+    // Prefiltered on the raw JSON before decoding, per the rule
+    // `task_cache::workspaces_matching` documents: decoding every row parses
+    // each workspace's whole activity feed, and a session closing issues in a
+    // loop lands here once per close. The task's id key appears verbatim in
+    // any row holding it, so the filter is a conservative superset and the
+    // exact `hierarchy_task_ids` comparison below rejects the extras.
     let holders = tokio::task::spawn_blocking(move || {
-        let records = store.list_workspaces()?;
+        let needle = wanted.key.clone();
         Ok::<_, lazybox_store::StoreError>(
-            records
+            crate::task_cache::workspaces_matching(store.as_ref(), std::slice::from_ref(&needle))?
                 .into_iter()
-                .filter_map(|record| record.workspace_json)
-                .filter_map(|json| lazybox_core::Workspace::decode_persisted(&json).ok())
                 .filter(|ws| ws.hierarchy_task_ids().any(|task| task == &wanted))
                 .map(|ws| ws.key)
                 .collect::<Vec<_>>(),
@@ -337,9 +388,10 @@ pub fn install(dir: &Path, launcher: &Path, path_env: Option<&str>) -> Option<Pa
     write_script(
         &dir.join("gh"),
         &format!(
-            "#!/bin/sh\n# lazybox gh shim (#1801) — routes reads, quota and change\n\
-             # signals through the daemon. Escape hatches: `gh.real`, or\n\
+            "#!/bin/sh\n# {} — lazybox gh shim (#1801): routes reads, quota and\n\
+             # change signals through the daemon. Escape hatches: `gh.real`, or\n\
              # {}=0 in the environment.\nexec {} gh \"$@\"\n",
+            lazybox_ipc::gh_shim::SHIM_MARKER,
             lazybox_ipc::gh_shim::SHIM_OPT_OUT_ENV,
             shell_quote(&launcher.to_string_lossy()),
         ),
@@ -356,10 +408,18 @@ pub fn install(dir: &Path, launcher: &Path, path_env: Option<&str>) -> Option<Pa
 
 /// The first executable `gh` on `path_env` that is not the shim itself.
 ///
-/// Skipping `shim_dir` by directory rather than by name is what makes
-/// re-entry structurally impossible: the shim's own PATH contains the shim,
-/// so a name-based guard would resolve `gh` back to itself and fork-bomb the
-/// session on the first `gh` call.
+/// Two independent guards, because either one alone has a hole. Skipping
+/// `shim_dir` handles the normal case, but that path is derived from
+/// configuration: when `LAZYBOX_GH_SHIM_DIR` is absent the caller falls back
+/// to `<home>/shims`, and a `LAZYBOX_HOME` naming a different profile than the
+/// shim actually on `PATH` makes the two disagree — at which point a
+/// directory-only guard resolves `gh` straight back to the shim and the
+/// session fork-bombs. So a candidate carrying [`lazybox_ipc::gh_shim::SHIM_MARKER`] is rejected on
+/// content as well, which holds whatever the paths say.
+///
+/// Neither guard is trusted to be sufficient: the caller also counts depth
+/// (see [`lazybox_ipc::gh_shim::SHIM_DEPTH_ENV`]) so recursion stays bounded
+/// even if both miss.
 pub fn real_gh(shim_dir: &Path, path_env: Option<&str>) -> Option<PathBuf> {
     let path = match path_env {
         Some(path) => path.to_string(),
@@ -370,7 +430,23 @@ pub fn real_gh(shim_dir: &Path, path_env: Option<&str>) -> Option<PathBuf> {
         .map(Path::new)
         .filter(|dir| *dir != shim_dir)
         .map(|dir| dir.join("gh"))
-        .find(|candidate| is_executable(candidate))
+        .find(|candidate| is_executable(candidate) && !is_shim_script(candidate))
+}
+
+/// Whether `path` is one of lazybox's own generated shims.
+///
+/// Reads only the head of the file: the marker is on the first line, and a
+/// `gh` binary is ~50 MB that must not be slurped to answer this.
+fn is_shim_script(path: &Path) -> bool {
+    use std::io::Read as _;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 256];
+    let Ok(read) = file.read(&mut head) else {
+        return false;
+    };
+    String::from_utf8_lossy(&head[..read]).contains(lazybox_ipc::gh_shim::SHIM_MARKER)
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -560,6 +636,78 @@ mod tests {
         assert_eq!(shim.cached("other", ttl, now), None);
         // And the answer expires rather than going stale forever.
         assert_eq!(shim.cached("k", ttl, now + Duration::from_secs(91)), None);
+    }
+
+    #[test]
+    fn the_cache_is_bounded_by_entry_count_regardless_of_ttl() {
+        // The regression: `store` evicted by age only, so a configured
+        // `read_cache_ttl: 24h` retained every distinct read of a fleet-day.
+        let mut shim = state();
+        let start = Instant::now();
+        let forever = Duration::from_secs(24 * 3600);
+        let total = MAX_CACHE_ENTRIES + 50;
+        for n in 0..total {
+            // A distinct instant per store, as real arrivals have — eviction
+            // orders by age, so a fixture that ties every timestamp would be
+            // asserting on which of several equally-old entries got picked.
+            let at = start + Duration::from_millis(n as u64);
+            shim.store(format!("o/r\u{1f}{n}"), "body".into(), forever, at);
+        }
+        let now = start + Duration::from_millis(total as u64);
+        assert_eq!(shim.cache.len(), MAX_CACHE_ENTRIES);
+        // Oldest evicted first, so the most recently asked questions survive
+        // and the first ones asked are the ones that went.
+        assert!(
+            shim.cached(&format!("o/r\u{1f}{}", total - 1), forever, now)
+                .is_some()
+        );
+        assert_eq!(shim.cached("o/r\u{1f}0", forever, now), None);
+        assert_eq!(shim.cached("o/r\u{1f}49", forever, now), None);
+    }
+
+    #[test]
+    fn the_cache_is_bounded_by_bytes_too() {
+        // Few enough entries to pass the count cap, large enough to blow the
+        // byte cap — the shape a fleet reading `gh issue list --json` makes.
+        let mut shim = state();
+        let now = Instant::now();
+        let forever = Duration::from_secs(24 * 3600);
+        let big = "x".repeat(128 * 1024);
+        for n in 0..400 {
+            shim.store(
+                format!("o/r\u{1f}{n}"),
+                big.clone(),
+                forever,
+                now + Duration::from_millis(n),
+            );
+        }
+        let bytes: usize = shim.cache.values().map(|entry| entry.stdout.len()).sum();
+        assert!(bytes <= MAX_CACHE_BYTES, "cache held {bytes} bytes");
+        assert!(shim.cache.len() < 400, "eviction must have happened");
+    }
+
+    #[tokio::test]
+    async fn a_configured_ttl_cannot_outlive_the_clamp() {
+        // A 24h TTL in config must not make a 24h-old answer servable.
+        let config = ServerConfig::in_memory();
+        let key = "gh\u{1f}ambient\u{1f}o/r\u{1f}issue\u{1f}view\u{1f}1";
+        let stored_at = Instant::now();
+        config.poll.gh_shim.lock().store(
+            key.into(),
+            "stale".into(),
+            Duration::from_secs(24 * 3600),
+            stored_at,
+        );
+        // Past the clamp, inside the configured TTL.
+        let later = stored_at + MAX_READ_CACHE_TTL + Duration::from_secs(1);
+        assert_eq!(
+            config.poll.gh_shim.lock().cached(
+                key,
+                Duration::from_secs(24 * 3600).min(MAX_READ_CACHE_TTL),
+                later
+            ),
+            None,
+        );
     }
 
     #[test]
@@ -849,6 +997,43 @@ mod tests {
         // With nothing but the shim on PATH there is no real gh to run.
         assert_eq!(
             real_gh(&shim_dir, Some(&shim_dir.display().to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn a_shim_is_skipped_by_content_even_from_the_wrong_directory() {
+        // The regression: `LAZYBOX_GH_SHIM_DIR` stripped and `LAZYBOX_HOME`
+        // naming another profile made the caller pass a shim_dir that is not
+        // the shim actually on PATH. With directory equality as the only
+        // guard, `real_gh` returned the shim itself and the session fork
+        // bombed — an unbounded fork of a 200 MB binary.
+        let root = tempfile::tempdir().expect("tempdir");
+        let on_path = root.path().join("real-profile-shims");
+        let believed = root.path().join("other-profile-shims");
+        let real_dir = root.path().join("usr-bin");
+        for dir in [&on_path, &believed, &real_dir] {
+            std::fs::create_dir_all(dir).expect("mkdir");
+        }
+        write_script(&real_dir.join("gh"), "#!/bin/sh\nexit 0\n").expect("real");
+        install(
+            &on_path,
+            &root.path().join("lazybox"),
+            Some(&real_dir.display().to_string()),
+        )
+        .expect("shim installed");
+
+        let path = format!("{}:{}", on_path.display(), real_dir.display());
+        assert_eq!(
+            real_gh(&believed, Some(&path)),
+            Some(real_dir.join("gh")),
+            "a shim must be recognised by its marker wherever it sits, not only \
+             when the caller already knows its directory",
+        );
+        // And with nothing but an unrecognised-by-path shim available, the
+        // answer is "no real gh", never the shim.
+        assert_eq!(
+            real_gh(&believed, Some(&on_path.display().to_string())),
             None
         );
     }

@@ -607,6 +607,18 @@ async fn main() -> anyhow::Result<()> {
         return snippet_subcommand(&args[1..]).await;
     }
 
+    // The `gh` shim is pure stdio passthrough, so it must run with the real
+    // fd 2. `init_tracing()` redirects OS stderr into the log file, and the
+    // shim runs real `gh` with inherited stdio — through a redirected fd 2
+    // that swallows `gh`'s OWN diagnostics ("Could not resolve to an Issue"
+    // and every other failure) into /tmp/lazybox.log, leaving the agent a
+    // non-zero exit and no message. The shim's own refusals (quota, depth
+    // guard, no `gh` on PATH) are lost the same way. Dispatched here, beside
+    // `snippet`, for exactly the reason documented there.
+    if matches!(args.first().map(String::as_str), Some("gh")) {
+        gh_cli::gh_subcommand(&args[1..]).await;
+    }
+
     // A lifecycle hook must never hard-error: Claude renders any non-zero
     // exit as a red "Stop hook error" and drops the state transition the
     // hook was meant to signal. Dispatch it *before* the fatal
@@ -653,7 +665,6 @@ async fn main() -> anyhow::Result<()> {
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("workspace") => workspace_subcommand(&args[1..]).await,
         Some("task") => task_status_cli::task_subcommand(&args[1..]).await,
-        Some("gh") => gh_cli::gh_subcommand(&args[1..]).await,
         Some("log") => log_subcommand(&args[1..]).await,
         Some("device") => device_cli::device_subcommand(&args[1..]).await,
         Some("auth") => auth_cli::auth_subcommand(&args[1..]).await,
@@ -3158,6 +3169,39 @@ mod argv_tests {
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The `gh` shim must be dispatched before `init_tracing()`.
+    ///
+    /// `init_tracing` redirects OS stderr into the log file. The shim runs
+    /// real `gh` with inherited stdio, so on the wrong side of that call it
+    /// swallows `gh`'s own diagnostics — "Could not resolve to an Issue" and
+    /// every other failure — into /tmp/lazybox.log, handing the agent a
+    /// non-zero exit and no message. Its own refusals (quota, the recursion
+    /// depth guard, no `gh` on PATH) vanish the same way.
+    ///
+    /// Asserted on source order because that is exactly what the invariant
+    /// is; `test_env.rs` pins a sibling rule the same way.
+    #[test]
+    fn the_gh_shim_is_dispatched_before_stderr_is_redirected() {
+        let source = include_str!("main.rs");
+        // Assembled at runtime so this test's own source cannot satisfy the
+        // search it performs — `include_str!` pulls in this module too.
+        let needle = format!(
+            "{}{}",
+            r#"Some("gh")) {"#, "\n        gh_cli::gh_subcommand"
+        );
+        let dispatch = source
+            .find(&needle)
+            .expect("main dispatches the gh subcommand");
+        let redirect = source
+            .find(&format!("init_tracing(){};", "?"))
+            .expect("main initializes tracing");
+        assert!(
+            dispatch < redirect,
+            "the gh shim is dispatched after init_tracing(), so gh's own stderr \
+             is redirected into the log file and never reaches the agent",
+        );
     }
 
     #[test]

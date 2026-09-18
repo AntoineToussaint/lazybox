@@ -18,7 +18,8 @@
 //! it may not do is make `gh` stop working.
 
 use lazybox_ipc::gh_shim::{
-    GhCallKind, GhChangeKind, GhRecordChange, GhReply, GhVerdict, SHIM_DIR_ENV, SHIM_OPT_OUT_ENV,
+    GhCallKind, GhChangeKind, GhRecordChange, GhReply, GhVerdict, MAX_SHIM_DEPTH, SHIM_DEPTH_ENV,
+    SHIM_DIR_ENV, SHIM_OPT_OUT_ENV,
 };
 use lazybox_ipc::{Command, Event};
 use lazybox_server::lifecycle;
@@ -45,6 +46,25 @@ const MAX_CACHEABLE_STDOUT: usize = 128 * 1024;
 /// Run one `gh` invocation. Never returns: the process exits with `gh`'s own
 /// status so a caller cannot tell the shim from the real thing.
 pub async fn gh_subcommand(args: &[String]) -> ! {
+    // Checked before anything else, and before any process is spawned. Every
+    // other guard against resolving `gh` back to this shim works by
+    // *identifying* the shim; this one needs to identify nothing, so it is the
+    // guard that still holds when the others are defeated — a stripped
+    // `LAZYBOX_GH_SHIM_DIR` combined with a `LAZYBOX_HOME` naming a different
+    // profile used to be an unbounded fork of a 200 MB binary.
+    let depth = std::env::var(SHIM_DEPTH_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if depth >= MAX_SHIM_DEPTH {
+        eprintln!(
+            "lazybox gh: refusing to run — {SHIM_DEPTH_ENV}={depth} means the shim resolved \
+             `gh` back to itself {depth} times. Run `gh.real`, or set {SHIM_OPT_OUT_ENV}=0, \
+             and check that the lazybox shim directory is the one on PATH."
+        );
+        std::process::exit(70);
+    }
+
     // The spawn sets this; falling back to the installed location matters for
     // a hand-run `lazybox gh`, whose PATH may still hold the shim — resolving
     // `gh` back to ourselves would spawn this process forever.
@@ -88,10 +108,13 @@ pub async fn gh_subcommand(args: &[String]) -> ! {
                 let _ = out.flush();
                 std::process::exit(0);
             }
-            Admission::Refused(reason) => {
+            Admission::Refused { reason, wait_secs } => {
+                // The wait travels with the refusal: an autonomous agent told
+                // only "re-run later" retries in a tight loop, and the honest
+                // answer can be "not for another 40 minutes".
                 eprintln!(
-                    "lazybox gh: {reason}. Re-run later, or bypass lazybox with `gh.real` / \
-                     {SHIM_OPT_OUT_ENV}=0."
+                    "lazybox gh: {reason}. Retry in {wait_secs}s, or bypass lazybox with \
+                     `gh.real` / {SHIM_OPT_OUT_ENV}=0."
                 );
                 std::process::exit(1);
             }
@@ -232,9 +255,10 @@ fn classify(args: &[String]) -> Call {
         };
     }
 
-    let cacheable = READS.iter().any(|(g, v)| *g == group && *v == verb)
+    let cacheable = (READS.iter().any(|(g, v)| *g == group && *v == verb)
         || group == "search"
-        || (group == "api" && is_api_read(args));
+        || (group == "api" && is_api_read(args)))
+        && !streams(args);
     if !cacheable {
         return Call {
             kind: Some(GhCallKind::Other),
@@ -247,6 +271,19 @@ fn classify(args: &[String]) -> Call {
         read_key: read_key(args, &positional, group),
         change: None,
     }
+}
+
+/// Whether the invocation produces output continuously rather than once.
+///
+/// `gh pr checks --watch` polls until every check settles — routinely twenty
+/// minutes — repainting a live table as it goes. Capturing its stdout to file
+/// the answer for the fleet gives the agent a frozen terminal for the whole
+/// run and then a dump, and caching the result is worse still: the next
+/// session's `--watch` would be handed the finished table instantly and never
+/// watch anything. Such a call is passed straight through instead.
+fn streams(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--watch" || arg.starts_with("--watch="))
 }
 
 /// Whether a `gh api` invocation only reads. `gh` itself infers POST from any
@@ -291,7 +328,7 @@ fn is_api_read(args: &[String]) -> bool {
 /// a key can never silently span two repositories.
 fn read_key(args: &[String], positional: &[&str], group: &str) -> Option<String> {
     let scope = repo_scope(args)?;
-    let mut key = String::from(&scope);
+    let mut key = format!("{}\u{1f}{scope}", answer_scope());
     // A `pr` read with no explicit target resolves against the current
     // branch, so the branch is part of the question being asked.
     if group == "pr" && !positional.get(2).is_some_and(|arg| looks_like_target(arg)) {
@@ -303,6 +340,74 @@ fn read_key(args: &[String], positional: &[&str], group: &str) -> Option<String>
         key.push_str(arg);
     }
     Some(key)
+}
+
+/// What the answer to a read depends on besides the repo and the argv: which
+/// GitHub the question is asked of, and as whom.
+///
+/// Without this the key is repo + argv alone, and `owner/repo` is not unique
+/// across hosts — [`normalize_remote`] deliberately discards the host, so an
+/// enterprise `ghe.corp.com/acme/widget` and `github.com/acme/widget` produced
+/// the *same* key and one session's `gh issue view 12` could be answered with
+/// the other host's issue 12. Identity has the same shape: a session that sets
+/// its own `GH_TOKEN` asking `gh issue list --assignee @me` must not be served
+/// another identity's list.
+///
+/// The token is never put in the key — only a fingerprint of it, through the
+/// same helper the provider uses to compare credentials without holding them.
+fn answer_scope() -> String {
+    let host = gh_host();
+    let identity = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
+        .map(|token| lazybox_gh::credential_fingerprint(&token))
+        // No explicit token means the ambient credential every session on this
+        // box shares, which is exactly the case sharing an answer is safe in.
+        .unwrap_or_else(|| "ambient".to_string());
+    format!("{host}\u{1f}{identity}")
+}
+
+/// The GitHub host this invocation addresses, in the order `gh` itself
+/// resolves it: `GH_HOST`, then the remote's own host, then the configured
+/// enterprise host, then github.com.
+fn gh_host() -> String {
+    if let Ok(host) = std::env::var("GH_HOST")
+        && !host.trim().is_empty()
+    {
+        return host.trim().to_string();
+    }
+    if let Some(host) = remote_host() {
+        return host;
+    }
+    lazybox_config::Config::load()
+        .ok()
+        .and_then(|config| config.github_host())
+        .unwrap_or_else(|| "github.com".to_string())
+}
+
+/// Host of the worktree's single git remote, if it has one.
+fn remote_host() -> Option<String> {
+    let remotes = git(&["remote"])?;
+    let mut names = remotes.lines().filter(|line| !line.trim().is_empty());
+    let only = names.next()?;
+    if names.next().is_some() {
+        return None;
+    }
+    host_of_remote(git(&["remote", "get-url", only])?.trim())
+}
+
+/// The host in a git remote URL, in any of git's spellings.
+///
+/// A remote with no host (a local path) yields `None` and the caller falls
+/// back to the configured host — which is the right answer for a worktree
+/// whose remote is not a GitHub URL at all.
+fn host_of_remote(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let after_user = after_scheme
+        .rsplit_once('@')
+        .map_or(after_scheme, |(_, r)| r);
+    let host = after_user.split(['/', ':']).next()?.trim();
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 fn looks_like_target(arg: &str) -> bool {
@@ -408,7 +513,7 @@ fn change_for(args: &[String], positional: &[&str], kind: GhChangeKind) -> Optio
 enum Admission {
     Allowed,
     Cached(String),
-    Refused(String),
+    Refused { reason: String, wait_secs: u64 },
 }
 
 async fn connect() -> Option<lazybox_ipc::Client> {
@@ -448,7 +553,7 @@ async fn admit(
             Some(GhReply::Admission(GhVerdict::Throttle { wait_secs, reason })) => {
                 let wait = Duration::from_secs(wait_secs);
                 if tokio::time::Instant::now() + wait > deadline {
-                    return Admission::Refused(reason);
+                    return Admission::Refused { reason, wait_secs };
                 }
                 tokio::time::sleep(wait).await;
             }
@@ -514,9 +619,21 @@ fn session_key() -> Option<lazybox_core::SessionKey> {
         .map(lazybox_core::SessionKey::from)
 }
 
+/// The depth to stamp on a child `gh`. A `gh` extension calls `gh` again and
+/// those nested calls come back through the shim, so the counter has to travel
+/// with them or the bound never trips.
+fn child_depth() -> String {
+    let current = std::env::var(SHIM_DEPTH_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    (current + 1).to_string()
+}
+
 fn run_inherit(real: &Path, args: &[String]) -> i32 {
     std::process::Command::new(real)
         .args(args)
+        .env(SHIM_DEPTH_ENV, child_depth())
         .status()
         .map(|status| status.code().unwrap_or(1))
         .unwrap_or_else(|error| {
@@ -531,6 +648,7 @@ fn run_inherit(real: &Path, args: &[String]) -> i32 {
 fn run_capturing(real: &Path, args: &[String]) -> (i32, Option<String>) {
     let output = std::process::Command::new(real)
         .args(args)
+        .env(SHIM_DEPTH_ENV, child_depth())
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -590,8 +708,10 @@ mod tests {
         let call = classify(&args("issue view 12 --repo acme/widget"));
         assert_eq!(call.kind, Some(GhCallKind::Read));
         let key = call.read_key.expect("an explicit --repo names the scope");
-        assert!(key.starts_with("acme/widget"), "{key}");
-        assert!(key.contains("12"), "{key}");
+        // host \u{1f} identity \u{1f} repo \u{1f} argv…
+        let fields: Vec<&str> = key.split('\u{1f}').collect();
+        assert_eq!(fields[2], "acme/widget", "{key}");
+        assert!(fields.contains(&"12"), "{key}");
         // The same question from another session must produce the same key.
         assert_eq!(
             Some(key),
@@ -637,8 +757,8 @@ mod tests {
         let positional = vec!["pr", "view"];
         let with_branch = read_key(&args("pr view --repo o/r"), &positional, "pr").unwrap();
         let fields: Vec<&str> = with_branch.split('\u{1f}').collect();
-        assert_eq!(fields[0], "o/r");
-        assert_eq!(fields[1], current_branch().unwrap_or_default());
+        assert_eq!(fields[2], "o/r");
+        assert_eq!(fields[3], current_branch().unwrap_or_default());
 
         // An explicitly numbered PR asks the same question from any branch, so
         // the branch must not narrow the key and cost the fleet the dedupe.
@@ -646,7 +766,7 @@ mod tests {
         let with_target =
             read_key(&args("pr view 7 --repo o/r"), &positional_target, "pr").unwrap();
         assert_eq!(
-            with_target.split('\u{1f}').collect::<Vec<_>>(),
+            with_target.split('\u{1f}').skip(2).collect::<Vec<_>>(),
             vec!["o/r", "pr", "view", "7", "--repo", "o/r"],
         );
     }
@@ -716,6 +836,81 @@ mod tests {
             classify(&args("api -X POST repos/o/r/issues")).kind,
             Some(GhCallKind::Other),
             "a writing api call is passed through, never replayed"
+        );
+    }
+
+    #[test]
+    fn a_streaming_read_is_never_captured_or_replayed() {
+        // The regression: `pr checks` is a cacheable read, so `--watch` was
+        // captured — the agent saw a frozen terminal for the whole 20-minute
+        // poll, and the finished table was then served to the next session's
+        // `--watch`, which therefore never watched anything.
+        let call = classify(&args("pr checks 12 --watch --repo o/r"));
+        assert_eq!(call.kind, Some(GhCallKind::Other));
+        assert_eq!(
+            call.read_key, None,
+            "a streaming invocation must inherit stdio, so it must not be cacheable",
+        );
+        // Without --watch it is an ordinary cacheable read.
+        assert!(
+            classify(&args("pr checks 12 --repo o/r"))
+                .read_key
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_cache_key_separates_hosts_and_identities() {
+        // The regression: the key was repo + argv, and `normalize_remote`
+        // discards the host — so `ghe.corp.com/acme/widget` and
+        // `github.com/acme/widget` collided and one host's issue 12 could be
+        // served as the other's.
+        assert_eq!(
+            host_of_remote("git@ghe.corp.com:acme/widget.git").as_deref(),
+            Some("ghe.corp.com")
+        );
+        assert_eq!(
+            host_of_remote("https://github.com/acme/widget").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            host_of_remote("ssh://git@ghe.corp.com/acme/widget.git").as_deref(),
+            Some("ghe.corp.com")
+        );
+        assert_eq!(
+            host_of_remote("https://user@ghe.corp.com/a/b").as_deref(),
+            Some("ghe.corp.com")
+        );
+        // A local path names no host; the caller falls back to the config.
+        assert_eq!(host_of_remote("/srv/git/repo.git"), None);
+
+        // The scope leads the key, so two hosts can never share one entry.
+        let key = read_key(
+            &args("issue view 12 --repo acme/widget"),
+            &["issue", "view", "12"],
+            "issue",
+        )
+        .expect("explicit --repo names the scope");
+        let scope = answer_scope();
+        assert!(
+            key.starts_with(&scope),
+            "key {key} must lead with the answer scope {scope}"
+        );
+        assert!(
+            scope.contains('\u{1f}'),
+            "scope carries both host and identity: {scope}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_token_is_fingerprinted_never_embedded() {
+        // Identity has to reach the key, but the token itself must not: the
+        // key is held in the daemon and travels the IPC socket.
+        let scope = answer_scope();
+        assert!(!scope.contains("ghp_"), "{scope}");
+        assert!(
+            scope.ends_with("ambient") || scope.split('\u{1f}').count() == 2,
+            "an unset token reads as the shared ambient credential: {scope}",
         );
     }
 

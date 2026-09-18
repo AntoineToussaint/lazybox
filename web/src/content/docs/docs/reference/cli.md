@@ -387,6 +387,7 @@ where `enabled: false` removes the shim instead of leaving it on PATH.
 | `RUST_LOG` | Log filter, e.g. `RUST_LOG=lazybox=debug` for verbose logs |
 | `LAZYBOX_GH_SHIM` | Set to `0` to bypass the `gh` shim and run the real binary directly |
 | `LAZYBOX_GH_SHIM_DIR` | Directory holding the shim; set on every spawn so the shim can resolve past itself |
+| `LAZYBOX_GH_SHIM_DEPTH` | How many shim invocations deep this process is. The shim stamps it on each `gh` it runs and refuses past 4, so a misidentified shim bounds instead of recursing |
 | `LAZYBOX_HOME` | Overrides every path lazybox writes under `~/.lazybox`: state, config, worktrees, runtime dir, tmux socket. Logs are separate — they default to `/tmp/lazybox.log` (override with `ui.log_path`) |
 | `LAZYBOX_RUNTIME_DIR` | Overrides just the daemon runtime directory (`daemon.sock` / `daemon.pid`); wins over `LAZYBOX_HOME`'s default `<home>/run/` |
 | `LAZYBOX_API_TOKEN` | Bearer token for `lazybox server api` (required unless `--insecure-no-auth`) |

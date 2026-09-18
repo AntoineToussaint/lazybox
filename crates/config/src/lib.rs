@@ -3859,7 +3859,6 @@ pub struct GithubAppConfig {
     pub installation_id: Option<u64>,
 }
 
-
 /// The `gh` shim lazybox puts on every spawned session's PATH.
 ///
 /// ```yaml

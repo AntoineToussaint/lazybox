@@ -176,8 +176,21 @@ the real binary, and asks the daemon before it spends
 - **Everything degrades toward plain `gh`.** No daemon, a slow answer, an
   unrecognised subcommand, `LAZYBOX_GH_SHIM=0`, or `gh.real` — each runs
   exactly what the agent typed. The shim may pace `gh`; it may never break it.
-- **`real_gh` skips the shim's own directory by path, not by name.** The
-  shim's PATH contains the shim, so a name-based guard resolves to itself.
+- **Three independent guards against the shim resolving `gh` to itself**, because
+  each alone has a hole. Path equality fails when `LAZYBOX_GH_SHIM_DIR` is
+  stripped and `LAZYBOX_HOME` names another profile; the `SHIM_MARKER` content
+  check covers that but not a hand-edited script; `SHIM_DEPTH_ENV` identifies
+  nothing and so bounds recursion whatever else missed. A `gh` extension calls
+  `gh` again, which is why the depth cap is 4 and not 1.
+- **The shim is dispatched before `init_tracing()`** (`tui-boot/src/main.rs`).
+  Tracing redirects OS stderr into the log file, and the shim runs `gh` with
+  inherited stdio — on the wrong side of that call, `gh`'s own errors go to
+  /tmp/lazybox.log and the agent gets a bare non-zero exit.
+- **The read-cache key leads with host + credential fingerprint.** `owner/repo`
+  is not unique across GitHub hosts, and `normalize_remote` discards the host,
+  so repo+argv alone let an enterprise issue be answered with github.com's.
+- **The cache is bounded three ways** — clamped TTL, entry count, total bytes.
+  Age alone bounds nothing when the arrival rate scales with the fleet.
 
 ## The metering / context-hygiene proxy
 

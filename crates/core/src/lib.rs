@@ -21,6 +21,7 @@ pub mod pricing;
 pub mod project;
 pub mod prompts;
 pub mod provider;
+pub mod review;
 pub mod scope;
 mod session_key;
 pub mod slug;
@@ -70,6 +71,12 @@ pub use provider::{
     DEFAULT_MAX_PAGES, FetchCoverage, FetchOutcome, FetchPage, FetchPageInfo, GITHUB_SOURCE,
     LINEAR_SOURCE, MergeOptions, MergeOutcome, MergeProgress, PaginationOutcome, PaginationStop,
     ProviderError, TaskProvider, TrailerOutcome, is_already_in_merge_queue, paginate,
+};
+pub use review::{
+    ArtifactStatus, Disposition, FileAnchor, Finding, FindingInput, FindingOutcome, Freshness,
+    OutcomeInput, REVIEW_SCHEMA_VERSION, ReportSelection, ResultIngest, ReviewArtifact,
+    ReviewIngest, ReviewOrigin, ReviewResult, ReviewResultSubmission, ReviewScope,
+    ReviewSubmission, Severity, select_report,
 };
 pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};
 pub use session_key::SessionKey;

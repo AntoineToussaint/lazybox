@@ -130,7 +130,7 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
 /// length-capped built-in joins, and
 /// `no_builtin_both_caps_its_length_and_licenses_unbounded_output` fails
 /// the build for a capped body that forgot to.
-const ENDING_ONLY_BUILTINS: &[&str] = &["catchup"];
+const ENDING_ONLY_BUILTINS: &[&str] = &["catchup", "clarify"];
 
 /// The output contract as delivered (#1697).
 ///
@@ -802,6 +802,41 @@ impl Snippets {
                      it ready only after you've genuinely tried and failed to find a \
                      problem — then say so. The verdict names how many must-fix items \
                      remain before pushing.",
+                ),
+            ),
+            (
+                "clarify".to_string(),
+                entry(
+                    "Review",
+                    "Explain this PR in a few lines, no verbiage",
+                    "Explain this PR to me. Your whole answer is the ending — there are \
+                     no findings to report before it, so the verdict and its detail \
+                     lines ARE the explanation, not a summary of one. Read the diff and \
+                     run whatever you need to read it properly; every anchor below comes \
+                     from the real tree, not from memory. The verdict names what is true \
+                     now that was not true before, in plain words, naming the \
+                     user-visible consequence rather than the code. The detail lines \
+                     carry, in this order and only while each earns its place: the \
+                     problem — what was actually broken and who it hurt, the concrete \
+                     failure rather than the category; the change — the one thing that \
+                     makes it right, and how small it is, because a one-file fix to a \
+                     scary-sounding bug is the most reassuring fact you have; the proof \
+                     — a number, a command's before/after, or the test that fails \
+                     without it, never \"added tests\" with no claim; the risk — what \
+                     could break, or \"nothing obvious\" if that is honest; and one line \
+                     past those only if it changes what the reviewer does, such as a \
+                     surprise found along the way, a deliberate non-goal a reader would \
+                     otherwise assume was included, or CI that is not green yet. Anchor \
+                     every claim — file paths, symbol names, issue numbers, real command \
+                     output. \"Refactored for clarity\" is not a claim; \"moved marker \
+                     parsing out of dockerrun so sdk no longer links docker/docker (go \
+                     list -deps: 24 packages -> 0)\" is. Banned: restating my question, \
+                     \"this PR introduces/implements/ensures\", \"comprehensive\", \
+                     \"robust\", \"various\", a bulleted tour of changed files, and any \
+                     sentence that would still be true of a different PR. If the diff \
+                     alone does not answer it, NEED CONTEXT names the missing piece \
+                     rather than guessing. This snippet changes nothing — no commit, no \
+                     push, no edit.",
                 ),
             ),
             (
@@ -1586,6 +1621,9 @@ impl Snippets {
                 // Deliberately NOT `catch`: a built-in key must never be a
                 // strict prefix of another, or the exact-key auto-submit
                 // (`]]scatchup`) stops firing once two keys share the prefix.
+                // Enforced for the whole catalog by
+                // `no_builtin_key_is_a_strict_prefix_of_another`, so the rule
+                // is checked rather than restated next to each new entry.
                 "catchup".to_string(),
                 entry(
                     "Review",
@@ -1899,6 +1937,10 @@ impl Snippets {
         // Asserted by `an_ending_only_builtin_drops_the_unbounded_clause`,
         // so renaming the key fails the build rather than silently
         // restoring the contradiction.
+        //
+        // A key that names no built-in is skipped here in silence, so the
+        // same test also proves every listed key resolves — otherwise a
+        // typo leaves the flag unset and quietly restores the clause.
         for key in ENDING_ONLY_BUILTINS {
             if let Some(snippet) = by_key.get_mut(*key) {
                 snippet.answer_is_the_ending = true;
@@ -2386,10 +2428,51 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
         assert!(delivered.contains("Hard cap: 7 lines total."));
         assert!(delivered.contains("`report_blocker`"));
 
-        // …and it is the ONLY one. Every other built-in asks for work to be
-        // done first, so withholding the clause there would cap real output.
+        // …and the opt-out is confined to `ENDING_ONLY_BUILTINS`. The rule
+        // is about what the snippet ASKS FOR, not which key it is: a
+        // built-in that asks for work to be done reports findings of
+        // unknown length, so withholding the clause there would cap real
+        // output. `catchup` and `clarify` ask for no work — they explain
+        // something that already happened, so their whole answer IS the
+        // ending and the unbounded preamble contradicts their own cap.
+        //
+        // Quantified over the list rather than a hardcoded key so adding a
+        // second ending-only built-in updates one place; asserting the list
+        // is non-empty keeps an emptied list from vacuously passing.
+        assert!(!ENDING_ONLY_BUILTINS.is_empty());
+        // Every listed key must name a real built-in. `builtin()` sets the
+        // flag through `if let Some(..) = by_key.get_mut(key)`, which skips
+        // a typo in silence, and the loop below only visits keys that
+        // exist — so without this, `"clarrify"` would leave `clarify`
+        // delivered with the unbounded clause and nothing would fail. The
+        // hardcoded `get("catchup").expect(..)` above used to be that
+        // proof; generalizing to a list dropped it for every other entry.
+        for key in ENDING_ONLY_BUILTINS {
+            let snippet = b.get(key).unwrap_or_else(|| {
+                panic!(
+                    "`ENDING_ONLY_BUILTINS` lists `{key}`, which ships no built-in — the \
+                     flag is never set and the unbounded-output clause silently returns"
+                )
+            });
+            // …and the body must say so, so the reader of the delivered
+            // prompt learns it from the snippet rather than inferring it
+            // from a clause that is missing. `catchup` states it outright;
+            // `clarify` gained the same sentence in #1796 when its
+            // self-imposed "AT MOST 8 lines" cap — which had been the only
+            // thing marking it short — was removed for conflicting with
+            // the contract's own seven.
+            assert!(
+                snippet.body.contains("Your whole answer is the ending"),
+                "`{key}` drops the unbounded-output clause but never tells the agent \
+                 its whole answer is the ending",
+            );
+        }
         for (key, snippet) in b.all() {
-            if key == "catchup" {
+            if ENDING_ONLY_BUILTINS.contains(&key) {
+                assert!(
+                    snippet.answer_is_the_ending,
+                    "built-in `{key}` is listed ending-only but did not get the flag",
+                );
                 continue;
             }
             assert!(
@@ -2465,6 +2548,43 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
         assert_eq!(body.matches("where things stand").count(), 1);
     }
 
+    /// …and the same rule holds for every ending-only built-in, not just
+    /// `catchup` (#1796). The hardcoded `where things stand` count above is
+    /// what #1767 left behind; `clarify` then shipped the identical defect
+    /// one key over — "First line: what is TRUE NOW that was not true
+    /// before" *and* "The verdict names what is true now that was not true
+    /// before", i.e. the same sentence demanded at the top and at the
+    /// bottom of an answer the contract caps at seven lines, burning two of
+    /// them on one claim.
+    ///
+    /// The fact an ending-only body assigns to its verdict is stated once,
+    /// in the verdict, because there is no body before the ending to state
+    /// it in.
+    #[test]
+    fn an_ending_only_body_states_its_verdict_fact_once() {
+        let b = Snippets::builtin();
+        for key in ENDING_ONLY_BUILTINS {
+            let lower = b.get(key).expect("ships built-in").body.to_lowercase();
+            // The clause the body assigns to its verdict: everything from
+            // "the verdict names " to the end of that clause.
+            let at = lower
+                .find("the verdict names ")
+                .expect("every built-in says what its verdict names");
+            let rest = &lower[at + "the verdict names ".len()..];
+            let clause = rest[..rest.find([',', ';', '.']).unwrap_or(rest.len())].trim();
+            assert!(
+                !clause.is_empty(),
+                "`{key}` names an empty verdict clause — the parser found nothing to check",
+            );
+            assert_eq!(
+                lower.matches(clause).count(),
+                1,
+                "`{key}` states its verdict's fact ({clause:?}) more than once — inside \
+                 the contract's seven-line cap that spends two lines on one claim",
+            );
+        }
+    }
+
     /// The regression that shipped: 46 of 61 bodies still ended with their
     /// own "close with a human-readable summary: …" while the appended
     /// contract said "nothing after it". Two terminal instructions in one
@@ -2479,6 +2599,12 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
                 "finish with",
                 "end with a",
                 "print a one-line",
+                // `clarify` shipped "Then stop." as its terminator (#1796
+                // review). The rule this guard states is "no built-in may
+                // carry a second [terminal instruction]"; the blacklist is
+                // how it is enforced, so a body that ends itself in words
+                // the list did not name evaded a guard it plainly broke.
+                "then stop",
             ] {
                 assert!(
                     !lower.contains(phrase),
@@ -2487,6 +2613,115 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
                 );
             }
         }
+    }
+
+    /// The contract owns the answer's *shape*, so no body may prescribe a
+    /// rival one (#1796). `clarify` shipped "Use exactly this shape, one
+    /// line each" over a five-label layout while the appended contract said
+    /// "Close with exactly this shape … and nothing after it" over a
+    /// STATUS/verdict/details layout: two "exactly this shape" instructions
+    /// in one delivered prompt, naming different shapes, with nothing to
+    /// arbitrate. Which one the model obeys then varies per turn and per
+    /// agent — the cross-agent divergence #1697 exists to remove.
+    ///
+    /// A body says what its lines must *carry*; the contract says where
+    /// they go.
+    #[test]
+    fn no_builtin_body_prescribes_a_rival_answer_shape() {
+        for (key, snippet) in Snippets::builtin().all() {
+            let lower = snippet.body.to_lowercase();
+            assert!(
+                !lower.contains("exactly this shape"),
+                "built-in `{key}` prescribes its own answer shape — the delivered \
+                 prompt would carry two, and the contract already owns it",
+            );
+        }
+    }
+
+    /// No built-in key may be a strict prefix of another, or the exact-key
+    /// auto-submit (`]]s<key>`) stops firing once two keys share a prefix.
+    ///
+    /// The rule had been prose only — a comment above `catchup` explaining
+    /// why it is not named `catch`. Prose attached to one entry travels
+    /// badly: #1796 inserted a snippet between that comment and the entry
+    /// it described, stranding it on the wrong key, and then restated the
+    /// same rule verbatim underneath. An invariant the whole catalog must
+    /// hold belongs in a test the whole catalog runs.
+    #[test]
+    fn no_builtin_key_is_a_strict_prefix_of_another() {
+        let keys: Vec<String> = Snippets::builtin()
+            .all()
+            .map(|(key, _)| key.to_string())
+            .collect();
+        for key in &keys {
+            for other in &keys {
+                assert!(
+                    key == other || !other.starts_with(key.as_str()),
+                    "built-in key `{key}` is a strict prefix of `{other}` — typing \
+                     `]]s{key}` can no longer auto-submit",
+                );
+            }
+        }
+    }
+
+    /// A body may not promise a longer answer than the contract allows
+    /// (#1796). `clarify` shipped "AT MOST 8 lines total" under a contract
+    /// whose own words are "Hard cap: 7 lines total … and nothing after
+    /// it"; for an ending-only snippet the whole answer *is* that ending,
+    /// so the eighth line the body explicitly invited ("CI that is not
+    /// green yet") is a line the contract forbids. On any red-CI PR the two
+    /// instructions could not both be obeyed.
+    ///
+    /// Quantified over every built-in, not just the ending-only ones: a
+    /// body that caps itself at all must be ending-only
+    /// (`no_builtin_both_caps_its_length_and_licenses_unbounded_output`),
+    /// so together the two guards mean no built-in may declare a budget
+    /// above the contract's.
+    #[test]
+    fn no_builtin_declares_a_line_budget_above_the_contracts_own() {
+        /// The `N` in "at most N lines", in any casing, or `None` when the
+        /// body states no such budget. "at most three or four issues"
+        /// (`carve`) is not one: the count must be digits and `line` must
+        /// follow it closely.
+        fn declared_line_budget(body: &str) -> Option<usize> {
+            let lower = body.to_lowercase();
+            for (idx, _) in lower.match_indices("at most ") {
+                let mut words = lower[idx + "at most ".len()..].split_whitespace();
+                let Some(n) = words.next().and_then(|w| w.parse::<usize>().ok()) else {
+                    continue;
+                };
+                if words.take(2).any(|w| w.starts_with("line")) {
+                    return Some(n);
+                }
+            }
+            None
+        }
+
+        // The contract's own cap, read off the shipped text rather than
+        // typed again, so re-tuning the contract re-tunes this guard.
+        assert!(CONTRACT_ENDING.contains("Hard cap: 7 lines total."));
+        const CONTRACT_CAP: usize = 7;
+
+        for (key, snippet) in Snippets::builtin().all() {
+            let Some(budget) = declared_line_budget(&snippet.body) else {
+                continue;
+            };
+            assert!(
+                budget <= CONTRACT_CAP,
+                "built-in `{key}` promises at most {budget} lines, but the delivered \
+                 contract caps the whole answer at {CONTRACT_CAP} — both cannot be obeyed",
+            );
+        }
+        // The parser earns its keep only if it actually reads the one
+        // budget that ships; a silently-`None` parser would pass vacuously.
+        assert_eq!(
+            declared_line_budget(&Snippets::builtin().get("catchup").expect("catchup").body),
+            Some(6),
+        );
+        assert_eq!(
+            declared_line_budget("aim for at most three or four issues"),
+            None
+        );
     }
 
     /// A verdict fact must describe what *this* snippet produces. Keying

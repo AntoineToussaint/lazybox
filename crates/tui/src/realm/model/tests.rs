@@ -914,7 +914,7 @@ mod effects_tests {
         // Rising edge: indicator asserted + a one-shot attention flash.
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: true,
-            watched_repos: 30,
+            deferred_secs: 420,
             required_points: 900,
             allowance: 120,
         });
@@ -923,7 +923,11 @@ mod effects_tests {
             .discovery_behind
             .as_ref()
             .expect("standing indicator asserted");
-        assert_eq!(behind.watched_repos, 30);
+        assert_eq!(
+            behind.label(),
+            "discovery behind 7m · needs 900 pts, have 120 · Shift-R",
+            "the advisory prints the governor's own refusal, not a count that can read 0 (#1806)"
+        );
         assert!(
             m.status.notice.is_some(),
             "rising edge raises an attention flash"
@@ -935,7 +939,7 @@ mod effects_tests {
         m.status.notice = None;
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: true,
-            watched_repos: 31,
+            deferred_secs: 480,
             required_points: 930,
             allowance: 120,
         });
@@ -944,8 +948,8 @@ mod effects_tests {
             "the level keeps the indicator standing"
         );
         assert_eq!(
-            m.status.discovery_behind.as_ref().unwrap().watched_repos,
-            31,
+            m.status.discovery_behind.as_ref().unwrap().required_points,
+            930,
             "the standing figures refresh from the latest level"
         );
         assert!(
@@ -956,7 +960,7 @@ mod effects_tests {
         // Recovery retracts the standing indicator.
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: false,
-            watched_repos: 0,
+            deferred_secs: 0,
             required_points: 0,
             allowance: 0,
         });
@@ -971,7 +975,7 @@ mod effects_tests {
         // daemon re-asserts the level within a tick if still behind.
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: true,
-            watched_repos: 30,
+            deferred_secs: 420,
             required_points: 900,
             allowance: 120,
         });

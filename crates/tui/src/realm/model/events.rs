@@ -2805,13 +2805,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // new issues), so it can't register a phantom failing provider.
                 IpcEvent::GithubDiscoveryBehind {
                     behind,
-                    watched_repos,
+                    deferred_secs,
                     required_points,
                     allowance,
                 } => {
                     if *behind {
                         let state = crate::realm::status_ctx::DiscoveryBehind {
-                            watched_repos: *watched_repos,
+                            deferred_secs: *deferred_secs,
                             required_points: *required_points,
                             allowance: *allowance,
                         };

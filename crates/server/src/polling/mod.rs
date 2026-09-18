@@ -1561,6 +1561,12 @@ pub struct TickState {
     /// daemon raises one user-visible "discovery behind" advisory; a manual
     /// refresh or a tick that finally admits the sweep resets it.
     pub(crate) full_sweep_deferral_streak: u32,
+    /// When the current deferral episode began — the first tick the
+    /// governor refused a due sweep. The advisory reports the wall-clock
+    /// stall from this rather than from the streak: the governor interval
+    /// widens and narrows with engagement, so a tick count is not a
+    /// duration. Cleared with the streak.
+    pub(crate) full_sweep_deferral_since: Option<std::time::Instant>,
     /// Whether the "discovery behind" advisory has already been broadcast
     /// for the current deferral episode, so the notice fires once when the
     /// stall sets in rather than every tick. Cleared when a sweep is
@@ -1598,6 +1604,7 @@ impl Default for TickState {
             implicit_gh_scopes: None,
             linear_schedule: Default::default(),
             full_sweep_deferral_streak: Default::default(),
+            full_sweep_deferral_since: None,
             discovery_behind_notified: Default::default(),
             gh_app_coverage: None,
             gh_app_gap_notified: None,
@@ -6571,6 +6578,51 @@ mod rescope_collapse_tests {
         assert!(
             !saw_removable,
             "a PR-claimed closed issue must defer cleanup to the PR's merge prompt"
+        );
+    }
+
+    /// Regression (#1806): retirement must not depend on the reconcile
+    /// sweep. The windowed rotation can't read the ABSENCE of a row — only
+    /// a reconcile carries that authority — but it does positively observe
+    /// a close, because a windowed member query drops `is:open` and a close
+    /// bumps `updatedAt`. That observation must retire the row on its own,
+    /// with no `PolledScope` authority anywhere in the tick, so an inbox
+    /// whose reconcile is budget-deferred still drains.
+    #[tokio::test]
+    async fn a_closed_issue_retires_on_observation_without_any_reconcile() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let open_issue = gh_task(
+            "o/r#60",
+            "https://github.com/o/r/issues/60",
+            TaskState::Open,
+            vec![],
+        );
+        let issue_ws = Workspace::from_task(open_issue.clone(), Utc::now());
+        let issue_key = issue_ws.key.clone();
+        seed(&store, &issue_ws);
+
+        // What a windowed rotation returns once the issue closes upstream.
+        let closed_issue = gh_task(
+            "o/r#60",
+            "https://github.com/o/r/issues/60",
+            TaskState::Closed,
+            vec![],
+        );
+        upsert_into_workspace_key(&config, &issue_key, closed_issue).await;
+
+        assert!(
+            load_workspace(&config, &issue_key).is_none(),
+            "a session-less closed issue must retire on the tick that observes it"
+        );
+
+        // And the rescope pass of that same tick carries no retirement
+        // authority at all — the rotation is windowed, so the row above was
+        // reaped by the observation, not by a sweep.
+        assert_eq!(
+            repo_first_polled_scope(false, true, &["o/r".to_string()], &["o/r".to_string()]),
+            PolledScope::Repos(Vec::new()),
         );
     }
 

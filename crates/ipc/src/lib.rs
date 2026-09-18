@@ -3661,8 +3661,8 @@ pub enum Event {
     /// New-item discovery is behind (#1391): a due GitHub full sweep has
     /// been deferred by the background rate governor for several
     /// consecutive ticks, so new-issue/PR reconcile discovery has stalled
-    /// (past ~25 `watch:` repos the forecast permanently exceeds the
-    /// per-tick GraphQL allowance). A **standing, self-clearing** signal —
+    /// (a squeezed GraphQL budget, or a token already spending its window
+    /// elsewhere). A **standing, self-clearing** signal —
     /// `behind: true` when the stall sets in, `behind: false` when a sweep
     /// is finally admitted (or stops being due) — so the client shows a
     /// persistent indicator that retracts itself, not a one-shot toast that
@@ -3670,12 +3670,15 @@ pub enum Event {
     /// issue-discovery probe keeps surfacing new issues meanwhile, so it
     /// must NOT flow through the `ProviderError` error channel (which would
     /// register a phantom failing provider and, cross-client, a bare error).
-    /// The `watched_repos` / `required_points` / `allowance` figures name
-    /// the lever; they are `0` on the clearing (`behind: false`) event.
+    /// `required_points` vs `allowance` is the governor's own refusal —
+    /// what the sweep costs against what this tick affords — and
+    /// `deferred_secs` is how long the stall has held; together they say
+    /// why discovery is behind rather than merely that it is (#1806). All
+    /// three are `0` on the clearing (`behind: false`) event.
     /// Appended last (bincode is ordinal-sensitive).
     GithubDiscoveryBehind {
         behind: bool,
-        watched_repos: u32,
+        deferred_secs: u32,
         required_points: u32,
         allowance: u32,
     },

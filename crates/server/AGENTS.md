@@ -33,7 +33,9 @@ produced duplicated lines in scrollback.
 
 `polling/scheduler.rs` runs tiers, not one interval: a hot set for live and
 armed workspaces (15s), a per-repo rotation for the roster, and a periodic
-unwindowed reconcile — the only pass allowed to retire rows. An armed
+unwindowed reconcile — the only pass that may retire a row it no longer
+sees. A windowed pass retires what it positively observes closed or
+merged, so retirement does not stall when the reconcile is deferred. An armed
 auto-merge rides the hot tier so green → merged is one tick, and leaves it
 once GitHub-native auto-merge takes over.
 

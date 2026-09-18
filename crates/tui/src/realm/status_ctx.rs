@@ -314,21 +314,26 @@ pub(crate) struct GithubRateLimitWait {
 }
 
 /// Standing "new-item discovery is behind" advisory (#1391). Held while the
-/// daemon reports the full sweep budget-deferred; the figures name the lever
-/// so the footer/inspect text can spell out why and what to do.
+/// daemon reports the full sweep budget-deferred; the figures are the
+/// governor's own refusal, so the footer/inspect text can say why.
 #[derive(Debug, Clone)]
 pub(crate) struct DiscoveryBehind {
-    pub watched_repos: u32,
+    /// Wall-clock length of the current stall.
+    pub deferred_secs: u32,
     pub required_points: u32,
     pub allowance: u32,
 }
 
 impl DiscoveryBehind {
-    /// Compact footer-slot label — narrow, names the primary lever.
+    /// Compact footer-slot label — short enough that the remedy survives
+    /// the slot's truncation (#1806), and every figure it prints is a
+    /// number the stall is actually made of.
     pub fn label(&self) -> String {
         format!(
-            "new-issue discovery behind · {} watched repos over budget · Shift-R to force",
-            self.watched_repos
+            "discovery behind {} · needs {} pts, have {} · Shift-R",
+            self.stalled_for(),
+            self.required_points,
+            self.allowance
         )
     }
 
@@ -336,11 +341,23 @@ impl DiscoveryBehind {
     /// user gets an immediate nudge on top of the standing indicator.
     pub fn flash_message(&self) -> String {
         format!(
-            "New-issue discovery is behind — {} watched repos exceed the poll budget \
-             (needs {} GraphQL pts, tick allowance {}). Press Shift-R to force a full sync, \
-             or reduce `watch:` filters.",
-            self.watched_repos, self.required_points, self.allowance
+            "New-issue discovery has been behind for {} — the GitHub sweep needs {} GraphQL \
+             pts and this tick's allowance is {}. Press Shift-R to force a full sync, or mute \
+             repos you don't need swept.",
+            self.stalled_for(),
+            self.required_points,
+            self.allowance
         )
+    }
+
+    /// Compact stall duration: seconds under a minute, then minutes, then
+    /// hours.
+    fn stalled_for(&self) -> String {
+        match self.deferred_secs {
+            secs if secs < 60 => format!("{secs}s"),
+            secs if secs < 3600 => format!("{}m", secs / 60),
+            secs => format!("{}h", secs / 3600),
+        }
     }
 }
 

@@ -2717,18 +2717,46 @@ impl<T: TerminalAdapter> Model<T> {
                         // for sources that don't carry one (reply / merge
                         // / close-issue), so the flash above still stands.
                         self.rollback_optimistic_chip(source);
-                    } else if matches!(source.as_str(), "store" | "terminal")
-                        && self.rollback_optimistic_removal(message)
+                    } else if matches!(
+                        source.as_str(),
+                        "store" | "store:local-work" | "terminal"
+                    ) && self.rollback_optimistic_removal(message)
                     {
                         // An optimistic archive/delete the daemon
                         // rejected: the row (and, for a project, its
                         // children) was removed locally, so re-insert it
                         // and surface why (#476). Delete failures arrive
-                        // as `store` (archive/db) or `terminal` (a backing
+                        // as `store` (archive/db), `store:local-work` (the
+                        // worktree safety gate) or `terminal` (a backing
                         // agent that couldn't be stopped) errors naming the
                         // key; one naming no pending removal keeps its
                         // quiet sync-log-only handling.
-                        self.flash_error(format!("✗ delete failed — {message}"));
+                        //
+                        // Both notices end with where to read the untruncated
+                        // text: the footer elides a long notice from the
+                        // middle, so a trailing pointer is the one part that
+                        // always survives, and a sticky error the user can
+                        // see but not read is worse than a short one (#1805).
+                        if source == "store:local-work" {
+                            // The refusal already leads with its recovery
+                            // verb, so it is flashed as-is — a fixed
+                            // "delete failed —" ahead of it would spend the
+                            // head budget the elision leaves for the
+                            // instruction. The diff viewer is offered because
+                            // this refusal, unlike a generic store failure,
+                            // is *about* work the user can still look at.
+                            let diff_keys = lazybox_tui_core::action::ActionDef::for_kind(
+                                lazybox_tui_core::action::ActionKind::ViewDiff,
+                            )
+                            .effective_keys_display(&self.action_key_overrides);
+                            self.flash_error(format!(
+                                "✗ {message} · {diff_keys} review diff · Shift-M for the full text"
+                            ));
+                        } else {
+                            self.flash_error(format!(
+                                "✗ delete failed — {message} · Shift-M for the full text"
+                            ));
+                        }
                     } else if self.pending_refresh_ack || poll_failed {
                         // A genuine sync-poll failure — reached only when
                         // the branches above did NOT already own this error

@@ -28982,6 +28982,62 @@ mod optimistic_mutation_tests {
         let n = m.status.notice.as_ref().expect("rollback flashes an error");
         assert_eq!(n.severity, NoticeSeverity::Permanent);
         assert!(n.message.contains("delete failed"), "got {:?}", n.message);
+        assert!(
+            n.message.ends_with("Shift-M for the full text"),
+            "a truncated sticky error must say where to read it whole: {:?}",
+            n.message,
+        );
+    }
+
+    /// The worktree safety gate's refusal (#1805). It arrives on its own
+    /// source, leads with the recovery verb, and is flashed verbatim —
+    /// no fixed "delete failed —" ahead of it — so the footer's
+    /// middle-elision eats the diagnostic instead of the instruction.
+    /// Both trailing pointers survive that elision by construction.
+    #[test]
+    fn local_work_refusal_leads_with_its_instruction_and_points_at_the_full_text() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#3");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+
+        m.handle_daemon_event(provider_error(
+            "store:local-work",
+            &format!(
+                "commit, stash or push, then retry \u{2014} delete refused, workspace \
+                 {ws_key} has local work: /wt/owner-repo/pr-3 (uncommitted changes)"
+            ),
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_some(),
+            "the gate's refusal must re-insert the optimistically removed row",
+        );
+        let n = m.status.notice.as_ref().expect("refusal flashes");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(
+            n.message.starts_with("✗ commit, stash or push, then retry"),
+            "instruction must lead the notice: {:?}",
+            n.message,
+        );
+        assert!(
+            n.message.ends_with("Shift-M for the full text"),
+            "the notice must say where it is readable in full: {:?}",
+            n.message,
+        );
+        assert!(
+            n.message.contains("g v review diff"),
+            "the refusal must offer the diff of what would be lost: {:?}",
+            n.message,
+        );
+        assert!(
+            n.message.find("then retry") < n.message.find("uncommitted changes"),
+            "the diagnostic must trail: {:?}",
+            n.message,
+        );
     }
 
     #[test]

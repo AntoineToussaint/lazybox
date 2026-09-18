@@ -749,6 +749,50 @@ mod tests {
         assert!(row.contains("work on this"), "contextual hint displaced");
     }
 
+    /// The dirty-worktree delete refusal (#1805). The reported render
+    /// was `× delete failed — workspace ci was not deleted …mit/stash,
+    /// or clean the checkout, then retry ×3`: the middle elision cut
+    /// the verb phrase in half because the variable diagnostic was
+    /// interpolated ahead of the fixed instruction. With the
+    /// instruction leading and the "where to read it whole" pointer
+    /// trailing, elision has nothing left to eat but the diagnostic.
+    #[test]
+    fn refusal_keeps_its_instruction_and_its_pointer() {
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let msg = concat!(
+            "\u{2717} commit, stash or push, then retry \u{2014} delete refused, ",
+            "workspace github:owner/repo#1805 has local work: ",
+            "/Users/dev/.lazybox/v2/github-owner-repo/ci (uncommitted changes)",
+            " \u{b7} g v review diff \u{b7} Shift-M for the full text",
+        );
+        let notice = Notice::new(msg, NoticeSeverity::Permanent);
+
+        let row = render_row_at(160, &keymap, &globals, None, Some(&notice));
+        assert!(
+            row.contains("commit, stash or push, then retry"),
+            "the instruction was elided: {row:?}",
+        );
+        assert!(
+            row.contains("Shift-M for the full text"),
+            "the pointer to the full text was elided: {row:?}",
+        );
+
+        // Narrower than the instruction's own budget: the head is cut,
+        // but the trailing pointer still keeps the error from being a
+        // dead end, and the verb is still the head that survives.
+        let row = render_row_at(120, &keymap, &globals, None, Some(&notice));
+        assert!(
+            row.contains("Shift-M for the full text"),
+            "the pointer must survive at any width: {row:?}",
+        );
+        assert!(
+            row.contains("✗ commit, s"),
+            "the verb, not the diagnostic, must own the head: {row:?}",
+        );
+        assert!(row.contains("quit"), "the escape hatch is still findable");
+    }
+
     /// A sticky error banner gets the wider ~50% cap so more of its
     /// leading reason survives truncation, where a routine notice at
     /// ~40% would clip it — and the hint zone still keeps `q q` (#588).

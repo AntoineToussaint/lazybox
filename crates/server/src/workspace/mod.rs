@@ -1241,6 +1241,94 @@ fn archived_row_key(key: &str) -> String {
     format!("{}{}", lazybox_core::KV_PREFIX_ARCHIVED, key)
 }
 
+/// The value an archived-key row held before it carried a record, and
+/// still holds whenever the archived row absorbed nothing.
+const ARCHIVED_FLAG: &str = "1";
+
+/// The value stored in an archived-key row.
+///
+/// A row is a *record*, not a flag, because a PR workspace absorbs the
+/// issues it closes (`closingIssuesReferences`) and archiving one row has
+/// to tombstone every key it was standing in for. Storing which keys were
+/// folded in is what keeps that reversible: by unarchive time the row is
+/// deleted, so the record is the only surviving list of the issue keys the
+/// user archived along with the PR.
+///
+/// Rows written before this was a record — and rows for a workspace that
+/// folded nothing in — hold the plain flag `"1"`, which parses as the
+/// default.
+#[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ArchiveRecord {
+    /// Keys this row was standing in for: the standalone workspace key
+    /// each absorbed task would get back if it were polled on its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    absorbed: Vec<String>,
+    /// The row that absorbed this key. Written on the absorbed keys' own
+    /// rows so an unarchive removes exactly the tombstones its archive
+    /// wrote, never one the user raised separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    absorbed_by: Option<String>,
+}
+
+/// Read `key`'s archive record. A missing row and the legacy flag
+/// [`ARCHIVED_FLAG`] both read as the default record; `Err` means the row
+/// exists but could not be read or parsed, which a write path must not
+/// treat as "nothing folded in".
+///
+/// The legacy flag is matched exactly rather than by "whatever fails to
+/// parse", because those two cases need opposite handling. A row holding
+/// a truncated or otherwise corrupt record still OWNS absorbed rows that
+/// name it in `absorbed_by`; reading it as the empty record would make
+/// [`unarchive_workspace_key`] drop the owner alone and strand every
+/// tombstone it wrote, permanently and invisibly — nothing else ever
+/// revisits an absorbed row. Failing loudly keeps the set recoverable.
+fn read_archive_record(config: &ServerConfig, key: &str) -> Result<ArchiveRecord, String> {
+    let Some(raw) = config
+        .store
+        .get_kv(&archived_row_key(key))
+        .map_err(|e| format!("read failed: {e}"))?
+    else {
+        return Ok(ArchiveRecord::default());
+    };
+    if raw == ARCHIVED_FLAG {
+        return Ok(ArchiveRecord::default());
+    }
+    serde_json::from_str(&raw).map_err(|e| format!("parse failed: {e}"))
+}
+
+/// The standalone workspace keys `workspace` is standing in for: one per
+/// attached task other than the row's own. A PR row that collapsed
+/// `Closes #40` into itself yields issue #40's key, which is the key a
+/// later poll of that issue would build a fresh row under.
+///
+/// Restricted to tasks from the row's OWN provider. A same-provider link
+/// is declared by the record — GitHub's `closingIssuesReferences`, or a
+/// closing keyword in the PR's own title — and names the issue outright,
+/// including cross-repo (`owner/repo#N`). A CROSS-provider link never is:
+/// a Linear ticket joins a GitHub PR's row only because
+/// `extract_linear_refs` matched `<TEAM>-<number>` against the PR's
+/// branch name or title, so lazybox's own `issue-1816-…` branches mint
+/// `ISSUE-1816` on sight. Letting that inference write a permanent
+/// tombstone in another provider's namespace means deleting one GitHub
+/// project (`WorkspaceRemovalReason::ProjectCascade`) can silently
+/// retire a Linear ticket the project never owned. The ticket loses its
+/// fold and returns to the inbox as its own row, which is the recoverable
+/// failure; a tombstone is not.
+fn absorbed_archive_keys(workspace: &Workspace, key: &str) -> Vec<String> {
+    let Some(source) = workspace.primary_task().map(|task| task.id.source.clone()) else {
+        return Vec::new();
+    };
+    workspace
+        .linked_task_ids()
+        .iter()
+        .filter(|id| id.source == source)
+        .map(lazybox_core::workspace_key_for_id)
+        .filter(|absorbed| absorbed != key)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Parse the legacy single-blob archived set (`KV_KEY_ARCHIVED`).
 /// `Ok(None)` = no blob stored; `Ok(Some(set))` = a blob was present
 /// and parsed; `Err` = the row exists but could not be read/parsed.
@@ -1306,13 +1394,80 @@ pub fn load_archived_set(config: &ServerConfig) -> std::collections::HashSet<Str
 /// former whole-set read-modify-write, it cannot lose a concurrent
 /// neighbour's tombstone when an overlapping daemon (e.g. during a
 /// restart) writes a different key between our load and our store.
+///
+/// Use [`archive_workspace_key_with_absorbed`] whenever the row being
+/// archived stands in for other keys; this one archives `key` alone.
 #[must_use]
 pub fn archive_workspace_key(config: &ServerConfig, key: &str) -> bool {
-    if let Err(e) = config.store.set_kv(&archived_row_key(key), "1") {
-        tracing::warn!("archive_workspace_key: set_kv failed: {e}");
+    archive_workspace_key_with_absorbed(config, key, &[])
+}
+
+/// [`archive_workspace_key`], also tombstoning the keys the row was
+/// standing in for (`absorbed`: the standalone workspace key of every
+/// task the row had folded in).
+///
+/// A PR row that collapsed `Closes #40` into itself presents as one item,
+/// so archiving it means "and the issue too" — otherwise the issue returns
+/// as a row of its own the moment the PR stops appearing in a tick (merged
+/// past the recently-merged sweep, closed, or filtered out) and the
+/// per-tick closes-index that had been routing it into the archived PR key
+/// misses (#1816).
+///
+/// The whole set lands as one atomic batch, and each absorbed row records
+/// the owner that wrote it, so [`unarchive_workspace_key`] on the PR key
+/// takes the issues back out with it.
+#[must_use]
+pub fn archive_workspace_key_with_absorbed(
+    config: &ServerConfig,
+    key: &str,
+    absorbed: &[String],
+) -> bool {
+    if absorbed.is_empty() {
+        if let Err(e) = config.store.set_kv(&archived_row_key(key), ARCHIVED_FLAG) {
+            tracing::warn!("archive_workspace_key: set_kv failed: {e}");
+            return false;
+        }
+        tracing::info!(workspace_key = %key, "archived workspace key (tombstone written)");
+        return true;
+    }
+
+    let mut batch = Vec::with_capacity(absorbed.len() + 1);
+    let owner = ArchiveRecord {
+        absorbed: absorbed.to_vec(),
+        absorbed_by: None,
+    };
+    let records = std::iter::once((key, owner)).chain(absorbed.iter().map(|folded| {
+        (
+            folded.as_str(),
+            ArchiveRecord {
+                absorbed: Vec::new(),
+                absorbed_by: Some(key.to_string()),
+            },
+        )
+    }));
+    for (row, record) in records {
+        match serde_json::to_string(&record) {
+            Ok(value) => batch.push(StoreMutation::SetKv {
+                key: archived_row_key(row),
+                value,
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    "archive_workspace_key: encoding {row}'s archive record failed: {e}"
+                );
+                return false;
+            }
+        }
+    }
+    if let Err(e) = config.store.apply_batch(&batch) {
+        tracing::warn!("archive_workspace_key: apply_batch failed: {e}");
         return false;
     }
-    tracing::info!(workspace_key = %key, "archived workspace key (tombstone written)");
+    tracing::info!(
+        workspace_key = %key,
+        absorbed = absorbed.len(),
+        "archived workspace key with its absorbed keys (tombstones written)",
+    );
     true
 }
 
@@ -1341,7 +1496,7 @@ pub(crate) fn migrate_legacy_archived_set(config: &ServerConfig) {
         .iter()
         .map(|k| StoreMutation::SetKv {
             key: archived_row_key(k),
-            value: "1".to_string(),
+            value: ARCHIVED_FLAG.to_string(),
         })
         .collect();
     batch.push(StoreMutation::DeleteKv {
@@ -1362,16 +1517,68 @@ pub(crate) fn migrate_legacy_archived_set(config: &ServerConfig) {
 /// only after persistence succeeds; otherwise an unarchived-but-still-deleted
 /// workspace could race back into existence during this daemon run.
 ///
-/// A single atomic per-key `delete_kv` — no read-modify-write, so it
-/// can't race a concurrent migration or archive. Legacy-blob keys are
-/// converted to per-key rows by `migrate_legacy_archived_set` at
-/// startup, before any unarchive can run, so this delete always sees a
-/// real row to remove.
+/// Takes the keys `key` absorbed out of the set with it, so the issues a
+/// PR row was standing in for return to the inbox alongside it (#1816) —
+/// each absorbed row names its owner, so a tombstone the user raised
+/// separately since the fold is left alone. No read-modify-write of a
+/// shared blob, so this can't race a concurrent migration or archive.
+/// Legacy-blob keys are converted to per-key rows by
+/// `migrate_legacy_archived_set` at startup, before any unarchive can
+/// run, so this delete always sees a real row to remove.
 #[must_use]
 pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
-    if let Err(e) = config.store.delete_kv(&archived_row_key(key)) {
-        tracing::warn!("unarchive_workspace_key: delete_kv failed: {e}");
-        return false;
+    // Reading the owner record, then each absorbed row, then deleting the
+    // lot is a read-modify-write ACROSS KEYS — the precise cycle
+    // `archive_updates` exists to serialize. #1496 made a single archive
+    // one atomic row write and left only the migrations holding this lock;
+    // absorbed keys put a multi-key cycle back. Without it, an archive of
+    // another row that absorbs one of our keys can land between our read
+    // and our batch, and we delete the tombstone it just wrote — the very
+    // resurrection this function's own feature prevents.
+    let _update_guard = config.archive_updates.lock();
+    let record = match read_archive_record(config, key) {
+        Ok(record) => record,
+        Err(e) => {
+            tracing::warn!("unarchive_workspace_key: reading {key}'s archive record failed: {e}");
+            return false;
+        }
+    };
+    let mut also_drop = Vec::new();
+    for folded in &record.absorbed {
+        // Only the tombstones this key's own archive wrote come back out.
+        // A folded key normally has no row of its own to archive, so this
+        // looks unreachable — but `load_archived_set` degrades to EMPTY on
+        // a read error, which lets a tombstoned issue upsert a standalone
+        // row that the user can then archive in its own right. That
+        // archive is theirs; ours must not undo it.
+        match read_archive_record(config, folded) {
+            Ok(folded_record) if folded_record.absorbed_by.as_deref() == Some(key) => {
+                also_drop.push(archived_row_key(folded));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "unarchive_workspace_key: reading {folded}'s archive record failed: {e}"
+                );
+                return false;
+            }
+        }
+    }
+
+    if also_drop.is_empty() {
+        if let Err(e) = config.store.delete_kv(&archived_row_key(key)) {
+            tracing::warn!("unarchive_workspace_key: delete_kv failed: {e}");
+            return false;
+        }
+    } else {
+        let batch: Vec<StoreMutation> = std::iter::once(archived_row_key(key))
+            .chain(also_drop)
+            .map(|key| StoreMutation::DeleteKv { key })
+            .collect();
+        if let Err(e) = config.store.apply_batch(&batch) {
+            tracing::warn!("unarchive_workspace_key: apply_batch failed: {e}");
+            return false;
+        }
     }
     config.deleted_workspaces.lock().remove(key);
     true
@@ -3471,7 +3678,16 @@ impl<'a> WorkspaceLifecycle<'a> {
         // and blocks the next poll from repairing/re-presenting it. Only the
         // archiving reasons suppress re-polling; the session tombstone below is
         // written for every reason.
-        if archive && !archive_workspace_key(config, key_str) {
+        // The row presents as one item — a PR and the issues it closes —
+        // so archiving it has to tombstone every key it stands in for, or
+        // a later poll of an absorbed issue builds a standalone row under
+        // a key the user never archived (#1816).
+        let absorbed = workspace_snapshot
+            .as_ref()
+            .filter(|_| archive)
+            .map(|workspace| absorbed_archive_keys(workspace, key_str))
+            .unwrap_or_default();
+        if archive && !archive_workspace_key_with_absorbed(config, key_str, &absorbed) {
             let _ = config.bus.send(Event::provider_error_retryable(
                 "store",
                 format!("could not archive workspace {key}; it was not deleted"),
@@ -4173,6 +4389,111 @@ mod archived_set_tests {
         let set = crate::workspace::load_archived_set_strict(&config).unwrap();
         assert_eq!(set.len(), 1);
         assert!(set.contains("k2"));
+    }
+
+    #[test]
+    fn absorbed_keys_are_tombstoned_with_their_row_and_come_back_with_it() {
+        // #1816: a PR row standing in for the issues it closes archives
+        // them too — and unarchive has to reverse the whole set, which is
+        // why the row is a record rather than a flag.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let absorbed = ["github-o-r-40".to_string(), "github-o-r-41".to_string()];
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &absorbed,
+        ));
+        assert_eq!(
+            crate::workspace::load_archived_set_strict(&config).unwrap(),
+            ["github-o-r-42", "github-o-r-40", "github-o-r-41"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+
+        assert!(crate::workspace::unarchive_workspace_key(
+            &config,
+            "github-o-r-42"
+        ));
+        assert!(
+            crate::workspace::load_archived_set_strict(&config)
+                .unwrap()
+                .is_empty(),
+            "the absorbed keys must not outlive the row that archived them"
+        );
+    }
+
+    #[test]
+    fn unarchive_leaves_an_independently_archived_absorbed_key_alone() {
+        // The owner's record lists the key, but that key's own row now
+        // names a different owner — a later archive of the issue on its
+        // own. Only the tombstones this archive wrote come back out.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &["github-o-r-40".to_string()],
+        ));
+        assert!(crate::workspace::archive_workspace_key(
+            &config,
+            "github-o-r-40"
+        ));
+
+        assert!(crate::workspace::unarchive_workspace_key(
+            &config,
+            "github-o-r-42"
+        ));
+        assert_eq!(
+            crate::workspace::load_archived_set_strict(&config).unwrap(),
+            ["github-o-r-40"].into_iter().map(String::from).collect(),
+        );
+    }
+
+    #[test]
+    fn a_corrupt_record_fails_the_unarchive_instead_of_stranding_its_tombstones() {
+        // Regression: reading a corrupt owner row as the empty record made
+        // unarchive drop the owner alone and strand every absorbed
+        // tombstone it had written — permanently, and invisibly, since
+        // nothing else ever revisits an absorbed row.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &["github-o-r-40".to_string()],
+        ));
+        store
+            .set_kv(&archived_row_key("github-o-r-42"), r#"{"absorbed":["#)
+            .unwrap();
+
+        assert!(
+            !crate::workspace::unarchive_workspace_key(&config, "github-o-r-42"),
+            "a record that cannot be parsed must fail the unarchive, not read as empty"
+        );
+        assert!(
+            crate::workspace::load_archived_set_strict(&config)
+                .unwrap()
+                .contains("github-o-r-40"),
+            "the absorbed tombstone stays recoverable rather than being stranded"
+        );
+    }
+
+    #[test]
+    fn a_legacy_flag_row_reads_as_an_empty_record() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key(&config, "k1"));
+        assert_eq!(
+            store.get_kv(&archived_row_key("k1")).unwrap().as_deref(),
+            Some("1"),
+            "a row with nothing folded in stays the plain flag"
+        );
+        assert_eq!(
+            super::read_archive_record(&config, "k1").unwrap(),
+            super::ArchiveRecord::default(),
+        );
     }
 }
 

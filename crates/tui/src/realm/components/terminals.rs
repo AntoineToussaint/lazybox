@@ -591,6 +591,13 @@ impl Terminals {
         self.inner.terminal_tracks_mouse(terminal_id)
     }
 
+    /// Whether `terminal_id`'s inner program enabled bracketed paste.
+    /// A human paste is framed only for programs that asked for the
+    /// framing.
+    pub fn terminal_accepts_bracketed_paste(&self, terminal_id: lazybox_ipc::TerminalId) -> bool {
+        self.inner.terminal_accepts_bracketed_paste(terminal_id)
+    }
+
     /// Wire id of the currently focused terminal, if any.
     pub fn focused_terminal_id(&self) -> Option<lazybox_ipc::TerminalId> {
         self.inner.focused_terminal_id()

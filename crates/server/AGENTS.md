@@ -29,6 +29,18 @@ its pane, which drives `Command::Resize` alone. Bytes must parse at the size
 they were laid out for; every client-side attempt to infer the size instead
 produced duplicated lines in scrollback.
 
+## A deep-scrollback capture names a watermark it already covers
+
+`SessionBackend::scrollback` returns `(history, seq)`, and `seq` promises the
+client that everything at or below it is *in* the history — that is what lets
+the client put back the live output the capture predates instead of erasing
+it. tmux paints a chunk to its attach client only after the pane grid holds
+that content, so the mark has to be read **before** `capture-pane`, never
+after: a mark read afterwards covers bytes the capture predates, and both
+sides then drop them (#1798). A chunk landing during the capture may be in it
+already and is re-fed by the client — a repeated repaint, which is the visible
+half of that trade.
+
 ## Polling
 
 `polling/scheduler.rs` runs tiers, not one interval: a hot set for live and

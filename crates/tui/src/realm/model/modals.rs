@@ -4415,6 +4415,143 @@ impl<T: TerminalAdapter> Model<T> {
         self.flush_dispatched_cmds(vec![cmd]);
     }
 
+    /// The spawn a branch-conflict recovery should resume, as the
+    /// `SpawnFallback` the recovery command carries. `None` when no spawn
+    /// is remembered — the recovery has nothing to resume and says so.
+    ///
+    /// Everything the user chose in setup rides along: the agent kind, the
+    /// model tier, the access mode, the cwd and the prompt. That is the
+    /// point of resolving in place rather than dismissing (#1742).
+    fn branch_conflict_spawn(
+        &mut self,
+    ) -> Option<(Box<lazybox_ipc::SpawnFallback>, Option<String>, bool)> {
+        let Some(lazybox_ipc::Command::Spawn {
+            session_key,
+            session_id,
+            client_request_id,
+            kind,
+            cwd,
+            initial_prompt,
+            initial_snippet: _,
+            on_main,
+            model_alias,
+            access,
+            force_new: _,
+            role: _,
+        }) = self.last_spawn.clone()
+        else {
+            self.flash_hint("nothing to resume");
+            return None;
+        };
+        Some((
+            Box::new(lazybox_ipc::SpawnFallback {
+                session_key,
+                session_id,
+                client_request_id,
+                kind,
+                cwd,
+                model_alias,
+                access,
+            }),
+            initial_prompt,
+            on_main,
+        ))
+    }
+
+    /// The branch collision the mounted modal is showing, as
+    /// `(wanted, blocker)` — `None` when the failed modal is some other
+    /// class, or is not a failure at all.
+    fn branch_conflict(&self) -> Option<(String, String)> {
+        let state = self.worktree_progress.as_ref()?;
+        state.failed().then_some(())?;
+        state.recovery()?.resolves_branch_conflict().then_some(())?;
+        let error = state.error()?;
+        Some((
+            lazybox_ipc::WorktreeRecovery::df_requested_branch(error)?,
+            lazybox_ipc::WorktreeRecovery::df_conflict_branch(error)?,
+        ))
+    }
+
+    /// `b` on a `BranchDirFileConflict` modal (#1742): ask for a branch
+    /// name, prefilled with the alternative the daemon's own retry would
+    /// have picked, and resume the original spawn on it.
+    ///
+    /// The prompt rejects a name that still collides with the blocker as
+    /// it is typed — `deps/grouping-2` reads as a fix but still wants the
+    /// `deps/` directory `deps` occupies — so an unusable name can't be
+    /// submitted into a second identical failure.
+    pub(super) fn prompt_for_another_branch(&mut self) {
+        use crate::realm::components::input::Input;
+
+        if matches!(self.modal_stack.last(), Some(Id::WorktreeBranchName)) {
+            return;
+        }
+        let Some((wanted, blocker)) = self.branch_conflict() else {
+            return;
+        };
+        let Some((spawn, initial_prompt, on_main)) = self.branch_conflict_spawn() else {
+            return;
+        };
+        let suggestion = lazybox_core::branch_namespace::alternative(&wanted, &blocker, 1);
+        self.set_modal_flow(ModalFlow::WorktreeBranchName {
+            spawn,
+            initial_prompt,
+            on_main,
+        });
+        let validated = blocker.clone();
+        let modal = Input::new(format!("'{blocker}' holds that name — use instead:"))
+            .title("Branch name")
+            .with_input(suggestion)
+            .with_validator(move |candidate: &str| {
+                let candidate = candidate.trim();
+                !candidate.is_empty()
+                    && !lazybox_core::branch_namespace::conflicts(candidate, &validated)
+            });
+        self.mount_modal(Id::WorktreeBranchName, modal);
+    }
+
+    /// `n` on the same modal: move the *blocking* branch's name aside so
+    /// the branch the spawn asked for is free. Renaming keeps every commit
+    /// on it — unlike a delete, which lazybox never performs here — but it
+    /// touches a branch the user did not name in this flow, so it asks
+    /// first and says exactly which branch and which new name.
+    pub(super) fn rename_blocking_branch(&mut self) {
+        use crate::realm::components::confirm::Confirm;
+
+        if matches!(
+            self.modal_stack.last(),
+            Some(Id::WorktreeRenameBlockingConfirm)
+        ) {
+            return;
+        }
+        let Some((wanted, blocker)) = self.branch_conflict() else {
+            return;
+        };
+        let Some((spawn, initial_prompt, on_main)) = self.branch_conflict_spawn() else {
+            return;
+        };
+        let alias = lazybox_core::branch_namespace::alternative(&blocker, &wanted, 1);
+        let cmd = lazybox_ipc::Command::ResolveBranchConflict {
+            spawn,
+            initial_prompt,
+            on_main,
+            resolution: lazybox_ipc::BranchConflictResolution::RenameBlocking {
+                from: blocker.clone(),
+                to: alias.clone(),
+            },
+        };
+        self.set_modal_flow(ModalFlow::WorktreeRenameBlockingConfirm { cmd: Box::new(cmd) });
+        // The checklist stays mounted underneath: declining must land back
+        // on the recovery modal with the other actions still reachable.
+        self.mount_modal(
+            Id::WorktreeRenameBlockingConfirm,
+            Confirm::new(format!(
+                "Rename local branch '{blocker}' to '{alias}' so '{wanted}' can be created? \
+                 Its commits are kept; nothing is pushed."
+            )),
+        );
+    }
+
     /// `g` on a `BranchHeldLive` `WorktreeProgress` modal (issue #787):
     /// jump to the live session already holding the branch instead of
     /// dead-ending. The holder path is named verbatim in the failure text;

@@ -346,6 +346,14 @@ pub enum Id {
     /// (#1572). The parked command lives in
     /// `ModalFlow::WorktreeRecreateConfirm`.
     WorktreeRecreateConfirm,
+    /// "Which branch name?" prompt behind `b` on a branch-namespace
+    /// collision (#1742). The spawn to resume lives in
+    /// `ModalFlow::WorktreeBranchName`.
+    WorktreeBranchName,
+    /// "Rename the blocking branch?" confirm behind `n` on the same
+    /// collision. The parked command lives in
+    /// `ModalFlow::WorktreeRenameBlockingConfirm`.
+    WorktreeRenameBlockingConfirm,
     /// Merge-conflict resolve prompt (issue #947). Offered when a `g m`
     /// merge is blocked (or rejected) by conflicts: `Msg::Confirmed(true)`
     /// spawns/attaches the workspace's agent with the conflict-resolution
@@ -1007,6 +1015,19 @@ pub(crate) enum ModalFlow {
     /// uncommitted tracked work into a `.bak-<n>` sibling was a single
     /// keypress; it now asks first.
     WorktreeRecreateConfirm { cmd: Box<lazybox_ipc::Command> },
+    /// The spawn parked behind the "which branch name?" prompt (#1742),
+    /// held whole so the resumed spawn carries the agent, model, access
+    /// and prompt the user originally chose. The blocking branch the
+    /// prompt validates against is captured by its validator.
+    WorktreeBranchName {
+        spawn: Box<lazybox_ipc::SpawnFallback>,
+        initial_prompt: Option<String>,
+        on_main: bool,
+    },
+    /// The `ResolveBranchConflict` command parked behind the "rename the
+    /// blocking branch?" confirm (#1742). Renaming someone else's branch
+    /// is an explicit operation, so it always asks first.
+    WorktreeRenameBlockingConfirm { cmd: Box<lazybox_ipc::Command> },
     /// The wizard Finish outcome parked behind the remove-repos
     /// confirm (#scale, proposal F).
     ScopeRemovalConfirm {
@@ -1389,6 +1410,16 @@ pub enum Msg {
     /// open a repo picker for the ticket's team; the pick persists
     /// `providers.linear.teams.<team>` and re-provisions.
     WorktreePickRepo,
+    /// `b` pressed on a `BranchDirFileConflict` `WorktreeProgress` modal
+    /// (#1742) — open an editable prompt for a free branch name, prefilled
+    /// with the one the daemon's own retry would have picked, and resume
+    /// the original spawn on it.
+    WorktreeUseAnotherBranch,
+    /// `n` pressed on the same modal — rename the *blocking* branch out of
+    /// the way (keeping its commits) and resume the spawn on the branch
+    /// originally asked for. The only repair available when the wanted
+    /// branch is a PR head.
+    WorktreeRenameBlockingBranch,
     PollingError((String, String, String, String)),
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
@@ -7775,6 +7806,8 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::WorktreeAdopt => self.adopt_worktree_branch(),
             Msg::WorktreeJumpToHolder => self.jump_to_worktree_holder(),
             Msg::WorktreePickRepo => self.pick_repo_for_linear_team(),
+            Msg::WorktreeUseAnotherBranch => self.prompt_for_another_branch(),
+            Msg::WorktreeRenameBlockingBranch => self.rename_blocking_branch(),
             Msg::Confirmed(yes) => {
                 let cmds = self.handle_confirmed(yes);
                 self.dispatch_cmds(cmds);

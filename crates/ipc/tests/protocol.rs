@@ -609,6 +609,20 @@ fn all_commands() -> Vec<Command> {
             session_key: lazybox_core::SessionKey::from("github-acme-widget-7"),
             enabled: true,
         },
+        Command::ResolveBranchConflict {
+            spawn: Box::new(lazybox_ipc::SpawnFallback {
+                session_key: "github:o/r#1".into(),
+                session_id: None,
+                client_request_id: Some("resolve-1".into()),
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: Some("/tmp".into()),
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            }),
+            initial_prompt: Some("carry on".into()),
+            on_main: false,
+            resolution: lazybox_ipc::BranchConflictResolution::UseBranch("deps-grouping".into()),
+        },
         Command::Shutdown,
     ]
 }
@@ -1579,6 +1593,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SetEpicPolicies { .. } => "SetEpicPolicies",
         Command::DecideToolUse { .. } => "DecideToolUse",
         Command::SetContextCompaction { .. } => "SetContextCompaction",
+        Command::ResolveBranchConflict { .. } => "ResolveBranchConflict",
     }
 }
 
@@ -1711,7 +1726,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        102,
+        103,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

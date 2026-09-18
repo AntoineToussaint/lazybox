@@ -2240,6 +2240,40 @@ pub enum Command {
         session_key: SessionKey,
         enabled: bool,
     },
+    /// Resolve a [`WorktreeRecovery::BranchDirFileConflict`] and resume the
+    /// spawn it aborted (#1742). `spawn` mirrors the failed
+    /// [`Command::Spawn`], so the originally requested agent / shell /
+    /// model / prompt is what starts once the conflict is cleared — the
+    /// user never re-enters setup. The daemon revalidates `resolution`
+    /// against the live ref namespace before acting, since the branch
+    /// state can change between the modal opening and the keypress.
+    /// Appended last (bincode is ordinal-sensitive).
+    ResolveBranchConflict {
+        spawn: Box<SpawnFallback>,
+        #[serde(default)]
+        initial_prompt: Option<String>,
+        #[serde(default)]
+        on_main: bool,
+        resolution: BranchConflictResolution,
+    },
+}
+
+/// How a branch-namespace collision should be cleared (#1742). Both arms
+/// are non-destructive: one sidesteps the taken name, the other moves the
+/// blocker's *name* while keeping every commit on it. Deleting a branch is
+/// deliberately not expressible here — it is never the repair lazybox
+/// performs on the user's behalf.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum BranchConflictResolution {
+    /// Cut the new work on this name instead. Only valid for a branch
+    /// lazybox derived; the daemon refuses it for a workspace whose branch
+    /// is a PR head, where renaming would silently retarget the PR.
+    UseBranch(String),
+    /// Rename the *blocking* local branch out of the way, then provision
+    /// the originally requested branch. Refused when `from` is checked out
+    /// in a live worktree.
+    RenameBlocking { from: String, to: String },
 }
 
 impl Command {
@@ -4133,6 +4167,19 @@ impl WorktreeRecovery {
         {
             return Self::Disk;
         }
+        // A directory/file branch conflict, in either phrasing: the wrapped
+        // `GitError::BranchDirFileConflict` ("directory/file conflict") and
+        // git's own raw refusal (`'refs/heads/deps' exists; cannot create
+        // '…'`). Checked BEFORE the transient block because that block's
+        // "cannot lock ref" marker rides git's raw D/F text — and because a
+        // raw refusal that carries no lock marker at all would otherwise
+        // fall past every arm to `Unknown`, whose only affordance is the
+        // retry that replays this exact failure. Either marker is
+        // definitionally a D/F, so matching early can't steal another class.
+        if message.contains("exists; cannot create") || message.contains("directory/file conflict")
+        {
+            return Self::BranchDirFileConflict;
+        }
         // Network transients that a retry can clear on its own — plus
         // lazybox's own transfer timeout ("`git fetch …` exceeded 300s
         // wall-clock", git-ops' bounded runners) and git's lock
@@ -4152,27 +4199,7 @@ impl WorktreeRecovery {
             || message.contains("index.lock")
             || message.contains("cannot lock ref")
         {
-            // A directory/file branch conflict is NOT a transient lock,
-            // yet git's raw phrasing is "cannot lock ref '…': '…' exists;
-            // cannot create '…'" — which trips the "cannot lock ref" arm
-            // above. Match git's own D/F marker ("exists; cannot create"),
-            // not the wrapped BranchDirFileConflict's "directory/file
-            // conflict" phrasing (that message never contains "cannot lock
-            // ref", so it reaches the post-block check instead). Without
-            // this, a raw D/F error would be mislabeled Transient and the
-            // modal would offer the exact doomed retry this class prevents.
-            if message.contains("exists; cannot create")
-                || message.contains("directory/file conflict")
-            {
-                return Self::BranchDirFileConflict;
-            }
             return Self::Transient;
-        }
-        // Directory/file branch-name conflict the daemon couldn't clear
-        // safely. Matched on the distinct phrase from
-        // `GitError::BranchDirFileConflict`.
-        if message.contains("directory/file conflict") {
-            return Self::BranchDirFileConflict;
         }
         Self::Unknown
     }
@@ -4410,9 +4437,8 @@ impl WorktreeRecovery {
             }
             Self::Disk => "Disk or permission error. Free space or fix permissions, then press r.",
             Self::BranchDirFileConflict => {
-                "The branch name collides with an existing branch (a directory/file \
-                 conflict). Delete or rename the conflicting branch — a bare retry \
-                 can't clear it."
+                "The branch name collides with an existing branch, so git can't create \
+                 both. Free that name, or start this work on a different one."
             }
             Self::Unknown => "Press r to retry, or Esc to dismiss.",
         }
@@ -4424,11 +4450,61 @@ impl WorktreeRecovery {
     /// modal can tell the user exactly which branch to delete or rename.
     /// `None` for every other class / message shape.
     pub fn df_conflict_branch(message: &str) -> Option<String> {
-        let after = message.split_once("already exists")?.0;
-        let end = after.rfind('\'')?;
-        let start = after[..end].rfind('\'')? + 1;
-        let name = after[start..end].trim();
+        if let Some(before) = message.split_once("already exists").map(|(head, _)| head)
+            && let Some(name) = Self::last_quoted(before)
+        {
+            return Some(name);
+        }
+        // git's own phrasing, which reaches the client whenever the D/F is
+        // raised somewhere the typed `GitError` doesn't wrap it:
+        // `'refs/heads/deps' exists; cannot create 'refs/heads/deps/grouping'`.
+        // `classify` already recognises this form, so the parsers have to as
+        // well — otherwise the class is right, both names are missing, and
+        // the modal collapses back to the dismiss-only dead end.
+        let before = message.split_once("exists; cannot create")?.0;
+        Self::last_quoted(before).map(Self::strip_ref_prefix)
+    }
+
+    /// The contents of the last single-quoted token in `text`.
+    fn last_quoted(text: &str) -> Option<String> {
+        let end = text.rfind('\'')?;
+        let start = text[..end].rfind('\'')? + 1;
+        let name = text[start..end].trim();
         (!name.is_empty()).then(|| name.to_string())
+    }
+
+    fn strip_ref_prefix(name: String) -> String {
+        name.strip_prefix("refs/heads/")
+            .map(str::to_string)
+            .unwrap_or(name)
+    }
+
+    /// The branch the spawn *asked* for in a
+    /// [`Self::BranchDirFileConflict`] message (``branch '<branch>' can't
+    /// be created because …``). With [`Self::df_conflict_branch`] it gives
+    /// the modal both sides of the collision, which is what a usable
+    /// alternative name has to be derived from (#1742).
+    pub fn df_requested_branch(message: &str) -> Option<String> {
+        if let Some(after) = message.split_once("branch '").map(|(_, tail)| tail)
+            && let Some(name) = after.split_once('\'').map(|(name, _)| name.trim())
+            && !name.is_empty()
+        {
+            return Some(name.to_string());
+        }
+        // The raw form names the branch being created after the marker.
+        let after = message.split_once("cannot create '")?.1;
+        let name = after.split_once('\'')?.0.trim();
+        (!name.is_empty()).then(|| Self::strip_ref_prefix(name.to_string()))
+    }
+
+    /// Whether the modal can offer to **resolve a branch-namespace
+    /// collision in place** (#1742): pick a free branch name for new work,
+    /// or move the blocking branch's name aside — then resume the spawn
+    /// with everything the user already chose. Only
+    /// [`Self::BranchDirFileConflict`], the one class whose blocker is a
+    /// *name*, not a state lazybox has to wait out.
+    pub fn resolves_branch_conflict(&self) -> bool {
+        matches!(self, Self::BranchDirFileConflict)
     }
 
     /// Concrete recovery text for a particular failure message.
@@ -4452,6 +4528,21 @@ impl WorktreeRecovery {
                 "Managed checkout:",
                 self.hint(),
             ),
+            // Name both sides: which branch blocks which is the whole
+            // fact, and it decides whether the fix is a new name for the
+            // work or a new name for the blocker (#1742).
+            Self::BranchDirFileConflict => {
+                match (
+                    Self::df_requested_branch(message),
+                    Self::df_conflict_branch(message),
+                ) {
+                    (Some(wanted), Some(blocker)) => format!(
+                        "'{blocker}' already occupies the name '{wanted}' needs — \
+                         git can't hold both."
+                    ),
+                    _ => self.hint().to_string(),
+                }
+            }
             // Name the branch: adopting is only obviously the right call
             // once you can see which branch you would be adopting (#1572).
             Self::BranchMismatch => match Self::mismatch_branch(message) {
@@ -5243,6 +5334,110 @@ mod worktree_recovery_tests {
             WorktreeRecovery::df_conflict_branch(msg).as_deref(),
             Some("release/v0.2.102"),
         );
+    }
+
+    /// #1742: the collision is only actionable once BOTH sides are in
+    /// hand — which name blocks which is what decides whether the work
+    /// moves or the blocker does. Pinned on the real
+    /// `GitError::BranchDirFileConflict` text in both directions, since
+    /// the daemon's own retry and the modal's suggestion read from it.
+    #[test]
+    fn dir_file_conflict_carries_both_branch_names() {
+        for (wanted, blocker) in [("release", "release/v0.2.102"), ("deps/grouping", "deps")] {
+            let msg = format!(
+                "worktree: checkout_new_branch_at: branch '{wanted}' can't be created \
+                 because '{blocker}' already exists — git can't hold both a branch and a \
+                 path named '{wanted}' (a directory/file conflict). Delete or rename \
+                 '{blocker}', then retry"
+            );
+            let class = WorktreeRecovery::classify(&msg);
+            assert_eq!(class, WorktreeRecovery::BranchDirFileConflict);
+            assert!(
+                class.resolves_branch_conflict(),
+                "the modal must offer to resolve the collision, not dead-end on it",
+            );
+            assert_eq!(
+                WorktreeRecovery::df_requested_branch(&msg).as_deref(),
+                Some(wanted),
+            );
+            assert_eq!(
+                WorktreeRecovery::df_conflict_branch(&msg).as_deref(),
+                Some(blocker),
+            );
+            // The remediation names the pair rather than repeating the
+            // generic "delete or rename" advice the class used to end on.
+            let remediation = class.remediation(&msg);
+            assert!(
+                remediation.contains(wanted) && remediation.contains(blocker),
+                "remediation must name both sides: {remediation}",
+            );
+        }
+    }
+
+    /// git's RAW D/F phrasing reaches the client whenever the failure is
+    /// raised somewhere the typed `GitError` doesn't wrap it — `classify`
+    /// carries an explicit arm for it. Both names must still parse: when
+    /// they didn't, the class was right, the pair was empty, and the modal
+    /// fell back to a dismiss-only footer under a hint promising actions
+    /// it no longer offered.
+    #[test]
+    fn dir_file_conflict_parses_gits_raw_phrasing_too() {
+        for (msg, wanted, blocker) in [
+            (
+                "worktree: checkout_at: fatal: 'refs/heads/deps' exists; cannot create \
+                 'refs/heads/deps/grouping'",
+                "deps/grouping",
+                "deps",
+            ),
+            (
+                "cannot lock ref 'refs/heads/release': 'refs/heads/release/v1' exists; \
+                 cannot create 'refs/heads/release'",
+                "release",
+                "release/v1",
+            ),
+        ] {
+            assert_eq!(
+                WorktreeRecovery::classify(msg),
+                WorktreeRecovery::BranchDirFileConflict,
+            );
+            assert_eq!(
+                WorktreeRecovery::df_requested_branch(msg).as_deref(),
+                Some(wanted),
+                "raw form must still name the branch being created: {msg}",
+            );
+            assert_eq!(
+                WorktreeRecovery::df_conflict_branch(msg).as_deref(),
+                Some(blocker),
+                "raw form must still name the blocker: {msg}",
+            );
+        }
+    }
+
+    /// No other class claims the branch-conflict recovery: offering a
+    /// branch rename on, say, a dirty leftover would be a fix for a
+    /// problem the user doesn't have.
+    #[test]
+    fn only_the_branch_collision_resolves_a_branch_conflict() {
+        for class in [
+            WorktreeRecovery::Transient,
+            WorktreeRecovery::BranchHeldLive,
+            WorktreeRecovery::BranchHeldManaged,
+            WorktreeRecovery::BranchMismatch,
+            WorktreeRecovery::DirtyLeftover,
+            WorktreeRecovery::BranchMissing,
+            WorktreeRecovery::Offline,
+            WorktreeRecovery::DefaultBranchUnresolved,
+            WorktreeRecovery::BadRepo,
+            WorktreeRecovery::LinearUnmapped,
+            WorktreeRecovery::JiraUnmapped,
+            WorktreeRecovery::Disk,
+            WorktreeRecovery::Unknown,
+        ] {
+            assert!(
+                !class.resolves_branch_conflict(),
+                "{class:?} must not offer a branch-name recovery",
+            );
+        }
     }
 
     /// #1755: the modal states a collision as the two branch names side

@@ -357,6 +357,53 @@ impl WorktreeProgressState {
     }
 }
 
+/// The two sides of a [`WorktreeRecovery::BranchDirFileConflict`], plus
+/// the names the modal's actions would use (#1742).
+///
+/// Both alternatives come from [`lazybox_core::branch_namespace`], the
+/// same arithmetic the daemon's own automatic retry uses, so the name
+/// offered here is the name it would have arrived at. They are proposals:
+/// the daemon revalidates against the live ref namespace before acting,
+/// because a sibling agent can take a name while this modal is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchConflict {
+    /// The branch the spawn asked for.
+    pub wanted: String,
+    /// The existing branch whose name occupies it.
+    pub blocker: String,
+    /// A free name for the *work*. `None` when `wanted` is the PR's head:
+    /// moving a PR's branch would leave the work off the ref the PR
+    /// tracks, so lazybox never offers it.
+    pub suggestion: Option<String>,
+    /// A free name for the *blocker*, for the rename action. Renaming
+    /// keeps every commit — it is the only repair available when the
+    /// wanted branch can't move.
+    pub blocker_alias: String,
+}
+
+impl BranchConflict {
+    /// Read a conflict out of a failure message, or `None` when the class
+    /// isn't a branch collision or the message names only one side.
+    fn from_error(
+        recovery: Option<WorktreeRecovery>,
+        error: Option<&str>,
+        pr_head: Option<&str>,
+    ) -> Option<Self> {
+        let error = error?;
+        recovery?.resolves_branch_conflict().then_some(())?;
+        let wanted = WorktreeRecovery::df_requested_branch(error)?;
+        let blocker = WorktreeRecovery::df_conflict_branch(error)?;
+        let is_pr_head = pr_head == Some(wanted.as_str());
+        Some(Self {
+            suggestion: (!is_pr_head)
+                .then(|| lazybox_core::branch_namespace::alternative(&wanted, &blocker, 1)),
+            blocker_alias: lazybox_core::branch_namespace::alternative(&blocker, &wanted, 1),
+            wanted,
+            blocker,
+        })
+    }
+}
+
 /// Modal renderer. A pure snapshot of [`WorktreeProgressState`] plus a
 /// self-advancing spinner index.
 pub struct WorktreeProgress {
@@ -387,6 +434,9 @@ pub struct WorktreeProgress {
     /// Whether `requested_branch` is the PR's head — the branch the PR
     /// keeps tracking whichever key is pressed.
     requested_is_pr_head: bool,
+    /// The branch-namespace collision this failure is, when it is one —
+    /// with the alternative names its recovery actions would use (#1742).
+    branch_conflict: Option<BranchConflict>,
     warning: Option<String>,
     spinner_idx: usize,
 }
@@ -417,6 +467,11 @@ impl WorktreeProgress {
                 .then(|| state.error().and_then(WorktreeRecovery::requested_branch))
                 .flatten(),
             requested_is_pr_head: false,
+            branch_conflict: BranchConflict::from_error(
+                state.recovery,
+                state.error(),
+                state.pr_head(),
+            ),
             warning: state.warning.clone(),
             spinner_idx: 0,
         };
@@ -508,49 +563,83 @@ impl Component for WorktreeProgress {
         // plus its remediation can exceed the modal's height, and when
         // they flowed through one paragraph the last line — the only one
         // telling the user what keys do anything — was the one clipped.
-        let footer: Vec<&str> = if let Some(err) = &self.error {
-            match (&self.requested_branch, &self.adopt_branch) {
-                // A branch collision is one fact: name the two branches
-                // side by side and nothing else. The path is derivable
-                // and the daemon's sentence would only restate the pair.
-                (Some(wanted), Some(found)) => {
-                    lines.push(Line::from(Span::styled(
-                        "  That worktree is already on another branch.",
-                        Style::default().fg(theme.text_strong),
-                    )));
-                    lines.push(Line::raw(""));
-                    for (label, branch, note) in [
-                        ("wanted", wanted, self.requested_is_pr_head),
-                        ("found", found, false),
-                    ] {
-                        let mut spans = vec![
-                            Span::styled(
-                                format!("    {label:<8} "),
-                                Style::default().fg(theme.text_dim),
-                            ),
-                            Span::styled(branch.clone(), Style::default().fg(theme.text_strong)),
-                        ];
-                        if note {
-                            spans.push(Span::styled(
-                                "  · the PR's head",
-                                Style::default().fg(theme.text_dim),
-                            ));
-                        }
-                        lines.push(Line::from(spans));
-                    }
+        let footer: Vec<String> = if let Some(err) = &self.error {
+            if let Some(conflict) = &self.branch_conflict {
+                // Which name blocks which is the whole fact, and it is
+                // what decides whether the work moves or the blocker
+                // does. State it as a pair; the daemon's sentence would
+                // only restate it in prose (#1742).
+                lines.push(Line::from(Span::styled(
+                    "  That branch name is already taken.",
+                    Style::default().fg(theme.text_strong),
+                )));
+                lines.push(Line::raw(""));
+                for (label, branch) in [
+                    ("wanted", &conflict.wanted),
+                    ("taken by", &conflict.blocker),
+                ] {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("    {label:<9} "),
+                            Style::default().fg(theme.text_dim),
+                        ),
+                        Span::styled(branch.clone(), Style::default().fg(theme.text_strong)),
+                    ]));
                 }
-                _ => {
+                if conflict.suggestion.is_none() {
+                    lines.push(Line::raw(""));
                     lines.push(Line::from(Span::styled(
-                        format!("  {}", WorktreeRecovery::user_facing(err)),
-                        Style::default().fg(theme.error),
+                        "  The wanted branch is the PR's head, so its work can't move                          to another name.",
+                        Style::default().fg(theme.text_dim),
                     )));
-                    // Per-class recovery guidance (issue #557): every
-                    // failure names a concrete next step.
-                    let recovery = self.recovery.unwrap_or(WorktreeRecovery::Unknown);
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", recovery.remediation(err)),
-                        Style::default().fg(theme.warn),
-                    )));
+                }
+            } else {
+                match (&self.requested_branch, &self.adopt_branch) {
+                    // A branch collision is one fact: name the two branches
+                    // side by side and nothing else. The path is derivable
+                    // and the daemon's sentence would only restate the pair.
+                    (Some(wanted), Some(found)) => {
+                        lines.push(Line::from(Span::styled(
+                            "  That worktree is already on another branch.",
+                            Style::default().fg(theme.text_strong),
+                        )));
+                        lines.push(Line::raw(""));
+                        for (label, branch, note) in [
+                            ("wanted", wanted, self.requested_is_pr_head),
+                            ("found", found, false),
+                        ] {
+                            let mut spans = vec![
+                                Span::styled(
+                                    format!("    {label:<8} "),
+                                    Style::default().fg(theme.text_dim),
+                                ),
+                                Span::styled(
+                                    branch.clone(),
+                                    Style::default().fg(theme.text_strong),
+                                ),
+                            ];
+                            if note {
+                                spans.push(Span::styled(
+                                    "  · the PR's head",
+                                    Style::default().fg(theme.text_dim),
+                                ));
+                            }
+                            lines.push(Line::from(spans));
+                        }
+                    }
+                    _ => {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", WorktreeRecovery::user_facing(err)),
+                            Style::default().fg(theme.error),
+                        )));
+                        // Per-class recovery guidance (issue #557): every
+                        // failure names a concrete next step.
+                        let recovery = self.recovery.unwrap_or(WorktreeRecovery::Unknown);
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", recovery.remediation(err)),
+                            Style::default().fg(theme.warn),
+                        )));
+                    }
                 }
             }
             // Every recoverable class offers a one-keypress path back to a
@@ -558,24 +647,39 @@ impl Component for WorktreeProgress {
             // classes and recreates the ones lazybox can safely rebuild
             // (preserve the conflicting checkout aside, re-provision); `g`
             // jumps to the live session holding a branch we can't take.
-            if self.retryable {
-                vec!["  r retry · Esc dismiss"]
+            if let Some(conflict) = &self.branch_conflict {
+                // A name collision is fixable from here (#1742): give the
+                // work a free name, or move the blocker's name aside.
+                // Both name the branch they would touch, because which
+                // branch moves is the whole decision.
+                let mut rows = Vec::new();
+                if let Some(suggestion) = &conflict.suggestion {
+                    rows.push(format!("  b use another branch name ({suggestion})"));
+                }
+                rows.push(format!(
+                    "  n rename '{}' → '{}' (keeps its commits)",
+                    conflict.blocker, conflict.blocker_alias
+                ));
+                rows.push("  r retry · Esc dismiss".to_string());
+                rows
+            } else if self.retryable {
+                vec!["  r retry · Esc dismiss".to_string()]
             } else if self.adopt_branch.is_some() {
                 // The lossless recovery leads: the work is on the branch
                 // the checkout already sits on, so adopting it keeps it
                 // (#1572). `r` still moves it aside and rebuilds.
                 vec![
-                    "  a use the branch that's there",
-                    "  r move it aside and start fresh · Esc dismiss",
+                    "  a use the branch that's there".to_string(),
+                    "  r move it aside and start fresh · Esc dismiss".to_string(),
                 ]
             } else if self.recreatable {
-                vec!["  r recreate · Esc dismiss"]
+                vec!["  r recreate · Esc dismiss".to_string()]
             } else if self.jump {
-                vec!["  g go to holder · Esc dismiss"]
+                vec!["  g go to holder · Esc dismiss".to_string()]
             } else if self.picks_repo {
-                vec!["  r pick repo · Esc dismiss"]
+                vec!["  r pick repo · Esc dismiss".to_string()]
             } else {
-                vec!["  Esc dismiss"]
+                vec!["  Esc dismiss".to_string()]
             }
         } else if let Some(warn) = &self.warning {
             // Provisioning succeeded but degraded: show the stale-base
@@ -585,9 +689,9 @@ impl Component for WorktreeProgress {
                 format!("  ⚠ {warn}"),
                 Style::default().fg(theme.warn),
             )));
-            vec!["  Esc dismiss"]
+            vec!["  Esc dismiss".to_string()]
         } else {
-            vec!["  Esc cancel"]
+            vec!["  Esc cancel".to_string()]
         };
 
         let modal_w = 60u16.min(area.width.saturating_sub(4));
@@ -656,6 +760,29 @@ impl AppComponent<Msg, UserEvent> for WorktreeProgress {
                 modifiers,
                 ..
             }) if modifiers.contains(KeyModifiers::CONTROL) => Some(Msg::ModalDismissed),
+            // A branch collision is resolved from here (#1742). `b`
+            // gives the work a free name, `n` moves the blocker's name
+            // aside — and `r` stays bound, because unlike the other
+            // non-retryable classes this one is also commonly fixed in a
+            // shell, and coming back to a dead end would be the defect.
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('b'),
+                ..
+            }) if self
+                .branch_conflict
+                .as_ref()
+                .is_some_and(|conflict| conflict.suggestion.is_some()) =>
+            {
+                Some(Msg::WorktreeUseAnotherBranch)
+            }
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('n'),
+                ..
+            }) if self.branch_conflict.is_some() => Some(Msg::WorktreeRenameBlockingBranch),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('r'),
+                ..
+            }) if self.branch_conflict.is_some() => Some(Msg::WorktreeRetry),
             // On a retryable failure, `r` re-issues the spawn that
             // failed. Failures requiring an out-of-band action leave it
             // unbound so the UI never advertises a retry that must fail.
@@ -1327,6 +1454,138 @@ mod tests {
                 .is_none(),
             "r must not recreate a live holder"
         );
+    }
+
+    /// The reported dead end (#1742). A `deps` branch blocking
+    /// `deps/grouping` used to render "Esc dismiss" and nothing else.
+    /// It must now state the pair and offer both repairs, and the
+    /// suggested name must actually clear the blocker — `deps/grouping-2`
+    /// reads like a fix and is not one.
+    fn branch_conflict_state(wanted: &str, blocker: &str) -> WorktreeProgressState {
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(format!(
+                "worktree: checkout_new_branch_at: branch '{wanted}' can't be created \
+                 because '{blocker}' already exists — git can't hold both a branch and a \
+                 path named '{wanted}' (a directory/file conflict). Delete or rename \
+                 '{blocker}', then retry"
+            )),
+        );
+        st
+    }
+
+    #[test]
+    fn branch_collision_offers_repairs_instead_of_a_dismiss_only_dead_end() {
+        let st = branch_conflict_state("deps/grouping", "deps");
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchDirFileConflict));
+        let out = render(&mut WorktreeProgress::from_state(&st), 78, 24);
+        let flat = flatten(&out);
+
+        assert!(
+            flat.contains("deps/grouping"),
+            "names the wanted branch: {flat}"
+        );
+        assert!(
+            flat.contains("taken by"),
+            "names the blocker's role: {flat}"
+        );
+        assert!(
+            flat.contains("use another branch name (deps-grouping)"),
+            "offers a name that actually clears `deps`: {flat}",
+        );
+        assert!(
+            !flat.contains("deps/grouping-2"),
+            "a suffixed name still needs the `deps/` directory: {flat}",
+        );
+        assert!(flat.contains("rename 'deps'"), "offers the rename: {flat}");
+        assert!(
+            flat.contains("r retry"),
+            "retry after an external fix: {flat}"
+        );
+        assert!(
+            !out.lines().any(|l| l.trim() == "Esc dismiss"),
+            "a supported remedy must not render as a dismiss-only footer: {out}",
+        );
+    }
+
+    /// Each advertised key produces its action, and only where it is
+    /// advertised — the modal must never bind a key it didn't show.
+    #[test]
+    fn branch_collision_keys_match_the_offered_actions() {
+        let st = branch_conflict_state("deps/grouping", "deps");
+        let mut comp = WorktreeProgress::from_state(&st);
+        assert!(matches!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('b')))),
+            Some(Msg::WorktreeUseAnotherBranch)
+        ));
+        assert!(matches!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('n')))),
+            Some(Msg::WorktreeRenameBlockingBranch)
+        ));
+        assert!(matches!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('r')))),
+            Some(Msg::WorktreeRetry)
+        ));
+        assert!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('a'))))
+                .is_none(),
+            "there is no checkout to adopt on a name collision",
+        );
+        assert!(matches!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Esc))),
+            Some(Msg::ModalDismissed)
+        ));
+    }
+
+    /// A PR's head branch is not lazybox's to rename: moving the work to
+    /// another name would leave it off the ref the PR tracks. `b` is
+    /// withdrawn — key and hint together — and the rename of the blocker
+    /// remains as the repair that does apply.
+    #[test]
+    fn a_pr_head_collision_withholds_the_rename_of_the_work() {
+        let mut st = branch_conflict_state("deps/grouping", "deps");
+        st.set_pr_head(Some("deps/grouping".to_string()));
+        let out = render(&mut WorktreeProgress::from_state(&st), 78, 24);
+        let flat = flatten(&out);
+        assert!(
+            !flat.contains("use another branch name"),
+            "a PR head must not be offered a rename: {flat}",
+        );
+        assert!(flat.contains("the PR's head"), "says why: {flat}");
+        assert!(
+            flat.contains("rename 'deps'"),
+            "the repair that applies: {flat}"
+        );
+
+        let mut comp = WorktreeProgress::from_state(&st);
+        assert!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('b'))))
+                .is_none(),
+            "the withheld action must not be secretly bound",
+        );
+        assert!(matches!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('n')))),
+            Some(Msg::WorktreeRenameBlockingBranch)
+        ));
+    }
+
+    /// The actions survive a narrow terminal. The footer is rendered
+    /// apart from the wrapped body precisely so the only actionable rows
+    /// are never the ones clipped.
+    #[test]
+    fn branch_collision_keys_survive_a_narrow_terminal() {
+        let st = branch_conflict_state("deps/grouping-of-all-the-weekly-dependency-bumps", "deps");
+        for (w, h) in [(40u16, 14u16), (52, 12), (80, 30)] {
+            let out = render(&mut WorktreeProgress::from_state(&st), w, h);
+            let flat = flatten(&out);
+            assert!(
+                flat.contains("use another branch name"),
+                "primary action lost at {w}x{h}: {out}",
+            );
+            assert!(flat.contains("retry"), "retry lost at {w}x{h}: {out}");
+        }
     }
 
     /// The row estimate matches word wrapping, not a bare character

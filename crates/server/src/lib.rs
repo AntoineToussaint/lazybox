@@ -1405,6 +1405,9 @@ impl Server {
                         lazybox_ipc::Command::RenameWorkspace { .. } => "RenameWorkspace",
                         lazybox_ipc::Command::RecreateWorktree { .. } => "RecreateWorktree",
                         lazybox_ipc::Command::AdoptWorktreeBranch { .. } => "AdoptWorktreeBranch",
+                        lazybox_ipc::Command::ResolveBranchConflict { .. } => {
+                            "ResolveBranchConflict"
+                        }
                         lazybox_ipc::Command::ListErrors => "ListErrors",
                         lazybox_ipc::Command::ClearErrors => "ClearErrors",
                         lazybox_ipc::Command::DeleteError { .. } => "DeleteError",
@@ -2745,6 +2748,21 @@ pub async fn dispatch_command(
         } => {
             spawn_handler::handle_adopt_worktree_branch(config, *spawn, initial_prompt, on_main)
                 .await;
+        }
+        lazybox_ipc::Command::ResolveBranchConflict {
+            spawn,
+            initial_prompt,
+            on_main,
+            resolution,
+        } => {
+            spawn_handler::handle_resolve_branch_conflict(
+                config,
+                *spawn,
+                initial_prompt,
+                on_main,
+                resolution,
+            )
+            .await;
         }
         lazybox_ipc::Command::SetUpdateDismissal { target } => {
             client_kv::set_update_dismissal(config, target).await;

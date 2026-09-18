@@ -15,6 +15,8 @@
 #
 # The Rust libghostty wrapper lives under crates/libghostty-vt*. Its pinned
 # upstream Ghostty source is prepared once in the same host-level cache.
+# Local setup also installs the pinned cargo-deny release gate into that cache.
+# CI jobs use the cargo-deny action and leave this opt-in path disabled.
 #
 # After running, `make build` / `make run` work without the user
 # having any specific zig version on PATH.
@@ -38,11 +40,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # `.zig-version` and every consumer follows.
 ZIG_VERSION="$(cat "${ROOT}/.zig-version")"
 GHOSTTY_COMMIT="$(cat "${ROOT}/.ghostty-version")"
+CARGO_DENY_VERSION="$(cat "${ROOT}/.cargo-deny-version")"
 # Shared cache root, overridable. Keep this default in lockstep with
 # the Makefile's `ZIG_CACHE` so `make build`/`run` (which compute the
 # pinned PATH themselves) find what `make setup` downloaded here.
 ZIG_CACHE="${LAZYBOX_ZIG_CACHE:-${HOME}/.cache/lazybox/zig}"
 GHOSTTY_CACHE="${LAZYBOX_GHOSTTY_CACHE:-${HOME}/.cache/lazybox/ghostty}"
+CARGO_DENY_CACHE="${LAZYBOX_CARGO_DENY_CACHE:-${HOME}/.cache/lazybox/cargo-deny}"
 # LAZYBOX_ZIG_LOCAL=1 installs into this worktree's vendor/zig/ instead
 # of the shared cache. run.sh and the Makefile prefer a local install.
 if [ "${LAZYBOX_ZIG_LOCAL:-}" = "1" ]; then
@@ -61,6 +65,30 @@ case "$(uname -m)" in
   *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
 esac
 host="${arch}-${os}"
+
+# ── Install the pinned local release gate ───────────────────────────────
+# `make release-gates` must not depend on an unrelated global cargo install.
+# `cargo install --locked` verifies crates.io package checksums and preserves
+# cargo-deny's own lockfile. Keep the version aligned with CI's cargo-deny
+# action when either side is upgraded.
+cargo_deny_root="${CARGO_DENY_CACHE}/${CARGO_DENY_VERSION}"
+cargo_deny_bin="${cargo_deny_root}/bin/cargo-deny"
+if [ "${LAZYBOX_INSTALL_RELEASE_TOOLS:-0}" = "1" ]; then
+  if [ -x "${cargo_deny_bin}" ]; then
+    echo "cargo-deny ${CARGO_DENY_VERSION}: already at ${cargo_deny_bin}"
+  else
+    echo "installing cargo-deny ${CARGO_DENY_VERSION}..."
+    rm -rf "${cargo_deny_root}"
+    mkdir -p "${CARGO_DENY_CACHE}"
+    cargo install cargo-deny \
+      --version "${CARGO_DENY_VERSION}" \
+      --locked \
+      --root "${cargo_deny_root}"
+    [ -x "${cargo_deny_bin}" ] \
+      || { echo "ERROR: cargo-deny binary missing after install" >&2; exit 1; }
+    echo "cargo-deny ${CARGO_DENY_VERSION}: installed to ${cargo_deny_bin}"
+  fi
+fi
 
 # ── Install zig 0.16.0 ──────────────────────────────────────────────────
 zig_dir="${ZIG_CACHE}/${host}-${ZIG_VERSION}"
@@ -228,7 +256,11 @@ fi
 # ── Print activation hint ───────────────────────────────────────────────
 echo
 echo "Bootstrap complete. To use pinned zig in this shell:"
-echo "  export PATH=\"${zig_dir}:\$PATH\""
+if [ "${LAZYBOX_INSTALL_RELEASE_TOOLS:-0}" = "1" ]; then
+  echo "  export PATH=\"${cargo_deny_root}/bin:${zig_dir}:\$PATH\""
+else
+  echo "  export PATH=\"${zig_dir}:\$PATH\""
+fi
 echo
 echo "Or run via Makefile (which sets PATH automatically):"
 echo "  make build"

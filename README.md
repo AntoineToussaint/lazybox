@@ -107,7 +107,7 @@ Prefer to build it yourself, or hacking on lazybox? Build from source:
 ```sh
 git clone https://github.com/AntoineToussaint/lazybox.git
 cd lazybox
-make setup     # one online preparation of pinned Zig, Ghostty, and Cargo caches
+make setup     # one online preparation of pinned Zig, Ghostty, cargo-deny, and Cargo caches
 make run       # build + run
 make release   # optimized build; strictly offline after setup
 ```

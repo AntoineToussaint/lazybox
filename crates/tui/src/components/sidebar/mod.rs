@@ -858,6 +858,12 @@ impl Sidebar {
         self.default_model_labels = defaults;
     }
 
+    /// Test-facing read of the badge's default-tier comparison values.
+    #[cfg(test)]
+    pub(crate) fn default_model_label(&self, letter: char) -> Option<&str> {
+        self.default_model_labels.get(&letter).map(String::as_str)
+    }
+
     /// Whether `model` is `letter`'s default tier — the badge is for
     /// deviations, so a default-tier run shows none (#1502).
     fn is_default_model(&self, letter: char, model: &str) -> bool {

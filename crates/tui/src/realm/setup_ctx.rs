@@ -93,22 +93,25 @@ pub enum SettingsAction {
     /// Re-run the agents picker.
     EditAgents,
     /// Pick the default agent (`setup.default_agent`) — the one `w`
-    /// "work on this" and new-workspace spawns use — then, when that
-    /// agent declares model tiers, its default tier
-    /// (`agents.<id>.models.default`). Carries the current default id
-    /// (and its default-tier label, if one is set) for the label.
+    /// "work on this" and new-workspace spawns use — then that agent's
+    /// own strength. Carries the current default id and the strength it
+    /// resolves to for the row label.
     EditDefaultAgent {
         current: String,
-        tier: Option<String>,
+        strength: Option<String>,
     },
-    /// Pick one agent's default model tier
-    /// (`agents.<id>.models.default`) directly — without routing
-    /// through the default-agent flow. One row per enabled agent that
-    /// declares a tier menu. Carries the current default-tier label
-    /// for the row badge.
-    EditDefaultModel {
+    /// Pick one agent's strength — the model tier a bare spawn of it
+    /// lands on (`agents.<id>.models.default`) — without routing through
+    /// the default-agent flow. One row per enabled agent, including an
+    /// agent that declares no tier menu: that row says so and opens
+    /// `config.yaml` at the key to add, because silently having no row
+    /// is how an agent ends up running an ambient model nobody chose.
+    /// `strength` is the resolved tier label, `configurable` whether the
+    /// agent declares a menu to pick from.
+    EditStrength {
         agent_id: String,
-        tier: Option<String>,
+        strength: Option<String>,
+        configurable: bool,
     },
     /// Toggle `agent.skip_permissions` — whether interactive Claude
     /// sessions launch with `--dangerously-skip-permissions`. Carries
@@ -170,13 +173,18 @@ impl SettingsAction {
             Self::EditFilters { label, .. } => format!("Edit roles + filters · {label}"),
             Self::EditProviders => "Edit providers (github / linear / …)".into(),
             Self::EditAgents => "Edit agents (claude / codex / cursor / …)".into(),
-            Self::EditDefaultAgent { current, tier } => match tier {
-                Some(tier) => format!("Change default agent · {current} · ◆ {tier}"),
+            Self::EditDefaultAgent { current, strength } => match strength {
+                Some(strength) => format!("Change default agent · {current} · ◆ {strength}"),
                 None => format!("Change default agent · {current}"),
             },
-            Self::EditDefaultModel { agent_id, tier } => match tier {
-                Some(tier) => format!("Default model · {agent_id} · ◆ {tier}"),
-                None => format!("Default model · {agent_id}"),
+            Self::EditStrength {
+                agent_id,
+                strength,
+                configurable,
+            } => match (strength, configurable) {
+                (Some(strength), _) => format!("Strength · {agent_id} · ◆ {strength}"),
+                (None, true) => format!("Strength · {agent_id} · agent default"),
+                (None, false) => format!("Strength · {agent_id} · not configured"),
             },
             Self::ToggleSkipPermissions { enabled } => format!(
                 "Skip permission prompts for your sessions · {}",
@@ -222,7 +230,7 @@ impl SettingsAction {
             }
             Self::EditAgents
             | Self::EditDefaultAgent { .. }
-            | Self::EditDefaultModel { .. }
+            | Self::EditStrength { .. }
             | Self::ToggleSkipPermissions { .. }
             | Self::EditLlmGateway { .. }
             | Self::SetUpSandbox { .. }
@@ -343,7 +351,7 @@ mod tests {
         assert_eq!(
             SettingsAction::EditDefaultAgent {
                 current: "codex".into(),
-                tier: None,
+                strength: None,
             }
             .label(),
             "Change default agent · codex"
@@ -351,34 +359,48 @@ mod tests {
     }
 
     #[test]
-    fn default_agent_label_shows_the_default_tier_badge() {
+    fn default_agent_label_shows_the_resolved_strength() {
         assert_eq!(
             SettingsAction::EditDefaultAgent {
                 current: "claude".into(),
-                tier: Some("Opus".into()),
+                strength: Some("Opus".into()),
             }
             .label(),
             "Change default agent · claude · ◆ Opus"
         );
     }
 
+    /// The three strength states are distinguishable: pinned, pickable
+    /// but unpinned, and no menu declared at all. A menu-less agent must
+    /// not read as "agent default" — that says a choice was made.
     #[test]
-    fn default_model_label_names_agent_and_tier() {
+    fn strength_label_distinguishes_pinned_unpinned_and_unconfigured() {
         assert_eq!(
-            SettingsAction::EditDefaultModel {
+            SettingsAction::EditStrength {
                 agent_id: "claude".into(),
-                tier: Some("Opus".into()),
+                strength: Some("Opus".into()),
+                configurable: true,
             }
             .label(),
-            "Default model · claude · ◆ Opus"
+            "Strength · claude · ◆ Opus"
         );
         assert_eq!(
-            SettingsAction::EditDefaultModel {
-                agent_id: "codex".into(),
-                tier: None,
+            SettingsAction::EditStrength {
+                agent_id: "claude".into(),
+                strength: None,
+                configurable: true,
             }
             .label(),
-            "Default model · codex"
+            "Strength · claude · agent default"
+        );
+        assert_eq!(
+            SettingsAction::EditStrength {
+                agent_id: "codex".into(),
+                strength: None,
+                configurable: false,
+            }
+            .label(),
+            "Strength · codex · not configured"
         );
     }
 

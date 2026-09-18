@@ -132,6 +132,44 @@ mod tests {
         assert!(m.dangling_aliases().is_empty());
     }
 
+    /// `default_tier` is the single answer to "which strength does this
+    /// agent run at": the menu's own `default`, resolved in the menu
+    /// itself. A dangling default names no tier — it must not fall
+    /// through to the built-in menu, or a deliberately restricted
+    /// (`replace: true`) menu gets labelled with a tier it dropped.
+    #[test]
+    fn default_tier_resolves_the_menus_own_default_only() {
+        let claude = AgentModels::builtin("claude").unwrap();
+        assert_eq!(
+            claude.default_tier().map(|t| t.label.as_str()),
+            Some("Opus"),
+        );
+
+        let mut restricted = AgentModels {
+            replace: true,
+            default: Some("M".into()),
+            tiers: vec![ModelTier {
+                alias: "M".into(),
+                label: "Sonnet".into(),
+                short: None,
+                args: vec!["--model".into(), "claude-sonnet-5".into()],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            restricted.default_tier().map(|t| t.label.as_str()),
+            Some("Sonnet"),
+        );
+
+        // The built-in menu declares `L`; this one does not, so the
+        // strength is unresolved rather than borrowed.
+        restricted.default = Some("L".into());
+        assert!(restricted.default_tier().is_none());
+
+        restricted.default = None;
+        assert!(restricted.default_tier().is_none());
+    }
+
     #[test]
     fn resolve_args_uses_named_alias() {
         let m = AgentModels::builtin("claude").unwrap();
@@ -682,6 +720,22 @@ impl AgentModels {
     /// The tier matching `alias`, if any.
     pub fn tier(&self, alias: &str) -> Option<&ModelTier> {
         self.tiers.iter().find(|t| t.alias == alias)
+    }
+
+    /// The tier a bare spawn of this agent lands on — this menu's
+    /// `default` alias resolved in this menu. `None` when the default is
+    /// unset or names an alias the menu doesn't declare, which is what
+    /// [`Self::resolve_args`] already treats as "no args, let the agent
+    /// pick its own model".
+    ///
+    /// The one place that answers "which strength does this agent run
+    /// at". Callers used to each re-derive it and disagreed: one
+    /// second-guessed the alias against [`Self::builtin`] *after*
+    /// `Config::agent_models` had already folded the built-in menu in,
+    /// so a `replace: true` menu got labelled with a tier it
+    /// deliberately does not declare.
+    pub fn default_tier(&self) -> Option<&ModelTier> {
+        self.default.as_deref().and_then(|alias| self.tier(alias))
     }
 
     /// The capability map this block declares: the deprecated `priority`

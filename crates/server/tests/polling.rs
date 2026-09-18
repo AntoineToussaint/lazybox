@@ -3457,6 +3457,52 @@ async fn issue_polled_after_pr_routes_into_pr_workspace() {
     assert_eq!(ws.gh_issues.len(), 1);
     assert_eq!(ws.gh_issues[0].id.key, "o/r#71");
 }
+
+#[tokio::test]
+async fn archiving_a_collapsed_pr_row_keeps_its_absorbed_issue_gone() {
+    // #1816: the collapsed row presents as one item, so `x x` on it
+    // dismisses the issue the PR absorbed as well. The issue's own key was
+    // never archived, and nothing but the per-tick closes-index routes the
+    // issue into the PR's key — so the first tick that does not carry the
+    // PR (merged past the recently-merged sweep, closed, filtered out) used
+    // to rebuild the issue as a standalone row.
+    use lazybox_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#141")));
+    let issue_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_issue_task("o/r#71")));
+
+    assert!(
+        workspace::delete_workspace(&config, &pr_key)
+            .await
+            .is_some()
+    );
+    assert!(
+        workspace::load_archived_set(&config).contains(issue_key.as_str()),
+        "archiving the row must tombstone the issue key it was standing in for",
+    );
+
+    // A tick that carries the issue alone.
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    assert!(
+        config.store.list_workspaces().unwrap().is_empty(),
+        "the absorbed issue must not come back as a row of its own",
+    );
+
+    // Reversible: restoring the PR row restores the issue with it, so the
+    // next poll rebuilds the collapsed workspace exactly as it was.
+    assert!(workspace::unarchive_workspace_key(&config, pr_key.as_str()));
+    assert!(!workspace::load_archived_set(&config).contains(issue_key.as_str()));
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    let records = config.store.list_workspaces().unwrap();
+    assert_eq!(records.len(), 1, "the row returns collapsed, not split");
+    let ws: lazybox_core::Workspace =
+        serde_json::from_str(records[0].workspace_json.clone().unwrap().as_str()).unwrap();
+    assert_eq!(ws.gh_issues.len(), 1);
+    assert_eq!(ws.gh_issues[0].id.key, "o/r#71");
+}
 /// Seed an issue workspace with a fabricated session and return its
 /// id alongside the workspace key. Used by the merge-prompt + confirm
 /// tests below — both want the same starting state.

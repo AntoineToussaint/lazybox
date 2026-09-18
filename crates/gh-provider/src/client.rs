@@ -455,10 +455,23 @@ impl BackgroundSweepForecast {
 const MERGED_SWEEP_MAX_PAGES: usize = 4;
 
 /// Page cap per roster member per query in the repo-first sweep: 100
-/// open PRs (4 × 25) / 400 open issues (4 × 100) per member on an
-/// unwindowed pass. A member that overflows reports incomplete coverage —
-/// preserved, never deleted — and its windowed passes stay small.
+/// PRs (4 × 25) / 400 issues (4 × 100) per member per `updated:` window.
+/// The PR half continues past it under a tightened window
+/// (`REPO_SWEEP_MAX_WINDOWS`) rather than failing; the issue half, at 400
+/// per window, reports incomplete coverage — preserved, never deleted.
 const REPO_SWEEP_MAX_PAGES: usize = 4;
+
+/// `updated:<=` windows one member's PR sweep may walk before it gives
+/// up and reports truncation. Each window is a fresh cursor walk of up
+/// to `REPO_SWEEP_MAX_PAGES`, so a member sweeps up to 1200 PRs — deep
+/// enough for the long-lived repos that used to fail the pass outright
+/// at 100, and bounded so a pathological member can't walk forever.
+const REPO_SWEEP_MAX_WINDOWS: usize = 12;
+
+/// Members per freshness-probe request. The probe's whole point is that
+/// one request covers a rotation batch; the chunk bounds only the query
+/// document, which grows one `search` alias per member and kind.
+const REPO_SWEEP_PROBE_CHUNK: usize = 20;
 
 /// One roster member of the repo-first sweep and the `updated:>=` floor
 /// to fetch it with (`None` = unwindowed, exhaustive for its open set).
@@ -1278,6 +1291,7 @@ fn request_profile(
         | "watched-repo"
         | "watched-repo issues"
         | "repo-sweep"
+        | "repo-sweep probe"
         | "repo-sweep issues"
         | "round-robin-repo" => (ApiResource::Graphql, RequestPriority::Recent),
         // Working-claim label sync (#1218 storm fix). These are REST label
@@ -1522,7 +1536,28 @@ pub struct GhClient {
     /// tightening the refresh tightens edge freshness. Defaults to
     /// [`ISSUE_DEPS_TTL`](Self::ISSUE_DEPS_TTL) when never set.
     deps_ttl: std::time::Duration,
+    /// Per-operation suppression state for the "blocked by rate budget"
+    /// warning. A starved governor refuses every request of every
+    /// operation for as long as it stays starved, and the refusal used
+    /// to log once per refusal: one 2026-09-17 outage wrote ~700
+    /// identical `repo-sweep blocked by rate budget` lines in two
+    /// minutes and ~35,000 in all, burying every other signal in the
+    /// log. Keyed by operation so one noisy op can't mute another.
+    blocked_warns:
+        std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, BlockedWarn>>>,
 }
+
+/// One operation's [`GhClient::blocked_warns`] entry: when its next
+/// warning may be emitted, and how many refusals were swallowed since
+/// the last one.
+#[derive(Debug)]
+struct BlockedWarn {
+    next: std::time::Instant,
+    suppressed: u32,
+}
+
+/// Minimum spacing between identical blocked-by-budget warnings.
+const BLOCKED_WARN_GAP: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Per-branch cost breakdown for one branch of a PR fetch, emitted
 /// under the `gh_sync_metrics` tracing target so a real poll can be
@@ -1663,6 +1698,9 @@ impl GhClient {
                 std::collections::HashMap::new(),
             )),
             deps_ttl: Self::ISSUE_DEPS_TTL,
+            blocked_warns: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -1711,6 +1749,9 @@ impl GhClient {
                 std::collections::HashMap::new(),
             )),
             deps_ttl: Self::ISSUE_DEPS_TTL,
+            blocked_warns: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -2361,7 +2402,7 @@ impl GhClient {
         // Interactive lets it consume the reserve intended for merge/reply.
         let (resource, priority) = request_profile(op);
         if let Err(reason) = self.budget.lock().admit(resource, op, priority, 1) {
-            tracing::warn!("{op} blocked by rate budget: {reason}");
+            self.warn_blocked(op, &reason);
             let retry_after_secs = reason.retry_after_secs(chrono::Utc::now());
             let self_throttle = reason.is_self_imposed();
             return Err(GhError::RateLimited {
@@ -2371,6 +2412,46 @@ impl GhClient {
             });
         }
         Ok(())
+    }
+
+    /// Emit the blocked-by-budget warning for `op`, at most once per
+    /// [`BLOCKED_WARN_GAP`] and carrying how many refusals were
+    /// swallowed in between. Every refused request is still a refused
+    /// request — the callers already surface that as an error — so the
+    /// log only needs to say that the op is being refused, and how hard.
+    fn warn_blocked(&self, op: &str, reason: &crate::rate_budget::AcquireError) {
+        let now = std::time::Instant::now();
+        let suppressed = {
+            let mut warns = self.blocked_warns.lock();
+            match warns.get_mut(op) {
+                Some(warn) if now < warn.next => {
+                    warn.suppressed += 1;
+                    return;
+                }
+                Some(warn) => {
+                    warn.next = now + BLOCKED_WARN_GAP;
+                    std::mem::take(&mut warn.suppressed)
+                }
+                None => {
+                    warns.insert(
+                        op.to_string(),
+                        BlockedWarn {
+                            next: now + BLOCKED_WARN_GAP,
+                            suppressed: 0,
+                        },
+                    );
+                    0
+                }
+            }
+        };
+        if suppressed == 0 {
+            tracing::warn!("{op} blocked by rate budget: {reason}");
+        } else {
+            tracing::warn!(
+                "{op} blocked by rate budget: {reason} \
+                 ({suppressed} further refusals suppressed since the last line)"
+            );
+        }
     }
 
     /// Admit `op`, sleeping out SHORT self-imposed waits instead of
@@ -4578,12 +4659,35 @@ impl GhClient {
         query: String,
         max_pages: usize,
     ) -> Result<Vec<Task>, GhError> {
+        let (tasks, stop) = self.fetch_pr_pages(op, &query, max_pages).await?;
+        match stop {
+            Some(reason) => {
+                tracing::error!(
+                    "{op} pagination stopped after {max_pages} pages; tail is non-authoritative"
+                );
+                Err(incomplete_pagination_error(op, tasks.len(), reason))
+            }
+            None => Ok(tasks),
+        }
+    }
+
+    /// Walk one PR search's cursor, returning what was fetched together
+    /// with the reason the walk stopped short — `None` meaning the set is
+    /// authoritative. Shared by
+    /// [`fetch_pr_single_query_capped`](Self::fetch_pr_single_query_capped),
+    /// which turns a short walk into an error, and by the repo sweep,
+    /// which re-windows on `updated:<=` and keeps going.
+    async fn fetch_pr_pages(
+        &self,
+        op: &'static str,
+        query: &str,
+        max_pages: usize,
+    ) -> Result<(Vec<Task>, Option<PaginationStop<GhError>>), GhError> {
         let started = std::time::Instant::now();
         let metrics = parking_lot::Mutex::new(BranchMetrics::new(op));
         let outcome = paginate(
             |cursor, page| {
                 let metrics = &metrics;
-                let query = &query;
                 async move {
                     self.acquire_paced(op).await.map_err(|error| {
                         tracing::error!("{op} budget error (page {page}): {error}");
@@ -4651,17 +4755,10 @@ impl GhClient {
         metrics.prs = tasks.len();
         metrics.elapsed_ms = started.elapsed().as_millis();
         metrics.emit();
-        if let Some(reason) = incomplete {
-            tracing::error!(
-                "{op} pagination stopped after {} pages; tail is non-authoritative",
-                metrics.requests
-            );
-            return Err(incomplete_pagination_error(op, tasks.len(), reason));
-        }
-        if graphql::query_names_viewer(&query, &self.user) {
+        if graphql::query_names_viewer(query, &self.user) {
             graphql::mark_involved(&mut tasks);
         }
-        Ok(tasks)
+        Ok((tasks, incomplete))
     }
 
     /// Fetch all open GitHub Issues involving the authenticated user,
@@ -4748,7 +4845,21 @@ impl GhClient {
         member: &str,
         since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> String {
-        graphql::repo_sweep_pr_query(member, self.sweep_role(member).map(|(_, term)| term), since)
+        self.repo_sweep_pr_query_until(member, since, None)
+    }
+
+    fn repo_sweep_pr_query_until(
+        &self,
+        member: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> String {
+        graphql::repo_sweep_pr_query(
+            member,
+            self.sweep_role(member).map(|(_, term)| term),
+            since,
+            until,
+        )
     }
 
     /// The `review-requested:USER` companion of [`Self::repo_sweep_pr_query`]
@@ -4760,12 +4871,22 @@ impl GhClient {
         member: &str,
         since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Option<String> {
+        let role = self.repo_sweep_reviewer_role(member)?;
+        Some(graphql::repo_sweep_pr_query(
+            member,
+            Some(&role),
+            since,
+            None,
+        ))
+    }
+
+    /// The `review-requested:USER` term the companion query is built
+    /// from, present exactly when the primary is `involves:`.
+    fn repo_sweep_reviewer_role(&self, member: &str) -> Option<String> {
         match self.sweep_role(member) {
-            Some((graphql::RoleQualifier::Involves, _)) => Some(graphql::repo_sweep_pr_query(
-                member,
-                Some(&graphql::RoleQualifier::ReviewRequested.for_user(&self.user)),
-                since,
-            )),
+            Some((graphql::RoleQualifier::Involves, _)) => {
+                Some(graphql::RoleQualifier::ReviewRequested.for_user(&self.user))
+            }
             _ => None,
         }
     }
@@ -4779,21 +4900,88 @@ impl GhClient {
         }
     }
 
+    /// Sweep one member's PR search to completion, re-windowing rather
+    /// than failing when the cursor walk hits its page cap (issue #1803).
+    ///
+    /// GitHub's search cursor is capped both by us and (at 1000 results)
+    /// by GitHub, so a repo with a long PR history used to fail its whole
+    /// pass — "returned 100 PRs across 4 pages, hit safety cap" — and its
+    /// rows went stale no matter how much budget was left. Under
+    /// `sort:updated-desc` the oldest item fetched is a true watermark:
+    /// re-asking with `updated:<=` that watermark resumes exactly where
+    /// the walk stopped. The bound is inclusive, so the boundary items
+    /// come back a second time and the dedup below drops them.
+    async fn sweep_prs_windowed<F>(&self, build: F) -> Result<Vec<Task>, GhError>
+    where
+        F: Fn(Option<chrono::DateTime<chrono::Utc>>) -> String,
+    {
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut ceiling: Option<chrono::DateTime<chrono::Utc>> = None;
+        for _ in 0..REPO_SWEEP_MAX_WINDOWS {
+            let (page, stop) = self
+                .fetch_pr_pages("repo-sweep", &build(ceiling), REPO_SWEEP_MAX_PAGES)
+                .await?;
+            let oldest = page.iter().map(|task| task.updated_at).min();
+            for task in page {
+                if seen.insert(task.id.key.clone()) {
+                    tasks.push(task);
+                }
+            }
+            let Some(stop) = stop else {
+                return Ok(tasks);
+            };
+            // Only the page cap is resumable. A mid-walk error or a
+            // missing cursor says nothing about where the set continues,
+            // so those stay the truncation they always were.
+            if !matches!(stop, PaginationStop::PageLimit { .. }) {
+                return Err(incomplete_pagination_error("repo-sweep", tasks.len(), stop));
+            }
+            // No watermark to advance to, or a whole capped walk sharing
+            // one timestamp: re-windowing would re-fetch the same items
+            // forever, so report the truncation instead of spinning.
+            match oldest {
+                Some(oldest) if Some(oldest) != ceiling => ceiling = Some(oldest),
+                _ => {
+                    tracing::error!(
+                        "repo-sweep hit its page cap on a window no timestamp can split; \
+                         tail is non-authoritative"
+                    );
+                    return Err(incomplete_pagination_error("repo-sweep", tasks.len(), stop));
+                }
+            }
+            tracing::debug!(
+                "repo-sweep page cap reached at {} PRs; resuming under updated:<={:?}",
+                tasks.len(),
+                ceiling,
+            );
+        }
+        tracing::error!(
+            "repo-sweep exhausted {REPO_SWEEP_MAX_WINDOWS} windows at {} PRs; \
+             tail is non-authoritative",
+            tasks.len(),
+        );
+        Err(GhError::Truncated {
+            count: tasks.len(),
+            pages: REPO_SWEEP_MAX_WINDOWS * REPO_SWEEP_MAX_PAGES,
+        })
+    }
+
     async fn fetch_member_prs(
         &self,
         member: &str,
         since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Vec<Task>, GhError> {
-        let primary = self.fetch_pr_single_query_capped(
-            "repo-sweep",
-            self.repo_sweep_pr_query(member, since),
-            REPO_SWEEP_MAX_PAGES,
-        );
+        let primary =
+            self.sweep_prs_windowed(|until| self.repo_sweep_pr_query_until(member, since, until));
+        let reviewer_role = self.repo_sweep_reviewer_role(member);
         let companion = async {
-            match self.repo_sweep_reviewer_query(member, since) {
-                Some(query) => {
-                    self.fetch_pr_single_query_capped("repo-sweep", query, REPO_SWEEP_MAX_PAGES)
-                        .await
+            match &reviewer_role {
+                Some(role) => {
+                    self.sweep_prs_windowed(|until| {
+                        graphql::repo_sweep_pr_query(member, Some(role), since, until)
+                    })
+                    .await
                 }
                 None => Ok(Vec::new()),
             }
@@ -4802,6 +4990,113 @@ impl GhClient {
         let mut tasks = primary?;
         merge_unseen(&mut tasks, companion?);
         Ok(tasks)
+    }
+
+    /// Members of `specs` whose windowed sweep provably has nothing to
+    /// fetch, so the pass can skip their queries entirely (issue #1803).
+    ///
+    /// A 30-minute sweep re-read every member unconditionally: an
+    /// unchanged repo cost exactly as much as a busy one. GitHub's
+    /// GraphQL endpoint answers no ETag, so there is no `If-None-Match`
+    /// to send — the equivalent is a watermark. One request carrying a
+    /// `search … first: 1` alias per member and kind returns each
+    /// member's newest `updatedAt`; a watermark below the member's
+    /// `updated:>=` floor means its windowed query would return an empty
+    /// page, so skipping it is not an approximation but the same result
+    /// for one GraphQL point instead of a page per member.
+    ///
+    /// Only windowed members are probed. An unwindowed (reconcile) pass
+    /// must come back with the member's whole open set — that set is what
+    /// retires rows — and no watermark proves anything about it.
+    ///
+    /// A probe that errors returns the empty set: this is an
+    /// optimization, and a sweep that runs anyway is correct, merely
+    /// expensive.
+    async fn repo_sweep_unchanged(
+        &self,
+        specs: &[RepoSweepSpec],
+        want_prs: bool,
+        want_issues: bool,
+    ) -> std::collections::HashSet<String> {
+        let started = std::time::Instant::now();
+        let mut metrics = BranchMetrics::new("repo-sweep probe");
+        let mut unchanged = std::collections::HashSet::new();
+        let kinds: Vec<&str> = [("is:pr", want_prs), ("is:issue", want_issues)]
+            .into_iter()
+            .filter_map(|(kind, wanted)| wanted.then_some(kind))
+            .collect();
+        let windowed: Vec<&RepoSweepSpec> =
+            specs.iter().filter(|spec| spec.since.is_some()).collect();
+        if kinds.is_empty() || windowed.len() < 2 {
+            // One member is not worth a round trip: probing it costs the
+            // same single request its sweep would have spent.
+            return unchanged;
+        }
+        for chunk in windowed.chunks(REPO_SWEEP_PROBE_CHUNK) {
+            let queries: Vec<String> = chunk
+                .iter()
+                .flat_map(|spec| {
+                    kinds
+                        .iter()
+                        .map(|kind| graphql::repo_sweep_probe_query(kind, &spec.member))
+                })
+                .collect();
+            if self.acquire_paced("repo-sweep probe").await.is_err() {
+                return unchanged;
+            }
+            let body = graphql::repo_sweep_probe_body(&queries);
+            let (response, bytes): (graphql::GqlSweepProbeResponse, usize) = match self
+                .post_graphql_with_retry_measured("repo-sweep probe", &body)
+                .await
+            {
+                Ok(measured) => measured,
+                Err(error) => {
+                    tracing::debug!("repo-sweep probe failed, sweeping in full: {error}");
+                    return unchanged;
+                }
+            };
+            metrics.requests += 1;
+            metrics.resp_bytes += bytes;
+            if let Some(errors) = &response.errors
+                && !errors.is_empty()
+            {
+                tracing::debug!(
+                    "repo-sweep probe reported errors, sweeping in full: {}",
+                    errors
+                        .iter()
+                        .map(|error| error.full())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                return unchanged;
+            }
+            let Some(data) = response.data else {
+                return unchanged;
+            };
+            if let Some(rate_limit) = &data.rate_limit {
+                metrics.graphql_cost += rate_limit.cost.unwrap_or(0);
+            }
+            for (position, spec) in chunk.iter().enumerate() {
+                let Some(since) = spec.since else { continue };
+                // EVERY kind must have reported, and every one of them
+                // must sit below the floor. A slot the probe could not
+                // read is unknown, not quiet, and skipping the member on
+                // its siblings' silence would drop real rows.
+                let watermarks: Option<Vec<_>> = (0..kinds.len())
+                    .map(|kind| data.watermark(position * kinds.len() + kind))
+                    .collect();
+                if watermarks.is_some_and(|watermarks| {
+                    watermarks
+                        .iter()
+                        .all(|watermark| watermark.is_none_or(|watermark| watermark < since))
+                }) {
+                    unchanged.insert(spec.member.clone());
+                }
+            }
+        }
+        metrics.elapsed_ms = started.elapsed().as_millis();
+        metrics.emit();
+        unchanged
     }
 
     /// Repo-first discovery sweep: one PR query and one issue query per
@@ -4831,8 +5126,15 @@ impl GhClient {
         let started = chrono::Utc::now();
         const MEMBER_CONCURRENCY: usize = 4;
 
+        let unchanged = self
+            .repo_sweep_unchanged(specs, want_prs, want_issues)
+            .await;
+        let quiet = &unchanged;
         let results = stream::iter(specs.iter().cloned())
             .map(|spec| async move {
+                if quiet.contains(&spec.member) {
+                    return (spec, Ok(Vec::new()), Ok((Vec::new(), Vec::new())));
+                }
                 let pr_fut = async {
                     if !want_prs {
                         return Ok(Vec::new());
@@ -4922,12 +5224,13 @@ impl GhClient {
         }
         outcome.retry_after_secs = errors.iter().filter_map(GhError::retry_after_secs).max();
         tracing::info!(
-            "fetch_repo_sweep: completed in {}ms — {} items across {} members ({} failed, {} unwindowed)",
+            "fetch_repo_sweep: completed in {}ms — {} items across {} members ({} failed, {} unwindowed, {} unchanged)",
             started_wall.elapsed().as_millis(),
             outcome.tasks.len(),
             specs.len(),
             outcome.failed.len(),
             outcome.unwindowed.len(),
+            unchanged.len(),
         );
         if !specs.is_empty() && outcome.completed.is_empty() {
             let details = outcome
@@ -8163,14 +8466,15 @@ mod tests {
             make_client("http://127.0.0.1:9").with_filters(vec!["author:test-user".into()], vec![]);
         assert_eq!(
             client.repo_sweep_pr_query("acme/widgets", None),
-            "is:open is:pr archived:false repo:acme/widgets author:test-user"
+            "is:open is:pr archived:false repo:acme/widgets author:test-user sort:updated-desc"
         );
         let since = chrono::DateTime::parse_from_rfc3339("2026-09-05T12:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
         assert_eq!(
             client.repo_sweep_pr_query("acme", Some(since)),
-            "is:pr archived:false org:acme author:test-user updated:>=2026-09-05T12:00:00+00:00"
+            "is:pr archived:false org:acme author:test-user \
+             updated:>=2026-09-05T12:00:00+00:00 sort:updated-desc"
         );
         assert_eq!(
             client.repo_sweep_reviewer_query("acme/widgets", None),
@@ -8192,19 +8496,22 @@ mod tests {
             .with_filters(vec!["involves:test-user".into()], vec![]);
         assert_eq!(
             client.repo_sweep_pr_query("acme/widgets", None),
-            "is:open is:pr archived:false repo:acme/widgets involves:test-user"
+            "is:open is:pr archived:false repo:acme/widgets involves:test-user sort:updated-desc"
         );
         assert_eq!(
             client
                 .repo_sweep_reviewer_query("acme/widgets", None)
                 .as_deref(),
-            Some("is:open is:pr archived:false repo:acme/widgets review-requested:test-user")
+            Some(
+                "is:open is:pr archived:false repo:acme/widgets review-requested:test-user \
+                 sort:updated-desc"
+            )
         );
         assert_eq!(client.repo_sweep_pr_queries_per_member(), 2);
         let bare = make_client("http://127.0.0.1:9");
         assert_eq!(
             bare.repo_sweep_pr_query("acme/widgets", None),
-            "is:open is:pr archived:false repo:acme/widgets",
+            "is:open is:pr archived:false repo:acme/widgets sort:updated-desc",
             "no filters wired (tests only; the poller always wires one) → unscoped"
         );
         assert_eq!(bare.repo_sweep_reviewer_query("acme/widgets", None), None);
@@ -8234,7 +8541,7 @@ mod tests {
         }
         assert_eq!(
             client.repo_sweep_pr_query("other/repo", None),
-            "is:open is:pr archived:false repo:other/repo involves:test-user"
+            "is:open is:pr archived:false repo:other/repo involves:test-user sort:updated-desc"
         );
         assert!(
             client
@@ -8276,6 +8583,306 @@ mod tests {
             bodies
                 .iter()
                 .any(|b| b.contains("review-requested:test-user"))
+        );
+    }
+
+    /// A GraphQL server that answers each request from the first
+    /// matching `(needle, body)` rule, recording every request body.
+    /// Unlike `spawn_recording_response_server`, which answers in
+    /// connection order, this is stable under the sweep's concurrent
+    /// member fan-out.
+    async fn spawn_matching_response_server(
+        rules: Vec<(&'static str, String)>,
+        fallback: String,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rules = std::sync::Arc::new(rules);
+        let fallback = std::sync::Arc::new(fallback);
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(connection) => connection,
+                    Err(_) => continue,
+                };
+                let (rules, fallback, requests) =
+                    (rules.clone(), fallback.clone(), requests.clone());
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 65536];
+                    let read = sock.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..read]).into_owned();
+                    let body = rules
+                        .iter()
+                        .find(|(needle, _)| request.contains(needle))
+                        .map(|(_, body)| body.clone())
+                        .unwrap_or_else(|| fallback.as_ref().clone());
+                    requests.lock().unwrap().push(request);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// One PR search page carrying an explicit `updatedAt`, so a test can
+    /// drive the sweep's `updated:<=` watermark.
+    fn pr_page_updated_at(number: u64, updated_at: &str, has_next: bool) -> String {
+        pr_search_page(number, Some((has_next, Some("CUR")))).replace(
+            r#""updatedAt": "2026-05-28T12:00:00Z""#,
+            &format!(r#""updatedAt": "{updated_at}""#),
+        )
+    }
+
+    /// A member with more PRs than one cursor walk can hold used to fail
+    /// its whole pass — "returned 100 PRs across 4 pages, hit safety cap"
+    /// — leaving its rows stale however much budget was left (#1803). It
+    /// now resumes under `updated:<=<oldest fetched>` and completes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_member_past_the_page_cap_resumes_under_a_tighter_window() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_matching_response_server(
+            // The re-windowed walk is the only one carrying a ceiling.
+            vec![(
+                "updated:<=",
+                pr_page_updated_at(2, "2026-09-10T08:00:00Z", false),
+            )],
+            pr_page_updated_at(1, "2026-09-15T08:00:00Z", true),
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        *client.budget.lock() = crate::rate_budget::RateBudget::unpaced();
+        let specs = vec![RepoSweepSpec {
+            member: "acme/widgets".to_string(),
+            since: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+        }];
+
+        let outcome = client
+            .fetch_repo_sweep(&specs, true, false, &std::collections::BTreeSet::new())
+            .await
+            .expect("hitting the page cap must re-window, not fail the member");
+
+        assert_eq!(outcome.completed, vec!["acme/widgets".to_string()]);
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert_eq!(
+            outcome.tasks.len(),
+            2,
+            "both windows' PRs land, deduped across the inclusive boundary"
+        );
+        let bodies = requests.lock().unwrap().clone();
+        assert!(
+            bodies.iter().any(|body| body.contains("sort:updated-desc")),
+            "the ceiling means nothing without a newest-first order"
+        );
+        assert_eq!(
+            bodies
+                .iter()
+                .filter(|body| body.contains("updated:<="))
+                .count(),
+            1,
+            "one re-window was enough; it must not keep walking"
+        );
+    }
+
+    /// A capped walk whose items all carry the same timestamp cannot be
+    /// split by time, so re-windowing would re-fetch it forever. That
+    /// member reports truncation instead of spinning.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_page_cap_the_window_cannot_split_still_reports_truncation() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_matching_response_server(
+            vec![],
+            pr_page_updated_at(1, "2026-09-15T08:00:00Z", true),
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        *client.budget.lock() = crate::rate_budget::RateBudget::unpaced();
+        let specs = vec![RepoSweepSpec {
+            member: "acme/widgets".to_string(),
+            since: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+        }];
+
+        let error = client
+            .fetch_repo_sweep(&specs, true, false, &std::collections::BTreeSet::new())
+            .await
+            .expect_err("an unsplittable member is the whole roster here");
+
+        assert!(
+            format!("{error}").contains("safety cap"),
+            "unexpected error: {error}"
+        );
+        let retried = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|body| body.contains("updated:<="))
+            .count();
+        assert!(
+            (1..=REPO_SWEEP_MAX_PAGES).contains(&retried),
+            "exactly one re-window may be attempted before giving up, saw {retried} pages"
+        );
+    }
+
+    fn probe_slots(watermarks: &[&str]) -> String {
+        let slots = watermarks
+            .iter()
+            .enumerate()
+            .map(|(idx, at)| format!(r#""p{idx}": {{ "nodes": [{{ "updatedAt": "{at}" }}] }}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"data":{{{slots},"rateLimit":{{"cost":1,"limit":5000,"remaining":4999,
+               "resetAt":"2026-09-17T13:00:00Z","used":1}}}}}}"#
+        )
+    }
+
+    /// The freshness probe is the sweep's `If-None-Match` stand-in:
+    /// members whose newest item predates their window floor are proved
+    /// empty by one request and their query pair is never sent (#1803).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_member_quiet_since_its_floor_is_completed_without_a_query() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_matching_response_server(
+            vec![(
+                "p0: search",
+                probe_slots(&["2026-09-17T09:00:00Z", "2026-09-17T09:30:00Z"]),
+            )],
+            pr_search_page(1, Some((false, None))),
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        *client.budget.lock() = crate::rate_budget::RateBudget::unpaced();
+        let floor = chrono::DateTime::parse_from_rfc3339("2026-09-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let specs = ["acme/widgets", "acme/gadgets"]
+            .into_iter()
+            .map(|member| RepoSweepSpec {
+                member: member.to_string(),
+                since: Some(floor),
+            })
+            .collect::<Vec<_>>();
+
+        let outcome = client
+            .fetch_repo_sweep(&specs, true, false, &std::collections::BTreeSet::new())
+            .await
+            .expect("a quiet roster is a complete sweep");
+
+        assert_eq!(outcome.completed.len(), 2, "quiet members still complete");
+        assert!(outcome.tasks.is_empty());
+        let bodies = requests.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1, "the probe was the whole pass: {bodies:?}");
+    }
+
+    /// A member whose newest item is at or past the floor is swept, and
+    /// one whose watermark the probe could not see is swept too — an
+    /// absent slot is "unknown", never "quiet".
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_member_that_moved_or_could_not_be_probed_is_still_swept() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_matching_response_server(
+            // Slot 0 moved past the floor; slot 1 is absent entirely.
+            vec![("p0: search", probe_slots(&["2026-09-17T14:00:00Z"]))],
+            pr_search_page(1, Some((false, None))),
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        *client.budget.lock() = crate::rate_budget::RateBudget::unpaced();
+        let floor = chrono::DateTime::parse_from_rfc3339("2026-09-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let specs = ["acme/widgets", "acme/gadgets"]
+            .into_iter()
+            .map(|member| RepoSweepSpec {
+                member: member.to_string(),
+                since: Some(floor),
+            })
+            .collect::<Vec<_>>();
+
+        let outcome = client
+            .fetch_repo_sweep(&specs, true, false, &std::collections::BTreeSet::new())
+            .await
+            .expect("both members sweep");
+
+        assert_eq!(outcome.completed.len(), 2);
+        let bodies = requests.lock().unwrap().clone();
+        assert!(
+            bodies.iter().any(|body| body.contains("repo:acme/widgets")),
+            "a member past its floor must be swept: {bodies:?}"
+        );
+        assert!(
+            bodies.iter().any(|body| body.contains("repo:acme/gadgets")),
+            "an unprobed member must be swept: {bodies:?}"
+        );
+    }
+
+    /// An unwindowed (reconcile) pass is never probed: it must come back
+    /// with the member's whole open set — the set that retires rows — and
+    /// no watermark proves anything about it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reconcile_is_never_probed() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_matching_response_server(
+            vec![],
+            pr_search_page(1, Some((false, None))),
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        *client.budget.lock() = crate::rate_budget::RateBudget::unpaced();
+        let specs = ["acme/widgets", "acme/gadgets"]
+            .into_iter()
+            .map(|member| RepoSweepSpec {
+                member: member.to_string(),
+                since: None,
+            })
+            .collect::<Vec<_>>();
+
+        client
+            .fetch_repo_sweep(&specs, true, false, &std::collections::BTreeSet::new())
+            .await
+            .expect("reconcile sweeps");
+
+        assert!(
+            !requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|body| body.contains("p0: search")),
+            "an unwindowed pass must not probe"
+        );
+    }
+
+    /// 700 identical refusals in two minutes buried every other signal in
+    /// the log (#1803). The first refusal per operation still logs; the
+    /// rest are counted, and one operation's noise never mutes another's.
+    #[tokio::test(flavor = "current_thread")]
+    async fn repeated_budget_refusals_collapse_into_one_warning_per_operation() {
+        let client = make_client("http://127.0.0.1:9");
+        let reason = crate::rate_budget::AcquireError::LocalBudgetExhausted { wait_secs: 3 };
+        for _ in 0..500 {
+            client.warn_blocked("repo-sweep", &reason);
+        }
+        client.warn_blocked("repo-sweep issues", &reason);
+
+        let warns = client.blocked_warns.lock();
+        assert_eq!(
+            warns["repo-sweep"].suppressed, 499,
+            "one line emitted, the rest counted for the next one"
+        );
+        assert_eq!(
+            warns["repo-sweep issues"].suppressed, 0,
+            "a second operation warns on its own clock"
         );
     }
 
@@ -9830,6 +10437,9 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             deps_ttl: GhClient::ISSUE_DEPS_TTL,
+            blocked_warns: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 

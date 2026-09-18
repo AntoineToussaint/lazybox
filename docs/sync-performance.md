@@ -143,6 +143,18 @@ watched repos (the *roster*):
   drop `is:open` so a merge or close comes back with its new state —
   no separate merged sweep. The governor caps the slice by allowance;
   members that don't fit keep their cursor age and lead the next tick.
+- **A freshness probe skips the quiet members** (#1803). GitHub's
+  GraphQL endpoint answers no ETag, so the sweep cannot send
+  `If-None-Match`; the equivalent is a watermark. One request ahead of
+  the fan-out carries a `search … first: 1` alias per member and kind
+  (`repo_sweep_probe_body`) and returns each member's newest
+  `updatedAt`. A watermark below the member's floor means its windowed
+  query would return an empty page, so its whole query pair is skipped —
+  the same result, for one GraphQL point instead of a page per member.
+  Skipped members still complete and still advance their floor. Only
+  *windowed* members are probed: a reconcile must come back with the
+  member's whole open set, and no watermark proves anything about it. A
+  probe that errors is ignored and the pass sweeps in full.
 - **Reconcile (every `FULL_SWEEP_INTERVAL`, or `Shift-R`).** Every
   member unwindowed (`is:open` plus a 7-day recent-activity query),
   queued in `TickState::reconcile_pending` and drained one
@@ -176,15 +188,23 @@ watched repos (the *roster*):
   GitHub defines `involves:` *without* requested reviewers, the
   `involves:` shape is paired with a `review-requested:USER` companion
   query per member — the same pairing the global sweep runs — and the
-  budget forecast counts both. The scope is also what keeps a busy
-  member inside the 4-page cap: an unscoped query on a repo with 100+
-  open PRs pages out every pass, the member never completes, and its
-  stale rows are never retired. A watched repo — or an org member
+  budget forecast counts both. A watched repo — or an org member
   covering one — is swept unscoped and without the companion, so its
   foreign PRs still download in full. The issue query is never
   role-scoped: the `@lazybox` mention scan rides it and must see every
   issue in the member; the display filter (`filter_github_tasks_with_watches`)
   drops the rows post-fetch.
+- **A PR sweep pages by `updated_at`, not to a cap** (#1803). Every
+  sweep query carries `sort:updated-desc`, and a PR walk that hits the
+  4-page cap re-asks under `updated:<=<oldest fetched>` instead of
+  failing the member (`sweep_prs_windowed`, up to 12 windows ≈ 1200
+  PRs). Before, a repo with a long PR history reported "returned 100 PRs
+  across 4 pages, hit safety cap" every pass, never completed, and its
+  rows went stale regardless of budget. The bound is inclusive and the
+  walk dedupes, so nothing is lost at a window boundary; a capped walk
+  whose items all share one timestamp cannot be split by time and still
+  reports truncation. The issue half keeps the flat cap (400 per
+  window).
 - **A row that never names the viewer is `TaskRole::Observer`** (#1760).
   Whole-repo queries (a watched member, the issue query, `g s`) return
   PRs and issues with no per-viewer signal, and before this they fell

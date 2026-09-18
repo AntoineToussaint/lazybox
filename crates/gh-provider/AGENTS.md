@@ -15,6 +15,13 @@ sweeps the whole roster and is the only pass allowed to retire rows. The
 user-centric `involves:USER` global sweep runs only when no scopes are
 configured.
 
+A rotation batch is preceded by one batched freshness probe: GraphQL has no
+ETag, so a watermark stands in for `If-None-Match`, and a member whose newest
+item predates its window floor is completed without a query. A PR walk that
+hits its page cap re-asks under `updated:<=<oldest fetched>` rather than
+failing the member — which is why every sweep query carries
+`sort:updated-desc`.
+
 The discovery filters' role term rides each member PR query: `pr.author`
 becomes `author:USER`, and two or more roles become `involves:USER` plus a
 `review-requested:USER` companion — GitHub's `involves:` omits review

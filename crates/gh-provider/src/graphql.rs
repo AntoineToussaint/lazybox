@@ -876,12 +876,18 @@ impl RoleQualifier {
 ///
 /// `role` is a viewer-relationship term (`author:USER`,
 /// `review-requested:USER`, …) — `None` sweeps the member's whole set.
+///
+/// `until` is the upper half of a re-windowed walk: the sweep caps its
+/// cursor walk per query, so a member whose window holds more PRs than
+/// the cap fits continues under `updated:<=<oldest fetched>` instead of
+/// failing (issue #1803).
 pub fn repo_sweep_pr_query(
     member: &str,
     role: Option<&str>,
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
 ) -> String {
-    build_query(&repo_sweep_qualifiers("is:pr", member, role, since))
+    build_query(&repo_sweep_qualifiers("is:pr", member, role, since, until))
 }
 
 /// Issue counterpart of [`repo_sweep_pr_query`]: same window semantics,
@@ -889,7 +895,9 @@ pub fn repo_sweep_pr_query(
 /// mention scan rides this query and must see every issue in the
 /// member; the display filter narrows the rows post-fetch.
 pub fn repo_sweep_issue_query(member: &str, since: Option<DateTime<Utc>>) -> String {
-    build_issues_query(&repo_sweep_qualifiers("is:issue", member, None, since))
+    build_issues_query(&repo_sweep_qualifiers(
+        "is:issue", member, None, since, None,
+    ))
 }
 
 fn repo_sweep_qualifiers(
@@ -897,8 +905,9 @@ fn repo_sweep_qualifiers(
     member: &str,
     role: Option<&str>,
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
 ) -> Vec<String> {
-    let mut quals = Vec::with_capacity(6);
+    let mut quals = Vec::with_capacity(7);
     if since.is_none() {
         quals.push("is:open".to_string());
     }
@@ -911,7 +920,116 @@ fn repo_sweep_qualifiers(
     if let Some(since) = since {
         quals.push(updated_since_qualifier(since));
     }
+    if let Some(until) = until {
+        quals.push(updated_until_qualifier(until));
+    }
+    quals.push(SWEEP_SORT.to_string());
     quals
+}
+
+/// Page order for every repo-sweep search. Relevance order — GitHub's
+/// default — makes the fetched prefix an arbitrary subset, so the
+/// oldest timestamp in it bounds nothing: re-windowing on `updated:<=`
+/// would drop the unfetched items that happen to be newer. Newest-first
+/// makes the oldest item fetched a true watermark.
+const SWEEP_SORT: &str = "sort:updated-desc";
+
+/// `updated:<=<until>` — the ceiling half of a re-windowed sweep walk,
+/// the mirror of [`updated_since_qualifier`]. Inclusive, like the floor,
+/// so an item sitting exactly on the boundary is re-fetched rather than
+/// skipped; the caller dedupes.
+pub fn updated_until_qualifier(until: DateTime<Utc>) -> String {
+    format!("updated:<={}", until.format("%Y-%m-%dT%H:%M:%S+00:00"))
+}
+
+/// The freshness-probe search for one roster member and item kind.
+///
+/// Carries the sweep's own qualifiers minus the window — and minus the
+/// role scope, deliberately. An unscoped watermark is a SUPERSET of
+/// what the scoped sweep would fetch, so it can only over-report change,
+/// never miss it, and it keeps the probe at one alias per member where
+/// `involves:` alone would need the primary and its reviewer companion.
+pub fn repo_sweep_probe_query(kind: &str, member: &str) -> String {
+    build_query(&[
+        kind.to_string(),
+        "archived:false".to_string(),
+        roster_member_qualifier(member),
+        SWEEP_SORT.to_string(),
+    ])
+}
+
+/// One GraphQL document probing many members' freshness at once.
+///
+/// GitHub's GraphQL endpoint answers no ETag and honours no
+/// `If-None-Match`, so a conditional sweep is not available there; this
+/// is its equivalent. Each `search` alias asks for a single node, so the
+/// whole document's node budget is one per member and a rotation batch
+/// probes for a single GraphQL point — against the page-per-member a
+/// sweep of the same batch costs.
+pub fn repo_sweep_probe_body(queries: &[String]) -> serde_json::Value {
+    use std::fmt::Write as _;
+    let mut doc = String::from("query {\n");
+    for (idx, query) in queries.iter().enumerate() {
+        let literal = serde_json::Value::String(query.clone());
+        let _ = writeln!(
+            doc,
+            "  p{idx}: search(query: {literal}, type: ISSUE, first: 1) {{ {SWEEP_PROBE_SELECTION} }}"
+        );
+    }
+    doc.push_str("  rateLimit { cost limit remaining resetAt used }\n}\n");
+    serde_json::json!({ "query": doc })
+}
+
+/// What one probe alias selects. A single timestamp per member, and
+/// deliberately nothing else: the probe is a change *detector*, not a
+/// task source — its nodes deserialize into [`GqlSweepProbeNode`], never
+/// a `GqlIssue` — and a whole rotation batch has to fit one GraphQL
+/// point. Splicing the shared issue block here would defeat the probe,
+/// which is why `no_issue_selection_in_this_file_escapes_the_shared_block`
+/// carves this span out alongside [`HOT_FRESHNESS_QUERY`].
+const SWEEP_PROBE_SELECTION: &str = r#"nodes { ... on PullRequest { updatedAt } ... on Issue { updatedAt } }
+"#;
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSweepProbeResponse {
+    pub data: Option<GqlSweepProbeData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSweepProbeData {
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: Option<GqlRateLimit>,
+    /// Alias (`p0`, `p1`, …) → that member's newest item. Flattened
+    /// because the alias set is built per request.
+    #[serde(flatten)]
+    pub slots: std::collections::BTreeMap<String, GqlSweepProbeSlot>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSweepProbeSlot {
+    pub nodes: Vec<GqlSweepProbeNode>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSweepProbeNode {
+    #[serde(rename = "updatedAt", default)]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl GqlSweepProbeData {
+    /// The newest `updatedAt` the probe saw in slot `idx`.
+    ///
+    /// The two empties are different facts and the caller must not
+    /// conflate them: an absent slot (`None`) is a member the probe could
+    /// not read — unknown, never quiet — while `Some(None)` is a member
+    /// that holds nothing of that kind at all, which is as quiet as it
+    /// gets.
+    pub fn watermark(&self, idx: usize) -> Option<Option<DateTime<Utc>>> {
+        let slot = self.slots.get(&format!("p{idx}"))?;
+        Some(slot.nodes.iter().filter_map(|node| node.updated_at).max())
+    }
 }
 
 /// Per-page size for the PR search. Was 100 (GraphQL's maximum)
@@ -4740,20 +4858,105 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(
-            repo_sweep_pr_query("acme/widgets", None, None),
-            "is:open is:pr archived:false repo:acme/widgets"
+            repo_sweep_pr_query("acme/widgets", None, None, None),
+            "is:open is:pr archived:false repo:acme/widgets sort:updated-desc"
         );
         assert_eq!(
-            repo_sweep_pr_query("acme/widgets", None, Some(since)),
-            "is:pr archived:false repo:acme/widgets updated:>=2026-09-05T12:00:00+00:00"
+            repo_sweep_pr_query("acme/widgets", None, Some(since), None),
+            "is:pr archived:false repo:acme/widgets updated:>=2026-09-05T12:00:00+00:00 \
+             sort:updated-desc"
         );
         assert_eq!(
             repo_sweep_issue_query("acme", None),
-            "is:open is:issue archived:false org:acme"
+            "is:open is:issue archived:false org:acme sort:updated-desc"
         );
         assert_eq!(
             repo_sweep_issue_query("acme", Some(since)),
-            "is:issue archived:false org:acme updated:>=2026-09-05T12:00:00+00:00"
+            "is:issue archived:false org:acme updated:>=2026-09-05T12:00:00+00:00 \
+             sort:updated-desc"
+        );
+    }
+
+    /// The re-windowed walk that replaces the old page-cap failure: the
+    /// ceiling rides the same query alongside the floor, and the order is
+    /// newest-first so the ceiling means anything at all.
+    #[test]
+    fn repo_sweep_pr_query_carries_an_updated_ceiling() {
+        let since = DateTime::parse_from_rfc3339("2026-09-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let until = DateTime::parse_from_rfc3339("2026-09-05T18:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            repo_sweep_pr_query("acme/widgets", None, Some(since), Some(until)),
+            "is:pr archived:false repo:acme/widgets updated:>=2026-09-05T12:00:00+00:00 \
+             updated:<=2026-09-05T18:30:00+00:00 sort:updated-desc"
+        );
+    }
+
+    /// The probe is the sweep's own candidate set, newest first, minus
+    /// the window and minus the role scope — a superset watermark can
+    /// over-report change but never miss it.
+    #[test]
+    fn repo_sweep_probe_query_is_the_unwindowed_unscoped_member() {
+        assert_eq!(
+            repo_sweep_probe_query("is:pr", "acme/widgets"),
+            "is:pr archived:false repo:acme/widgets sort:updated-desc"
+        );
+        assert_eq!(
+            repo_sweep_probe_query("is:issue", "acme"),
+            "is:issue archived:false org:acme sort:updated-desc"
+        );
+    }
+
+    /// Every member rides ONE document, one node each — that is what
+    /// makes probing a rotation batch cost a single GraphQL point.
+    #[test]
+    fn repo_sweep_probe_body_aliases_every_query_in_one_document() {
+        let body = repo_sweep_probe_body(&[
+            "is:pr repo:acme/widgets".to_string(),
+            "is:issue repo:acme/widgets".to_string(),
+        ]);
+        let doc = body["query"].as_str().unwrap();
+        assert!(
+            doc.contains(r#"p0: search(query: "is:pr repo:acme/widgets""#),
+            "{doc}"
+        );
+        assert!(
+            doc.contains(r#"p1: search(query: "is:issue repo:acme/widgets""#),
+            "{doc}"
+        );
+        assert_eq!(doc.matches("first: 1").count(), 2, "one node per alias");
+        assert!(doc.contains("rateLimit"), "the probe must report its cost");
+    }
+
+    /// Slot lookup is by alias index, and an absent or empty slot reads
+    /// as "unknown" — never as "quiet", which would skip a member the
+    /// probe could not see.
+    #[test]
+    fn sweep_probe_watermark_reads_the_newest_node_per_slot() {
+        let data: GqlSweepProbeData = serde_json::from_value(serde_json::json!({
+            "p0": { "nodes": [{ "updatedAt": "2026-09-17T10:00:00Z" }] },
+            "p1": { "nodes": [] },
+            "rateLimit": { "cost": 1, "limit": 5000, "remaining": 4999,
+                           "resetAt": "2026-09-17T11:00:00Z", "used": 1 },
+        }))
+        .unwrap();
+        assert_eq!(
+            data.watermark(0).flatten().unwrap().to_rfc3339(),
+            "2026-09-17T10:00:00+00:00"
+        );
+        assert_eq!(
+            data.watermark(1),
+            Some(None),
+            "a member holding nothing of that kind is quiet, not unknown"
+        );
+        assert_eq!(data.watermark(2), None, "an absent slot is unknown");
+        assert_eq!(
+            data.rate_limit.and_then(|rate_limit| rate_limit.cost),
+            Some(1),
+            "rateLimit must not be swallowed by the flattened alias map"
         );
     }
 
@@ -4783,13 +4986,18 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(
-            repo_sweep_pr_query("acme/widgets", Some("author:me"), None),
-            "is:open is:pr archived:false repo:acme/widgets author:me"
+            repo_sweep_pr_query("acme/widgets", Some("author:me"), None, None),
+            "is:open is:pr archived:false repo:acme/widgets author:me sort:updated-desc"
         );
         assert_eq!(
-            repo_sweep_pr_query("acme/widgets", Some("review-requested:me"), Some(since)),
+            repo_sweep_pr_query(
+                "acme/widgets",
+                Some("review-requested:me"),
+                Some(since),
+                None
+            ),
             "is:pr archived:false repo:acme/widgets review-requested:me \
-             updated:>=2026-09-05T12:00:00+00:00"
+             updated:>=2026-09-05T12:00:00+00:00 sort:updated-desc"
         );
     }
 
@@ -4947,12 +5155,15 @@ mod tests {
     /// — must be immediately followed by the splice. Adding a query
     /// without it fails here without anyone remembering to register it.
     ///
-    /// `HOT_FRESHNESS_QUERY` is carved out by design, not by oversight:
-    /// it is a change *detector*, not a task source. Its response is
-    /// never deserialized into a `GqlIssue` (it stays
-    /// `serde_json::Value`, so the fingerprint is the raw node), and it
-    /// must stay lean — splicing the full block there would defeat the
-    /// two-tier probe. It is exempt because it cannot erase anything.
+    /// The two freshness probes are carved out by design, not by
+    /// oversight: they are change *detectors*, not task sources. Neither
+    /// response is deserialized into a `GqlIssue` —
+    /// `HOT_FRESHNESS_QUERY`'s stays `serde_json::Value` so the
+    /// fingerprint is the raw node, and `SWEEP_PROBE_SELECTION` yields a
+    /// lone `updatedAt` — and both must stay lean: splicing the full
+    /// block would defeat the two-tier hot probe and blow the sweep
+    /// probe's one-node-per-member budget. They are exempt because they
+    /// cannot erase anything.
     #[test]
     fn no_issue_selection_in_this_file_escapes_the_shared_block() {
         // Queries live above the test module; `mod tests` also contains
@@ -4963,15 +5174,22 @@ mod tests {
             .expect("this file has a test module")
             .0;
 
-        // Carve out the freshness probe by its own span.
-        let probe_start = queries
-            .find("const HOT_FRESHNESS_QUERY")
-            .expect("the probe is defined in this file");
-        let probe_end = probe_start
-            + queries[probe_start..]
-                .find("\n\"#;")
-                .expect("the probe const terminates")
-            + 4;
+        // Carve out the freshness probes by their own spans.
+        let probes: Vec<std::ops::Range<usize>> =
+            ["const HOT_FRESHNESS_QUERY", "const SWEEP_PROBE_SELECTION"]
+                .into_iter()
+                .map(|name| {
+                    let start = queries
+                        .find(name)
+                        .expect("the probe is defined in this file");
+                    let end = start
+                        + queries[start..]
+                            .find("\n\"#;")
+                            .expect("the probe const terminates")
+                        + 4;
+                    start..end
+                })
+                .collect();
 
         let mut checked = 0;
         for token in ["... on Issue {", "issue(number:"] {
@@ -4979,7 +5197,7 @@ mod tests {
             while let Some(hit) = queries[from..].find(token) {
                 let at = from + hit;
                 from = at + token.len();
-                if (probe_start..probe_end).contains(&at) {
+                if probes.iter().any(|probe| probe.contains(&at)) {
                     continue;
                 }
                 // Whatever follows must close the raw string and splice.
@@ -6922,11 +7140,11 @@ mod tests {
         assert!(query_names_viewer("is:open is:pr involves:alice", "alice"));
         assert!(query_names_viewer("is:pr mentions:Alice repo:o/r", "alice"));
         assert!(query_names_viewer(
-            &repo_sweep_pr_query("o/r", Some("involves:alice"), None),
+            &repo_sweep_pr_query("o/r", Some("involves:alice"), None, None),
             "alice"
         ));
         assert!(
-            !query_names_viewer(&repo_sweep_pr_query("o/r", None, None), "alice"),
+            !query_names_viewer(&repo_sweep_pr_query("o/r", None, None, None), "alice"),
             "an unscoped member sweep returns the repo's whole set"
         );
         assert!(

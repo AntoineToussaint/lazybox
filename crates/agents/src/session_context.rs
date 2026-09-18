@@ -88,6 +88,10 @@ delivery, so verify with `read_session`.\n\
   - `ask_session` sends a question — or a catalog snippet with `send_snippet` — to a \
 sibling and returns its answer; when *you* receive a `<lazybox-request>`, answer it \
 with `reply_request` before moving on.\n\
+  - `task_status` answers \"is anyone working on `owner/repo#N`?\" — workspace, \
+live agent turn, claim and blocker as separate facts (a finished turn is not a \
+finished task), read-only, and an issue still resolves after its PR takes over \
+the row. From a shell: `lazybox task status <ref>`.\n\
   - `epic_status` / `epic_ready` are the live plan of record for any epic this \
 workspace joins — the daemon derives status, so answer \"what's blocked / what's next\" \
 from them, not from re-reading the graph; `report_blocker` flags this workspace as \
@@ -216,6 +220,7 @@ mod tests {
             "notify_session",
             // Epic coordination (#1522): the derived-status query tools and the
             // blocker-flag tools ride the same MCP-only half.
+            "task_status",
             "epic_status",
             "epic_ready",
             "report_blocker",
@@ -284,6 +289,10 @@ mod tests {
         // 3600 had decayed into one (#1586's first pass left 6 bytes free, so
         // the next correct sentence could not be added without a cap change
         // anyway), and the +250 here is sized to the bullet just added.
+        // #1785 added the `task_status` bullet — the lookup an agent reaches
+        // for when asked "are we working on #N", and the one place the
+        // turn-ended-is-not-task-done distinction is stated where an agent
+        // will actually read it; +400 keeps prose-shaped headroom over it.
         let text = lazybox_session_context_with_mcp();
         assert!(
             text.lines().count() <= 37,
@@ -291,7 +300,7 @@ mod tests {
             text.lines().count()
         );
         assert!(
-            text.len() <= 4200,
+            text.len() <= 4600,
             "session context should stay tight: {} bytes",
             text.len()
         );

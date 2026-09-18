@@ -219,6 +219,7 @@ pub mod socket_service;
 pub mod spawn_handler;
 mod spawn_plan;
 pub mod stats_accumulator;
+pub mod task_status;
 mod terminal_commands;
 mod terminal_io;
 #[cfg(test)]
@@ -1343,6 +1344,7 @@ impl Server {
                         lazybox_ipc::Command::Unsnooze { .. } => "Unsnooze",
                         lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::SetTrackMain { .. } => "SetTrackMain",
+                        lazybox_ipc::Command::QueryTaskStatus { .. } => "QueryTaskStatus",
                         lazybox_ipc::Command::SetMetered { .. } => "SetMetered",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
                         lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
@@ -2781,6 +2783,32 @@ pub async fn dispatch_command(
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::set_track_main(config, &key, enabled).await;
+        }
+        lazybox_ipc::Command::QueryTaskStatus {
+            reference,
+            default_repo,
+            client_request_id,
+        } => {
+            let result =
+                match lazybox_core::task_ref::parse_task_ref(&reference, default_repo.as_deref()) {
+                    Some(id) => task_status::report(config, &id).await,
+                    None => Err(
+                        lazybox_ipc::task_status::TaskStatusError::UnresolvedReference {
+                            reference,
+                        },
+                    ),
+                };
+            // Answer on the asking connection, not the bus. A status lookup is
+            // request/response: broadcasting it would oblige the caller to
+            // `Subscribe` (paying for a full `Snapshot` of every workspace and
+            // terminal just to ask a question), push the report at every other
+            // client, and — because a lagging subscriber's events are dropped
+            // outright — let a loaded daemon lose the reply and report a
+            // timeout for an answer it computed correctly.
+            let _ = tx.send(lazybox_ipc::Event::TaskStatus {
+                client_request_id,
+                result,
+            });
         }
         lazybox_ipc::Command::SetMetered {
             session_key,

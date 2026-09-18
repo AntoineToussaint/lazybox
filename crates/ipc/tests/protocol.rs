@@ -354,6 +354,11 @@ fn all_commands() -> Vec<Command> {
             session_key: key.clone(),
             enabled: true,
         },
+        Command::QueryTaskStatus {
+            reference: "o/r#151".into(),
+            default_repo: Some("o/r".into()),
+            client_request_id: Some("req-1".into()),
+        },
         Command::SetMetered {
             session_key: key.clone(),
             enabled: true,
@@ -1430,6 +1435,40 @@ fn all_events() -> Vec<Event> {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             open: 1,
         },
+        Event::TaskStatus {
+            client_request_id: Some("req-1".into()),
+            result: Ok(lazybox_ipc::task_status::TaskStatusReport {
+                schema_version: lazybox_ipc::task_status::TASK_STATUS_SCHEMA_VERSION,
+                task: lazybox_ipc::task_status::TaskRefInfo {
+                    id: lazybox_core::TaskId {
+                        source: "github".into(),
+                        key: "o/r#151".into(),
+                    },
+                    repo: Some("o/r".into()),
+                    number: Some(151),
+                },
+                observed_at: sample_time(),
+                workspaces: Vec::new(),
+                // Deliberately EMPTY: a `skip_serializing_if` on this field
+                // omits it from the wire only in this case, and bincode is not
+                // self-describing, so the frame desyncs. A non-empty sample
+                // here passes while every real reply fails.
+                unreadable_workspaces: Vec::new(),
+                verdict: lazybox_ipc::task_status::Verdict {
+                    state: lazybox_ipc::task_status::WorkState::NoWorkspace,
+                    reason: "no workspace on this daemon holds this record".into(),
+                    evidence: Vec::new(),
+                },
+            }),
+        },
+        // Same tag as the row above (the corpus dedups by tag), so the error
+        // half of the result is round-tripped too.
+        Event::TaskStatus {
+            client_request_id: None,
+            result: Err(lazybox_ipc::task_status::TaskStatusError::Unavailable {
+                detail: "read workspaces: disk".into(),
+            }),
+        },
     ]
 }
 
@@ -1467,6 +1506,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::Unsnooze { .. } => "Unsnooze",
         Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
         Command::SetTrackMain { .. } => "SetTrackMain",
+        Command::QueryTaskStatus { .. } => "QueryTaskStatus",
         Command::SetMetered { .. } => "SetMetered",
         Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
         Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
@@ -1659,6 +1699,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentCompaction { .. } => "AgentCompaction",
         Event::AgentRequestReplied { .. } => "AgentRequestReplied",
         Event::AgentRequestsOpen { .. } => "AgentRequestsOpen",
+        Event::TaskStatus { .. } => "TaskStatus",
     }
 }
 
@@ -1670,12 +1711,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        101,
+        102,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        110,
+        111,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

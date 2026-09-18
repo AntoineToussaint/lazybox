@@ -310,6 +310,44 @@ Unlike fire-and-forget hooks, a failure exits non-zero: the caller asked for a
 workspace and is told if the daemon was unreachable or the project couldn't be
 resolved.
 
+## `lazybox task status`
+
+Answers **"is anyone working on `owner/repo#N`?"** — the supported lookup for a
+person at a shell and for an agent that cannot receive MCP tools. Read-only: it
+never spawns, resumes, claims or changes anything.
+
+```bash
+lazybox task status obin-ai/core-solutions#151
+lazybox task status https://github.com/obin-ai/core-solutions/issues/151 --json
+lazybox task status 187 --repo obin-ai/core-solutions
+```
+
+| Command / option | Effect |
+| --- | --- |
+| `task status <ref>` | Look the record up: `owner/repo#N`, a GitHub issue/PR URL, a Linear key, or `#N` beside `--repo` |
+| `--repo <owner/repo>` | Repo used to resolve the bare `#N` / `N` forms |
+| `--issue` / `--pr` / `--ticket <ref>` | Aliases for the positional reference |
+| `--json` | Emit the full structured report (versioned by `schema_version`) instead of the summary |
+| `--socket <path>` | Daemon socket to query (defaults to the standard socket) |
+
+The daemon answers from its own live state, so the record resolves through
+**every** id its workspace holds — an issue still answers after its PR has taken
+over the row, and every matching workspace is reported rather than an arbitrary
+first one.
+
+The report keeps apart facts that are easy to conflate. A finished agent turn is
+**not** task completion; an unexpired `lazybox:w:` claim is **not** proof of a
+running process (it has a one-hour TTL a crashed worker stops renewing); a
+retained session worktree is **not** an agent turn. Where the evidence is
+missing or contradictory the verdict is `unknown` rather than a guess.
+
+Exit codes: `0` when status was established (including "nobody is working on
+it", which is a real answer), `2` for a reference that cannot be resolved, `1`
+when the daemon is unreachable or could not read its state — so a script never
+reads a failed lookup as "no worker".
+
+The same report is available to a wired agent as the `task_status` MCP tool.
+
 ## Environment variables
 
 | Variable | Effect |

@@ -1393,6 +1393,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // consumed earlier in this function.
                 | IpcEvent::AgentRequestReplied { .. }
                 | IpcEvent::AgentRequestsOpen { .. }
+                // `task_status` (#1785) is request/response: the daemon answers
+                // on the asking connection, so this never reaches a TUI client.
+                // The arm exists because `Event` is one shared exhaustive enum.
+                | IpcEvent::TaskStatus { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2558,6 +2562,10 @@ impl<T: TerminalAdapter> Model<T> {
             // the coordination bus, not a provider poll.
             | IpcEvent::AgentRequestReplied { .. }
             | IpcEvent::AgentRequestsOpen { .. }
+            // `task_status` (#1785) is request/response: the daemon answers
+            // on the asking connection, so this never reaches a TUI client.
+            // The arm exists because `Event` is one shared exhaustive enum.
+            | IpcEvent::TaskStatus { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -2909,6 +2917,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // poll-indicator / mutation-failure semantics either.
                 | IpcEvent::AgentRequestReplied { .. }
                 | IpcEvent::AgentRequestsOpen { .. }
+                // `task_status` (#1785) is request/response: the daemon answers
+                // on the asking connection, so this never reaches a TUI client.
+                // The arm exists because `Event` is one shared exhaustive enum.
+                | IpcEvent::TaskStatus { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

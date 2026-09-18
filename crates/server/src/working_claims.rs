@@ -718,6 +718,20 @@ fn list_records(config: &ServerConfig) -> Result<Vec<WorkingClaimRecord>, String
         .collect()
 }
 
+/// The claim labels this daemon is currently renewing — the ones whose record
+/// carries our own `owner_id`. A `lazybox:w:` label upstream that is absent
+/// here is held by another box (or by a process that died without releasing
+/// it), which is what lets a status lookup say "claimed elsewhere" instead of
+/// implying a local worker (#1785).
+pub(crate) fn locally_held_labels(config: &ServerConfig) -> std::collections::HashSet<String> {
+    list_records(config)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|record| record.owner_id == config.working_claim_owner_id)
+        .map(|record| record.label)
+        .collect()
+}
+
 /// A genuinely permanent failure — bad config, missing workspace, malformed
 /// identity. Won't fix itself by waiting, so it surfaces every time.
 fn emit_error(config: &ServerConfig, workspace: &WorkspaceKey, action: &str, reason: &str) {

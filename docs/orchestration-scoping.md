@@ -345,6 +345,11 @@ its own wall instead of idling — the session briefing says so); a
 same module as `Blocked by:`; and a `blocked:<kind>` label as the visible
 projection (§4j rules apply).
 
+A declared blocker is a row keyed by workspace, so it travels with the work:
+the issue→PR fold re-keys it onto the PR inside the same transaction that
+retires the issue row (merging reasons when the PR declared one of its own),
+and a row whose workspace no longer exists is collected on the next recompute.
+
 Blockers lead everywhere: first in the epic header line (`⛔ 2 blocked!`
 when the operator owns one), the first section of the overview (sorted by
 how much work each holds, then by age, operator-owned rows bold), first in

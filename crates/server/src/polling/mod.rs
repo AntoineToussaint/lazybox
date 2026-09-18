@@ -4516,11 +4516,16 @@ async fn commit_merge(
         })
         .collect();
     let post_commit_events = issue_merge_events(&pr_key, pending);
+    // The absorbed rows' declared blockers move onto the PR in this same
+    // transaction: the blocker follows the work, and a crash cannot leave one
+    // keyed to the issue row the batch deletes (#1793).
+    let blocker_mutations = crate::epics::absorb_declared_mutations(config, &deletes, &pr_key);
     match commit_workspace_move(
         config,
         vec![(pr_key.clone(), pr_ws)],
         deletes.clone(),
         terminal_moves,
+        blocker_mutations,
         post_commit_events,
         workspace_guards,
     )
@@ -4940,6 +4945,7 @@ pub async fn handle_adopt_sessions(
         Vec::new(),
         vec![(source_session_key, target_session_key)],
         Vec::new(),
+        Vec::new(),
         workspace_guards,
     )
     .await
@@ -5027,6 +5033,7 @@ pub(crate) async fn transfer_owned_worktree_session(
         ],
         Vec::new(),
         vec![(source_session_key, target_session_key)],
+        Vec::new(),
         Vec::new(),
         workspace_guards,
     )

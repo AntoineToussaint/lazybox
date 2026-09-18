@@ -982,6 +982,10 @@ fn prepare_terminal_rebadges(
 /// cross the transaction boundary with a half-registered terminal. In-memory
 /// routing and bus events change only after the store batch succeeds.
 ///
+/// `extra_mutations` are kv rows keyed by workspace that the move re-keys too
+/// (declared blockers), committed in the same transaction so no crash window
+/// can leave one pointing at a workspace the batch just deleted.
+///
 /// The blocking owner performs the transaction, map update, and entire event
 /// tail. Dropping the async caller detaches that owner instead of cancelling it
 /// between a successful SQLite commit and its in-memory/client projections.
@@ -990,6 +994,7 @@ pub(super) async fn commit_workspace_move(
     upserts: Vec<(WorkspaceKey, Workspace)>,
     deletes: Vec<WorkspaceKey>,
     terminal_moves: Vec<(lazybox_core::SessionKey, lazybox_core::SessionKey)>,
+    extra_mutations: Vec<StoreMutation>,
     post_commit_events: Vec<Event>,
     workspace_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<CommitOutcome, CommitError> {
@@ -1001,23 +1006,23 @@ pub(super) async fn commit_workspace_move(
     let config_owned = config.clone();
     tokio::task::spawn_blocking(move || {
         let mut terminal_guard = terminal_guard;
-        let (mut terminal_mutations, rebadge_plans) = match terminal_guard.as_ref() {
+        let (mut kv_mutations, rebadge_plans) = match terminal_guard.as_ref() {
             Some(entries) => prepare_terminal_rebadges(entries, terminal_moves)?,
             None => (Vec::new(), Vec::new()),
         };
+        kv_mutations.extend(extra_mutations);
         // History/draft are workspace-scoped (keyed by session_key), so a rebadge
         // must relabel them onto the new workspace in the SAME transaction as the
         // workspace + terminal-meta move — otherwise the `]]h` history / recap /
         // draft would blank the instant the terminal wears the PR badge.
         for plan in &rebadge_plans {
-            terminal_mutations.extend(crate::spawn_handler::rebadge_workspace_history_mutations(
+            kv_mutations.extend(crate::spawn_handler::rebadge_workspace_history_mutations(
                 &*config_owned.store,
                 plan.from.as_str(),
                 plan.to.as_str(),
             ));
         }
-        let committed =
-            persist_workspace_batch(&config_owned, upserts, deletes, terminal_mutations)?;
+        let committed = persist_workspace_batch(&config_owned, upserts, deletes, kv_mutations)?;
         let outcome = committed.outcome;
 
         if let Some(entries) = terminal_guard.as_mut() {

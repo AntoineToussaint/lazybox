@@ -58,7 +58,7 @@ impl Messages {
 
     /// The scrollable body, as styled lines. Re-derived each render so
     /// theme + width changes are picked up.
-    fn body_lines(&self, theme: &crate::theme::Theme) -> Vec<Line<'static>> {
+    fn body_lines(&self, theme: &crate::theme::Theme, width: u16) -> Vec<Line<'static>> {
         if self.entries.is_empty() {
             return vec![Line::from(Span::styled(
                 "No messages yet — notices you see in the footer collect here.",
@@ -67,7 +67,39 @@ impl Messages {
         }
         self.entries
             .iter()
-            .map(|e| self.entry_line(e, theme))
+            .flat_map(|e| self.entry_lines(e, theme, width))
+            .collect()
+    }
+
+    /// One log entry, wrapped to `width`. This window is where the
+    /// footer's width-capped notices are supposed to be readable in
+    /// full, so an entry longer than the modal must wrap rather than
+    /// clip — an error pointing here for its recovery instruction
+    /// would otherwise lose it a second time (#1805). Continuation
+    /// lines are indented under the severity glyph so a wrapped entry
+    /// still reads as one row.
+    ///
+    /// Pre-wrapped rather than left to `Paragraph::wrap`, which counts
+    /// pre-wrap lines for `scroll` and would mis-clamp the scrollbar.
+    fn entry_lines(
+        &self,
+        e: &MessageEntry,
+        theme: &crate::theme::Theme,
+        width: u16,
+    ) -> Vec<Line<'static>> {
+        const INDENT: u16 = 2;
+        let line = self.entry_line(e, theme);
+        let wrapped =
+            crate::components::comment_render::wrap_one(line, width.saturating_sub(INDENT));
+        wrapped
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut line)| {
+                if i > 0 {
+                    line.spans.insert(0, Span::raw(" ".repeat(INDENT as usize)));
+                }
+                line
+            })
             .collect()
     }
 
@@ -125,7 +157,7 @@ impl Component for Messages {
         };
         self.body_height = body_area.height.max(1);
 
-        let lines = self.body_lines(theme);
+        let lines = self.body_lines(theme, body_area.width);
         // Clamp scroll so a short log can't leave blank rows scrolled
         // off the top.
         let max = max_scroll(lines.len(), self.body_height);
@@ -239,6 +271,40 @@ mod tests {
         assert!(out.contains("merge rejected: base out of date"), "{out}");
         assert!(out.contains("auto-merging repo"), "{out}");
         assert!(out.contains("c clear"), "{out}");
+    }
+
+    /// The footer width-caps its notices and points here for the rest,
+    /// so an entry wider than the window must wrap instead of clipping
+    /// — otherwise the pointer sends the user to a second truncation
+    /// of the same text (#1805).
+    #[test]
+    fn a_long_entry_is_readable_in_full() {
+        let msg = concat!(
+            "\u{2717} commit, stash or push, then retry \u{2014} delete refused, ",
+            "workspace github:owner/repo#1805 has local work: ",
+            "/Users/dev/.lazybox/v2/github-owner-repo/ci (uncommitted changes)",
+        );
+        let mut comp = Messages::new(vec![entry(msg, NoticeSeverity::Permanent, 30)], now());
+        let out = render(&mut comp, 90, 20);
+        let flat = out.replace('\n', " ");
+        for word in msg.split_whitespace() {
+            assert!(
+                flat.contains(word),
+                "{word:?} was clipped off the log entry:\n{out}",
+            );
+        }
+        // ...because it wrapped: the diagnostic lands on a later row
+        // than the instruction instead of being clipped at the frame.
+        let rows: Vec<&str> = out.lines().collect();
+        let head = rows
+            .iter()
+            .position(|l| l.contains("commit, stash or push"))
+            .expect("instruction row");
+        let tail = rows
+            .iter()
+            .position(|l| l.contains("(uncommitted changes)"))
+            .expect("diagnostic row");
+        assert!(tail > head, "the entry did not wrap:\n{out}");
     }
 
     #[test]

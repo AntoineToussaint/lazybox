@@ -97,12 +97,37 @@ pub enum NoticeKey {
     DaemonConnection,
 }
 
+/// Which end of a notice carries the part the user must be able to
+/// read. The footer is one line, so a long notice always loses
+/// something; this decides what.
+///
+/// The default is [`Self::Tail`] because most notices are a fixed
+/// `✗ <verb> failed:` prefix followed by the reason, or a name
+/// followed by `— press ! to jump`: the payload is at the end, and
+/// middle truncation keeps it. A notice that LEADS with the thing to
+/// act on is the opposite case — middle truncation gives its head only
+/// half the budget, so a 33-cell recovery instruction needs a ~150
+/// column terminal to survive whole, and is cut mid-verb below that
+/// (#1805).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoticePayload {
+    /// Payload at the end: middle-truncate, keeping both ends.
+    #[default]
+    Tail,
+    /// Payload at the start — a recovery instruction followed by a
+    /// diagnostic that is only supporting detail. End-truncate, so the
+    /// instruction survives intact and elision eats the diagnostic.
+    Lead,
+}
+
 /// One footer notice — message + severity + when it was set
 /// (for auto-fade).
 #[derive(Debug, Clone)]
 pub struct Notice {
     pub message: String,
     pub severity: NoticeSeverity,
+    /// Which end of `message` must survive truncation.
+    pub payload: NoticePayload,
     pub set_at: std::time::Instant,
     /// What this notice is *about*, when it has a resolvable cause — so a
     /// later event can retract it (see [`NoticeKey`]). `None` for a plain
@@ -122,10 +147,18 @@ impl Notice {
         Self {
             message: message.into(),
             severity,
+            payload: NoticePayload::Tail,
             set_at: std::time::Instant::now(),
             key: None,
             repeats: 1,
         }
+    }
+
+    /// Mark this notice as leading with the part the user must read.
+    /// See [`NoticePayload::Lead`].
+    pub fn leading(mut self) -> Self {
+        self.payload = NoticePayload::Lead;
+        self
     }
 
     /// The workspace this notice is about, if it is a workspace-action
@@ -293,15 +326,25 @@ pub fn render(
         let chrome = pill("").width();
         // A repeating condition renders its count — `merge failed ×4`
         // reads as "still happening", where a frozen-looking pill read
-        // as "the footer is broken" (#1245).
-        let text = if n.repeats > 1 {
-            format!("{} ×{}", n.message, n.repeats)
+        // as "the footer is broken" (#1245). The count is reserved out
+        // of the budget and appended AFTER truncation: folded into the
+        // string it competed with the payload for the same cells, so a
+        // re-firing error paid for its own honesty by clipping the tail
+        // it was pointing at (#1805).
+        let count = if n.repeats > 1 {
+            format!(" ×{}", n.repeats)
         } else {
-            n.message.clone()
+            String::new()
         };
-        let message =
-            crate::util::truncate_ellipsis_middle(&text, right_cap.saturating_sub(chrome));
-        Some(pill(&message))
+        let budget = right_cap
+            .saturating_sub(chrome)
+            .saturating_sub(crate::util::visual_width(&count));
+        // Cut the end the notice doesn't need: see [`NoticePayload`].
+        let message = match n.payload {
+            NoticePayload::Lead => crate::util::truncate_ellipsis(&n.message, budget),
+            NoticePayload::Tail => crate::util::truncate_ellipsis_middle(&n.message, budget),
+        };
+        Some(pill(&format!("{message}{count}")))
     } else if let Some((spinner, label)) = polling_status {
         // Two-tone render: bright accent for the spinner glyph
         // (drives the eye), dim text for the surrounding label so
@@ -747,6 +790,77 @@ mod tests {
             "actionable tail truncated away: {row:?}",
         );
         assert!(row.contains("work on this"), "contextual hint displaced");
+    }
+
+    /// The dirty-worktree delete refusal (#1805). The reported render
+    /// was `× delete failed — workspace ci was not deleted …mit/stash,
+    /// or clean the checkout, then retry ×3`: the instruction was cut
+    /// in half because a middle-truncated notice gives its head only
+    /// half the budget, and the variable diagnostic was interpolated
+    /// ahead of the fixed verb.
+    ///
+    /// The widths here are the point. An earlier version of this test
+    /// asserted only at 120 and 160 — the two widths where a
+    /// middle-truncated instruction happens to survive — and passed
+    /// while 100 and 110 were still broken. A refusal is tagged
+    /// `Lead`, so it end-truncates and the instruction survives whole
+    /// at every width that can hold it at all.
+    #[test]
+    fn refusal_keeps_its_instruction_at_every_width_and_repeat_count() {
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let instruction = "commit, stash or push, then retry";
+        let msg = concat!(
+            "\u{2717} commit, stash or push, then retry \u{2014} delete refused, ",
+            "workspace github:owner/repo#1805 has local work: ",
+            "/Users/dev/.lazybox/v2/github-owner-repo/ci (uncommitted changes)",
+        );
+
+        for width in [100u16, 110, 120, 140, 160, 200] {
+            for repeats in [1u32, 3] {
+                let mut notice = Notice::new(msg, NoticeSeverity::Permanent).leading();
+                notice.repeats = repeats;
+                let row = render_row_at(width, &keymap, &globals, None, Some(&notice));
+                assert!(
+                    row.contains(instruction),
+                    "instruction elided at width {width} \u{d7}{repeats}: {row:?}",
+                );
+                assert!(
+                    row.contains("quit"),
+                    "escape hatch displaced at width {width}: {row:?}",
+                );
+                if repeats > 1 {
+                    // The count is reserved out of the budget, so a
+                    // re-firing error still reports honestly instead of
+                    // paying for the count by clipping its own payload.
+                    assert!(
+                        row.contains("\u{d7}3"),
+                        "repeat count lost at width {width}: {row:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The `Lead` tag is what does the work — the same text left at the
+    /// default `Tail` still loses its instruction, which is the bug this
+    /// pins. Without this, `refusal_keeps_its_instruction…` could pass
+    /// for the wrong reason (a message that simply got shorter).
+    #[test]
+    fn a_tail_payload_notice_still_loses_a_leading_instruction() {
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let msg = concat!(
+            "\u{2717} commit, stash or push, then retry \u{2014} delete refused, ",
+            "workspace github:owner/repo#1805 has local work: ",
+            "/Users/dev/.lazybox/v2/github-owner-repo/ci (uncommitted changes)",
+        );
+        let notice = Notice::new(msg, NoticeSeverity::Permanent);
+        let row = render_row_at(100, &keymap, &globals, None, Some(&notice));
+        assert!(
+            !row.contains("commit, stash or push, then retry"),
+            "middle truncation is supposed to halve this head: {row:?}",
+        );
     }
 
     /// A sticky error banner gets the wider ~50% cap so more of its

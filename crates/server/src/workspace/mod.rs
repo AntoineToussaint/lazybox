@@ -1566,11 +1566,29 @@ impl Reclaimed {
 pub(crate) struct WorkspaceRemovalRisk {
     pub path: std::path::PathBuf,
     pub reasons: Vec<String>,
+    /// The checkout holds work only the user can rescue — uncommitted
+    /// changes or commits no remote has. Separate from `reasons`
+    /// because it selects the recovery verb the refusal leads with,
+    /// and re-deriving that by matching reason prose would silently
+    /// change the advice the next time a reason is reworded.
+    pub preserves_work: bool,
 }
 
 impl WorkspaceRemovalRisk {
     fn describe(&self) -> String {
         format!("{} ({})", self.path.display(), self.reasons.join(", "))
+    }
+}
+
+/// The recovery verb a refused removal leads with. The footer elides a
+/// long notice from the middle, so whatever trails the diagnostic is
+/// what gets cut — the instruction has to come first, and it has to be
+/// true for the risks actually found (#1805).
+fn removal_refusal_instruction(risks: &[WorkspaceRemovalRisk]) -> &'static str {
+    if risks.iter().any(|risk| risk.preserves_work) {
+        "commit, stash or push, then retry"
+    } else {
+        "stop the session, then retry"
     }
 }
 
@@ -1730,26 +1748,46 @@ async fn inspect_workspace_risks(
             risks.push(WorkspaceRemovalRisk {
                 path,
                 reasons: vec!["checkout could not be verified by the worktree inspector".into()],
+                preserves_work: false,
             });
             continue;
         };
         if row.is_safe_to_delete {
             continue;
         }
-        let reasons = workspace_removal_reasons(row, require_stopped, pr_merged);
-        if !reasons.is_empty() {
-            risks.push(WorkspaceRemovalRisk { path, reasons });
+        let found = workspace_removal_reasons(row, require_stopped, pr_merged);
+        if !found.reasons.is_empty() {
+            risks.push(WorkspaceRemovalRisk {
+                path,
+                reasons: found.reasons,
+                preserves_work: found.preserves_work,
+            });
         }
     }
     Ok(risks)
+}
+
+/// Why one checkout blocks removal: the reasons to show, plus whether
+/// any of them is work only the user can rescue.
+///
+/// The flag is set beside the reason that implies it, never re-derived
+/// from the row or matched out of the reason strings afterwards — two
+/// derivations of "is this rescuable?" drift the moment a reason is
+/// added here, and the drift is silent: the refusal keeps rendering,
+/// with the wrong recovery verb.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemovalReasons {
+    pub reasons: Vec<String>,
+    pub preserves_work: bool,
 }
 
 fn workspace_removal_reasons(
     row: &lazybox_git_ops::WorktreeInspection,
     require_stopped: bool,
     pr_merged: bool,
-) -> Vec<String> {
+) -> RemovalReasons {
     let mut reasons = Vec::new();
+    let mut preserves_work = false;
     if row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked) {
         reasons.push("locked".into());
     }
@@ -1758,9 +1796,11 @@ fn workspace_removal_reasons(
     }
     if row.has_uncommitted_changes {
         reasons.push("uncommitted changes".into());
+        preserves_work = true;
     }
     if row.has_unpushed_commits && !pr_merged {
         reasons.push("unpushed commits".into());
+        preserves_work = true;
     }
     // The "still active" fallback keys off `is_safe_to_delete`, which folds
     // in the unpushed flag. When the merged PR suppressed that flag above, a
@@ -1776,7 +1816,10 @@ fn workspace_removal_reasons(
     if reasons.is_empty() && require_stopped && !safe_to_delete {
         reasons.push("checkout is still active".into());
     }
-    reasons
+    RemovalReasons {
+        reasons,
+        preserves_work,
+    }
 }
 
 #[cfg(test)]
@@ -1900,12 +1943,18 @@ mod removal_classification_tests {
             // local-work probes succeeded.
             is_safe_to_delete: false,
         };
-        assert!(workspace_removal_reasons(&row, false, false).is_empty());
+        assert!(
+            workspace_removal_reasons(&row, false, false)
+                .reasons
+                .is_empty()
+        );
 
         row.status_verified = false;
-        assert_eq!(
-            workspace_removal_reasons(&row, false, false),
-            vec!["cleanliness could not be proven"]
+        let found = workspace_removal_reasons(&row, false, false);
+        assert_eq!(found.reasons, vec!["cleanliness could not be proven"]);
+        assert!(
+            !found.preserves_work,
+            "an unprovable checkout holds no work the user can commit away",
         );
     }
 
@@ -1931,19 +1980,24 @@ mod removal_classification_tests {
 
         // Without the merged signal, the false positive blocks removal —
         // even under the final `require_stopped` gate.
-        assert_eq!(
-            workspace_removal_reasons(&row, true, false),
-            vec!["unpushed commits"]
-        );
+        let found = workspace_removal_reasons(&row, true, false);
+        assert_eq!(found.reasons, vec!["unpushed commits"]);
+        assert!(found.preserves_work, "unpushed commits are rescuable work");
         // With it, the checkout is cleared for teardown and the "still
         // active" fallback does not re-block it.
-        assert!(workspace_removal_reasons(&row, true, true).is_empty());
+        assert!(
+            workspace_removal_reasons(&row, true, true)
+                .reasons
+                .is_empty()
+        );
 
         // Genuine on-disk work is still protected regardless of merge state.
         row.has_uncommitted_changes = true;
-        assert_eq!(
-            workspace_removal_reasons(&row, true, true),
-            vec!["uncommitted changes"]
+        let found = workspace_removal_reasons(&row, true, true);
+        assert_eq!(found.reasons, vec!["uncommitted changes"]);
+        assert!(
+            found.preserves_work,
+            "the flag must be set beside the reason, not re-derived",
         );
     }
 }
@@ -2514,18 +2568,71 @@ mod reclaim_worktree_tests {
             std::fs::read_to_string(worktree.join("release-fix.txt")).unwrap(),
             "only local copy\n"
         );
-        let mut visible_error = false;
+        let mut refusal = None;
         while let Ok(event) = events.try_recv() {
-            if matches!(
-                event,
-                Event::ProviderError { ref message, .. }
-                    if message.contains("local work must be preserved")
-                        && message.contains("unpushed commits")
-            ) {
-                visible_error = true;
+            if let Event::ProviderError {
+                ref source,
+                ref message,
+                ..
+            } = event
+                && message.contains("unpushed commits")
+            {
+                refusal = Some((source.clone(), message.clone()));
             }
         }
-        assert!(visible_error, "refusal is visible instead of silent");
+        let (source, message) = refusal.expect("refusal is visible instead of silent");
+        assert_eq!(
+            source, "store:local-work",
+            "the safety gate's refusal is classified apart from a generic store failure",
+        );
+        assert!(
+            message.starts_with("commit, stash or push, then retry"),
+            "the instruction must lead so middle-elision cannot eat it: {message:?}",
+        );
+        assert!(
+            message.find("then retry") < message.find("unpushed commits"),
+            "the diagnostic must trail the instruction: {message:?}",
+        );
+        assert!(
+            message.contains(key.as_str()),
+            "the key the client rolls back on must survive the rewording: {message:?}",
+        );
+        assert!(
+            !message.contains("Shift-M"),
+            "the daemon must not name client keys: {message:?}",
+        );
+    }
+
+    /// The verb has to match the risk. "commit, stash or push" is the
+    /// wrong advice for a checkout whose only problem is that something
+    /// is still running in it — and that advice is now the part of the
+    /// notice most likely to survive truncation.
+    #[test]
+    fn refusal_instruction_follows_the_risk() {
+        let preservable = WorkspaceRemovalRisk {
+            path: "/w".into(),
+            reasons: vec!["uncommitted changes".into()],
+            preserves_work: true,
+        };
+        let stateful = WorkspaceRemovalRisk {
+            path: "/w".into(),
+            reasons: vec!["checkout is still active".into()],
+            preserves_work: false,
+        };
+        assert_eq!(
+            removal_refusal_instruction(std::slice::from_ref(&preservable)),
+            "commit, stash or push, then retry",
+        );
+        assert_eq!(
+            removal_refusal_instruction(std::slice::from_ref(&stateful)),
+            "stop the session, then retry",
+        );
+        // Any rescuable work in the set wins: losing it is the
+        // irreversible half.
+        assert_eq!(
+            removal_refusal_instruction(&[stateful, preservable]),
+            "commit, stash or push, then retry",
+        );
     }
 
     #[tokio::test]
@@ -3314,11 +3421,19 @@ impl<'a> WorkspaceLifecycle<'a> {
                         %detail,
                         "workspace removal refused by fresh worktree safety gate",
                     );
+                    // Instruction first, diagnostic last. The footer
+                    // elides a long notice from the middle, so leading
+                    // with the variable `{detail}` meant the longer the
+                    // diagnostic, the more certainly the verb phrase was
+                    // the part cut away (#1805). The dedicated source
+                    // lets the client offer the diff viewer — the refusal
+                    // knows there is local work worth looking at, where a
+                    // plain store failure does not.
                     let _ = config.bus.send(Event::provider_error_permanent(
-                        "store",
+                        "store:local-work",
                         format!(
-                            "workspace {key} was not deleted because local work must be preserved: \
-                         {detail}. Push, commit/stash, or clean the checkout, then retry"
+                            "{} — delete refused, workspace {key} has local work: {detail}",
+                            removal_refusal_instruction(&risks)
                         ),
                     ));
                     // The gate preserves on-disk work, but a detached orphan
@@ -3610,11 +3725,17 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
                     .map(WorkspaceRemovalRisk::describe)
                     .collect::<Vec<_>>()
                     .join("; ");
+                // Same gate, same refusal, same shape as the
+                // single-workspace path: instruction first so the
+                // footer's elision takes the diagnostic instead of the
+                // verb, on the source that tells the client this one
+                // already leads with its recovery step (#1805).
                 let _ = config.bus.send(Event::provider_error_permanent(
-                    "store",
+                    "store:local-work",
                     format!(
-                        "project {project_key} was not deleted because workspace {} has local \
-                         work to preserve: {detail}",
+                        "{} — delete refused, project {project_key} has local work in \
+                         workspace {}: {detail}",
+                        removal_refusal_instruction(&risks),
                         workspace.key
                     ),
                 ));

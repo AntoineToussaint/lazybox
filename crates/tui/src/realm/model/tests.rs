@@ -33203,3 +33203,194 @@ mod worktree_progress_ownership_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod agent_output_search_tests {
+    //! The daemon-side terminal-OUTPUT scan behind `agent:` / `said:`
+    //! (#1780). Unlike the two prompt corpora, this one is asynchronous and
+    //! unordered with respect to typing, so the model owes the search three
+    //! things the client-side halves never needed: a debounce, a request id,
+    //! and a rule for a reply that outlived its query.
+    use super::super::*;
+    use lazybox_ipc::{Client, Command};
+    use std::time::Duration;
+    use tuirealm::ratatui::layout::Size;
+
+    const WS_ASKED: &str = "github:o/r#1";
+    const WS_SAID: &str = "github:o/r#2";
+
+    fn model_and_commands() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = tokio::sync::mpsc::channel(64);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        super::seed_ws(&mut m, WS_ASKED);
+        super::seed_ws(&mut m, WS_SAID);
+        (m, cmd_rx)
+    }
+
+    fn type_query(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, query: &str) {
+        m.sidebar.open_global_search();
+        for c in query.chars() {
+            m.sidebar.handle_search_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+    }
+
+    /// Tick past the debounce and return whatever scan it issued. The FIRST
+    /// tick after a query change is what records the change, so backdating
+    /// before it is overwritten — which is exactly the collapsing the
+    /// debounce is for.
+    fn settle(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) -> Vec<(u64, Vec<String>)> {
+        m.tick_agent_output_search();
+        m.agent_output_search.changed_at =
+            Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        m.tick_agent_output_search();
+        scans(rx)
+    }
+
+    fn scans(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<(u64, Vec<String>)> {
+        let mut scans = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let Command::SearchAgentOutput {
+                request_id,
+                needles,
+            } = cmd
+            {
+                scans.push((request_id, needles));
+            }
+        }
+        scans
+    }
+
+    /// A query with no agent term costs nothing. The scan reads the tail of
+    /// every live agent ring, so the qualifier has to be the only thing
+    /// that buys it — exactly as stage 1 (#1774) made the corpus opt-in.
+    #[test]
+    fn a_query_without_an_agent_term_never_scans() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "login is:pr");
+        m.agent_output_search.changed_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+        m.tick_agent_output_search();
+        assert!(scans(&mut rx).is_empty());
+    }
+
+    /// Typing `said:borrow` is six keystrokes and six different questions.
+    /// Each would re-scan every ring, so the needles must hold still before
+    /// one is issued — and then exactly one is, not one per tick.
+    #[test]
+    fn a_typed_needle_is_debounced_into_one_scan() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+
+        m.tick_agent_output_search();
+        assert!(
+            scans(&mut rx).is_empty(),
+            "the needles just moved — nothing is owed yet"
+        );
+
+        m.agent_output_search.changed_at =
+            Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        m.tick_agent_output_search();
+        let issued = scans(&mut rx);
+        assert_eq!(issued.len(), 1, "{issued:?}");
+        assert_eq!(issued[0].1, vec!["borrow".to_string()]);
+
+        m.tick_agent_output_search();
+        m.tick_agent_output_search();
+        assert!(
+            scans(&mut rx).is_empty(),
+            "a settled query is scanned once, not once per run-loop iteration"
+        );
+    }
+
+    /// The reply the user is waiting for lands, and only it. The scan is
+    /// asynchronous, so a reply for a needle already typed past would
+    /// filter the sidebar by a question nobody asked.
+    #[test]
+    fn a_stale_reply_is_dropped_and_the_live_one_filters() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+        let (request_id, _) = settle(&mut m, &mut rx).pop().expect("one scan issued");
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            0,
+            "before the scan answers, the client's own corpora select nothing"
+        );
+
+        let matched = vec![(
+            WS_SAID.to_string(),
+            "error[E0502]: cannot borrow `self` as mutable".to_string(),
+        )];
+        m.apply_agent_output_matches(request_id.wrapping_add(1), matched.clone());
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            0,
+            "a reply the client never asked for must not reach the corpus"
+        );
+
+        m.apply_agent_output_matches(request_id, matched);
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            1,
+            "the awaited reply selects the workspace whose OUTPUT matched"
+        );
+        assert_eq!(
+            m.sidebar.selected_workspace().map(|w| w.key.to_string()),
+            Some(WS_SAID.to_string()),
+        );
+    }
+
+    /// Moving the needles invalidates both the in-flight request and the
+    /// results it would have produced: text scanned for `bor` is not
+    /// evidence about `borrow`, and leaving it up shows rows the query no
+    /// longer selects.
+    #[test]
+    fn changing_the_needles_drops_the_previous_answer() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+        let (first, _) = settle(&mut m, &mut rx).pop().expect("one scan issued");
+        m.apply_agent_output_matches(
+            first,
+            vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
+        );
+        assert_eq!(m.sidebar.visible_workspace_count(), 1);
+
+        // One more keystroke: a different question entirely.
+        m.sidebar.handle_search_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        m.tick_agent_output_search();
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            0,
+            "the previous scan's rows go with the query that asked for them"
+        );
+
+        let (second, needles) = settle(&mut m, &mut rx)
+            .pop()
+            .expect("the new needles are scanned");
+        assert_eq!(needles, vec!["borrowx".to_string()]);
+        assert_ne!(second, first);
+
+        // And the first request's reply, arriving late, is inert.
+        m.apply_agent_output_matches(
+            first,
+            vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
+        );
+        assert_eq!(m.sidebar.visible_workspace_count(), 0);
+    }
+}

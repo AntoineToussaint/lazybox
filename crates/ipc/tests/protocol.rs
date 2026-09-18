@@ -661,6 +661,10 @@ fn all_commands() -> Vec<Command> {
             }),
             client_request_id: "req-2".into(),
         },
+        Command::SearchAgentOutput {
+            request_id: 7,
+            needles: vec!["cannot borrow".into(), "deadlock".into()],
+        },
         Command::Shutdown,
     ]
 }
@@ -1554,6 +1558,13 @@ fn all_events() -> Vec<Event> {
             client_request_id: "req-2".into(),
             reply: lazybox_ipc::gh_shim::GhReply::Recorded,
         },
+        Event::AgentOutputMatches {
+            request_id: 7,
+            entries: vec![(
+                "github:o/r#1".into(),
+                "error[E0502]: cannot borrow `self` as mutable\n".into(),
+            )],
+        },
     ]
 }
 
@@ -1669,6 +1680,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::ResolveBranchConflict { .. } => "ResolveBranchConflict",
         Command::GhAdmit { .. } => "GhAdmit",
         Command::GhCompleted { .. } => "GhCompleted",
+        Command::SearchAgentOutput { .. } => "SearchAgentOutput",
     }
 }
 
@@ -1792,6 +1804,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentRequestsOpen { .. } => "AgentRequestsOpen",
         Event::TaskStatus { .. } => "TaskStatus",
         Event::GhShimReply { .. } => "GhShimReply",
+        Event::AgentOutputMatches { .. } => "AgentOutputMatches",
     }
 }
 

@@ -500,7 +500,11 @@ mod effects_tests {
                 referenced_line: "+fix();".into(),
                 context: vec![" keep();".into(), "+fix();".into()],
                 body: "rename this helper".into(),
-                anchor_row: 3,
+                anchor: crate::realm::components::diff_review::CommentAnchor {
+                    file: 0,
+                    hunk: 0,
+                    line: Some(1),
+                },
             }],
         );
 
@@ -563,7 +567,11 @@ mod effects_tests {
                 referenced_line: "+fix();".into(),
                 context: vec!["+fix();".into()],
                 body: "fix this".into(),
-                anchor_row: 3,
+                anchor: crate::realm::components::diff_review::CommentAnchor {
+                    file: 0,
+                    hunk: 0,
+                    line: Some(1),
+                },
             }],
         );
 

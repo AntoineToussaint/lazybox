@@ -11,7 +11,7 @@ owns. Ship it narrowly: markdown first, opened in the existing reader
 modal.
 
 Carry artifacts on **the filesystem**, in a spool directory under the
-worktree's `.lazybox/`, watched by the daemon. Not an OSC sequence, and
+worktree's `.lazybox/`, noticed by the daemon. Not an OSC sequence, and
 not a path announced on stdout. Both of those ride the terminal stream —
 not because lazybox could not parse them back out (it already does that
 for OSC 52) but because they are intercepted in the client rather than
@@ -42,7 +42,13 @@ answer depends on it:
   with click-mapped links. `MarkdownModal` wraps it, and
   `Model::mount_description_modal(title, body, ask_subject)` mounts it. A
   markdown artifact therefore needs to produce exactly two things — a
-  title and a body — to reach a finished reader.
+  title and a body — to reach a finished reader. It is not quite a
+  drop-in, in one direction each way. Against: that function early-returns
+  when `Id::DescriptionModal` is already top of the modal stack, so an
+  artifact opened while a task description is up would silently do
+  nothing. For: `Id::consumes_scroll` whitelists `DescriptionModal` alone
+  for wheel events, so a *new* modal id would silently lose mouse scroll.
+  Reuse the id and handle the stacking; do not mint a fresh one.
 - **Two structured agent → daemon channels already exist, and neither
   touches the PTY.**
   - *Hooks.* The agent runs `lazybox hook-ingest --backend-key K`, whose
@@ -121,25 +127,33 @@ there, and none of them is about parsing difficulty:
 
 So: drop the announcement rather than choose between its two forms. The
 daemon already owns `.lazybox/` in the worktree and already writes into
-it. If the artifact spool is a known subdirectory, the daemon can watch
-the directory — the agent writes a file, the daemon notices. No sentinel,
+it. If the artifact spool is a known subdirectory, the daemon can find
+it — the agent writes a file, the daemon notices. No sentinel,
 no escape sequence, no parsing of anything the agent painted. "Survives a
 repaint" stops being a question because nothing entered the VT.
 
-This also makes the channel agent-agnostic for free, which matters more
-than it first appears:
+This also makes the *transport* agent-agnostic, which matters more than it
+first appears — and cuts differently than it first appears:
 
 | Channel | Claude | Codex | Cursor | GenericCli |
 | --- | --- | --- | --- | --- |
 | Spool directory | yes | yes | yes | yes |
 | Hook payload | yes | yes | no | no |
 | MCP tool | yes | no | no | no |
+| *Told it exists today* | *yes* | *no* | *no* | *no* |
 
 `Agent::supports_mcp_config` defaults to `false` and only Claude overrides
 it, so the MCP server reaches Claude alone today. Hooks reach Claude and
 Codex. Writing a file needs no agent capability whatsoever — it is the only
 one of the three that works for every agent lazybox can spawn, including
 `GenericCli`, whose whole point is that lazybox knows nothing about it.
+
+Read the last row before quoting the first. *Writing* to the spool needs no
+capability; *learning that the spool exists* is a separate channel with its
+own, currently narrower, reach — today the session-context briefing is
+Claude-only. The transport is agent-agnostic; the feature is not agent-
+agnostic until the announcement is solved, which is its own problem below
+and not a detail of this one.
 
 MCP is still worth adding later, but as **ergonomics over the same
 contract**, not as a competing transport: a `post_artifact` tool whose
@@ -151,7 +165,7 @@ A hook payload cannot serve as the transport at all. A hook's fields are
 fixed by the agent — `parse_claude_hook` reads `hook_event_name`,
 `session_id`, `cwd`, `tool_name`, `notification` — and there is no slot to
 put an artifact in. Its only role here would be as a *nudge* that a write
-happened (a `PostToolUse` on a `Write`), which a directory watch already
+happened (a `PostToolUse` on a `Write`), which reading the spool already
 gives us without depending on which agent is running.
 
 ## The open questions, answered
@@ -174,19 +188,53 @@ daemon. Teaching the contract about a channel that is not always present
 would make every snippet's closing summary conditional on something it
 cannot check.
 
-The capability announcement belongs in `lazybox_session_context` instead.
-That text already exists to tell an agent "what lazybox lets you do beyond
-plain `git`/`gh`", it already names `.lazybox/task.json`, and it already
-rides the spawn-intrinsic `SessionStart` hook. An artifact spool is
-precisely that kind of fact. The plain-text closing summary stays the
-always-works path; an artifact is what an agent reaches for when it has
-something a paragraph genuinely cannot carry.
+**Where the announcement goes is a separate, harder question, and the
+obvious answer is wrong.** `lazybox_session_context` looks like the home
+for it: that text exists to tell an agent "what lazybox lets you do beyond
+plain `git`/`gh`" and it already names `.lazybox/task.json`. But it does
+not reach every agent. `session_context_to_emit` returns `None` unless the
+hook is `SessionStart` *and* `--emit-session-context` is in argv — a marker
+Claude's hook command carries and Codex's deliberately omits, so Codex's
+`SessionStart` is a documented no-op. Cursor and `GenericCli` override
+neither `Agent::build_hook_settings` nor `Agent::hook_command_args`, so
+they have no hook path at all.
+
+Putting the announcement there unmodified would hand the most universal
+transport a Claude-only announcement channel — narrower than hooks, and no
+broader than the MCP tool it was chosen over. Codex, Cursor and
+`GenericCli` could each write to the spool and would never learn it
+exists.
+
+The Codex half is a known gap rather than an oversight, and it comes with
+its own blocker: `hook_command` notes that only the settings-file path
+carries the marker "since it is unverified whether Codex surfaces a hook's
+stdout as context", with a `TODO(codex)` to route the same text through a
+per-launch Codex configuration once that is confirmed. So an artifact
+announcement for Codex is downstream of a measurement nobody has taken.
+
+So announcement is a per-agent-capability problem in its own right, and
+lazybox already has the machinery for exactly that: the emission is gated
+on markers the daemon adds per spawn, and `lazybox_session_context_with_mcp`
+is the precedent for a capability paragraph that appears only for sessions
+actually wired to it. An artifact announcement follows that pattern — its
+own marker, added for spawns whose agent lazybox can brief — and the agents
+with no hook path need a non-hook carrier. Two candidates, to be settled by
+the slice that adds the announcement rather than here: the spawn-time work
+prompt, or a short `README` written into the spool directory itself, which
+is discoverable by an agent that goes looking and costs one file. Whichever
+it picks, that slice owes a check of the carrier's actual per-agent reach —
+assuming reach is the mistake this section exists to record.
+
+The plain-text closing summary stays the always-works path; an artifact is
+what an agent reaches for when it has something a paragraph genuinely
+cannot carry.
 
 ## Slices
 
-1. **Markdown, spool directory, existing modal.** The daemon watches
-   `.lazybox/artifacts/`, excludes it from git the way `write_record_file`
-   excludes `task.json`, attaches what it finds to the workspace, and the
+1. **Markdown, spool directory, existing modal.** The daemon picks up
+   `.lazybox/artifacts/` (watch or poll — it decides, see below), excludes
+   it from git the way `write_record_file` excludes `task.json` and in the
+   same pass, attaches what it finds to the workspace, and the
    TUI opens a markdown artifact through `mount_description_modal`. Nearly
    all of the value, and it reuses a renderer and a modal that already
    ship.
@@ -203,11 +251,26 @@ something a paragraph genuinely cannot carry.
 
 - Whether a directory watch or a poll is the right mechanism for the
   daemon side, and at what interval. Slice 1 decides that against the
-  polling tiers in `crates/server`; this document does not.
+  polling tiers in `crates/server`; this document says only "noticed", and
+  deliberately does not pick. The decision is not cost-free either way:
+  there is no filesystem-watch dependency anywhere in the workspace today
+  (the `Notify` in `crates/server` is `tokio::sync::Notify`, an async
+  primitive, not an fs watcher), so a watch means a new third-party crate
+  through `cargo-deny` and `machete` plus a cross-platform inotify /
+  FSEvents surface, while polling is the idiom the daemon already runs.
 - Whether `.git/info/exclude` in the *common* dir is the right place for a
   per-worktree artifact pattern. It is what `task.json` does, and the
-  pattern is worktree-relative, but a spool written by many concurrent
-  worktrees exercises it harder than one file does.
+  pattern is worktree-relative. The sharp edge is that
+  `task_cache::exclude_record_file` is a read-check-append-rename with no
+  lock, which is harmless while it writes exactly one idempotent pattern
+  and stops being harmless with two. Concretely: if the artifacts pattern
+  is ever added from a *different* call site than `write_record_file`, a
+  spawn that read the pre-artifacts contents can rename its version over
+  the one that just added it — the pattern is lost, artifacts dirty the
+  worktree, and the dirty-worktree delete refusal (#1805) fires on a
+  workspace the user never dirtied. So the constraint on slice 1 is that
+  both patterns are written by the same call site, in one pass; that is a
+  requirement, not a caution.
 - No measurement of OSC or stdout survival under either agent was
   performed. The design removes the need for one, but the prior question —
   whether Claude Code or Codex can be made to emit a chosen escape

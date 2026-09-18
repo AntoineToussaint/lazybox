@@ -302,6 +302,12 @@ impl Sidebar {
         self.inner.set_default_model_labels(defaults);
     }
 
+    /// Test-facing read of the badge's default-tier comparison values.
+    #[cfg(test)]
+    pub(crate) fn default_model_label(&self, letter: char) -> Option<&str> {
+        self.inner.default_model_label(letter)
+    }
+
     /// Record whether `ui.usage_summary` is on — gates the always-visible
     /// per-provider usage row in the header (#1059).
     pub fn set_usage_summary(&mut self, show: bool) {

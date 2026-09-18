@@ -6,6 +6,22 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **One name for how hard an agent runs: "strength"** (#1797). It is the model
+  tier menu you already have — `agents.<id>.models` — not a new concept beside
+  it. A tier's `args` carry the model *and* its reasoning flags, so there is no
+  separate thinking setting to keep in step, and `models.default` stays the one
+  place your choice is stored. Settings says so: every enabled agent now gets a
+  **Strength** row, including one lazybox ships no menu for — that row says
+  "not configured" and opens `config.yaml` at the key to declare, instead of
+  being skipped so the agent silently ran whatever its CLI defaults to. Opening
+  Settings re-reads the menus from disk, so a row and the picker it opens can no
+  longer describe different config, and a tab taller than your terminal scrolls
+  the selected row into view rather than clipping it off-screen. The
+  task-declared `capability` map is deliberately *not* called strength: it
+  ranks nothing, as of #1598.
+
 ## [0.1.16] - 2026-09-18
 
 The onboarding and coordination release. Lazybox stops explaining itself in a

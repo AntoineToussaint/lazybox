@@ -20,7 +20,30 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A push may contain more than one commit, so its `before` revision
+          # is not necessarily the candidate's direct parent.
+          fetch-depth: 0
       - uses: ./.github/actions/rust-build-env
+
+      - name: Resolve the paired baseline
+        id: revisions
+        env:
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        shell: bash
+        run: |
+          candidate="$GITHUB_SHA"
+          if [[ "$GITHUB_EVENT_NAME" == "push" \
+            && -n "$PUSH_BASE_SHA" \
+            && ! "$PUSH_BASE_SHA" =~ ^0+$ ]]; then
+            base="$PUSH_BASE_SHA"
+          else
+            base="$(git rev-parse "${candidate}^")"
+          fi
+          git cat-file -e "${base}^{commit}"
+          printf "base=%s\ncandidate=%s\n" "$base" "$candidate" >> "$GITHUB_OUTPUT"
+          printf "Comparing base \`%s\` with candidate \`%s\` on this runner.\n" \
+            "$base" "$candidate" >> "$GITHUB_STEP_SUMMARY"
 
       # A unique save key plus a broad restore prefix makes each run compare
       # with the newest retained main-branch result while still allowing the
@@ -33,25 +56,45 @@ jobs:
           restore-keys: |
             criterion-${{ runner.os }}-
 
-      - name: Run deterministic local benchmarks
+      - name: Benchmark base and candidate on the same runner
+        env:
+          BASE_SHA: ${{ steps.revisions.outputs.base }}
+          CANDIDATE_SHA: ${{ steps.revisions.outputs.candidate }}
         shell: bash
         run: |
-          rm -rf target/criterion
-          cargo bench -p lazybox-server --bench sync -- \
-            --quick --noplot
-          # libghostty-vt currently emits an info line for every parser
-          # allocation. Keep thousands of native lines out of the CI log, but
-          # print the captured stderr if compilation or the benchmark fails.
-          if ! cargo bench -p lazybox-tui --bench terminal_feed -- \
-            --quick --noplot 2>terminal-benchmark.stderr; then
-            cat terminal-benchmark.stderr
-            exit 1
-          fi
-          rm terminal-benchmark.stderr
-          python3 scripts/criterion-to-benchmark-json.py \
-            target/criterion benchmark-output.json
+          benchmark_revision() {
+            local revision="$1"
+            local output="$2"
 
-      - name: Compare with prior main-branch results
+            git checkout --detach "$revision"
+            rm -rf target/criterion
+            cargo bench -p lazybox-server --bench sync -- \
+              --quick --noplot
+            # libghostty-vt currently emits an info line for every parser
+            # allocation. Keep thousands of native lines out of the CI log,
+            # but print the captured stderr if the benchmark fails.
+            if ! cargo bench -p lazybox-tui --bench terminal_feed -- \
+              --quick --noplot 2>terminal-benchmark.stderr; then
+              cat terminal-benchmark.stderr
+              return 1
+            fi
+            rm terminal-benchmark.stderr
+            python3 scripts/criterion-to-benchmark-json.py \
+              target/criterion "$output"
+          }
+
+          benchmark_revision "$BASE_SHA" "$RUNNER_TEMP/benchmark-base.json"
+          benchmark_revision "$CANDIDATE_SHA" benchmark-output.json
+
+      - name: Compare paired benchmark results
+        run: |
+          python3 scripts/compare-criterion-benchmarks.py \
+            "$RUNNER_TEMP/benchmark-base.json" benchmark-output.json
+
+      # Keep the cross-run history for charts, but do not gate on absolute
+      # timings from a different hosted runner. The paired comparison above
+      # owns the release verdict.
+      - name: Record historical benchmark results
         uses: benchmark-action/github-action-benchmark@v1.22.1
         with:
           name: lazybox Criterion benchmarks
@@ -65,7 +108,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ github.sha }}
           alert-threshold: "150%"
-          fail-threshold: "200%"
-          fail-on-alert: true
+          fail-on-alert: false
           summary-always: true
           max-items-in-chart: 100

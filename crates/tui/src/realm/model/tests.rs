@@ -932,6 +932,21 @@ mod effects_tests {
             m.status.notice.is_some(),
             "rising edge raises an attention flash"
         );
+        // Regression (#1806): the flash must name only levers that move
+        // the refused number. The sweep is priced per member now, so its
+        // required points carry no roster term and muting repos cannot
+        // change admission by a single point — offering it sends the user
+        // to do work that provably does nothing, the same dead end as the
+        // "0 watched repos over budget" line. What moves it is the
+        // allowance: Shift-R's widened refresh grant, or a larger
+        // background share.
+        let flash = m.status.notice.as_ref().unwrap().message.clone();
+        assert!(
+            !flash.contains("mute"),
+            "muting no longer lowers the required points: {flash}"
+        );
+        assert!(flash.contains("Shift-R"), "{flash}");
+        assert!(flash.contains("background_budget_share"), "{flash}");
 
         // The daemon re-sends the level every deferred tick. The indicator
         // must persist, and the flash must NOT re-fire — otherwise the

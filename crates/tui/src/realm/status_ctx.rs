@@ -343,11 +343,21 @@ impl DiscoveryBehind {
 
     /// Fuller one-shot flash raised the moment the stall sets in, so the
     /// user gets an immediate nudge on top of the standing indicator.
+    ///
+    /// Names only levers that still move the refused number. Muting repos
+    /// used to lower it, back when the sweep was priced at the whole
+    /// roster; it is priced per member now, so the required points carry
+    /// no roster term at all and muting cannot change admission by a
+    /// single point (#1806). Telling the user to mute repos would send
+    /// them to do work that provably does nothing — the same dead-end the
+    /// "0 watched repos over budget" line was. What moves it is the
+    /// allowance: `Shift-R`, or a larger `background_budget_share`.
     pub fn flash_message(&self) -> String {
         format!(
             "New-issue discovery has been behind for {} — the GitHub sweep needs {} GraphQL \
-             pts and this tick's allowance is {}. Press Shift-R to force a full sync, or mute \
-             repos you don't need swept.",
+             pts and this tick's allowance is {}. Press Shift-R to force a sync now, or raise \
+             `providers.github.background_budget_share` to give the background sweep more of \
+             the rate window.",
             self.stalled_for(),
             self.required_points,
             self.allowance

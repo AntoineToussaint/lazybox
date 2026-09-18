@@ -9819,6 +9819,48 @@ mod tests {
         );
     }
 
+    /// Regression (#1806, directive 3): a pending manual refresh must reach
+    /// `begin_full_refresh_tick`, whose grant is the remaining non-reserved
+    /// window rather than one tick's sustainable share.
+    ///
+    /// That routing is the ONLY thing that gives `Shift-R` force. The
+    /// scheduler's admission gate reads `graphql_points` and nothing else —
+    /// it cannot tell a forced tick from a background one — so if this
+    /// branch were dropped, `force_full_sweep` would merely re-assert that
+    /// the sweep is due, which it already is while the "discovery behind"
+    /// advisory is showing. The key the footer names would do nothing, and
+    /// no other test would notice: `full_refresh_protects_action_reserve`
+    /// exercises `acquire_or_block`, not the plan.
+    #[tokio::test]
+    async fn manual_refresh_widens_the_tick_grant() {
+        let client = GhClient::stub_with_rate_limit_for_tests(
+            "test",
+            "fp",
+            4_000,
+            5_000,
+            chrono::Utc::now() + chrono::Duration::minutes(50),
+        )
+        .expect("stub client");
+        let interval = std::time::Duration::from_secs(60);
+
+        let paced = client.begin_background_tick(interval).graphql_points;
+
+        client.force_full_sweep();
+        let forced = client.begin_background_tick(interval).graphql_points;
+
+        assert!(
+            forced > paced,
+            "a forced sweep must draw on the window, not a tick's share \
+             (forced={forced}, paced={paced})"
+        );
+        // Still bounded by the window minus the reserve held for merges
+        // and replies — a refresh gets more room, never the reserve.
+        assert!(
+            forced < 4_000,
+            "the action reserve must survive a forced sweep (forced={forced})"
+        );
+    }
+
     #[tokio::test]
     async fn full_refresh_protects_action_reserve() {
         let client = GhClient::stub_with_rate_limit_for_tests(

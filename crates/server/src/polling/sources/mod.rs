@@ -557,22 +557,32 @@ mod discovery_behind_tests {
         assert_eq!(d.streak, 0);
     }
 
-    /// Regression (#1806): the advisory tells the user to press Shift-R,
-    /// so a forced sweep must actually be admitted — the deferral streak
-    /// the advisory is made of must not be an input to the gate that
-    /// refused it. It isn't: admission reads only the governor plan and
-    /// the (now roster-independent) price, so a long-running stall is
-    /// cleared by the first forced tick rather than perpetuating itself.
+    /// Regression (#1806, directive 3): the advisory tells the user to
+    /// press Shift-R, so the forced sweep must clear the very stall the
+    /// advisory is made of — end to end, from the refusal that raised it
+    /// to the recovery that retracts it.
+    ///
+    /// The force comes from the ALLOWANCE, not from this gate: a pending
+    /// manual refresh makes `GhClient::begin_background_tick` hand back a
+    /// `begin_full_refresh_tick` plan, whose grant is the remaining
+    /// non-reserved window rather than one tick's sustainable share
+    /// (pinned in `lazybox_gh`'s `manual_refresh_widens_the_tick_grant`).
+    /// So the tick that follows Shift-R evaluates the same gate against a
+    /// much larger number. Modelled here as the two plans the scheduler
+    /// actually sees on consecutive ticks.
     #[test]
-    fn a_forced_sweep_is_admitted_however_long_the_stall_has_run() {
+    fn a_forced_sweep_clears_the_stall_the_advisory_was_raised_by() {
         let forecast = lazybox_gh::BackgroundSweepForecast {
             global_points: 8,
             repo_base_points: 3,
             per_repo_points: 4,
             per_repo_issue_points: 2,
         };
-        let plan = lazybox_gh::BackgroundPlan {
-            graphql_points: 120,
+        let required = forecast.repo_sweep_reconcile_points(RECONCILE_ADMISSION_MEMBERS);
+        // The stalling plan: one tick's share, short of even one member's
+        // reconcile price (2x4 + 2 = 10).
+        let paced = lazybox_gh::BackgroundPlan {
+            graphql_points: 6,
             rest_core_points: 1,
             graphql_budget_current: true,
             pressure: false,
@@ -581,19 +591,20 @@ mod discovery_behind_tests {
         };
         let mut d = Deferral::new();
         for _ in 0..50 {
-            d.tick(true, false);
+            let admitted = full_sweep_admitted(true, &paced, required);
+            assert!(!admitted, "this allowance is what keeps the sweep refused");
+            d.tick(true, admitted);
         }
-        assert!(d.notified, "a long stall is standing");
+        assert!(d.notified, "so the advisory is standing");
 
-        let admitted = full_sweep_admitted(
-            true,
-            &plan,
-            forecast.repo_sweep_reconcile_points(RECONCILE_ADMISSION_MEMBERS),
-        );
-        assert!(
-            admitted,
-            "Shift-R must be admitted, not refused by the same governor"
-        );
+        // The user presses the key the advisory names: the next tick's
+        // plan is drawn from the remaining non-reserved window instead.
+        let forced = lazybox_gh::BackgroundPlan {
+            graphql_points: 900,
+            ..paced
+        };
+        let admitted = full_sweep_admitted(true, &forced, required);
+        assert!(admitted, "the refresh grant must cover the sweep");
         assert_eq!(
             d.tick(true, admitted),
             DeferralSignal::Recovered,
@@ -3177,12 +3188,17 @@ pub fn github_watch_repos_from_filters(
 }
 
 /// Source-attention ladder (#scale): Muted (or source-snoozed)
-/// `watch:` repos leave the watched fan-out entirely — each entry
-/// costs 2 unrotated queries per sweep AND inflates the governor's
-/// required-points forecast (the ~25-repo cliff where full sweeps
-/// stop being admitted). Muting is the lever that buys that budget
-/// back; unmuting restores the entry on the next tick, because the
+/// `watch:` repos leave the watched fan-out entirely — each entry costs
+/// 2 unrotated queries per sweep, so muting cuts real work off every
+/// tick; unmuting restores the entry on the next tick, because the
 /// watch list is rebuilt from config every `sources_for`.
+///
+/// It no longer moves the repo-first admission gate, though: that is
+/// priced per member ([`RECONCILE_ADMISSION_MEMBERS`]) and carries no
+/// roster term, so the "~25-repo cliff where full sweeps stop being
+/// admitted" this used to buy back is gone (#1806). Muting buys
+/// throughput, not admission — do not offer it to a user whose sweep is
+/// being refused.
 fn retain_unmuted_watches(
     watch_repos: &mut std::collections::BTreeSet<String>,
     cfg: &lazybox_config::Config,

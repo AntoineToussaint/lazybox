@@ -94,6 +94,35 @@ so a failed lookup can never read as "no worker". The same derivation backs
 `lazybox task status <ref>` over `Command::QueryTaskStatus`, which is the
 documented fallback for a session that gets no MCP tools.
 
+## The tracker-record cache handed to sessions
+
+The daemon already pays GitHub for every record it shows, and the token's
+budget is shared with every agent it spawns — agents outspent the poller 100:1
+and left the inbox forty minutes stale (#1799). `task_cache.rs` serves that
+cache back: `.lazybox/task.json` is written into the worktree at spawn, and
+`task` / `get_issue` / `get_pr` / `list_issues` read it live. Nothing there
+may fall back to a provider fetch — a miss is reported as a miss, or serving
+an agent spends the budget the cache exists to protect. A store failure is an
+error, never an empty result: empty is how these tools say "never polled",
+which an agent acts on.
+
+Three shapes there are load-bearing and easy to get wrong:
+
+- **Comments come from `Workspace::activity`, never `Task::recent_activity`.**
+  The inbox scan selects `comments(last: 1)` and `attach_task` replaces the
+  task on every poll without preserving activity, so a polled task holds at
+  most the newest comment while the thread accumulates in the workspace feed.
+- **The record file is hidden with `info/exclude`, never a `.gitignore`.**
+  `<repo>/.lazybox/` belongs to the repository — `snippets.yaml` lives there
+  and is committed — so an ignore file in it breaks `git add` for the repo's
+  own config, invisibly, and lands in the user's clone for a linked checkout.
+- **`list_issues` returns summaries.** Full bodies at list scale are tens of
+  thousands of tokens from the tool whose purpose is protecting context.
+
+Cache age lives in `PollState`, not on the persisted `Workspace`: the commit
+path skips a byte-identical row to avoid a write and a broadcast, so a stamp
+inside the row would re-broadcast every row on every tick.
+
 ## The metering / context-hygiene proxy
 
 `proxy/` sits between an agent and its provider. Two facts live at different

@@ -2165,6 +2165,19 @@ async fn handle_spawn_inner(
                 .as_ref()
                 .map(|ws| ws.metered || workspace_in_metered_space(&cfg, ws))
                 .unwrap_or(false));
+    // #1799: hand this workspace's tracker record to the session on disk
+    // before the agent starts, so its first act isn't `gh issue view` for
+    // text the daemon already paid for. Agent terminals only — a shell has
+    // no context window to protect — and best-effort: a session without the
+    // file just falls back to `gh`.
+    if matches!(kind, TerminalKind::Agent(_)) {
+        crate::task_cache::write_record_file_for_spawn(
+            config,
+            &WorkspaceKey::new(session_key.as_str()),
+            &agent_worktree,
+        )
+        .await;
+    }
     // #1420: provision the cross-agent coordination MCP for a supporting
     // agent spawn (Claude). Mints + registers a per-session token and writes
     // the agent's `--mcp-config` file; `None` for shells, unsupported agents,

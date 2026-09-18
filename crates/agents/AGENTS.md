@@ -78,4 +78,7 @@ prompt — in any repo, including ones with no agent-context file of their own.
 It is user-visible text with tests over it (`crates/core/tests/`), so treat a
 wording change as a behaviour change: it must not promise a workspace for a
 filed issue, and it must keep naming the coordination tools, since a session
-that does not know they exist will not look for them.
+that does not know they exist will not look for them. The base half also has
+to keep pointing at `.lazybox/task.json` and saying not to `gh issue view` the
+record it already holds — the GitHub budget it protects is the daemon's own
+(#1799).

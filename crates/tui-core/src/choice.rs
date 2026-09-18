@@ -131,7 +131,9 @@ pub enum PickFlow {
     Url,
     Theme,
     DefaultAgent,
-    DefaultModel {
+    /// The strength picker for `agent_id` — which tier in that agent's
+    /// own menu its bare spawns run at.
+    Strength {
         agent_id: Option<String>,
     },
     SidebarContext {
@@ -361,7 +363,9 @@ pub enum PickOutcome<F> {
     OpenUrl(String),
     SaveTheme(String),
     SaveDefaultAgent(String),
-    SaveDefaultModel {
+    /// Persist `agents.<agent_id>.models.default`. `alias: None` unpins
+    /// it, leaving the agent on whatever its own CLI defaults to.
+    SaveStrength {
         agent_id: String,
         alias: Option<String>,
     },
@@ -564,12 +568,10 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
             .and_then(P::as_text)
             .map(|agent| PickOutcome::SaveDefaultAgent(agent.to_string()))
             .unwrap_or(PickOutcome::NoOp),
-        PickFlow::DefaultModel { agent_id } => {
-            match (agent_id, picks.first().and_then(P::opt_text)) {
-                (Some(agent_id), Some(alias)) => PickOutcome::SaveDefaultModel { agent_id, alias },
-                _ => PickOutcome::NoOp,
-            }
-        }
+        PickFlow::Strength { agent_id } => match (agent_id, picks.first().and_then(P::opt_text)) {
+            (Some(agent_id), Some(alias)) => PickOutcome::SaveStrength { agent_id, alias },
+            _ => PickOutcome::NoOp,
+        },
         PickFlow::SidebarContext {
             session_key,
             actions,
@@ -1633,11 +1635,11 @@ mod tests {
         assert!(matches!(
             resolve_pick(
                 &[Payload::OptText(None)],
-                PickFlow::DefaultModel {
+                PickFlow::Strength {
                     agent_id: Some("codex".into()),
                 },
             ),
-            PickOutcome::SaveDefaultModel {
+            PickOutcome::SaveStrength {
                 agent_id,
                 alias: None,
             } if agent_id == "codex"

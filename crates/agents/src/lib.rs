@@ -30,6 +30,7 @@ pub use pty::{
 };
 pub use session_context::{
     lazybox_mcp_coordination_context, lazybox_session_context, lazybox_session_context_with_mcp,
+    lazybox_session_prompt,
 };
 pub use state_machine::{
     AgentStateMachine, HOOK_STALENESS, HookAuthority, Liveness, Outcome, PtyReading, Reading,

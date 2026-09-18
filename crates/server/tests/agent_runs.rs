@@ -496,10 +496,16 @@ async fn codex_turn_processes_resume_as_one_logical_run() {
         assert_eq!(configs[0].resume_session_id, None);
         assert_eq!(configs[1].resume_session_id.as_deref(), Some("thread-help"));
     }
-    assert_eq!(
-        prompts.lock().unwrap().as_slice(),
-        ["first question", "follow-up question"]
-    );
+    {
+        let prompts = prompts.lock().unwrap();
+        assert!(
+            prompts[0].contains("lazybox log"),
+            "first headless Codex turn must carry the lazybox briefing: {}",
+            prompts[0]
+        );
+        assert!(prompts[0].ends_with("---\n\nfirst question"));
+        assert_eq!(prompts[1], "follow-up question");
+    }
 
     client.send(Command::InterruptAgentRun { run_id }).unwrap();
     assert!(matches!(

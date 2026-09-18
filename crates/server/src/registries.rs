@@ -1435,7 +1435,9 @@ pub struct PollState {
     /// a stamp inside the row would make every row differ on every tick and
     /// defeat that. In-memory also keeps it honest across a restart — a fresh
     /// daemon reports "unknown" rather than replaying a stamp it can no longer
-    /// vouch for. Bounded by the number of workspaces the poller has seen.
+    /// vouch for. Entries are dropped when their row is deleted
+    /// (`forget_tasks_fetched`), so the map tracks live workspaces rather
+    /// than every key the poller has ever seen.
     tasks_fetched: Arc<parking_lot::RwLock<HashMap<lazybox_core::WorkspaceKey, DateTime<Utc>>>>,
 }
 
@@ -1443,6 +1445,11 @@ impl PollState {
     /// Record that `key`'s tasks were just read from their provider.
     pub(crate) fn note_tasks_fetched(&self, key: &lazybox_core::WorkspaceKey) {
         self.tasks_fetched.write().insert(key.clone(), Utc::now());
+    }
+
+    /// Drop `key`'s fetch time — its row is gone.
+    pub(crate) fn forget_tasks_fetched(&self, key: &lazybox_core::WorkspaceKey) {
+        self.tasks_fetched.write().remove(key);
     }
 
     /// Snapshot of every recorded fetch time. A workspace absent from it has

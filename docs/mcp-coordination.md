@@ -171,7 +171,22 @@ reported as a miss, or serving an agent spends the budget the cache protects:
 | `lazybox_task()` | This workspace's own record — number, title, full body, labels, state, parent, sub-issues, comments, and for a PR its branches, diff size and unsuccessful checks. Also written to `.lazybox/task.json` in the worktree at spawn. | the persisted `Workspace`'s tasks, projected by `task_cache.rs` |
 | `lazybox_get_issue(repo, number)` | Any cached issue in a watched repo, same shape. | same |
 | `lazybox_get_pr(repo, number)` | Any cached PR. Issue and PR share GitHub's numbering, so the two tools disambiguate. | same |
-| `lazybox_list_issues(repo, state?, limit?)` | Survey a repo in one call instead of fanning out `gh issue view`. Returns only what the inbox scope covers, so empty means unpolled. | same |
+| `lazybox_list_issues(repo, state?, limit?)` | Survey a repo in one call instead of fanning out `gh issue view`. Returns **summaries** — body preview, no comments — so a survey cannot blow the context it exists to protect; `get_issue` fetches the one you want in full. Returns only what the inbox scope covers, so empty means unpolled. | same |
+
+Comments come from the workspace's durable `activity` feed, never from a
+polled `Task`: the inbox scan selects `comments(last: 1)` and `attach_task`
+replaces the task in its slot on every poll without preserving activity, so a
+polled task carries at most the newest comment. The feed is a bounded window,
+so `comments_omitted` counts what lazybox holds and did not send — it cannot
+speak for comments lazybox never fetched, and the tool descriptions say so.
+Body and comment text is third-party, and every payload carries
+`content_warning` naming it as data rather than instructions.
+
+The file is hidden from git through the checkout's `info/exclude`, naming the
+one path. Not a `.gitignore` in `.lazybox/`: that directory is the
+repository's (`<repo>/.lazybox/snippets.yaml` is committed), and an ignore
+file there makes `git add` of the repo's own config fail while staying
+invisible in `git status`.
 
 Every record carries `fetched_at` — when the daemon last read it from the
 provider, not when the agent asked — so a session can judge staleness instead

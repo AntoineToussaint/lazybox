@@ -830,6 +830,12 @@ fn persist_workspace_batch(
         }
     }
 
+    // #1799: a deleted row's cache-age stamp has nothing left to describe.
+    // Dropped here, beside the delete mutation, so the in-memory map tracks
+    // live workspaces rather than every key the poller has ever seen.
+    for key in &deletes {
+        config.poll.forget_tasks_fetched(key);
+    }
     mutations.extend(deletes.into_iter().map(StoreMutation::DeleteWorkspace));
     if mutations.is_empty() {
         return Ok(CommittedWorkspaceBatch {

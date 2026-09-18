@@ -75,8 +75,9 @@ pub use session_key::SessionKey;
 pub use stack::{StackPosition, detect_stacks};
 pub use task::*;
 pub use task_record::{
-    PullRequestRecord, RECORD_COMMENT_LIMIT, RecordComment, RecordKind, TASK_FILE_RELATIVE_PATH,
-    TaskRecord, WORKSPACE_RECORD_FILE_SCHEMA, WorkspaceRecordFile, sub_issue_ids,
+    PullRequestRecord, RECORD_COMMENT_LIMIT, RECORD_CONTENT_WARNING,
+    RECORD_LIST_BODY_PREVIEW_BYTES, RecordComment, RecordKind, TASK_FILE_RELATIVE_PATH, TaskRecord,
+    WORKSPACE_RECORD_FILE_SCHEMA, WorkspaceRecordFile, sub_issue_ids,
 };
 pub use workspace::{
     CleanupPrompt, HopperMeta, MAX_ACTIVITY_ITEMS, ROLE_LABEL_PREFIX, Role, SENT_SNIPPETS_MAX,

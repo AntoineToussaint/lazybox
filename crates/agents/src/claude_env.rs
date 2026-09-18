@@ -31,11 +31,13 @@
 //!   [`crate::hook_settings::build_settings`], covering spawns whether or
 //!   not that file is generated.
 
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+use fs2::FileExt;
 use serde_json::{Map, Value};
 
 /// Settings key that suppresses Claude's one-time bypass-permissions
@@ -53,6 +55,42 @@ fn lock_config() -> io::Result<MutexGuard<'static, ()>> {
     CLAUDE_CONFIG_LOCK
         .lock()
         .map_err(|_| io::Error::other("Claude config preparation lock was poisoned"))
+}
+
+/// Hold both the cheap in-process mutex and an OS-backed sibling lock.
+///
+/// lazybox can have more than one daemon (profiles, tests, or two app
+/// versions) preparing Claude at once. A process-local mutex protects threads
+/// but lets those processes publish stale read-modify-write snapshots over one
+/// another, dropping trust records and stranding an unattended agent at the
+/// trust dialog.
+struct ClaudeConfigGuard {
+    _process: MutexGuard<'static, ()>,
+    _file: File,
+}
+
+fn lock_config_path(config_path: &Path) -> io::Result<ClaudeConfigGuard> {
+    let process = lock_config()?;
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "config path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let name = config_path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "config path has no file name")
+    })?;
+    let mut lock_name = name.to_os_string();
+    lock_name.push(".lazybox.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(config_path.with_file_name(lock_name))?;
+    file.lock_exclusive()?;
+    Ok(ClaudeConfigGuard {
+        _process: process,
+        _file: file,
+    })
 }
 
 /// Prepare `~/.claude.json` for an unattended launch in `worktree`:
@@ -79,7 +117,7 @@ pub fn seed_unattended_env(worktree: &Path) -> io::Result<()> {
 /// update). A missing config is created with a minimal structure; an
 /// unparseable one is left untouched (returns `Err`).
 fn seed_unattended_env_in(config_path: &Path, worktree: &Path) -> io::Result<()> {
-    let _guard = lock_config()?;
+    let _guard = lock_config_path(config_path)?;
     let mut root: Value = match std::fs::read_to_string(config_path) {
         Ok(text) => serde_json::from_str(&text)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
@@ -189,7 +227,7 @@ pub fn ambient_model() -> Option<String> {
 /// set. A missing file (and its `~/.claude` parent) is created; an
 /// unparseable one is left untouched (returns `Err`).
 fn seed_skip_dangerous_mode_prompt_in(settings_path: &Path) -> io::Result<()> {
-    let _guard = lock_config()?;
+    let _guard = lock_config_path(settings_path)?;
     let mut root: Value = match std::fs::read_to_string(settings_path) {
         // An empty (or whitespace-only) file carries no settings to
         // preserve — treat it like a missing one and seed fresh, rather
@@ -336,6 +374,72 @@ mod tests {
             );
         }
         assert!(onboarded(&config));
+    }
+
+    #[test]
+    fn concurrent_processes_preserve_every_worktree() {
+        let dir = scratch("concurrent-processes");
+        let config = dir.join(".claude.json");
+        let gate = dir.join("start-gate");
+        let _ = std::fs::remove_file(&config);
+        let _ = std::fs::remove_file(&gate);
+        let executable = std::env::current_exe().expect("test executable");
+        let mut children = Vec::new();
+        for number in 0..12 {
+            let child = std::process::Command::new(&executable)
+                .arg("--exact")
+                .arg("claude_env::tests::cross_process_seed_helper")
+                .arg("--nocapture")
+                .env("LAZYBOX_CLAUDE_LOCK_TEST_CONFIG", &config)
+                .env("LAZYBOX_CLAUDE_LOCK_TEST_GATE", &gate)
+                .env(
+                    "LAZYBOX_CLAUDE_LOCK_TEST_WORKTREE",
+                    format!("/tmp/concurrent-process-wt-{number}"),
+                )
+                .spawn()
+                .expect("spawn trust seeder");
+            children.push(child);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        File::create(&gate).expect("open process start gate");
+        for child in children {
+            let output = child.wait_with_output().expect("join trust seeder");
+            assert!(
+                output.status.success(),
+                "trust seeder failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+        for number in 0..12 {
+            assert!(
+                trusted(&config, &format!("/tmp/concurrent-process-wt-{number}")),
+                "cross-process seed lost worktree {number}",
+            );
+        }
+        assert!(onboarded(&config));
+    }
+
+    #[test]
+    fn cross_process_seed_helper() {
+        let Some(config) = std::env::var_os("LAZYBOX_CLAUDE_LOCK_TEST_CONFIG") else {
+            return;
+        };
+        let gate = PathBuf::from(
+            std::env::var_os("LAZYBOX_CLAUDE_LOCK_TEST_GATE").expect("process start gate"),
+        );
+        let worktree = PathBuf::from(
+            std::env::var_os("LAZYBOX_CLAUDE_LOCK_TEST_WORKTREE").expect("process worktree"),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !gate.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for process start gate",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        seed_unattended_env_in(Path::new(&config), &worktree).expect("seed cross-process trust");
     }
 
     #[test]

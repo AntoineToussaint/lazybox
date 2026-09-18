@@ -5491,6 +5491,21 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     pub fn flash_error(&mut self, msg: impl Into<String>) {
+        self.flash_error_with(msg, crate::realm::components::footer::NoticePayload::Tail);
+    }
+
+    /// [`Self::flash_error`] for an error that LEADS with its recovery
+    /// instruction — the footer keeps the head and elides the trailing
+    /// diagnostic instead of halving both (#1805).
+    pub fn flash_error_leading(&mut self, msg: impl Into<String>) {
+        self.flash_error_with(msg, crate::realm::components::footer::NoticePayload::Lead);
+    }
+
+    fn flash_error_with(
+        &mut self,
+        msg: impl Into<String>,
+        payload: crate::realm::components::footer::NoticePayload,
+    ) {
         use crate::realm::components::footer::NoticeSeverity;
         let msg = msg.into();
         // The footer width-caps its notice segment, so a long error
@@ -5507,7 +5522,7 @@ impl<T: TerminalAdapter> Model<T> {
         if !dup {
             self.status.sync.note_error("ui", "", &msg, "");
         }
-        self.flash(msg, NoticeSeverity::Permanent);
+        self.flash_with(msg, NoticeSeverity::Permanent, payload);
     }
 
     /// Like [`Self::flash_error`], but tags the banner with the
@@ -5795,6 +5810,22 @@ impl<T: TerminalAdapter> Model<T> {
         msg: impl Into<String>,
         severity: crate::realm::components::footer::NoticeSeverity,
     ) {
+        self.flash_with(
+            msg,
+            severity,
+            crate::realm::components::footer::NoticePayload::Tail,
+        );
+    }
+
+    /// `flash`, with control over which end of the message the footer
+    /// must keep when it doesn't fit — see
+    /// [`crate::realm::components::footer::NoticePayload`].
+    pub fn flash_with(
+        &mut self,
+        msg: impl Into<String>,
+        severity: crate::realm::components::footer::NoticeSeverity,
+        payload: crate::realm::components::footer::NoticePayload,
+    ) {
         use crate::realm::components::footer::{Notice, NoticeSeverity};
         // Sticky severities own the footer slot: they never auto-fade
         // and demand an acknowledgment (Esc), so they must not be
@@ -5858,7 +5889,11 @@ impl<T: TerminalAdapter> Model<T> {
         if severity != NoticeSeverity::Hint {
             self.status.messages.record(&msg, severity);
         }
-        self.status.notice = Some(Notice::new(msg, severity));
+        let notice = Notice::new(msg, severity);
+        self.status.notice = Some(match payload {
+            crate::realm::components::footer::NoticePayload::Lead => notice.leading(),
+            crate::realm::components::footer::NoticePayload::Tail => notice,
+        });
         self.redraw = true;
     }
 

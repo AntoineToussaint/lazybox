@@ -992,6 +992,7 @@ mod tests {
         Notice {
             message: "x".into(),
             severity,
+            payload: crate::realm::components::footer::NoticePayload::Tail,
             set_at: Instant::now() - age,
             key: None,
             repeats: 1,

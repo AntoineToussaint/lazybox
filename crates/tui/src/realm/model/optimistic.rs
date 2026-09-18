@@ -141,6 +141,15 @@ impl<T: TerminalAdapter> Model<T> {
     /// delete-failure `ProviderError { source: "store" }` names the key
     /// in its message; re-insert the stashed rows when it matches a
     /// pending removal. Returns true when one was reverted.
+    ///
+    /// The cursor is put back too. Taking the row out moved it to a
+    /// neighbour, and restoring the row without restoring the cursor
+    /// rolls back only half the optimistic change: the row returns,
+    /// selected is someone else, and every per-row action — plus any
+    /// advice the failure notice gives about "this workspace" — lands
+    /// on a workspace the user never touched (#1805). Only a
+    /// single-row removal re-focuses; a project cascade restores a
+    /// header and N children with no one row to return to.
     pub(super) fn rollback_optimistic_removal(&mut self, message: &str) -> bool {
         let Some(pos) = self
             .pending_mutations
@@ -150,7 +159,12 @@ impl<T: TerminalAdapter> Model<T> {
             return false;
         };
         let mutation = self.pending_mutations.remove(pos);
+        let restored_row = (mutation.project.is_none() && mutation.workspaces.len() == 1)
+            .then(|| lazybox_core::SessionKey::from(&mutation.workspaces[0].key));
         self.apply_rollback(mutation);
+        if let Some(key) = restored_row {
+            self.sidebar.focus_workspace_key(&key);
+        }
         true
     }
 

@@ -2717,45 +2717,39 @@ impl<T: TerminalAdapter> Model<T> {
                         // for sources that don't carry one (reply / merge
                         // / close-issue), so the flash above still stands.
                         self.rollback_optimistic_chip(source);
-                    } else if matches!(
-                        source.as_str(),
-                        "store" | "store:local-work" | "terminal"
-                    ) && self.rollback_optimistic_removal(message)
+                    } else if is_removal_failure_source(source)
+                        && self.rollback_optimistic_removal(message)
                     {
                         // An optimistic archive/delete the daemon
                         // rejected: the row (and, for a project, its
                         // children) was removed locally, so re-insert it
                         // and surface why (#476). Delete failures arrive
-                        // as `store` (archive/db), `store:local-work` (the
-                        // worktree safety gate) or `terminal` (a backing
-                        // agent that couldn't be stopped) errors naming the
-                        // key; one naming no pending removal keeps its
-                        // quiet sync-log-only handling.
+                        // as `store` (archive/db), `store:<why>` (a refusal
+                        // the daemon classified — today the worktree safety
+                        // gate) or `terminal` (a backing agent that couldn't
+                        // be stopped) errors naming the key; one naming no
+                        // pending removal keeps its quiet sync-log-only
+                        // handling.
                         //
-                        // Both notices end with where to read the untruncated
-                        // text: the footer elides a long notice from the
-                        // middle, so a trailing pointer is the one part that
-                        // always survives, and a sticky error the user can
-                        // see but not read is worse than a short one (#1805).
+                        // Neither notice names a key for reading the full
+                        // text. A key baked into the message is a claim
+                        // about a keymap and a focus that the message
+                        // cannot see: `Shift-M` does nothing while a live
+                        // terminal owns the keys, and a fixed suffix is
+                        // also the first thing truncation eats. The
+                        // affordance that IS focus-aware already exists —
+                        // `notice_action_hints` offers `Enter detail` (the
+                        // full text, wrapped) exactly while the keys will
+                        // fire (#453, #1805).
                         if source == "store:local-work" {
-                            // The refusal already leads with its recovery
-                            // verb, so it is flashed as-is — a fixed
-                            // "delete failed —" ahead of it would spend the
-                            // head budget the elision leaves for the
-                            // instruction. The diff viewer is offered because
-                            // this refusal, unlike a generic store failure,
-                            // is *about* work the user can still look at.
-                            let diff_keys = lazybox_tui_core::action::ActionDef::for_kind(
-                                lazybox_tui_core::action::ActionKind::ViewDiff,
-                            )
-                            .effective_keys_display(&self.action_key_overrides);
-                            self.flash_error(format!(
-                                "✗ {message} · {diff_keys} review diff · Shift-M for the full text"
-                            ));
+                            // The refusal leads with its recovery verb, so
+                            // it is flashed as-is and tagged `Lead`: a
+                            // fixed "delete failed —" ahead of it would
+                            // spend the head budget on ceremony, and middle
+                            // truncation would halve what's left.
+                            self.flash_error_leading(format!("✗ {message}"));
                         } else {
-                            self.flash_error(format!(
-                                "✗ delete failed — {message} · Shift-M for the full text"
-                            ));
+                            self.flash_error(format!("✗ delete failed — {message}"));
                         }
                     } else if self.pending_refresh_ack || poll_failed {
                         // A genuine sync-poll failure — reached only when
@@ -3946,6 +3940,19 @@ impl<T: TerminalAdapter> Model<T> {
 /// runs …) — those keep their existing handling. The strings mirror
 /// the daemon's `emit_err` sources in
 /// `crates/server/src/polling/handlers.rs`.
+/// Delete failures the client rolls back on. `store` is the generic
+/// archive/db rejection, `store:<why>` a refusal the daemon classified
+/// (the worktree safety gate sends `store:local-work`), `terminal` a
+/// backing agent that could not be stopped.
+///
+/// Prefix-matched rather than enumerated: a new `store:<why>` the
+/// daemon adds must not silently stop rolling back, which would leave
+/// the row gone from the UI while the daemon still has it, with no
+/// notice, until the next poll re-upserts it.
+fn is_removal_failure_source(source: &str) -> bool {
+    source == "store" || source == "terminal" || source.starts_with("store:")
+}
+
 fn mutation_failure_label(source: &str) -> Option<&'static str> {
     match source {
         "reviewers" => Some("request reviewers"),

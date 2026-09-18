@@ -1755,25 +1755,39 @@ async fn inspect_workspace_risks(
         if row.is_safe_to_delete {
             continue;
         }
-        let reasons = workspace_removal_reasons(row, require_stopped, pr_merged);
-        if !reasons.is_empty() {
+        let found = workspace_removal_reasons(row, require_stopped, pr_merged);
+        if !found.reasons.is_empty() {
             risks.push(WorkspaceRemovalRisk {
                 path,
-                reasons,
-                preserves_work: row.has_uncommitted_changes
-                    || (row.has_unpushed_commits && !pr_merged),
+                reasons: found.reasons,
+                preserves_work: found.preserves_work,
             });
         }
     }
     Ok(risks)
 }
 
+/// Why one checkout blocks removal: the reasons to show, plus whether
+/// any of them is work only the user can rescue.
+///
+/// The flag is set beside the reason that implies it, never re-derived
+/// from the row or matched out of the reason strings afterwards — two
+/// derivations of "is this rescuable?" drift the moment a reason is
+/// added here, and the drift is silent: the refusal keeps rendering,
+/// with the wrong recovery verb.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemovalReasons {
+    pub reasons: Vec<String>,
+    pub preserves_work: bool,
+}
+
 fn workspace_removal_reasons(
     row: &lazybox_git_ops::WorktreeInspection,
     require_stopped: bool,
     pr_merged: bool,
-) -> Vec<String> {
+) -> RemovalReasons {
     let mut reasons = Vec::new();
+    let mut preserves_work = false;
     if row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked) {
         reasons.push("locked".into());
     }
@@ -1782,9 +1796,11 @@ fn workspace_removal_reasons(
     }
     if row.has_uncommitted_changes {
         reasons.push("uncommitted changes".into());
+        preserves_work = true;
     }
     if row.has_unpushed_commits && !pr_merged {
         reasons.push("unpushed commits".into());
+        preserves_work = true;
     }
     // The "still active" fallback keys off `is_safe_to_delete`, which folds
     // in the unpushed flag. When the merged PR suppressed that flag above, a
@@ -1800,7 +1816,10 @@ fn workspace_removal_reasons(
     if reasons.is_empty() && require_stopped && !safe_to_delete {
         reasons.push("checkout is still active".into());
     }
-    reasons
+    RemovalReasons {
+        reasons,
+        preserves_work,
+    }
 }
 
 #[cfg(test)]
@@ -1924,12 +1943,18 @@ mod removal_classification_tests {
             // local-work probes succeeded.
             is_safe_to_delete: false,
         };
-        assert!(workspace_removal_reasons(&row, false, false).is_empty());
+        assert!(
+            workspace_removal_reasons(&row, false, false)
+                .reasons
+                .is_empty()
+        );
 
         row.status_verified = false;
-        assert_eq!(
-            workspace_removal_reasons(&row, false, false),
-            vec!["cleanliness could not be proven"]
+        let found = workspace_removal_reasons(&row, false, false);
+        assert_eq!(found.reasons, vec!["cleanliness could not be proven"]);
+        assert!(
+            !found.preserves_work,
+            "an unprovable checkout holds no work the user can commit away",
         );
     }
 
@@ -1955,19 +1980,24 @@ mod removal_classification_tests {
 
         // Without the merged signal, the false positive blocks removal —
         // even under the final `require_stopped` gate.
-        assert_eq!(
-            workspace_removal_reasons(&row, true, false),
-            vec!["unpushed commits"]
-        );
+        let found = workspace_removal_reasons(&row, true, false);
+        assert_eq!(found.reasons, vec!["unpushed commits"]);
+        assert!(found.preserves_work, "unpushed commits are rescuable work");
         // With it, the checkout is cleared for teardown and the "still
         // active" fallback does not re-block it.
-        assert!(workspace_removal_reasons(&row, true, true).is_empty());
+        assert!(
+            workspace_removal_reasons(&row, true, true)
+                .reasons
+                .is_empty()
+        );
 
         // Genuine on-disk work is still protected regardless of merge state.
         row.has_uncommitted_changes = true;
-        assert_eq!(
-            workspace_removal_reasons(&row, true, true),
-            vec!["uncommitted changes"]
+        let found = workspace_removal_reasons(&row, true, true);
+        assert_eq!(found.reasons, vec!["uncommitted changes"]);
+        assert!(
+            found.preserves_work,
+            "the flag must be set beside the reason, not re-derived",
         );
     }
 }
@@ -2566,6 +2596,10 @@ mod reclaim_worktree_tests {
         assert!(
             message.contains(key.as_str()),
             "the key the client rolls back on must survive the rewording: {message:?}",
+        );
+        assert!(
+            !message.contains("Shift-M"),
+            "the daemon must not name client keys: {message:?}",
         );
     }
 
@@ -3691,11 +3725,17 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
                     .map(WorkspaceRemovalRisk::describe)
                     .collect::<Vec<_>>()
                     .join("; ");
+                // Same gate, same refusal, same shape as the
+                // single-workspace path: instruction first so the
+                // footer's elision takes the diagnostic instead of the
+                // verb, on the source that tells the client this one
+                // already leads with its recovery step (#1805).
                 let _ = config.bus.send(Event::provider_error_permanent(
-                    "store",
+                    "store:local-work",
                     format!(
-                        "project {project_key} was not deleted because workspace {} has local \
-                         work to preserve: {detail}",
+                        "{} — delete refused, project {project_key} has local work in \
+                         workspace {}: {detail}",
+                        removal_refusal_instruction(&risks),
                         workspace.key
                     ),
                 ));

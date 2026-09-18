@@ -28982,22 +28982,96 @@ mod optimistic_mutation_tests {
         let n = m.status.notice.as_ref().expect("rollback flashes an error");
         assert_eq!(n.severity, NoticeSeverity::Permanent);
         assert!(n.message.contains("delete failed"), "got {:?}", n.message);
+        // No key is baked into the text: `Shift-M` does nothing while a
+        // live terminal owns the keys, and a fixed suffix is also the
+        // first thing truncation eats. `notice_action_hints` offers
+        // `Enter detail` instead, gated on the keys actually firing.
         assert!(
-            n.message.ends_with("Shift-M for the full text"),
-            "a truncated sticky error must say where to read it whole: {:?}",
+            !n.message.contains("Shift-M"),
+            "the notice must not promise a keystroke it cannot guarantee: {:?}",
             n.message,
         );
     }
 
     /// The worktree safety gate's refusal (#1805). It arrives on its own
-    /// source, leads with the recovery verb, and is flashed verbatim —
-    /// no fixed "delete failed —" ahead of it — so the footer's
-    /// middle-elision eats the diagnostic instead of the instruction.
-    /// Both trailing pointers survive that elision by construction.
+    /// source, leads with the recovery verb, is flashed verbatim — no
+    /// fixed "delete failed —" ahead of it — and is tagged `Lead` so the
+    /// footer end-truncates it. No key is baked into the text.
+    ///
+    /// It also puts the cursor back on the row it refused. The
+    /// optimistic removal moved the cursor to a neighbour; restoring the
+    /// row without the cursor left every per-row action — `review diff`
+    /// most of all — pointed at a workspace the user never touched, so
+    /// "look at what you would lose" showed someone else's diff.
     #[test]
-    fn local_work_refusal_leads_with_its_instruction_and_points_at_the_full_text() {
+    fn local_work_refusal_leads_with_its_instruction_and_reselects_the_refused_row() {
         let mut m = build_model();
-        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#3");
+        let refused = seed_pr_workspace(&mut m, "github:owner/repo#3");
+        let neighbour = seed_pr_workspace(&mut m, "github:owner/repo#4");
+        let sk: SessionKey = (&refused).into();
+        let neighbour_sk: SessionKey = (&neighbour).into();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        assert!(m.sidebar.workspace_by_key(&sk).is_none());
+        assert_eq!(
+            m.sidebar.selected_workspace_key(),
+            Some(&neighbour_sk),
+            "the optimistic removal moves the cursor off the row it took",
+        );
+
+        m.handle_daemon_event(provider_error(
+            "store:local-work",
+            &format!(
+                "commit, stash or push, then retry \u{2014} delete refused, workspace \
+                 {refused} has local work: /wt/owner-repo/pr-3 (uncommitted changes)"
+            ),
+        ));
+        assert!(
+            m.sidebar.workspace_by_key(&sk).is_some(),
+            "the gate's refusal must re-insert the optimistically removed row",
+        );
+        assert_eq!(
+            m.sidebar.selected_workspace_key(),
+            Some(&sk),
+            "rollback must restore the cursor too, or per-row advice lands elsewhere",
+        );
+
+        let n = m.status.notice.as_ref().expect("refusal flashes");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert_eq!(
+            n.payload,
+            crate::realm::components::footer::NoticePayload::Lead,
+            "the refusal leads with its instruction, so the footer must keep the head",
+        );
+        assert!(
+            n.message.starts_with("✗ commit, stash or push, then retry"),
+            "instruction must lead the notice: {:?}",
+            n.message,
+        );
+        assert!(
+            !n.message.contains("Shift-M"),
+            "no baked keystroke: {:?}",
+            n.message,
+        );
+        assert!(
+            n.message.find("then retry") < n.message.find("uncommitted changes"),
+            "the diagnostic must trail: {:?}",
+            n.message,
+        );
+    }
+
+    /// A `store:<why>` source the client has never seen must still roll
+    /// back. Enumerating the known sources meant a new refusal class
+    /// silently stopped rolling back — the row stayed gone from the UI
+    /// while the daemon still had it, with no notice at all.
+    #[test]
+    fn an_unknown_store_refinement_still_rolls_back() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#5");
         let sk: SessionKey = (&ws_key).into();
         m.dispatch_action_confirmed(
             &Action::Archive,
@@ -29006,38 +29080,14 @@ mod optimistic_mutation_tests {
         assert!(m.sidebar.workspace_by_key(&sk).is_none());
 
         m.handle_daemon_event(provider_error(
-            "store:local-work",
-            &format!(
-                "commit, stash or push, then retry \u{2014} delete refused, workspace \
-                 {ws_key} has local work: /wt/owner-repo/pr-3 (uncommitted changes)"
-            ),
+            "store:some-future-reason",
+            &format!("delete refused, workspace {ws_key} for a reason added later"),
         ));
         assert!(
             m.sidebar.workspace_by_key(&sk).is_some(),
-            "the gate's refusal must re-insert the optimistically removed row",
+            "an unenumerated store refinement must still re-insert the row",
         );
-        let n = m.status.notice.as_ref().expect("refusal flashes");
-        assert_eq!(n.severity, NoticeSeverity::Permanent);
-        assert!(
-            n.message.starts_with("✗ commit, stash or push, then retry"),
-            "instruction must lead the notice: {:?}",
-            n.message,
-        );
-        assert!(
-            n.message.ends_with("Shift-M for the full text"),
-            "the notice must say where it is readable in full: {:?}",
-            n.message,
-        );
-        assert!(
-            n.message.contains("g v review diff"),
-            "the refusal must offer the diff of what would be lost: {:?}",
-            n.message,
-        );
-        assert!(
-            n.message.find("then retry") < n.message.find("uncommitted changes"),
-            "the diagnostic must trail: {:?}",
-            n.message,
-        );
+        assert!(m.status.notice.is_some(), "and must still say why");
     }
 
     #[test]

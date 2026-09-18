@@ -527,6 +527,7 @@ booleans all default to `true`.
 | `filters` | list | `[]` | Narrow which PRs appear (empty = everything) |
 | `background_budget_share` | float | `0.55` | Maximum share of each observed GitHub primary rate-limit budget that scheduled polling may consume; the remainder stays available to interactive `gh`, agents, and bursts. |
 | `include_accessible_repos` | bool | `false` | Widen the inbox scope to every repo you can reach — owned, org-member, and direct-collaborator — not just the scopes you ticked in setup. Involved PRs/issues in any of those surface without a manual tick; repos you can't access stay hidden. |
+| `app` | map | unset | A GitHub App registration giving the status sweep its own rate-limit budget. See [`providers.github.app`](#providersgithubapp). |
 
 Each `filters` entry has exactly one of:
 
@@ -535,6 +536,47 @@ Each `filters` entry has exactly one of:
 | `org` | PRs involving you in this org |
 | `repo` | PRs involving you in `owner/name` |
 | `watch` | All open PRs in `owner/name`, regardless of involvement |
+
+### `providers.github.app`
+
+Optional. Without it, the daemon's status sweep and every agent session run on
+your personal token and share its 5,000 requests/hour — and the sweep is the
+only consumer that keeps a reserve, so it is the one that starves. A busy fleet
+can spend the whole budget and leave the inbox frozen while it looks healthy.
+
+A GitHub App *installation* token carries its own 5,000/hour, so polling never
+competes with agent traffic. Authoring — commits, PRs, comments, merges — keeps
+using your personal token either way, which is what should be attributed to you.
+
+```yaml
+providers:
+  github:
+    app:
+      app_id: 123456
+      private_key_path: ~/.lazybox/github-app.private-key.pem
+      installation_id: 987654   # optional
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `app_id` | integer | — | The App's numeric id, from its settings page |
+| `private_key_path` | path | — | The App's private key (`.pem`). A leading `~/` is expanded |
+| `installation_id` | integer | discovered | Which installation to poll as. Required only when the App has more than one installation |
+
+`LAZYBOX_GITHUB_APP_ID`, `LAZYBOX_GITHUB_APP_PRIVATE_KEY_PATH` and
+`LAZYBOX_GITHUB_APP_INSTALLATION_ID` override the config block.
+
+The App needs read access to the repositories you poll — **Metadata**,
+**Contents**, **Pull requests** and **Issues** are enough for the status sweep.
+
+**Coverage is all-or-nothing.** The sweep discovers work with a GraphQL search,
+not a per-repo fan-out, so a credential that cannot see one scoped repo simply
+returns fewer rows with no error to notice. If the installation does not reach
+every repo, org and `watch:` entry in your scope — or if
+`include_accessible_repos` is on, which makes the scope open-ended — lazybox
+polls everything on your personal token instead and tells you why, rather than
+letting part of the inbox go dark. Widen the installation (or narrow the scope)
+and the sweep moves back onto the App budget on its own.
 
 ### `providers.linear`
 

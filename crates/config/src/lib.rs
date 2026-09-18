@@ -3821,6 +3821,39 @@ pub struct GithubConfig {
     /// ```
     #[serde(default)]
     pub pr_trailers: lazybox_core::TrailerPolicy,
+    /// Optional GitHub App registration giving the daemon's poller a
+    /// rate-limit budget of its own.
+    ///
+    /// Without it the poller and every agent session share the user's
+    /// 5,000 requests/hour, and a busy fleet can spend the lot — the inbox
+    /// then freezes while looking healthy. An App *installation* token
+    /// carries its own 5,000/hour, so status polling never competes with
+    /// agent traffic. Authoring (comments, merges, commits) keeps using the
+    /// user token either way, so it stays attributed to the user.
+    ///
+    /// ```yaml
+    /// providers:
+    ///   github:
+    ///     app:
+    ///       app_id: 123456
+    ///       private_key_path: ~/.lazybox/github-app.private-key.pem
+    ///       installation_id: 987654   # optional when the App has one install
+    /// ```
+    #[serde(default)]
+    pub app: Option<GithubAppConfig>,
+}
+
+/// A registered GitHub App the daemon authenticates its poller as.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GithubAppConfig {
+    /// The App's numeric id, from its settings page.
+    pub app_id: u64,
+    /// Path to the App's private key (`.pem`). A leading `~/` is expanded.
+    pub private_key_path: String,
+    /// Which installation to poll as. Optional: discovered automatically
+    /// when the App has exactly one installation.
+    #[serde(default)]
+    pub installation_id: Option<u64>,
 }
 
 impl GithubConfig {
@@ -3845,6 +3878,7 @@ impl Default for GithubConfig {
             include_accessible_repos: false,
             host: None,
             pr_trailers: lazybox_core::TrailerPolicy::default(),
+            app: None,
         }
     }
 }

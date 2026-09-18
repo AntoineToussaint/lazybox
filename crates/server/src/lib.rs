@@ -2893,7 +2893,11 @@ pub async fn dispatch_command(
             // cache: a user who just ran `gh auth login` and hit
             // refresh must not wait out a failure-backoff window.
             lazybox_auth::invalidate_command_credential_cache();
-            if let Some(client) = config.poll.cached_gh_client() {
+            // Force the sweep on the client that RUNS it: with a GitHub App
+            // carrying the sweep, the cached user client is a different
+            // client with its own hot-freshness and dependency caches, and
+            // forcing it would leave `Shift-R` doing nothing.
+            if let Some(client) = config.poll.polling_gh_client() {
                 client.force_full_sweep();
             }
             // An explicit refresh also bypasses Linear's slow cadence gate

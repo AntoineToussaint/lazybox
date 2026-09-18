@@ -12,7 +12,7 @@ use super::{
 use crate::ServerConfig;
 use chrono::Utc;
 use lazybox_core::{AutoFixKind, FetchCoverage, LinearScope, ProviderConfig, Task, WorkspaceKey};
-use lazybox_gh::GhClient;
+use lazybox_gh::{AppCredentials, GhClient};
 use lazybox_ipc::{Event, ProviderErrorKind};
 use lazybox_linear::LinearClient;
 use std::future::Future;
@@ -415,6 +415,17 @@ mod discovery_behind_tests {
 /// source doesn't block rescope.
 pub struct GhSource {
     client: GhClient,
+    /// The client that speaks *as the user*, when `client` above does not.
+    ///
+    /// Once a GitHub App installation credential carries the sweep for its
+    /// own rate budget, two things still belong to the human: the REST
+    /// notifications heartbeat, because `/notifications` is their own feed
+    /// and an installation token cannot read it, and anything the sweep
+    /// authors on their behalf — the 👀 reaction that acknowledges a
+    /// `@lazybox` mention. The two clients share one cursor + sweep-clock
+    /// state (`sharing_sync_state_with`), so the split is invisible to
+    /// everything downstream. `None` when the sweep is already the user's.
+    user_client: Option<GhClient>,
     filter: ProviderConfig,
     scopes: std::collections::BTreeSet<String>,
     watch_repos: std::collections::BTreeSet<String>,
@@ -879,11 +890,16 @@ impl GhSource {
         )
     }
 
+    /// The client to act as the human with — see the `user_client` field.
+    fn as_user(&self) -> &GhClient {
+        self.user_client.as_ref().unwrap_or(&self.client)
+    }
+
     async fn persist_sync_cursors(&self) {
         let Some(store) = self.cursor_store.clone() else {
             return;
         };
-        let key = format!("github:sync-cursors:v1:{}", self.client.username());
+        let key = gh_state_key("github:sync-cursors:v1", &self.client);
         let cursors = self.client.sync_cursors();
         let Ok(payload) = serde_json::to_string(&cursors) else {
             return;
@@ -904,7 +920,7 @@ impl GhSource {
         let Some(payload) = self.client.pending_rate_state_payload() else {
             return;
         };
-        let key = format!("github:rate-state:v1:{}", self.client.username());
+        let key = gh_state_key("github:rate-state:v1", &self.client);
         let write = payload.clone();
         match tokio::task::spawn_blocking(move || store.set_kv(&key, &write)).await {
             Ok(Ok(())) => self.client.mark_rate_state_persisted(payload),
@@ -1327,7 +1343,7 @@ impl GhSource {
             const REACT_CONCURRENCY: usize = 5;
             stream::iter(react_targets)
                 .for_each_concurrent(REACT_CONCURRENCY, |target_node_id| async move {
-                    if let Err(e) = self.client.react_eyes(&target_node_id).await {
+                    if let Err(e) = self.as_user().react_eyes(&target_node_id).await {
                         tracing::warn!(
                             target = %target_node_id,
                             "react_eyes failed (spawn still queued; next tick may re-fire — \
@@ -1647,7 +1663,7 @@ impl GhSource {
     /// answers 304.
     async fn fetch_incremental(&self) -> Result<Option<Vec<Task>>, lazybox_core::ProviderError> {
         self.emit_progress("Checking GitHub notifications…");
-        let poll = match self.client.fetch_notifications().await {
+        let poll = match self.as_user().fetch_notifications().await {
             Ok(p) => p,
             Err(e) => {
                 let error = lazybox_core::ProviderError::from(e);
@@ -3164,6 +3180,23 @@ fn linear_filter_for_scope(mut filter: ProviderConfig, scope: &[LinearScope]) ->
     filter
 }
 
+/// Key for one of the poller's persisted state rows (sync cursors, rate
+/// state), namespaced by the credential as well as the viewer.
+///
+/// The rows describe *a credential's* observed rate window and sweep floors.
+/// A GitHub App installation token has its own 5,000/hour, so restoring the
+/// user token's observed budget onto it — or the reverse, after the App is
+/// switched off — would start the governor from another window's numbers.
+/// The user-token key keeps its original shape so no existing row is
+/// orphaned.
+fn gh_state_key(prefix: &str, client: &GhClient) -> String {
+    let viewer = client.username();
+    match lazybox_gh::is_installation_source(client.credential_source()) {
+        true => format!("{prefix}:{viewer}:{}", client.credential_source()),
+        false => format!("{prefix}:{viewer}"),
+    }
+}
+
 /// Pure reuse decision for the cached GitHub client: reuse only when
 /// BOTH the credential source label and the token fingerprint match
 /// the freshly-resolved credential.
@@ -4078,9 +4111,28 @@ pub(super) async fn sources_for_with_engagement(
                 };
                 match client_result {
                     Ok(client) => {
+                        // Give the status sweep its own credential when a
+                        // GitHub App is registered and reaches everything the
+                        // sweep queries (#1802). Otherwise it keeps polling on
+                        // the user token, which agent sessions also spend.
+                        let poll = github_poll_client(
+                            &client,
+                            configured_host.as_deref(),
+                            setup,
+                            lazybox_config::Config::load().ok().as_ref(),
+                            state,
+                            &bus,
+                            &gh_client_cache,
+                        )
+                        .await;
+                        let (poll_client, poll_restore, user_client) = match poll {
+                            Some((poll_client, restore)) => (poll_client, restore, Some(client)),
+                            None => (client, restore_sync_cursors, None),
+                        };
                         push_github_source(
-                            client,
-                            restore_sync_cursors,
+                            poll_client,
+                            poll_restore,
+                            user_client,
                             setup,
                             bus.clone(),
                             state,
@@ -4124,6 +4176,7 @@ pub(super) async fn sources_for_with_engagement(
                     push_github_source(
                         existing,
                         false,
+                        None,
                         setup,
                         bus.clone(),
                         state,
@@ -4240,6 +4293,410 @@ pub(super) async fn sources_for_with_engagement(
     sources
 }
 
+/// How long a fetched [`lazybox_gh::InstallationCoverage`] is trusted before
+/// it is re-listed. The set only changes when someone adds or removes a repo
+/// from the App installation, so a per-tick refresh would spend a request a
+/// minute re-reading the same answer.
+pub(super) const APP_COVERAGE_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// The GitHub App registration to poll as, or `None` when none is set up.
+/// The environment wins over config, mirroring `LAZYBOX_GITHUB_TOKEN`.
+fn github_app_credentials(cfg: Option<&lazybox_config::Config>) -> Option<AppCredentials> {
+    if let Some(app) = AppCredentials::from_env() {
+        return Some(app);
+    }
+    let app = cfg?.providers.github.app.as_ref()?;
+    AppCredentials::from_parts(
+        &app.app_id.to_string(),
+        &super::handlers::expand_tilde(std::path::Path::new(&app.private_key_path)),
+        app.installation_id.map(|id| id.to_string()).as_deref(),
+    )
+}
+
+/// The repos and orgs the status sweep will actually query: the scopes ticked
+/// in setup, the `org:` / `repo:` config filters, and every `watch:` repo —
+/// bare `owner` / `owner/repo`, with the `github:` prefix stripped.
+///
+/// This is the set an App installation has to reach for the inbox to stay
+/// complete. `include_accessible_repos` is deliberately *not* folded in: it
+/// widens the roster to every repo the user can reach, which is open-ended
+/// and reported as its own coverage gap below.
+pub(super) fn github_poll_scopes(
+    setup: &lazybox_core::PersistedSetup,
+    cfg: Option<&lazybox_config::Config>,
+) -> Vec<String> {
+    let mut out: std::collections::BTreeSet<String> = setup
+        .selected_scopes
+        .get("github")
+        .cloned()
+        .unwrap_or_default();
+    if let Some(cfg) = cfg {
+        out.extend(github_scopes_from_filters(&cfg.providers.github.filters));
+        out.extend(github_watch_repos_from_filters(
+            &cfg.providers.github.filters,
+        ));
+    }
+    out.iter()
+        .map(|scope| scope.strip_prefix("github:").unwrap_or(scope).to_string())
+        .filter(|scope| !scope.is_empty())
+        .collect()
+}
+
+/// Why the App installation cannot carry the whole sweep, phrased for the
+/// user. `None` means it can.
+pub(super) fn app_coverage_gap(
+    coverage: &lazybox_gh::InstallationCoverage,
+    scopes: &[String],
+    include_accessible_repos: bool,
+) -> Option<String> {
+    if include_accessible_repos {
+        return Some(
+            "`providers.github.include_accessible_repos` polls every repo you can reach, \
+             which no App installation is scoped to"
+                .to_string(),
+        );
+    }
+    if scopes.is_empty() {
+        // No scopes, no filters: the inbox is every repo the token can see
+        // (`involves:me` everywhere). An installation would narrow that to
+        // its own repos, and the rows it dropped would just stop appearing.
+        return Some(
+            "no GitHub scopes are selected, so the inbox is every repo your token can see"
+                .to_string(),
+        );
+    }
+    let uncovered = coverage.uncovered(scopes.iter().map(String::as_str));
+    if uncovered.is_empty() {
+        return None;
+    }
+    Some(format!("not in the installation: {}", uncovered.join(", ")))
+}
+
+/// Pick the client the status sweep polls through.
+///
+/// Returns `Some(poll_client)` when a GitHub App installation credential
+/// resolves AND covers everything the sweep queries — the sweep then runs on
+/// the App's own 5,000/hour, which no agent session can spend. `None` keeps
+/// the sweep on `user_client`, exactly as before this existed.
+///
+/// Falling back is all-or-nothing on purpose. The sweep's discovery side is a
+/// GraphQL *search*, not a per-repo fan-out: run under a credential that
+/// cannot see one of the scoped repos, it returns fewer rows with no error to
+/// notice. Polling everything on the user token is the only way an uncovered
+/// repo keeps appearing at all — so the gap is reported and the whole sweep
+/// steps back, rather than half the inbox going quietly dark.
+async fn github_poll_client(
+    user_client: &GhClient,
+    host: Option<&str>,
+    setup: &lazybox_core::PersistedSetup,
+    cfg: Option<&lazybox_config::Config>,
+    state: &mut TickState,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    gh_client_cache: &crate::registries::GithubClientCache,
+) -> Option<(GhClient, bool)> {
+    let app = github_app_credentials(cfg)?;
+
+    let coverage = match state.gh_app_coverage.as_ref() {
+        Some((at, coverage)) if at.elapsed() < APP_COVERAGE_TTL => coverage.clone(),
+        _ => match lazybox_gh::app_auth::fetch_coverage(&app, host).await {
+            Ok(coverage) => {
+                state.gh_app_coverage = Some((std::time::Instant::now(), coverage.clone()));
+                coverage
+            }
+            Err(e) => {
+                note_app_coverage_gap(state, bus, Some(format!("{e}")));
+                gh_client_cache.clear_poll();
+                return None;
+            }
+        },
+    };
+
+    let scopes = github_poll_scopes(setup, cfg);
+    let include_accessible = cfg.is_some_and(|c| c.providers.github.include_accessible_repos);
+    if let Some(gap) = app_coverage_gap(&coverage, &scopes, include_accessible) {
+        note_app_coverage_gap(state, bus, Some(gap));
+        gh_client_cache.clear_poll();
+        return None;
+    }
+
+    let cred = match lazybox_gh::poller_credential_chain(Some(app), host)
+        .resolve(&lazybox_gh::poller_credential_scope(host))
+        .await
+    {
+        Ok(cred) => cred,
+        Err(e) => {
+            note_app_coverage_gap(
+                state,
+                bus,
+                Some(format!("the installation token did not resolve: {e}")),
+            );
+            gh_client_cache.clear_poll();
+            return None;
+        }
+    };
+    note_app_coverage_gap(state, bus, None);
+
+    // Reuse the cached installation client while the token material is
+    // unchanged, same rule the user client follows: the source label is
+    // rotation-stable, so only the fingerprint can tell a refreshed token
+    // from the startup one. The provider hands out the same token until it
+    // is within ten minutes of expiring, so this rebuilds about once an hour.
+    let fingerprint = lazybox_gh::credential_fingerprint(cred.token());
+    let cached = gh_client_cache.cached_poll().filter(|c| {
+        gh_client_reusable(
+            c.credential_source(),
+            c.credential_fingerprint(),
+            &cred.source,
+            &fingerprint,
+        )
+    });
+    if let Some(client) = cached {
+        return Some((client, false));
+    }
+    // The viewer is the human whose inbox this is; an installation token has
+    // no user of its own, so it is carried over from the user client rather
+    // than asked of GitHub (which answers 403 for `/user` here).
+    match GhClient::from_credential_with_host_as(cred, host, Some(user_client.username())).await {
+        Ok(client) => {
+            gh_client_cache.store_poll(client.clone());
+            tracing::info!(
+                installation = coverage.installation_id,
+                source = client.credential_source(),
+                "github status sweep is polling on its own GitHub App budget"
+            );
+            Some((client, true))
+        }
+        Err(e) => {
+            note_app_coverage_gap(
+                state,
+                bus,
+                Some(format!("the installation client failed to build: {e}")),
+            );
+            gh_client_cache.clear_poll();
+            None
+        }
+    }
+}
+
+/// Tell the user, once, that the App is not carrying the sweep and the user
+/// token is — and tell them again when the reason changes. `None` retracts a
+/// standing notice by going quiet: the App is carrying the sweep again.
+///
+/// Degradation here is invisible by construction — the inbox keeps working,
+/// just on the budget agents are spending — so it is surfaced rather than
+/// left to the log.
+fn note_app_coverage_gap(
+    state: &mut TickState,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    gap: Option<String>,
+) {
+    if state.gh_app_gap_notified == gap {
+        return;
+    }
+    state.gh_app_gap_notified = gap.clone();
+    let Some(reason) = gap else {
+        tracing::info!("github App installation now covers the whole poll scope");
+        return;
+    };
+    tracing::warn!(
+        reason = %reason,
+        "github polling fell back to your personal token; it shares its rate limit with agent sessions"
+    );
+    let _ = bus.send(Event::Notification {
+        title: "GitHub polling is on your personal token".to_string(),
+        body: format!(
+            "The GitHub App is not carrying the status sweep ({reason}), so polling shares \
+             your 5,000/hour with agent sessions."
+        ),
+    });
+}
+
+#[cfg(test)]
+mod github_app_budget_tests {
+    use super::*;
+    use lazybox_gh::InstallationCoverage;
+
+    fn coverage(all: bool, repos: &[&str]) -> InstallationCoverage {
+        InstallationCoverage {
+            installation_id: 7,
+            account: "acme".into(),
+            all_repositories: all,
+            repositories: repos.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    fn setup_with_scopes(scopes: &[&str]) -> lazybox_core::PersistedSetup {
+        let mut setup = lazybox_core::PersistedSetup {
+            enabled_providers: ["github".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+        setup.selected_scopes.insert(
+            "github".to_string(),
+            scopes.iter().map(|s| s.to_string()).collect(),
+        );
+        setup
+    }
+
+    #[test]
+    fn poll_scopes_strip_the_provider_prefix_and_include_watched_repos() {
+        let setup = setup_with_scopes(&["github:acme/widget", "github:acme"]);
+        let cfg = lazybox_config::Config::parse(
+            "providers:\n  github:\n    filters:\n      - repo: other/thing\n      - watch: acme/gadget\n",
+        )
+        .expect("config");
+        let scopes = github_poll_scopes(&setup, Some(&cfg));
+        for expected in ["acme", "acme/widget", "other/thing", "acme/gadget"] {
+            assert!(
+                scopes.iter().any(|s| s == expected),
+                "{expected} missing from {scopes:?}",
+            );
+        }
+        assert!(
+            scopes.iter().all(|s| !s.starts_with("github:")),
+            "coverage is compared against bare owner/repo: {scopes:?}",
+        );
+    }
+
+    #[test]
+    fn a_covering_installation_reports_no_gap() {
+        let setup = setup_with_scopes(&["github:acme/widget"]);
+        assert_eq!(
+            app_coverage_gap(
+                &coverage(false, &["acme/widget"]),
+                &github_poll_scopes(&setup, None),
+                false,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_repo_outside_the_installation_is_named_in_the_gap() {
+        // The sweep's discovery side is a GraphQL search: under a
+        // credential that cannot see `other/thing` it just returns fewer
+        // rows. The gap must name the repo so the fallback is legible
+        // rather than an inbox quietly missing a project.
+        let setup = setup_with_scopes(&["github:acme/widget", "github:other/thing"]);
+        let gap = app_coverage_gap(
+            &coverage(false, &["acme/widget"]),
+            &github_poll_scopes(&setup, None),
+            false,
+        )
+        .expect("an uncovered repo is a gap");
+        assert!(gap.contains("other/thing"), "{gap}");
+        assert!(!gap.contains("acme/widget"), "{gap}");
+    }
+
+    #[test]
+    fn an_unscoped_inbox_is_itself_a_gap() {
+        // Empty scopes means `involves:me` everywhere — unbounded, so an
+        // "All repositories" installation on one org still would not cover
+        // it, and the repos it dropped would just stop appearing.
+        let setup = setup_with_scopes(&[]);
+        let gap = app_coverage_gap(
+            &coverage(true, &[]),
+            &github_poll_scopes(&setup, None),
+            false,
+        )
+        .expect("an unscoped inbox is a gap");
+        assert!(gap.contains("no GitHub scopes"), "{gap}");
+    }
+
+    #[test]
+    fn widening_the_inbox_to_every_reachable_repo_is_itself_a_gap() {
+        // `include_accessible_repos` makes the roster open-ended — repos
+        // the user joins tomorrow are in scope — so no installation can
+        // be proven to cover it.
+        let setup = setup_with_scopes(&["github:acme/widget"]);
+        let gap = app_coverage_gap(
+            &coverage(true, &[]),
+            &github_poll_scopes(&setup, None),
+            true,
+        )
+        .expect("an open-ended roster is a gap");
+        assert!(gap.contains("include_accessible_repos"), "{gap}");
+    }
+
+    /// Authoring must stay the user's. With the poller on an App
+    /// credential, the shared cache — which mutations and interactive
+    /// reads pull from — has to keep serving the user client, while the
+    /// App client lives in its own slot.
+    // `stub_for_tests` builds an octocrab transport, which registers with
+    // the tokio reactor even though nothing here makes a request.
+    #[tokio::test]
+    async fn the_app_poll_client_never_displaces_the_user_client_mutations_use() {
+        let cache = crate::registries::GithubClientCache::default();
+        let user = GhClient::stub_for_tests("cmd:gh auth token", "user-fp").expect("user stub");
+        let app =
+            GhClient::stub_for_tests("github-app:42/installation:7", "app-fp").expect("app stub");
+        cache.store(user);
+        cache.store_poll(app);
+        assert_eq!(
+            cache.cached().expect("user client").credential_source(),
+            "cmd:gh auth token",
+        );
+        assert_eq!(
+            cache
+                .cached_poll()
+                .expect("poll client")
+                .credential_source(),
+            "github-app:42/installation:7",
+        );
+
+        // Losing App coverage must drop the App client without taking the
+        // user client — and the mutation path — down with it.
+        cache.clear_poll();
+        assert!(cache.cached_poll().is_none());
+        assert!(cache.cached().is_some());
+    }
+
+    /// The notice fires when the gap appears and when its reason changes,
+    /// and not on every one of the sixty ticks an hour in between.
+    #[test]
+    fn the_fallback_notice_fires_on_change_not_every_tick() {
+        let (bus, mut rx) = tokio::sync::broadcast::channel(16);
+        let mut state = TickState::default();
+
+        note_app_coverage_gap(
+            &mut state,
+            &bus,
+            Some("not in the installation: a/b".into()),
+        );
+        note_app_coverage_gap(
+            &mut state,
+            &bus,
+            Some("not in the installation: a/b".into()),
+        );
+        let first = rx.try_recv().expect("the gap is announced");
+        assert!(
+            matches!(&first, Event::Notification { body, .. } if body.contains("a/b")),
+            "{first:?}",
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "an unchanged gap must not re-notify every tick",
+        );
+
+        note_app_coverage_gap(
+            &mut state,
+            &bus,
+            Some("not in the installation: c/d".into()),
+        );
+        assert!(rx.try_recv().is_ok(), "a changed gap is announced again");
+
+        // Recovery is silent but re-arms the notice.
+        note_app_coverage_gap(&mut state, &bus, None);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(state.gh_app_gap_notified, None);
+        note_app_coverage_gap(
+            &mut state,
+            &bus,
+            Some("not in the installation: c/d".into()),
+        );
+        assert!(rx.try_recv().is_ok(), "the notice re-arms after recovery");
+    }
+}
+
 /// Build and push the GitHub task source from an authenticated
 /// client. Extracted from `sources_for_with_engagement` so the
 /// credential-failure path can reach it too: a failed `gh auth token`
@@ -4249,6 +4706,12 @@ pub(super) async fn sources_for_with_engagement(
 async fn push_github_source(
     client: GhClient,
     restore_sync_cursors: bool,
+    // The user-token client, when the poller is NOT running on it — i.e.
+    // when `client` above is a GitHub App installation client with its own
+    // rate-limit budget. It is what the shared cache keeps serving to
+    // mutations and reads, so comments and merges stay attributed to the
+    // user, and it is what answers "which repos can *you* reach".
+    user_client: Option<GhClient>,
     setup: &lazybox_core::PersistedSetup,
     bus: tokio::sync::broadcast::Sender<Event>,
     state: &mut TickState,
@@ -4313,7 +4776,8 @@ async fn push_github_source(
             // it `None` so the next tick retries rather than
             // pinning a truncated allowlist that would hide
             // repos until restart.
-            match client.accessible_scopes().await {
+            let reachability = user_client.as_ref().unwrap_or(&client);
+            match reachability.accessible_scopes().await {
                 Ok(accessible) => state.implicit_gh_scopes = Some(accessible),
                 Err(e) => {
                     tracing::info!("github accessible-scopes fetch failed, retrying next tick: {e}")
@@ -4338,8 +4802,13 @@ async fn push_github_source(
         // Native `blocked_by` edges refresh on the same cadence as the row:
         // tie their cache TTL to the configured repo-refresh interval.
         .with_repo_refresh_interval(repo_refresh_interval);
+    // The heartbeat runs on the user client while the sweep runs on the App
+    // client, so they must agree on the notification cursor and the sweep
+    // clocks. Adopt before caching, so the copy handlers reach for is
+    // coherent too.
+    let user_client = user_client.map(|user| user.sharing_sync_state_with(&client));
     if restore_sync_cursors && let Some(store) = cursor_store.clone() {
-        let key = format!("github:sync-cursors:v1:{}", client.username());
+        let key = gh_state_key("github:sync-cursors:v1", &client);
         match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {
             Ok(Ok(Some(payload))) => {
                 match serde_json::from_str::<lazybox_gh::SyncCursors>(&payload) {
@@ -4365,7 +4834,7 @@ async fn push_github_source(
     // learned last run instead of re-bursting into the
     // same throttle.
     if restore_sync_cursors && let Some(store) = cursor_store.clone() {
-        let key = format!("github:rate-state:v1:{}", client.username());
+        let key = gh_state_key("github:rate-state:v1", &client);
         match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {
             Ok(Ok(Some(payload))) => {
                 match serde_json::from_str::<lazybox_gh::PersistedRateState>(&payload) {
@@ -4412,7 +4881,10 @@ async fn push_github_source(
             let _ = bus.send(Event::ViewerIdentities { logins: snapshot });
         }
     }
-    gh_client_cache.store(client.clone());
+    // The cache feeds mutations and interactive reads as well as the next
+    // tick's client reuse, so it holds the USER client whenever the poller
+    // is on a separate App credential — authoring must stay the user's.
+    gh_client_cache.store(user_client.clone().unwrap_or_else(|| client.clone()));
     // Resolve the `@lazybox` allowlist. Empty YAML
     // list → fall back to "just the authenticated
     // viewer", which mirrors the design doc's MVP
@@ -4621,6 +5093,7 @@ async fn push_github_source(
         );
     }
     sources.push(Box::new(GhSource {
+        user_client,
         client,
         filter,
         scopes,

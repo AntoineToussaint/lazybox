@@ -27,6 +27,12 @@ http = "1.4"
 # github.com's login endpoints, which live outside octocrab's api.github.com
 # base. Feature set mirrors linear-provider so the TLS backend is shared.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+# GitHub App auth (`app_auth.rs`). `jsonwebtoken` builds the RSA signing key
+# octocrab's `.app()` takes, and `secrecy` unwraps the `SecretString` octocrab
+# returns for an installation token. Both versions match octocrab's own pins
+# so neither adds a second copy to the tree.
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem"] }
+secrecy = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

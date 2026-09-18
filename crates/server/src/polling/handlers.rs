@@ -75,7 +75,7 @@ pub async fn post_reply(
         workspace_key,
         trimmed.len()
     );
-    if let Some(client) = config.poll.cached_gh_client() {
+    if let Some(client) = config.poll.polling_gh_client() {
         client.force_full_sweep();
     }
     config.poll.wake(true);
@@ -2781,7 +2781,7 @@ pub(crate) async fn inspect_worktrees_with(
 /// Expand a leading `~/` against `$HOME`. Mirrors the daemon's mount /
 /// scan path expansion so `scan.roots: [~/development]` resolves the
 /// same way the CLI `lazybox scan` does.
-fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
+pub(super) fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
     if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("~/"))
         && let Ok(home) = std::env::var("HOME")
     {
@@ -3579,8 +3579,9 @@ pub async fn prefetch_top_pr_details(
     const PREFETCH_CONCURRENCY: usize = 3;
 
     // Reuse the persistent GhClient cache. If absent (linear-only
-    // setup, or auth failed earlier), prefetch is a no-op.
-    let Some(client) = config.poll.cached_gh_client() else {
+    // setup, or auth failed earlier), prefetch is a no-op. This is
+    // background poll work, so it rides the polling budget.
+    let Some(client) = config.poll.polling_gh_client() else {
         return;
     };
 

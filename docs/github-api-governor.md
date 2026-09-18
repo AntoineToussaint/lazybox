@@ -23,6 +23,24 @@ the last 100 emergency points,
 provided their forecast fits the remaining quota. Actual primary
 exhaustion still blocks requests until reset.
 
+## A separate budget for the sweep
+
+The share above divides **one** budget. Registering a GitHub App
+(`providers.github.app`) instead gives the status sweep an installation
+credential with a 5,000/hour of its own, so agent traffic and scheduled
+polling stop competing at all — the reserve then protects interactive
+actions from the sweep rather than the sweep from agents.
+
+Two governors then exist, one per client, each observing its own limit
+headers. `PollState::polling_gh_client()` names the one the sweep is running
+on; `cached_gh_client()` stays the user's, for mutations and reads. Without
+an App, both are the same client and the share above is the whole story.
+
+The sweep only moves onto the App budget when the installation reaches every
+scoped repo, org and `watch:` entry: discovery is a GraphQL search, so a
+credential missing one of them returns fewer rows and no error. A gap puts
+the whole sweep back on the user token with a notice naming it.
+
 ## Admission and accounting
 
 Every `GhClient` clone shares the same governor, eight-request

@@ -181,6 +181,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | --- | --- |
 | `a R` | restart stopped agents |
 | `a K` | recover all credit |
+| `a A` | artifacts |
 | `a c` | spawn claude |
 | `a x` | spawn codex |
 | `a u` | spawn cursor |

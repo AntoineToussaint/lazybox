@@ -12250,6 +12250,106 @@ mod merge_focus_follow_tests {
         );
     }
 
+    fn rendered_description_modal(
+        model: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+    ) -> String {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                model
+                    .app
+                    .view(&Id::DescriptionModal, frame, Rect::new(0, 0, 100, 20))
+            })
+            .expect("render description modal");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The `▤N` badge's carrier and the `a A` reader (#1822): the daemon
+    /// owns the spool and pushes what it holds, an empty set clears the row,
+    /// and the reader opens whatever is attached.
+    #[test]
+    fn spooled_artifacts_badge_the_row_and_open_in_the_reader() {
+        use lazybox_core::Artifact;
+
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        let session = SessionKey::from(&ws_key);
+        assert!(m.sidebar.focus_workspace_key(&session));
+        assert_eq!(m.sidebar.artifact_count(&session), 0);
+
+        // `a A` on a workspace with no spool says so rather than opening an
+        // empty reader: the catalog gates the chord on the workspace, not on
+        // its spool, so the user has to learn which is missing.
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenArtifacts);
+        assert_ne!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+
+        let at = chrono::Utc::now();
+        m.handle_daemon_event(IpcEvent::WorkspaceArtifacts {
+            workspace_key: ws_key.clone(),
+            artifacts: vec![
+                Artifact::from_markdown("findings.md", "# Findings\n\nIt works.\n", at),
+                Artifact::from_markdown("plan.md", "# The plan\n\nStep one.\n", at),
+            ],
+            hidden: 1,
+        });
+        assert_eq!(m.sidebar.artifact_count(&session), 2);
+
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenArtifacts);
+        assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+
+        // The artifact reader shares `Id::DescriptionModal` so it keeps the
+        // wheel (`Id::consumes_scroll` whitelists that id alone), and
+        // `mount_description_modal` is idempotent on it — so `a A` over an
+        // already-open reader has to pop before it mounts, or it would do
+        // nothing at all.
+        m.update(Msg::ModalDismissed);
+        m.mount_description_modal("A task description".into(), "its body".into(), None);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenArtifacts);
+        assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+        assert_eq!(
+            m.modal_stack
+                .iter()
+                .filter(|id| **id == Id::DescriptionModal)
+                .count(),
+            1,
+            "the artifacts replace the open reader rather than stacking on it"
+        );
+        let rendered = rendered_description_modal(&mut m);
+        assert!(
+            rendered.contains("artifacts"),
+            "the reader must now show the artifacts, not the description it replaced: {rendered}"
+        );
+        assert!(
+            !rendered.contains("A task description"),
+            "the replaced description must be gone: {rendered}"
+        );
+
+        m.handle_daemon_event(IpcEvent::WorkspaceArtifacts {
+            workspace_key: ws_key,
+            artifacts: vec![],
+            hidden: 0,
+        });
+        assert_eq!(
+            m.sidebar.artifact_count(&session),
+            0,
+            "a cleared spool stops badging"
+        );
+    }
+
     /// `E A` arms auto-dispatch — but only behind a confirm that names the
     /// epic and the worker cap, because arming it is what authorizes lazybox
     /// to start agents unattended (#1525).

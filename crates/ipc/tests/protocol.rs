@@ -1554,6 +1554,15 @@ fn all_events() -> Vec<Event> {
             client_request_id: "req-2".into(),
             reply: lazybox_ipc::gh_shim::GhReply::Recorded,
         },
+        Event::WorkspaceArtifacts {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            artifacts: vec![lazybox_core::Artifact::from_markdown(
+                "plan.md",
+                "# The plan\n\nStep one.\n",
+                sample_time(),
+            )],
+            hidden: 2,
+        },
     ]
 }
 
@@ -1792,6 +1801,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentRequestsOpen { .. } => "AgentRequestsOpen",
         Event::TaskStatus { .. } => "TaskStatus",
         Event::GhShimReply { .. } => "GhShimReply",
+        Event::WorkspaceArtifacts { .. } => "WorkspaceArtifacts",
     }
 }
 

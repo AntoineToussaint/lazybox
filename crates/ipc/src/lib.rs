@@ -3959,11 +3959,26 @@ pub enum Event {
     /// filters, and a workspace with several agent terminals contributes
     /// all of them. Empty is the normal "nothing matched" answer, and the
     /// client must apply it — it is what clears a previous query's rows.
-    ///
-    /// Appended last (bincode is ordinal-sensitive).
     AgentOutputMatches {
         request_id: u64,
         entries: Vec<(String, String)>,
+    },
+    /// Markdown artifacts an agent spooled into this workspace's worktrees
+    /// (#1822), as the daemon's spool sweep last read them.
+    ///
+    /// Broadcast whenever the set moves — a file appeared, changed or was
+    /// removed — and replayed after the `Subscribe` snapshot for every
+    /// workspace carrying one, so a client that connects between two changes
+    /// still seeds the row's badge. An empty `artifacts` clears it.
+    ///
+    /// `hidden` counts the artifacts past `ARTIFACT_MAX_PER_WORKSPACE`: they
+    /// are still on disk, and the reader names them rather than presenting a
+    /// truncated set as the whole one. Appended last (bincode is
+    /// ordinal-sensitive).
+    WorkspaceArtifacts {
+        workspace_key: lazybox_core::WorkspaceKey,
+        artifacts: Vec<lazybox_core::Artifact>,
+        hidden: usize,
     },
 }
 

@@ -183,6 +183,7 @@ The strength rows carry the agent whose menu the model name was read from (here,
 | --- | --- |
 | `a R` | restart stopped agents |
 | `a K` | recover all credit |
+| `a A` | artifacts |
 | `a c` | spawn claude |
 | `a x` | spawn codex |
 | `a u` | spawn cursor |

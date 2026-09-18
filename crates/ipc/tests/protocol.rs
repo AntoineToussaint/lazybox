@@ -1565,6 +1565,15 @@ fn all_events() -> Vec<Event> {
                 "error[E0502]: cannot borrow `self` as mutable\n".into(),
             )],
         },
+        Event::WorkspaceArtifacts {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            artifacts: vec![lazybox_core::Artifact::from_markdown(
+                "plan.md",
+                "# The plan\n\nStep one.\n",
+                sample_time(),
+            )],
+            hidden: 2,
+        },
     ]
 }
 
@@ -1805,6 +1814,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::TaskStatus { .. } => "TaskStatus",
         Event::GhShimReply { .. } => "GhShimReply",
         Event::AgentOutputMatches { .. } => "AgentOutputMatches",
+        Event::WorkspaceArtifacts { .. } => "WorkspaceArtifacts",
     }
 }
 
@@ -1821,7 +1831,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        114,
+        115,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

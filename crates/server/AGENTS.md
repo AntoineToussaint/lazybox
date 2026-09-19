@@ -194,6 +194,46 @@ the real binary, and asks the daemon before it spends
 - **The cache is bounded three ways** — clamped TTL, entry count, total bytes.
   Age alone bounds nothing when the arrival rate scales with the fleet.
 
+## Searching what an agent said
+
+`agent_output_search.rs` answers the `/` search's `agent:` / `said:`
+qualifiers over terminal OUTPUT (#1780). The prompt half (#1774) is
+client-side; output exists only in the replay rings, so the client asks and
+the daemon scans.
+
+- **It returns deduplicated matching LINES, never a byte window.** An agent
+  TUI repaints its whole box continuously, so a window is mostly duplicate
+  frames — and those frames position each row with a CSI rather than a
+  newline. Only a ROW-changing sequence ends a line: `C`/`D`/`G` move within
+  one row (programs pad columns with `\x1b[<n>C` because it is shorter than
+  spaces) and reconstruct as a blank, erases and SGR are invisible. Breaking
+  on any of those split one rendered row in two, and every multi-word needle
+  spanning the split missed.
+- **Evidence is kept per needle, not per workspace.** The client ANDs the
+  `agent:` terms, so a needle with no evidence *excludes* the workspace. One
+  global line cap let a chatty needle spend the whole budget and silently
+  drop a row that matched every term; buckets plus round-robin ordering give
+  each term its own room, and a `const` assert pins `MATCH_CORPUS_BYTES` at
+  one full line per needle so the byte trim cannot undo it. The same applies
+  to `MAX_AGENT_OUTPUT_NEEDLES`: a needle past the cap is a false negative,
+  not a widening, so raise it rather than trim it.
+- **Cost is bounded before the query is issued**: the newest
+  `SCAN_TAIL_BYTES` of each ring, `MATCH_CORPUS_BYTES` per workspace, and
+  `SNAPSHOT_CONCURRENCY` snapshots in flight — sequential per-snapshot
+  deadlines cost N × the deadline in series, which is what that bound exists
+  for. The price is a function of terminal count, not of how chatty an agent
+  has been.
+- **An empty reply is load-bearing.** It is what clears the previous
+  query's rows on the client, and a client that hears nothing cannot tell
+  "no match" from "still scanning" — so the handler always sends one.
+- **The reply is scoped to its request id, and the client latch times out.**
+  The scan is asynchronous and unordered with respect to typing, so a reply
+  that outlives its query would filter the sidebar by a needle the user typed
+  past. The reply can also never arrive — a full event queue makes the
+  forwarder close the connection — so the client releases the latch on a
+  deadline and on the reconnect `Snapshot`, and re-asks on a slow cadence so
+  a standing query stays as live as its prompt half already is.
+
 ## The metering / context-hygiene proxy
 
 `proxy/` sits between an agent and its provider. Two facts live at different

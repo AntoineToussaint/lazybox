@@ -1887,6 +1887,9 @@ pub struct Model<T: TerminalAdapter> {
     /// `agent:` search corpus (#1774), so `view` rebuilds it only when
     /// the terminal stack's history actually moved.
     agent_text_rev: u64,
+    /// The daemon output scan backing the `agent:` / `said:` qualifiers
+    /// over what the agent SAID (#1780).
+    agent_output_search: AgentOutputSearch,
     /// UI→worker control channel for the remote box: explicit
     /// connect/disconnect (the `Shift-C` action) and the startup
     /// auto-connect (#1066). `None` when no `sandbox:` box is configured.
@@ -2803,6 +2806,77 @@ fn opened_file_notice(
 /// session. See `Model::tick_tips`.
 const TIP_IDLE_DELAY: Duration = Duration::from_secs(8);
 
+/// How long the `agent:` / `said:` needles must hold still before the
+/// client asks the daemon to scan terminal output for them (#1780).
+///
+/// Each scan reads the tail of EVERY live agent ring, so dispatching per
+/// keystroke would re-scan the whole fleet once per character of a typed
+/// word. 180ms is past a fast typist's inter-key interval and well under
+/// the ~250ms at which a user starts to perceive a wait — the rows from
+/// the client's own prompt corpora are already on screen throughout.
+const AGENT_OUTPUT_SEARCH_DEBOUNCE: Duration = Duration::from_millis(180);
+
+/// How long a dispatched scan may stay in flight before the client stops
+/// waiting for it and asks again (#1780).
+///
+/// The reply can be lost without any error reaching this client: a full
+/// event queue makes the daemon's forwarder CLOSE the connection
+/// (`EventSender`'s documented overload behaviour), and the request dies
+/// with it — as it does on a daemon restart. Without a deadline the
+/// `dispatched` latch below would never release, so the tick would
+/// early-return forever, the search bar would read `scanning output…`
+/// permanently, and every row that matches only on output would stay
+/// hidden until the user retyped the query.
+///
+/// This is the same rule `restart_in_flight` states in `events.rs`: a
+/// stale in-flight guard is strictly worse than an early release. Set well
+/// past a healthy scan (tens of ms) so a slow daemon is waited for, not
+/// raced.
+const AGENT_OUTPUT_SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often a STANDING `agent:` query re-scans (#1780).
+///
+/// Without this the two halves of one query disagree: the prompt corpus
+/// re-filters on every new prompt (`refresh_agent_search_text`,
+/// `ingest_durable_agent_text`), so a committed query stays live for what
+/// agents are *asked* while frozen at dispatch time for what they *said*.
+/// A workspace that hits the searched error a minute after the query was
+/// typed simply never appears, and nothing distinguishes that from "it
+/// isn't there". The scan is bounded per terminal, so re-asking on a slow
+/// cadence costs a fixed amount rather than growing with the session.
+const AGENT_OUTPUT_SEARCH_REFRESH: Duration = Duration::from_secs(5);
+
+/// The daemon output scan behind an `agent:` / `said:` query (#1780).
+///
+/// `needles` is the derived form of the live query, not the query itself:
+/// two queries that differ only outside their agent terms ask for the same
+/// scan, and re-issuing it would re-scan every ring for nothing.
+#[derive(Debug, Default)]
+struct AgentOutputSearch {
+    /// Needles the sidebar's query currently implies. Empty for every
+    /// query without an agent term — the common case, and the one that
+    /// keeps the qualifier's cost opt-in.
+    needles: Vec<String>,
+    /// When `needles` last changed, for the debounce.
+    changed_at: Option<std::time::Instant>,
+    /// Whether the current `needles` have already been sent. A scan is
+    /// issued once per distinct needle set, not once per tick.
+    dispatched: bool,
+    /// When the current scan was sent. Kept after its reply lands, because
+    /// it times both [`AGENT_OUTPUT_SEARCH_TIMEOUT`] (a reply that never
+    /// came) and [`AGENT_OUTPUT_SEARCH_REFRESH`] (a standing query going
+    /// stale); `in_flight` is what distinguishes the two.
+    dispatched_at: Option<std::time::Instant>,
+    /// The request the client will accept a reply for. `None` once a reply
+    /// has been applied, or as soon as the needles move — which is how a
+    /// reply that outlived its query is dropped rather than filtering the
+    /// sidebar by a needle the user has typed past.
+    in_flight: Option<u64>,
+    /// Monotonic request ids. Wrapping is harmless: an id only has to be
+    /// distinct from the one request that may still be in flight.
+    next_request_id: u64,
+}
+
 /// How long the first `q` stays armed waiting for the second tap.
 // `Q_DOUBLE_TAP_WINDOW` retired — value lives on `ui_defaults`
 // now, sourced from `~/.lazybox/config.yaml::ui.quit_double_tap_window`
@@ -2864,6 +2938,7 @@ impl<T: TerminalAdapter> Model<T> {
             remote_notice_rx: None,
             remote_marks: std::collections::HashMap::new(),
             agent_text_rev: 0,
+            agent_output_search: AgentOutputSearch::default(),
             remote_control: None,
             remote_require_connect: false,
             event_backlog: helpers::BacklogMonitor::default(),
@@ -7075,6 +7150,116 @@ impl<T: TerminalAdapter> Model<T> {
         self.agent_text_rev = rev;
         self.sidebar
             .set_agent_text(self.terminals.agent_text_by_session());
+    }
+
+    /// Keep the daemon's terminal-OUTPUT scan in step with the live query
+    /// (#1780). Called once per run-loop iteration; a no-op for every query
+    /// that carries no `agent:` / `said:` term, which is almost all of them.
+    ///
+    /// Debounced rather than dispatched per keystroke: `agent:par` and
+    /// `agent:parser` are two different scans over every live ring, and a
+    /// user types the second within a few tens of milliseconds of the first.
+    /// Waiting [`AGENT_OUTPUT_SEARCH_DEBOUNCE`] after the needles last moved
+    /// costs the user nothing they can perceive and collapses a typed word
+    /// into one scan.
+    pub(super) fn tick_agent_output_search(&mut self) {
+        let needles = self.sidebar.agent_qualifier_needles();
+        let now = std::time::Instant::now();
+        if needles != self.agent_output_search.needles {
+            // The needles moved, so any in-flight reply now answers a
+            // question the user has typed past. Drop the previous results
+            // with it: text scanned for `par` is not evidence about
+            // `parser`, and leaving it up would show rows the query no
+            // longer selects.
+            self.agent_output_search.needles = needles;
+            self.agent_output_search.changed_at = Some(now);
+            self.agent_output_search.in_flight = None;
+            self.agent_output_search.dispatched = false;
+            self.agent_output_search.dispatched_at = None;
+            self.sidebar.set_agent_output_text(Vec::new());
+            self.sidebar
+                .set_agent_output_scanning(!self.agent_output_search.needles.is_empty());
+            self.redraw = true;
+        }
+        // Release a scan whose reply is never coming. The connection can end
+        // under the daemon's own overload handling, taking the request with
+        // it and leaving nothing to answer this latch — so the latch has to
+        // time itself out rather than trust a reply that may not exist.
+        if self
+            .agent_output_search
+            .dispatched_at
+            .is_some_and(|at| now.duration_since(at) >= AGENT_OUTPUT_SEARCH_TIMEOUT)
+        {
+            self.agent_output_search.in_flight = None;
+            self.agent_output_search.dispatched = false;
+            self.agent_output_search.dispatched_at = None;
+            self.agent_output_search.changed_at = Some(now - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        }
+        // A settled query re-asks on a slow cadence so its rows stay as live
+        // as the prompt half of the same query already is.
+        if self.agent_output_search.in_flight.is_none()
+            && self.agent_output_search.dispatched
+            && self
+                .agent_output_search
+                .dispatched_at
+                .is_some_and(|at| now.duration_since(at) >= AGENT_OUTPUT_SEARCH_REFRESH)
+        {
+            self.agent_output_search.dispatched = false;
+            self.agent_output_search.changed_at = Some(now - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        }
+        if self.agent_output_search.dispatched
+            || self.agent_output_search.needles.is_empty()
+            || self
+                .agent_output_search
+                .changed_at
+                .is_none_or(|at| now.duration_since(at) < AGENT_OUTPUT_SEARCH_DEBOUNCE)
+        {
+            return;
+        }
+        self.agent_output_search.next_request_id =
+            self.agent_output_search.next_request_id.wrapping_add(1);
+        let request_id = self.agent_output_search.next_request_id;
+        self.agent_output_search.in_flight = Some(request_id);
+        self.agent_output_search.dispatched = true;
+        self.agent_output_search.dispatched_at = Some(now);
+        self.send_cmd(IpcCommand::SearchAgentOutput {
+            request_id,
+            needles: self.agent_output_search.needles.clone(),
+        });
+    }
+
+    /// Release an in-flight output scan because the connection it was sent
+    /// on is gone (#1780). A fresh `Event::Snapshot` is the client's
+    /// reconnect signal, and the daemon-side request died with the old
+    /// connection — so the reply this latch waits for will never arrive.
+    /// Clearing it here makes the next tick re-dispatch immediately rather
+    /// than waiting out [`AGENT_OUTPUT_SEARCH_TIMEOUT`]; the timeout stays
+    /// as the catch-all for losses that produce no Snapshot at all.
+    pub(super) fn release_agent_output_scan_on_reconnect(&mut self) {
+        if self.agent_output_search.in_flight.take().is_some() {
+            self.agent_output_search.dispatched = false;
+            self.agent_output_search.dispatched_at = None;
+            self.agent_output_search.changed_at =
+                Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        }
+    }
+
+    /// Adopt one `Event::AgentOutputMatches` (#1780), or drop it when the
+    /// query has moved on. Staleness is decided by request id and nothing
+    /// else: the scan is asynchronous and unordered with respect to typing,
+    /// so a reply that outlived its query would filter the sidebar by a
+    /// needle no longer in the box.
+    pub(super) fn apply_agent_output_matches(
+        &mut self,
+        request_id: u64,
+        entries: Vec<(String, String)>,
+    ) {
+        if self.agent_output_search.in_flight != Some(request_id) {
+            return;
+        }
+        self.agent_output_search.in_flight = None;
+        self.sidebar.set_agent_output_text(entries);
+        self.redraw = true;
     }
 
     pub fn view(&mut self) {

@@ -4946,3 +4946,93 @@ async fn failed_provision_fails_spawn_loudly_and_leaves_no_session() {
     .await
     .expect("deadline");
 }
+
+/// `Command::SearchAgentOutput` (#1780): what the agent SAID is reachable
+/// only here, in the daemon's replay rings. The scan has to survive the two
+/// properties of that stream — it is ANSI-laden, and a full-screen agent
+/// repaints the same rows continuously — and it must answer even when
+/// nothing matched, because an empty reply is what clears the previous
+/// query's rows on the client.
+#[tokio::test]
+async fn agent_output_search_matches_through_ansi_and_collapses_repaints() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let _terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // A repainting agent: the same row re-drawn, cursor-positioned
+        // rather than newline-separated, with the phrase split across SGR
+        // colour changes.
+        let mut stream = Vec::new();
+        for _ in 0..40 {
+            stream.extend_from_slice(
+                b"\x1b[1;1H\x1b[2K\x1b[1;31merror[E0502]\x1b[0m: \x1b[1mcannot \x1b[1mborrow\x1b[0m `self`",
+            );
+        }
+        stream.extend_from_slice(b"\x1b[2;1Hall done\r\n");
+        mock.emit(&key, &stream).await;
+
+        client
+            .send(Command::SearchAgentOutput {
+                request_id: 11,
+                needles: vec!["cannot borrow".into()],
+            })
+            .unwrap();
+        let reply = wait_for(
+            &mut client,
+            |event| matches!(event, Event::AgentOutputMatches { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("the scan replies");
+        let Event::AgentOutputMatches {
+            request_id,
+            entries,
+        } = reply
+        else {
+            unreachable!()
+        };
+        assert_eq!(request_id, 11, "the reply carries its request back");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].0, "test:ws-1");
+        assert!(
+            entries[0].1.contains("cannot borrow `self`"),
+            "escapes wrapping the phrase must not defeat the match: {:?}",
+            entries[0].1
+        );
+        assert!(
+            !entries[0].1.contains('\x1b'),
+            "the client is handed text, not a terminal stream: {:?}",
+            entries[0].1
+        );
+        assert_eq!(
+            entries[0].1.lines().count(),
+            1,
+            "forty repaints of one row are one line: {:?}",
+            entries[0].1
+        );
+
+        // Nothing matched is still an answer, and it is the one that clears
+        // the previous query's rows.
+        client
+            .send(Command::SearchAgentOutput {
+                request_id: 12,
+                needles: vec!["nothing said this".into()],
+            })
+            .unwrap();
+        let reply = wait_for(
+            &mut client,
+            |event| matches!(event, Event::AgentOutputMatches { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("an empty scan replies too");
+        assert!(matches!(
+            reply,
+            Event::AgentOutputMatches { request_id, ref entries } if request_id == 12 && entries.is_empty()
+        ));
+    })
+    .await
+    .expect("test deadline");
+}

@@ -553,6 +553,24 @@ pub struct Sidebar {
     /// because it additionally holds prompts submitted since the snapshot —
     /// the daemon's copy is only re-read on connect.
     agent_text_live: HashMap<SessionKey, String>,
+    /// Matching lines of terminal OUTPUT the daemon's scan returned for the
+    /// live query (#1780) — what the agent *said back*, which lives only in
+    /// the daemon's replay rings. APPENDED to the two prompt corpora rather
+    /// than overriding them: a workspace can match on what it was asked, on
+    /// what it answered, or on both, and shadowing either half would make a
+    /// query's result depend on which half the daemon happened to reach.
+    ///
+    /// Scoped to one query. It is replaced wholesale by each reply and
+    /// cleared when the agent terms change, because text scanned for a
+    /// different needle answers a different question. It is NOT refreshed
+    /// while a query stands: a scan is a point-in-time answer, and
+    /// re-running it on a timer would put the fleet-wide cost on a clock
+    /// rather than on something the user did.
+    agent_text_output: HashMap<SessionKey, String>,
+    /// A daemon output scan is in flight for the live query (#1780). The
+    /// search bar says so: the rows on screen are the answer from the two
+    /// client-side corpora alone, and more may still arrive.
+    agent_output_scanning: bool,
     /// Excerpt of the agent text that matched, for rows an `agent:` term
     /// selected — the row's "why did this match" cue, since the hit isn't
     /// in the title the underline marks. Rebuilt by every recompute from
@@ -777,6 +795,8 @@ impl Sidebar {
             agent_text: HashMap::new(),
             agent_text_durable: HashMap::new(),
             agent_text_live: HashMap::new(),
+            agent_text_output: HashMap::new(),
+            agent_output_scanning: false,
             agent_excerpts: HashMap::new(),
             agent_text_rev: 0,
             broadcast_selected: std::collections::HashSet::new(),
@@ -4795,9 +4815,46 @@ impl Sidebar {
         self.rebuild_agent_text();
     }
 
-    /// Re-merge the two corpora and re-run a live search against the result.
-    /// The live half wins per key: it is the durable half plus whatever has
-    /// been submitted since the snapshot.
+    /// Replace the terminal-OUTPUT half of the corpus with one daemon scan's
+    /// answer (#1780) and re-filter. Wholesale, not merged: the reply is the
+    /// complete answer for its query, and an empty one is what clears the
+    /// previous query's rows.
+    pub fn set_agent_output_text(&mut self, entries: Vec<(String, String)>) {
+        self.agent_output_scanning = false;
+        // Clearing an already-empty corpus changes nothing, and the model
+        // clears on every needle change — which is every keystroke of an
+        // `agent:` query, each of which has already re-filtered once.
+        if self.agent_text_output.is_empty() && entries.is_empty() {
+            return;
+        }
+        self.agent_text_output = entries
+            .into_iter()
+            .map(|(key, text)| (SessionKey::new(key), text))
+            .collect();
+        self.rebuild_agent_text();
+    }
+
+    /// Note that a daemon output scan is in flight (or has finished without
+    /// a reply this client will use). Only the search bar reads it, so this
+    /// never re-filters.
+    pub fn set_agent_output_scanning(&mut self, scanning: bool) {
+        self.agent_output_scanning = scanning;
+    }
+
+    /// The needles an output scan for the live query would search for —
+    /// empty when there is no query or it carries no `agent:` / `said:`
+    /// term, which is the signal that no scan is owed.
+    pub fn agent_qualifier_needles(&self) -> Vec<String> {
+        self.search.as_ref().map_or_else(Vec::new, |s| {
+            lazybox_tui_core::inbox::agent_qualifier_needles(&s.query)
+        })
+    }
+
+    /// Re-merge the three corpora and re-run a live search against the
+    /// result. The live prompt half wins over the durable one per key: it is
+    /// the durable half plus whatever has been submitted since the snapshot.
+    /// Scanned output is appended to whichever prompt text a key has, so a
+    /// workspace stays matchable on both what it was asked and what it said.
     fn rebuild_agent_text(&mut self) {
         let mut merged = self.agent_text_durable.clone();
         merged.extend(
@@ -4805,6 +4862,13 @@ impl Sidebar {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone())),
         );
+        for (key, output) in &self.agent_text_output {
+            let corpus = merged.entry(key.clone()).or_default();
+            if !corpus.is_empty() && !corpus.ends_with('\n') {
+                corpus.push('\n');
+            }
+            corpus.push_str(output);
+        }
         self.agent_text = merged;
         self.agent_text_rev = self.agent_text_rev.wrapping_add(1);
         if self.search.as_ref().is_some_and(|s| {

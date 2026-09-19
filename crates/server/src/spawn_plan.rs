@@ -461,6 +461,9 @@ pub(crate) fn argv_for(
             } else {
                 agent.spawn(&ctx)
             };
+            if ctx.hook_settings_path.is_none() || ctx.access == AgentRunAccess::ReadOnly {
+                argv.extend(agent.session_context_args(lazybox_agents::lazybox_session_context()));
+            }
             if let Some(command) = hook_command {
                 argv.extend(agent.hook_command_args(command));
             }
@@ -851,6 +854,7 @@ mod tests {
         for resume in [false, true] {
             let mut request = input(TerminalKind::Agent("codex".into()));
             request.resume = resume;
+            request.initial_prompt = None;
             let plan = build_spawn_plan(request, &cfg, &Registry::default_builtins())
                 .expect("valid Codex plan");
             assert!(
@@ -862,6 +866,36 @@ mod tests {
             );
             assert_eq!(plan.model_alias.as_deref(), Some("L"));
             assert_eq!(plan.model_label.as_deref(), Some("GPT-5.5"));
+            let context_arg = plan
+                .argv
+                .iter()
+                .find_map(|arg| arg.strip_prefix("developer_instructions="))
+                .expect("bare Codex spawn and resume carry native startup context");
+            assert_eq!(
+                serde_json::from_str::<String>(context_arg).expect("quoted briefing"),
+                lazybox_agents::lazybox_session_context()
+            );
+        }
+    }
+
+    #[test]
+    fn hookless_claude_spawn_and_resume_carry_native_startup_context() {
+        for resume in [false, true] {
+            let mut request = input(TerminalKind::Agent("claude".into()));
+            request.hook_settings = None;
+            request.initial_prompt = None;
+            request.resume = resume;
+            let plan = build_spawn_plan(
+                request,
+                &lazybox_config::Config::default(),
+                &Registry::default_builtins(),
+            )
+            .expect("hookless Claude plan");
+            assert!(plan.argv.windows(2).any(|args| args
+                == [
+                    "--append-system-prompt",
+                    lazybox_agents::lazybox_session_context()
+                ]));
         }
     }
 
@@ -899,7 +933,7 @@ mod tests {
             "['--model', '--verbose']",
         ] {
             let cfg = lazybox_config::Config::parse(&format!(
-                "agents:\n  codex:\n    models:\n      L:\n        label: Invalid\n        args: {args}\n"
+                "agents:\n  codex:\n    models:\n      tiers:\n        - alias: L\n          label: Invalid\n          args: {args}\n"
             ))
             .expect("parse malformed model arguments");
             let registry = Registry::default_builtins();

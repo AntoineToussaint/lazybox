@@ -87,3 +87,11 @@ record it already holds — the GitHub budget it protects is the daemon's own
 (#1799). Global response/formatting rules live here too, once per session;
 snippets carry only task-specific instructions and must not append a second
 contract later in the turn.
+
+PTY starts deliver the briefing through Claude's context hook, or native
+startup arguments when there is no hook: Codex's `developer_instructions`
+override and Claude's `--append-system-prompt`. This covers bare starts with
+no task yet. Other adapters prefix their initial task; structured/headless
+runs prefix the first input at the provider boundary. Codex's injected
+`developer_instructions` is owned by Lazybox for these launches; repository
+`AGENTS.md` guidance still loads normally.

@@ -52,7 +52,7 @@ worktree layout on startup.
 `src/polling/mod.rs`), `core` (`src/task_ref.rs`), `tui-boot`
 **Config / flags:** `--issue` / `--pr` / `--ticket` / `--scratch` on
 `lazybox workspace create`
-**Key bindings:** `x n` (named create, now attach-or-refuse under a repo)
+**Key bindings:** `w w` works the selected tracker record
 
 ### What it does
 Every GitHub issue / PR and every Linear ticket gets **exactly one** lazybox
@@ -75,9 +75,8 @@ and the record's own row reads idle while an agent is actually on it (#1586).
 - **CLI:** `lazybox workspace create --issue owner/repo#N` (also `--pr` /
   `--ticket`; `#N` resolves against `--repo`). Repo-less scratch is
   `--name <name> --scratch`.
-- **TUI:** `x n` under a repo group either attaches to the open task the name
-  names, or is refused with the rule; under a local project it creates as
-  before.
+- **TUI:** select the tracker row and press `w w`. `x n` is separate: it
+  always creates a repo-free floating folder, regardless of selection.
 
 ### How it works (brief)
 `lazybox_core::task_ref::parse_task_ref` maps every reference shape
@@ -104,10 +103,10 @@ number is deliberately not a reference — `#7` means the record, `7` is an
 ordinary scratch name — so a create can never be silently redirected by a name
 that merely looks numeric.
 
-The TUI's `x n` (and the Start sheet's rows) therefore send `scratch: true`:
+The Start sheet's project-workspace rows send `scratch: true`:
 there is no keybinding for "yes, this is scratch", and a human who opened the
 New-workspace modal and typed a name has already declared intent. They keep
-the attach, so `x n` "#1586" still lands on that issue's row. The refusal
+the attach, so a project-workspace name "#1586" still lands on that issue's row. The refusal
 exists to teach agents and scripts, which reach the daemon through the CLI,
 MCP, or gateway and can pass `--scratch` deliberately.
 
@@ -125,9 +124,9 @@ activity, cost and notes onto the PR's row and archives the scratch one.
 - [ ] `lazybox workspace create --name foo --repo owner/repo` is refused with
       the rule; adding `--scratch` succeeds.
 - [ ] `--scratch` still attaches when the name is a record (`--name '#7'`).
-- [ ] `x n` under a repo group creates without refusing, but `x n` "#7"
-      attaches to issue #7's row.
-- [ ] `x n` under a Linear team project is guarded the same way.
+- [ ] Project-workspace creation from the Start sheet attaches a name "#7"
+      to issue #7's row; `x n` instead creates an independent repo-free folder.
+- [ ] Named creation under a Linear team project uses the same attach guard.
 - [ ] `lazybox workspace create --issue <url>` prints `Attached to …` and the
       record's existing key.
 - [ ] A scratch workspace whose branch becomes a PR's head folds into the PR's
@@ -268,34 +267,41 @@ walk before deleting anything.
 
 ---
 
-## New pre-PR workspace
+## Floating and coordination workspaces
 
 **Status:** stable
-**Crate(s):** `tui`, `git-ops`
-**Config / flags:** —
-**Key bindings:** `x n`
+**Crate(s):** `tui`, `core`, `server` (`workspace/floating.rs`)
+**Config / flags:** `agent.coordination_prompt`
+**Key bindings:** `x n` floating, `x c` coordination
 
 ### What it does
-Creates a fresh workspace with a new branch off the latest `main`, before any
-PR exists — for starting work from scratch.
+Creates a persistent empty folder without a repository, branch, or tracker
+record. Coordination workspaces also start with the Coordinator role and an
+overridable brief covering epics, cross-repo owner contracts, blockers and the
+minimum necessary issues. Implementation stays on the owning tracker record.
 
 ### How to use it
-Press `x n`, enter a name; lazybox creates the branch + worktree and opens the
-workspace ready for an agent or shell.
+Press `x n` or `x c`, enter a name; lazybox opens the configured default agent
+in a fresh folder even with an empty sidebar. Override coordination instructions
+with `agent.coordination_prompt`; an empty string disables only the extra brief.
 
 ### How it works (brief)
-`NewWorkspace` (`crates/tui-core/src/action.rs`) prompts for a name and calls
-`WorktreeManager::checkout_new_branch()` off the repo's base branch.
+`CreateFloatingWorkspace` allocates a folder through the core sandbox paths
+and persists its purpose. PTY and headless launches resolve durable sessions
+through the same daemon owner; restarts and resumes reuse the folder. Archive
+removes the row but preserves user files, and a later create never reuses an
+archived folder. Legacy persisted local sandbox folders migrate explicitly;
+a key prefix alone cannot authorize a spawn.
 
 ### Test checklist
-- [ ] `x n` prompts for a name and creates a worktree on a new branch.
-- [ ] The new branch is based on the latest `main`.
-- [ ] You can immediately spawn an agent in the new workspace.
+- [ ] Both actions work with no project selected and create an empty non-git folder.
+- [ ] Agent starts and resumes use the explicit model and shared startup rules.
+- [ ] Coordination starts/resumes also receive the configured or built-in brief.
+- [ ] Archive preserves notes; stale workspace/session requests are rejected.
 
 ### Known sharp edges
-- Needs a repo context to branch from; behavior with no scoped repo is undefined.
-- Under a repo group this is attach-or-refuse, not create — see
-  [One workspace per tracker record](#one-workspace-per-tracker-record).
+- Floating folders are not git worktrees and are not automatically deleted on
+  archive. Keep implementation in the tracker workspace, not a floating folder.
 
 ---
 

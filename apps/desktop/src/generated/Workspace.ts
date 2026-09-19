@@ -2,6 +2,7 @@
 import type { Activity } from "./Activity";
 import type { AutomationPolicies } from "./AutomationPolicies";
 import type { CleanupPrompt } from "./CleanupPrompt";
+import type { FloatingWorkspaceKind } from "./FloatingWorkspaceKind";
 import type { HopperMeta } from "./HopperMeta";
 import type { ProjectKey } from "./ProjectKey";
 import type { Role } from "./Role";
@@ -42,6 +43,10 @@ project_key: ProjectKey | null,
  * derived workspaces leave this `false`.
  */
 local: boolean,
+/**
+ * Repo-free directory purpose, independent of sidebar grouping and name.
+ */
+floating: FloatingWorkspaceKind | null,
 /**
  * Present when this is a user-captured personal Hopper workspace.
  * Kept separate from local: imported checkouts and hand-created

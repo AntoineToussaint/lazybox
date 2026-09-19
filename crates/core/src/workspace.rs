@@ -324,7 +324,8 @@ pub enum CleanupPrompt {
 ///   canary). Optional with `#[serde(default)]`, so older records read
 ///   back cleanly as not opted in — the canary is never inherited, only
 ///   chosen.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 13;
+/// - 14: `Workspace::floating` records ownership of a repo-free directory.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 14;
 
 /// How long a workspace counts as "recently woken" after an
 /// event-conditional snooze fires (#scale): within this window the row
@@ -523,6 +524,15 @@ pub enum WorkspaceDecodeError {
     NewerSchema { found: u32, supported: u32 },
 }
 
+/// Purpose of a persistent Lazybox-owned directory with no repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum FloatingWorkspaceKind {
+    Thinking,
+    Coordination,
+}
+
 /// One workspace = one unit of work (PR + linked issues), holding
 /// **zero or more sessions**. A session is one folder worktree on
 /// disk; without sessions the workspace is purely a tracking row
@@ -552,6 +562,9 @@ pub struct Workspace {
     /// derived workspaces leave this `false`.
     #[serde(default)]
     pub local: bool,
+    /// Repo-free directory purpose, independent of sidebar grouping and name.
+    #[serde(default)]
+    pub floating: Option<FloatingWorkspaceKind>,
     /// Present when this is a user-captured personal Hopper workspace.
     /// Kept separate from local: imported checkouts and hand-created
     /// project workspaces are local too, but do not belong in the Hopper.
@@ -742,6 +755,7 @@ impl Workspace {
             key,
             project_key: None,
             local: false,
+            floating: None,
             hopper: None,
             linked_checkout: None,
             branch,
@@ -1234,6 +1248,7 @@ impl Workspace {
             key: _,
             project_key: _,
             local: _,
+            floating: _,
             hopper: _,
             linked_checkout: _,
             name: _,

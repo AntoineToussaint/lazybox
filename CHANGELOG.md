@@ -6,6 +6,14 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Added
+
+- `x n` now creates a floating workspace in a fresh persistent folder without
+  inheriting a repository. `x c` creates a coordination workspace with a built-in
+  brief for epics, cross-repo contracts, blockers, and minimal issue count;
+  override it with `agent.coordination_prompt`.
+- Close-issue moves from `x c` to `x Shift-C` to make room for coordination.
+
 ### Fixed
 
 - Claude and Codex launches now always use Lazybox's selected/default model,

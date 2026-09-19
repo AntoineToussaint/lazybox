@@ -2241,9 +2241,7 @@ async fn handle_spawn_inner(
                 return None;
             }
         };
-        let requires_persisted_session = !landed_on_main
-            && !workspace_key.as_str().starts_with("sandbox-")
-            && owning_session.is_some();
+        let requires_persisted_session = !landed_on_main && owning_session.is_some();
         if requires_persisted_session
             && !owning_session.is_some_and(|id| workspace.find_session(id).is_some())
         {
@@ -2334,6 +2332,21 @@ async fn handle_spawn_inner(
     // still gates on the proxy being enabled/running — needs no change and
     // every safety property of the canary is preserved.
     let mut spawn_ws = load_workspace(config, &WorkspaceKey::new(session_key.as_str()));
+    let coordination_context = spawn_ws
+        .as_ref()
+        .ok()
+        .and_then(|workspace| crate::workspace::floating::coordination_prompt(workspace, &cfg));
+    if let (Some(context), TerminalKind::Agent(id)) = (&coordination_context, &kind)
+        && config
+            .agents
+            .get(id)
+            .is_some_and(|agent| agent.session_context_args(context).is_empty())
+    {
+        initial_prompt = Some(match initial_prompt.take() {
+            Some(prompt) => format!("{context}\n\n{prompt}"),
+            None => lazybox_agents::lazybox_session_prompt(context),
+        });
+    }
     // #1523: stamp an in-band role (the `E p` / `E c` role spawns carry one)
     // onto this freshly-loaded workspace copy *before* the preamble is derived
     // below. The role spawn also emits a separate `SetWorkspaceRole` to persist
@@ -2419,6 +2432,7 @@ async fn handle_spawn_inner(
             terminal_id,
             hook_settings,
             hook_command: argv_hook_command,
+            coordination_context,
             repo_env,
             declared_model_alias,
             autonomous,
@@ -3528,24 +3542,7 @@ async fn resolve_or_create_session(
 ) -> Result<(PathBuf, SessionId, bool), crate::ServerError> {
     let workspace_key = WorkspaceKey::new(session_key.as_str());
 
-    // Sandbox workspaces (key prefix `sandbox-`) live in a
-    // dedicated per-workspace directory at `paths::sandbox_dir(key)`.
-    // No worktree provisioning — the dir is just a plain mkdir from
-    // `create_sandbox_workspace`. Sessions all share that directory.
-    if workspace_key.as_str().starts_with("sandbox-") {
-        let path = lazybox_core::paths::sandbox_dir(workspace_key.as_str());
-        // Best-effort mkdir in case the user removed the dir between
-        // sandbox creation and spawn. Failure logs but doesn't abort.
-        if let Err(e) = std::fs::create_dir_all(&path) {
-            tracing::warn!(
-                sandbox = %path.display(),
-                "sandbox dir create_dir_all failed at spawn time: {e}",
-            );
-        }
-        return Ok((path, session_id.unwrap_or_else(SessionId::new), false));
-    }
-
-    // Every non-sandbox spawn without an explicit cwd must resolve to
+    // Every spawn without an explicit cwd must resolve to
     // a persisted workspace. Falling back to the daemon's cwd is unsafe:
     // a stale key or store failure could otherwise launch an agent in
     // whichever repository happened to start the daemon. The tombstone
@@ -3570,6 +3567,16 @@ async fn resolve_or_create_session(
             return Err(error);
         }
     };
+
+    if workspace.floating.is_some() {
+        return crate::workspace::floating::resolve_session(
+            config,
+            &workspace_key,
+            session_id,
+            session_kind_from_terminal(kind),
+        )
+        .await;
+    }
 
     // Linked (no-worktree) workspace: every session lands directly in
     // the user's existing checkout on whatever branch it already sits
@@ -12950,6 +12957,7 @@ mod tests {
             false,
             hook_settings_path,
             hook_command,
+            None,
             model_args,
             resume,
             None,
@@ -13492,6 +13500,7 @@ mod tests {
                 terminal_id,
                 hook_settings: None,
                 hook_command: None,
+                coordination_context: None,
                 repo_env: vec![("PROJECT_ENV".into(), "test".into())],
                 declared_model_alias: None,
                 autonomous: false,

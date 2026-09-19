@@ -60,6 +60,7 @@ pub(crate) struct SpawnPlanInput {
     pub terminal_id: TerminalId,
     pub hook_settings: Option<PathBuf>,
     pub hook_command: Option<String>,
+    pub coordination_context: Option<String>,
     pub repo_env: Vec<(String, String)>,
     pub declared_model_alias: Option<String>,
     pub autonomous: bool,
@@ -188,6 +189,7 @@ pub(crate) fn build_spawn_plan(
         terminal_id,
         hook_settings,
         hook_command,
+        coordination_context,
         repo_env,
         declared_model_alias,
         autonomous,
@@ -240,6 +242,7 @@ pub(crate) fn build_spawn_plan(
         cfg.agent.strict_mcp(),
         hook_settings.clone(),
         hook_command.as_deref(),
+        coordination_context.as_deref(),
         &resolved_model.args,
         resume,
         provider_session_id.as_deref(),
@@ -435,6 +438,7 @@ pub(crate) fn argv_for(
     strict_mcp: bool,
     hook_settings_path: Option<PathBuf>,
     hook_command: Option<&str>,
+    coordination_context: Option<&str>,
     model_args: &[String],
     resume: bool,
     provider_session_id: Option<&str>,
@@ -462,7 +466,14 @@ pub(crate) fn argv_for(
                 agent.spawn(&ctx)
             };
             if ctx.hook_settings_path.is_none() || ctx.access == AgentRunAccess::ReadOnly {
-                argv.extend(agent.session_context_args(lazybox_agents::lazybox_session_context()));
+                let mut context = lazybox_agents::lazybox_session_context().to_string();
+                if let Some(extra) = coordination_context {
+                    context.push_str("\n\n");
+                    context.push_str(extra);
+                }
+                argv.extend(agent.session_context_args(&context));
+            } else if let Some(extra) = coordination_context {
+                argv.extend(agent.session_context_args(extra));
             }
             if let Some(command) = hook_command {
                 argv.extend(agent.hook_command_args(command));
@@ -646,6 +657,7 @@ mod tests {
             terminal_id: TerminalId(42),
             hook_settings: None,
             hook_command: None,
+            coordination_context: None,
             repo_env: Vec::new(),
             declared_model_alias: None,
             autonomous: false,
@@ -896,6 +908,35 @@ mod tests {
                     "--append-system-prompt",
                     lazybox_agents::lazybox_session_context()
                 ]));
+        }
+    }
+
+    #[test]
+    fn coordination_context_is_present_on_bare_starts_and_resumes() {
+        for agent in ["codex", "claude"] {
+            for resume in [false, true] {
+                let mut request = input(TerminalKind::Agent(agent.into()));
+                request.resume = resume;
+                request.initial_prompt = None;
+                request.coordination_context = Some("Coordinate the shared epic.".into());
+                let plan = build_spawn_plan(
+                    request,
+                    &lazybox_config::Config::default(),
+                    &Registry::default_builtins(),
+                )
+                .unwrap();
+                assert!(
+                    plan.argv
+                        .iter()
+                        .any(|arg| arg.contains("Coordinate the shared epic.")
+                            && arg.contains("lazybox log")),
+                    "{agent} resume={resume}"
+                );
+                assert!(
+                    plan.initial_prompt.is_none(),
+                    "native context does not submit an artificial task"
+                );
+            }
         }
     }
 

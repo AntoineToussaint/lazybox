@@ -297,6 +297,7 @@ fn v0_legacy_minimal_blob_deserializes() {
     assert_eq!(ws.schema, 0);
     assert_eq!(ws.key.as_str(), "old");
     assert!(ws.sessions.is_empty());
+    assert!(ws.floating.is_none());
     assert!(ws.read_indices.is_empty());
     assert!(ws.snoozed_until.is_none());
     assert_eq!(ws.cleanup_prompt, CleanupPrompt::Unresolved);

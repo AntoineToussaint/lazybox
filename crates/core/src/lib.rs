@@ -81,9 +81,9 @@ pub use task_record::{
     WORKSPACE_RECORD_FILE_SCHEMA, WorkspaceRecordFile, sub_issue_ids,
 };
 pub use workspace::{
-    CleanupPrompt, HopperMeta, MAX_ACTIVITY_ITEMS, ROLE_LABEL_PREFIX, Role, SENT_SNIPPETS_MAX,
-    Session as WorkspaceSession, SessionId, SessionKind, SessionLayout, SessionRunState,
-    SnippetDeliveryLog, SnoozeWake, TileDirection, TileTree, WOKE_WINDOW,
+    CleanupPrompt, FloatingWorkspaceKind, HopperMeta, MAX_ACTIVITY_ITEMS, ROLE_LABEL_PREFIX, Role,
+    SENT_SNIPPETS_MAX, Session as WorkspaceSession, SessionId, SessionKind, SessionLayout,
+    SessionRunState, SnippetDeliveryLog, SnoozeWake, TileDirection, TileTree, WOKE_WINDOW,
     WORKING_CLAIM_HEARTBEAT_SECS, WORKING_CLAIM_LABEL_PREFIX, WORKING_CLAIM_TTL_SECS,
     WORKING_LABEL_NAME, WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceDecodeError, WorkspaceKey,
     project_key_for_task, snooze_wake_due, workspace_key_for, workspace_key_for_id,

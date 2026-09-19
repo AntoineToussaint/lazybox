@@ -555,6 +555,61 @@ struct CapturingSpawner {
     captured: Arc<std::sync::Mutex<Option<AgentStreamConfig>>>,
 }
 
+#[tokio::test]
+async fn fresh_coordination_headless_runs_resolve_folder_context_and_model() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for agent in ["claude", "codex"] {
+            let captured = Arc::new(std::sync::Mutex::new(None));
+            let mut config = ServerConfig::in_memory();
+            config.agent_stream_spawner = Arc::new(CapturingSpawner {
+                captured: captured.clone(),
+            });
+            let key = lazybox_server::workspace::floating::create(
+                &config,
+                &format!("headless-{agent}"),
+                lazybox_core::FloatingWorkspaceKind::Coordination,
+            )
+            .unwrap();
+            for resume in [false, true] {
+                lazybox_server::agent_runs::handle_start_agent_run(
+                    &config,
+                    AgentRunRequestId(format!("floating-{agent}-{resume}")),
+                    (&key).into(),
+                    None,
+                    None,
+                    agent.into(),
+                    AgentRuntimeMode::StreamJson,
+                    None,
+                    None,
+                    resume,
+                    lazybox_ipc::AgentRunAccess::ReadOnly,
+                    None,
+                )
+                .await;
+                let launch = captured.lock().unwrap().take().expect("spawner invoked");
+                assert_eq!(
+                    launch.cwd,
+                    Some(lazybox_core::paths::sandbox_dir(key.as_str()))
+                );
+                assert_eq!(launch.continue_latest, resume);
+                assert!(launch.extra_args.iter().any(|arg| arg == "--model"));
+                assert!(
+                    launch
+                        .extra_args
+                        .iter()
+                        .any(|arg| { arg.contains("minimum necessary number of issues") })
+                );
+            }
+            let record = config.store.get_workspace(&key).unwrap().unwrap();
+            let workspace =
+                lazybox_core::Workspace::decode_persisted(&record.workspace_json.unwrap()).unwrap();
+            assert_eq!(workspace.sessions.len(), 1, "resume reuses the session");
+        }
+    })
+    .await
+    .expect("floating headless launch completed");
+}
+
 impl AgentStreamSpawner for CapturingSpawner {
     fn spawn<'a>(
         &'a self,

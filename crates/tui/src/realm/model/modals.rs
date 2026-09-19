@@ -561,6 +561,26 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::NewWorkspace, modal);
     }
 
+    pub(super) fn mount_floating_workspace_input(
+        &mut self,
+        kind: lazybox_core::FloatingWorkspaceKind,
+    ) {
+        use crate::realm::components::input::Input;
+        if !self.modal_stack.is_empty() {
+            return;
+        }
+        self.set_modal_flow(ModalFlow::FloatingWorkspace { kind });
+        let title = match kind {
+            lazybox_core::FloatingWorkspaceKind::Thinking => "Floating workspace",
+            lazybox_core::FloatingWorkspaceKind::Coordination => "Coordination workspace",
+        };
+        let modal = Input::new("Name this workspace")
+            .title(title)
+            .placeholder("A fresh folder, no repository")
+            .with_validator(|s: &str| !s.trim().is_empty());
+        self.mount_modal(Id::NewWorkspace, modal);
+    }
+
     /// Mount the "Rename workspace" prompt for the focused workspace,
     /// prefilled with its current display name (issue #744). Submit →
     /// `Msg::InputSubmitted(name)` while `Id::RenameWorkspace` is on top
@@ -3632,7 +3652,7 @@ impl<T: TerminalAdapter> Model<T> {
     ///   projects.
     /// - **Repository…** — the `x p` repo picker (or, with no tracked
     ///   repos, the new-project input).
-    /// - **Workspace** — the `x n` name input under the project at the
+    /// - **Workspace** — the project-workspace name input under the project at the
     ///   cursor; listed only when there is one.
     /// - **Project…** — the project picker; listed when ≥ 1 project.
     ///

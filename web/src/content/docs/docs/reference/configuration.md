@@ -112,6 +112,8 @@ agent:
   llm_gateway_url: "http://gateway.internal"
   # Hard per-epic cap for Coordinator spawn_worker calls; 0 disables them.
   max_epic_workers: 6
+  # Override the extra startup brief for coordination workspaces (x c).
+  # coordination_prompt: "Our planning and coordination procedure..."
 
 # ── agents (per-agent overrides) ─────────────────────────────────────
 # Model-tier menu the `w S`/`w M`/`w L` and `a S`/`a M`/`a L` chords and
@@ -304,6 +306,7 @@ hand.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
+| `coordination_prompt` | string | built-in brief | Extra startup instructions for coordination workspaces (`x c`). Covers epics, owner contracts, cross-repo blockers, and minimal issue count. Read on every start/resume. An empty string disables this extra brief; shared Lazybox startup rules still apply. |
 | `autonomous_skip_permissions` | bool | unset | Whether autonomous `@lazybox` work runs Claude with `--dangerously-skip-permissions`. **Unset** resolves per spawn from *who* triggered it: `true` for your own work (`w`, your own mentions/labels), but `false` for a spawn a foreign actor triggered — a mention from someone other than you, or a `lazybox:` label on an issue you didn't author — so their attacker-influenceable issue text can't drive an unattended skip-permissions agent on your host. Set `true`/`false` to pin it either way. |
 | `skip_permissions` | bool | `false` | Skip permission prompts for interactively spawned agents too |
 | `llm_gateway_url` | string | unset | Global LLM-gateway base URL. When set, every spawned agent gets it injected as the base-URL env var its CLI reads (`ANTHROPIC_BASE_URL` for Claude, `OPENAI_BASE_URL` for Codex / Cursor). A per-repo `env` entry for the same var wins. Auth keys are deliberately not managed here. |
@@ -441,12 +444,13 @@ action in
 | `manage_labels` | `g l` | Edit labels |
 | `open_in_browser` | `g o` | Open the PR / issue in the browser |
 | `archive` | `x x` | Archive the workspace |
-| `new_workspace` | `x n` | New pre-PR workspace |
+| `new_workspace` | `x n` | Repo-free floating workspace |
+| `new_coordination_workspace` | `x c` | Repo-free coordination workspace |
 | `new_project` | `x p` | New project / pick a repo |
 | `adopt_sessions` | `x a` | Move sessions into another workspace |
 | `collapse_into_pr` | `x j` | Join an issue workspace into its closing PR |
 | `long_snooze` | `x z` | Snooze the workspace for about a year |
-| `close_issue` | `x c` | Close an issue upstream |
+| `close_issue` | `x C` | Close an issue upstream |
 
 See the [keybindings reference](/docs/reference/keybindings/) for the full
 default keymap.

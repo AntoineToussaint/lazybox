@@ -152,7 +152,7 @@ Start from an unread GitHub event and carry it to completion:
    on one PR's CI. On a **repo-scoped** workspace (no single PR/issue), `g s`
    instead **discovers** the repo's open issues and PRs so you can pull them in
    without a full `Shift-R` sweep.
-5. On an issue, `x c` closes it upstream after confirmation. When the work is
+5. On an issue, `x Shift-C` closes it upstream after confirmation. When the work is
    finished, `x x` archives the workspace and cleans up its sessions. To do both
    at once — close/delete the issue or PR upstream **and** archive the workspace
    (killing its sessions) — use `x k` (close & kill), a single confirmed step for

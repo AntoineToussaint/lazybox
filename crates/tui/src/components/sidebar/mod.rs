@@ -386,11 +386,18 @@ pub struct Sidebar {
     /// so two agents sharing a tier label keep distinct shorts. Refreshed
     /// whenever the model menus reload (`set_model_shorts`).
     model_shorts: HashMap<(char, String), String>,
-    /// `badge_letter → label` of each agent's DEFAULT model tier
-    /// (`agents.<id>.models.default`, else the built-in default). A row
-    /// whose single agent runs its default tier shows no `◆` badge — the
-    /// badge marks a deliberate deviation, so `◆Op` on thirty rows stops
-    /// being wallpaper (#1502). Fed by `set_default_model_labels`.
+    /// `badge_letter → label` of the strength each agent runs at — the
+    /// tier `agents.<id>.models.default` names, resolved in that agent's
+    /// own menu and nowhere else. A row whose single agent runs that
+    /// strength shows no `◆` badge — the badge marks a deliberate
+    /// deviation, so `◆Op` on thirty rows stops being wallpaper (#1502).
+    /// Fed by `set_default_model_labels`.
+    ///
+    /// An agent whose strength doesn't resolve is absent, so its runs
+    /// always badge. Deliberately no fall back to the built-in menu:
+    /// `Config::agent_models` has already folded that in, so a second
+    /// fallback could only fire for a `replace: true` menu — labelling a
+    /// Sonnet-only menu "Opus", the tier it dropped on purpose (#1797).
     default_model_labels: HashMap<char, String>,
     /// Built-in agent registry, consulted so an agent's display badge
     /// (`C` / `X` / `U`) comes from the agent itself rather than a

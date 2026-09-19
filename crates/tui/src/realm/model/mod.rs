@@ -1725,6 +1725,26 @@ pub enum PaneFocus {
     Terminals,
 }
 
+/// The agent roster a config enables, or the built-in trio when it names
+/// none — so the zero-config `a c` / `a x` / `a u` chords still work out
+/// of the box. Using the enabled set rather than unioning it with the
+/// built-ins avoids binding both `cursor` and `cursor-agent` to `u`.
+///
+/// Shared by the boot path and [`Model::reload_agent_models`]: both
+/// derive the roster and the per-agent menus from the *same* config read,
+/// so a reload can't pair a fresh menu with a stale roster and leave a
+/// newly enabled agent with no row.
+pub(crate) fn enabled_agents(config: &lazybox_config::Config) -> Vec<String> {
+    if config.setup.agents.is_empty() {
+        ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        config.setup.agents.iter().cloned().collect()
+    }
+}
+
 /// `badge_letter → label` of every agent's default strength — the tier
 /// `agents.<id>.models.default` names. Agents whose strength doesn't
 /// resolve are absent, so their runs always badge (#1502).
@@ -3640,22 +3660,10 @@ impl<T: TerminalAdapter> Model<T> {
             user_config.auto_fix.opt_out_labels.clone(),
         );
         // Generate the per-agent SpawnAgent catalog rows (#102 P2):
-        // exactly the agents the wizard enabled. An unconfigured user
-        // (empty `setup.agents`) falls back to the built-in trio so the
-        // zero-config `a c` / `a x` / `a u` chords still work out of
-        // the box.
-        // Using the enabled set (rather than unioning it with the
-        // built-ins) avoids binding both `cursor` and `cursor-agent` to
-        // `u`. Per-agent key remaps live in `ui.action_keys` under
-        // `spawn_agent.<id>`.
-        let agents: Vec<String> = if user_config.setup.agents.is_empty() {
-            ["claude", "codex", "cursor"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        } else {
-            user_config.setup.agents.iter().cloned().collect()
-        };
+        // exactly the agents the wizard enabled — see [`enabled_agents`]
+        // for the roster rule. Per-agent key remaps live in
+        // `ui.action_keys` under `spawn_agent.<id>`.
+        let agents = enabled_agents(user_config);
         self.set_agents(agents.clone());
         // Keymap = the selected in-tree preset (#102 P4) as a base
         // layer, with the user's explicit `ui.action_keys` on top so
@@ -5103,7 +5111,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// nothing: one YAML typo would re-key every chord and badge to the
     /// built-in menus, presenting fallback defaults as though the user's
     /// config had applied.
-    pub(crate) fn reload_agent_models(&mut self) {
+    pub(crate) fn reload_agent_models(&mut self) -> Option<lazybox_config::Config> {
         let cfg = match lazybox_config::Config::load() {
             Ok(cfg) => cfg,
             Err(error) => {
@@ -5111,15 +5119,38 @@ impl<T: TerminalAdapter> Model<T> {
                     "{} didn't parse ({error}) — keeping the models already loaded",
                     lazybox_core::paths::config_yaml().display(),
                 ));
-                return;
+                return None;
             }
         };
-        let models = self
-            .agents
+        // Roster and menus from the one read, through the same rule the
+        // boot path uses. Iterating the startup roster here instead left
+        // an agent added by a hand edit with a menu nobody asked for and
+        // no row at all, out of a file lazybox had just parsed.
+        let agents = enabled_agents(&cfg);
+        let models = agents
             .iter()
             .map(|id| (id.clone(), cfg.agent_models(id)))
             .collect();
+        if agents != self.agents {
+            // `set_agents` keeps the default agent inside the roster by
+            // reassigning it to the first entry when a roster omits it.
+            // That is right on a boot path and silent here: a refresh
+            // triggered by opening Settings would otherwise move which
+            // agent bare `w` spawns, mid-session, with the config still
+            // naming the old one. Report it, because the user did not ask
+            // for it and nothing else on screen would say.
+            let before = self.sidebar.default_agent().to_string();
+            self.set_agents(agents);
+            let after = self.sidebar.default_agent();
+            if after != before {
+                let moved = format!(
+                    "default agent {before} is not in `setup.agents` — using {after} for this session",
+                );
+                self.flash_info(moved);
+            }
+        }
         self.set_agent_models(models);
+        Some(cfg)
     }
 
     /// The label of the strength `agent_id` currently runs at — the tier
@@ -6922,12 +6953,13 @@ impl<T: TerminalAdapter> Model<T> {
         }
 
         // Re-read the per-agent menus from disk before building the
-        // rows. The rows and the pickers they open used to read
-        // different snapshots — the row a fresh `Config::load()`, the
-        // picker the cached map — so a hand-edited YAML showed the new
-        // strength on the row and offered the old menu in the editor.
-        self.reload_agent_models();
-        let actions = self.build_settings_actions();
+        // rows, and build every row from that one snapshot. The rows and
+        // the pickers they open used to read different snapshots — the
+        // row a fresh `Config::load()`, the picker the cached map — so a
+        // hand-edited YAML showed the new strength on the row and offered
+        // the old menu in the editor.
+        let reloaded = self.reload_agent_models();
+        let actions = self.build_settings_actions(reloaded);
         if actions.is_empty() {
             // No persisted setup → fall back to the full wizard.
             self.reopen_setup();
@@ -6953,7 +6985,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// Build the visible actions from the user's cached persisted
     /// setup. Per-provider actions only appear if the provider is
     /// enabled. Always includes the "full setup" escape hatch.
-    fn build_settings_actions(&self) -> Vec<SettingsAction> {
+    fn build_settings_actions(
+        &self,
+        reloaded: Option<lazybox_config::Config>,
+    ) -> Vec<SettingsAction> {
         let Some(p) = &self.setup.persisted else {
             return Vec::new();
         };
@@ -6975,20 +7010,23 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
-        // One fresh load feeds every config-backed row below, so even a
-        // hand-edited YAML shows its current values without a restart.
-        // The agent menus come from `self.agent_models`, which
-        // `open_settings` has just reloaded from the same file.
-        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        // One read feeds every config-backed row below, so even a
+        // hand-edited YAML shows its current values without a restart —
+        // and so no two rows can disagree about what the file says. The
+        // caller's snapshot is that read; `None` means it didn't parse
+        // (already reported), and the defaults stand in for the rows that
+        // have nothing better to show.
+        let cfg = reloaded.unwrap_or_default();
         let default_agent = self.sidebar.default_agent().to_string();
         actions.push(SettingsAction::EditDefaultAgent {
-            strength: self.strength_label(&default_agent),
-            current: default_agent,
+            current: default_agent.clone(),
         });
         // One strength row per enabled agent — picking one must not
         // require making that agent the default first, and an agent
         // with no tier menu gets a row saying so rather than no row at
-        // all.
+        // all. The default agent needs no special case: `set_agents`
+        // reassigns it into the roster whenever a roster omits it, so it
+        // is always one of these.
         for agent_id in &self.agents {
             actions.push(SettingsAction::EditStrength {
                 strength: self.strength_label(agent_id),

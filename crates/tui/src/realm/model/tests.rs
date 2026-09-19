@@ -9957,7 +9957,6 @@ mod modal_input_responsiveness_tests {
         let mut m = build_model();
         m.dispatch_settings_action(SettingsAction::EditDefaultAgent {
             current: "claude".into(),
-            strength: None,
         });
         assert_eq!(m.modal_stack.last(), Some(&Id::DefaultAgentPicker));
         m.dispatch_modal_key(key(Key::Esc));
@@ -10088,6 +10087,131 @@ mod modal_input_responsiveness_tests {
             m.agent_models["claude"].default.as_deref(),
             Some("L"),
             "mirrored into the in-memory menu",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The reload derives the roster and the menus from the SAME config
+    /// read. It used to iterate the startup roster while reading a fresh
+    /// file, so an agent added by a hand edit got no menu and no Strength
+    /// row out of a config lazybox had just parsed (#1797 review).
+    #[test]
+    fn reload_picks_up_an_agent_added_to_the_roster_by_a_hand_edit() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-roster-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+
+        std::fs::write(
+            home.join("config.yaml"),
+            concat!(
+                "setup:\n  agents: [claude, aider]\n",
+                "agents:\n  aider:\n    command: aider\n",
+                "    models:\n      default: H\n      tiers:\n",
+                "        - alias: H\n          label: House\n",
+                "          args: [--model, house]\n",
+            ),
+        )
+        .unwrap();
+
+        m.open_settings();
+        assert_eq!(
+            m.strength_label("aider").as_deref(),
+            Some("House"),
+            "the agent named by the edited roster gets its menu",
+        );
+        let rows: Vec<String> = m
+            .setup
+            .settings_actions
+            .iter()
+            .filter_map(|a| match a {
+                SettingsAction::EditStrength { agent_id, .. } => Some(agent_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(rows.contains(&"aider".to_string()), "{rows:?}");
+        assert!(
+            !rows.contains(&"cursor".to_string()),
+            "an agent the edited roster drops loses its row too: {rows:?}",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A roster that omits the configured default agent makes
+    /// `set_agents` reassign the default to the roster's first entry.
+    /// That is the existing invariant — so every agent with a Strength
+    /// row is rostered, and the default is one of them — but reaching it
+    /// by *opening Settings* moves which agent bare `w` spawns, so the
+    /// refresh has to say it did (#1797 review).
+    #[test]
+    fn a_roster_that_drops_the_default_agent_reports_the_move() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-offroster-default-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        std::fs::write(
+            home.join("config.yaml"),
+            "setup:\n  agents: [claude]\n  default_agent: codex\n",
+        )
+        .unwrap();
+        m.set_default_agent("codex");
+
+        m.open_settings();
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a silent change of `w`'s target is the bug");
+        assert!(
+            notice.message.contains("codex") && notice.message.contains("claude"),
+            "the notice must name both agents: {}",
+            notice.message,
+        );
+
+        let rows: Vec<String> = m
+            .setup
+            .settings_actions
+            .iter()
+            .filter_map(|a| match a {
+                SettingsAction::EditStrength { agent_id, .. } => Some(agent_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["claude".to_string()],
+            "one row per rostered agent, no duplicate for the old default: {rows:?}",
+        );
+        assert!(
+            m.setup.settings_actions.iter().any(|a| matches!(
+                a,
+                SettingsAction::EditDefaultAgent { current } if current == "claude"
+            )),
+            "the default-agent row names the agent actually in use",
         );
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };

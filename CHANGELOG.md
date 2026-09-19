@@ -6,7 +6,7 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
-## [0.1.15] - 2026-09-18
+## [0.1.16] - 2026-09-18
 
 The onboarding and coordination release. Lazybox stops explaining itself in a
 slide deck and starts teaching in the live UI — a sandboxed practice world you
@@ -144,6 +144,15 @@ License Agreement accompanies the change.
   launching a rogue instance. The `fixall` snippet commits *and* pushes every
   fix, and `carve` + `dod` decomposition snippets join the catalog. The desktop
   shell compiles against main again, with its CI check re-enabled.
+
+### Install
+
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
+
+## [0.1.15] - 2026-09-18
+
+The tag was cut, but its release-notes smoke test failed before a GitHub
+Release or Homebrew formula was published. It is superseded by 0.1.16.
 
 ## [0.1.14] - 2026-09-01
 

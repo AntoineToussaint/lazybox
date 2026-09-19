@@ -35,3 +35,24 @@ if grep -F './target/release/lazybox' "$SCRIPT" >/dev/null; then
 	fail "release artifact check hardcodes a worktree-local target directory"
 fi
 echo "PASS release artifact follows Cargo target directory"
+
+valid_notes='### Install
+
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox'
+printf '%s\n' "$valid_notes" | bash "$(dirname "$SCRIPT")/check-release-notes.sh" \
+	|| fail "supported release notes were rejected"
+echo "PASS supported release-note install contract"
+
+for forbidden in \
+	'brew install AntoineToussaint/lazybox/lazybox' \
+	'lazybox-tui-boot' \
+	'lazybox-tui-installer.sh'; do
+	expect_rejected "release notes reject $forbidden" "unsupported public install identity: $forbidden" \
+		bash -c 'printf "%s\n%s\n" "$1" "$2" | bash "$3"' _ \
+		"$valid_notes" "$forbidden" "$(dirname "$SCRIPT")/check-release-notes.sh"
+done
+
+expect_rejected "release notes require supported Homebrew command" \
+	"release notes omit the supported Homebrew install command" \
+	bash -c 'printf "%s\n" "No install instructions." | bash "$1"' _ \
+	"$(dirname "$SCRIPT")/check-release-notes.sh"

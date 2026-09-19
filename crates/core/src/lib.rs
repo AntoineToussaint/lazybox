@@ -36,7 +36,7 @@ mod workspace;
 pub use agent::{AgentConfig, AgentModels, CapabilityAliases, ModelChoice, ModelTier};
 pub use agent_policy::{AgentPolicies, AgentPolicy, AgentPolicyOverride, AgentPolicyOverrides};
 pub use artifact::{
-    ARTIFACT_EXTENSION, ARTIFACT_MAX_BYTES, ARTIFACT_MAX_PER_WORKSPACE,
+    ARTIFACT_EXTENSION, ARTIFACT_MAX_BYTES, ARTIFACT_MAX_PER_WORKSPACE, ARTIFACT_MAX_TOTAL_BYTES,
     ARTIFACT_SPOOL_RELATIVE_PATH, Artifact, artifact_document,
 };
 pub use autofix::{

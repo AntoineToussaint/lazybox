@@ -308,28 +308,33 @@ impl SnippetAction {
 /// a clean review skipping the call (indistinguishable, later, from no review)
 /// and a rejected draft being mistaken for an accepted report.
 const DEEP_REVIEW_CONTRACT: &str =
-    "ARTIFACT CONTRACT (this review is not finished until it is persisted)
+    "ARTIFACT CONTRACT (persist the findings if you can, and say so if you cannot)
 Your findings must outlive this session: a fixer may be a different agent, at a
 different strength, days later, with none of this conversation. Nothing you leave
-in the terminal reaches it. So when you are done, call the lazybox MCP tool
-`submit_review` with: the readable report verbatim; `scope` — a label naming what
-you reviewed, `base_sha` and `head_sha` from `git rev-parse`, and — when the
-worktree is dirty — `dirty_digest`, a digest of the uncommitted diff
-(`git diff HEAD | shasum`); and one
-`findings` entry per finding carrying its severity, `file:line` anchors, the
+in the terminal reaches it.
+If you have the lazybox MCP tools, call `submit_review` when you are done, with:
+the readable report verbatim; `scope` — a label naming what you reviewed,
+`base_sha` and `head_sha` from `git rev-parse`, and — when the worktree is dirty
+— `dirty_digest`, a digest of the uncommitted diff (`git diff HEAD | shasum`);
+and one `findings` entry per finding carrying its severity, `file:line` anchors, the
 evidence that makes it real, and the remediation you suggest. Write the evidence
 for a reader who never saw this review — it is the reasoning, not a label.
 Zero findings is a complete review: submit the empty findings list rather than
 skipping the call, so a fixer can tell a clean tree from a review that never ran.
 A malformed or incomplete submission is kept as a DRAFT that no fixer will bind;
-the reply names each defect, so fix them and submit again before you finish.";
+the reply names each defect, so fix them and submit again before you finish.
+If you do NOT have those tools, they do not exist for this session: do not fake
+the call and do not stop over it. Deliver the review as prose exactly as you
+otherwise would, and add one line saying the findings were not persisted, so
+nobody assumes a later fixer can pick them up.";
 
 /// Delivered with every `fix_all` snippet. The binding step is first and
 /// explicit because the failure it prevents is silent: a fixer that starts from
 /// an empty memory still finishes, still reports success, and has fixed nothing.
-const FIX_ALL_CONTRACT: &str = "ARTIFACT CONTRACT (bind a report before you change anything)
-Do not work from memory, from scrollback, or from a review you believe happened.
-First call the lazybox MCP tool `list_reviews`, passing the tree as it is now
+const FIX_ALL_CONTRACT: &str = "ARTIFACT CONTRACT (work from the review, not from memory of it)
+If you have the lazybox MCP tools, bind a report before you change anything: do
+not work from scrollback or from a review you believe happened. Call
+`list_reviews`, passing the tree as it is now
 (`head_sha`, plus `dirty_digest` when it is dirty). Obey its `selection`:
 - `missing` — STOP. There is nothing to fix from. Say a deep review must run
   first; never start an empty fixer and never substitute your own reading.
@@ -345,7 +350,13 @@ When you are done, call `submit_review_result` with the bound report id and one
 outcome per finding — `fixed`, `already_resolved`, `blocked` or `refuted` — each
 with the evidence behind it and the commits and checks that back it. Every
 finding needs one, including the ones you refute: a result that skips a finding
-is kept as a draft naming it. The original report is never modified.";
+is kept as a draft naming it. The original report is never modified.
+If you do NOT have those tools, this session has no artifact channel and none of
+the calls above exist for you — so do not stop over it, and do not invent them.
+Work from the review in this conversation exactly as you would have before, and
+say in your verdict that you worked from
+conversation memory rather than a bound report,
+so the difference is visible to whoever reads it.";
 
 /// Single snippet definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1078,8 +1089,9 @@ impl Snippets {
                 entry(
                     "Review",
                     "Apply the review findings you just produced",
-                    "Take the findings from the review report bound to this workspace \
-                     and *implement* them — the deliverable is a clean, tested diff, not a \
+                    "Take the review findings for this workspace — the report you \
+                     bound if there is one, otherwise the review from this \
+                     conversation — and *implement* them — the deliverable is a clean, tested diff, not a \
                      list. \"Here are the changes I would make\" is not an acceptable \
                      output; apply them. Go in severity order, highest first, and for \
                      each finding fix the *real cause* at the `file:line` it names, \
@@ -3216,22 +3228,75 @@ Close with exactly this shape, at most 8 lines, and nothing after it:
             "`missing` — STOP",
             "ambiguous",
             "revalidate each finding",
+            "conversation memory rather than a bound report",
         ] {
             assert!(delivered.contains(needle), "fixall contract: {needle}");
         }
     }
 
     /// The #1732 premise: FIXALL may run in a session that never saw the
-    /// review, so its body must not claim otherwise.
+    /// review, so its body must not claim otherwise — and, symmetrically, it
+    /// must not claim a bound report is the ONLY source, because the artifact
+    /// channel does not reach every agent.
     #[test]
-    fn fixall_does_not_assume_the_review_happened_here() {
+    fn fixall_names_both_a_bound_report_and_this_conversation() {
         let builtins = Snippets::builtin();
         let body = &builtins.get("fixall").expect("fixall").body;
         assert!(
             !body.contains("you just produced"),
-            "fixall must not assume same-conversation memory of the review"
+            "fixall must not assume same-conversation memory is the only source"
         );
-        assert!(body.contains("bound to this workspace"));
+        assert!(body.contains("bound"), "fixall must name the bound report");
+        assert!(
+            body.contains("conversation"),
+            "fixall must still work for an agent with no artifact channel"
+        );
+    }
+
+    /// The regression this pair exists to prevent (#1831 review).
+    ///
+    /// `delivery_body` appends the artifact contract from the declared
+    /// `action` alone, and nothing on the delivery path knows whether the
+    /// receiving agent can call an MCP tool — `Agent::supports_mcp_config`
+    /// defaults to false and only Claude overrides it, and `lazybox-tui`
+    /// cannot depend on `lazybox-agents` to ask. So the contract reaches
+    /// agents that have no such tools, and an unconditional "call
+    /// `list_reviews` … `missing` — STOP" told those agents to stop doing
+    /// work they previously did from conversation memory.
+    ///
+    /// The capability is therefore stated as a condition the agent resolves
+    /// about itself, and both branches are mandatory text.
+    #[test]
+    fn artifact_contracts_carry_a_branch_for_an_agent_without_the_tools() {
+        for action in [SnippetAction::DeepReview, SnippetAction::FixAll] {
+            let contract = action.artifact_contract();
+            assert!(
+                contract.contains("If you have the lazybox MCP tools"),
+                "{} must gate its tool calls on having them",
+                action.as_str()
+            );
+            assert!(
+                contract.contains("do NOT have those tools"),
+                "{} must say what to do without them",
+                action.as_str()
+            );
+            assert!(
+                contract.contains("do not stop"),
+                "{} must not leave a toolless agent stopping",
+                action.as_str()
+            );
+        }
+        // The STOP that remains is scoped to a real `missing` selection, which
+        // only an agent that actually called `list_reviews` can receive.
+        let fixall = SnippetAction::FixAll.artifact_contract();
+        let stop = fixall.find("`missing` — STOP").expect("missing branch");
+        let gate = fixall
+            .find("If you have the lazybox MCP tools")
+            .expect("capability gate");
+        assert!(
+            gate < stop,
+            "the STOP must sit inside the tools-available branch"
+        );
     }
 
     /// A user's own snippet that declares an action joins the workflow: the

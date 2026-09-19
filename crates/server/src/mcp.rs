@@ -592,6 +592,37 @@ struct SubmitReviewArgs {
     imported: bool,
 }
 
+impl SubmitReviewArgs {
+    /// Total free-text bytes this submission would persist. Sums every string
+    /// that reaches the stored row, because the row is what the cap protects
+    /// and `report` is only its largest single field.
+    fn submission_bytes(&self) -> usize {
+        let strings = |v: &[String]| v.iter().map(String::len).sum::<usize>();
+        self.report.len()
+            + strings(&self.checks)
+            + strings(&self.open_questions)
+            + self
+                .findings
+                .iter()
+                .map(|f| {
+                    f.id.as_deref().map_or(0, str::len)
+                        + f.title.len()
+                        + f.severity.len()
+                        + f.evidence.len()
+                        + f.remediation.len()
+                        + strings(&f.anchors)
+                        + strings(&f.checks)
+                })
+                .sum::<usize>()
+            + self.scope.as_ref().map_or(0, |s| {
+                s.label.len()
+                    + s.base_sha.as_deref().map_or(0, str::len)
+                    + s.head_sha.as_deref().map_or(0, str::len)
+                    + s.dirty_digest.as_deref().map_or(0, str::len)
+            })
+    }
+}
+
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 struct ListReviewsArgs {
     /// The tree as it is NOW (`head_sha`, plus `dirty_digest` when dirty), so
@@ -2619,18 +2650,21 @@ impl LazyboxMcp {
         args: SubmitReviewArgs,
         now_ms: i64,
     ) -> Result<serde_json::Value, McpError> {
-        if args.report.len() > review_store::MAX_REPORT_BYTES {
-            return Err(McpError::invalid_request(
-                format!(
-                    "report exceeds {} bytes — submit the review, not the transcript",
-                    review_store::MAX_REPORT_BYTES
-                ),
-                None,
-            ));
-        }
         if args.findings.len() > review_store::MAX_FINDINGS {
             return Err(McpError::invalid_request(
                 format!("more than {} findings", review_store::MAX_FINDINGS),
+                None,
+            ));
+        }
+        // Every free-text field, not just `report`: the findings carry the
+        // bulk of a large submission and all of them land in one kv row.
+        let submitted_bytes = args.submission_bytes();
+        if submitted_bytes > review_store::MAX_SUBMISSION_BYTES {
+            return Err(McpError::invalid_request(
+                format!(
+                    "submission is {submitted_bytes} bytes across report and findings, over the {} byte limit — submit the review, not the transcript",
+                    review_store::MAX_SUBMISSION_BYTES
+                ),
                 None,
             ));
         }
@@ -2763,17 +2797,14 @@ impl LazyboxMcp {
         let report_id = args.report_id.trim().to_string();
         let ws = workspace.clone();
         let wanted = report_id.clone();
+        // `None` here is usually a typo, but it is also what a fixer sees when
+        // retention pruned the report it bound hours ago. Refusing would throw
+        // away every outcome it just produced, so the orphan path records them.
         let report = crate::store_blocking(&self.config.store, move |store| {
             review_store::get_report(store, &ws, &wanted)
         })
         .await
-        .map_err(|error| McpError::internal_error(format!("read review: {error}"), None))?
-        .ok_or_else(|| {
-            McpError::invalid_request(
-                format!("workspace {workspace} has no review report {report_id:?}"),
-                None,
-            )
-        })?;
+        .map_err(|error| McpError::internal_error(format!("read review: {error}"), None))?;
         let (_, agent) = self.caller_identity(caller).await;
         let run_id = self.caller_run_id(caller).await;
         let _guard = self.config.mcp.reviews_write().lock().await;
@@ -2783,21 +2814,22 @@ impl LazyboxMcp {
         })
         .await
         .map_err(|error| McpError::internal_error(format!("allocate result id: {error}"), None))?;
-        let result = lazybox_core::ReviewResultSubmission {
-            report_id: report.id.clone(),
+        let submission = lazybox_core::ReviewResultSubmission {
+            report_id: report_id.clone(),
             outcomes: args.outcomes.into_iter().map(Into::into).collect(),
             checks: args.checks,
             notes: args.notes,
-        }
-        .into_artifact(
-            &report,
-            lazybox_core::ResultIngest {
-                id,
-                run_id,
-                agent,
-                created_at_ms: now_ms,
-            },
-        );
+        };
+        let ingest = lazybox_core::ResultIngest {
+            id,
+            run_id,
+            agent,
+            created_at_ms: now_ms,
+        };
+        let result = match &report {
+            Some(report) => submission.into_artifact(report, ingest),
+            None => submission.into_orphan_artifact(workspace.clone(), report_id.clone(), ingest),
+        };
         let to_save = result.clone();
         crate::store_blocking(&self.config.store, move |store| {
             review_store::save_result(store, &to_save)
@@ -2814,6 +2846,8 @@ impl LazyboxMcp {
             "defects": result.defects,
             "note": if complete {
                 "Recorded against the report, which is unchanged."
+            } else if report.is_none() {
+                "Recorded, but the report it answers is no longer retained, so the outcomes could not be checked against its findings. Your work is saved; nothing further to submit."
             } else {
                 "Kept as a DRAFT — the report is not fully answered. Give every listed finding an outcome and submit again."
             },
@@ -5511,27 +5545,55 @@ mod tests {
         assert_eq!(result["uncovered"][0], "f2");
     }
 
-    /// A result against a report this workspace does not hold is refused,
-    /// rather than persisted as an orphan.
+    /// Retention can delete the report a fixer bound hours ago — binding and
+    /// submitting are far apart. Refusing the result threw away every outcome
+    /// at the last step, after all the work. It is recorded as a draft naming
+    /// why instead, so nothing the fixer produced is lost.
     #[tokio::test]
-    async fn a_result_for_an_unknown_report_is_refused() {
+    async fn a_result_outlives_the_report_it_answers() {
         let handler = LazyboxMcp::new(ServerConfig::in_memory());
         let workspace = SessionKey::from("github:acme/widget#1");
-        assert!(
-            handler
-                .submit_review_result_payload(
-                    &workspace,
-                    SubmitReviewResultArgs {
-                        report_id: "r9".to_string(),
-                        outcomes: vec![],
+        let result = handler
+            .submit_review_result_payload(
+                &workspace,
+                SubmitReviewResultArgs {
+                    report_id: "r9".to_string(),
+                    outcomes: vec![OutcomeArgs {
+                        finding_id: "f1".to_string(),
+                        disposition: "fixed".to_string(),
+                        evidence: "propagated the provider error".to_string(),
+                        commits: vec!["abc1234".to_string()],
                         checks: vec![],
-                        notes: String::new(),
-                    },
-                    1,
-                )
-                .await
-                .is_err()
+                    }],
+                    checks: vec!["make test".to_string()],
+                    notes: String::new(),
+                },
+                1,
+            )
+            .await
+            .expect("an absent report must not discard the fixer's work");
+        assert_eq!(result["status"], "draft");
+        assert_eq!(result["report_id"], "r9");
+        assert_eq!(result["outcomes"], 1, "the outcome survived");
+        assert!(
+            result["defects"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .any(|d| d
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("no longer retained")),
+            "{result:?}"
         );
+        // And it is durable, not just reported back.
+        let stored = crate::store_blocking(&handler.config.store, |store| {
+            review_store::list_results(store, "github:acme/widget#1")
+        })
+        .await
+        .expect("list");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].outcomes.len(), 1);
     }
 
     /// An import needs no head SHA and is flagged as needing revalidation —
@@ -5568,19 +5630,51 @@ mod tests {
         assert_eq!(listed["reports"][0]["origin"], "imported");
     }
 
-    /// An oversized report is refused at the boundary rather than persisted.
+    /// An oversized submission is refused at the boundary rather than
+    /// persisted — whichever field carries the bytes.
+    ///
+    /// Capping `report` alone bounded nothing: the same payload routed through
+    /// `findings[].evidence` sailed past it into one kv row that every
+    /// `list_reviews` then deserializes in full (#1831 review).
     #[tokio::test]
-    async fn an_oversized_report_is_refused() {
+    async fn an_oversized_submission_is_refused_whichever_field_carries_it() {
         let handler = LazyboxMcp::new(ServerConfig::in_memory());
         let workspace = SessionKey::from("github:acme/widget#1");
-        let mut args = submit_args("head1", vec![]);
-        args.report = "x".repeat(review_store::MAX_REPORT_BYTES + 1);
+
+        let mut in_report = submit_args("head1", vec![]);
+        in_report.report = "x".repeat(review_store::MAX_SUBMISSION_BYTES + 1);
         assert!(
             handler
-                .submit_review_payload(&workspace, args, 1)
+                .submit_review_payload(&workspace, in_report, 1)
                 .await
-                .is_err()
+                .is_err(),
+            "an oversized report must be refused"
         );
+
+        // The same volume, spread across findings instead.
+        let per_finding = review_store::MAX_SUBMISSION_BYTES / 8;
+        let findings: Vec<FindingArgs> = (0..10)
+            .map(|_| {
+                let mut f = finding_args("bulk");
+                f.evidence = "y".repeat(per_finding);
+                f
+            })
+            .collect();
+        assert!(
+            handler
+                .submit_review_payload(&workspace, submit_args("head1", findings), 1)
+                .await
+                .is_err(),
+            "bytes routed through findings must be refused the same way"
+        );
+
+        // Nothing oversized reached the store.
+        let stored = crate::store_blocking(&handler.config.store, |store| {
+            review_store::list_reports(store, "github:acme/widget#1")
+        })
+        .await
+        .expect("list");
+        assert!(stored.is_empty(), "a refused submission must not persist");
     }
 
     #[tokio::test]

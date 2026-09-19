@@ -10,9 +10,11 @@
 //! Layout mirrors the blackboard's (`mcp::note_key_prefix` and friends): one kv
 //! row per artifact under a sanitized, workspace-scoped prefix with a
 //! zero-padded sequence, so `list_kv_prefix`'s lexical order *is* insertion
-//! order. Sanitizing can map two distinct workspace keys onto one prefix, so
-//! every read filters on the `workspace` recorded inside the row — the same
-//! guard `read_notes` applies to a note's stored scope.
+//! order. The workspace segment is escaped rather than collapsed, so two
+//! distinct workspace keys can never share a prefix; reads additionally
+//! filter on the `workspace` recorded inside each row, which is now
+//! belt-and-braces against a hand-edited or foreign row rather than the only
+//! thing standing between two workspaces.
 
 use lazybox_core::{ArtifactStatus, ReviewArtifact, ReviewResult};
 use lazybox_store::{Store, StoreError, StoreMutation};
@@ -31,26 +33,57 @@ const RESULTS_PER_WORKSPACE: usize = 20;
 /// Zero-pad width for the per-workspace sequence, matching the note keys'.
 const SEQ_WIDTH: usize = 12;
 
-/// Largest accepted readable report, in bytes. A review report is prose with
-/// quoted code, not a transcript dump; the cap bounds one row the way
-/// `MAX_NOTE_BYTES` bounds a note.
-pub(crate) const MAX_REPORT_BYTES: usize = 256 * 1024;
+/// Largest accepted submission, in bytes, summed across **every** free-text
+/// field it carries.
+///
+/// Measuring `report` alone looked equivalent — it is the big field — but a
+/// submission has ~1500 other unbounded strings: `MAX_FINDINGS` findings each
+/// with a title, evidence, remediation, anchors and checks, plus the
+/// top-level checks and open questions. Capping one of them bounds nothing,
+/// and every one of those bytes lands in a single kv row that
+/// `list_reviews` then deserializes in full on every call. A note has exactly
+/// one free-text field, which is why `MAX_NOTE_BYTES` can cap a field and
+/// still bound a row; this cannot, so it sums instead (#1831 review).
+pub(crate) const MAX_SUBMISSION_BYTES: usize = 256 * 1024;
 /// Largest accepted finding count in one submission.
 pub(crate) const MAX_FINDINGS: usize = 200;
 
-/// Filesystem-safe rendering of a workspace key (which carries `:`, `/`, `#`).
-fn sanitize(key: &str) -> String {
-    key.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+/// Key-safe, **injective** rendering of a workspace key (which carries `:`,
+/// `/`, `#`).
+///
+/// Collapsing every non-alphanumeric byte to `_` — the obvious encoding, and
+/// the one the blackboard still uses — is lossy, and the loss is not
+/// cosmetic: `github:my-org/tools#42` and `github:my/org-tools#42` are two
+/// real repos that collapse to the same string. Reads can defend against that
+/// by filtering on the `workspace` stored inside each row, but *retention*
+/// cannot — it deletes by key prefix, so one workspace's writes evict the
+/// other's rows (#1831 review). Escaping instead of collapsing removes the
+/// collision rather than guarding one of its two consequences.
+///
+/// Every byte outside `[A-Za-z0-9]` becomes `_XX` (uppercase hex), and `_`
+/// itself is escaped as `_5F`, so a literal `_` never appears unescaped and
+/// the mapping is reversible. The output stays within `[A-Za-z0-9_]`, which
+/// keeps `:` out of the encoded segment — `next_seq` splits the trailing
+/// sequence off on `:` and would otherwise mis-parse it.
+fn encode_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    for byte in key.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            out.push(byte as char);
+        } else {
+            out.push('_');
+            out.push_str(&format!("{byte:02X}"));
+        }
+    }
+    out
 }
 
 fn report_prefix(workspace: &str) -> String {
-    format!("{REVIEW_KV_PREFIX}{}:", sanitize(workspace))
+    format!("{REVIEW_KV_PREFIX}{}:", encode_key(workspace))
 }
 
 fn result_prefix(workspace: &str) -> String {
-    format!("{RESULT_KV_PREFIX}{}:", sanitize(workspace))
+    format!("{RESULT_KV_PREFIX}{}:", encode_key(workspace))
 }
 
 fn row_key(prefix: &str, seq: u64) -> String {
@@ -200,6 +233,10 @@ pub fn save_result(store: &dyn Store, result: &ReviewResult) -> Result<(), Store
 pub fn report_summary(report: &ReviewArtifact) -> serde_json::Value {
     serde_json::json!({
         "report_id": report.id,
+        // Explicit, because the summaries list drafts too: a fixer reading
+        // `reports[]` instead of `selection` must not be able to mistake an
+        // unbindable draft for something it can work from.
+        "bindable": report.is_bindable(),
         "status": match report.status {
             ArtifactStatus::Completed => "completed",
             ArtifactStatus::Draft => "draft",
@@ -308,23 +345,69 @@ mod tests {
         assert!(get_report(&store, other, "r1").expect("get").is_some());
     }
 
-    /// Sanitizing `:` `/` `#` to `_` can map two distinct workspace keys onto
-    /// one kv prefix. The stored `workspace` is the authority, so a collision
-    /// must not leak one workspace's findings into the other's fixer.
+    /// The encoding is injective, so the pairs that collapse together under a
+    /// collapse-to-`_` scheme stay distinct. `my-org/tools` vs `my/org-tools`
+    /// are two REAL repo shapes — a hyphen in the owner against a hyphen in
+    /// the repo — which is what makes this reachable rather than theoretical.
     #[test]
-    fn colliding_sanitized_prefixes_do_not_share_reports() {
+    fn distinct_workspaces_never_share_a_key_prefix() {
+        for (a, b) in [
+            ("github:my-org/tools#42", "github:my/org-tools#42"),
+            ("github:a-b/c#7", "github:a/b-c#7"),
+            ("gh:acme/repo#7", "gh_acme_repo_7"),
+        ] {
+            assert_ne!(
+                encode_key(a),
+                encode_key(b),
+                "{a} and {b} share an encoded prefix"
+            );
+            assert_ne!(report_prefix(a), report_prefix(b));
+            assert_ne!(result_prefix(a), result_prefix(b));
+        }
+        // And the encoding stays inside the alphabet the key structure needs:
+        // a `:` in the workspace segment would break `next_seq`'s split.
+        let encoded = encode_key("github:my-org/tools#42");
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "{encoded}"
+        );
+    }
+
+    /// Reads were always filtered by the stored `workspace`; RETENTION was
+    /// not, and retention is what deletes. One workspace filling its
+    /// allowance and a second submitting once used to evict the first's
+    /// oldest report (observed: 20 -> 19). This asserts the write path, not
+    /// just the read path — the distinction the previous test missed.
+    #[test]
+    fn one_workspaces_writes_never_evict_anothers_reports() {
         let (_dir, store) = store();
-        let a = "gh:acme/repo#7";
-        let b = "gh_acme_repo_7";
-        assert_eq!(sanitize(a), sanitize(b));
-        save_report(&store, &report(&store, a, "aaa", 10)).expect("save");
-        save_report(&store, &report(&store, b, "bbb", 20)).expect("save");
-        let for_a = list_reports(&store, a).expect("list");
-        assert_eq!(for_a.len(), 1);
-        assert_eq!(for_a[0].workspace, a);
-        let for_b = list_reports(&store, b).expect("list");
-        assert_eq!(for_b.len(), 1);
-        assert_eq!(for_b[0].workspace, b);
+        let a = "github:my-org/tools#42";
+        let b = "github:my/org-tools#42";
+        for i in 0..REPORTS_PER_WORKSPACE {
+            let artifact = report(&store, a, "aaa", i as i64);
+            save_report(&store, &artifact).expect("save");
+        }
+        assert_eq!(
+            list_reports(&store, a).expect("list").len(),
+            REPORTS_PER_WORKSPACE
+        );
+        for i in 0..REPORTS_PER_WORKSPACE {
+            let artifact = report(&store, b, "bbb", 100 + i as i64);
+            save_report(&store, &artifact).expect("save");
+        }
+        assert_eq!(
+            list_reports(&store, a).expect("list").len(),
+            REPORTS_PER_WORKSPACE,
+            "workspace B's writes evicted workspace A's reports"
+        );
+        assert_eq!(
+            list_reports(&store, b).expect("list").len(),
+            REPORTS_PER_WORKSPACE
+        );
+        // Sequences are per-workspace too, so ids don't skip.
+        assert_eq!(list_reports(&store, b).expect("list")[0].id, "r1");
     }
 
     #[test]

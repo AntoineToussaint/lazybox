@@ -227,22 +227,39 @@ snippets:
 Declaring it adds the step's **artifact contract** to the delivered text
 — the obligation that makes the handoff durable:
 
-- `deep_review` — the review is not finished until it calls the
-  `submit_review` MCP tool with the readable report, the scope it read
-  (`base_sha` / `head_sha`, plus `dirty_digest` on a dirty tree), and one
-  entry per finding carrying its severity, `file:line` anchors, evidence
-  and suggested remediation. **Zero findings is a complete review**: the
-  empty list is submitted, so a later fixer can tell a clean tree from a
-  review that never ran. A malformed submission is kept as a *draft* that
-  no fixer will bind, and the reply names each defect.
-- `fix_all` — the fixer calls `list_reviews` first and obeys its
-  `selection`: `bound` (read it with `get_review` and work from its
-  findings), `ambiguous` (ask which report), or `missing` (**stop** — a
-  deep review must run first). A bound report whose head has moved still
-  binds, but every finding is revalidated against the code as it is now.
-  The run ends with `submit_review_result`: one outcome per finding —
-  `fixed`, `already_resolved`, `blocked` or `refuted` — with the evidence
-  behind it. The original report is never modified.
+- `deep_review` — with the tools available, the review is not finished
+  until it calls `submit_review` with the readable report, the scope it
+  read (`base_sha` / `head_sha`, plus `dirty_digest` on a dirty tree), and
+  one entry per finding carrying its severity, `file:line` anchors,
+  evidence and suggested remediation. **Zero findings is a complete
+  review**: the empty list is submitted, so a later fixer can tell a clean
+  tree from a review that never ran. A malformed submission is kept as a
+  *draft* that no fixer will bind, and the reply names each defect.
+- `fix_all` — with the tools available, the fixer calls `list_reviews`
+  first and obeys its `selection`: `bound` (read it with `get_review` and
+  work from its findings), `ambiguous` (ask which report), or `missing`
+  (**stop** — a deep review must run first). A bound report whose head has
+  moved still binds, but every finding is revalidated against the code as
+  it is now. The run ends with `submit_review_result`: one outcome per
+  finding — `fixed`, `already_resolved`, `blocked` or `refuted` — with the
+  evidence behind it. The original report is never modified.
+
+### Not every agent has the tools
+
+The artifact channel is the daemon's MCP server, and that reaches only
+agents lazybox can inject an MCP config into — `Agent::supports_mcp_config`,
+which Claude sets and the others do not. A snippet is delivered as text to
+whatever agent is focused, and nothing on that path knows which one it is,
+so both contracts state the tool calls as a **condition the agent resolves
+about itself** and spell out the other branch.
+
+Without the tools, `deep_review` delivers the review as prose and adds a
+line saying the findings were not persisted; `fix_all` works from the
+review in the same conversation, exactly as it did before artifacts
+existed, and says in its verdict that it did. Neither stops. That matters:
+an unconditional "call `list_reviews` … `missing` — STOP" would have told
+every agent without the tools to abandon work it had previously done from
+conversation memory.
 
 Artifacts live in the daemon's store, not in the worktree, so they
 survive the session ending, the worktree being cleaned up, and a daemon

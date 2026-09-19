@@ -95,10 +95,15 @@ impl FileAnchor {
                     file: file.to_string(),
                     line: Some(line),
                 }),
-                Err(_) => Some(Self {
-                    file: text.to_string(),
-                    line: None,
-                }),
+                // `src/main.rs:` has a separator and no line; the colon is
+                // punctuation, not part of the path.
+                Err(_) => {
+                    let file = text.trim_end_matches(':');
+                    (!file.is_empty()).then(|| Self {
+                        file: file.to_string(),
+                        line: None,
+                    })
+                }
             },
             _ => Some(Self {
                 file: text.to_string(),
@@ -323,10 +328,18 @@ pub fn select_report(reports: &[ReviewArtifact], current: &ReviewScope) -> Repor
     if tier.is_empty() {
         return ReportSelection::Missing;
     }
+    // Ambiguity is keyed on the label, and the label is free text that
+    // defaults to empty. Two same-head reviews of genuinely different work —
+    // one crate versus the whole diff — both unlabelled would dedup to a
+    // single `""` and bind the newest silently, which is exactly the
+    // ambiguous-scope case that has to be explicit. An empty label proves
+    // nothing about what was reviewed, so it cannot be used to prove two
+    // reports describe the same work; only a human can resolve that.
     let mut labels: Vec<&str> = tier.iter().map(|r| r.scope.label.trim()).collect();
     labels.sort_unstable();
     labels.dedup();
-    if labels.len() > 1 {
+    let unprovable = tier.len() > 1 && labels.iter().any(|label| label.is_empty());
+    if labels.len() > 1 || unprovable {
         let mut candidates: Vec<&&ReviewArtifact> = tier.iter().collect();
         candidates.sort_by_key(|r| std::cmp::Reverse(r.created_at_ms));
         return ReportSelection::Ambiguous {
@@ -628,6 +641,17 @@ impl ReviewResultSubmission {
     /// could report progress on findings nobody made.
     pub fn into_artifact(self, report: &ReviewArtifact, ingest: ResultIngest) -> ReviewResult {
         let mut defects = Vec::new();
+        // A draft was never bindable, so a result against one means the fixer
+        // worked from something no selection would have handed it. The work is
+        // still recorded — refusing it would destroy the only copy — but the
+        // result carries the reason it is not trustworthy.
+        if !report.is_bindable() {
+            defects.push(format!(
+                "report {} is not bindable ({:?}); a result against it means the fixer did not \
+                 work from a selected report",
+                report.id, report.status
+            ));
+        }
         let mut outcomes = Vec::with_capacity(self.outcomes.len());
         let mut covered: Vec<String> = Vec::with_capacity(self.outcomes.len());
 
@@ -702,6 +726,73 @@ impl ReviewResultSubmission {
             status,
             outcomes,
             uncovered,
+            checks: trimmed_lines(self.checks),
+            notes: self.notes.trim().to_string(),
+            defects,
+            created_at_ms: ingest.created_at_ms,
+        }
+    }
+}
+
+impl ReviewResultSubmission {
+    /// Ingest a result whose report is **gone** — pruned by retention while
+    /// the fixer was working, since binding and submitting are hours apart.
+    ///
+    /// Refusing here was the obvious behaviour and the wrong one: it threw
+    /// away every per-finding outcome at the last step, after all the work,
+    /// with no partial save. The report is what validates finding ids, so
+    /// without it the result cannot be complete — but "cannot be validated"
+    /// and "must be destroyed" are different things, and only the first is
+    /// true. The outcomes are recorded as a draft that names why.
+    pub fn into_orphan_artifact(
+        self,
+        workspace: String,
+        report_id: String,
+        ingest: ResultIngest,
+    ) -> ReviewResult {
+        let mut defects = vec![format!(
+            "report {report_id} is no longer retained, so these outcomes could not be checked \
+             against its findings"
+        )];
+        let mut outcomes = Vec::with_capacity(self.outcomes.len());
+        let mut covered: Vec<String> = Vec::with_capacity(self.outcomes.len());
+        for (index, input) in self.outcomes.into_iter().enumerate() {
+            let finding_id = input.finding_id.trim().to_string();
+            if finding_id.is_empty() {
+                defects.push(format!("outcome {}: finding_id is empty", index + 1));
+                continue;
+            }
+            if covered.contains(&finding_id) {
+                defects.push(format!("outcome {finding_id}: reported twice"));
+                continue;
+            }
+            let Some(disposition) = Disposition::parse(&input.disposition) else {
+                defects.push(format!(
+                    "outcome {finding_id}: disposition {:?} is not one of fixed / \
+                     already_resolved / blocked / refuted",
+                    input.disposition
+                ));
+                continue;
+            };
+            covered.push(finding_id.clone());
+            outcomes.push(FindingOutcome {
+                finding_id,
+                disposition,
+                evidence: input.evidence.trim().to_string(),
+                commits: trimmed_lines(input.commits),
+                checks: trimmed_lines(input.checks),
+            });
+        }
+        ReviewResult {
+            schema: REVIEW_SCHEMA_VERSION,
+            id: ingest.id,
+            report_id,
+            workspace,
+            run_id: ingest.run_id,
+            agent: ingest.agent,
+            status: ArtifactStatus::Draft,
+            outcomes,
+            uncovered: Vec::new(),
             checks: trimmed_lines(self.checks),
             notes: self.notes.trim().to_string(),
             defects,
@@ -1058,6 +1149,50 @@ mod tests {
         );
     }
 
+    /// Ambiguity was keyed on a label that defaults to empty, so two
+    /// same-head reviews of different work — both unlabelled — bound the
+    /// newest silently. Unprovable is not the same as identical.
+    #[test]
+    fn two_unlabelled_reports_at_one_head_are_ambiguous_not_silently_bound() {
+        let head = Some("bbb".to_string());
+        let bare = || ReviewScope {
+            label: String::new(),
+            head_sha: head.clone(),
+            ..ReviewScope::default()
+        };
+        let crate_only = completed("r1", 10, bare());
+        let whole_diff = completed("r2", 20, bare());
+        let current = ReviewScope {
+            head_sha: head,
+            ..ReviewScope::default()
+        };
+        assert_eq!(
+            select_report(&[crate_only, whole_diff], &current),
+            ReportSelection::Ambiguous {
+                candidates: vec!["r2".to_string(), "r1".to_string()],
+            }
+        );
+    }
+
+    /// One unlabelled report is not ambiguous with itself — the guard must
+    /// not turn the ordinary single-review case into a question.
+    #[test]
+    fn a_single_unlabelled_report_still_binds() {
+        let scope = ReviewScope {
+            label: String::new(),
+            head_sha: Some("bbb".to_string()),
+            ..ReviewScope::default()
+        };
+        let only = completed("r1", 10, scope.clone());
+        assert_eq!(
+            select_report(&[only], &scope),
+            ReportSelection::Bound {
+                id: "r1".to_string(),
+                freshness: Freshness::Current,
+            }
+        );
+    }
+
     #[test]
     fn a_stale_report_still_binds_but_demands_revalidation() {
         let scope = ReviewScope {
@@ -1231,6 +1366,72 @@ mod tests {
         .into_artifact(&report, result_ingest());
         assert_eq!(result.status, ArtifactStatus::Completed);
         assert!(result.outcomes.is_empty());
+    }
+
+    /// Retention can delete the report a fixer bound hours earlier. Refusing
+    /// the result destroyed every outcome at the last step; it is recorded as
+    /// a draft naming the reason instead.
+    #[test]
+    fn a_result_whose_report_was_pruned_is_kept_not_discarded() {
+        let result = ReviewResultSubmission {
+            report_id: "r5".to_string(),
+            outcomes: vec![outcome("f1", "fixed"), outcome("f2", "refuted")],
+            checks: vec!["make test".to_string()],
+            notes: "green".to_string(),
+        }
+        .into_orphan_artifact(
+            "gh:acme/repo#7".to_string(),
+            "r5".to_string(),
+            result_ingest(),
+        );
+        assert_eq!(result.status, ArtifactStatus::Draft);
+        assert_eq!(result.outcomes.len(), 2, "the fixer's work survives");
+        assert_eq!(result.report_id, "r5");
+        assert_eq!(result.checks, vec!["make test".to_string()]);
+        assert!(
+            result
+                .defects
+                .iter()
+                .any(|d| d.contains("no longer retained")),
+            "{:?}",
+            result.defects
+        );
+    }
+
+    /// A result against a draft means the fixer bound something no selection
+    /// would have handed it. Record it, but say so.
+    #[test]
+    fn a_result_against_an_unbindable_report_is_flagged() {
+        let mut finding = good_finding();
+        finding.anchors.clear();
+        let draft = submission(vec![finding]).into_artifact(ingest("r1", 10));
+        assert!(!draft.is_bindable());
+        let result = ReviewResultSubmission {
+            report_id: "r1".to_string(),
+            ..Default::default()
+        }
+        .into_artifact(&draft, result_ingest());
+        assert_eq!(result.status, ArtifactStatus::Draft);
+        assert!(
+            result.defects.iter().any(|d| d.contains("not bindable")),
+            "{:?}",
+            result.defects
+        );
+    }
+
+    #[test]
+    fn an_anchor_keeps_no_dangling_separator() {
+        let anchor = FileAnchor::parse("src/main.rs:").expect("anchor");
+        assert_eq!(anchor.file, "src/main.rs");
+        assert_eq!(anchor.line, None);
+        assert_eq!(anchor.render(), "src/main.rs");
+        // A colon inside a real name is still not a separator.
+        assert_eq!(
+            FileAnchor::parse("weird:name.rs").expect("anchor").file,
+            "weird:name.rs"
+        );
+        // Nothing but separators anchors nothing.
+        assert_eq!(FileAnchor::parse(":::"), None);
     }
 
     #[test]

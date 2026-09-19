@@ -50,6 +50,16 @@ pub const ARTIFACT_MAX_BYTES: u64 = 256 * 1024;
 /// reader can say so instead of quietly showing a partial set.
 pub const ARTIFACT_MAX_PER_WORKSPACE: usize = 24;
 
+/// Largest total body the attached set carries for one workspace.
+///
+/// [`ARTIFACT_MAX_BYTES`] and [`ARTIFACT_MAX_PER_WORKSPACE`] bound one file
+/// and one count, but their *product* is what a single broadcast event
+/// carries — 6 MiB, a number nobody chose, cloned per subscriber and held in
+/// the bus ring. This is the bound that was actually decided: past it the
+/// newest artifacts are kept and the rest counted as hidden, exactly as the
+/// count cap does.
+pub const ARTIFACT_MAX_TOTAL_BYTES: usize = 1024 * 1024;
+
 /// One markdown document an agent spooled for its workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
@@ -87,6 +97,27 @@ impl Artifact {
                 body: contents.trim_start_matches('\n').to_string(),
                 written_at,
             },
+        }
+    }
+
+    /// The stand-in for an artifact the daemon could not read at all — not
+    /// UTF-8, permissions, a vanished file.
+    ///
+    /// Same rule as [`Self::oversized`]: the spool is a channel an agent
+    /// writes to unprompted, so a file that is present but unreadable has to
+    /// say so. Logging it and dropping it reads to the user as lazybox never
+    /// having noticed, which is the one outcome this channel must not have.
+    pub fn unreadable(name: impl Into<String>, reason: &str, written_at: DateTime<Utc>) -> Self {
+        let name = name.into();
+        let body = format!(
+            "lazybox could not read this artifact: {reason}\n\nIt is in the worktree at \
+`{ARTIFACT_SPOOL_RELATIVE_PATH}/{name}`. A spooled artifact must be UTF-8 markdown.",
+        );
+        Self {
+            title: humanise_stem(&name),
+            name,
+            body,
+            written_at,
         }
     }
 
@@ -143,7 +174,7 @@ pub fn artifact_document(
         body.push_str("# ");
         body.push_str(&artifact.title);
         body.push_str("\n\n");
-        body.push_str(artifact.body.trim());
+        body.push_str(&close_unterminated_fence(artifact.body.trim()));
     }
     if let Some(footer) = footer {
         body.push_str(&footer);
@@ -154,6 +185,52 @@ pub fn artifact_document(
         format!("{} artifacts · {workspace_name}", artifacts.len())
     };
     Some((title, body))
+}
+
+/// Terminate a code fence the artifact left open.
+///
+/// Per CommonMark an unclosed fence runs to the end of the *document*, and
+/// the combined reader document is several artifacts concatenated — so one
+/// artifact ending mid-fence (a file caught mid-write, an agent that forgot
+/// the closing line) would swallow every artifact after it and the hidden-
+/// count footer with them. One artifact's mistake must not hide the others.
+fn close_unterminated_fence(body: &str) -> String {
+    let mut open: Option<(char, usize)> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start_matches(' ');
+        // More than three leading spaces is indented code, not a fence.
+        if line.len() - trimmed.len() > 3 {
+            continue;
+        }
+        let Some(marker) = trimmed.chars().next().filter(|c| *c == '`' || *c == '~') else {
+            continue;
+        };
+        let run = trimmed.chars().take_while(|c| *c == marker).count();
+        if run < 3 {
+            continue;
+        }
+        match open {
+            // A closing fence is a bare run of at least the opener's length,
+            // of the same character, with nothing but whitespace after it.
+            Some((open_marker, open_run))
+                if marker == open_marker && run >= open_run && trimmed[run..].trim().is_empty() =>
+            {
+                open = None;
+            }
+            Some(_) => {}
+            None => open = Some((marker, run)),
+        }
+    }
+    match open {
+        Some((marker, run)) => {
+            let mut closed = String::with_capacity(body.len() + run + 1);
+            closed.push_str(body);
+            closed.push('\n');
+            closed.extend(std::iter::repeat_n(marker, run));
+            closed
+        }
+        None => body.to_string(),
+    }
 }
 
 /// Split a leading level-1 ATX heading off the front of a markdown file.
@@ -268,6 +345,52 @@ mod tests {
         let a = Artifact::from_markdown("plan.md", "# Plan\n\nStep one.\n", at());
         let (_, body) = artifact_document("ws", &[a], 3).expect("document");
         assert!(body.contains("3 older artifact(s) not shown"), "{body}");
+    }
+
+    #[test]
+    fn an_unterminated_fence_cannot_swallow_the_following_artifacts() {
+        // Per CommonMark an unclosed fence runs to end-of-document, so
+        // concatenating bodies let one artifact caught mid-write hide every
+        // artifact after it — and the hidden-count footer with them.
+        let broken = Artifact::from_markdown("broken.md", "# Broken\n\n```rust\nfn x() {}\n", at());
+        let intact = Artifact::from_markdown("intact.md", "# Intact\n\nVisible.\n", at());
+        let (_, body) = artifact_document("ws", &[broken, intact], 2).expect("document");
+        let after_fence = body
+            .split("# Intact")
+            .nth(1)
+            .expect("the second artifact survives");
+        assert!(after_fence.contains("Visible."));
+        assert!(
+            body.contains("2 older artifact(s) not shown"),
+            "the footer must not be inside the broken artifact's fence: {body}"
+        );
+        // The opener is closed exactly once — a tilde fence and a longer
+        // backtick run must not be mistaken for each other.
+        assert_eq!(body.matches("```").count(), 2, "{body}");
+    }
+
+    #[test]
+    fn a_properly_closed_fence_is_left_alone() {
+        let closed = Artifact::from_markdown("a.md", "# A\n\n```\ncode\n```\n", at());
+        let other = Artifact::from_markdown("b.md", "# B\n\nx\n", at());
+        let (_, body) = artifact_document("ws", &[closed, other], 0).expect("document");
+        assert_eq!(body.matches("```").count(), 2, "no fence was added: {body}");
+    }
+
+    #[test]
+    fn a_tilde_fence_is_closed_with_tildes() {
+        let broken = Artifact::from_markdown("a.md", "# A\n\n~~~~\ncode\n", at());
+        let other = Artifact::from_markdown("b.md", "# B\n\nx\n", at());
+        let (_, body) = artifact_document("ws", &[broken, other], 0).expect("document");
+        assert!(body.contains("~~~~\ncode\n~~~~"), "{body}");
+    }
+
+    #[test]
+    fn unreadable_names_the_file_and_the_reason() {
+        let a = Artifact::unreadable("junk.md", "stream did not contain valid UTF-8", at());
+        assert_eq!(a.title, "junk");
+        assert!(a.body.contains(".lazybox/artifacts/junk.md"));
+        assert!(a.body.contains("valid UTF-8"));
     }
 
     #[test]

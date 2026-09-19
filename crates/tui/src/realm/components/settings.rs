@@ -223,12 +223,21 @@ impl Component for Settings {
             .title_style(theme.modal_title());
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
-        if inner.height < 4 {
+        if inner.height < 3 {
             return;
         }
 
         // Header (tab bar + divider) and hint stay pinned; only the rows
         // scroll, so the tab strip can't be pushed off by a long tab.
+        //
+        // The hint is the one row that yields. Reserving all three chrome
+        // rows unconditionally meant a viewport with exactly three inner
+        // rows had nothing left for the rows themselves, and returning
+        // early there painted an empty bordered box — no tabs, no keys,
+        // no sign the modal was even interactive. The tab strip and one
+        // row carry more than the key reminder does, so at three rows the
+        // hint goes and the rest still works.
+        let show_hint = inner.height >= 4;
         let header = Rect {
             x: inner.x,
             y: inner.y,
@@ -239,7 +248,7 @@ impl Component for Settings {
             x: inner.x,
             y: inner.y + 2,
             width: inner.width,
-            height: inner.height - 3,
+            height: inner.height - if show_hint { 3 } else { 2 },
         };
         let total = self.active_rows().len();
         let height = usize::from(rows_area.height);
@@ -275,18 +284,20 @@ impl Component for Settings {
         }
         frame.render_widget(Paragraph::new(lines), rows_area);
 
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "←/→ tab · ↑/↓ move · Enter pick · Esc close",
-                theme.hint(),
-            ))),
-            Rect {
-                x: inner.x,
-                y: inner.y + inner.height - 1,
-                width: inner.width,
-                height: 1,
-            },
-        );
+        if show_hint {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "←/→ tab · ↑/↓ move · Enter pick · Esc close",
+                    theme.hint(),
+                ))),
+                Rect {
+                    x: inner.x,
+                    y: inner.y + inner.height - 1,
+                    width: inner.width,
+                    height: 1,
+                },
+            );
+        }
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -484,6 +495,44 @@ mod tests {
         let mut comp = Settings::new(tabs());
         let out = render(&mut comp, 30, 5);
         assert!(out.lines().count() <= 5);
+    }
+
+    /// The shortest viewport that fits any content at all still shows the
+    /// tabs and a row. The row budget has three chrome rows to pay for
+    /// (tab bar, divider, hint) and at this height only two fit, so the
+    /// hint yields — the alternative, bailing out, painted an empty
+    /// bordered box with no tabs, no keys and no sign it was interactive.
+    ///
+    /// `tiny_terminal_does_not_panic` sits at height 5, which bails in
+    /// every version, so nothing covered this boundary.
+    #[test]
+    fn the_shortest_usable_height_keeps_the_tabs_and_a_row() {
+        let mut comp = Settings::new(tabs());
+        let out = render(&mut comp, 60, 7);
+        assert!(out.contains("1 Providers"), "tabs must survive: {out}");
+        assert!(
+            out.contains("▸ Add / remove repos · GitHub"),
+            "the cursor row must survive: {out}"
+        );
+        assert!(
+            !out.contains("Esc close"),
+            "the hint is what yields at this height: {out}"
+        );
+        // Still navigable with nothing painted off the modal.
+        comp.on(&key(Key::Char('2')));
+        let out = render(&mut comp, 60, 7);
+        assert!(out.contains("Change default agent"), "{out}");
+        assert!(out.lines().count() <= 7);
+    }
+
+    /// One row shorter there is genuinely nothing to show, and that must
+    /// stay a clean no-op rather than an underflow.
+    #[test]
+    fn one_row_below_the_usable_height_draws_only_the_frame() {
+        let mut comp = Settings::new(tabs());
+        let out = render(&mut comp, 60, 6);
+        assert!(out.contains("Settings"), "the frame still draws: {out}");
+        assert!(!out.contains("1 Providers"), "{out}");
     }
 
     /// A tab taller than the modal scrolls the cursor row into view.

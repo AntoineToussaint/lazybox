@@ -94,12 +94,13 @@ pub enum SettingsAction {
     EditAgents,
     /// Pick the default agent (`setup.default_agent`) — the one `w`
     /// "work on this" and new-workspace spawns use — then that agent's
-    /// own strength. Carries the current default id and the strength it
-    /// resolves to for the row label.
-    EditDefaultAgent {
-        current: String,
-        strength: Option<String>,
-    },
+    /// own strength. Carries the current default id for the row label.
+    ///
+    /// Deliberately no strength badge: that agent has its own
+    /// [`Self::EditStrength`] row directly below, and printing the same
+    /// `◆ Opus` on both made two adjacent rows look like two views of one
+    /// setting instead of the two separate choices they are.
+    EditDefaultAgent { current: String },
     /// Pick one agent's strength — the model tier a bare spawn of it
     /// lands on (`agents.<id>.models.default`) — without routing through
     /// the default-agent flow. One row per enabled agent, including an
@@ -173,10 +174,7 @@ impl SettingsAction {
             Self::EditFilters { label, .. } => format!("Edit roles + filters · {label}"),
             Self::EditProviders => "Edit providers (github / linear / …)".into(),
             Self::EditAgents => "Edit agents (claude / codex / cursor / …)".into(),
-            Self::EditDefaultAgent { current, strength } => match strength {
-                Some(strength) => format!("Change default agent · {current} · ◆ {strength}"),
-                None => format!("Change default agent · {current}"),
-            },
+            Self::EditDefaultAgent { current } => format!("Change default agent · {current}"),
             Self::EditStrength {
                 agent_id,
                 strength,
@@ -346,27 +344,26 @@ mod tests {
         );
     }
 
+    /// The row names the agent and nothing else. It used to repeat that
+    /// agent's strength badge, which the dedicated row below already
+    /// carries — two adjacent rows reading `◆ Opus` for two different
+    /// actions (#1797 review).
     #[test]
-    fn default_agent_label_names_the_current() {
+    fn default_agent_label_names_the_current_agent_only() {
         assert_eq!(
             SettingsAction::EditDefaultAgent {
                 current: "codex".into(),
-                strength: None,
             }
             .label(),
             "Change default agent · codex"
         );
-    }
-
-    #[test]
-    fn default_agent_label_shows_the_resolved_strength() {
-        assert_eq!(
-            SettingsAction::EditDefaultAgent {
+        assert!(
+            !SettingsAction::EditDefaultAgent {
                 current: "claude".into(),
-                strength: Some("Opus".into()),
             }
-            .label(),
-            "Change default agent · claude · ◆ Opus"
+            .label()
+            .contains('◆'),
+            "the strength badge belongs to the strength row",
         );
     }
 

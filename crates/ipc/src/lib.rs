@@ -53,13 +53,18 @@ pub const MAX_COMMAND_FRAME_BYTES: u32 = 256 * 1024;
 /// reader refuses.
 pub const MAX_WRITE_CHUNK_BYTES: usize = (MAX_COMMAND_FRAME_BYTES / 2) as usize;
 
-/// Needles one [`Command::SearchAgentOutput`] may carry (#1780). A query
-/// AND-ing more `agent:` terms than this is honoured for the terms that
-/// fit: the client evaluates every term itself against the corpus the
-/// scan returns, so a dropped needle can only widen the returned text,
-/// never admit a row the query excludes. The bound exists so the daemon's
-/// per-byte cost stays linear in a number the user cannot inflate.
-pub const MAX_AGENT_OUTPUT_NEEDLES: usize = 4;
+/// Needles one [`Command::SearchAgentOutput`] may carry (#1780) — a cost
+/// bound, so the daemon's per-line work stays linear in a number the user
+/// cannot inflate.
+///
+/// **A needle past this cap is not free.** The client ANDs every `agent:`
+/// term against the corpus the scan returns, so a term the daemon never
+/// scanned for has no evidence and EXCLUDES the workspace — a false
+/// negative, not a widening. The cap is therefore set well past any
+/// realistic query rather than tight: a search with more than eight
+/// `agent:` terms degrades to prompt-only matching for the extras, and
+/// nothing on screen explains it. Raise this before trimming it.
+pub const MAX_AGENT_OUTPUT_NEEDLES: usize = 8;
 
 /// Longest needle [`Command::SearchAgentOutput`] scans with. A needle past
 /// this is truncated rather than dropped — truncating widens the match set

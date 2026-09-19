@@ -32519,6 +32519,103 @@ mod agent_output_search_tests {
         );
     }
 
+    /// Regression for the permanent wedge: the reply can be lost without any
+    /// error reaching this client — a full event queue makes the daemon close
+    /// the connection, taking the request with it. Before the deadline the
+    /// `dispatched` latch never released, so the tick early-returned forever,
+    /// the bar read `scanning output…` permanently, and output-only matches
+    /// stayed hidden until the user retyped the query.
+    #[test]
+    fn a_reply_that_never_arrives_is_retried_not_waited_on_forever() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+        let (first, _) = settle(&mut m, &mut rx).pop().expect("one scan issued");
+
+        // No reply. Ticking does nothing until the deadline passes.
+        m.tick_agent_output_search();
+        assert!(scans(&mut rx).is_empty(), "still within the deadline");
+
+        m.agent_output_search.dispatched_at =
+            Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_TIMEOUT);
+        m.tick_agent_output_search();
+        let (second, needles) = scans(&mut rx)
+            .pop()
+            .expect("a lost reply must be retried, not waited on forever");
+        assert_ne!(second, first, "the retry carries a fresh request id");
+        assert_eq!(needles, vec!["borrow".to_string()]);
+
+        // The retry's reply still lands; the stale first id does not.
+        m.apply_agent_output_matches(
+            first,
+            vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
+        );
+        assert_eq!(m.sidebar.visible_workspace_count(), 0);
+        m.apply_agent_output_matches(
+            second,
+            vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
+        );
+        assert_eq!(m.sidebar.visible_workspace_count(), 1);
+    }
+
+    /// A committed query must not freeze: the prompt half of the same query
+    /// re-filters on every new prompt, so leaving the output half pinned to
+    /// dispatch time made one query half-live — a workspace that hit the
+    /// searched error after the query was typed never appeared, and nothing
+    /// distinguished that from "it isn't there".
+    #[test]
+    fn a_standing_query_re_scans_so_its_rows_stay_live() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+        let (first, _) = settle(&mut m, &mut rx).pop().expect("one scan issued");
+        m.apply_agent_output_matches(first, Vec::new());
+        assert_eq!(m.sidebar.visible_workspace_count(), 0);
+
+        // Settled: no re-ask until the refresh cadence comes round.
+        m.tick_agent_output_search();
+        assert!(scans(&mut rx).is_empty(), "a fresh answer is not re-asked");
+
+        m.agent_output_search.dispatched_at =
+            Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_REFRESH);
+        m.tick_agent_output_search();
+        let (second, _) = scans(&mut rx)
+            .pop()
+            .expect("a standing query re-scans rather than freezing");
+        assert_ne!(second, first);
+
+        // The agent said it since, and the row appears without retyping.
+        m.apply_agent_output_matches(
+            second,
+            vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
+        );
+        assert_eq!(m.sidebar.visible_workspace_count(), 1);
+    }
+
+    /// A reconnect is the precise terminating outcome: the daemon lost the
+    /// request with the old connection, so the latch releases on the fresh
+    /// `Snapshot` rather than waiting out the whole deadline.
+    #[test]
+    fn a_reconnect_releases_the_scan_without_waiting_out_the_deadline() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+        let (first, _) = settle(&mut m, &mut rx).pop().expect("one scan issued");
+
+        m.handle_daemon_event(lazybox_ipc::Event::Snapshot {
+            workspaces: Vec::new(),
+            terminals: Vec::new(),
+            projects: Vec::new(),
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+
+        m.agent_output_search.changed_at =
+            Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        m.tick_agent_output_search();
+        let (second, _) = scans(&mut rx)
+            .pop()
+            .expect("the reconnect re-asks instead of stranding the latch");
+        assert_ne!(second, first);
+    }
+
     /// Moving the needles invalidates both the in-flight request and the
     /// results it would have produced: text scanned for `bor` is not
     /// evidence about `borrow`, and leaving it up shows rows the query no

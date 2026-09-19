@@ -1599,6 +1599,13 @@ impl<T: TerminalAdapter> Model<T> {
         // Push to the sidebar AFTER the snapshot's WorkspaceUpserted-
         // equivalent rows are processed below, so the first render
         // already has both layers.
+        if let IpcEvent::Snapshot { .. } = &event {
+            // A Snapshot is the reconnect signal: any output scan this
+            // client had in flight died with the previous connection, so its
+            // latch is released here rather than waiting for a reply the
+            // daemon can no longer send (#1780).
+            self.release_agent_output_scan_on_reconnect();
+        }
         if let IpcEvent::Snapshot { projects, .. } = &event {
             // The snapshot is authoritative for daemon-known projects, so
             // drop any that vanished while the client was disconnected

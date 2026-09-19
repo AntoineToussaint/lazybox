@@ -6,6 +6,8 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-09-19
+
 ### Added
 
 - `x n` now creates a floating workspace in a fresh persistent folder without
@@ -22,6 +24,23 @@ contain explicitly documented compatibility changes.
 - Lazybox's response rules and mechanics are available from session startup,
   including bare Codex terminals. Snippets no longer append a separate output
   contract, and their previews no longer advertise status-card endings.
+- Repository-scoped GitHub polling now splits repositories between the GitHub
+  App installation and user credentials according to actual access, preserving
+  polling coverage while keeping agent traffic off the installation's budget.
+
+### Upgrade notes
+
+- Upgrade the daemon and clients together: the wire contract and persisted
+  workspace schema changed. Older binaries cannot read newly saved schema-14
+  workspace records.
+- Archived floating folders retain their contents; archiving does not delete
+  your notes or other files.
+- Desktop frontend build/test failures remain tracked in #1858. This release
+  does not claim desktop frontend validation.
+
+### Install
+
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
 
 ## [0.1.16] - 2026-09-18
 

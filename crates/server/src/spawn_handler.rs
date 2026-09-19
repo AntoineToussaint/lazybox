@@ -62,10 +62,12 @@ use std::time::Duration;
 /// (empty replay for that one terminal) than freeze the daemon.
 pub(crate) const SNAPSHOT_PER_SESSION_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Bound concurrent terminal snapshot assembly. Sequential 500ms deadlines
-/// made N wedged sessions block Subscribe for N×500ms; unlimited fan-out
-/// would instead stampede the blocking store pool on large installations.
-const SNAPSHOT_CONCURRENCY: usize = 16;
+/// Bound concurrent terminal snapshot assembly — `snapshot_terminals`, and
+/// the `agent:` output scan, which walks every live agent ring. Sequential
+/// 500ms deadlines made N wedged sessions block Subscribe for N×500ms;
+/// unlimited fan-out would instead stampede the blocking store pool on
+/// large installations.
+pub(crate) const SNAPSHOT_CONCURRENCY: usize = 16;
 
 /// Monotonic terminal-id allocator. Module-local so ids are unique
 /// across the process even if the terminals map is wiped (tests, or

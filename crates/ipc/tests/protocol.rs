@@ -1816,12 +1816,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        107,
+        108,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        113,
+        114,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

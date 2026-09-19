@@ -22,11 +22,13 @@
 //!   [`MATCH_CORPUS_BYTES`], so a query's price is bounded before it is
 //!   issued.
 
+use futures::{StreamExt, stream};
 use lazybox_core::SessionKey;
 use lazybox_ipc::{Event, MAX_AGENT_OUTPUT_NEEDLE_BYTES, MAX_AGENT_OUTPUT_NEEDLES};
 use std::collections::BTreeMap;
 
 use crate::ServerConfig;
+use crate::spawn_handler::SNAPSHOT_CONCURRENCY;
 
 /// Newest bytes of each terminal's ring the scan reads.
 ///
@@ -38,20 +40,37 @@ use crate::ServerConfig;
 /// a hundred of them.
 pub const SCAN_TAIL_BYTES: usize = 256 * 1024;
 
-/// Bytes of matched text one workspace contributes to the reply. The
-/// client wants enough to build a ~48-char excerpt and to satisfy the
-/// other `agent:` terms of an AND-ed query; it has no use for a transcript.
-pub const MATCH_CORPUS_BYTES: usize = 2 * 1024;
+/// Bytes of matched text one workspace contributes to the reply.
+///
+/// Sized so EVERY needle's first hit always fits (the `const` assert
+/// below pins that), because the client ANDs the `agent:` terms against
+/// this text: a needle whose only evidence was trimmed away here reads as
+/// "not in this workspace" and drops a row that genuinely matched.
+pub const MATCH_CORPUS_BYTES: usize = 8 * 1024;
 
-/// Distinct matching lines kept per workspace. Past a handful, extra hits
-/// say nothing new about *which* workspace this is — and they are what a
-/// repaint produces most of.
-const MAX_MATCH_LINES: usize = 8;
+/// Distinct matching lines kept **per needle**, not per workspace.
+///
+/// A single global cap starved later needles: matching is first-come
+/// across all needles, so a terminal with a repeating `error` line filled
+/// the whole budget and a `deadlock` line further along never made it
+/// back. The client, requiring both `agent:error` and `agent:deadlock`,
+/// then found no evidence for the second and excluded a workspace whose
+/// output contained both — a silent miss with nothing on screen to
+/// explain it. Per-needle buckets give every term its own room.
+const MAX_MATCH_LINES_PER_NEEDLE: usize = 4;
 
 /// Longest single matched line carried back. A pasted log line or a
 /// wrapped-then-rejoined repaint row can be enormous; the needle plus its
 /// surroundings is all the excerpt can show.
 const MAX_MATCH_LINE_BYTES: usize = 512;
+
+/// The corpus must hold one full-length line for every needle, or the
+/// trimming in [`fold_matches`] could still drop a needle's only evidence
+/// and reintroduce the silent miss the per-needle buckets exist to stop.
+const _: () = assert!(
+    MATCH_CORPUS_BYTES >= MAX_AGENT_OUTPUT_NEEDLES * (MAX_MATCH_LINE_BYTES + 1),
+    "MATCH_CORPUS_BYTES must fit one line per needle"
+);
 
 /// `Command::SearchAgentOutput` — scan every live agent terminal's ring
 /// for `needles` and reply to the asking connection with the matching
@@ -80,31 +99,42 @@ pub async fn handle_search_agent_output(
         return;
     }
 
-    let mut tails: Vec<(SessionKey, Vec<u8>)> = Vec::new();
-    for (session_key, backend_key) in config.terminal.agent_terminal_backends().await {
-        // Same deadline the Subscribe path puts on a snapshot, for the same
-        // reason: a pump wedged on the per-PTY ring mutex must cost this
-        // query one terminal's worth of history, not the whole reply.
-        match tokio::time::timeout(
-            crate::spawn_handler::SNAPSHOT_PER_SESSION_TIMEOUT,
-            config.backend.snapshot(&backend_key),
-        )
-        .await
-        {
-            Ok(Ok(snapshot)) => {
-                let tail = tail_from_line_boundary(&snapshot.replay, SCAN_TAIL_BYTES).to_vec();
-                if !tail.is_empty() {
-                    tails.push((session_key, tail));
+    // Bounded fan-out, not a sequential loop: the deadline below is
+    // per-snapshot, so N wedged terminals cost N × the deadline in series —
+    // the exact pathology `SNAPSHOT_CONCURRENCY` was introduced for on the
+    // Subscribe path. Unlimited fan-out would instead stampede the ring
+    // locks on a large installation, so this borrows both bounds.
+    let targets = config.terminal.agent_terminal_backends().await;
+    let tails: Vec<(SessionKey, Vec<u8>)> = stream::iter(targets)
+        .map(|(session_key, backend_key)| async move {
+            // Same deadline the Subscribe path puts on a snapshot, for the
+            // same reason: a pump wedged on the per-PTY ring mutex must cost
+            // this query one terminal's worth of history, not the whole
+            // reply.
+            match tokio::time::timeout(
+                crate::spawn_handler::SNAPSHOT_PER_SESSION_TIMEOUT,
+                config.backend.snapshot(&backend_key),
+            )
+            .await
+            {
+                Ok(Ok(snapshot)) => {
+                    let tail = tail_from_line_boundary(&snapshot.replay, SCAN_TAIL_BYTES).to_vec();
+                    (!tail.is_empty()).then_some((session_key, tail))
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(key = %backend_key, "agent output scan: snapshot failed: {e}");
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!(key = %backend_key, "agent output scan: snapshot timed out");
+                    None
                 }
             }
-            Ok(Err(e)) => {
-                tracing::debug!(key = %backend_key, "agent output scan: snapshot failed: {e}");
-            }
-            Err(_) => {
-                tracing::debug!(key = %backend_key, "agent output scan: snapshot timed out");
-            }
-        }
-    }
+        })
+        .buffered(SNAPSHOT_CONCURRENCY)
+        .filter_map(|tail| async move { tail })
+        .collect()
+        .await;
 
     let entries = match tokio::task::spawn_blocking(move || fold_matches(tails, &needles)).await {
         Ok(entries) => entries,
@@ -147,21 +177,61 @@ fn normalize_needles(needles: Vec<String>) -> Vec<String> {
 /// workspaces — a workspace with two agent tabs contributes both, since the
 /// search filters workspaces rather than tabs.
 fn fold_matches(tails: Vec<(SessionKey, Vec<u8>)>, needles: &[String]) -> Vec<(String, String)> {
-    let mut per_session: BTreeMap<String, String> = BTreeMap::new();
+    // Buckets are merged across a workspace's terminals BEFORE the
+    // round-robin, not after. Interleaving per terminal and concatenating
+    // would let a first tab that matches many needles with long lines spend
+    // the whole corpus, dropping a second tab's only evidence for a needle
+    // the first never matched — the per-terminal shape of the very starvation
+    // the buckets exist to prevent.
+    let mut per_session: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
     for (session_key, tail) in tails {
-        let Some(matched) = scan_output(&tail, needles) else {
+        let buckets = scan_buckets(&tail, needles);
+        if buckets.iter().all(Vec::is_empty) {
             continue;
-        };
-        let corpus = per_session.entry(session_key.to_string()).or_default();
-        for line in matched.lines() {
-            if corpus.len() + line.len() + 1 > MATCH_CORPUS_BYTES {
-                break;
+        }
+        let merged = per_session
+            .entry(session_key.to_string())
+            .or_insert_with(|| vec![Vec::new(); needles.len()]);
+        for (slot, hits) in buckets.into_iter().enumerate() {
+            for hit in hits {
+                if merged[slot].len() < MAX_MATCH_LINES_PER_NEEDLE && !merged[slot].contains(&hit) {
+                    merged[slot].push(hit);
+                }
             }
-            corpus.push_str(line);
-            corpus.push('\n');
         }
     }
-    per_session.into_iter().collect()
+    per_session
+        .into_iter()
+        .filter_map(|(key, buckets)| {
+            let mut corpus = String::new();
+            for line in round_robin(&buckets) {
+                if corpus.len() + line.len() + 1 > MATCH_CORPUS_BYTES {
+                    break;
+                }
+                corpus.push_str(&line);
+                corpus.push('\n');
+            }
+            (!corpus.is_empty()).then_some((key, corpus))
+        })
+        .collect()
+}
+
+/// Flatten per-needle buckets newest-priority-first: every needle's first
+/// hit, then every needle's second, and so on, deduplicated. The order is
+/// what makes the byte trim above safe — the first round is one line per
+/// needle, which [`MATCH_CORPUS_BYTES`] is asserted to hold.
+fn round_robin(buckets: &[Vec<String>]) -> Vec<String> {
+    let mut ordered: Vec<String> = Vec::new();
+    for round in 0..MAX_MATCH_LINES_PER_NEEDLE {
+        for bucket in buckets {
+            if let Some(hit) = bucket.get(round)
+                && !ordered.contains(hit)
+            {
+                ordered.push(hit.clone());
+            }
+        }
+    }
+    ordered
 }
 
 /// The newest `max_bytes` of `bytes`, advanced to the first line boundary
@@ -183,34 +253,56 @@ fn tail_from_line_boundary(bytes: &[u8], max_bytes: usize) -> &[u8] {
 ///
 /// Lines are reconstructed rather than split on `\n`, because that is not
 /// where a repainting program puts its row boundaries: it positions the
-/// cursor with a CSI and writes the row. So a cursor-move or erase
-/// sequence ends the current line, while SGR colour and OSC title runs are
-/// dropped in place — splitting on those too would tear `error: cannot
-/// borrow` apart at whatever byte the syntax highlighter recoloured, and a
-/// multi-word needle would then match nothing.
+/// cursor with a CSI and writes the row. So a ROW-changing sequence ends
+/// the current line, while SGR colour, OSC titles and erases are dropped
+/// in place — splitting on those too would tear `error: cannot borrow`
+/// apart at whatever byte the syntax highlighter recoloured, and a
+/// multi-word needle would then match nothing. Column moves within a row
+/// become a single space, because that is what the columns they skip
+/// render as; dropping them outright would fuse `Name` and `Value` into
+/// `NameValue`.
+///
+/// Evidence is kept PER NEEDLE and returned round-robin — every needle's
+/// first hit, then every needle's second, and so on. The client ANDs the
+/// `agent:` terms against this text, so a needle with no evidence excludes
+/// the workspace; first-come ordering under one global cap let a chatty
+/// needle spend the whole budget and silently drop a row that matched
+/// every term.
 ///
 /// Deduplication runs over MATCHING lines only. A repaint re-emits the
 /// same row dozens of times and every copy would otherwise fill the reply
 /// — but a set over EVERY line would be a set the size of the scan window,
-/// and the reply is capped at a handful of lines anyway, so the dedup runs
-/// over that handful instead.
+/// and the reply is capped at a few lines per needle anyway, so the dedup
+/// runs over that handful instead.
 pub fn scan_output(bytes: &[u8], needles: &[String]) -> Option<String> {
-    let mut matches: Vec<String> = Vec::new();
+    let ordered = round_robin(&scan_buckets(bytes, needles));
+    (!ordered.is_empty()).then(|| ordered.join("\n"))
+}
+
+/// [`scan_output`]'s per-needle buckets, before they are flattened — what
+/// [`fold_matches`] merges across a workspace's terminals.
+fn scan_buckets(bytes: &[u8], needles: &[String]) -> Vec<Vec<String>> {
+    let mut buckets: Vec<Vec<String>> = vec![Vec::new(); needles.len()];
     let mut line: Vec<u8> = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         let ended = match bytes[i] {
             0x1b => {
                 let end = lazybox_agents::detect::skip_escape(bytes, i);
-                let ends_line = breaks_line(&bytes[i..end]);
-                if ends_line {
-                    take_line(&mut line, needles, &mut matches);
+                let effect = escape_effect(&bytes[i..end]);
+                match effect {
+                    EscapeEffect::EndsRow => take_line(&mut line, needles, &mut buckets),
+                    // A skipped column renders as blank, so it separates
+                    // words exactly as a space does; the whitespace collapse
+                    // in `take_line` folds a run of them back to one.
+                    EscapeEffect::SkipsColumns => line.push(b' '),
+                    EscapeEffect::Invisible => {}
                 }
                 i = end;
-                ends_line
+                matches!(effect, EscapeEffect::EndsRow)
             }
             b'\n' | b'\r' => {
-                take_line(&mut line, needles, &mut matches);
+                take_line(&mut line, needles, &mut buckets);
                 i += 1;
                 true
             }
@@ -226,49 +318,67 @@ pub fn scan_output(bytes: &[u8], needles: &[String]) -> Option<String> {
                 false
             }
         };
-        if ended && matches.len() >= MAX_MATCH_LINES {
+        if ended
+            && buckets
+                .iter()
+                .all(|b| b.len() >= MAX_MATCH_LINES_PER_NEEDLE)
+        {
             break;
         }
     }
-    take_line(&mut line, needles, &mut matches);
-    (!matches.is_empty()).then(|| matches.join("\n"))
+    take_line(&mut line, needles, &mut buckets);
+    buckets
 }
 
-/// Whether an escape run ends the current line. True for the CSI cursor
-/// moves, erases and scrolls a repaint lays rows out with; false for SGR
-/// (`m`), device reports, OSC / DCS strings and charset designators, which
-/// occur *within* a row.
-fn breaks_line(run: &[u8]) -> bool {
+/// What a stripped escape run does to the text being reconstructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapeEffect {
+    /// Content after it lands on a different row — a line boundary.
+    EndsRow,
+    /// The cursor moves within the SAME row, leaving blank columns behind.
+    SkipsColumns,
+    /// No effect on layout: colour, titles, device reports, erases.
+    Invisible,
+}
+
+/// Classify a stripped escape run by what it does to row layout.
+///
+/// Only sequences that change the ROW end a line. The distinction matters
+/// because `C` (CUF), `D` (CUB) and `G` (CHA) move the cursor *within* the
+/// current row — programs pad columns with `\x1b[<n>C` because it is
+/// shorter than spaces — so treating them as boundaries split one rendered
+/// row into fragments and made every needle spanning the padding miss.
+/// They skip columns instead, which reconstruct as a blank.
+///
+/// Erases (`J`, `K`) change no row either: `\x1b[2K` is emitted right
+/// after the positioning sequence that already ended the line, and a
+/// trailing `\x1b[K` clears leftovers on the row just written — breaking
+/// there would split `foo\x1b[K` from the `bar` that lands beside it.
+fn escape_effect(run: &[u8]) -> EscapeEffect {
     if run.first() != Some(&0x1b) || run.get(1) != Some(&b'[') {
-        return false;
+        return EscapeEffect::Invisible;
     }
-    matches!(
-        run.last(),
-        Some(
-            b'A' | b'B'
-                | b'C'
-                | b'D'
-                | b'E'
-                | b'F'
-                | b'G'
-                | b'H'
-                | b'J'
-                | b'K'
-                | b'L'
-                | b'M'
-                | b'S'
-                | b'T'
-                | b'd'
-                | b'f'
-        )
-    )
+    match run.last() {
+        // CUU / CUD / CNL / CPL / CUP / VPA / HVP change the row, and
+        // IL / DL / SU / SD shift which row content lands on.
+        Some(b'A' | b'B' | b'E' | b'F' | b'H' | b'L' | b'M' | b'S' | b'T' | b'd' | b'f') => {
+            EscapeEffect::EndsRow
+        }
+        // CUF / CUB / CHA are column moves inside one row.
+        Some(b'C' | b'D' | b'G') => EscapeEffect::SkipsColumns,
+        _ => EscapeEffect::Invisible,
+    }
 }
 
-/// Close the pending line: decode, collapse whitespace, and keep it when
-/// it matches a needle and is not one the caller already has.
-fn take_line(line: &mut Vec<u8>, needles: &[String], matches: &mut Vec<String>) {
+/// Close the pending line: decode, collapse whitespace, and file it under
+/// every needle it matches that still has room.
+///
+/// Per-needle buckets rather than one list: the client ANDs the `agent:`
+/// terms, so a needle left without evidence excludes the workspace
+/// outright. A line matching several needles counts for all of them.
+fn take_line(line: &mut Vec<u8>, needles: &[String], buckets: &mut [Vec<String>]) {
     let raw = std::mem::take(line);
-    if raw.is_empty() || matches.len() >= MAX_MATCH_LINES {
+    if raw.is_empty() {
         return;
     }
     let text = String::from_utf8_lossy(&raw);
@@ -283,10 +393,17 @@ fn take_line(line: &mut Vec<u8>, needles: &[String], matches: &mut Vec<String>) 
         return;
     }
     let folded = collapsed.to_lowercase();
-    if !needles
+    let wanted: Vec<usize> = needles
         .iter()
-        .any(|needle| folded.contains(needle.as_str()))
-    {
+        .enumerate()
+        .filter(|(slot, needle)| {
+            folded.contains(needle.as_str())
+                && buckets[*slot].len() < MAX_MATCH_LINES_PER_NEEDLE
+                && !buckets[*slot].contains(&collapsed)
+        })
+        .map(|(slot, _)| slot)
+        .collect();
+    if wanted.is_empty() {
         return;
     }
     if collapsed.len() > MAX_MATCH_LINE_BYTES {
@@ -296,8 +413,8 @@ fn take_line(line: &mut Vec<u8>, needles: &[String], matches: &mut Vec<String>) 
         }
         collapsed.truncate(end);
     }
-    if !matches.contains(&collapsed) {
-        matches.push(collapsed);
+    for slot in wanted {
+        buckets[slot].push(collapsed.clone());
     }
 }
 
@@ -355,6 +472,100 @@ mod tests {
         }
         let hit = scan_output(&stream, &needles(&["lazybox-server"])).expect("matches");
         assert_eq!(hit, "compiling lazybox-server v0.1.0");
+    }
+
+    /// Regression for the silent miss a single global line cap produced: a
+    /// chatty needle filled the whole budget and a later needle came back
+    /// with no evidence, so the client's AND dropped a workspace whose
+    /// output contained both terms.
+    #[test]
+    fn a_chatty_needle_cannot_starve_a_later_one() {
+        let mut stream = Vec::new();
+        // Far more `error` lines than any per-needle budget, all distinct so
+        // dedup cannot collapse them.
+        for n in 0..50 {
+            stream.extend_from_slice(format!("error: variant {n} failed\n").as_bytes());
+        }
+        stream.extend_from_slice(b"thread 'main' hit a deadlock\n");
+
+        let hit = scan_output(&stream, &needles(&["error", "deadlock"]))
+            .expect("both needles have evidence");
+        assert!(
+            hit.lines().any(|l| l.contains("deadlock")),
+            "the later needle must survive a chatty earlier one: {hit:?}"
+        );
+        assert!(hit.lines().any(|l| l.contains("error:")), "{hit:?}");
+
+        // And the round-robin puts each needle's first hit up front, so the
+        // per-workspace byte trim in `fold_matches` cannot drop one either.
+        let entries = fold_matches(
+            vec![(SessionKey::from("github:o/r#1"), stream)],
+            &needles(&["error", "deadlock"]),
+        );
+        assert!(
+            entries[0].1.contains("deadlock"),
+            "the corpus trim must not drop a needle's only evidence: {:?}",
+            entries[0].1
+        );
+    }
+
+    /// The per-needle guarantee has to hold at WORKSPACE level, because that
+    /// is what the client ANDs against. Folding terminal-by-terminal let a
+    /// first tab that matches many needles with long lines spend the whole
+    /// corpus and drop a second tab's only evidence for a needle the first
+    /// never matched.
+    #[test]
+    fn a_second_tab_keeps_its_evidence_when_the_first_is_verbose() {
+        let key = SessionKey::from("github:o/r#1");
+        let filler = "x".repeat(MAX_MATCH_LINE_BYTES);
+        let mut verbose = Vec::new();
+        // The first tab matches seven of the eight needles, with maximal
+        // lines, enough raw text to overrun the corpus on its own.
+        for slot in 0..7 {
+            for n in 0..MAX_MATCH_LINES_PER_NEEDLE {
+                verbose.extend_from_slice(format!("term{slot} {n} {filler}\n").as_bytes());
+            }
+        }
+        let quiet = b"only here: term7 appears\n".to_vec();
+
+        let mut asked: Vec<String> = (0..8).map(|n| format!("term{n}")).collect();
+        asked.truncate(MAX_AGENT_OUTPUT_NEEDLES);
+        let entries = fold_matches(vec![(key.clone(), verbose), (key.clone(), quiet)], &asked);
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].1.contains("term7"),
+            "the quiet tab's only evidence must survive a verbose sibling: {:?}",
+            entries[0].1
+        );
+        assert!(entries[0].1.len() <= MATCH_CORPUS_BYTES);
+    }
+
+    /// `\x1b[<n>C` is a COLUMN move inside one row — programs pad with it
+    /// because it is shorter than spaces. Treating it as a line boundary
+    /// split one rendered row in two and made every needle spanning the
+    /// padding miss.
+    #[test]
+    fn a_column_move_pads_the_row_instead_of_ending_it() {
+        let padded = b"Name\x1b[6CValue is here";
+        let hit = scan_output(padded, &needles(&["name value"]))
+            .expect("the row reads as one line across the padding");
+        assert_eq!(hit, "Name Value is here");
+
+        // CHA (`G`) and CUB (`D`) are column moves too.
+        assert!(scan_output(b"left\x1b[20Gright", &needles(&["left right"])).is_some());
+        assert!(scan_output(b"left\x1b[2Dright", &needles(&["left right"])).is_some());
+
+        // An erase clears leftovers on the row just written; it does not end
+        // it, so content beside it stays on the same line.
+        let erased = b"foo\x1b[Kbar";
+        assert_eq!(
+            scan_output(erased, &needles(&["foobar"])),
+            Some("foobar".to_string())
+        );
+
+        // Row moves still end the line — the property the padding fix must
+        // not cost us.
+        assert!(scan_output(b"a\x1b[2;1Hb", &needles(&["a b"])).is_none());
     }
 
     /// Cost is bounded by the tail, not by how chatty the agent has been:
@@ -422,8 +633,9 @@ mod tests {
             entries[0].1.len()
         );
         assert!(
-            entries[0].1.lines().count() <= MAX_MATCH_LINES * 2,
-            "each terminal is capped at MAX_MATCH_LINES"
+            entries[0].1.lines().count()
+                <= MAX_MATCH_LINES_PER_NEEDLE * needles(&["parser"]).len() * 2,
+            "each terminal is capped per needle"
         );
     }
 
@@ -444,16 +656,12 @@ mod tests {
     #[test]
     fn needles_are_clamped_before_they_reach_the_scan() {
         let long = "x".repeat(MAX_AGENT_OUTPUT_NEEDLE_BYTES * 2);
-        let clamped = normalize_needles(vec![
-            "  ".into(),
-            String::new(),
-            "Parser".into(),
-            long,
-            "a".into(),
-            "b".into(),
-            "c".into(),
-            "d".into(),
-        ]);
+        let mut raw: Vec<String> = vec!["  ".into(), String::new(), "Parser".into(), long];
+        // Push past the cap so the `take` is what bounds the result, not the
+        // input length — the assertion below would otherwise pass for any
+        // cap at or above the number of needles supplied.
+        raw.extend((0..MAX_AGENT_OUTPUT_NEEDLES).map(|n| format!("extra{n}")));
+        let clamped = normalize_needles(raw);
         assert_eq!(clamped.len(), MAX_AGENT_OUTPUT_NEEDLES);
         assert_eq!(clamped[0], "parser", "needles fold case");
         assert_eq!(clamped[1].len(), MAX_AGENT_OUTPUT_NEEDLE_BYTES);

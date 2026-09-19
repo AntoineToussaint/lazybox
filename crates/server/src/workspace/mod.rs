@@ -1,6 +1,7 @@
 //! Workspace and project lifecycle operations owned by the daemon.
 
 pub mod attach;
+pub mod floating;
 
 use crate::ServerConfig;
 use crate::polling::{
@@ -18,6 +19,8 @@ use std::collections::{HashMap, HashSet};
 /// for a row that may never have reached the store.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateWorkspaceError {
+    #[error("create floating workspace directory: {0}")]
+    Directory(#[from] std::io::Error),
     #[error("allocate a collision-free workspace key: {0}")]
     Allocate(#[source] StoreError),
     #[error("persist workspace: {0}")]
@@ -611,6 +614,7 @@ pub fn create_local_project(config: &ServerConfig, name: &str) -> lazybox_core::
 /// Called once at daemon startup from both `run_embedded_realm` and
 /// `server_start` so each lazybox launch self-heals legacy state.
 pub fn migrate_legacy_sandbox(config: &ServerConfig) {
+    floating::migrate_legacy(config);
     let key = WorkspaceKey::new("sandbox".to_string());
     let Some(record) = config.store.get_workspace(&key).ok().flatten() else {
         return;
@@ -1815,6 +1819,12 @@ fn lifecycle_worktree_paths(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Vec<std::path::PathBuf> {
+    // Repo-free folders contain user notes, not disposable git worktrees.
+    // Archive only the row and sessions; preserve the directory even when
+    // the configured worktree root happens to contain the sandbox root.
+    if workspace.floating.is_some() {
+        return Vec::new();
+    }
     let mgr = config.worktree_manager();
     let shared_main =
         crate::spawn_handler::main_worktree_path_under(workspace, config.worktree_root_path())

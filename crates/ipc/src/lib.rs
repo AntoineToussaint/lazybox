@@ -1503,6 +1503,13 @@ pub enum Command {
         #[serde(default)]
         scratch: bool,
     },
+    /// Create a persistent repo-free directory and optionally start an agent.
+    CreateFloatingWorkspace {
+        name: String,
+        kind: lazybox_core::FloatingWorkspaceKind,
+        spawn_agent: Option<String>,
+        client_request_id: Option<String>,
+    },
     /// Create a brand-new local Project — a top-level container the
     /// sidebar groups workspaces under, like a github repo but with
     /// no upstream provider. Slugified to `local-<slug>`; idempotent

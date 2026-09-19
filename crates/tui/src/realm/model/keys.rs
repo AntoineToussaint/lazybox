@@ -3147,6 +3147,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenWith => Action::OpenWith,
         ActionKind::ViewDiff => Action::ViewDiff,
         ActionKind::NewWorkspace => Action::NewWorkspace,
+        ActionKind::NewCoordinationWorkspace => Action::NewCoordinationWorkspace,
         ActionKind::RenameWorkspace => Action::RenameWorkspace,
         ActionKind::MoveToSpace => Action::MoveToSpace,
         ActionKind::NewProject => Action::NewProject,

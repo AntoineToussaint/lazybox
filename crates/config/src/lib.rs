@@ -2097,6 +2097,10 @@ impl AgentEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSection {
+    /// Override the built-in brief on coordination workspaces (`x c`). An
+    /// explicit empty string disables the extra brief; shared startup rules
+    /// still apply. Read on each agent launch, including resumes.
+    pub coordination_prompt: Option<String>,
     #[serde(flatten)]
     pub config: lazybox_core::AgentConfig,
     /// Launch lazybox-spawned autonomous sessions (e.g. `@lazybox`-triggered

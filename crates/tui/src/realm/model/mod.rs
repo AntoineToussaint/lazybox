@@ -1163,6 +1163,9 @@ pub(crate) enum ModalFlow {
     JiraProjectRepo { project: String },
     /// New-workspace name input, carrying the project to create under.
     NewWorkspaceProject { project: lazybox_core::ProjectKey },
+    FloatingWorkspace {
+        kind: lazybox_core::FloatingWorkspaceKind,
+    },
     /// Rename-workspace name input (#744), carrying the workspace to
     /// rename. Consumed by `handle_input_submitted` →
     /// `Command::RenameWorkspace`.
@@ -6083,6 +6086,10 @@ impl<T: TerminalAdapter> Model<T> {
         for cmd in cmds {
             let workspace_create = match &cmd {
                 IpcCommand::CreateWorkspace {
+                    client_request_id: Some(id),
+                    ..
+                }
+                | IpcCommand::CreateFloatingWorkspace {
                     client_request_id: Some(id),
                     ..
                 } => Some(id.clone()),

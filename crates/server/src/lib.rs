@@ -1358,6 +1358,7 @@ impl Server {
                         lazybox_ipc::Command::DeleteProject { .. } => "DeleteProject",
                         lazybox_ipc::Command::CollapseIntoPr { .. } => "CollapseIntoPr",
                         lazybox_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
+                        lazybox_ipc::Command::CreateFloatingWorkspace { .. } => "CreateFloatingWorkspace",
                         lazybox_ipc::Command::CreateProject { .. } => "CreateProject",
                         lazybox_ipc::Command::AdoptSessions { .. } => "AdoptSessions",
                         lazybox_ipc::Command::RequestReviewers { .. } => "RequestReviewers",
@@ -2663,6 +2664,53 @@ pub async fn dispatch_command(
                 spawn_handler::handle_spawn(
                     config,
                     session_key,
+                    None,
+                    lazybox_ipc::TerminalKind::Agent(agent_id),
+                    spawn_handler::SpawnOptions {
+                        client_request_id,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            } else if let Some(client_request_id) = client_request_id {
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::CommandCompleted { client_request_id });
+            }
+        }
+        lazybox_ipc::Command::CreateFloatingWorkspace {
+            name,
+            kind,
+            spawn_agent,
+            client_request_id,
+        } => {
+            let key = match workspace::floating::create(config, &name, kind) {
+                Ok(key) => key,
+                Err(error) => {
+                    let event = match client_request_id {
+                        Some(client_request_id) => lazybox_ipc::Event::CommandFailed {
+                            client_request_id,
+                            message: error.to_string(),
+                        },
+                        None => lazybox_ipc::Event::Notification {
+                            title: "Workspace not created".into(),
+                            body: error.to_string(),
+                        },
+                    };
+                    let _ = config.bus.send(event);
+                    return;
+                }
+            };
+            if let Some(client_request_id) = &client_request_id {
+                let _ = config.bus.send(lazybox_ipc::Event::WorkspaceCreated {
+                    client_request_id: client_request_id.clone(),
+                    workspace_key: key.clone(),
+                });
+            }
+            if let Some(agent_id) = spawn_agent {
+                spawn_handler::handle_spawn(
+                    config,
+                    (&key).into(),
                     None,
                     lazybox_ipc::TerminalKind::Agent(agent_id),
                     spawn_handler::SpawnOptions {

@@ -141,6 +141,13 @@ pub async fn handle_start_agent_run(
         }
     };
     let mut argv = agent_impl.spawn(&spawn_ctx);
+    if let Ok(workspace) = crate::spawn_handler::load_workspace(
+        config,
+        &lazybox_core::WorkspaceKey::new(resolved_session_key.as_str()),
+    ) && let Some(context) = crate::workspace::floating::coordination_prompt(&workspace, &yaml)
+    {
+        argv.extend(agent_impl.session_context_args(&context));
+    }
     argv.extend(model_args);
     let Some((program, extra_args)) = argv.split_first() else {
         let _ = config.bus.send(Event::AgentRunStartFailed {
@@ -462,6 +469,19 @@ async fn resolve_target(
         .ok_or_else(|| "agent workspace has no persisted session data".to_string())?;
     let workspace = lazybox_core::Workspace::decode_persisted(&json)
         .map_err(|error| format!("could not decode agent workspace: {error}"))?;
+    if workspace.floating.is_some() {
+        let (path, id, _) = crate::workspace::floating::resolve_session(
+            config,
+            &key,
+            session_id,
+            lazybox_core::SessionKind::Agent {
+                agent_id: agent.into(),
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        return Ok((Some(path), Some(id), session_key.clone()));
+    }
     let session = match session_id {
         Some(id) => workspace
             .find_session(id)

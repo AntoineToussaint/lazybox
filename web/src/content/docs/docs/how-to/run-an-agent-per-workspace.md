@@ -20,6 +20,18 @@ any checkout; lazybox does not wrap those actions behind an approval layer.
 
 ## Spawn an agent
 
+For repo-free thinking, `x n` asks for a name and opens the default agent in a
+fresh, persistent Lazybox-owned folder. It works from an empty sidebar and
+does not inherit the selected repository. `x c` creates a coordination
+workspace in the same way, with startup instructions covering epics,
+cross-repository owner contracts, blockers, and the minimum necessary number
+of issues. Override that brief with `agent.coordination_prompt` in config.
+The folder and workspace purpose survive restart; archiving the row preserves
+the folder and its contents under Lazybox's state directory in `sandboxes/`.
+Implementation work still belongs in its tracker record's repository workspace.
+
+For a repository workspace, continue below.
+
 With a workspace selected in the sidebar, press `a` to open the agent menu
 (a which-key popup), then the agent's key:
 

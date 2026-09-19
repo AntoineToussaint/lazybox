@@ -1676,42 +1676,12 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::NewWorkspace => {
-                let focused = self.sidebar.focused_project_key();
-                // Explicit variant list (no `_` catch-all) so a new
-                // Intent variant is a compile error here — this
-                // consumer must decide what it means instead of
-                // silently swallowing it.
-                use crate::intent::Intent;
-                match crate::intent::resolve_new_workspace(focused) {
-                    Intent::MountNewWorkspaceInput { project_key } => {
-                        self.mount_new_workspace_input(project_key);
-                    }
-                    Intent::Notice(msg) => {
-                        self.flash_info(msg);
-                    }
-                    // The resolver only produces the two arms above;
-                    // the rest are unreachable from this call.
-                    Intent::NoOp
-                    | Intent::SpawnAgent { .. }
-                    | Intent::SpawnRoleAgent { .. }
-                    | Intent::SpawnShell { .. }
-                    | Intent::MountReply { .. }
-                    | Intent::MountAdoptPicker { .. }
-                    | Intent::OpenEditor
-                    | Intent::MergePr { .. }
-                    | Intent::UpdateBranch { .. }
-                    | Intent::SetAutoMergeOnGreen { .. }
-                    | Intent::SetTrackMain { .. }
-                    | Intent::SetMetered { .. }
-                    | Intent::SetContextCompaction { .. }
-                    | Intent::KillWorkspace { .. }
-                    | Intent::Snooze { .. }
-                    | Intent::Unsnooze { .. }
-                    | Intent::MarkAllRead { .. }
-                    | Intent::MarkActivitiesRead { .. }
-                    | Intent::CollapseIntoPr { .. }
-                    | Intent::MountHandoffPicker { .. } => {}
-                }
+                self.mount_floating_workspace_input(lazybox_core::FloatingWorkspaceKind::Thinking);
+            }
+            Action::NewCoordinationWorkspace => {
+                self.mount_floating_workspace_input(
+                    lazybox_core::FloatingWorkspaceKind::Coordination,
+                );
             }
             Action::RenameWorkspace => {
                 // A cursor parked on a Space header renames the Space

@@ -666,7 +666,7 @@ impl<T: TerminalAdapter> Model<T> {
             project_key,
             spawn_agent,
             client_request_id: Some(client_request_id),
-            // No anchor: `x n` and the Start sheet's Chat row are the
+            // No anchor: the Start sheet's project-workspace and Chat rows are
             // hand-made-workspace flows, so the daemon resolves the name
             // itself. It still attaches when the name turns out to be a
             // record (`#1586` lands on that issue's row, never beside it) —
@@ -701,6 +701,23 @@ impl<T: TerminalAdapter> Model<T> {
                 let name = text.trim().to_string();
                 let project_key = match self.modal_flow.take() {
                     Some(ModalFlow::NewWorkspaceProject { project }) => Some(project),
+                    Some(ModalFlow::FloatingWorkspace { kind }) if !name.is_empty() => {
+                        let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+                        self.pending_workspace_creates.insert(
+                            client_request_id.clone(),
+                            super::PendingWorkspaceCreate {
+                                name: name.clone(),
+                                spawn_agent: true,
+                                workspace_key: None,
+                            },
+                        );
+                        return vec![IpcCommand::CreateFloatingWorkspace {
+                            name,
+                            kind,
+                            spawn_agent: Some(self.sidebar.default_agent().to_string()),
+                            client_request_id: Some(client_request_id),
+                        }];
+                    }
                     _ => None,
                 };
                 match (name.is_empty(), project_key) {

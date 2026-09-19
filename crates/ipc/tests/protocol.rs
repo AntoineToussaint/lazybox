@@ -333,6 +333,12 @@ fn all_commands() -> Vec<Command> {
         Command::CreateProject {
             name: "local project".into(),
         },
+        Command::CreateFloatingWorkspace {
+            name: "Coordinate the release".into(),
+            kind: lazybox_core::FloatingWorkspaceKind::Coordination,
+            spawn_agent: Some("codex".into()),
+            client_request_id: Some("create-floating".into()),
+        },
         Command::SetSessionLayout {
             session_key: key.clone(),
             session_id_raw: "00000000-0000-0000-0000-000000000001".into(),
@@ -1545,6 +1551,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::MarkActivityRead { .. } => "MarkActivityRead",
         Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
         Command::CreateWorkspace { .. } => "CreateWorkspace",
+        Command::CreateFloatingWorkspace { .. } => "CreateFloatingWorkspace",
         Command::CreateProject { .. } => "CreateProject",
         Command::SetSessionLayout { .. } => "SetSessionLayout",
         Command::Snooze { .. } => "Snooze",
@@ -1760,7 +1767,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        105,
+        106,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

@@ -2008,6 +2008,9 @@ fn command_request_id(command: &Command) -> Option<String> {
         }
         | Command::CreateWorkspace {
             client_request_id, ..
+        }
+        | Command::CreateFloatingWorkspace {
+            client_request_id, ..
         } => client_request_id.clone(),
         _ => None,
     }

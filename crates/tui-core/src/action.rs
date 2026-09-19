@@ -101,8 +101,10 @@ pub enum Action {
     OpenWithApp(String),
     /// Review the workspace's combined staged/unstaged worktree diff.
     ViewDiff,
-    /// Create a brand-new pre-PR workspace (asks for a name).
+    /// Create a repo-free floating workspace (asks for a name).
     NewWorkspace,
+    /// Create a repo-free workspace with coordination startup instructions.
+    NewCoordinationWorkspace,
     /// Rename the focused workspace's display name in place — opens an
     /// input prefilled with the current name. Only the display label
     /// changes; the workspace key and worktree path stay stable so
@@ -605,6 +607,7 @@ pub enum ActionKind {
     OpenWithApp,
     ViewDiff,
     NewWorkspace,
+    NewCoordinationWorkspace,
     RenameWorkspace,
     MoveToSpace,
     NewProject,
@@ -793,6 +796,7 @@ impl ActionKind {
         // hiding/destructive actions last. The runtime which-key popup
         // inherits this order directly.
         Self::NewWorkspace,
+        Self::NewCoordinationWorkspace,
         Self::RenameWorkspace,
         Self::MoveToSpace,
         Self::NewProject,
@@ -932,6 +936,7 @@ impl Action {
             Action::OpenWithApp(_) => ActionKind::OpenWithApp,
             Action::ViewDiff => ActionKind::ViewDiff,
             Action::NewWorkspace => ActionKind::NewWorkspace,
+            Action::NewCoordinationWorkspace => ActionKind::NewCoordinationWorkspace,
             Action::RenameWorkspace => ActionKind::RenameWorkspace,
             Action::MoveToSpace => ActionKind::MoveToSpace,
             Action::NewProject => ActionKind::NewProject,
@@ -1496,8 +1501,15 @@ impl ActionDef {
             ActionKind::NewWorkspace => &Self {
                 kind: ActionKind::NewWorkspace,
                 default_keys: "x n",
-                label: "new workspace",
-                describe: "Create a pre-PR workspace (asks for a name).",
+                label: "floating workspace",
+                describe: "Create a persistent empty folder for thinking, with no repository or tracker record (asks for a name).",
+                section: Section::Workspace,
+            },
+            ActionKind::NewCoordinationWorkspace => &Self {
+                kind: ActionKind::NewCoordinationWorkspace,
+                default_keys: "x c",
+                label: "coordination workspace",
+                describe: "Create a repo-free workspace whose agent knows Lazybox's epic, cross-repo, owner-contract, and blocker workflow. Override its brief with agent.coordination_prompt.",
                 section: Section::Workspace,
             },
             ActionKind::RenameWorkspace => &Self {
@@ -1517,7 +1529,7 @@ impl ActionDef {
             ActionKind::NewProject => &Self {
                 kind: ActionKind::NewProject,
                 default_keys: "x p",
-                // Distinct from NewWorkspace's "new workspace" — the two
+                // Distinct from NewWorkspace's "floating workspace" — the two
                 // used to share a label, rendering two identical footer
                 // cells for different actions.
                 label: "new project",
@@ -1568,7 +1580,7 @@ impl ActionDef {
             },
             ActionKind::CloseIssue => &Self {
                 kind: ActionKind::CloseIssue,
-                default_keys: "x c",
+                default_keys: "x C",
                 label: "close issue",
                 describe: "Close the focused GitHub issue upstream (as not-planned). Only on issue workspaces; a true delete needs elevated permissions, so this closes instead. Confirmed first.",
                 section: Section::Workspace,
@@ -2475,6 +2487,7 @@ impl ActionKind {
             ActionKind::OpenWithApp => "open_with_app",
             ActionKind::ViewDiff => "view_diff",
             ActionKind::NewWorkspace => "new_workspace",
+            ActionKind::NewCoordinationWorkspace => "new_coordination_workspace",
             ActionKind::RenameWorkspace => "rename_workspace",
             ActionKind::MoveToSpace => "move_to_space",
             ActionKind::NewProject => "new_project",
@@ -2789,6 +2802,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
         ActionKind::NewWorkspace
+        | ActionKind::NewCoordinationWorkspace
         | ActionKind::RenameWorkspace
         | ActionKind::MoveToSpace
         | ActionKind::NewProject
@@ -3603,6 +3617,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         ActionKind::VisualSelect => has_ws,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
+        | ActionKind::NewCoordinationWorkspace
         | ActionKind::NewProject
         | ActionKind::ImportCheckout
         | ActionKind::AddScanRoot
@@ -4243,7 +4258,7 @@ mod tests {
             def.default_chord(),
             Some(Chord::Seq(vec![
                 KeyStroke::new(false, false, false, ChordCode::Char('x')),
-                KeyStroke::new(false, false, false, ChordCode::Char('c')),
+                KeyStroke::new(false, true, false, ChordCode::Char('c')),
             ])),
             "close-issue lives in the workspace-management menu",
         );
@@ -5286,6 +5301,7 @@ mod tests {
     fn workspace_management_actions_share_the_x_leader() {
         let expected = [
             (ActionKind::NewWorkspace, 'n'),
+            (ActionKind::NewCoordinationWorkspace, 'c'),
             (ActionKind::NewProject, 'p'),
             (ActionKind::ImportCheckout, 'i'),
             (ActionKind::AddScanRoot, 'r'),
@@ -5295,7 +5311,7 @@ mod tests {
             (ActionKind::CollapseIntoPr, 'j'),
             (ActionKind::LongSnooze, 'z'),
             (ActionKind::Archive, 'x'),
-            (ActionKind::CloseIssue, 'c'),
+            (ActionKind::CloseIssue, 'C'),
         ];
         let leader = KeyStroke::new(false, false, false, ChordCode::Char('x'));
         for (kind, key) in expected {
@@ -5303,7 +5319,12 @@ mod tests {
                 ActionDef::for_kind(kind).default_chord(),
                 Some(Chord::Seq(vec![
                     leader,
-                    KeyStroke::new(false, false, false, ChordCode::Char(key)),
+                    KeyStroke::new(
+                        false,
+                        key.is_ascii_uppercase(),
+                        false,
+                        ChordCode::Char(key.to_ascii_lowercase()),
+                    ),
                 ])),
                 "{kind:?} must stay in the workspace menu",
             );
@@ -5497,7 +5518,7 @@ mod tests {
         );
         assert_eq!(
             ActionDef::for_kind(ActionKind::NewWorkspace).label,
-            "new workspace"
+            "floating workspace"
         );
     }
 

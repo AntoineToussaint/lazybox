@@ -77,7 +77,7 @@ pub fn scrollback_dir() -> PathBuf {
 }
 
 /// Sandbox workspaces — repo-less scratch directories the user
-/// creates via `x p`. Lives next to the worktree base under
+/// creates via `x n` (thinking) or `x c` (coordination). Lives under
 /// `<home>/v2/sandboxes/<slug>/`. Survives across lazybox restarts
 /// and is preserved on `x x` archive (the workspace record
 /// goes; the directory stays for the user to clean up manually if

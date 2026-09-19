@@ -43,6 +43,14 @@ Duplicate spawns are collapsed by the SpawnCoordinator rather than by the
 callers, so a double-fire or an issue→PR rebadge never forks two backends.
 Explicit spawn keys still force a new agent deliberately.
 
+Repo-free workspaces persist `Workspace.floating` as their directory purpose.
+`workspace/floating.rs` owns fresh-folder allocation and durable session
+resolution through core paths; never authorize a spawn from a key prefix.
+Archive preserves these folders and their user files. Coordination workspaces
+start with the Coordinator role and load `agent.coordination_prompt` (or the
+built-in brief) on every fresh start and resume, alongside the shared startup
+contract. They organize work; implementation stays on the tracker record.
+
 ## Merge has two call sites
 
 `polling/handlers.rs` (the interactive merge) and `polling/auto_merge.rs`

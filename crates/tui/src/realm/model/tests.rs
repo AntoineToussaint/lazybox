@@ -1767,14 +1767,46 @@ mod effects_tests {
         }
     }
 
-    /// `x n` under a REPO project must declare itself scratch (#1586).
-    ///
-    /// The daemon refuses an anchor-less named create under a tracker-backed
-    /// project, and the TUI has no keybinding for "yes, this is scratch" — so
-    /// sending `scratch: false` here dead-ends an action the Start sheet still
-    /// offers, with a CLI flag (`--scratch`) as the only stated way out and no
-    /// way to reach it. `scratch` suppresses only the refusal, so the record
-    /// attach still applies and `x n` "#7" continues to land on issue #7's row.
+    #[test]
+    fn floating_actions_work_without_a_selected_project_and_correlate_creation() {
+        for (action, expected) in [
+            (
+                lazybox_tui_core::action::Action::NewWorkspace,
+                lazybox_core::FloatingWorkspaceKind::Thinking,
+            ),
+            (
+                lazybox_tui_core::action::Action::NewCoordinationWorkspace,
+                lazybox_core::FloatingWorkspaceKind::Coordination,
+            ),
+        ] {
+            let mut m = build_model();
+            m.dispatch_action(&action);
+            assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspace));
+            let cmds = m.handle_input_submitted("  Think it through  ".into());
+            match cmds.as_slice() {
+                [
+                    IpcCommand::CreateFloatingWorkspace {
+                        name,
+                        kind,
+                        spawn_agent,
+                        client_request_id,
+                    },
+                ] => {
+                    assert_eq!(name, "Think it through");
+                    assert_eq!(*kind, expected);
+                    assert!(spawn_agent.is_some());
+                    assert!(
+                        m.pending_workspace_creates
+                            .contains_key(client_request_id.as_ref().unwrap())
+                    );
+                }
+                _ => panic!("expected correlated floating create: {cmds:?}"),
+            }
+        }
+    }
+
+    /// The repo-project creation modal still declares named work as scratch
+    /// (#1586). It is distinct from `x n`, which now creates a floating folder.
     #[test]
     fn new_workspace_under_a_repo_declares_scratch_so_it_cannot_dead_end() {
         let mut m = build_model();
@@ -1792,7 +1824,7 @@ mod effects_tests {
                 ..
             } => {
                 assert_eq!(project_key, &pk);
-                assert_eq!(*anchor, None, "`x n` resolves the name daemon-side");
+                assert_eq!(*anchor, None, "the modal resolves the name daemon-side");
                 assert!(
                     *scratch,
                     "a human who typed a name in the New-workspace modal must not be refused \

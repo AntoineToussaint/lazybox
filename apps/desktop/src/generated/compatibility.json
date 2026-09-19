@@ -223,6 +223,7 @@
             "cleanup_prompt": "unresolved",
             "compact_context": false,
             "created_at": "2023-11-14T22:13:20Z",
+            "floating": null,
             "gh_issues": [],
             "hopper": null,
             "key": "github-o-r-42",
@@ -291,7 +292,7 @@
             "read_indices": [],
             "remote": null,
             "role": null,
-            "schema": 13,
+            "schema": 14,
             "seen_count": 0,
             "sent_snippets": {
               "recent": [],
@@ -316,6 +317,7 @@
         "cleanup_prompt": "unresolved",
         "compact_context": false,
         "created_at": "2023-11-14T22:13:20Z",
+        "floating": null,
         "gh_issues": [],
         "hopper": null,
         "key": "github-o-r-42",
@@ -384,7 +386,7 @@
         "read_indices": [],
         "remote": null,
         "role": null,
-        "schema": 13,
+        "schema": 14,
         "seen_count": 0,
         "sent_snippets": {
           "recent": [],
@@ -567,6 +569,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 1771600108,
+  "protocol_fingerprint": 1199233034,
   "protocol_version": 4
 }

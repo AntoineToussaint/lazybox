@@ -2519,6 +2519,13 @@ pub struct Model<T: TerminalAdapter> {
     /// DAG (`E g`) readouts render from this cache, and the held-merge
     /// confirm on `g m` consults it to name unmerged predecessors.
     pub(crate) epic_snapshots: std::collections::HashMap<String, lazybox_ipc::EpicSnapshot>,
+    /// Markdown artifacts agents spooled per workspace (#1822) and the count
+    /// the daemon's cap left out, from `Event::WorkspaceArtifacts` (seeded on
+    /// connect, refreshed on every spool change). `a A` renders these through
+    /// the description reader. Not persisted: the spool files in the worktree
+    /// are the durable copy, and the daemon re-derives this from them.
+    pub(crate) artifacts:
+        std::collections::HashMap<lazybox_core::WorkspaceKey, (Vec<lazybox_core::Artifact>, usize)>,
     /// Skill names triggered this session, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Feeds the skills picker's "Recent" group so
     /// a repeated skill is one `]]k` + `Enter` away, mirroring
@@ -2980,6 +2987,7 @@ impl<T: TerminalAdapter> Model<T> {
             unconfirmed_snippet: std::collections::HashMap::new(),
             mastery: std::collections::HashMap::new(),
             epic_snapshots: std::collections::HashMap::new(),
+            artifacts: std::collections::HashMap::new(),
             recent_skills: Vec::new(),
             dismissed_updates: Vec::new(),
             snippet_keepmine: Vec::new(),

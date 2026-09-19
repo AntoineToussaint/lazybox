@@ -2589,6 +2589,9 @@ impl<T: TerminalAdapter> Model<T> {
                     self.mount_notes(session_key);
                 }
             }
+            Action::OpenArtifacts => {
+                self.open_workspace_artifacts();
+            }
             Action::RequestReviewers => {
                 if let Some(cmd) = self.begin_request_reviewers() {
                     cmds.push(cmd);

@@ -1950,6 +1950,45 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::DescriptionModal, modal);
     }
 
+    /// Open the focused workspace's spooled artifacts (#1822) in the
+    /// description reader.
+    ///
+    /// One artifact opens under its own title; several open as one document,
+    /// newest first, each under its own `#` heading — the reader already
+    /// scrolls, and a set of artifacts from one session is read together far
+    /// more often than one is picked out of it. `None` is a notice rather
+    /// than a silent no-op: the catalog gates `a A` on a workspace existing,
+    /// not on that workspace having spooled anything, so a user who presses
+    /// it on an empty row has to learn which of the two is missing.
+    pub(crate) fn open_workspace_artifacts(&mut self) {
+        let Some(ws) = self.sidebar.selected_workspace() else {
+            return;
+        };
+        let (key, name) = (ws.key.clone(), ws.name.clone());
+        let Some((artifacts, hidden)) = self.artifacts.get(&key) else {
+            self.flash_info(
+                "no artifacts here — an agent writes them to .lazybox/artifacts/ in its worktree",
+            );
+            return;
+        };
+        let Some((title, body)) = lazybox_core::artifact_document(&name, artifacts, *hidden) else {
+            return;
+        };
+        // The artifact reader IS the description reader: `Id::consumes_scroll`
+        // whitelists `Id::DescriptionModal` alone for wheel events, so a fresh
+        // id would silently lose mouse scroll. The cost of sharing it is that
+        // `mount_description_modal` is idempotent on that id — it early-returns
+        // when the reader is already top of the stack, which would make `a A`
+        // over an open task description do nothing at all. Pop first so the
+        // artifacts replace it; Esc then returns to whatever was underneath.
+        if self.modal_stack.last() == Some(&Id::DescriptionModal) {
+            self.pop_modal();
+        }
+        // The reader's `a` (ask about this) resolves against the selection,
+        // which is exactly the workspace these came from.
+        self.mount_description_modal(title, body, None);
+    }
+
     /// Open the repo merge-history ledger (#1432) in its loading state.
     /// The caller pairs this with a `Command::FetchRepoMergeHistory`; the
     /// reply (`Event::RepoMergeHistory`) repaints it via

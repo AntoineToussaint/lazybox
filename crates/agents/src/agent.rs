@@ -266,6 +266,14 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Whether lazybox must refuse to start this adapter unless its resolved
+    /// tier carries an explicit model flag. Built-in LLM agents opt in so a
+    /// malformed or missing menu cannot silently fall through to a provider
+    /// CLI/account default.
+    fn requires_explicit_model(&self) -> bool {
+        false
+    }
+
     /// Interactive shell/PTY behavior for this agent. The server owns the
     /// universal paste/settle/submit transaction; adapters only select a
     /// protocol. Simple and generic CLIs inherit [`PtyProtocol::LINE_ORIENTED`].
@@ -750,6 +758,9 @@ pub mod builtins {
         fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
             Some(StructuredAgentProtocol::ClaudeStreamJson)
         }
+        fn requires_explicit_model(&self) -> bool {
+            true
+        }
         fn supports_mcp_config(&self) -> bool {
             true
         }
@@ -1036,6 +1047,9 @@ pub mod builtins {
         }
         fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
             Some(StructuredAgentProtocol::CodexExecJson)
+        }
+        fn requires_explicit_model(&self) -> bool {
+            true
         }
         fn pty_protocol(&self) -> PtyProtocol {
             PtyProtocol::GUARDED_COMPOSER

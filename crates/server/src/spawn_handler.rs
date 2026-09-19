@@ -2443,10 +2443,10 @@ async fn handle_spawn_inner(
     // the persisted workspace, not a field of the incoming Spawn command.
     {
         Ok(plan) => plan,
-        Err(_) => {
+        Err(error) => {
             let _ = config.bus.send(Event::provider_error_permanent(
                 &plan_error_source,
-                "no agent registered for this id",
+                error.to_string(),
             ));
             return None;
         }

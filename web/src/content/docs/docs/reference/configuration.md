@@ -116,11 +116,11 @@ agent:
 # ── agents (per-agent overrides) ─────────────────────────────────────
 # Model-tier menu the `w S`/`w M`/`w L` and `a S`/`a M`/`a L` chords and
 # the `model:<tier>` task labels pick from. Claude ships a built-in
-# Haiku/Sonnet/Opus/Fable menu; other agents define theirs here.
+# Haiku/Sonnet/Opus/Fable menu; Codex ships a pinned GPT-5.5 default.
 agents:
   codex:
     models:
-      default: M             # tier a bare spawn uses; unset → agent default
+      default: M             # tier a bare spawn uses; overlays Lazybox's default
       tiers:
         - alias: M
           label: GPT-5
@@ -326,8 +326,11 @@ Per-agent definitions and overrides keyed by agent id (`claude`, `codex`, …).
 An entry with `command` registers a generic agent CLI at daemon startup. Add
 that id to `setup.agents`, then give it a chord through
 `ui.action_keys.spawn_agent.<id>`. Entries without `command` simply customize
-a built-in. Claude ships a Haiku (`S`) / Sonnet (`M`) / Opus (`L`) model menu;
-other agents have no built-in menu.
+a built-in. Claude ships a Haiku (`S`) / Sonnet (`M`) / Opus (`L`) model menu,
+and Codex ships a pinned GPT-5.5 (`L`) default. Both built-ins pass an explicit
+model on interactive, resume, and structured/headless launches; a missing or
+malformed selected tier refuses the launch instead of inheriting a provider
+CLI/account default. Other agents have no built-in menu.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -336,7 +339,7 @@ other agents have no built-in menu.
 | `args` | list of string | `[]` | Arguments appended to `command` for a fresh session |
 | `resume_args` | list of string | unset | Arguments appended to `command` for resume; unset reuses `args` |
 | `asking_patterns` | list of string | `[]` | Output markers that classify the custom agent as **Input Needed** |
-| `models.default` | string | unset | Alias of the tier a bare spawn uses; unset → the agent's own default model |
+| `models.default` | string | built-in-dependent | Alias of the tier a bare spawn uses. Claude and Codex inherit Lazybox's pinned built-in default; custom agents without a menu may use their own default model |
 | `models.tiers` | list | `[]` | Ordered tier menu. Each entry: `alias` (the chord key — a single uppercase letter binds as `Shift`, e.g. `S` → `w S`), `label` (shown in the popup and the `◆` tab badge), `args` (appended to the spawn argv) |
 | `models.capability` | map | `{}` | `best` / `high` / `medium` / `low` capability labels → tier alias, used when a spawn declares no explicit tier. The deprecated `models.priority` spelling still parses and is rewritten on save. A `model:<tier>` label names a `models.tiers` entry directly and needs no map |
 | `auto_update` | bool | `false` | Let lazybox apply this agent's CLI updates automatically when the scheduled out-of-band check finds a newer version. Off by default: the check still runs and surfaces "update available", but installing waits for the manual "update agent CLIs" action. |

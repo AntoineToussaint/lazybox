@@ -131,10 +131,16 @@
           ]
         },
         {
-          "default_tier": null,
+          "default_tier": "L",
           "id": "codex",
           "label": "Codex",
-          "models": []
+          "models": [
+            {
+              "alias": "L",
+              "excluded_from_default": false,
+              "label": "GPT-5.5"
+            }
+          ]
         },
         {
           "default_tier": null,

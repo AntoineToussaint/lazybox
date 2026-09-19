@@ -62,11 +62,8 @@ impl<T: TerminalAdapter> Model<T> {
                 .map(|(key, snippet)| SnippetPick {
                     key: key.to_string(),
                     category: snippet.category.clone(),
-                    // `delivery_body`, not `dispatch_body`: this payload is
-                    // what reaches the agent (submit) or seeds an editable
-                    // composer, so it carries the output contract. The
-                    // picker's *preview* rows are `PickerRow`, a separate
-                    // type that stays on the authored text (#1697).
+                    // This named delivery boundary intentionally adds no
+                    // global policy; the spawn-time briefing already did.
                     body: snippet.delivery_body(),
                 })
                 .collect()

@@ -133,6 +133,44 @@ pub(crate) struct SpawnPlan {
 pub(crate) enum SpawnPlanError {
     #[error("no agent registered for id {0}")]
     UnknownAgent(String),
+    #[error(
+        "agent {0} requires an explicit lazybox model, but its selected/default tier has no model flag"
+    )]
+    MissingRequiredModel(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModel {
+    pub alias: Option<String>,
+    pub args: Vec<String>,
+    pub label: Option<String>,
+}
+
+/// Resolve one agent launch's requested/default tier and enforce adapters
+/// that require an explicit Lazybox model pin. Both PTY and structured runs
+/// call this helper so neither path can silently regain provider defaults.
+pub(crate) fn resolve_model_for_agent(
+    cfg: &lazybox_config::Config,
+    agent: &dyn Agent,
+    agent_id: &str,
+    requested_alias: Option<&str>,
+) -> Result<ResolvedModel, SpawnPlanError> {
+    let models = cfg.agent_models(agent_id);
+    let alias = requested_alias
+        .map(str::to_string)
+        .or_else(|| models.default.clone());
+    let tier = alias.as_deref().and_then(|alias| models.tier(alias));
+    let model_id = tier
+        .and_then(lazybox_core::ModelTier::model_id)
+        .filter(|id| !id.trim().is_empty() && !id.starts_with('-'));
+    if agent.requires_explicit_model() && model_id.is_none() {
+        return Err(SpawnPlanError::MissingRequiredModel(agent_id.to_string()));
+    }
+    Ok(ResolvedModel {
+        alias,
+        args: tier.map(|tier| tier.args.clone()).unwrap_or_default(),
+        label: tier.map(|tier| tier.label.clone()),
+    })
 }
 
 pub(crate) fn build_spawn_plan(
@@ -179,21 +217,19 @@ pub(crate) fn build_spawn_plan(
         ),
         _ => None,
     };
-    let mut resolved_model_alias = model_alias.clone().or_else(|| declared_model_alias.clone());
-    let (model_args, model_label) = match &kind {
-        TerminalKind::Agent(agent_id) => {
-            let models = cfg.agent_models(agent_id);
-            if resolved_model_alias.is_none() {
-                resolved_model_alias = models.default.clone();
-            }
-            let alias = resolved_model_alias.as_deref();
-            let label = alias
-                .or(models.default.as_deref())
-                .and_then(|alias| models.tier(alias))
-                .map(|tier| tier.label.clone());
-            (models.resolve_args(alias), label)
-        }
-        _ => (Vec::new(), None),
+    let requested_model_alias = model_alias.as_deref().or(declared_model_alias.as_deref());
+    let resolved_model = match &kind {
+        TerminalKind::Agent(agent_id) => resolve_model_for_agent(
+            cfg,
+            agent.as_deref().expect("agent resolved"),
+            agent_id,
+            requested_model_alias,
+        )?,
+        _ => ResolvedModel {
+            alias: requested_model_alias.map(str::to_string),
+            args: Vec::new(),
+            label: None,
+        },
     };
     let argv = argv_for(
         agents,
@@ -204,7 +240,7 @@ pub(crate) fn build_spawn_plan(
         cfg.agent.strict_mcp(),
         hook_settings.clone(),
         hook_command.as_deref(),
-        &model_args,
+        &resolved_model.args,
         resume,
         provider_session_id.as_deref(),
         access,
@@ -372,8 +408,8 @@ pub(crate) fn build_spawn_plan(
         initial_prompt,
         terminal_id,
         hook_settings,
-        model_label,
-        model_alias: resolved_model_alias,
+        model_label: resolved_model.label,
+        model_alias: resolved_model.alias,
         provider_session_id,
         replace_terminal_id,
         prompt_history,
@@ -807,6 +843,73 @@ mod tests {
 
         assert_eq!(plan.model_alias.as_deref(), Some("L"));
         assert_eq!(plan.model_label.as_deref(), Some("Opus"));
+    }
+
+    #[test]
+    fn bare_codex_spawn_and_resume_pin_the_lazybox_default_model() {
+        let cfg = lazybox_config::Config::default();
+        for resume in [false, true] {
+            let mut request = input(TerminalKind::Agent("codex".into()));
+            request.resume = resume;
+            let plan = build_spawn_plan(request, &cfg, &Registry::default_builtins())
+                .expect("valid Codex plan");
+            assert!(
+                plan.argv
+                    .windows(2)
+                    .any(|args| args == ["--model", "gpt-5.5"]),
+                "Codex launch must carry Lazybox's model pin: {:?}",
+                plan.argv
+            );
+            assert_eq!(plan.model_alias.as_deref(), Some("L"));
+            assert_eq!(plan.model_label.as_deref(), Some("GPT-5.5"));
+        }
+    }
+
+    #[test]
+    fn builtin_agent_with_missing_or_unknown_model_is_refused() {
+        let cfg =
+            lazybox_config::Config::parse("agents:\n  codex:\n    models:\n      replace: true\n")
+                .expect("parse model-less Codex config");
+        let error = match build_spawn_plan(
+            input(TerminalKind::Agent("codex".into())),
+            &cfg,
+            &Registry::default_builtins(),
+        ) {
+            Ok(_) => panic!("Codex must not fall through to the provider default"),
+            Err(error) => error,
+        };
+        assert_eq!(error, SpawnPlanError::MissingRequiredModel("codex".into()));
+
+        let cfg = lazybox_config::Config::default();
+        let mut request = input(TerminalKind::Agent("claude".into()));
+        request.model_alias = Some("missing".into());
+        let error = match build_spawn_plan(request, &cfg, &Registry::default_builtins()) {
+            Ok(_) => panic!("unknown explicit tier must not fall through"),
+            Err(error) => error,
+        };
+        assert_eq!(error, SpawnPlanError::MissingRequiredModel("claude".into()));
+    }
+
+    #[test]
+    fn builtin_agent_with_empty_or_missing_model_value_is_refused() {
+        for args in [
+            "['--model=']",
+            "['--model', '']",
+            "['--model']",
+            "['--model', '--verbose']",
+        ] {
+            let cfg = lazybox_config::Config::parse(&format!(
+                "agents:\n  codex:\n    models:\n      L:\n        label: Invalid\n        args: {args}\n"
+            ))
+            .expect("parse malformed model arguments");
+            let registry = Registry::default_builtins();
+            let agent = registry.get("codex").expect("Codex built-in");
+            assert_eq!(
+                resolve_model_for_agent(&cfg, agent.as_ref(), "codex", None),
+                Err(SpawnPlanError::MissingRequiredModel("codex".into())),
+                "must refuse model args {args}"
+            );
+        }
     }
 
     #[test]

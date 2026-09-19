@@ -410,11 +410,8 @@ impl SnippetPicker {
     /// category + origin + tag, any disclosure notice, and the full
     /// wrapped body — so the user sees exactly what auto-submit will send.
     ///
-    /// "Exactly" is per-snippet. Built-ins are delivered with a shared
-    /// output contract appended (#1697, `Snippet::delivery_body`); it is
-    /// identical for all of them and documented once in `docs/snippets.md`,
-    /// so previewing it here would cost ~19 lines per row to tell the user
-    /// nothing that distinguishes this snippet from the next.
+    /// Global response rules are already in the agent's startup briefing,
+    /// so the preview and submitted snippet text are identical.
     fn render_preview(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let Some(c) = self.cursor else {
             frame.render_widget(
@@ -896,7 +893,6 @@ mod tests {
             skill: None,
             provider: None,
             next: Vec::new(),
-            answer_is_the_ending: false,
             origin,
         }
     }

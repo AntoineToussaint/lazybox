@@ -43,8 +43,8 @@ substring table has them classifying each other as broken.
 ## Model tiers
 
 Tiers are declared per agent under `agents.<id>.models` in YAML — an ordered
-`alias → { label, args }` menu plus a `default` tier for bare spawns. Claude
-ships a built-in menu; other agents declare their own. The rules that are easy
+`alias → { label, args }` menu plus a `default` tier for bare spawns. Claude and
+Codex ship built-in menus; other agents declare their own. The rules that are easy
 to get wrong:
 
 - A user `models:` block **overlays** the built-in menu — a declared alias
@@ -54,9 +54,12 @@ to get wrong:
 - `excluded_from_default` keeps a tier off every bare spawn; a user block
   never *inherits* a capability mapping onto such a tier it did not declare.
   Writing-class models must not be reachable by a coding task's label.
-- A bare spawn always passes an explicit `--model`, which outranks a `model`
-  in the user's own agent settings. Config load warns when the two disagree —
-  keep that warning working, because the pin is otherwise invisible.
+- Every built-in Claude and Codex spawn — PTY, resume, or structured/headless —
+  passes an explicit model from lazybox's resolved default tier. A missing,
+  dangling, or model-less tier refuses the launch instead of inheriting a
+  provider CLI/account default. Claude config load warns when this pin
+  disagrees with the user's ambient setting, because the override is otherwise
+  invisible.
 - A task's `model:<token>` label (or `@model:` body marker) resolves through
   alias, then label, then pinned id. The legacy `best`/`high`/`medium`/`low`
   spelling names urgency but selects a model; `model:` outranks it.
@@ -81,4 +84,6 @@ filed issue, and it must keep naming the coordination tools, since a session
 that does not know they exist will not look for them. The base half also has
 to keep pointing at `.lazybox/task.json` and saying not to `gh issue view` the
 record it already holds — the GitHub budget it protects is the daemon's own
-(#1799).
+(#1799). Global response/formatting rules live here too, once per session;
+snippets carry only task-specific instructions and must not append a second
+contract later in the turn.

@@ -501,11 +501,12 @@ they do too:
   instruction. Long enough to be specific, short enough to read at a
   glance in the preview pane.
 
-Every built-in is **delivered** with the same output contract. It is appended
-by `Snippet::delivery_body()` when the snippet is sent; exported skills, role
-preambles, and catalog previews carry only the authored body because they are
-not terminal turns. User-defined bodies and overrides are also delivered
-exactly as authored.
+Every agent session starts with Lazybox's response contract, independent of
+whether its first task came from a built-in snippet, a user prompt, an
+automatic/headless run, or a later snippet. `Snippet::delivery_body()` sends
+only the task-specific instruction; exported skills, role preambles, catalog
+previews, user-defined bodies, and overrides therefore stay exactly as
+authored.
 
 The contract governs the handoff, not its visual shape. It asks for the
 concrete outcome first, preserves the evidence and named blockers that support
@@ -524,8 +525,8 @@ example, `push` names the pushed SHA, `ready` names the resulting draft state
 and that it pushed nothing, and `whyci` names the failing checks and that it
 changed nothing. That fact is per snippet, never inferred from its category.
 
-The complete authored built-in `rev` body (the contract is appended at
-delivery, so it is not part of what you would write):
+The complete built-in `rev` body (global response rules are already in the
+session briefing, so they are not part of what you write):
 
 ```yaml
 snippets:

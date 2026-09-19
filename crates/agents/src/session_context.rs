@@ -11,14 +11,14 @@
 /// The spawn context lazybox teaches every task-carrying agent — the "always"
 /// half of what an agent is told, riding either the spawn-intrinsic hook or
 /// the first task prompt so `a c`/`s` get it as surely as a `w w` work prompt
-/// does. It carries
-/// lazybox's *mechanics* (the load-bearing labels an agent must not strip,
+/// does. It carries lazybox's response discipline plus its *mechanics* (the
+/// load-bearing labels an agent must not strip,
 /// the policies that can act on a PR without it, the `@lazybox` trigger and
 /// its hazard, and the extra handles beyond `git`/`gh`), not the per-task
 /// brief — that stays in the work prompt.
 ///
-/// Kept tight because it is paid on every launch: a mechanics reference, not
-/// a manual. Constant for now; a later revision can swap this for an
+/// Kept tight because it is paid on every launch: a startup contract, not a
+/// manual. Constant for now; a later revision can swap this for an
 /// `agent.session_context` config key or daemon-provided dynamic text (this
 /// workspace's PR, branch, live policies, current labels) without touching
 /// either agent's hook path.
@@ -26,6 +26,14 @@ pub fn lazybox_session_context() -> &'static str {
     "You are running inside lazybox, a reactive PR inbox that hosts this session in \
 its own terminal. A few lazybox mechanics coordinate work across a fleet of agents — \
 know them before you touch labels or post comments.\n\
+\n\
+How to respond: lead with the concrete outcome and preserve the specific evidence and named \
+blockers that support it. End with a direct handoff, not a second summary or fixed template. \
+Never compress evidence into generic labels, aligned key/value rows, or a status taxonomy. If \
+the reader must act, say who must do what and why. If blocked only on information the user has, \
+ask one specific question and, when available, call `report_blocker` with it. Do not emit status \
+banners, glyphs, dividers, elapsed-time/runtime lines, or meta commentary about the response. \
+Do not discard evidence to fit a line cap; stop when the handoff is complete.\n\
 \n\
 Load-bearing GitHub labels — never strip these, they are live coordination state, \
 not junk:\n\
@@ -185,6 +193,28 @@ mod tests {
             assert!(
                 text.contains(needle),
                 "session context must name `{needle}`: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_owns_the_response_contract_for_every_launch() {
+        let text = lazybox_session_context();
+        for needle in [
+            "lead with the concrete outcome",
+            "specific evidence and named blockers",
+            "direct handoff, not a second summary",
+            "Never compress evidence into generic labels",
+            "who must do what and why",
+            "`report_blocker`",
+            "Do not emit status banners",
+            "elapsed-time/runtime lines",
+            "Do not discard evidence to fit a line cap",
+            "stop when the handoff is complete",
+        ] {
+            assert!(
+                text.contains(needle),
+                "spawn-time response contract must contain {needle:?}: {text}"
             );
         }
     }
@@ -390,7 +420,7 @@ mod tests {
             text.lines().count()
         );
         assert!(
-            text.len() <= 5500,
+            text.len() <= 6250,
             "session context should stay tight: {} bytes",
             text.len()
         );

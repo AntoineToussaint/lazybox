@@ -180,12 +180,11 @@ share one row, and they should share one artifact list. Session scope
 would drop artifacts on respawn; turn scope has no durable representation
 anywhere in the system.
 
-**Should the output contract mention artifacts?** No — it stays
-deliberately ignorant. The contract (`config::snippets::output_contract`)
-is appended at delivery to every built-in snippet and has to keep working
-headless, over SSH, on a phone. Artifacts need a worktree and a running
-daemon. Teaching the contract about a channel that is not always present
-would make every snippet's closing summary conditional on something it
+**Should the response contract mention artifacts?** No — it stays
+deliberately ignorant. The contract rides `lazybox_session_context` at agent
+startup and has to work headless, over SSH, and on a phone. Artifacts need a
+worktree and a running daemon. Teaching the contract about a channel that is
+not always present would make every handoff conditional on something it
 cannot check.
 
 **Where the announcement goes is a separate, harder question, and the

@@ -43,10 +43,21 @@ actors to GitHub — the installation and the user each have their own primary
 and secondary limits — so the split is correct, but a reader reasoning about
 total in-flight requests must count both.
 
-The sweep only moves onto the App budget when the installation reaches every
-scoped repo, org and `watch:` entry: discovery is a GraphQL search, so a
-credential missing one of them returns fewer rows and no error. A gap puts
-the whole sweep back on the user token with a notice naming it.
+What the installation reaches moves onto the App budget; what it does not
+stays on the user token, in the same tick. Repo-first discovery is a
+per-member fan-out, so the roster partitions cleanly by credential, and every
+read is routed to the token that can see its repo — a credential missing a
+repo does not fail, it returns fewer rows and no error.
+
+Two shapes cannot be partitioned and still put the whole sweep back on the
+user token with a notice naming the reason: `include_accessible_repos`, whose
+roster is open-ended, and a sweep with no roster at all — that one is a single
+global `involves:` search, and there is nothing to split.
+
+Because a split makes the user client do scheduled work of its own, it also
+gets its own per-tick governor pass; a budget that never begins a tick never
+clears its per-tick accounting, and would eventually refuse everything
+scheduled.
 
 ## Admission and accounting
 

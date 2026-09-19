@@ -118,10 +118,25 @@ GraphQL `viewer` (the budget bootstrap drops it), and `GET /notifications`
 (the REST heartbeat — it is the user's own feed). The heartbeat and the sweep
 share one cursor + sweep-clock state via `GhClient::sharing_sync_state_with`.
 
-Coverage is all-or-nothing on purpose. Discovery is a GraphQL *search*, not a
-per-repo fan-out, so a credential that cannot see a scoped repo returns fewer
-rows and no error. One uncovered scope puts the whole sweep back on the user
-token with a notice naming it; #1807 tracks partitioning instead.
+Coverage decides how much of the sweep the installation carries
+(`poll_credential_plan`). Whenever discovery is **repo-first** — the user has
+scoped or watched repos, so the sweep is a per-member fan-out — the roster is
+partitioned: members the installation reaches run on its budget, the rest run
+on the user token, in the same tick (#1807). Every read is routed the same
+way (`GhSource::client_for`), because a credential that cannot see a repo does
+not fail — a search returns fewer rows, a node read returns "not visible".
+That routing, not a downstream guard, is what keeps a reconcile from retiring
+rows it never really swept.
+
+Two shapes cannot be partitioned and still fall back whole, with a notice
+naming the reason: `include_accessible_repos` (an open-ended roster), and a
+sweep with no roster at all — that one is a single global `involves:` search,
+and there is nothing to split.
+
+A split means the user client does real scheduled work, so it gets its own
+`begin_background_tick`. A `RateBudget` that never begins a tick never clears
+its per-tick scheduled accounting, and its spend accrues until every
+scheduled request it makes is refused against an allowance nobody granted.
 
 ## The tracker-record cache handed to sessions
 

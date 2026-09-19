@@ -80,6 +80,13 @@ installer_version="$(sed -n 's/^release_version="\([^"]*\)"$/\1/p' crates/tui-bo
 grep -q "^## \[$version\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$" CHANGELOG.md \
 	|| die "CHANGELOG.md has no dated [$version] section"
 
+release_notes="$(awk -v wanted="## [$version] -" '
+	index($0, wanted) == 1 { inside=1 }
+	inside && seen && /^## \[/ { exit }
+	inside { print; seen=1 }
+' CHANGELOG.md)"
+printf '%s\n' "$release_notes" | scripts/check-release-notes.sh
+
 # Unreleased must be empty. Shipping notes above the release heading would make
 # the tag and the curated GitHub Release disagree about what it contains.
 unreleased_body="$(awk '/^## \[Unreleased\]/{inside=1; next} inside && /^## /{exit} inside{print}' CHANGELOG.md)"

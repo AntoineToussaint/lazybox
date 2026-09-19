@@ -80,6 +80,7 @@ release: ## Build lazybox optimized, strictly offline (run `make setup` once fir
 	@PATH="$(PINNED_PATH)" LAZYBOX_GHOSTTY_CACHE="$(GHOSTTY_CACHE)" LAZYBOX_OFFLINE=1 CARGO_NET_OFFLINE=true cargo build --offline --locked -p lazybox-tui-boot --release
 
 release-gates: ## Run every automatable source/web gate required before a release.
+	@bash scripts/cut-release_test.sh
 	@$(MAKE) fmt-check
 	@$(MAKE) pre-commit
 	@PATH="$(PINNED_PATH)" cargo nextest run --workspace --profile ci

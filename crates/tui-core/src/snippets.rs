@@ -75,10 +75,8 @@ impl PickerRow {
             // skill-dispatching snippet (#798) previews its resolved skill
             // invocation, not the raw authored body.
             //
-            // `dispatch_body`, not `delivery_body`: the shared output
-            // contract (#1697) is appended to every built-in identically,
-            // so it carries no per-snippet information and is named once in
-            // the picker chrome instead of repeated in all 61 previews.
+            // The preview and delivered text are now identical: global
+            // response rules ride the agent's startup briefing, not snippets.
             body: snippet.dispatch_body(),
             origin: snippet.origin.label().to_string(),
             badge: String::new(),
@@ -409,7 +407,6 @@ mod tests {
             skill: None,
             provider: None,
             next: Vec::new(),
-            answer_is_the_ending: false,
             origin,
         }
     }

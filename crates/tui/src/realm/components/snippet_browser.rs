@@ -5,9 +5,8 @@
 //! popup, which never functions as a browsable list. This modal lists
 //! every merged snippet — key, origin, description, and the full body —
 //! so a user can see what's available and what each one expands to. The
-//! shared output contract (#1697) is appended at delivery rather than
-//! stored in a body, so it is named once in the header instead of being
-//! repeated under every entry.
+//! global response contract is part of the agent's startup briefing, so
+//! every row here is exactly the task-specific text the snippet sends.
 //! Reachable from any pane via `]`, the `,` Settings palette, and listed
 //! in Ask Lazybox's shortcut index.
 //!
@@ -115,15 +114,12 @@ impl SnippetBrowser {
             return wrap_one(line, width);
         }
         let mut lines: Vec<Line<'static>> = Vec::new();
-        // The shared output contract (#1697) is appended at *delivery*, not
-        // stored in any body, so it appears nowhere below. Said once here
-        // rather than repeated under all 61 built-ins, which would bury
-        // what actually differs between them — the reason to open this.
+        // Global response rules are injected once at agent start. Keep this
+        // browser about the task-specific text that differs between rows.
         lines.extend(wrap_one(
             Line::from(Span::styled(
-                "Built-ins are delivered with a shared ending contract (one STATUS line \
-                 + a short verdict); it is not part of the bodies below. See \
-                 docs/snippets.md.",
+                "Global response rules are loaded when the agent starts; the bodies below \
+                 are the complete task-specific snippet text.",
                 Style::default().fg(theme.text_dim).italic(),
             )),
             width,
@@ -343,7 +339,6 @@ mod tests {
                     skill: None,
                     provider: None,
                     next: Vec::new(),
-                    answer_is_the_ending: false,
                     origin: SnippetOrigin::BuiltIn,
                 },
                 lazybox_config::SnippetState::Builtin,
@@ -357,7 +352,6 @@ mod tests {
                     skill: None,
                     provider: None,
                     next: Vec::new(),
-                    answer_is_the_ending: false,
                     origin: SnippetOrigin::Global,
                 },
                 lazybox_config::SnippetState::OverrideStale,
@@ -393,7 +387,6 @@ mod tests {
             skill: None,
             provider: None,
             next: Vec::new(),
-            answer_is_the_ending: false,
             origin: SnippetOrigin::BuiltIn,
         }
     }
@@ -450,7 +443,6 @@ mod tests {
                     skill: None,
                     provider: None,
                     next: Vec::new(),
-                    answer_is_the_ending: false,
                     origin: SnippetOrigin::Global,
                 },
                 // No badge: this test exercises body wrapping, not the
@@ -470,17 +462,17 @@ mod tests {
                 .map(|s| s.content.as_ref())
                 .collect::<String>()
         };
-        // The catalog note (#1697) is a document-level preamble, not a
-        // body row, so it is not indented. `row_starts` is where the
-        // first snippet begins, so slicing there drops the note by
-        // position instead of relaxing the indent rule below.
+        // The startup-contract note is a document-level preamble, not a body
+        // row, so it is not indented. `row_starts` is where the first snippet
+        // begins, so slicing there drops the note by position instead of
+        // relaxing the indent rule below.
         let first_row = comp.row_starts.first().expect("one row").0;
         assert!(
             lines[..first_row]
                 .iter()
                 .map(flat)
                 .collect::<String>()
-                .contains("shared ending contract"),
+                .contains("Global response rules"),
             "the catalog note precedes the first snippet",
         );
         let body: Vec<String> = lines[first_row..]
@@ -526,7 +518,6 @@ mod tests {
                         skill: None,
                         provider: None,
                         next: Vec::new(),
-                        answer_is_the_ending: false,
                         origin: SnippetOrigin::BuiltIn,
                     },
                     lazybox_config::SnippetState::Builtin,

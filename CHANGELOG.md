@@ -6,6 +6,15 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude and Codex launches now always use Lazybox's selected/default model,
+  including headless runs and resumed sessions. Codex ships a pinned GPT-5.5
+  default; invalid model selections fail before launch.
+- Lazybox's response rules and mechanics are available from session startup,
+  including bare Codex terminals. Snippets no longer append a separate output
+  contract, and their previews no longer advertise status-card endings.
+
 ## [0.1.16] - 2026-09-18
 
 The onboarding and coordination release. Lazybox stops explaining itself in a

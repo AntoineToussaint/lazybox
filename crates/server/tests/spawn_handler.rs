@@ -2371,12 +2371,14 @@ async fn codex_initial_prompt_pastes_then_sends_enter_separately() {
             "Codex prompt was not followed by a separate Enter; writes = {writes:?}",
         );
         let mut expected_paste = b"\x1b[200~".to_vec();
-        let expected_prompt = lazybox_agents::lazybox_session_prompt(WORK);
+        let argv = mock.argv_for(&key).await.expect("Codex argv");
         assert!(
-            expected_prompt.contains("lazybox log"),
-            "unattended Codex prompt must carry the lazybox briefing"
+            argv.iter().any(
+                |arg| arg.starts_with("developer_instructions=") && arg.contains("lazybox log")
+            ),
+            "Codex receives the briefing through native startup arguments"
         );
-        expected_paste.extend_from_slice(expected_prompt.as_bytes());
+        expected_paste.extend_from_slice(WORK.as_bytes());
         expected_paste.extend_from_slice(b"\x1b[201~");
         assert_eq!(writes[0], expected_paste);
         assert_eq!(writes[1], b"\r");

@@ -266,6 +266,21 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Whether lazybox must refuse to start this adapter unless its resolved
+    /// tier carries an explicit model flag. Built-in LLM agents opt in so a
+    /// malformed or missing menu cannot silently fall through to a provider
+    /// CLI/account default.
+    fn requires_explicit_model(&self) -> bool {
+        false
+    }
+
+    /// Native startup arguments for a session briefing when no context hook
+    /// is available. An empty result asks the server to prefix task prompts.
+    /// Adapters with native support also cover a bare interactive launch.
+    fn session_context_args(&self, _context: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Interactive shell/PTY behavior for this agent. The server owns the
     /// universal paste/settle/submit transaction; adapters only select a
     /// protocol. Simple and generic CLIs inherit [`PtyProtocol::LINE_ORIENTED`].
@@ -750,6 +765,12 @@ pub mod builtins {
         fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
             Some(StructuredAgentProtocol::ClaudeStreamJson)
         }
+        fn requires_explicit_model(&self) -> bool {
+            true
+        }
+        fn session_context_args(&self, context: &str) -> Vec<String> {
+            vec!["--append-system-prompt".into(), context.into()]
+        }
         fn supports_mcp_config(&self) -> bool {
             true
         }
@@ -1036,6 +1057,20 @@ pub mod builtins {
         }
         fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
             Some(StructuredAgentProtocol::CodexExecJson)
+        }
+        fn session_context_args(&self, context: &str) -> Vec<String> {
+            // JSON strings are valid TOML basic strings, including escaped
+            // newlines and quotes in the multi-line session briefing.
+            vec![
+                "-c".into(),
+                format!(
+                    "developer_instructions={}",
+                    serde_json::Value::String(context.into())
+                ),
+            ]
+        }
+        fn requires_explicit_model(&self) -> bool {
+            true
         }
         fn pty_protocol(&self) -> PtyProtocol {
             PtyProtocol::GUARDED_COMPOSER

@@ -1905,7 +1905,6 @@ showing keybinding search only",
                     skill: None,
                     provider: None,
                     next: Vec::new(),
-                    answer_is_the_ending: false,
                     origin: Default::default(),
                 };
                 match lazybox_config::Snippets::upsert_global_snippet(&key, &snippet) {

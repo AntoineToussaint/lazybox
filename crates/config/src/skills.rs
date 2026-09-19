@@ -1253,7 +1253,6 @@ mod export_tests {
             skill: None,
             provider: None,
             next: Vec::new(),
-            answer_is_the_ending: false,
             origin: SnippetOrigin::BuiltIn,
         }
     }
@@ -1540,11 +1539,8 @@ mod export_tests {
         );
     }
 
-    /// An exported skill is *model-selectable mid-task*
-    /// (`docs/snippets-vs-skills.md`) — unlike a snippet, which is always
-    /// the whole turn. So the export carries the authored body and never
-    /// the output contract, whose "nothing after it" would truncate the
-    /// host turn a model invoked this skill from.
+    /// An exported skill carries only the task-specific authored body. The
+    /// global response contract belongs to the session startup briefing.
     #[test]
     fn an_exported_skill_carries_no_output_contract() {
         let root = tmp_root("no-contract");

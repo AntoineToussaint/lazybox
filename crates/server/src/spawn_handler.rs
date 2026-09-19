@@ -2287,14 +2287,15 @@ async fn handle_spawn_inner(
     let hook_settings = exe.as_deref().and_then(|exe| {
         write_hook_settings(config, &kind, terminal_id, &hook_command_placeholder(exe))
     });
-    // A prompt-carrying agent spawn is the unattended/headless PTY path. If
-    // this adapter cannot receive the briefing from a context-capable
-    // SessionStart hook (Codex, Cursor, GenericCli, or Claude when hook setup
-    // failed), put the exact same briefing in front of its task. Previously
-    // only hooked Claude learned that `lazybox log` and the coordination
-    // contracts existed; every other autonomous backend started blind.
-    if matches!(kind, TerminalKind::Agent(_))
+    // Native context flags also cover bare starts (Codex and hookless Claude).
+    // Other adapters receive the same briefing before their first task.
+    if let TerminalKind::Agent(agent_id) = &kind
         && hook_settings.is_none()
+        && config.agents.get(agent_id).is_some_and(|agent| {
+            agent
+                .session_context_args(lazybox_agents::lazybox_session_context())
+                .is_empty()
+        })
         && let Some(prompt) = initial_prompt.take()
     {
         initial_prompt = Some(lazybox_agents::lazybox_session_prompt(&prompt));
@@ -2443,10 +2444,10 @@ async fn handle_spawn_inner(
     // the persisted workspace, not a field of the incoming Spawn command.
     {
         Ok(plan) => plan,
-        Err(_) => {
+        Err(error) => {
             let _ = config.bus.send(Event::provider_error_permanent(
                 &plan_error_source,
-                "no agent registered for this id",
+                error.to_string(),
             ));
             return None;
         }
@@ -19050,6 +19051,8 @@ mod tests {
             vec![
                 "claude".to_string(),
                 "--dangerously-skip-permissions".to_string(),
+                "--append-system-prompt".to_string(),
+                lazybox_agents::lazybox_session_context().to_string(),
             ],
             "unattended argv inherits the user's MCP setup by default (#1183)",
         );
@@ -19066,7 +19069,14 @@ mod tests {
             false,
         )
         .expect("claude registered");
-        assert_eq!(without_skip, vec!["claude".to_string()]);
+        assert_eq!(
+            without_skip,
+            vec![
+                "claude".to_string(),
+                "--append-system-prompt".to_string(),
+                lazybox_agents::lazybox_session_context().to_string()
+            ]
+        );
 
         // With a generated hook settings file, `--settings <path>` is
         // appended so Claude reports state through structured hooks.
@@ -19099,7 +19109,7 @@ mod tests {
         let kind = TerminalKind::Agent("codex".into());
         let cwd = std::path::PathBuf::from("/tmp/wt");
 
-        // No hook command → PTY-only, argv untouched beyond the bare spawn.
+        // No hook command still carries native startup instructions.
         let bare = argv_for(
             &config,
             &kind,
@@ -19112,7 +19122,11 @@ mod tests {
             false,
         )
         .expect("codex registered");
-        assert_eq!(bare, vec!["codex".to_string()]);
+        assert_eq!(bare.first().map(String::as_str), Some("codex"));
+        assert!(
+            bare.iter()
+                .any(|arg| arg.starts_with("developer_instructions="))
+        );
 
         // With a hook command, Codex's argv gains the trust-bypass flag and
         // one `-c hooks.<Event>=…` override per tracked lifecycle event, so
@@ -19166,6 +19180,8 @@ mod tests {
             argv,
             vec![
                 "claude".to_string(),
+                "--append-system-prompt".to_string(),
+                lazybox_agents::lazybox_session_context().to_string(),
                 "--model".to_string(),
                 "claude-opus-5".to_string(),
             ]
@@ -19192,7 +19208,15 @@ mod tests {
             true,
         )
         .expect("claude registered");
-        assert_eq!(claude, vec!["claude".to_string(), "--continue".to_string()]);
+        assert_eq!(
+            claude,
+            vec![
+                "claude".to_string(),
+                "--continue".to_string(),
+                "--append-system-prompt".to_string(),
+                lazybox_agents::lazybox_session_context().to_string()
+            ]
+        );
 
         let codex = argv_for(
             &config,
@@ -19207,7 +19231,7 @@ mod tests {
         )
         .expect("codex registered");
         assert_eq!(
-            codex,
+            codex[..3],
             vec![
                 "codex".to_string(),
                 "resume".to_string(),
@@ -19254,7 +19278,7 @@ mod tests {
             false,
         )
         .expect("codex registered");
-        assert_eq!(agent, vec!["codex".to_string()]);
+        assert_eq!(agent.first().map(String::as_str), Some("codex"));
 
         let log = argv_for(
             &config,

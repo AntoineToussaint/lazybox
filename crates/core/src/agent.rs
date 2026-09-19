@@ -308,9 +308,15 @@ mod tests {
     }
 
     #[test]
-    fn only_claude_has_builtin_tiers() {
-        assert!(AgentModels::builtin("claude").is_some());
-        assert!(AgentModels::builtin("codex").is_none());
+    fn builtins_that_launch_llms_have_pinned_default_tiers() {
+        for agent in ["claude", "codex"] {
+            let models = AgentModels::builtin(agent).expect("built-in model menu");
+            let default = models.default.as_deref().expect("default alias");
+            assert!(
+                models.tier(default).and_then(ModelTier::model_id).is_some(),
+                "{agent}'s default tier must carry an explicit model"
+            );
+        }
         assert!(AgentModels::builtin("cursor-agent").is_none());
     }
 
@@ -776,10 +782,10 @@ impl AgentModels {
     }
 
     /// Aliases named by `default` or any `capability.*` that no tier in the
-    /// menu defines. Each is a dangling reference that resolves to no
-    /// args — the spawn silently keeps the agent's own hard-coded model
-    /// instead of the tier the config appears to request. Config load
-    /// surfaces these as warnings so the no-op is discoverable.
+    /// menu defines. Each is a dangling reference that resolves to no args;
+    /// adapters that require a Lazybox model pin refuse such a launch, while
+    /// other adapters may fall back to their own defaults. Config load
+    /// surfaces these as warnings so the broken selection is discoverable.
     ///
     /// Returns `(source, alias)` pairs where `source` is `"default"` or a
     /// `"capability.<tier>"` token, in a stable order (`default` first,
@@ -821,8 +827,8 @@ impl AgentModels {
 
     /// Resolve the spawn args for a chosen `alias`, or for the
     /// configured `default` tier when `alias` is `None`. An unknown
-    /// alias (or an unset / dangling default) yields no args, so the
-    /// agent falls back to its own default model.
+    /// alias (or an unset / dangling default) yields no args; the launching
+    /// adapter decides whether that is allowed or must be refused.
     pub fn resolve_args(&self, alias: Option<&str>) -> Vec<String> {
         let want = alias.or(self.default.as_deref());
         want.and_then(|a| self.tier(a))
@@ -845,9 +851,9 @@ impl AgentModels {
     }
 
     /// Built-in tier menu for a known agent id, or `None` for an agent
-    /// lazybox ships no model presets for. Only Claude ships presets —
-    /// its model flag (`--model`) takes stable aliases; Codex / Cursor
-    /// name their models differently and are left to per-agent YAML.
+    /// lazybox ships no model presets for. Claude and Codex both ship a
+    /// pinned default: a lazybox launch must never inherit whichever model
+    /// the provider CLI or account happens to choose that day.
     pub fn builtin(agent_id: &str) -> Option<AgentModels> {
         match agent_id {
             // Claude's default tier is pinned so a bare spawn always
@@ -917,6 +923,28 @@ impl AgentModels {
                     high: Some("L".into()),
                     medium: Some("M".into()),
                     low: Some("S".into()),
+                },
+                deprecated_priority: CapabilityAliases::default(),
+                unknown: Default::default(),
+            }),
+            // Codex gets one conservative built-in tier rather than a menu
+            // of provider-moving aliases. Users can overlay more tiers, but
+            // the shipped default is enough to guarantee that every bare
+            // interactive and structured launch carries an explicit model.
+            "codex" => Some(AgentModels {
+                default: Some("L".into()),
+                replace: false,
+                tiers: vec![ModelTier {
+                    alias: "L".into(),
+                    label: "GPT-5.5".into(),
+                    short: Some("G".into()),
+                    args: vec!["--model".into(), "gpt-5.5".into()],
+                }],
+                capability: CapabilityAliases {
+                    best: Some("L".into()),
+                    high: Some("L".into()),
+                    medium: Some("L".into()),
+                    low: Some("L".into()),
                 },
                 deprecated_priority: CapabilityAliases::default(),
                 unknown: Default::default(),

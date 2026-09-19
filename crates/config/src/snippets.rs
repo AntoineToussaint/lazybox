@@ -36,18 +36,15 @@
 //! refactor), and an escape hatch ("if it's clean, say so"). See
 //! `docs/snippets.md` for the full house style.
 //!
-//! **Adding a built-in?** Two invariants hold over *every* entry, and both
-//! are enforced by tests that a new key joins silently — #1759 shipped a
+//! **Adding a built-in?** One invariant holds over *every* entry and is
+//! enforced by tests that a new key joins silently — #1759 shipped a
 //! red `main` because #1749 added `catchup` while #1697 was adding an
 //! all-built-ins invariant in a separate PR, so neither one's CI could see
 //! the other:
 //!
-//! 1. The body must state what its handoff leads with, in the read-only /
+//! The body must state what its handoff leads with, in the read-only /
 //!    write house form ("… ; this snippet changes nothing") —
 //!    `every_builtin_states_what_its_handoff_leads_with`.
-//! 2. If the body caps its own total answer length, it must also set
-//!    [`Snippet::answer_is_the_ending`], so it does not receive a redundant
-//!    work/evidence preamble — `a_length_capped_builtin_receives_no_work_preamble`.
 //!
 //! At runtime the TUI loads both and feeds the merged set into the
 //! snippet picker mounted by the terminal pane on `]<key>`.
@@ -78,60 +75,6 @@ const BANNED_DISMISSALS: &[&str] = &[
     "as a follow-up",
     "left as an exercise",
 ];
-
-/// The contract's first line — the banner every delivered built-in carries.
-const CONTRACT_HEADER: &str = "OUTPUT CONTRACT";
-
-/// The work/evidence preamble that precedes the handoff discipline.
-///
-/// It is the half of the contract that assumes the answer has a body at
-/// all: do the work and report its evidence before handing it off. True for
-/// every built-in that asks for work to be done — and redundant for one whose
-/// whole answer is already the handoff.
-///
-/// `catchup` (#1749) is that snippet: its body caps the whole answer at six
-/// lines, so repeating a work phase before its answer only invites a second
-/// account of the same facts. The preamble is withheld from a snippet that
-/// declares [`Snippet::answer_is_the_ending`].
-const CONTRACT_WORK_PREAMBLE: &str =
-    "Do the requested work and report the concrete evidence needed to support the conclusion.";
-
-/// The handoff discipline appended to every delivered built-in.
-///
-/// This deliberately specifies content, not a presentation template. The
-/// status/glyph/column contract that preceded it made models append a second,
-/// lossy summary: concrete findings became generic labels and useful evidence
-/// disappeared to satisfy a line cap. The handoff must preserve the answer,
-/// not project it into another schema.
-const CONTRACT_ENDING: &str = "End with a direct handoff, not a second summary or a fixed template.
-State the concrete outcome first and preserve the specific evidence and named blockers that support it.
-Never compress evidence into generic labels, aligned key/value rows, or a status taxonomy.
-If the reader must act, say who must do what and why. If blocked only on information the user
-has, ask one specific question and, when available, call `report_blocker` with that question.
-Do not emit status banners, glyphs, dividers, elapsed-time/runtime lines, or meta commentary
-about the response. Do not repeat facts merely to manufacture an ending, and do not discard
-evidence to fit a line cap. Stop when the handoff is complete.";
-
-/// The built-in keys whose answer IS the contract's handoff (#1769), so
-/// [`CONTRACT_WORK_PREAMBLE`] is withheld from them.
-///
-/// A named set rather than an inline literal: it is the list a future
-/// length-capped built-in joins; tests fail the build for a capped body that
-/// forgot to opt out of the redundant preamble.
-const ENDING_ONLY_BUILTINS: &[&str] = &["catchup", "clarify"];
-
-/// The output contract as delivered (#1697).
-///
-/// `answer_is_the_ending` drops [`CONTRACT_WORK_PREAMBLE`]; everything
-/// else is byte-identical either way, pinned by
-/// `the_default_contract_is_byte_identical_to_the_shipped_text`.
-fn output_contract(answer_is_the_ending: bool) -> String {
-    if answer_is_the_ending {
-        format!("{CONTRACT_HEADER}\n{CONTRACT_ENDING}")
-    } else {
-        format!("{CONTRACT_HEADER}\n{CONTRACT_WORK_PREAMBLE}\n{CONTRACT_ENDING}")
-    }
-}
 
 /// Lock a stable sibling inode, not the YAML inode replaced by rename.
 /// Every application writer holds this across the entire read-modify-write.
@@ -264,22 +207,6 @@ pub struct Snippet {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub next: Vec<String>,
-    /// Whether this snippet's answer *is* the output contract's handoff,
-    /// with no separate work phase before it (#1769).
-    ///
-    /// The #1697 split normally adds a work/evidence preamble before the
-    /// handoff discipline. `catchup` and `clarify` have no separate work
-    /// report, so that preamble would invite them to narrate the same answer
-    /// twice. Set here, this withholds that one clause; the assembly lives in this
-    /// module's private `output_contract` (not linked: rustdoc runs with
-    /// `-D warnings`, and a public item may not intra-doc-link a private one).
-    ///
-    /// Built-in-only, like [`Snippet::origin`]: the contract is never
-    /// appended to a user snippet ([`Snippet::delivery_body`]), so a
-    /// user-settable key would be a knob that does nothing. Hand-set by
-    /// [`Snippets::builtin`]; serde ignores it in both directions.
-    #[serde(skip)]
-    pub answer_is_the_ending: bool,
     /// Provenance — which file the entry came from. Hand-set by the
     /// loader; serde ignores it on the way in / out. Used by the
     /// picker to show "global" vs "repo" hints alongside each row,
@@ -477,12 +404,8 @@ impl Snippet {
     /// flows through the same delivery path as any other body, so Recent,
     /// `]N`, and `Shift-B` broadcast track it unchanged.
     ///
-    /// This is the *authored* text, NOT the bytes an agent receives — see
-    /// [`Snippet::delivery_body`] for those. The two differ by the output
-    /// contract (#1697), and the split is load-bearing: this half is what
-    /// gets embedded in something larger (a `SKILL.md` export, a Planner
-    /// role preamble) or shown as a catalog entry, where a final handoff
-    /// instruction would be a lie — the snippet is not the whole turn there.
+    /// This is the authored text. Lazybox's global response contract is
+    /// injected once at session start, not appended to individual snippets.
     pub fn dispatch_body(&self) -> String {
         match &self.skill {
             None => self.body.clone(),
@@ -497,31 +420,11 @@ impl Snippet {
         }
     }
 
-    /// The text actually delivered to an agent: [`Snippet::dispatch_body`]
-    /// plus the shared output contract (#1697).
-    ///
-    /// The contract is appended **here, at delivery**, rather than baked
-    /// into `body` by [`Snippets::builtin`]. It governs the final handoff,
-    /// so it is only true where the snippet *is* the turn:
-    /// `]]s`, `]]n`, `Shift-B` broadcast, and the `send_snippet` MCP tool.
-    /// Baking it into `body` leaked it into three places where that claim
-    /// is false and actively harmful: an exported `SKILL.md`, which a model
-    /// can invoke *mid-task* on its own (`docs/snippets-vs-skills.md`), so
-    /// the handoff would interrupt the host turn; the Planner role preamble,
-    /// which folds two brief bodies in ahead of the real work prompt; and the `]`
-    /// catalog browser, which renders every body and so repeated one
-    /// constant 61 times.
-    ///
-    /// Built-ins only. A user-defined snippet — or a user override of a
-    /// built-in key — is delivered exactly as authored, because rewriting
-    /// someone's prompt is not ours to do.
+    /// The text actually delivered to an agent. Kept as a named boundary for
+    /// dispatch call sites, but it no longer adds global policy: every agent
+    /// receives that policy in lazybox's spawn-time session briefing.
     pub fn delivery_body(&self) -> String {
-        let body = self.dispatch_body();
-        if self.origin != SnippetOrigin::BuiltIn {
-            return body;
-        }
-        let contract = output_contract(self.answer_is_the_ending);
-        format!("{body}\n\n{contract}")
+        self.dispatch_body()
     }
 
     /// Stable content hash of the body, whitespace-normalized so
@@ -651,7 +554,6 @@ impl Snippets {
             skill: None,
             provider: None,
             next: Vec::new(),
-            answer_is_the_ending: false,
             origin: SnippetOrigin::BuiltIn,
         };
         // Provider-scoped built-in: only surfaces on a workspace whose task
@@ -664,7 +566,6 @@ impl Snippets {
             skill: None,
             provider: Some(provider.to_string()),
             next: Vec::new(),
-            answer_is_the_ending: false,
             origin: SnippetOrigin::BuiltIn,
         };
         // Scope on the canonical provider ids so config can't drift from
@@ -1911,22 +1812,6 @@ impl Snippets {
                 snippet.next = vec![next.to_string()];
             }
         }
-        // The built-ins whose answer IS the contract's handoff, so the
-        // ordinary work/evidence preamble is withheld (#1769). `catchup`
-        // and `clarify` ask for a concise explanation and nothing else;
-        // adding a separate report phase invites a duplicate answer.
-        // Asserted by `an_ending_only_builtin_drops_the_work_preamble`,
-        // so renaming the key fails the build rather than silently
-        // restoring the contradiction.
-        //
-        // A key that names no built-in is skipped here in silence, so the
-        // same test also proves every listed key resolves — otherwise a
-        // typo leaves the flag unset and quietly restores the clause.
-        for key in ENDING_ONLY_BUILTINS {
-            if let Some(snippet) = by_key.get_mut(*key) {
-                snippet.answer_is_the_ending = true;
-            }
-        }
         Self { by_key }
     }
 
@@ -2303,173 +2188,15 @@ snippets:
         assert_eq!(s.get("bare").unwrap().category, "");
     }
 
-    /// The contract rides *delivery*, never the authored body (#1697).
-    ///
-    /// Baking it into `body` leaked a turn-ending trailer into three
-    /// embed/preview surfaces where the snippet is not the whole turn —
-    /// see [`Snippet::delivery_body`]. Asserting on both halves is the
-    /// point: `body` must stay clean, `delivery_body` must carry it.
+    /// Global response rules belong to the spawn-time lazybox briefing, so a
+    /// snippet delivery contains only its task-specific instruction.
     #[test]
-    fn the_output_contract_rides_delivery_not_the_authored_body() {
+    fn snippet_delivery_adds_no_global_response_contract() {
         for (key, snippet) in Snippets::builtin().all() {
+            assert_eq!(snippet.delivery_body(), snippet.dispatch_body(), "{key}");
             assert!(
-                !snippet.body.contains("OUTPUT CONTRACT"),
-                "built-in `{key}` baked the contract into its authored body — it belongs \
-                 in `delivery_body` so exports and role preambles don't carry it",
-            );
-            assert!(
-                !snippet.dispatch_body().contains("OUTPUT CONTRACT"),
+                !snippet.delivery_body().contains("OUTPUT CONTRACT"),
                 "{key}"
-            );
-            assert!(!snippet.body.contains(['🟢', '🟡', '🔴', '❓']), "{key}");
-
-            let delivered = snippet.delivery_body();
-            assert!(
-                delivered.ends_with(&output_contract(snippet.answer_is_the_ending)),
-                "{key}"
-            );
-            assert_eq!(delivered.matches("OUTPUT CONTRACT").count(), 1, "{key}");
-            assert!(delivered.starts_with(&snippet.dispatch_body()), "{key}");
-            // The evidence-preserving handoff and `report_blocker` routing are
-            // unconditional; only the work/evidence preamble is withheld.
-            assert!(delivered.contains(CONTRACT_ENDING), "{key}");
-            assert_eq!(
-                delivered.contains(CONTRACT_WORK_PREAMBLE),
-                !snippet.answer_is_the_ending,
-                "{key}"
-            );
-        }
-    }
-
-    /// The shared contract preserves the answer instead of replacing it with a lossy projection.
-    #[test]
-    fn the_contract_requires_a_direct_evidence_preserving_handoff() {
-        for delivered in [output_contract(false), output_contract(true)] {
-            assert!(delivered.contains("direct handoff"));
-            assert!(delivered.contains("concrete outcome first"));
-            assert!(delivered.contains("specific evidence and named blockers"));
-            assert!(delivered.contains("who must do what and why"));
-            assert!(delivered.contains("`report_blocker`"));
-            assert!(delivered.contains("Stop when the handoff is complete"));
-        }
-    }
-
-    /// Regression: the presentation schema turned concrete findings into a generic banner,
-    /// arbitrary key/value labels, and a runtime footer. None belongs in an answer.
-    #[test]
-    fn the_contract_forbids_the_lossy_status_projection() {
-        for delivered in [output_contract(false), output_contract(true)] {
-            for forbidden in [
-                "ACTION NEEDED",
-                "NEED CONTEXT",
-                "ten-second summary",
-                "Hard cap:",
-                "Example ending:",
-                "Worked for",
-                "────────────────",
-                "🟢",
-                "🔴",
-                "🟡",
-                "❓",
-            ] {
-                assert!(
-                    !delivered.contains(forbidden),
-                    "the shared contract still teaches the lossy token {forbidden:?}"
-                );
-            }
-            assert!(delivered.contains("not a second summary or a fixed template"));
-            assert!(delivered.contains("Do not emit status banners"));
-            assert!(delivered.contains("elapsed-time/runtime lines"));
-            assert!(delivered.contains("do not discard\nevidence to fit a line cap"));
-        }
-    }
-
-    /// An ending-only snippet does not need the ordinary work/evidence preamble.
-    #[test]
-    fn an_ending_only_builtin_drops_the_work_preamble() {
-        let b = Snippets::builtin();
-        let catchup = b.get("catchup").expect("ships built-in `catchup`");
-        assert!(
-            catchup.answer_is_the_ending,
-            "`catchup`'s answer is its handoff — it must not carry a duplicate work preamble",
-        );
-        let delivered = catchup.delivery_body();
-        assert!(
-            !delivered.contains(CONTRACT_WORK_PREAMBLE),
-            "`catchup` still carries a redundant work preamble:\n{delivered}",
-        );
-        // The evidence-preserving handoff and blocker routing still ride.
-        assert!(delivered.contains(CONTRACT_HEADER));
-        assert!(delivered.contains("direct handoff"));
-        assert!(delivered.contains("`report_blocker`"));
-
-        // …and the opt-out is confined to `ENDING_ONLY_BUILTINS`. The rule
-        // is about what the snippet asks for, not which key it is: ordinary
-        // built-ins do work before the handoff, while `catchup` and `clarify`
-        // explain something already present and need no duplicate work phase.
-        //
-        // Quantified over the list rather than a hardcoded key so adding a
-        // second ending-only built-in updates one place; asserting the list
-        // is non-empty keeps an emptied list from vacuously passing.
-        assert!(!ENDING_ONLY_BUILTINS.is_empty());
-        // Every listed key must name a real built-in. `builtin()` sets the
-        // flag through `if let Some(..) = by_key.get_mut(key)`, which skips
-        // a typo in silence, and the loop below only visits keys that
-        // exist — so without this, `"clarrify"` would leave `clarify`
-        // delivered with the work preamble and nothing would fail. The
-        // hardcoded `get("catchup").expect(..)` above used to be that
-        // proof; generalizing to a list dropped it for every other entry.
-        for key in ENDING_ONLY_BUILTINS {
-            let snippet = b.get(key).unwrap_or_else(|| {
-                panic!(
-                    "`ENDING_ONLY_BUILTINS` lists `{key}`, which ships no built-in — the \
-                     flag is never set and the work preamble silently returns"
-                )
-            });
-            // …and the body must say so, so the reader of the delivered
-            // prompt learns it from the snippet rather than inferring it
-            // from a clause that is missing. `catchup` states it outright;
-            // `clarify` gained the same sentence in #1796 when its
-            // self-imposed "AT MOST 8 lines" cap — which had been the only
-            // thing marking it short — was removed for conflicting with
-            // the contract's own seven.
-            assert!(
-                snippet.body.contains("Your whole answer is the ending"),
-                "`{key}` drops the work preamble but never tells the agent \
-                 its whole answer is the handoff",
-            );
-        }
-        for (key, snippet) in b.all() {
-            if ENDING_ONLY_BUILTINS.contains(&key) {
-                assert!(
-                    snippet.answer_is_the_ending,
-                    "built-in `{key}` is listed ending-only but did not get the flag",
-                );
-                continue;
-            }
-            assert!(
-                !snippet.answer_is_the_ending,
-                "built-in `{key}` opted out of the work preamble even though it has \
-                 work and evidence to report",
-            );
-        }
-    }
-
-    /// A length-capped built-in is ending-only and receives no redundant work preamble.
-    #[test]
-    fn a_length_capped_builtin_receives_no_work_preamble() {
-        for (key, snippet) in Snippets::builtin().all() {
-            // "at most N lines" in any casing — the shape a body uses to
-            // cap its own total answer, whatever number it picks.
-            let lower = snippet.body.to_lowercase();
-            let caps_itself = lower.contains("at most") && lower.contains("lines");
-            if !caps_itself {
-                continue;
-            }
-            assert!(
-                !snippet.delivery_body().contains(CONTRACT_WORK_PREAMBLE),
-                "built-in `{key}` caps its own answer length but is delivered with \
-                 a redundant work preamble — set `answer_is_the_ending`",
             );
         }
     }
@@ -2620,15 +2347,6 @@ snippets:
         assert!(fact("commit").contains("whether it was pushed"));
     }
 
-    /// A question that blocks progress also uses lazybox machine state when available.
-    #[test]
-    fn a_context_question_routes_into_report_blocker() {
-        assert!(CONTRACT_ENDING.contains("report_blocker"));
-        assert!(CONTRACT_ENDING.contains("ask one specific question"));
-        let contract = Snippets::builtin().get("rev").expect("rev").delivery_body();
-        assert!(contract.contains("`report_blocker`"));
-    }
-
     /// #1697 named `ready` / `doc` / `bench` as under-specified — each
     /// asked for an outcome without naming how to observe it.
     #[test]
@@ -2652,10 +2370,7 @@ snippets:
         }
     }
 
-    /// A user's own prompt is delivered as authored. The contract is
-    /// lazybox's house style for *its* built-ins, not a rewrite we impose
-    /// on someone's file — and an override shadows the built-in origin, so
-    /// it opts out with it.
+    /// A user's own prompt and an override are delivered as authored.
     #[test]
     fn user_bodies_and_overrides_are_delivered_as_authored() {
         let yaml = "snippets:\n  rev:\n    body: My review\n  custom:\n    body: My task\n";
@@ -3231,7 +2946,6 @@ snippets:
             skill: None,
             provider: None,
             next: Vec::new(),
-            answer_is_the_ending: false,
             origin: SnippetOrigin::Unknown,
         }
     }

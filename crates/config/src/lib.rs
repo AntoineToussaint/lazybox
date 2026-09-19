@@ -2944,10 +2944,10 @@ impl Config {
 
     /// Human-readable warnings for every configured agent whose model
     /// menu names an alias no tier defines — a `default` or `capability.*`
-    /// that dangles. Such a reference resolves to no args, so the spawn
-    /// silently keeps the agent's own hard-coded model instead of the
-    /// tier the config appears to request; surfacing it makes that no-op
-    /// discoverable (issue #748).
+    /// that dangles. Such a reference resolves to no args. Built-in Claude
+    /// and Codex launches refuse it rather than inheriting a provider model;
+    /// other adapters may still use their own default. Surface it before the
+    /// user meets that refusal at spawn time (issue #748).
     pub fn model_alias_warnings(&self) -> Vec<String> {
         self.agents
             .keys()
@@ -2970,8 +2970,8 @@ impl Config {
                         };
                         format!(
                             "agents.{agent_id}.models.{source} names alias {alias:?}, \
-                             which no tier defines — the spawn will silently keep \
-                             {agent_id}'s own default model"
+                             which no tier defines — built-in agents that require a model \
+                             pin will refuse the spawn"
                         )
                     })
             })
@@ -6224,9 +6224,14 @@ ui:
     #[test]
     fn agent_models_falls_back_to_builtin_then_empty() {
         let cfg = Config::default();
-        // Claude ships a built-in tier menu; unknown agents get none.
+        // Built-in LLM agents ship pinned defaults; unknown agents get none.
         assert!(!cfg.agent_models("claude").tiers.is_empty());
-        assert!(cfg.agent_models("codex").tiers.is_empty());
+        assert!(!cfg.agent_models("codex").tiers.is_empty());
+        assert_eq!(
+            cfg.agent_models("codex").resolve_args(None),
+            vec!["--model".to_string(), "gpt-5.5".to_string()]
+        );
+        assert!(cfg.agent_models("no-such-agent").tiers.is_empty());
     }
 
     #[test]
@@ -6280,6 +6285,18 @@ agents:
             m.resolve_args(None),
             vec!["--model".to_string(), "claude-opus-5".to_string()],
             "a bare spawn always pins an explicit coding model"
+        );
+    }
+
+    #[test]
+    fn agent_models_builtin_codex_defaults_to_a_pinned_model() {
+        let cfg = Config::default();
+        let models = cfg.agent_models("codex");
+        assert_eq!(models.default.as_deref(), Some("L"));
+        assert_eq!(
+            models.resolve_args(None),
+            vec!["--model".to_string(), "gpt-5.5".to_string()],
+            "a bare Codex spawn always pins Lazybox's explicit model"
         );
     }
 

@@ -117,14 +117,25 @@ agent:
 # Model-tier menu the `w S`/`w M`/`w L` and `a S`/`a M`/`a L` chords and
 # the `model:<tier>` task labels pick from. Claude ships a built-in
 # Haiku/Sonnet/Opus/Fable menu; other agents define theirs here.
+#
+# This menu is what Settings calls the agent's **strength** — one concept,
+# stored here and nowhere else. A tier's `args` carry the model AND its
+# reasoning flags, so there is no separate thinking setting to keep in
+# step. `models.default` is the strength a bare spawn runs at; each agent
+# resolves the same alias in its own menu, so switching agents switches
+# the model without touching the choice.
 agents:
   codex:
     models:
-      default: M             # tier a bare spawn uses; unset → agent default
+      default: M             # strength a bare spawn uses; unset → agent default
       tiers:
         - alias: M
           label: GPT-5
           args: ["-m", "gpt-5"]
+        - alias: L
+          label: GPT-5 · high
+          # One tier, one decision: the model and how hard it thinks.
+          args: ["-m", "gpt-5", "-c", "model_reasoning_effort=high"]
   aider:
     name: Aider
     command: aider
@@ -336,8 +347,8 @@ other agents have no built-in menu.
 | `args` | list of string | `[]` | Arguments appended to `command` for a fresh session |
 | `resume_args` | list of string | unset | Arguments appended to `command` for resume; unset reuses `args` |
 | `asking_patterns` | list of string | `[]` | Output markers that classify the custom agent as **Input Needed** |
-| `models.default` | string | unset | Alias of the tier a bare spawn uses; unset → the agent's own default model |
-| `models.tiers` | list | `[]` | Ordered tier menu. Each entry: `alias` (the chord key — a single uppercase letter binds as `Shift`, e.g. `S` → `w S`), `label` (shown in the popup and the `◆` tab badge), `args` (appended to the spawn argv) |
+| `models.default` | string | unset | Alias of the tier a bare spawn uses — the agent's **strength** as Settings shows it; unset → the agent's own default model. An alias this menu doesn't declare resolves to no strength rather than borrowing the built-in menu's |
+| `models.tiers` | list | `[]` | Ordered tier menu. Each entry: `alias` (the chord key — a single uppercase letter binds as `Shift`, e.g. `S` → `w S`), `label` (shown in the popup and the `◆` tab badge), `args` (appended to the spawn argv — the model id and any reasoning/effort flags that go with it) |
 | `models.capability` | map | `{}` | `best` / `high` / `medium` / `low` capability labels → tier alias, used when a spawn declares no explicit tier. The deprecated `models.priority` spelling still parses and is rewritten on save. A `model:<tier>` label names a `models.tiers` entry directly and needs no map |
 | `auto_update` | bool | `false` | Let lazybox apply this agent's CLI updates automatically when the scheduled out-of-band check finds a newer version. Off by default: the check still runs and surfaces "update available", but installing waits for the manual "update agent CLIs" action. |
 

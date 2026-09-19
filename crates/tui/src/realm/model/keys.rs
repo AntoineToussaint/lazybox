@@ -9,14 +9,14 @@
 //!
 //! Free helpers used only by this surface (`rect_contains`,
 //! `key_event_to_chord`, `find_action_for_chord`,
-//! `emit_clipboard_copy`) live in `mod.rs`
+//! the clipboard boundary) live in `mod.rs`
 //! today and are reachable from this submodule because child
 //! modules can see their parent's private items.
 
 use super::{
-    Id, Model, PaneFocus, TerminalDrag, TerminalSelection, emit_clipboard_copy,
-    find_action_for_seq, find_action_for_stroke, key_event_to_stroke, rect_contains, section_rank,
-    seq_continuations, seq_continuations_available,
+    Id, Model, PaneFocus, TerminalDrag, TerminalSelection, find_action_for_seq,
+    find_action_for_stroke, key_event_to_stroke, rect_contains, section_rank, seq_continuations,
+    seq_continuations_available,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
 use lazybox_ipc::Command as IpcCommand;
@@ -1976,10 +1976,19 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Handle a bracketed-paste event from the host terminal. The
     /// host wraps the pasted text in `ESC[200~ … ESC[201~` and
-    /// crossterm hands us the inner string. We forward the same
-    /// wrapped sequence to the focused terminal's PTY so the
-    /// inner program (Claude, shell, vim) sees a single paste
-    /// instead of a stream of keystrokes.
+    /// crossterm hands us the inner string. We forward it to the
+    /// focused terminal's PTY so the inner program (Claude, shell, vim)
+    /// sees a single paste instead of a stream of keystrokes.
+    ///
+    /// The markers go back on only when that inner program asked for
+    /// them (DECSET 2004). Host paste detection and inner-application
+    /// framing are separate contracts: a program that never enabled
+    /// bracketed paste has no parser for `ESC[200~` and prints it, so
+    /// re-wrapping unconditionally put literal markers into `cat`, into
+    /// a shell with the mode off, and into anything reading raw bytes.
+    /// The payload itself is passed through byte for byte in both modes
+    /// — no newline translation, which would turn a multi-line paste
+    /// into a run of submits.
     ///
     /// Only fires when the terminal pane is focused. Other panes
     /// don't have a useful paste-target today (reply textarea has
@@ -1996,10 +2005,15 @@ impl<T: TerminalAdapter> Model<T> {
         // Enter as a blank recap (the keystroke tracker only sees the
         // CR, not the paste payload).
         let draft = self.terminals.record_paste(text);
+        let bracketed = self.terminals.terminal_accepts_bracketed_paste(terminal_id);
         let mut bytes = Vec::with_capacity(text.len() + 12);
-        bytes.extend_from_slice(b"\x1b[200~");
+        if bracketed {
+            bytes.extend_from_slice(b"\x1b[200~");
+        }
         bytes.extend_from_slice(text.as_bytes());
-        bytes.extend_from_slice(b"\x1b[201~");
+        if bracketed {
+            bytes.extend_from_slice(b"\x1b[201~");
+        }
         self.send_cmd(IpcCommand::Write {
             terminal_id,
             bytes,
@@ -2629,11 +2643,12 @@ impl<T: TerminalAdapter> Model<T> {
                             if let Some((text, anchor, focus_pt)) = span
                                 && !text.trim().is_empty()
                             {
-                                emit_clipboard_copy(&text);
-                                self.flash_hint(format!(
-                                    "copied {} to clipboard",
-                                    if clicks == 2 { "word" } else { "line" }
-                                ));
+                                let delivery = (self.clipboard)(&text);
+                                self.flash_hint(delivery.notice(if clicks == 2 {
+                                    "word"
+                                } else {
+                                    "line"
+                                }));
                                 self.terminal_selection = Some(TerminalSelection {
                                     terminal,
                                     anchor,
@@ -2730,13 +2745,12 @@ impl<T: TerminalAdapter> Model<T> {
                             drag.focus,
                         );
                         if !text.trim().is_empty() {
-                            emit_clipboard_copy(&text);
+                            let delivery = (self.clipboard)(&text);
                             let lines = text.lines().count();
-                            self.flash_hint(format!(
-                                "copied {} line{} to clipboard",
-                                lines,
+                            self.flash_hint(delivery.notice(&format!(
+                                "{lines} line{}",
                                 if lines == 1 { "" } else { "s" }
-                            ));
+                            )));
                         }
                     } else {
                         click_no_drag_at = Some(drag.down);

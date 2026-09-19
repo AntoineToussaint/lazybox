@@ -43,6 +43,18 @@ laid out at one size reparsed at another duplicate lines in scrollback. Three
 separate client-side fixes recurred before the size authority moved to the
 daemon; do not reintroduce a local guess.
 
+## A capture never replaces output it predates
+
+`apply_scrollback` swaps the whole grid for the daemon's tmux capture, and
+`last_seq` never rewinds — so a batch that arrived while the fetch was in
+flight and is then dropped is gone for good, with nothing on screen to say so.
+Every batch delivered since the fetch was armed is retained on the slot and
+the part above the reply's watermark is re-fed on top of the rebuild. When
+that retained stream can no longer be spliced on — it outran its cap, or a
+ring resync rebuilt the grid from another baseline — the capture is *refused*:
+the local grid holds every byte, it is only shallower, and the next upward
+scroll re-captures.
+
 ## Confirm modals do not guard against stray keys
 
 `default_no()` is an alias that does nothing — Enter confirms. A Confirm is a

@@ -6,7 +6,7 @@
 //! - **Key / catalog**: `key_event_to_chord` (crossterm → catalog
 //!   chord), `find_action_for_chord` (catalog lookup honoring user
 //!   overrides).
-//! - **Clipboard**: `emit_clipboard_copy` (OSC 52).
+//! - **Clipboard**: `emit_clipboard_copy` (native helper, else OSC 52).
 //! - **Run loop entry points**: `run_with_client`, `run_loop_with_model`.
 //! - **Loop-health guards**: `should_drop_stale_input` /
 //!   `StaleInputTally` (bounded input replay after a stall),
@@ -2039,15 +2039,95 @@ fn crossterm_to_realm(key: crossterm::event::KeyEvent) -> RealmKey {
     RealmKey::new(code, convert_modifiers(key.modifiers))
 }
 
-/// Queue an OSC 52 clipboard-set on the host terminal writer. The host
-/// (Ghostty / iTerm2 / Kitty / WezTerm) lands the text on the system
-/// clipboard. Format: `ESC ] 52 ; c ; <base64> ESC \`. Wraps the
-/// lazybox-side "copy from terminal selection" gesture — without OSC 52
-/// the extracted text would just live in memory.
-pub(crate) fn emit_clipboard_copy(text: &str) {
+/// How far a copy actually got. The two transports lazybox has do not
+/// offer the same guarantee, and the footer used to claim success for
+/// both — so a copy that the host terminal quietly ignored read exactly
+/// like one that landed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ClipboardDelivery {
+    /// A native helper on the machine the user is sitting at took the
+    /// text: it is on the system clipboard now.
+    Host,
+    /// Handed to the host terminal as OSC 52. Modern emulators
+    /// (Ghostty / iTerm2 / Kitty / WezTerm) act on it; Terminal.app and
+    /// anything with the escape disabled drop it, and nothing comes
+    /// back either way.
+    Terminal,
+}
+
+impl ClipboardDelivery {
+    /// Footer line for a copy of `what` ("3 lines", "word", "line").
+    pub(crate) fn notice(self, what: &str) -> String {
+        match self {
+            Self::Host => format!("copied {what} to clipboard"),
+            Self::Terminal => format!("copied {what} — OSC 52 sent, host terminal decides"),
+        }
+    }
+}
+
+/// Put the lazybox-side terminal selection on the clipboard, preferring
+/// the client machine's own clipboard and falling back to OSC 52.
+///
+/// The clipboard belongs to where the user is sitting, not to where the
+/// daemon runs, so the native attempt is made here in the client — a
+/// terminal driven by a remote daemon still copies to the laptop in
+/// front of it. OSC 52 (`ESC ] 52 ; c ; <base64> ESC \`) remains the
+/// path for every host where there is no native helper, and it is the
+/// one that travels when lazybox itself is being viewed over ssh.
+pub(crate) fn emit_clipboard_copy(text: &str) -> ClipboardDelivery {
+    if native_clipboard_copy(text) {
+        return ClipboardDelivery::Host;
+    }
     let encoded = base64_encode(text.as_bytes());
     let sequence = format!("\x1b]52;c;{encoded}\x1b\\");
     super::render_writer::enqueue_raw(sequence.as_bytes());
+    ClipboardDelivery::Terminal
+}
+
+/// How long the UI thread will wait on the native clipboard helper
+/// before giving up on it and falling back to OSC 52.
+#[cfg(target_os = "macos")]
+const NATIVE_CLIPBOARD_DEADLINE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Hand `text` to macOS's `pbcopy`, reporting whether it took it.
+///
+/// Runs off the UI thread and is abandoned at
+/// [`NATIVE_CLIPBOARD_DEADLINE`]: the caller is the single thread that
+/// repaints, and both the pipe write and the child's exit can block
+/// indefinitely on a wedged pasteboard server. An abandoned helper
+/// leaves its thread parked on that write until the pasteboard recovers
+/// — one parked thread, rather than a frozen UI.
+#[cfg(target_os = "macos")]
+fn native_clipboard_copy(text: &str) -> bool {
+    use std::io::Write as _;
+    let payload = text.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let spawned = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let delivered = match spawned {
+            Ok(mut child) => {
+                let wrote = child
+                    .stdin
+                    .take()
+                    .is_some_and(|mut pipe| pipe.write_all(payload.as_bytes()).is_ok());
+                // `pbcopy` writes the pasteboard on EOF, which the
+                // dropped pipe above just delivered.
+                wrote && child.wait().is_ok_and(|status| status.success())
+            }
+            Err(_) => false,
+        };
+        let _ = tx.send(delivered);
+    });
+    rx.recv_timeout(NATIVE_CLIPBOARD_DEADLINE).unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_clipboard_copy(_text: &str) -> bool {
+    false
 }
 
 /// Tiny RFC 4648 base64 encoder. Lazybox doesn't have a `base64` dep

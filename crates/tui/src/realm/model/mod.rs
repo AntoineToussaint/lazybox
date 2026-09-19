@@ -53,9 +53,9 @@ pub fn terminal_leader_reference_rows() -> Vec<(String, String)> {
 // (`keys.rs`, etc.) can keep their `super::foo` import shape after
 // the helpers moved out of mod.rs.
 pub(crate) use helpers::{
-    emit_clipboard_copy, find_action_for_seq, find_action_for_stroke, key_event_to_stroke,
-    paint_selection, rect_contains, section_rank, seq_continuations, seq_continuations_available,
-    split_coach, split_for_footer,
+    find_action_for_seq, find_action_for_stroke, key_event_to_stroke, paint_selection,
+    rect_contains, section_rank, seq_continuations, seq_continuations_available, split_coach,
+    split_for_footer,
 };
 
 use crate::PaneId;
@@ -81,6 +81,9 @@ const RIGHT_PID: PaneId = PaneId::new(2);
 const TERMINALS_PID: PaneId = PaneId::new(3);
 
 type UrlOpener = dyn Fn(&str, Option<&str>) -> std::io::Result<()> + Send + Sync;
+/// Client-side clipboard boundary. Returns how far the copy actually
+/// got so the caller can say so instead of assuming.
+type ClipboardWriter = dyn Fn(&str) -> helpers::ClipboardDelivery + Send + Sync;
 type MouseCaptureRequester = dyn Fn(bool) -> std::io::Result<()> + Send + Sync;
 
 /// Component IDs for modal-side mounts only. Pane access is via
@@ -2089,6 +2092,11 @@ pub struct Model<T: TerminalAdapter> {
     /// tests never mutate the terminal running the test process.
     mouse_capture_requester: Box<MouseCaptureRequester>,
     url_opener: Box<UrlOpener>,
+    /// Clipboard I/O boundary, injected for the same reason as
+    /// `mouse_capture_requester`: the real one reaches the clipboard of
+    /// the machine lazybox runs on, and a test must not write to the
+    /// developer's.
+    clipboard: Box<ClipboardWriter>,
     /// Active lazybox-side drag-selection in the terminal pane. Set on
     /// mouse Down inside the terminal rect and extended on Drag; while a
     /// drag is parked against the top/bottom edge the idle tick
@@ -2908,6 +2916,7 @@ impl<T: TerminalAdapter> Model<T> {
             mouse_capture_requested_at: Instant::now(),
             mouse_capture_requester,
             url_opener: Box::new(crate::editors::open_url),
+            clipboard: Box::new(helpers::emit_clipboard_copy),
             terminal_drag: None,
             terminal_selection: None,
             terminal_click: None,
@@ -3100,7 +3109,11 @@ impl Model<tuirealm::terminal::TestTerminalAdapter> {
     ) -> anyhow::Result<Self> {
         let terminal = tuirealm::terminal::TestTerminalAdapter::new(size)
             .map_err(|e| anyhow::anyhow!("test adapter init: {e:?}"))?;
-        Ok(Self::build(terminal, client, Box::new(|_| Ok(()))))
+        let mut model = Self::build(terminal, client, Box::new(|_| Ok(())));
+        // Headless: the copy gestures run, but nothing leaves the
+        // process. A test that asserts on delivery installs its own.
+        model.clipboard = Box::new(|_| helpers::ClipboardDelivery::Terminal);
+        Ok(model)
     }
 
     #[cfg(test)]

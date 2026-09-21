@@ -17026,6 +17026,16 @@ mod leader_tile_tests {
             focused: vec![1],
         });
         m.terminals.set_active_tab(1);
+        // The program in tile 1 asked for bracketed paste, so the paste
+        // below is framed — `handle_paste` frames per terminal mode.
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(1),
+            bytes: Arc::<[u8]>::from(b"\x1b[?2004h".to_vec()),
+            first_seq: 1,
+            seq: 1,
+            cols: 0,
+            rows: 0,
+        });
 
         let area = m.layout.last_area;
         let (_, _, bottom) = m.effective_pane_rects(area);
@@ -18033,6 +18043,82 @@ mod terminal_url_mouse_tests {
         assert!(
             model.terminal_selection.is_none(),
             "typing dismisses the word highlight",
+        );
+    }
+
+    /// With mouse capture ON, the lazybox-side selection gestures are
+    /// what copy is: the host never sees the drag. Both the word/line
+    /// gesture and a drag must hand their exact text to the clipboard
+    /// boundary, and the footer must report what that boundary did
+    /// rather than assume success (#1798).
+    #[test]
+    fn copy_under_capture_hands_the_selection_to_the_clipboard_boundary() {
+        let (mut model, _server, _opened) = build_model(1);
+        let copies = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&copies);
+        model.clipboard = Box::new(move |text: &str| {
+            recorder.lock().expect("copy mutex").push(text.to_string());
+            super::super::helpers::ClipboardDelivery::Host
+        });
+        assert!(
+            model.mouse_capture_on,
+            "precondition: lazybox owns the mouse"
+        );
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, "run src/main.rs now\r\n".as_bytes().to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+        ] {
+            left(&mut model, kind, x + 8, y);
+        }
+
+        assert_eq!(
+            *copies.lock().expect("copy mutex"),
+            vec!["src/main.rs".to_string()],
+            "the double-click copies exactly the word under the pointer",
+        );
+        let notice = model.status.notice.as_ref().expect("copy notice");
+        assert_eq!(
+            notice.message, "copied word to clipboard",
+            "a delivered copy says so plainly",
+        );
+    }
+
+    /// The same gesture over a boundary that only managed the escape
+    /// transport must not claim the clipboard (#1798).
+    #[test]
+    fn a_best_effort_copy_is_not_reported_as_a_clipboard_write() {
+        let (mut model, _server, _opened) = build_model(1);
+        model.clipboard = Box::new(|_| super::super::helpers::ClipboardDelivery::Terminal);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, "run src/main.rs now\r\n".as_bytes().to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+        ] {
+            left(&mut model, kind, x + 8, y);
+        }
+
+        let notice = &model.status.notice.as_ref().expect("copy notice").message;
+        assert!(notice.contains("OSC 52"), "{notice}");
+        assert!(
+            !notice.ends_with("to clipboard"),
+            "an unconfirmed escape must not read as a landed copy: {notice}",
         );
     }
 
@@ -28438,11 +28524,36 @@ mod keybinding_audit_tests {
     #[test]
     fn mouse_capture_default_chords_toggle_and_remap_moves_them() {
         let (mut m, _server) = build_model();
+        // Every toggle must reach the host boundary: releasing capture
+        // is what hands the trackpad back for native selection and
+        // Cmd-C, so a chord that flips the flag without issuing
+        // `DisableMouseCapture` leaves host copy broken (#1798).
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&requested);
+        m.mouse_capture_requester = Box::new(move |enabled| {
+            captured.lock().expect("mouse request mutex").push(enabled);
+            Ok(())
+        });
         let initial = m.mouse_capture_on;
         press(&mut m, Key::Function(8));
         assert_eq!(m.mouse_capture_on, !initial, "F8 toggles capture");
         m.dispatch_key(KeyEvent::new(Key::Char('s'), KeyModifiers::ALT));
         assert_eq!(m.mouse_capture_on, initial, "Alt-s toggles it back");
+        // The third catalog alias, for terminals that swallow the other two.
+        m.dispatch_key(KeyEvent::new(
+            Key::Char('s'),
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+        ));
+        assert_eq!(m.mouse_capture_on, !initial, "Ctrl-Alt-s toggles too");
+        m.dispatch_key(KeyEvent::new(
+            Key::Char('s'),
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+        ));
+        assert_eq!(
+            *requested.lock().expect("mouse request mutex"),
+            vec![!initial, initial, !initial, initial],
+            "each toggle drives the host boundary with the new mode",
+        );
 
         // A remap moves the binding: the old default goes dead, the
         // new chord fires.
@@ -32604,6 +32715,161 @@ mod follow_up_chain_tests {
             m.sidebar.broadcast_selected_count(),
             2,
             "a no-op bulk run leaves the marks for a retry",
+        );
+    }
+}
+
+#[cfg(test)]
+mod clipboard_and_paste_tests {
+    //! The terminal's two human-facing clipboard contracts (#1798,
+    //! consolidating #1685).
+    //!
+    //! **Copy** has two transports with different guarantees, and the
+    //! footer used to claim the same success for both — a copy the host
+    //! terminal silently dropped read exactly like one that landed.
+    //!
+    //! **Paste** is framed per terminal: `ESC[200~ … ESC[201~` only for
+    //! a program that enabled DECSET 2004. Framing a program that never
+    //! asked for it puts the literal markers into its input, which is
+    //! what `cat`, a bracketed-paste-off shell and anything reading raw
+    //! bytes showed.
+    use super::super::helpers::ClipboardDelivery;
+    use super::super::*;
+    use lazybox_ipc::{
+        Command as IpcCommand, Event as IpcEvent, TerminalId, TerminalKind, channel,
+    };
+    use std::sync::Arc;
+    use tuirealm::ratatui::layout::Size;
+
+    type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
+
+    fn model_with_terminal() -> (TestModel, lazybox_ipc::Connection) {
+        let (client, server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = lazybox_core::SessionKey::from("github:o/r#1");
+        m.terminals.set_active_session(Some(key.clone()));
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: key,
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        m.focus = PaneFocus::Terminals;
+        (m, server)
+    }
+
+    /// `seq` must advance across calls — a chunk at or below the slot's
+    /// watermark is dropped as already applied.
+    fn feed(m: &mut TestModel, seq: u64, bytes: &[u8]) {
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(1),
+            bytes: Arc::<[u8]>::from(bytes.to_vec()),
+            first_seq: seq,
+            seq,
+            cols: 0,
+            rows: 0,
+        });
+    }
+
+    fn pasted_bytes(
+        m: &mut TestModel,
+        server: &mut lazybox_ipc::Connection,
+        text: &str,
+    ) -> Vec<u8> {
+        while server.rx.try_recv().is_ok() {}
+        m.handle_paste(text);
+        let mut out = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let IpcCommand::Write { bytes, .. } = cmd {
+                out.extend_from_slice(&bytes);
+            }
+        }
+        out
+    }
+
+    /// The escape-transport copy is best effort and says so; only the
+    /// native path claims the clipboard outright.
+    #[test]
+    fn a_copy_notice_names_the_transport_that_ran() {
+        assert_eq!(
+            ClipboardDelivery::Host.notice("3 lines"),
+            "copied 3 lines to clipboard"
+        );
+        let escaped = ClipboardDelivery::Terminal.notice("word");
+        assert!(escaped.starts_with("copied word"), "{escaped}");
+        assert!(
+            escaped.contains("OSC 52") && escaped.contains("host terminal decides"),
+            "a best-effort escape must not read as a confirmed clipboard write: {escaped}",
+        );
+    }
+
+    /// DECSET 2004 on: the program parses the markers, so it gets them
+    /// and sees one paste instead of a run of keystrokes.
+    #[test]
+    fn paste_is_bracketed_for_a_program_that_enabled_the_mode() {
+        let (mut m, mut server) = model_with_terminal();
+        feed(&mut m, 1, b"\x1b[?2004h");
+        assert!(
+            m.terminals.terminal_accepts_bracketed_paste(TerminalId(1)),
+            "precondition: the mode is on",
+        );
+
+        assert_eq!(
+            pasted_bytes(&mut m, &mut server, "one\ntwo"),
+            b"\x1b[200~one\ntwo\x1b[201~".to_vec(),
+        );
+    }
+
+    /// Mode off: the bytes go through unframed. A terminal that never
+    /// enabled bracketed paste has no parser for `ESC[200~` and prints
+    /// it — and nothing is added to submit the paste either.
+    #[test]
+    fn paste_is_unframed_for_a_program_that_did_not() {
+        let (mut m, mut server) = model_with_terminal();
+        assert!(
+            !m.terminals.terminal_accepts_bracketed_paste(TerminalId(1)),
+            "precondition: a fresh terminal has not enabled the mode",
+        );
+
+        assert_eq!(
+            pasted_bytes(&mut m, &mut server, "one\ntwo"),
+            b"one\ntwo".to_vec(),
+            "exact bytes: no markers, no translated newline, no added CR",
+        );
+    }
+
+    /// A program that turns the mode back off (DECRST 2004) stops
+    /// getting the framing — the mode is read per paste, not latched at
+    /// spawn.
+    #[test]
+    fn paste_framing_follows_the_mode_back_off() {
+        let (mut m, mut server) = model_with_terminal();
+        feed(&mut m, 1, b"\x1b[?2004h");
+        assert!(pasted_bytes(&mut m, &mut server, "x").starts_with(b"\x1b[200~"));
+
+        feed(&mut m, 2, b"\x1b[?2004l");
+        assert_eq!(pasted_bytes(&mut m, &mut server, "x"), b"x".to_vec());
+    }
+
+    /// Non-ASCII and multi-line payloads reach the PTY byte for byte in
+    /// both modes — the copy/paste round trip is only as good as what
+    /// the paste side forwards.
+    #[test]
+    fn paste_passes_unicode_through_unchanged() {
+        let text = "héllo → wörld\nsecond ligne ✓";
+        let (mut m, mut server) = model_with_terminal();
+        assert_eq!(
+            pasted_bytes(&mut m, &mut server, text),
+            text.as_bytes().to_vec()
+        );
+
+        feed(&mut m, 1, b"\x1b[?2004h");
+        assert_eq!(
+            pasted_bytes(&mut m, &mut server, text),
+            [b"\x1b[200~".as_slice(), text.as_bytes(), b"\x1b[201~"].concat(),
         );
     }
 }

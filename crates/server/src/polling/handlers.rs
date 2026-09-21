@@ -3055,7 +3055,7 @@ pub async fn on_terminal_transition(
 /// modal can warn before the force-delete. `terminal_state` (merged PR
 /// vs closed issue) only steers the confirm-modal wording.
 ///
-/// **A cleanup the removal gate would refuse is never offered** (the merged-cleanup reprompt loop).
+/// **A cleanup the removal gate would refuse is never offered** (#1867).
 /// The destructive path re-inspects and refuses on local work, so a
 /// prompt issued over a dirty checkout could only ever end in that
 /// refusal — and it left nothing behind, so the next sweep issued it
@@ -3187,7 +3187,7 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     // cleanup the gate is already certain to refuse is what made the
     // refusal loop: the prompt fired, the removal was refused for local
     // work, nothing recorded that, and the next sweep prompted again
-    // (the merged-cleanup reprompt loop). `Err` is unsafe, never clean — the gate fails closed the
+    // (#1867). `Err` is unsafe, never clean — the gate fails closed the
     // same way, so a workspace we cannot inspect is parked too.
     let outlook = crate::workspace::removal_outlook_with(config, mgr, &workspace).await;
     let blocked_detail = match &outlook {
@@ -5245,7 +5245,7 @@ mod inspect_tests {
         assert!(wt.exists(), "prompt must not delete anything");
     }
 
-    /// Merged-cleanup reprompt loop: a merged worktree the removal gate would refuse is NOT
+    /// #1867: a merged worktree the removal gate would refuse is NOT
     /// offered for cleanup — the prompt it used to emit could only end
     /// in that refusal. It is announced once, quietly, and the row and
     /// worktree are left alone.
@@ -5283,7 +5283,7 @@ mod inspect_tests {
         assert!(load_workspace(&config, &key).is_some(), "row must remain");
     }
 
-    /// The other half of that fix: `has_local_work` still means "a confirmed
+    /// The other half of #1867: `has_local_work` still means "a confirmed
     /// removal destroys work", which is NOT the same as "the gate
     /// refuses". A merged PR's squash-merged tip reads as unpushed —
     /// the gate relaxes that (the work is upstream under another SHA) so
@@ -5321,7 +5321,7 @@ mod inspect_tests {
         );
     }
 
-    /// Regression for the merged-cleanup reprompt loop — the loop itself. A merged workspace the
+    /// Regression for #1867 — the loop itself. A merged workspace the
     /// gate refuses is announced ONCE and then stays silent across every
     /// later sweep, with the reprompt throttle expired each time so the
     /// silence is the new suppression and not the cadence gate. When the
@@ -5397,7 +5397,7 @@ mod inspect_tests {
         assert!(!has_local_work, "a cleaned checkout has nothing to lose");
     }
 
-    /// Merged-cleanup reprompt loop: the parked announcement is re-made when the BLOCKING state
+    /// #1867: the parked announcement is re-made when the BLOCKING state
     /// changes but still blocks — the user rescued one checkout's work
     /// and left another reason behind, so the notice must name the new
     /// one rather than stay pinned to the first.
@@ -5465,7 +5465,7 @@ mod inspect_tests {
 
     /// A closed **issue** emits the same `MergedPrRemovable` prompt as a
     /// merged PR, but tags `terminal_state = Closed` so the modal copy
-    /// reads "closed" (#250). The checkout is clean: since the merged-cleanup reprompt loop fix a
+    /// reads "closed" (#250). The checkout is clean: since #1867 a
     /// checkout the removal gate would refuse is parked rather than
     /// prompted, so dirtying it here would test the other path.
     #[tokio::test]
@@ -5653,7 +5653,7 @@ mod inspect_tests {
         assert!(load_workspace(&config, &key).is_some());
     }
 
-    /// #552 + the merged-cleanup reprompt loop: a closed issue whose worktree has uncommitted work
+    /// #552 + #1867: a closed issue whose worktree has uncommitted work
     /// is NOT destroyed — and is no longer offered for a cleanup the
     /// removal gate would refuse either. It is announced once and the
     /// worktree + row are left intact.

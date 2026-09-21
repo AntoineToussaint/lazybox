@@ -1837,7 +1837,7 @@ pub struct RemovalPromptMemory {
     /// paths and reasons, exactly as the refusal words them.
     ///
     /// This is a *state* key, not a "we already asked" flag, and the
-    /// difference is the whole point (the merged-cleanup reprompt loop). Prompting for a removal
+    /// difference is the whole point (#1867). Prompting for a removal
     /// the gate then refuses left nothing behind, so every sweep
     /// re-offered it and re-raised the red refusal; suppressing on a
     /// boolean instead would outlive the user fixing the checkout and

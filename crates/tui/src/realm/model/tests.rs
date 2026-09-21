@@ -25607,7 +25607,7 @@ mod dismiss_and_messages_tests {
         );
     }
 
-    /// Merged-cleanup reprompt loop, the client half: the daemon now *parks* a merged workspace
+    /// #1867, the client half: the daemon now *parks* a merged workspace
     /// whose cleanup its removal gate would refuse, announcing it once as
     /// a plain `Notification` instead of emitting `MergedPrRemovable`.
     /// That must land as an Info notice in the durable log and mount NO

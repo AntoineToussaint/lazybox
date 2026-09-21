@@ -223,7 +223,8 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 
 | Chord | Action |
 | --- | --- |
-| `x n` | floating workspace |
+| `x n` | new workspace |
+| `x F` | floating workspace |
 | `x c` | coordination workspace |
 | `x R` | rename |
 | `x m` | move to space |

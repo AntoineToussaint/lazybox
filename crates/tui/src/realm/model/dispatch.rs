@@ -1676,6 +1676,36 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::NewWorkspace => {
+                // Repo-scoped again (#1863). `x n` creates a named workspace
+                // under the cursor's project — the way every long-running
+                // non-PR line of work gets a home in a repo (a `Cleanup`
+                // workspace per module, each with its own worktree and
+                // agent). It was repointed at the floating input, which left
+                // NO chord able to do this; floating now lives on `x f`.
+                //
+                // #1586 is not in tension with this: the rule forbids a
+                // second workspace BESIDE a tracked item, splitting branch,
+                // activity and cost across two rows. A named workspace under
+                // a project with no record for this work yet is the only row
+                // that work has, and it becomes the PR row via the normal
+                // rebadge once a PR opens.
+                match self.sidebar.focused_project_key() {
+                    Some(project_key) => self.mount_new_workspace_input(project_key),
+                    // No project under the cursor — the `(no repo)` bucket, a
+                    // Space header, an empty inbox. Offer the floating input
+                    // rather than failing silently, and say why, so the key
+                    // still does something explicable.
+                    None => {
+                        self.flash_info(
+                            "no project under the cursor — creating a floating workspace (x f)",
+                        );
+                        self.mount_floating_workspace_input(
+                            lazybox_core::FloatingWorkspaceKind::Thinking,
+                        );
+                    }
+                }
+            }
+            Action::FloatingWorkspace => {
                 self.mount_floating_workspace_input(lazybox_core::FloatingWorkspaceKind::Thinking);
             }
             Action::NewCoordinationWorkspace => {

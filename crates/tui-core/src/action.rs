@@ -103,6 +103,7 @@ pub enum Action {
     ViewDiff,
     /// Create a repo-free floating workspace (asks for a name).
     NewWorkspace,
+    FloatingWorkspace,
     /// Create a repo-free workspace with coordination startup instructions.
     NewCoordinationWorkspace,
     /// Rename the focused workspace's display name in place — opens an
@@ -607,6 +608,7 @@ pub enum ActionKind {
     OpenWithApp,
     ViewDiff,
     NewWorkspace,
+    FloatingWorkspace,
     NewCoordinationWorkspace,
     RenameWorkspace,
     MoveToSpace,
@@ -796,6 +798,7 @@ impl ActionKind {
         // hiding/destructive actions last. The runtime which-key popup
         // inherits this order directly.
         Self::NewWorkspace,
+        Self::FloatingWorkspace,
         Self::NewCoordinationWorkspace,
         Self::RenameWorkspace,
         Self::MoveToSpace,
@@ -936,6 +939,7 @@ impl Action {
             Action::OpenWithApp(_) => ActionKind::OpenWithApp,
             Action::ViewDiff => ActionKind::ViewDiff,
             Action::NewWorkspace => ActionKind::NewWorkspace,
+            Action::FloatingWorkspace => ActionKind::FloatingWorkspace,
             Action::NewCoordinationWorkspace => ActionKind::NewCoordinationWorkspace,
             Action::RenameWorkspace => ActionKind::RenameWorkspace,
             Action::MoveToSpace => ActionKind::MoveToSpace,
@@ -1501,6 +1505,17 @@ impl ActionDef {
             ActionKind::NewWorkspace => &Self {
                 kind: ActionKind::NewWorkspace,
                 default_keys: "x n",
+                label: "new workspace",
+                describe: "Create a named workspace under the cursor's project — a home in that repo for long-running work with no tracker record yet (asks for a name). It becomes the PR row via the normal rebadge once a PR opens. With no project under the cursor this falls back to a floating workspace and says so.",
+                section: Section::Workspace,
+            },
+            ActionKind::FloatingWorkspace => &Self {
+                kind: ActionKind::FloatingWorkspace,
+                // NOT `x f`: that is `ConvertSession`, and the collision
+                // detector fails the build on a double-bind. `x F` keeps the
+                // f-for-floating mnemonic without displacing an existing
+                // binding (#1863).
+                default_keys: "x F",
                 label: "floating workspace",
                 describe: "Create a persistent empty folder for thinking, with no repository or tracker record (asks for a name).",
                 section: Section::Workspace,
@@ -2487,6 +2502,7 @@ impl ActionKind {
             ActionKind::OpenWithApp => "open_with_app",
             ActionKind::ViewDiff => "view_diff",
             ActionKind::NewWorkspace => "new_workspace",
+            ActionKind::FloatingWorkspace => "floating_workspace",
             ActionKind::NewCoordinationWorkspace => "new_coordination_workspace",
             ActionKind::RenameWorkspace => "rename_workspace",
             ActionKind::MoveToSpace => "move_to_space",
@@ -2802,6 +2818,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
         ActionKind::NewWorkspace
+        | ActionKind::FloatingWorkspace
         | ActionKind::NewCoordinationWorkspace
         | ActionKind::RenameWorkspace
         | ActionKind::MoveToSpace
@@ -3617,6 +3634,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         ActionKind::VisualSelect => has_ws,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
+        | ActionKind::FloatingWorkspace
         | ActionKind::NewCoordinationWorkspace
         | ActionKind::NewProject
         | ActionKind::ImportCheckout
@@ -3696,6 +3714,36 @@ pub fn universal_shortcuts() -> Vec<&'static ActionDef> {
 
 #[cfg(test)]
 mod tests {
+    /// Regression (#1863): `x n` is the PROJECT-SCOPED new workspace and
+    /// `x f` is the floating one — two chords, two actions.
+    ///
+    /// `x n` had been repointed at the floating input, which left no chord
+    /// able to create a named workspace inside a repo. That is how every
+    /// long-running non-PR line of work gets a home there, so the split is
+    /// pinned here: same key, same meaning, and floating reachable on its own.
+    #[test]
+    fn new_workspace_and_floating_workspace_are_separate_chords() {
+        let nw = ActionDef::for_kind(ActionKind::NewWorkspace);
+        let fw = ActionDef::for_kind(ActionKind::FloatingWorkspace);
+
+        assert_eq!(nw.default_keys, "x n");
+        assert_eq!(fw.default_keys, "x F");
+        assert_ne!(nw.kind, fw.kind);
+
+        // `x n` must not describe itself as floating — the label is what the
+        // footer and `?` help show, and it is how the meaning drifted before.
+        assert!(
+            !nw.label.contains("floating"),
+            "x n must not be the floating workspace: {:?}",
+            nw.label,
+        );
+        assert!(fw.label.contains("floating"), "{:?}", fw.label);
+
+        // Both are workspace-group actions: `x` is the workspace leader.
+        assert_eq!(nw.section, Section::Workspace);
+        assert_eq!(fw.section, Section::Workspace);
+    }
+
     use super::*;
 
     #[test]
@@ -5518,8 +5566,19 @@ mod tests {
         );
         assert_eq!(
             ActionDef::for_kind(ActionKind::NewWorkspace).label,
-            "floating workspace"
+            "new workspace"
         );
+        // …and the three must be mutually distinct, which is what this test
+        // is actually for: no two footer cells reading the same. Pinning
+        // NewWorkspace to "floating workspace" is how #1863's regression
+        // survived — the test agreed with the bug.
+        let labels = [
+            ActionDef::for_kind(ActionKind::NewProject).label,
+            ActionDef::for_kind(ActionKind::NewWorkspace).label,
+            ActionDef::for_kind(ActionKind::FloatingWorkspace).label,
+        ];
+        let unique: std::collections::BTreeSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len(), "labels collide: {labels:?}");
     }
 
     /// The mouse-capture toggle is a catalog row (discoverable in `?`,

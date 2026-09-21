@@ -25607,6 +25607,36 @@ mod dismiss_and_messages_tests {
         );
     }
 
+    /// Merged-cleanup reprompt loop, the client half: the daemon now *parks* a merged workspace
+    /// whose cleanup its removal gate would refuse, announcing it once as
+    /// a plain `Notification` instead of emitting `MergedPrRemovable`.
+    /// That must land as an Info notice in the durable log and mount NO
+    /// modal — the unsolicited destructive confirm (which defaults to
+    /// Yes) answering into `store:local-work` is what re-raised the red
+    /// footer refusal every poll tick.
+    #[test]
+    fn a_parked_cleanup_notice_informs_without_mounting_a_confirm() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.handle_daemon_event(lazybox_ipc::Event::Notification {
+            title: "lazybox".into(),
+            body: "o/r#1 was merged — keeping its workspace, it has local work: \
+                   /tmp/wt (uncommitted changes to tracked files) · x x removes it"
+                .into(),
+        });
+
+        assert_eq!(m.top_modal(), None, "a parked cleanup must not prompt");
+        let notice = m.status.notice.as_ref().expect("footer notice");
+        assert_eq!(notice.severity, NoticeSeverity::Info, "quiet, not red");
+        assert!(
+            m.status
+                .messages
+                .recent()
+                .any(|e| e.message.contains("keeping its workspace")),
+            "the parked cleanup must stay readable in Shift-M"
+        );
+    }
+
     /// Esc clears the current notice whatever its severity — the whole
     /// point of #309. A sticky Permanent error (which never auto-fades)
     /// is the case that motivated it.

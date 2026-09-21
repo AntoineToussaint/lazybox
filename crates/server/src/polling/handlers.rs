@@ -3050,17 +3050,32 @@ pub async fn on_terminal_transition(
 /// Inspect a terminal-state workspace's backing worktrees and emit
 /// [`Event::MergedPrRemovable`] so the TUI can prompt. Read-only — no
 /// deletion happens until the user confirms (which comes back as
-/// `Command::RemoveMergedWorkspace`). `has_local_work` is set when any
-/// session worktree has uncommitted or unpushed work, so the modal can
-/// warn before the force-delete. `terminal_state` (merged PR vs closed
-/// issue) only steers the confirm-modal wording.
+/// `Command::RemoveMergedWorkspace`). `has_local_work` is set when a
+/// reclaimed worktree holds work the removal would destroy, so the
+/// modal can warn before the force-delete. `terminal_state` (merged PR
+/// vs closed issue) only steers the confirm-modal wording.
+///
+/// **A cleanup the removal gate would refuse is never offered** (#1867).
+/// The destructive path re-inspects and refuses on local work, so a
+/// prompt issued over a dirty checkout could only ever end in that
+/// refusal — and it left nothing behind, so the next sweep issued it
+/// again, and the user collected the red refusal notice forever.
+/// [`crate::workspace::removal_outlook_with`] answers "would the gate
+/// allow this?" with the gate's own predicate; when it would not, the
+/// workspace is parked by [`park_blocked_cleanup`] with a one-shot
+/// notice instead, keyed on the blocking state so it re-arms when the
+/// checkout changes.
 ///
 /// Every emit path (the open→terminal transition and the per-tick
 /// reprompt sweep) funnels through here. A durable "keep" answer
 /// ([`lazybox_core::CleanupPrompt::Declined`], issue #499) suppresses permanently;
 /// re-emits are otherwise throttled to [`super::REMOVAL_REPROMPT_AFTER`]
 /// via [`super::RemovalPromptMemory`] so a user staring at the modal
-/// doesn't collect a fresh copy every tick.
+/// doesn't collect a fresh copy every tick. That throttle also bounds
+/// how often the gate preflight runs its git inspection: a parked
+/// workspace is re-checked once per `REMOVAL_REPROMPT_AFTER`, not once
+/// per poll tick, so a checkout cleaned up mid-window re-arms within
+/// that window rather than instantly.
 ///
 /// A session-less **merged PR** still prompts (issue #499): removal just
 /// drops the tracking row, but a merged PR shouldn't linger unprompted
@@ -3166,13 +3181,44 @@ pub(crate) async fn prompt_merged_pr_removal_with(
         prompts.prompted.insert(key.as_str().to_string(), now);
     }
 
-    let session_paths = workspace_worktree_paths(&workspace);
     let active_terminal_count = count_live_terminals(config, key).await;
-    let has_local_work = workspace_local_work(config, mgr, key, &session_paths)
+    // Ask the removal gate itself what it would do, rather than
+    // re-deriving "is this checkout dirty?" beside it. Offering a
+    // cleanup the gate is already certain to refuse is what made the
+    // refusal loop: the prompt fired, the removal was refused for local
+    // work, nothing recorded that, and the next sweep prompted again
+    // (#1867). `Err` is unsafe, never clean — the gate fails closed the
+    // same way, so a workspace we cannot inspect is parked too.
+    let outlook = crate::workspace::removal_outlook_with(config, mgr, &workspace).await;
+    let blocked_detail = match &outlook {
+        Ok(outlook) if outlook.is_blocked() => Some(outlook.blocked_detail()),
+        Ok(_) => None,
+        Err(error) => Some(format!("worktrees could not be inspected: {error}")),
+    };
+
+    if let Some(detail) = blocked_detail {
+        park_blocked_cleanup(config, key, &label, terminal_state, detail).await;
+        return;
+    }
+
+    // Reaching here means the gate would let the removal through, so
+    // any parked state is stale: drop it, and the next blocking state
+    // (or this same one, if the user dirties the checkout again) gets
+    // its own notice.
+    config
+        .poll
+        .removal_prompts
+        .lock()
         .await
-        // A failed inspection is a warning, never a clean bill of health.
-        // The destructive command performs the same fail-closed check again.
-        .unwrap_or(true);
+        .blocked
+        .remove(key.as_str());
+
+    // A merged PR's squash-merged tip reads as unpushed and does NOT
+    // block removal (the work is upstream under another SHA), but those
+    // commits still exist only here — the confirm modal has to warn
+    // before it destroys them. That is why this is a separate fact from
+    // the blockers above and comes off the same inspection.
+    let has_local_work = outlook.map(|o| o.destroys_work).unwrap_or(true);
 
     tracing::info!(
         workspace = %key,
@@ -3187,6 +3233,66 @@ pub(crate) async fn prompt_merged_pr_removal_with(
         terminal_state,
         active_terminal_count,
         has_local_work,
+    });
+}
+
+/// A terminal-state workspace whose cleanup the removal gate would
+/// refuse: say so once, then stay quiet until the checkout changes.
+///
+/// The suppression is keyed on the refusal's own detail string — the
+/// paths and the reasons — not on an "already prompted" boolean. That matters
+/// for the half of the bug that is NOT the loop: a boolean would
+/// survive the user fixing the thing it was set for, and the workspace
+/// would then sit merged and cleanable with nobody ever asking. Commit,
+/// push, discard or delete anything in one of these checkouts and the
+/// detail changes (or empties, which re-arms the real prompt through the
+/// caller above), so the next sweep speaks again.
+///
+/// The notice is an `Event::Notification`, which the TUI flashes as Info
+/// and keeps in the durable messages log (`Shift-M`) — visible, but not
+/// the red permanent-error footer the repeated refusal was raising, and
+/// not a modal demanding an answer the user cannot give. The row itself
+/// stays in the inbox showing its merged/closed state, and `x x` removes
+/// it (offering the "WIPE IT ANYWAY" override) whenever the user is
+/// ready.
+async fn park_blocked_cleanup(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    label: &str,
+    terminal_state: lazybox_ipc::RemovableTerminalState,
+    detail: String,
+) {
+    {
+        // Read and record under one lock: a concurrent sweep must not be
+        // able to see "not recorded yet" twice and emit the notice twice.
+        let mut prompts = config.poll.removal_prompts.lock().await;
+        let previous = prompts
+            .blocked
+            .insert(key.as_str().to_string(), detail.clone());
+        if previous.as_deref() == Some(detail.as_str()) {
+            // The same workspace, blocked by the same thing, as last
+            // time. This is the whole fix: no prompt, no notice, no log
+            // line — until that string changes.
+            return;
+        }
+    }
+
+    let verb = match terminal_state {
+        lazybox_ipc::RemovableTerminalState::Merged => "merged",
+        lazybox_ipc::RemovableTerminalState::Closed => "closed",
+    };
+    tracing::info!(
+        workspace = %key,
+        %detail,
+        ?terminal_state,
+        "terminal state — cleanup parked, the removal gate would refuse it"
+    );
+    let _ = config.bus.send(Event::Notification {
+        title: "lazybox".into(),
+        body: format!(
+            "{label} was {verb} — keeping its workspace, it has local work: \
+             {detail} · x x removes it once you have committed, pushed or discarded"
+        ),
     });
 }
 
@@ -3231,13 +3337,11 @@ pub(crate) async fn remove_merged_workspace_with(
     // The row is actually gone — now drop its reprompt bookkeeping. On a
     // failed prerequisite it must remain so the level-triggered prompt can
     // offer the destructive action again.
-    config
-        .poll
-        .removal_prompts
-        .lock()
-        .await
-        .prompted
-        .remove(key.as_str());
+    {
+        let mut prompts = config.poll.removal_prompts.lock().await;
+        prompts.prompted.remove(key.as_str());
+        prompts.blocked.remove(key.as_str());
+    }
 
     Some(reclaimed)
 }
@@ -3261,69 +3365,20 @@ fn workspace_worktree_paths(
         .collect()
 }
 
-/// Whether any of a workspace's session worktrees hold uncommitted or
-/// unpushed work. `Some(false)` — clean, and also the answer for a
-/// session-less workspace (no worktree to inspect). `Some(true)` — at
-/// least one worktree is dirty or ahead of its remote. `None` — the
-/// inspect itself failed, so cleanliness is unknown: callers that would
-/// destroy a worktree must treat `None` as unsafe, never as clean.
-async fn workspace_local_work(
-    config: &ServerConfig,
-    mgr: &lazybox_git_ops::WorktreeManager,
-    key: &WorkspaceKey,
-    session_paths: &std::collections::HashSet<std::path::PathBuf>,
-) -> Option<bool> {
-    if session_paths.is_empty() {
-        return Some(false);
-    }
-    let tracked = match crate::workspace::collect_tracked_sessions(config).await {
-        Ok(tracked) => tracked,
-        Err(error) => {
-            tracing::warn!(workspace = %key, %error, "prompt_merged_pr_removal: tracked-session scan failed");
-            return None;
-        }
-    };
-    let paths: Vec<std::path::PathBuf> = session_paths.iter().cloned().collect();
-    match mgr.inspect_paths(&paths, &tracked).await {
-        Ok(rows) => Some(session_paths.iter().any(|path| {
-            rows.iter()
-                .find(|row| canon(&row.path) == *path)
-                .map(|row| {
-                    // The same split the removal gate makes (#1866): a
-                    // checkout dirty only with an untracked `target/` holds
-                    // nothing the user can rescue, so warning them that a
-                    // merged PR's worktree "has local work" over a build
-                    // cache is exactly as wrong here as in the refusal.
-                    row.has_tracked_modifications
-                        || row.has_untracked_work
-                        || row.has_unpushed_commits
-                        || row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
-                })
-                // The path exists in the workspace record but the inspector
-                // cannot account for it. Warn and let the final server gate
-                // refuse removal rather than presenting an unsafe "clean".
-                .unwrap_or_else(|| path.exists())
-        })),
-        Err(e) => {
-            tracing::warn!(workspace = %key, "prompt_merged_pr_removal: inspect failed: {e}");
-            None
-        }
-    }
-}
-
 /// Cancel a pending workspace-removal prompt (issue #552): drop the
 /// reprompt throttle memory so a re-close prompts cleanly, then
 /// broadcast [`Event::RemovalCancelled`] so any TUI dismisses a still-
 /// mounted "remove closed issue?" modal. Called when a closed issue
 /// reopens before its removal was acted on.
 pub(crate) async fn cancel_pending_removal(config: &ServerConfig, key: &WorkspaceKey) {
-    config
-        .poll
-        .removal_prompts
-        .lock()
-        .await
-        .prompted
-        .remove(key.as_str());
+    {
+        let mut prompts = config.poll.removal_prompts.lock().await;
+        prompts.prompted.remove(key.as_str());
+        // A reopened issue is no longer a parked cleanup at all; if it
+        // closes again with the same dirty checkout, that is worth
+        // saying again.
+        prompts.blocked.remove(key.as_str());
+    }
     let _ = config.bus.send(Event::RemovalCancelled {
         workspace_key: key.clone(),
     });
@@ -5190,11 +5245,12 @@ mod inspect_tests {
         assert!(wt.exists(), "prompt must not delete anything");
     }
 
-    /// A merged worktree with uncommitted work flags
-    /// `has_local_work = true` so the confirm modal warns before the
-    /// force-delete.
+    /// #1867: a merged worktree the removal gate would refuse is NOT
+    /// offered for cleanup — the prompt it used to emit could only end
+    /// in that refusal. It is announced once, quietly, and the row and
+    /// worktree are left alone.
     #[tokio::test]
-    async fn prompt_flags_local_work_for_dirty_merged_worktree() {
+    async fn prompt_parks_dirty_merged_worktree_instead_of_offering_cleanup() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "dirty", "feat").await;
         delete_remote_ref(&fx, "feat").await;
@@ -5214,24 +5270,209 @@ mod inspect_tests {
         )
         .await;
 
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
+        let Event::Notification { body, .. } = evt else {
+            unreachable!()
+        };
+        assert!(
+            body.contains("o/r#1") && body.contains("local work"),
+            "the parked cleanup must name the workspace and why: {body}"
+        );
+        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        assert!(wt.exists(), "parking must not delete anything");
+        assert!(load_workspace(&config, &key).is_some(), "row must remain");
+    }
+
+    /// The other half of #1867: `has_local_work` still means "a confirmed
+    /// removal destroys work", which is NOT the same as "the gate
+    /// refuses". A merged PR's squash-merged tip reads as unpushed —
+    /// the gate relaxes that (the work is upstream under another SHA) so
+    /// the prompt IS offered, and it must still warn, because those
+    /// commits exist nowhere else.
+    #[tokio::test]
+    async fn prompt_warns_about_unpushed_commits_on_a_merged_pr() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "unpushed", "feat").await;
+        std::fs::write(wt.join("local.txt"), "local\n").unwrap();
+        run(&wt, &["add", "."]).await;
+        run(&wt, &["commit", "-q", "-m", "local only"]).await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Merged,
+        )
+        .await;
+
         let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
         let Event::MergedPrRemovable { has_local_work, .. } = evt else {
             unreachable!()
         };
-        assert!(has_local_work, "dirty worktree must warn before delete");
+        assert!(
+            has_local_work,
+            "commits no remote has must warn even when they do not block"
+        );
     }
 
-    /// A closed **issue** whose worktree has local work emits the same
-    /// `MergedPrRemovable` prompt as a merged PR, but tags
-    /// `terminal_state = Closed` so the modal copy reads "closed" (#250).
-    /// The worktree is dirtied so the assertion is meaningful even under
-    /// the pre-#1129 clean-auto-remove behavior.
+    /// Regression for #1867 — the loop itself. A merged workspace the
+    /// gate refuses is announced ONCE and then stays silent across every
+    /// later sweep, with the reprompt throttle expired each time so the
+    /// silence is the new suppression and not the cadence gate. When the
+    /// user cleans the checkout, the real cleanup prompt arrives.
+    ///
+    /// Without the fix the second and third sweeps re-emit
+    /// `MergedPrRemovable`, which is exactly the prompt the user
+    /// answered into the `store:local-work` refusal every minute.
+    #[tokio::test]
+    async fn refused_cleanup_is_announced_once_and_rearms_when_clean() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "loop", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        let sweep = async |config: &ServerConfig, mgr: &lazybox_git_ops::WorktreeManager| {
+            prompt_merged_pr_removal_with(
+                config,
+                mgr,
+                &key,
+                lazybox_ipc::RemovableTerminalState::Merged,
+            )
+            .await;
+        };
+
+        sweep(&config, &mgr).await;
+        let first = drain_until(&mut rx, |e| {
+            matches!(
+                e,
+                Event::MergedPrRemovable { .. } | Event::Notification { .. }
+            )
+        })
+        .await;
+
+        // Every later tick: nothing at all. This is the loop — before
+        // the fix, each of these sweeps re-emitted `MergedPrRemovable`,
+        // and each answer to it came back as the red `store:local-work`
+        // refusal.
+        for _ in 0..3 {
+            expire_reprompt_throttle(&config, &key).await;
+            sweep(&config, &mgr).await;
+        }
+        assert_no_event(&mut rx, |e| {
+            matches!(
+                e,
+                Event::MergedPrRemovable { .. } | Event::Notification { .. }
+            )
+        })
+        .await;
+
+        // …and what it said once was the quiet notice, not a cleanup
+        // offer the gate was always going to refuse.
+        assert!(
+            matches!(first, Event::Notification { .. }),
+            "a refused cleanup must be announced, not offered: {first:?}"
+        );
+
+        // The user commits/discards: the situation changed, so the
+        // cleanup the daemon parked is offered for real.
+        std::fs::remove_file(wt.join("scratch.txt")).unwrap();
+        expire_reprompt_throttle(&config, &key).await;
+        sweep(&config, &mgr).await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        let Event::MergedPrRemovable { has_local_work, .. } = evt else {
+            unreachable!()
+        };
+        assert!(!has_local_work, "a cleaned checkout has nothing to lose");
+    }
+
+    /// #1867: the parked announcement is re-made when the BLOCKING state
+    /// changes but still blocks — the user rescued one checkout's work
+    /// and left another reason behind, so the notice must name the new
+    /// one rather than stay pinned to the first.
+    #[tokio::test]
+    async fn parked_cleanup_reannounces_when_the_blocker_changes() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "changed-blocker", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Merged,
+        )
+        .await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
+        let Event::Notification { body, .. } = evt else {
+            unreachable!()
+        };
+        assert!(body.contains("new untracked files"), "got: {body}");
+
+        // Track the file (still uncommitted) — a different reason.
+        run(&wt, &["add", "scratch.txt"]).await;
+        expire_reprompt_throttle(&config, &key).await;
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Merged,
+        )
+        .await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
+        let Event::Notification { body, .. } = evt else {
+            unreachable!()
+        };
+        assert!(
+            body.contains("uncommitted changes to tracked files"),
+            "a changed blocker must be re-announced: {body}"
+        );
+    }
+
+    /// Backdate a workspace's reprompt stamp so the next sweep is not
+    /// silenced by `REMOVAL_REPROMPT_AFTER`. `checked_sub` can return
+    /// `None` on a host whose uptime is under the interval (a fresh CI
+    /// VM); dropping the stamp models the same "nothing recorded" state.
+    async fn expire_reprompt_throttle(config: &ServerConfig, key: &WorkspaceKey) {
+        let mut prompts = config.poll.removal_prompts.lock().await;
+        match std::time::Instant::now().checked_sub(crate::polling::REMOVAL_REPROMPT_AFTER) {
+            Some(past) => {
+                prompts.prompted.insert(key.as_str().to_string(), past);
+            }
+            None => {
+                prompts.prompted.remove(key.as_str());
+            }
+        }
+    }
+
+    /// A closed **issue** emits the same `MergedPrRemovable` prompt as a
+    /// merged PR, but tags `terminal_state = Closed` so the modal copy
+    /// reads "closed" (#250). The checkout is clean: since #1867 a
+    /// checkout the removal gate would refuse is parked rather than
+    /// prompted, so dirtying it here would test the other path.
     #[tokio::test]
     async fn prompt_emits_closed_terminal_state_for_issue() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "issue", "feat").await;
         delete_remote_ref(&fx, "feat").await;
-        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
         let store = Arc::new(MemoryStore::new());
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
@@ -5412,11 +5653,12 @@ mod inspect_tests {
         assert!(load_workspace(&config, &key).is_some());
     }
 
-    /// #552: a closed issue whose worktree has uncommitted work is NOT
-    /// destroyed — it prompts (`MergedPrRemovable`, `has_local_work`)
-    /// and leaves the worktree + row intact until the user answers.
+    /// #552 + #1867: a closed issue whose worktree has uncommitted work
+    /// is NOT destroyed — and is no longer offered for a cleanup the
+    /// removal gate would refuse either. It is announced once and the
+    /// worktree + row are left intact.
     #[tokio::test]
-    async fn closed_issue_dirty_session_prompts() {
+    async fn closed_issue_dirty_session_is_parked_not_prompted() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "issue-dirty", "feat").await;
         std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
@@ -5435,21 +5677,19 @@ mod inspect_tests {
         )
         .await;
 
-        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
-        let Event::MergedPrRemovable {
-            has_local_work,
-            terminal_state,
-            ..
-        } = evt
-        else {
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
+        let Event::Notification { body, .. } = evt else {
             unreachable!()
         };
-        assert!(has_local_work, "dirty worktree must warn, not auto-remove");
-        assert_eq!(terminal_state, lazybox_ipc::RemovableTerminalState::Closed);
-        assert!(wt.exists(), "dirty worktree must survive the prompt");
+        assert!(
+            body.contains("closed") && body.contains("local work"),
+            "the parked cleanup must read as a closed issue kept for its work: {body}"
+        );
+        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        assert!(wt.exists(), "dirty worktree must survive");
         assert!(
             load_workspace(&config, &key).is_some(),
-            "row must remain until the user answers"
+            "row must remain — nothing was removed"
         );
     }
 

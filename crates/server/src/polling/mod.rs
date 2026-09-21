@@ -1832,6 +1832,23 @@ pub struct RemovalPromptMemory {
     /// heals on its own. Cleared wholesale on client (re)connect so a
     /// fresh subscriber is prompted on the next tick, not in 5 min.
     pub(crate) prompted: std::collections::HashMap<String, std::time::Instant>,
+    /// Terminal-state workspaces whose cleanup the removal gate would
+    /// refuse, mapped to the refusal detail that blocks them — the
+    /// paths and reasons, exactly as the refusal words them.
+    ///
+    /// This is a *state* key, not a "we already asked" flag, and the
+    /// difference is the whole point (#1867). Prompting for a removal
+    /// the gate then refuses left nothing behind, so every sweep
+    /// re-offered it and re-raised the red refusal; suppressing on a
+    /// boolean instead would outlive the user fixing the checkout and
+    /// strand a workspace that had become cleanable. Keyed on the
+    /// detail, the suppression lifts the moment the checkout's blocking
+    /// state changes — including to "nothing blocks it", which is when
+    /// the real prompt fires again.
+    ///
+    /// Per-process like `prompted`: a restarted daemon re-announces
+    /// once, which is the same self-heal contract.
+    pub(crate) blocked: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3970,13 +3987,11 @@ async fn sync_one_tracked_workspace(
 /// the reprompt sweep stops asking — across restarts, not just this
 /// session (issue #499). The row stays until removed explicitly.
 pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
-    config
-        .poll
-        .removal_prompts
-        .lock()
-        .await
-        .prompted
-        .remove(key.as_str());
+    {
+        let mut prompts = config.poll.removal_prompts.lock().await;
+        prompts.prompted.remove(key.as_str());
+        prompts.blocked.remove(key.as_str());
+    }
     let outcome = apply_and_commit(config, key, |ws| {
         ws.cleanup_prompt = lazybox_core::CleanupPrompt::Declined;
     })
@@ -3994,7 +4009,13 @@ pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
 /// waiting out `REMOVAL_REPROMPT_AFTER`. A prompt the reconnecting
 /// client never saw shouldn't be throttled as if it had been.
 pub async fn mark_removal_prompts_for_replay(config: &ServerConfig) {
-    config.poll.removal_prompts.lock().await.prompted.clear();
+    let mut prompts = config.poll.removal_prompts.lock().await;
+    prompts.prompted.clear();
+    // The parked-cleanup notices go with them: a client that never saw
+    // "this merged workspace is being kept because it has local work"
+    // should hear it once on connect, for the same reason it should see
+    // a prompt it missed.
+    prompts.blocked.clear();
 }
 
 /// If `workspace`'s PR closes issues that lazybox tracks as their own

@@ -1786,9 +1786,20 @@ pub(crate) struct WorkspaceRemovalRisk {
 }
 
 impl WorkspaceRemovalRisk {
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         format!("{} ({})", self.path.display(), self.reasons.join(", "))
     }
+}
+
+/// Render a whole risk set the way every refusal names it, so the
+/// prompt path that *predicts* a refusal and the gate that *emits* one
+/// are describing the same thing in the same words.
+pub(crate) fn describe_removal_risks(risks: &[WorkspaceRemovalRisk]) -> String {
+    risks
+        .iter()
+        .map(WorkspaceRemovalRisk::describe)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The recovery verb a refused removal leads with. The footer elides a
@@ -1819,13 +1830,22 @@ fn lifecycle_worktree_paths(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Vec<std::path::PathBuf> {
+    lifecycle_worktree_paths_with(config, &config.worktree_manager(), workspace)
+}
+
+/// [`lifecycle_worktree_paths`] with the manager supplied, so a test
+/// can root the managed-namespace check at its fixture.
+fn lifecycle_worktree_paths_with(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    workspace: &Workspace,
+) -> Vec<std::path::PathBuf> {
     // Repo-free folders contain user notes, not disposable git worktrees.
     // Archive only the row and sessions; preserve the directory even when
     // the configured worktree root happens to contain the sandbox root.
     if workspace.floating.is_some() {
         return Vec::new();
     }
-    let mgr = config.worktree_manager();
     let shared_main =
         crate::spawn_handler::main_worktree_path_under(workspace, config.worktree_root_path())
             .map(|path| canonical_or_self(&path));
@@ -1913,7 +1933,7 @@ pub(crate) async fn inspect_workspace_removal_risks(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Result<Vec<WorkspaceRemovalRisk>, String> {
-    inspect_workspace_risks(config, workspace, true).await
+    inspect_workspace_risks(config, &config.worktree_manager(), workspace, true).await
 }
 
 /// Preflight variant used before a project cascade stops any terminals. It
@@ -1924,22 +1944,93 @@ pub(crate) async fn inspect_workspace_local_risks(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Result<Vec<WorkspaceRemovalRisk>, String> {
-    inspect_workspace_risks(config, workspace, false).await
+    inspect_workspace_local_risks_with(config, &config.worktree_manager(), workspace).await
+}
+
+/// [`inspect_workspace_local_risks`] with the manager supplied — the
+/// daemon always passes `config.worktree_manager()`; tests root one at a
+/// tempdir without mutating `LAZYBOX_HOME`.
+pub(crate) async fn inspect_workspace_local_risks_with(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    workspace: &Workspace,
+) -> Result<Vec<WorkspaceRemovalRisk>, String> {
+    inspect_workspace_risks(config, mgr, workspace, false).await
+}
+
+/// What a removal of `workspace` would do right now, answered once from
+/// one inspection: whether the gate would refuse it, and whether it
+/// would destroy work either way.
+///
+/// The two are NOT the same question and must not be collapsed. A
+/// squash-merged PR's unpushed tip does not block removal (the gate
+/// relaxes it — the work is upstream under a different SHA) but the
+/// commits are still local-only, so the confirm modal must still warn
+/// before destroying them. Deriving either half separately is how the
+/// prompt came to offer a cleanup the gate then refused.
+#[derive(Debug, Default)]
+pub(crate) struct RemovalOutlook {
+    /// Why the gate would refuse, in its own words. Empty means the
+    /// removal is expected to be allowed. Evaluated with
+    /// `require_stopped = false`: a live terminal is not a blocker here
+    /// because the removal stops it before re-inspecting.
+    pub(crate) blockers: Vec<WorkspaceRemovalRisk>,
+    /// Any reclaimed checkout holds uncommitted, untracked or unpushed
+    /// work — what the confirm modal warns about before a force-delete.
+    pub(crate) destroys_work: bool,
+}
+
+impl RemovalOutlook {
+    /// The gate would refuse this removal as it stands.
+    pub(crate) fn is_blocked(&self) -> bool {
+        !self.blockers.is_empty()
+    }
+
+    /// The blocking state in the refusal's own words — the string the
+    /// prompt path both shows the user and keys its suppression on, so
+    /// the suppression lifts exactly when the checkout changes.
+    pub(crate) fn blocked_detail(&self) -> String {
+        describe_removal_risks(&self.blockers)
+    }
+}
+
+/// Preflight [`RemovalOutlook`] for `workspace`. `Err` is reserved for
+/// an inspection that could not be *performed*: callers must treat it
+/// as unsafe, never as a clean bill of health.
+pub(crate) async fn removal_outlook_with(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    workspace: &Workspace,
+) -> Result<RemovalOutlook, String> {
+    inspect_workspace_outlook(config, mgr, workspace, false).await
 }
 
 async fn inspect_workspace_risks(
     config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
     workspace: &Workspace,
     require_stopped: bool,
 ) -> Result<Vec<WorkspaceRemovalRisk>, String> {
-    let paths = lifecycle_worktree_paths(config, workspace);
+    Ok(
+        inspect_workspace_outlook(config, mgr, workspace, require_stopped)
+            .await?
+            .blockers,
+    )
+}
+
+async fn inspect_workspace_outlook(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    workspace: &Workspace,
+    require_stopped: bool,
+) -> Result<RemovalOutlook, String> {
+    let paths = lifecycle_worktree_paths_with(config, mgr, workspace);
     if paths.is_empty() {
-        return Ok(Vec::new());
+        return Ok(RemovalOutlook::default());
     }
 
     let tracked = collect_tracked_sessions(config).await?;
-    let inspections = config
-        .worktree_manager()
+    let inspections = mgr
         .inspect_paths(&paths, &tracked)
         .await
         .map_err(|error| format!("could not inspect worktrees safely: {error}"))?;
@@ -1959,29 +2050,39 @@ async fn inspect_workspace_risks(
         .as_ref()
         .is_some_and(|pr| pr.state == lazybox_core::TaskState::Merged);
 
-    let mut risks = Vec::new();
+    let mut outlook = RemovalOutlook::default();
     for path in paths {
         let Some(row) = by_path.get(&canonical_or_self(&path)) else {
-            risks.push(WorkspaceRemovalRisk {
+            // Unaccounted for: a warning, never a clean bill of health.
+            outlook.destroys_work = true;
+            outlook.blockers.push(WorkspaceRemovalRisk {
                 path,
                 reasons: vec!["checkout could not be verified by the worktree inspector".into()],
                 preserves_work: false,
             });
             continue;
         };
+        // What a removal would destroy is asked of the row directly,
+        // independently of what BLOCKS the removal: the merged-PR
+        // relaxation below un-blocks an unpushed tip, it does not make
+        // those commits exist anywhere else.
+        outlook.destroys_work |= row.has_tracked_modifications
+            || row.has_untracked_work
+            || row.has_unpushed_commits
+            || row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked);
         if row.is_safe_to_delete {
             continue;
         }
         let found = workspace_removal_reasons(row, require_stopped, pr_merged);
         if !found.reasons.is_empty() {
-            risks.push(WorkspaceRemovalRisk {
+            outlook.blockers.push(WorkspaceRemovalRisk {
                 path,
                 reasons: found.reasons,
                 preserves_work: found.preserves_work,
             });
         }
     }
-    Ok(risks)
+    Ok(outlook)
 }
 
 /// Why one checkout blocks removal: the reasons to show, plus whether
@@ -3980,11 +4081,7 @@ impl<'a> WorkspaceLifecycle<'a> {
             match inspect_workspace_removal_risks(config, workspace).await {
                 Ok(risks) if risks.is_empty() => {}
                 Ok(risks) if self.force.wipes() => {
-                    let detail = risks
-                        .iter()
-                        .map(WorkspaceRemovalRisk::describe)
-                        .collect::<Vec<_>>()
-                        .join("; ");
+                    let detail = describe_removal_risks(&risks);
                     tracing::warn!(
                         workspace = %key,
                         ?reason,
@@ -3996,11 +4093,7 @@ impl<'a> WorkspaceLifecycle<'a> {
                     );
                 }
                 Ok(risks) => {
-                    let detail = risks
-                        .iter()
-                        .map(WorkspaceRemovalRisk::describe)
-                        .collect::<Vec<_>>()
-                        .join("; ");
+                    let detail = describe_removal_risks(&risks);
                     tracing::warn!(
                         workspace = %key,
                         risk_count = risks.len(),
@@ -4340,11 +4433,7 @@ pub async fn delete_project(
         match inspect_workspace_local_risks(config, workspace).await {
             Ok(risks) if risks.is_empty() => {}
             Ok(risks) => {
-                let detail = risks
-                    .iter()
-                    .map(WorkspaceRemovalRisk::describe)
-                    .collect::<Vec<_>>()
-                    .join("; ");
+                let detail = describe_removal_risks(&risks);
                 // Same gate, same refusal, same shape as the
                 // single-workspace path: instruction first so the
                 // footer's elision takes the diagnostic instead of the

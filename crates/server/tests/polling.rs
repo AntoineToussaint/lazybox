@@ -2887,7 +2887,7 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
         .await;
 
     assert!(
-        workspace::delete_workspace(&config, &workspace_key)
+        workspace::delete_workspace(&config, &workspace_key, workspace::RemovalForce::Gated)
             .await
             .is_some()
     );
@@ -2989,7 +2989,7 @@ async fn delete_workspace_kills_every_owned_session_and_spares_other_workspaces(
     }
 
     assert!(
-        workspace::delete_workspace(&config, &target_key)
+        workspace::delete_workspace(&config, &target_key, workspace::RemovalForce::Gated)
             .await
             .is_some()
     );
@@ -3053,7 +3053,7 @@ async fn failed_terminal_kill_preserves_workspace_and_retryable_mappings() {
     let mut bus = config.bus.subscribe();
 
     assert!(
-        workspace::delete_workspace(&config, &workspace_key)
+        workspace::delete_workspace(&config, &workspace_key, workspace::RemovalForce::Gated)
             .await
             .is_none()
     );
@@ -3474,7 +3474,7 @@ async fn archiving_a_collapsed_pr_row_keeps_its_absorbed_issue_gone() {
     let issue_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_issue_task("o/r#71")));
 
     assert!(
-        workspace::delete_workspace(&config, &pr_key)
+        workspace::delete_workspace(&config, &pr_key, workspace::RemovalForce::Gated)
             .await
             .is_some()
     );
@@ -3531,7 +3531,7 @@ async fn archiving_a_row_does_not_tombstone_a_cross_provider_ticket_it_absorbed(
         &[],
     )));
     assert!(
-        workspace::delete_workspace(&config, &pr_key)
+        workspace::delete_workspace(&config, &pr_key, workspace::RemovalForce::Gated)
             .await
             .is_some()
     );
@@ -4293,7 +4293,11 @@ async fn user_delete_archives_and_blocks_resurrection() {
     polling::upsert(&config, make_task("o/r#1")).await;
     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#1")));
 
-    assert!(workspace::delete_workspace(&config, &key).await.is_some());
+    assert!(
+        workspace::delete_workspace(&config, &key, workspace::RemovalForce::Gated)
+            .await
+            .is_some()
+    );
     polling::upsert(&config, make_task("o/r#1")).await;
 
     assert!(
@@ -4310,7 +4314,11 @@ async fn unarchive_clears_persisted_and_live_spawn_tombstones() {
     let task = make_task("o/r#restore");
     polling::upsert(&config, task.clone()).await;
     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
-    assert!(workspace::delete_workspace(&config, &key).await.is_some());
+    assert!(
+        workspace::delete_workspace(&config, &key, workspace::RemovalForce::Gated)
+            .await
+            .is_some()
+    );
     assert!(workspace::load_archived_set(&config).contains(key.as_str()));
     // A settled delete releases its own spawn tombstone (a recreated
     // same-key workspace must not have its spawns silently killed).
@@ -5642,7 +5650,7 @@ async fn delete_project_cascades_through_workspaces() {
         .unwrap();
 
     let mut bus = config.bus.subscribe();
-    workspace::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key, workspace::RemovalForce::Gated).await;
 
     // The two child workspaces are gone, the orphan is not.
     let key_a = WorkspaceKey::new(ws_a.key.as_str());
@@ -5744,7 +5752,7 @@ async fn delete_project_preserves_parent_when_a_child_cannot_stop() {
         .await;
     backend.fail_kill(&backend_key, "tmux timed out").await;
 
-    workspace::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key, workspace::RemovalForce::Gated).await;
 
     assert!(
         config
@@ -5789,7 +5797,7 @@ async fn delete_project_refuses_to_skip_a_corrupt_workspace_record() {
         .unwrap();
     let mut bus = config.bus.subscribe();
 
-    workspace::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key, workspace::RemovalForce::Gated).await;
 
     assert!(
         config
@@ -6854,7 +6862,7 @@ async fn delete_project_with_no_workspaces_still_removes_project() {
         .unwrap();
 
     let mut bus = config.bus.subscribe();
-    workspace::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key, workspace::RemovalForce::Gated).await;
 
     assert!(
         !config

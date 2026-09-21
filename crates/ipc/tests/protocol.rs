@@ -292,12 +292,14 @@ fn all_commands() -> Vec<Command> {
         },
         Command::Kill {
             session_key: key.clone(),
+            force: false,
         },
         Command::RemoveMergedWorkspace {
             session_key: key.clone(),
         },
         Command::DeleteProject {
             project_key: lazybox_core::ProjectKey::github("o", "r"),
+            force: false,
         },
         Command::CollapseIntoPr {
             issue_workspace_key: key.clone(),

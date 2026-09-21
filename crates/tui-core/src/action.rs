@@ -692,6 +692,7 @@ pub enum ActionKind {
     OpenHopper,
     DismissNotice,
     InspectNotice,
+    ForceWipeWorkspace,
     OpenSettings,
     OpenThemePicker,
     OpenSnippets,
@@ -755,6 +756,7 @@ impl ActionKind {
         Self::OpenHopper,
         Self::DismissNotice,
         Self::InspectNotice,
+        Self::ForceWipeWorkspace,
         // The three Jump actions sit together so the help panel reads
         // them as one coherent group.
         Self::JumpToWorkspace,
@@ -1185,6 +1187,13 @@ impl ActionDef {
                 default_keys: "Enter",
                 label: "detail",
                 describe: "Open the current footer error in a full-text detail modal. The footer pill width-caps its message, so a long error (a merge rejection, a spawn failure) shows truncated; this pops the whole thing, wrapped and readable. Only active while a sticky error notice is up; Enter keeps its normal pane meaning otherwise.",
+                section: Section::Global,
+            },
+            ActionKind::ForceWipeWorkspace => &Self {
+                kind: ActionKind::ForceWipeWorkspace,
+                default_keys: "Shift-Z",
+                label: "wipe anyway",
+                describe: "Override a refused delete. When the daemon refuses to remove a workspace because its checkout still holds uncommitted changes or unpushed commits, this offers the escape hatch the refusal otherwise lacks: it names the workspace and the exact work at risk, then requires you to type WIPE to confirm. Only active while such a refusal is on screen; the key does nothing otherwise, and the removal it forces destroys work no remote has.",
                 section: Section::Global,
             },
             ActionKind::OpenSettings => &Self {
@@ -2583,6 +2592,7 @@ impl ActionKind {
             ActionKind::OpenHopper => "open_hopper",
             ActionKind::DismissNotice => "dismiss_notice",
             ActionKind::InspectNotice => "inspect_notice",
+            ActionKind::ForceWipeWorkspace => "force_wipe_workspace",
             ActionKind::OpenSettings => "open_settings",
             ActionKind::OpenThemePicker => "open_theme_picker",
             ActionKind::OpenSnippets => "open_snippets",
@@ -3659,6 +3669,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenHopper
         | ActionKind::DismissNotice
         | ActionKind::InspectNotice
+        // Gated on a live local-work refusal, which the catalog cannot
+        // see — the key branch and the footer hint both check it, and
+        // the key is inert without one.
+        | ActionKind::ForceWipeWorkspace
         | ActionKind::OpenSettings
         | ActionKind::OpenThemePicker
         | ActionKind::OpenSnippets

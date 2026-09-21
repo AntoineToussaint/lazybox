@@ -163,22 +163,34 @@ impl<T: TerminalAdapter> Model<T> {
     /// on a workspace the user never touched (#1805). Only a
     /// single-row removal re-focuses; a project cascade restores a
     /// header and N children with no one row to return to.
-    pub(super) fn rollback_optimistic_removal(&mut self, message: &str) -> bool {
-        let Some(pos) = self
+    ///
+    /// Returns the restored row's identity — the target a "wipe anyway"
+    /// override would re-send the removal for. It comes from the stash,
+    /// not from the failure prose: the message names the key, but the
+    /// stash IS the key, and a force-delete must not aim at whatever a
+    /// reworded diagnostic happens to parse out.
+    pub(super) fn rollback_optimistic_removal(
+        &mut self,
+        message: &str,
+    ) -> Option<super::WipeTarget> {
+        let pos = self
             .pending_mutations
             .iter()
-            .position(|m| m.source == "store" && message.contains(&m.key))
-        else {
-            return false;
-        };
+            .position(|m| m.source == "store" && message.contains(&m.key))?;
         let mutation = self.pending_mutations.remove(pos);
+        let target = match mutation.project.as_ref() {
+            Some(project) => super::WipeTarget::Project(project.key.clone()),
+            None => {
+                super::WipeTarget::Workspace(lazybox_core::SessionKey::new(mutation.key.clone()))
+            }
+        };
         let restored_row = (mutation.project.is_none() && mutation.workspaces.len() == 1)
             .then(|| lazybox_core::SessionKey::from(&mutation.workspaces[0].key));
         self.apply_rollback(mutation);
         if let Some(key) = restored_row {
             self.sidebar.focus_workspace_key(&key);
         }
-        true
+        Some(target)
     }
 
     fn apply_rollback(&mut self, mutation: OptimisticMutation) {

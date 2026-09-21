@@ -2264,6 +2264,7 @@ async fn reclaim_workspace_worktrees(
     config: &ServerConfig,
     workspace: &Workspace,
     keep_cost: bool,
+    force: RemovalForce,
 ) -> (Reclaimed, Option<tokio::task::JoinHandle<()>>) {
     // Measure the reclaim synchronously (a stat-only walk) so the
     // returned total — and the "reclaimed N GB" notice — is accurate
@@ -2291,8 +2292,8 @@ async fn reclaim_workspace_worktrees(
         crate::client_kv::clear_session_cost(&*config.store, workspace.key.as_str());
     }
 
-    let cleanup =
-        (!paths.is_empty()).then(|| spawn_worktree_removal(config, workspace.key.clone(), paths));
+    let cleanup = (!paths.is_empty())
+        .then(|| spawn_worktree_removal(config, workspace.key.clone(), paths, force));
     (reclaimed, cleanup)
 }
 
@@ -2310,12 +2311,23 @@ async fn reclaim_workspace_worktrees(
 /// provision or a re-created session now owns. It also re-runs the worktree
 /// inspector and the delete boundary re-probes locked/dirty/unpushed state
 /// under the repo lock. Missing or unverifiable inspection rows are preserved.
+///
+/// [`RemovalForce::WipeAnyway`] suppresses only the cleanliness half of
+/// that boundary. It has to: the row is already gone by this point, so a
+/// forced removal that still preserved the checkout would leave a dirty
+/// directory nothing in the UI points at — the dead end moved onto disk
+/// rather than ended. The re-provision guard is NOT suppressed; that one
+/// protects a checkout someone else now owns, which no confirmation of
+/// this removal covers. An uninspectable path is still preserved (named
+/// in the log): the deletion boundary needs an inspection row, and the
+/// user can remove a named directory.
 /// Returns the task handle for tests to await; the deletion path
 /// fire-and-forgets it.
 fn spawn_worktree_removal(
     config: &ServerConfig,
     key: WorkspaceKey,
     paths: Vec<std::path::PathBuf>,
+    force: RemovalForce,
 ) -> tokio::task::JoinHandle<()> {
     let mgr = config.worktree_manager();
     // Completion latch so the shutdown drain can wait for this task
@@ -2386,7 +2398,7 @@ fn spawn_worktree_removal(
             let guard_key = key.clone();
             let guard_path = path.clone();
             match mgr
-                .delete_inspected_if(row, /*force=*/ false, move || {
+                .delete_inspected_if(row, force.wipes(), move || {
                     !worktree_path_is_reclaimed(&guard_config, &guard_key, &guard_path)
                 })
                 .await
@@ -2606,6 +2618,7 @@ mod reclaim_worktree_tests {
             &config,
             WorkspaceKey::new("local:scratch"),
             vec![wt.clone()],
+            RemovalForce::Gated,
         );
         handle.await.expect("removal task");
 
@@ -2643,7 +2656,7 @@ mod reclaim_worktree_tests {
             "a committed session at the path reads as reclaimed",
         );
 
-        spawn_worktree_removal(&config, key, vec![wt.clone()])
+        spawn_worktree_removal(&config, key, vec![wt.clone()], RemovalForce::Gated)
             .await
             .expect("removal task");
 
@@ -2685,7 +2698,8 @@ mod reclaim_worktree_tests {
             Utc::now(),
         ));
 
-        let (reclaimed, cleanup) = reclaim_workspace_worktrees(&config, &workspace, true).await;
+        let (reclaimed, cleanup) =
+            reclaim_workspace_worktrees(&config, &workspace, true, RemovalForce::Gated).await;
 
         // Byte accounting is synchronous, so the notice is accurate the
         // instant the poll path returns — before the slow `rm` runs.
@@ -2717,7 +2731,8 @@ mod reclaim_worktree_tests {
             Utc::now(),
         ));
 
-        let (reclaimed, cleanup) = reclaim_workspace_worktrees(&config, &workspace, true).await;
+        let (reclaimed, cleanup) =
+            reclaim_workspace_worktrees(&config, &workspace, true, RemovalForce::Gated).await;
 
         assert_eq!(reclaimed.worktrees, 0);
         assert_eq!(reclaimed.bytes, 0);
@@ -2736,7 +2751,7 @@ mod reclaim_worktree_tests {
         let workspace = Workspace::empty(key.clone(), "gone", Utc::now());
         crate::client_kv::add_session_cost(&config, key.as_str().to_string(), 1_500_000).await;
 
-        let _ = reclaim_workspace_worktrees(&config, &workspace, true).await;
+        let _ = reclaim_workspace_worktrees(&config, &workspace, true, RemovalForce::Gated).await;
 
         assert_eq!(
             crate::client_kv::session_costs(&*config.store),
@@ -2757,7 +2772,7 @@ mod reclaim_worktree_tests {
         let workspace = Workspace::empty(key.clone(), "gone", Utc::now());
         crate::client_kv::add_session_cost(&config, key.as_str().to_string(), 1_500_000).await;
 
-        let _ = reclaim_workspace_worktrees(&config, &workspace, false).await;
+        let _ = reclaim_workspace_worktrees(&config, &workspace, false, RemovalForce::Gated).await;
 
         assert!(
             crate::client_kv::session_costs(&*config.store).is_empty(),
@@ -2771,7 +2786,9 @@ mod reclaim_worktree_tests {
         let mut events = config.bus.subscribe();
 
         assert_eq!(
-            delete_workspace(&config, &key).await.map(|_| ()),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .map(|_| ()),
             None,
             "x x must fail closed when the branch is ahead"
         );
@@ -2820,6 +2837,86 @@ mod reclaim_worktree_tests {
         );
     }
 
+    /// The escape hatch from the refusal above. The gate is right to
+    /// refuse by default, but "commit, stash or push, then retry" is a
+    /// dead end for a user who wants the work gone: the row came back
+    /// every time and there was no override at all. `WipeAnyway` is the
+    /// override — it must actually remove the row and the checkout the
+    /// gate was protecting.
+    #[tokio::test]
+    async fn forced_workspace_delete_overrides_the_local_work_gate() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(true).await;
+        let mut events = config.bus.subscribe();
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::WipeAnyway)
+                .await
+                .is_some(),
+            "the user asked for the wipe after being shown the risk",
+        );
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "the row the refusal kept resurrecting is gone",
+        );
+        assert!(!worktree.exists(), "the unpushed checkout is reclaimed");
+
+        while let Ok(event) = events.try_recv() {
+            if let Event::ProviderError { ref source, .. } = event {
+                assert_ne!(
+                    source, "store:local-work",
+                    "a forced wipe must not re-refuse — that is the dead end it exists to end",
+                );
+            }
+        }
+    }
+
+    /// The same override, un-asked-for, must change nothing: the gate is
+    /// the default and a plain delete still fails closed. Paired with the
+    /// test above so "force works" can never be satisfied by a gate that
+    /// stopped refusing.
+    #[tokio::test]
+    async fn unforced_workspace_delete_still_refuses_local_work() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(true).await;
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_none(),
+            "the gate is the default",
+        );
+        assert!(load_workspace(&config, &key).is_some(), "row survives");
+        assert!(worktree.exists(), "checkout survives");
+    }
+
+    /// The project cascade has its own local-work preflight — a second
+    /// refusal site. A force that honoured only the per-workspace gate
+    /// would still dead-end here, one dirty child refusing the whole
+    /// project, so the override has to reach both.
+    #[tokio::test]
+    async fn forced_project_delete_overrides_the_cascade_preflight() {
+        let project_key = lazybox_core::ProjectKey::github("o", "r");
+        let (_root, config, key, worktree) = managed_checkout_fixture_at(
+            true,
+            "github-o-r/release-guard",
+            Some(project_key.clone()),
+        )
+        .await;
+
+        delete_project(&config, &project_key, RemovalForce::Gated).await;
+        assert!(
+            load_workspace(&config, &key).is_some(),
+            "the preflight refuses a cascade over a dirty child",
+        );
+        assert!(worktree.exists(), "and preserves its checkout");
+
+        delete_project(&config, &project_key, RemovalForce::WipeAnyway).await;
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "the forced cascade removes the child the preflight refused",
+        );
+        assert!(!worktree.exists(), "and reclaims its checkout");
+    }
+
     /// The verb has to match the risk. "commit, stash or push" is the
     /// wrong advice for a checkout whose only problem is that something
     /// is still running in it — and that advice is now the part of the
@@ -2857,7 +2954,9 @@ mod reclaim_worktree_tests {
         let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
 
         assert!(
-            delete_workspace(&config, &key).await.is_some(),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
             "clean stopped work remains deletable"
         );
         assert!(
@@ -2887,7 +2986,9 @@ mod reclaim_worktree_tests {
         commit_upsert(&config, &key, workspace).expect("persist active session");
 
         assert!(
-            delete_workspace(&config, &key).await.is_some(),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
             "no live terminal means the checkout is not active"
         );
         assert!(!worktree.exists(), "managed worktree reclaimed");
@@ -2906,7 +3007,9 @@ mod reclaim_worktree_tests {
         .await;
 
         assert!(
-            delete_workspace(&config, &key).await.is_some(),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
             "clean stopped work remains deletable"
         );
         assert!(!worktree.exists(), "managed worktree reclaimed");
@@ -2924,7 +3027,11 @@ mod reclaim_worktree_tests {
         )
         .await;
 
-        assert!(delete_workspace(&config, &key).await.is_some());
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some()
+        );
         assert!(
             load_workspace(&config, &key).is_none(),
             "workspace row removed"
@@ -2955,7 +3062,9 @@ mod reclaim_worktree_tests {
         commit_upsert(&config, &key, workspace).expect("persist merged pr");
 
         assert!(
-            delete_workspace(&config, &key).await.is_some(),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
             "a merged PR's unpushed-looking tip does not block the archive"
         );
         assert!(
@@ -2983,7 +3092,9 @@ mod reclaim_worktree_tests {
         std::fs::write(worktree.join("target/debug/blob"), vec![0u8; 8192]).expect("blob");
 
         assert_eq!(
-            delete_workspace(&config, &key).await.map(|_| ()),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .map(|_| ()),
             None,
             "x x fails closed on uncommitted work"
         );
@@ -3209,12 +3320,53 @@ fn io_lock_holder_fields(config: &ServerConfig, backend_key: &str) -> (String, u
     }
 }
 
+/// Whether a removal may override the fresh worktree safety gate.
+///
+/// A named type, not a bare `bool`, for the same reason
+/// `WorkspaceRemovalReason` is one: this decides whether work no
+/// remote has survives the next keypress, and an unlabelled `true` at a
+/// destructive call site says nothing about which way is safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalForce {
+    /// The default. A checkout with uncommitted changes or unpushed
+    /// commits refuses the removal and the row stays in the inbox.
+    Gated,
+    /// The user saw exactly what would be destroyed and asked for it
+    /// anyway ("WIPE IT ANYWAY"). Skips the *cleanliness* gate only —
+    /// terminal teardown, archive policy and worktree reclaim are
+    /// unchanged — and logs the overridden risks at `warn`.
+    WipeAnyway,
+}
+
+impl RemovalForce {
+    /// Built from the wire's `force` bool (`Command::Kill`,
+    /// `Command::DeleteProject`). One conversion point so a new caller
+    /// cannot invent a third meaning for the flag.
+    #[must_use]
+    pub fn from_wire(force: bool) -> Self {
+        if force { Self::WipeAnyway } else { Self::Gated }
+    }
+
+    fn wipes(self) -> bool {
+        matches!(self, Self::WipeAnyway)
+    }
+}
+
 /// Delete a workspace, returning the worktree space reclaimed on success
 /// or `None` when the row was preserved (a prerequisite failed). The
 /// caller surfaces the reclaimed total via `notify_reclaimed`.
+///
+/// `force` is the user's explicit override of the local-work gate; every
+/// caller states it, and [`RemovalForce::Gated`] is what "delete"
+/// normally means.
 #[must_use]
-pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Option<Reclaimed> {
+pub async fn delete_workspace(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    force: RemovalForce,
+) -> Option<Reclaimed> {
     WorkspaceLifecycle::new(config)
+        .forcing(force)
         .remove(key, WorkspaceRemovalReason::UserArchive)
         .await
 }
@@ -3248,11 +3400,25 @@ impl WorkspaceRemovalReason {
 /// sequence.
 pub(crate) struct WorkspaceLifecycle<'a> {
     config: &'a ServerConfig,
+    /// Whether this removal overrides the fresh local-work gate.
+    /// Defaults to [`RemovalForce::Gated`] so every existing caller
+    /// keeps the safe behaviour without restating it; only a removal the
+    /// user explicitly wiped opts in via [`Self::forcing`].
+    force: RemovalForce,
 }
 
 impl<'a> WorkspaceLifecycle<'a> {
     pub(crate) fn new(config: &'a ServerConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            force: RemovalForce::Gated,
+        }
+    }
+
+    /// Carry the user's "WIPE IT ANYWAY" decision into this removal.
+    pub(crate) fn forcing(mut self, force: RemovalForce) -> Self {
+        self.force = force;
+        self
     }
 
     #[must_use]
@@ -3621,11 +3787,30 @@ impl<'a> WorkspaceLifecycle<'a> {
         // capability: the checkout may have changed while the modal was open,
         // and a just-finished agent commonly leaves committed-but-unpushed work.
         // Every destructive entry point funnels through this exact gate before
-        // archive/store mutation. There is currently no force override; unsafe
-        // work stays tracked and visible until the user pushes/stashes it.
+        // archive/store mutation. `RemovalForce::WipeAnyway` is the ONLY way
+        // past it: the user was shown the very risks below and asked for the
+        // wipe anyway. It skips the refusal, not the inspection — the override
+        // is logged with the full detail so the destroyed work is named in
+        // /tmp/lazybox.log, which is the only record left of it.
         if let Some(workspace) = workspace_snapshot.as_ref() {
             match inspect_workspace_removal_risks(config, workspace).await {
                 Ok(risks) if risks.is_empty() => {}
+                Ok(risks) if self.force.wipes() => {
+                    let detail = risks
+                        .iter()
+                        .map(WorkspaceRemovalRisk::describe)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    tracing::warn!(
+                        workspace = %key,
+                        ?reason,
+                        risk_count = risks.len(),
+                        %detail,
+                        "FORCED workspace removal — the worktree safety gate refused this \
+                         removal and the user overrode it; uncommitted changes and unpushed \
+                         commits in the paths above are being destroyed",
+                    );
+                }
                 Ok(risks) => {
                     let detail = risks
                         .iter()
@@ -3664,6 +3849,19 @@ impl<'a> WorkspaceLifecycle<'a> {
                     }
                     config.deleted_workspaces.lock().remove(key_str);
                     return None;
+                }
+                Err(error) if self.force.wipes() => {
+                    // Fail-closed is the gate's rule, but a forced wipe has
+                    // already accepted losing whatever is there — refusing
+                    // because we could not enumerate it would re-create the
+                    // exact dead end the override exists to end.
+                    tracing::warn!(
+                        workspace = %key,
+                        ?reason,
+                        %error,
+                        "FORCED workspace removal — worktrees could not be inspected; \
+                         wiping without knowing what is being destroyed",
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(workspace = %key, "workspace removal inspection failed: {error}");
@@ -3800,7 +3998,8 @@ impl<'a> WorkspaceLifecycle<'a> {
         // `keep_cost = archive`: an archive keeps the durable meter-cost row
         // (the finished PR's price), a genuine delete drops it so no dead row
         // lingers under a key that can never render again.
-        let (reclaimed, cleanup) = reclaim_workspace_worktrees(config, &workspace, archive).await;
+        let (reclaimed, cleanup) =
+            reclaim_workspace_worktrees(config, &workspace, archive, self.force).await;
         #[cfg(test)]
         if let Some(handle) = cleanup {
             let _ = handle.await;
@@ -3887,8 +4086,12 @@ async fn kill_orphan_backend_sessions(
 /// updated — without that step, the next poll would re-create the
 /// workspaces from upstream tasks and the project would never
 /// stay gone.
-pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::ProjectKey) {
-    tracing::info!(project_key = %project_key, "delete_project: starting cascade");
+pub async fn delete_project(
+    config: &ServerConfig,
+    project_key: &lazybox_core::ProjectKey,
+    force: RemovalForce,
+) {
+    tracing::info!(project_key = %project_key, ?force, "delete_project: starting cascade");
 
     // Snapshot the workspace list before mutation — `delete_workspace`
     // removes rows from the store, so iterating a live cursor would
@@ -3943,6 +4146,13 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
     // but this first pass prevents a known-dirty later workspace from
     // turning one project action into a silent partial cascade.
     for workspace in &children {
+        // A forced cascade skips the preflight outright: the user was shown
+        // the refusal this pass produced and chose the wipe. Each child's own
+        // gate below is forced too, or the preflight would just be re-run
+        // per child and refuse there instead.
+        if force.wipes() {
+            break;
+        }
         match inspect_workspace_local_risks(config, workspace).await {
             Ok(risks) if risks.is_empty() => {}
             Ok(risks) => {
@@ -3994,6 +4204,7 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
     let mut reclaimed = Reclaimed::default();
     for key in &child_keys {
         let Some(child) = WorkspaceLifecycle::new(config)
+            .forcing(force)
             .remove(key, WorkspaceRemovalReason::ProjectCascade)
             .await
         else {
@@ -4917,7 +5128,9 @@ mod orphan_backend_session_tests {
         );
 
         assert!(
-            delete_workspace(&config, &key).await.is_some(),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
             "the workspace deletes even though its only session is a registry-less orphan"
         );
 
@@ -4990,7 +5203,7 @@ mod orphan_backend_session_tests {
         let started = tokio::time::Instant::now();
         let removed = tokio::time::timeout(
             2 * DETACH_AFTER_KILL_TIMEOUT + std::time::Duration::from_secs(20),
-            delete_workspace(&config, &key),
+            delete_workspace(&config, &key, RemovalForce::Gated),
         )
         .await
         .expect("the removal must complete within its bound instead of hanging");

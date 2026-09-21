@@ -827,12 +827,14 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         },
         Command::Kill {
             session_key: "test:ws".into(),
+            force: false,
         },
         Command::RemoveMergedWorkspace {
             session_key: "test:ws".into(),
         },
         Command::DeleteProject {
             project_key: pkey(),
+            force: false,
         },
         Command::CollapseIntoPr {
             issue_workspace_key: "test:ws".into(),

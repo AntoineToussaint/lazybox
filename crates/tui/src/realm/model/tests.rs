@@ -2424,7 +2424,7 @@ mod effects_tests {
         let cmds = m.handle_confirmed(true);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::Kill { session_key } => {
+            IpcCommand::Kill { session_key, .. } => {
                 assert_eq!(session_key, &SessionKey::from(&ws_key));
             }
             other => panic!("expected Kill, got {other:?}"),
@@ -9180,6 +9180,11 @@ mod stale_input_tests {
                 | Id::WorktreeRecreateConfirm
                 | Id::WorktreeRenameBlockingConfirm
                 | Id::WorktreeBranchName
+                // Typed confirmation for a force-delete: a stale Enter
+                // must never reach it (it can't — the validator rejects
+                // anything but `WIPE` — but the classification says so
+                // deliberately rather than by luck).
+                | Id::ForceWipeConfirm
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
                 // (HeaderContext's entries are all local/reversible, but
@@ -14989,7 +14994,7 @@ mod merge_focus_follow_tests {
                     assert_eq!(workspace_key, &wskey);
                     "delete"
                 }
-                IpcCommand::Kill { session_key } => {
+                IpcCommand::Kill { session_key, .. } => {
                     assert_eq!(session_key, &key);
                     "kill"
                 }
@@ -18805,7 +18810,7 @@ mod destructive_confirm_tests {
         let cmds = m.handle_confirmed(true);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::Kill { session_key } => assert_eq!(session_key, &sk),
+            IpcCommand::Kill { session_key, .. } => assert_eq!(session_key, &sk),
             other => panic!("expected Kill after Yes, got {other:?}"),
         }
     }
@@ -19107,7 +19112,7 @@ mod destructive_confirm_tests {
         let cmds = m.handle_confirmed(true);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::Kill { session_key } => assert_eq!(
+            IpcCommand::Kill { session_key, .. } => assert_eq!(
                 session_key, &sa,
                 "Yes must kill the workspace the prompt named, not the drifted selection",
             ),
@@ -29453,6 +29458,177 @@ mod optimistic_mutation_tests {
             n.message.find("then retry") < n.message.find("uncommitted changes"),
             "the diagnostic must trail: {:?}",
             n.message,
+        );
+    }
+
+    /// The refusal used to end there: "commit, stash or push, then
+    /// retry" and a row that came back on every attempt. It now arms the
+    /// override — on the focus-aware footer hint, not baked into the
+    /// message — and the offer names the workspace and the work at risk.
+    #[test]
+    fn local_work_refusal_arms_the_wipe_escape_hatch() {
+        let mut m = build_model();
+        let refused = seed_pr_workspace(&mut m, "github:owner/repo#7");
+        let sk: SessionKey = (&refused).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        m.handle_daemon_event(provider_error(
+            "store:local-work",
+            &format!(
+                "commit, stash or push, then retry \u{2014} delete refused, workspace \
+                 {refused} has local work: /wt/owner-repo/pr-7 (uncommitted changes)"
+            ),
+        ));
+
+        let offer = m.wipe_offer().expect("the refusal offers a way out");
+        assert_eq!(
+            offer.target,
+            WipeTarget::Workspace(sk.clone()),
+            "the wipe targets the row the refusal named, taken from the rollback stash",
+        );
+        assert_eq!(
+            offer.detail, "/wt/owner-repo/pr-7 (uncommitted changes)",
+            "the risk detail is carried so the confirm can quote it",
+        );
+        let prompt = offer.prompt();
+        assert!(
+            prompt.contains(sk.as_str()) && prompt.contains("uncommitted changes"),
+            "the prompt must name the workspace AND the work it destroys: {prompt:?}",
+        );
+        assert!(
+            prompt.contains("Type WIPE to confirm"),
+            "the prompt states the guard: {prompt:?}",
+        );
+        assert!(
+            m.notice_action_hints()
+                .iter()
+                .any(|b| b.label.contains("wipe anyway")),
+            "the escape hatch rides the focus-aware hint, not the message text",
+        );
+    }
+
+    /// Only a local-work refusal arms it. A disk-full `store` failure is
+    /// not a case for destroying anything, and a stale offer under an
+    /// unrelated error would be a force-delete armed under a message
+    /// that says nothing about it.
+    #[test]
+    fn other_delete_failures_offer_no_wipe() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#8");
+        let sk: SessionKey = (&ws_key).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        m.handle_daemon_event(provider_error(
+            "store",
+            &format!("could not delete workspace {ws_key}: disk full"),
+        ));
+
+        assert!(
+            m.wipe_offer().is_none(),
+            "no wipe for a plain store failure"
+        );
+        assert!(
+            !m.notice_action_hints()
+                .iter()
+                .any(|b| b.label.contains("wipe anyway")),
+        );
+    }
+
+    /// The offer lives and dies with the notice that explains it.
+    #[test]
+    fn the_wipe_offer_dies_with_its_notice() {
+        let mut m = build_model();
+        let refused = seed_pr_workspace(&mut m, "github:owner/repo#9");
+        let sk: SessionKey = (&refused).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        m.handle_daemon_event(provider_error(
+            "store:local-work",
+            &format!(
+                "commit, stash or push, then retry \u{2014} delete refused, workspace \
+                 {refused} has local work: /wt/x (unpushed commits)"
+            ),
+        ));
+        assert!(m.wipe_offer().is_some());
+
+        m.status.notice = None;
+        assert!(
+            m.wipe_offer().is_none(),
+            "dismissing the refusal disarms the override",
+        );
+        m.flash_error("\u{2717} something else failed".to_string());
+        assert!(
+            m.wipe_offer().is_none(),
+            "an unrelated error must not inherit the wipe",
+        );
+    }
+
+    /// The whole point: the override actually reaches the daemon as a
+    /// forced removal — and only after the word is typed. `Confirm` here
+    /// would not have been a guard at all (it always highlights Yes, so
+    /// Enter accepts), which is why this is a typed prompt.
+    #[test]
+    fn typing_wipe_sends_a_forced_kill() {
+        let mut m = build_model();
+        let refused = seed_pr_workspace(&mut m, "github:owner/repo#10");
+        let sk: SessionKey = (&refused).into();
+        m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+        m.handle_daemon_event(provider_error(
+            "store:local-work",
+            &format!(
+                "commit, stash or push, then retry \u{2014} delete refused, workspace \
+                 {refused} has local work: /wt/x (uncommitted changes)"
+            ),
+        ));
+
+        // The key opens a prompt; it never wipes on the keystroke.
+        m.dispatch_key(tuirealm::event::KeyEvent::new(
+            tuirealm::event::Key::Char('Z'),
+            tuirealm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::ForceWipeConfirm),
+            "the hint opens the typed confirmation",
+        );
+
+        // Anything but the word is refused, even though the modal's own
+        // validator would already have swallowed it.
+        assert!(
+            m.handle_input_submitted("yes".into()).is_empty(),
+            "only the typed word wipes",
+        );
+        m.handle_daemon_event(provider_error(
+            "store:local-work",
+            &format!(
+                "commit, stash or push, then retry \u{2014} delete refused, workspace \
+                 {refused} has local work: /wt/x (uncommitted changes)"
+            ),
+        ));
+        m.dispatch_key(tuirealm::event::KeyEvent::new(
+            tuirealm::event::Key::Char('Z'),
+            tuirealm::event::KeyModifiers::NONE,
+        ));
+        let cmds = m.handle_input_submitted("WIPE".into());
+        match cmds.as_slice() {
+            [IpcCommand::Kill { session_key, force }] => {
+                assert_eq!(session_key, &sk);
+                assert!(force, "the wipe must actually override the daemon's gate");
+            }
+            other => panic!("expected a forced Kill, got {other:?}"),
+        }
+        assert!(
+            m.wipe_offer().is_none(),
+            "the offer is spent once the wipe is sent",
         );
     }
 

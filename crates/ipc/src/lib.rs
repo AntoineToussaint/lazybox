@@ -1377,8 +1377,22 @@ pub enum Command {
         #[serde(default)]
         backend_key: Option<String>,
     },
+    /// Drop a workspace: kill its sessions, archive the row, reclaim
+    /// only the checkouts the safety gate cleared.
+    ///
+    /// `force` is the "WIPE IT ANYWAY" override. The daemon
+    /// refuses a removal whose checkout still holds uncommitted changes
+    /// or unpushed commits, and that refusal is the default — it is the
+    /// only thing standing between a keystroke and work no remote has.
+    /// With `force: true` the daemon skips *that cleanliness gate only*
+    /// (terminal teardown, reclaim and archive still run) and logs the
+    /// overridden risk detail at `warn`, so a wipe is forensically
+    /// visible in the daemon log. The field is not `#[serde(default)]`
+    /// on purpose: every construction site must choose, and bincode
+    /// would not apply a default anyway.
     Kill {
         session_key: SessionKey,
+        force: bool,
     },
     /// Answer to a `MergedPrRemovable` event (the user confirmed the
     /// "this PR merged — remove its workspace and worktree?" modal).
@@ -1398,6 +1412,11 @@ pub enum Command {
     /// ActionConfirm modal on the TUI side.
     DeleteProject {
         project_key: lazybox_core::ProjectKey,
+        /// The same "WIPE IT ANYWAY" override as [`Command::Kill`],
+        /// applied to the cascade: it skips the project-wide local-work
+        /// preflight AND each child's own gate. Without it one dirty
+        /// child refuses the whole project, which is the default.
+        force: bool,
     },
     /// Manually collapse an issue workspace into the PR workspace
     /// that closes it. Same end-state as the auto-detect path

@@ -420,6 +420,9 @@ async fn content_bearing_ghost_without_bare_is_not_rm_rfed() {
         build_bytes: 0,
         last_modified: None,
         has_uncommitted_changes: false,
+        has_tracked_modifications: false,
+        has_untracked_work: false,
+        has_untracked_build_output: false,
         status_verified: false,
         has_unpushed_commits: false,
         is_safe_to_delete: true,
@@ -463,6 +466,9 @@ async fn empty_ghost_without_bare_is_still_cleaned() {
         build_bytes: 0,
         last_modified: None,
         has_uncommitted_changes: false,
+        has_tracked_modifications: false,
+        has_untracked_work: false,
+        has_untracked_build_output: false,
         status_verified: false,
         has_unpushed_commits: false,
         is_safe_to_delete: true,
@@ -494,6 +500,9 @@ async fn vanished_ghost_without_bare_is_a_clean_noop() {
         build_bytes: 0,
         last_modified: None,
         has_uncommitted_changes: false,
+        has_tracked_modifications: false,
+        has_untracked_work: false,
+        has_untracked_build_output: false,
         status_verified: false,
         has_unpushed_commits: false,
         is_safe_to_delete: true,
@@ -1597,4 +1606,211 @@ async fn inspect_paths_is_scoped_to_the_requested_paths() {
 
     let row = find_row(&report, &vanished).unwrap();
     assert_eq!(row.reasons, vec![OrphanReason::Prunable]);
+}
+
+// ---------------------------------------------------------------------
+// Regenerable build output is not local work (#1866)
+//
+// The reported shape: a checkout whose ENTIRE dirty state was `?? target/`
+// — 1.1 MB of cargo output, no modified tracked file, no unpushed commit —
+// could never be deleted, and the refusal told the user to "commit, stash
+// or push" something that does not exist. Note that `target/` is NOT in
+// the fixture repo's `.gitignore`: that is exactly why git reports it, and
+// why a fix keyed on gitignore status would not fix the reported bug.
+// ---------------------------------------------------------------------
+
+/// Put an untracked build-output directory in `wt`, deliberately WITHOUT
+/// adding it to `.gitignore` — the user's actual repro.
+fn add_unignored_build_output(wt: &Path, dir: &str) {
+    let build = wt.join(dir);
+    std::fs::create_dir_all(build.join("debug")).unwrap();
+    std::fs::write(build.join("debug").join("artifact.bin"), vec![0u8; 4096]).unwrap();
+}
+
+async fn inspect_row(fx: &Fixture, name: &str) -> WorktreeInspection {
+    mgr(fx)
+        .inspect_worktrees(&[])
+        .await
+        .unwrap()
+        .iter()
+        .find(|r| r.path.ends_with(name))
+        .unwrap_or_else(|| panic!("no inspector row for {name}"))
+        .clone()
+}
+
+/// The bug: a worktree dirty ONLY with an untracked, UNIGNORED `target/`
+/// is deletable. Git itself reports `?? target/` here (proven inline), so
+/// this is the exact state that used to be unfollowably refused.
+#[tokio::test]
+async fn untracked_build_output_alone_does_not_block_delete() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "buildonly", "buildonly", "main").await;
+    add_unignored_build_output(&wt, "target");
+
+    // The premise of the whole fix: git does NOT ignore this directory.
+    let status = run_capture(&wt, &["status", "--porcelain"]).await;
+    assert_eq!(
+        status, "?? target/\n",
+        "fixture must reproduce `?? target/`"
+    );
+
+    let row = inspect_row(&fx, "buildonly").await;
+    assert!(
+        row.has_uncommitted_changes,
+        "git still reports the checkout dirty — the flag's meaning is unchanged"
+    );
+    assert!(!row.has_tracked_modifications);
+    assert!(!row.has_untracked_work);
+    assert!(row.has_untracked_build_output);
+    assert!(row.is_dirty_only_with_build_output());
+
+    mgr(&fx)
+        .delete_inspected(&row, /*force=*/ false)
+        .await
+        .expect("a checkout dirty only with build output must be deletable");
+    assert!(!wt.exists(), "the worktree is gone");
+}
+
+/// Every name in `BUILD_OUTPUT_DIRS` gets the same treatment, unignored.
+#[tokio::test]
+async fn each_recognized_build_dir_alone_does_not_block_delete() {
+    for dir in lazybox_git_ops::BUILD_OUTPUT_DIRS {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "gen", "gen", "main").await;
+        add_unignored_build_output(&wt, dir);
+
+        let row = inspect_row(&fx, "gen").await;
+        assert!(
+            row.is_dirty_only_with_build_output(),
+            "{dir}/ must read as regenerable output"
+        );
+        mgr(&fx)
+            .delete_inspected(&row, /*force=*/ false)
+            .await
+            .unwrap_or_else(|e| panic!("{dir}/ must not block a delete: {e}"));
+        assert!(!wt.exists(), "{dir}/");
+    }
+}
+
+/// A gitignored build dir is the *confirming* case: git never reports it,
+/// so the checkout reads clean and deletes exactly as it always did. The
+/// fix must not depend on reaching this path.
+#[tokio::test]
+async fn gitignored_build_output_still_reads_clean() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "ignored", "ignored", "main").await;
+    add_unignored_build_output(&wt, "target");
+    let common = run_capture(&wt, &["rev-parse", "--git-common-dir"]).await;
+    let info = PathBuf::from(common.trim()).join("info");
+    std::fs::create_dir_all(&info).unwrap();
+    std::fs::write(info.join("exclude"), "target/\n").unwrap();
+
+    let row = inspect_row(&fx, "ignored").await;
+    assert!(!row.has_uncommitted_changes);
+    assert!(!row.is_dirty_only_with_build_output());
+    mgr(&fx)
+        .delete_inspected(&row, /*force=*/ false)
+        .await
+        .expect("an ignored build dir was never a blocker");
+    assert!(!wt.exists());
+}
+
+/// A new file an agent wrote and never committed is work, and keeps
+/// blocking — even sitting beside a `target/` that does not.
+#[tokio::test]
+async fn an_untracked_source_file_beside_build_output_still_blocks() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "notes", "notes", "main").await;
+    add_unignored_build_output(&wt, "target");
+    std::fs::write(wt.join("notes.md"), "work nobody else has").unwrap();
+
+    let row = inspect_row(&fx, "notes").await;
+    assert!(row.has_untracked_work);
+    assert!(row.has_untracked_build_output);
+    assert!(!row.is_dirty_only_with_build_output());
+
+    let err = mgr(&fx)
+        .delete_inspected(&row, /*force=*/ false)
+        .await
+        .expect_err("an uncommitted new file must still refuse");
+    assert!(err.to_string().contains("uncommitted"), "got: {err}");
+    assert!(wt.join("notes.md").exists(), "the file survives");
+}
+
+/// A modified TRACKED file beside build output still blocks.
+#[tokio::test]
+async fn a_modified_tracked_file_beside_build_output_still_blocks() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "edited", "edited", "main").await;
+    add_unignored_build_output(&wt, "target");
+    std::fs::write(wt.join("README.md"), "edited by hand\n").unwrap();
+
+    let row = inspect_row(&fx, "edited").await;
+    assert!(row.has_tracked_modifications);
+    assert!(!row.is_dirty_only_with_build_output());
+
+    let err = mgr(&fx)
+        .delete_inspected(&row, /*force=*/ false)
+        .await
+        .expect_err("a modified tracked file must still refuse");
+    assert!(err.to_string().contains("uncommitted"), "got: {err}");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("README.md")).unwrap(),
+        "edited by hand\n"
+    );
+}
+
+/// Unpushed commits keep blocking: the relaxation is about the working
+/// tree, and never about commits no remote has.
+#[tokio::test]
+async fn unpushed_commits_beside_build_output_still_block() {
+    let fx = setup_fixture().await;
+    run(&fx.upstream_path, &["branch", "buildahead"]).await;
+    let wt = add_wt(&fx, "buildahead", "buildahead", "buildahead").await;
+    run(&fx.bare, &["config", "branch.buildahead.remote", "origin"]).await;
+    run(
+        &fx.bare,
+        &["config", "branch.buildahead.merge", "refs/heads/buildahead"],
+    )
+    .await;
+    std::fs::write(wt.join("ahead.txt"), "ahead").unwrap();
+    run(&wt, &["add", "."]).await;
+    run(&wt, &["commit", "-q", "-m", "ahead"]).await;
+    add_unignored_build_output(&wt, "target");
+
+    let row = inspect_row(&fx, "buildahead").await;
+    assert!(
+        row.is_dirty_only_with_build_output(),
+        "tree holds only output"
+    );
+    assert!(row.has_unpushed_commits);
+
+    let err = mgr(&fx)
+        .delete_inspected(&row, /*force=*/ false)
+        .await
+        .expect_err("unpushed commits must still refuse");
+    assert!(err.to_string().contains("unpushed"), "got: {err}");
+    assert!(wt.exists());
+}
+
+/// The delete boundary re-probes under the lock: a stale inspection that
+/// says "only build output" cannot authorize deleting a tree where real
+/// work has appeared since.
+#[tokio::test]
+async fn a_stale_build_output_inspection_cannot_delete_new_work() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "raced", "raced", "main").await;
+    add_unignored_build_output(&wt, "target");
+    let row = inspect_row(&fx, "raced").await;
+    assert!(row.is_dirty_only_with_build_output());
+
+    // Work lands between inspection and delete.
+    std::fs::write(wt.join("late.rs"), "fn main() {}").unwrap();
+
+    let err = mgr(&fx)
+        .delete_inspected(&row, /*force=*/ false)
+        .await
+        .expect_err("the fresh in-lock probe is the authority");
+    assert!(err.to_string().contains("uncommitted"), "got: {err}");
+    assert!(wt.join("late.rs").exists());
 }

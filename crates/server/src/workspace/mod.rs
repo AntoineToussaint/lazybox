@@ -1998,6 +1998,34 @@ pub(crate) struct RemovalReasons {
     pub preserves_work: bool,
 }
 
+/// [`lazybox_git_ops::WorktreeInspection::is_safe_to_delete`] recomputed with the two
+/// relaxations this gate owns, and only this gate.
+///
+/// 1. A **merged PR**'s squash-merged branch reads as ahead of its
+///    (now-gone) remote ref, so the unpushed flag is suppressed above and
+///    must not re-block here.
+/// 2. **Regenerable build output.** `is_safe_to_delete` demands a
+///    byte-empty `git status`, which an untracked `target/` never is — so
+///    without this, suppressing the reason above only moved the refusal
+///    to the "checkout is still active" fallback, and the workspace stayed
+///    undeletable with even less explanation (#1866).
+///
+/// Everything else the flag requires is re-asserted unchanged: the status
+/// probe must have RUN, the checkout must be unlocked, and it must carry a
+/// reapable reason.
+fn removal_safe_to_delete(row: &lazybox_git_ops::WorktreeInspection, pr_merged: bool) -> bool {
+    if row.is_safe_to_delete {
+        return true;
+    }
+    let holds_no_work = !row.has_tracked_modifications && !row.has_untracked_work;
+    let pushed_enough = !row.has_unpushed_commits || pr_merged;
+    row.status_verified
+        && holds_no_work
+        && pushed_enough
+        && !row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
+        && row.has_reapable_reason()
+}
+
 fn workspace_removal_reasons(
     row: &lazybox_git_ops::WorktreeInspection,
     require_stopped: bool,
@@ -2011,26 +2039,24 @@ fn workspace_removal_reasons(
     if !row.status_verified {
         reasons.push("cleanliness could not be proven".into());
     }
-    if row.has_uncommitted_changes {
-        reasons.push("uncommitted changes".into());
+    // Named by kind, because the instruction the refusal leads with is
+    // "commit, stash or push" — advice that has to be about something the
+    // user can actually commit, stash or push (#1866). An untracked
+    // `target/` is neither: it is not listed at all, and it does not set
+    // `preserves_work`.
+    if row.has_tracked_modifications {
+        reasons.push("uncommitted changes to tracked files".into());
+        preserves_work = true;
+    }
+    if row.has_untracked_work {
+        reasons.push("new untracked files".into());
         preserves_work = true;
     }
     if row.has_unpushed_commits && !pr_merged {
         reasons.push("unpushed commits".into());
         preserves_work = true;
     }
-    // The "still active" fallback keys off `is_safe_to_delete`, which folds
-    // in the unpushed flag. When the merged PR suppressed that flag above, a
-    // clean, unlocked, reapable checkout must not be re-blocked here purely
-    // because it was ahead of the (now-gone) remote branch.
-    let safe_to_delete = row.is_safe_to_delete
-        || (pr_merged
-            && row.has_unpushed_commits
-            && row.status_verified
-            && !row.has_uncommitted_changes
-            && !row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
-            && row.has_reapable_reason());
-    if reasons.is_empty() && require_stopped && !safe_to_delete {
+    if reasons.is_empty() && require_stopped && !removal_safe_to_delete(row, pr_merged) {
         reasons.push("checkout is still active".into());
     }
     RemovalReasons {
@@ -2154,6 +2180,9 @@ mod removal_classification_tests {
             build_bytes: 0,
             last_modified: None,
             has_uncommitted_changes: false,
+            has_tracked_modifications: false,
+            has_untracked_work: false,
+            has_untracked_build_output: false,
             status_verified: true,
             has_unpushed_commits: false,
             // An active tracked session is not deletable yet, even when its
@@ -2190,6 +2219,9 @@ mod removal_classification_tests {
             build_bytes: 0,
             last_modified: None,
             has_uncommitted_changes: false,
+            has_tracked_modifications: false,
+            has_untracked_work: false,
+            has_untracked_build_output: false,
             status_verified: true,
             has_unpushed_commits: true,
             is_safe_to_delete: false,
@@ -2210,11 +2242,102 @@ mod removal_classification_tests {
 
         // Genuine on-disk work is still protected regardless of merge state.
         row.has_uncommitted_changes = true;
+        row.has_tracked_modifications = true;
         let found = workspace_removal_reasons(&row, true, true);
-        assert_eq!(found.reasons, vec!["uncommitted changes"]);
+        assert_eq!(found.reasons, vec!["uncommitted changes to tracked files"]);
         assert!(
             found.preserves_work,
             "the flag must be set beside the reason, not re-derived",
+        );
+    }
+
+    /// The reported bug (#1866): the checkout's whole dirty state was an
+    /// untracked `target/`. "commit, stash or push" named nothing that
+    /// existed, so the workspace could never be deleted.
+    #[test]
+    fn regenerable_build_output_alone_does_not_refuse_a_removal() {
+        let mut row = lazybox_git_ops::WorktreeInspection {
+            path: "/tmp/lazybox-build-output".into(),
+            bare_path: Some("/tmp/lazybox-build-output.git".into()),
+            branch: Some("feat".into()),
+            session_id: Some("session".into()),
+            reasons: vec![lazybox_git_ops::OrphanReason::SessionStopped],
+            size_bytes: 1_100_000,
+            build_bytes: 1_100_000,
+            last_modified: None,
+            // git reports the checkout dirty — an unignored `target/` is
+            // `?? target/` — but nothing in it is work.
+            has_uncommitted_changes: true,
+            has_tracked_modifications: false,
+            has_untracked_work: false,
+            has_untracked_build_output: true,
+            status_verified: true,
+            has_unpushed_commits: false,
+            // `is_safe_to_delete` still demands a byte-empty status, so the
+            // relaxation has to survive the "still active" fallback too.
+            is_safe_to_delete: false,
+        };
+        let found = workspace_removal_reasons(&row, true, false);
+        assert!(
+            found.reasons.is_empty(),
+            "build output is not a reason to refuse: {:?}",
+            found.reasons
+        );
+        assert!(!found.preserves_work);
+
+        // An untracked file that is NOT build output is work, and blocks —
+        // with advice that names what it is.
+        row.has_untracked_work = true;
+        let found = workspace_removal_reasons(&row, true, false);
+        assert_eq!(found.reasons, vec!["new untracked files"]);
+        assert!(found.preserves_work);
+
+        // So does a modified tracked file.
+        row.has_untracked_work = false;
+        row.has_tracked_modifications = true;
+        let found = workspace_removal_reasons(&row, true, false);
+        assert_eq!(found.reasons, vec!["uncommitted changes to tracked files"]);
+        assert!(found.preserves_work);
+
+        // And so do unpushed commits, on an otherwise output-only tree.
+        row.has_tracked_modifications = false;
+        row.has_unpushed_commits = true;
+        let found = workspace_removal_reasons(&row, true, false);
+        assert_eq!(found.reasons, vec!["unpushed commits"]);
+        assert!(found.preserves_work);
+    }
+
+    /// The relaxation never reaches a checkout whose status could not be
+    /// read, and never unlocks a locked one.
+    #[test]
+    fn build_output_relaxation_still_requires_a_verified_unlocked_checkout() {
+        let mut row = lazybox_git_ops::WorktreeInspection {
+            path: "/tmp/lazybox-build-output-guards".into(),
+            bare_path: Some("/tmp/lazybox-build-output-guards.git".into()),
+            branch: Some("feat".into()),
+            session_id: Some("session".into()),
+            reasons: vec![lazybox_git_ops::OrphanReason::SessionStopped],
+            size_bytes: 0,
+            build_bytes: 0,
+            last_modified: None,
+            has_uncommitted_changes: true,
+            has_tracked_modifications: false,
+            has_untracked_work: false,
+            has_untracked_build_output: true,
+            status_verified: false,
+            has_unpushed_commits: false,
+            is_safe_to_delete: false,
+        };
+        assert_eq!(
+            workspace_removal_reasons(&row, true, false).reasons,
+            vec!["cleanliness could not be proven"],
+        );
+
+        row.status_verified = true;
+        row.reasons.push(lazybox_git_ops::OrphanReason::Locked);
+        assert_eq!(
+            workspace_removal_reasons(&row, true, false).reasons,
+            vec!["locked"],
         );
     }
 }
@@ -2503,6 +2626,17 @@ mod reclaim_worktree_tests {
             cwd.display(),
             String::from_utf8_lossy(&output.stderr),
         );
+    }
+
+    async fn run_git_capture(cwd: &std::path::Path, args: &[&str]) -> String {
+        let output = tokio::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .await
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
     async fn managed_checkout_fixture(
@@ -2886,6 +3020,56 @@ mod reclaim_worktree_tests {
         );
         assert!(load_workspace(&config, &key).is_some(), "row survives");
         assert!(worktree.exists(), "checkout survives");
+    }
+
+    /// End to end for the reported bug (#1866): a stopped, clean, fully
+    /// pushed checkout whose only dirty entry is an unignored `target/`
+    /// deletes on the ordinary gated path — no force, no "commit, stash
+    /// or push" for something that does not exist — and the directory,
+    /// build output and all, goes with it.
+    #[tokio::test]
+    async fn gated_delete_reclaims_a_checkout_dirty_only_with_build_output() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
+        let build = worktree.join("target").join("debug");
+        std::fs::create_dir_all(&build).expect("build dir");
+        std::fs::write(build.join("artifact.bin"), vec![0u8; 4096]).expect("artifact");
+        // The premise: the repo does NOT ignore `target/`, so git reports it.
+        let status = run_git_capture(&worktree, &["status", "--porcelain"]).await;
+        assert_eq!(
+            status, "?? target/\n",
+            "fixture must reproduce `?? target/`"
+        );
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
+            "build output is not work the user can rescue",
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        assert!(
+            !worktree.exists(),
+            "checkout reclaimed, not stranded on disk"
+        );
+    }
+
+    /// The same shape plus one uncommitted file an agent wrote: still
+    /// refused, and nothing on disk is touched.
+    #[tokio::test]
+    async fn gated_delete_still_refuses_a_new_file_beside_build_output() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
+        std::fs::create_dir_all(worktree.join("target")).expect("build dir");
+        std::fs::write(worktree.join("target/artifact.bin"), b"junk").expect("artifact");
+        std::fs::write(worktree.join("notes.md"), "work nobody else has").expect("notes");
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_none(),
+            "an uncommitted new file is still work",
+        );
+        assert!(load_workspace(&config, &key).is_some(), "row survives");
+        assert!(worktree.join("notes.md").exists(), "and so does the file");
     }
 
     /// The project cascade has its own local-work preflight — a second

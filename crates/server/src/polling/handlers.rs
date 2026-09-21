@@ -3289,7 +3289,13 @@ async fn workspace_local_work(
             rows.iter()
                 .find(|row| canon(&row.path) == *path)
                 .map(|row| {
-                    row.has_uncommitted_changes
+                    // The same split the removal gate makes (#1866): a
+                    // checkout dirty only with an untracked `target/` holds
+                    // nothing the user can rescue, so warning them that a
+                    // merged PR's worktree "has local work" over a build
+                    // cache is exactly as wrong here as in the refusal.
+                    row.has_tracked_modifications
+                        || row.has_untracked_work
                         || row.has_unpushed_commits
                         || row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
                 })

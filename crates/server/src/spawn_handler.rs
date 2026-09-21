@@ -16950,9 +16950,13 @@ mod tests {
             .expect("save workspace");
 
         assert!(
-            crate::workspace::delete_workspace(&config, &key)
-                .await
-                .is_some()
+            crate::workspace::delete_workspace(
+                &config,
+                &key,
+                crate::workspace::RemovalForce::Gated
+            )
+            .await
+            .is_some()
         );
         assert!(
             !config.deleted_workspaces.lock().contains("test:del-clear"),
@@ -17001,9 +17005,13 @@ mod tests {
         // under paused time) and proceeds anyway — the wedged-spawn
         // shape.
         assert!(
-            crate::workspace::delete_workspace(&config, &key)
-                .await
-                .is_some()
+            crate::workspace::delete_workspace(
+                &config,
+                &key,
+                crate::workspace::RemovalForce::Gated
+            )
+            .await
+            .is_some()
         );
         assert!(
             config.deleted_workspaces.lock().contains("test:del-busy"),

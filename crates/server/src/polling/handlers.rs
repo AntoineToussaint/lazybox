@@ -5863,9 +5863,13 @@ mod inspect_tests {
         let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
 
         assert!(
-            crate::workspace::delete_workspace(&config, &key)
-                .await
-                .is_some()
+            crate::workspace::delete_workspace(
+                &config,
+                &key,
+                crate::workspace::RemovalForce::Gated
+            )
+            .await
+            .is_some()
         );
         drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
         assert!(load_workspace(&config, &key).is_none(), "store row removed");
@@ -5893,9 +5897,13 @@ mod inspect_tests {
         );
         let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
 
-        let reclaimed = crate::workspace::delete_workspace(&config, &key)
-            .await
-            .expect("delete should succeed");
+        let reclaimed = crate::workspace::delete_workspace(
+            &config,
+            &key,
+            crate::workspace::RemovalForce::Gated,
+        )
+        .await
+        .expect("delete should succeed");
 
         assert!(
             !wt.exists(),
@@ -5994,7 +6002,12 @@ mod inspect_tests {
             fx.base.path().to_path_buf(),
         );
 
-        let removed = crate::workspace::delete_workspace(&config, &key).await;
+        let removed = crate::workspace::delete_workspace(
+            &config,
+            &key,
+            crate::workspace::RemovalForce::Gated,
+        )
+        .await;
 
         assert!(
             removed.is_some(),
@@ -6042,7 +6055,12 @@ mod inspect_tests {
         )
         .await;
 
-        let removed = crate::workspace::delete_workspace(&config, &key).await;
+        let removed = crate::workspace::delete_workspace(
+            &config,
+            &key,
+            crate::workspace::RemovalForce::Gated,
+        )
+        .await;
 
         assert!(
             removed.is_none(),

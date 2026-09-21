@@ -520,7 +520,9 @@ pub enum DesktopCommand {
         session_key: lazybox_core::SessionKey,
     },
     /// Archive the workspace: kill its sessions and drop the row (the TUI's
-    /// `x x` on a workspace). Maps to [`Command::Kill`].
+    /// `x x` on a workspace). Maps to [`Command::Kill`] with the local-work
+    /// gate ON — the desktop shell has no "wipe anyway" affordance to show
+    /// the user what a force would destroy, so it never sends one.
     Archive {
         session_key: lazybox_core::SessionKey,
     },
@@ -734,7 +736,10 @@ impl DesktopCommand {
             DesktopCommand::UpdateBranch { session_key } => Command::UpdateBranch {
                 workspace_key: workspace_key_of(&session_key),
             },
-            DesktopCommand::Archive { session_key } => Command::Kill { session_key },
+            DesktopCommand::Archive { session_key } => Command::Kill {
+                session_key,
+                force: false,
+            },
             DesktopCommand::CloseIssue { session_key } => Command::CloseIssue {
                 workspace_key: workspace_key_of(&session_key),
             },

@@ -3279,7 +3279,7 @@ mod tests {
             Command::from(DesktopCommand::Archive {
                 session_key: session_key.clone(),
             }),
-            Command::Kill { session_key: key } if key == session_key
+            Command::Kill { session_key: key, force: false } if key == session_key
         ));
         assert!(matches!(
             Command::from(DesktopCommand::CloseIssue {

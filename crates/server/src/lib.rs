@@ -2933,9 +2933,10 @@ pub async fn dispatch_command(
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::set_auto_fix_policies(config, &key, ci, conflict).await;
         }
-        lazybox_ipc::Command::Kill { session_key } => {
+        lazybox_ipc::Command::Kill { session_key, force } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            if let Some(reclaimed) = workspace::delete_workspace(config, &key).await {
+            let force = workspace::RemovalForce::from_wire(force);
+            if let Some(reclaimed) = workspace::delete_workspace(config, &key, force).await {
                 workspace::notify_reclaimed(config, "Workspace removed", reclaimed);
             }
         }
@@ -2949,8 +2950,13 @@ pub async fn dispatch_command(
                 workspace::notify_reclaimed(config, "Workspace removed", reclaimed);
             }
         }
-        lazybox_ipc::Command::DeleteProject { project_key } => {
-            workspace::delete_project(config, &project_key).await;
+        lazybox_ipc::Command::DeleteProject { project_key, force } => {
+            workspace::delete_project(
+                config,
+                &project_key,
+                workspace::RemovalForce::from_wire(force),
+            )
+            .await;
         }
         lazybox_ipc::Command::CollapseIntoPr {
             issue_workspace_key,

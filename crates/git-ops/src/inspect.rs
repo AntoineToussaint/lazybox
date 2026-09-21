@@ -577,9 +577,11 @@ impl WorktreeManager {
 
     /// Delete a worktree the inspector flagged. A non-force call treats the
     /// inspection as advisory and freshly re-checks locked, dirty, and
-    /// unpushed state under the repo lock before removal. `force` remains an
-    /// explicit administrative override for the orphan-cleanup UI; workspace
-    /// lifecycle deletion never uses it.
+    /// unpushed state under the repo lock before removal. `force` is an
+    /// explicit administrative override: the orphan-cleanup UI, and a
+    /// workspace-lifecycle removal the user confirmed as a wipe after being
+    /// shown the exact work it destroys. Routine lifecycle deletion does not
+    /// use it.
     pub async fn delete_inspected(
         &self,
         inspection: &WorktreeInspection,

@@ -43,7 +43,11 @@ async fn floating_folder_and_session_survive_reuse_and_archive_preserves_user_fi
         assert_eq!(first_id, resumed_id);
         assert_eq!(read(&config, &key).sessions.len(), 1);
         std::fs::write(path.join("notes.md"), "Keep this plan").unwrap();
-        assert!(workspace::delete_workspace(&config, &key).await.is_some());
+        assert!(
+            workspace::delete_workspace(&config, &key, workspace::RemovalForce::Gated)
+                .await
+                .is_some()
+        );
         assert_eq!(
             std::fs::read_to_string(path.join("notes.md")).unwrap(),
             "Keep this plan"

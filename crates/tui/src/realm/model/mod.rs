@@ -346,6 +346,11 @@ pub enum Id {
     /// (#1572). The parked command lives in
     /// `ModalFlow::WorktreeRecreateConfirm`.
     WorktreeRecreateConfirm,
+    /// "Type WIPE to confirm" prompt behind the `wipe anyway` footer
+    /// hint: the escape hatch from a delete the daemon refused because
+    /// the checkout still holds local work. The target and the exact
+    /// risk detail live in `ModalFlow::ForceWipe`.
+    ForceWipeConfirm,
     /// "Which branch name?" prompt behind `b` on a branch-namespace
     /// collision (#1742). The spawn to resume lives in
     /// `ModalFlow::WorktreeBranchName`.
@@ -961,6 +966,63 @@ pub(crate) struct RemovalPrompt {
     pub(crate) has_local_work: bool,
 }
 
+/// What a refused delete would have removed, and what stood in the way
+/// — everything the "WIPE IT ANYWAY" escape hatch needs to name the
+/// damage before doing it.
+///
+/// Built only from the daemon's own `store:local-work` refusal: the
+/// target comes from the optimistic-removal stash that refusal rolled
+/// back (structural, not parsed), and only the human-readable risk
+/// detail is lifted out of the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingWipe {
+    /// What a confirmed wipe targets — one workspace row, or a project
+    /// and its cascade.
+    pub(crate) target: WipeTarget,
+    /// The exact risk text the daemon refused with: which checkouts,
+    /// and whether the work is uncommitted or merely unpushed. Quoted
+    /// verbatim into the confirm prompt — this is the user's last look
+    /// at work that is about to stop existing.
+    pub(crate) detail: String,
+    /// The refusal notice this offer belongs to. The offer is only live
+    /// while that exact notice is still on screen, so an unrelated
+    /// error arriving later cannot inherit a wipe the user never saw
+    /// the reason for.
+    pub(crate) notice: String,
+}
+
+/// The row a [`PendingWipe`] would destroy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WipeTarget {
+    Workspace(lazybox_core::SessionKey),
+    Project(lazybox_core::ProjectKey),
+}
+
+impl PendingWipe {
+    /// What the confirm prompt says. Names the target and quotes the
+    /// daemon's own risk detail: the only honest way to ask for this is
+    /// to show exactly what stops existing, because nothing here is
+    /// recoverable afterwards.
+    pub(crate) fn prompt(&self) -> String {
+        format!(
+            "Permanently destroy local work in {}?\n\n{}\n\nThis cannot be undone — the \
+             changes and commits above exist nowhere else. Type WIPE to confirm.",
+            self.target.label(),
+            self.detail,
+        )
+    }
+}
+
+impl WipeTarget {
+    /// How the confirm prompt names this target.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Workspace(key) => format!("workspace {key}"),
+            Self::Project(key) => format!("project {key} and every workspace under it"),
+        }
+    }
+}
+
 /// The single active modal-flow continuation: what the currently
 /// mounted modal will do when it resolves (pick / submit / confirm),
 /// and the data threaded across a multi-step flow's stages.
@@ -1010,6 +1072,11 @@ pub(crate) enum ModalFlow {
     ViewPick {
         views: Vec<lazybox_config::ViewConfig>,
     },
+    /// The forced removal parked behind the "type WIPE" prompt. Built
+    /// from the daemon's `store:local-work` refusal, so the command it
+    /// sends targets exactly the row the refusal named — not whatever
+    /// the cursor drifted onto while the prompt was open.
+    ForceWipe { offer: PendingWipe },
     /// The `RecreateWorktree` command parked behind the "preserve a dirty
     /// checkout aside?" confirm (#1572). Moving a checkout with
     /// uncommitted tracked work into a `.bak-<n>` sibling was a single
@@ -2239,6 +2306,12 @@ pub struct Model<T: TerminalAdapter> {
     /// round-trip rolls back; the success echo drops the entry. See
     /// `optimistic.rs`.
     pending_mutations: Vec<optimistic::OptimisticMutation>,
+    /// The live "WIPE IT ANYWAY" offer, set when the daemon refuses a
+    /// removal because the checkout still holds local work. Holds the
+    /// refused target and the risk detail so the confirm prompt can name
+    /// what it destroys; pinned to the notice that produced it so a
+    /// later, unrelated error can never inherit the offer.
+    pending_wipe: Option<PendingWipe>,
     /// Event-fed queue of workspace-removal prompts — out-of-scope
     /// workspaces with running terminals (`WorkspaceOutOfScope`) or
     /// merged/closed PRs (`MergedPrRemovable`). The daemon won't
@@ -2929,6 +3002,7 @@ impl<T: TerminalAdapter> Model<T> {
             awaiting_assignable_users: None,
             pending_diff_session: None,
             pending_mutations: Vec::new(),
+            pending_wipe: None,
             removal_prompt_queue: std::collections::VecDeque::new(),
             merge_prompt_queue: std::collections::VecDeque::new(),
             worktree_progress: None,
@@ -5965,7 +6039,19 @@ impl<T: TerminalAdapter> Model<T> {
         if !sticky || self.resolve_focus_for_keys().is_none() {
             return Vec::new();
         }
-        [ActionKind::InspectNotice, ActionKind::DismissNotice]
+        // The wipe hint rides the same focus-aware affordance rather
+        // than a key baked into the refusal text, for the reason the
+        // refusal text carries no key at all: a message cannot see the
+        // keymap or the focus, and a fixed suffix is the first thing
+        // truncation eats. It is offered only while THIS refusal is the
+        // notice on screen, so the key is advertised exactly when it
+        // fires — and the escape hatch is one keystroke from the dead
+        // end instead of nowhere.
+        let mut kinds = vec![ActionKind::InspectNotice, ActionKind::DismissNotice];
+        if self.wipe_offer().is_some() {
+            kinds.push(ActionKind::ForceWipeWorkspace);
+        }
+        kinds
             .into_iter()
             .map(|kind| {
                 let def = ActionDef::for_kind(kind);
@@ -5975,6 +6061,47 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             })
             .collect()
+    }
+
+    /// The live "WIPE IT ANYWAY" offer, or `None`.
+    ///
+    /// An offer survives only as long as the refusal that created it is
+    /// the notice on screen. Dismiss the notice, or let any other error
+    /// replace it, and the offer is gone — a key that force-deletes a
+    /// workspace must never be armed under a message that says nothing
+    /// about it.
+    pub(super) fn wipe_offer(&self) -> Option<&PendingWipe> {
+        let offer = self.pending_wipe.as_ref()?;
+        let notice = self.status.notice.as_ref()?;
+        (notice.message == offer.notice).then_some(offer)
+    }
+
+    /// Open the wipe confirmation for the live offer (the
+    /// `ForceWipeWorkspace` binding, `Shift-Z` by default).
+    ///
+    /// The guard is a typed confirmation, not a yes/no Confirm: this
+    /// codebase's `Confirm` always highlights Yes (`default_no` is an
+    /// alias for `destructive`), so Enter alone accepts it — fine for
+    /// an archive the daemon will still refuse if it is unsafe, not
+    /// fine for the one command that removes that refusal. `Input`'s
+    /// validator gates Enter, and an empty input is always invalid, so
+    /// nothing short of typing WIPE can destroy unpushed work.
+    pub(super) fn prompt_force_wipe(&mut self) {
+        use crate::realm::components::input::Input;
+
+        if matches!(self.modal_stack.last(), Some(Id::ForceWipeConfirm)) {
+            return;
+        }
+        let Some(offer) = self.wipe_offer().cloned() else {
+            return;
+        };
+        let prompt = offer.prompt();
+        self.set_modal_flow(ModalFlow::ForceWipe { offer });
+        let modal = Input::new(prompt)
+            .title("⚠ WIPE IT ANYWAY")
+            .placeholder("WIPE")
+            .with_validator(|candidate: &str| candidate.trim() == "WIPE");
+        self.mount_modal(Id::ForceWipeConfirm, modal);
     }
 
     /// Arm a fresh [`ModalFlow`] continuation. Debug-asserts that no

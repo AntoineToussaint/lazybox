@@ -838,6 +838,7 @@ impl<T: TerminalAdapter> Model<T> {
                         self.optimistic_remove_workspace(session_key);
                         vec![IpcCommand::Kill {
                             session_key: session_key.clone(),
+                            force: false,
                         }]
                     }
                     Action::CloseIssue => match workspace.as_ref() {
@@ -976,6 +977,7 @@ impl<T: TerminalAdapter> Model<T> {
                                 IpcCommand::DeleteOrClose { workspace_key },
                                 IpcCommand::Kill {
                                     session_key: session_key.clone(),
+                                    force: false,
                                 },
                             ]
                         }
@@ -1112,6 +1114,7 @@ impl<T: TerminalAdapter> Model<T> {
                         self.optimistic_remove_project(project_key);
                         vec![IpcCommand::DeleteProject {
                             project_key: project_key.clone(),
+                            force: false,
                         }]
                     }
                     other => self.dispatch_action_unchecked(other),
@@ -1752,10 +1755,16 @@ impl<T: TerminalAdapter> Model<T> {
                 // already ensures one of the two has a target.
                 if let Some(sk) = session_key {
                     self.optimistic_remove_workspace(&sk);
-                    cmds.push(IpcCommand::Kill { session_key: sk });
+                    cmds.push(IpcCommand::Kill {
+                        session_key: sk,
+                        force: false,
+                    });
                 } else if let Some(project_key) = self.sidebar.focused_project_key() {
                     self.optimistic_remove_project(&project_key);
-                    cmds.push(IpcCommand::DeleteProject { project_key });
+                    cmds.push(IpcCommand::DeleteProject {
+                        project_key,
+                        force: false,
+                    });
                 }
             }
             Action::AdoptSessions => {

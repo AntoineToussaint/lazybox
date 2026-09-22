@@ -342,7 +342,10 @@ mod tests {
                 AgentPolicyOverride::Text(blank.to_string()),
             )]);
             let policies = AgentPolicies::resolve([&config]);
-            assert!(policies.text(ASK_BEFORE_FILING).is_none(), "blank {blank:?}");
+            assert!(
+                policies.text(ASK_BEFORE_FILING).is_none(),
+                "blank {blank:?}"
+            );
             assert!(!policies.render().contains("-  "), "blank {blank:?}");
         }
     }

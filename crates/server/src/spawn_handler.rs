@@ -19088,7 +19088,9 @@ mod tests {
                 "claude".to_string(),
                 "--dangerously-skip-permissions".to_string(),
                 "--append-system-prompt".to_string(),
-                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render()),
+                lazybox_agents::lazybox_session_context(
+                    &lazybox_core::AgentPolicies::builtin().render()
+                ),
             ],
             "unattended argv inherits the user's MCP setup by default (#1183)",
         );
@@ -19110,7 +19112,9 @@ mod tests {
             vec![
                 "claude".to_string(),
                 "--append-system-prompt".to_string(),
-                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render())
+                lazybox_agents::lazybox_session_context(
+                    &lazybox_core::AgentPolicies::builtin().render()
+                )
             ]
         );
 
@@ -19217,7 +19221,9 @@ mod tests {
             vec![
                 "claude".to_string(),
                 "--append-system-prompt".to_string(),
-                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render()),
+                lazybox_agents::lazybox_session_context(
+                    &lazybox_core::AgentPolicies::builtin().render()
+                ),
                 "--model".to_string(),
                 "claude-opus-5".to_string(),
             ]
@@ -19250,7 +19256,9 @@ mod tests {
                 "claude".to_string(),
                 "--continue".to_string(),
                 "--append-system-prompt".to_string(),
-                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render())
+                lazybox_agents::lazybox_session_context(
+                    &lazybox_core::AgentPolicies::builtin().render()
+                )
             ]
         );
 

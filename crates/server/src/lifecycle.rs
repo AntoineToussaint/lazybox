@@ -505,8 +505,7 @@ mod hook_tests {
             Some(lazybox_agents::lazybox_session_context_with_mcp(RULES)),
         );
         // Base-only emission never names a bus-only tool.
-        let base_text =
-            session_context_to_emit(&base, &hook("SessionStart"), RULES).expect("base");
+        let base_text = session_context_to_emit(&base, &hook("SessionStart"), RULES).expect("base");
         assert!(
             !base_text.contains("post_note") && !base_text.contains("blackboard"),
             "unwired briefing must not advertise the bus: {base_text}"

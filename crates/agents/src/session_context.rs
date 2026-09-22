@@ -37,15 +37,13 @@ pub fn lazybox_session_context(standing_rules: &str) -> String {
 /// follows. Split from [`CONTEXT_MECHANICS`] so the user's standing rules
 /// land between them: rules about *how to work* belong ahead of the
 /// reference material about labels and handles, not buried under it.
-const CONTEXT_OPENING: &str =
-    "You are running inside lazybox, a reactive PR inbox that hosts this session in \
+const CONTEXT_OPENING: &str = "You are running inside lazybox, a reactive PR inbox that hosts this session in \
 its own terminal. A few lazybox mechanics coordinate work across a fleet of agents — \
 know them before you touch labels or post comments.";
 
 /// Everything after the standing rules: the response contract and the
 /// lazybox mechanics an agent cannot infer from the repo it is sitting in.
-const CONTEXT_MECHANICS: &str =
-    "How to respond: lead with the concrete outcome and preserve the specific evidence and named \
+const CONTEXT_MECHANICS: &str = "How to respond: lead with the concrete outcome and preserve the specific evidence and named \
 blockers that support it. End with a direct handoff, not a second summary or fixed template. \
 Never compress evidence into generic labels, aligned key/value rows, or a status taxonomy. If \
 the reader must act, say who must do what and why. If blocked only on information the user has, \

@@ -170,7 +170,10 @@ pub struct Config {
     ///   ask-before-filing-a-record: "Ask me before filing anything."
     ///   house-rule: "Never touch `main` directly."
     /// ```
-    #[serde(default, skip_serializing_if = "lazybox_core::AgentPolicyOverrides::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "lazybox_core::AgentPolicyOverrides::is_empty"
+    )]
     pub policies: lazybox_core::AgentPolicyOverrides,
 }
 
@@ -1918,7 +1921,10 @@ pub struct RepoConfig {
     ///     policies:
     ///       ask-before-filing-a-record: false   # this repo wants the issues
     /// ```
-    #[serde(default, skip_serializing_if = "lazybox_core::AgentPolicyOverrides::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "lazybox_core::AgentPolicyOverrides::is_empty"
+    )]
     pub policies: lazybox_core::AgentPolicyOverrides,
 }
 
@@ -7167,7 +7173,11 @@ policies:
         );
         // ...and never written back into a config file the user did not
         // ask for it in.
-        assert!(!serde_yaml::to_string(&cfg).expect("dump").contains("policies"));
+        assert!(
+            !serde_yaml::to_string(&cfg)
+                .expect("dump")
+                .contains("policies")
+        );
     }
 
     #[test]

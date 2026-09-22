@@ -1217,15 +1217,14 @@ mod tests {
                 .to_string(),
             ),
         };
-        let injected =
-            input_with_session_context(
-                StructuredAgentProtocol::ClaudeStreamJson,
-                input,
-                true,
-                RULES,
-            )
-            .expect("inject raw Claude message")
-                .expect("non-empty input");
+        let injected = input_with_session_context(
+            StructuredAgentProtocol::ClaudeStreamJson,
+            input,
+            true,
+            RULES,
+        )
+        .expect("inject raw Claude message")
+        .expect("non-empty input");
         let value: Value = serde_json::from_str(injected.json.as_deref().expect("raw JSON"))
             .expect("still valid JSON");
         let text = value["message"]["content"][0]["text"]

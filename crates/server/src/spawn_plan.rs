@@ -895,7 +895,9 @@ mod tests {
                 .expect("bare Codex spawn and resume carry native startup context");
             assert_eq!(
                 serde_json::from_str::<String>(context_arg).expect("quoted briefing"),
-                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render())
+                lazybox_agents::lazybox_session_context(
+                    &lazybox_core::AgentPolicies::builtin().render()
+                )
             );
         }
     }
@@ -913,8 +915,9 @@ mod tests {
                 &Registry::default_builtins(),
             )
             .expect("hookless Claude plan");
-            let expected =
-                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render());
+            let expected = lazybox_agents::lazybox_session_context(
+                &lazybox_core::AgentPolicies::builtin().render(),
+            );
             assert!(
                 plan.argv
                     .windows(2)

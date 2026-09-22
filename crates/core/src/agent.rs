@@ -213,7 +213,10 @@ mod tests {
         assert_eq!(
             m.tiers
                 .iter()
-                .map(|t| (t.alias.as_str(), t.model_id().expect("every tier pins a model")))
+                .map(|t| (
+                    t.alias.as_str(),
+                    t.model_id().expect("every tier pins a model")
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("S", "gpt-5.6-luna"),
@@ -227,13 +230,22 @@ mod tests {
         // the same fact, which is why nothing noticed the pin going stale.
         assert_eq!(m.default.as_deref(), Some("L"));
         // The whole ladder is reachable by strength, not just the default.
-        assert_eq!(m.alias_for_capability(crate::CapabilityTier::Best), Some("XL"));
-        assert_eq!(m.alias_for_capability(crate::CapabilityTier::High), Some("L"));
+        assert_eq!(
+            m.alias_for_capability(crate::CapabilityTier::Best),
+            Some("XL")
+        );
+        assert_eq!(
+            m.alias_for_capability(crate::CapabilityTier::High),
+            Some("L")
+        );
         assert_eq!(
             m.alias_for_capability(crate::CapabilityTier::Medium),
             Some("M")
         );
-        assert_eq!(m.alias_for_capability(crate::CapabilityTier::Low), Some("S"));
+        assert_eq!(
+            m.alias_for_capability(crate::CapabilityTier::Low),
+            Some("S")
+        );
         // Unlike Claude's XL (Fable, a writing model), Codex's top rung is a
         // coding model: nothing may quietly exclude it.
         assert!(m.tiers.iter().all(|t| !t.excluded_from_default()));

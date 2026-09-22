@@ -10970,6 +10970,34 @@ mod modal_input_responsiveness_tests {
         );
     }
 
+    /// The second step of the default-agent flow is only a choice if the
+    /// agent has a ladder to choose from. Codex used to ship one tier, so
+    /// picking "default agent → codex" opened a picker with a single real
+    /// row and the strength was decided for you. Both built-ins now offer
+    /// the same four rungs, named by strength and by the model each pins.
+    #[test]
+    fn the_default_model_picker_offers_codex_a_full_strength_ladder() {
+        let codex = lazybox_core::AgentModels::builtin("codex").unwrap();
+        let rows = crate::realm::model::default_model_rows("codex", &codex);
+        let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Built-in default  ·  Sol  ·  gpt-5.6-sol",
+                "Luna  ·  S  ·  gpt-5.6-luna",
+                "Terra  ·  M  ·  gpt-5.6-terra",
+                "Sol  ·  L  ·  gpt-5.6-sol",
+                "Astra  ·  XL  ·  gpt-6-astra",
+            ]
+        );
+        // Every rung is selectable — none is filtered out as
+        // creative-class the way Claude's Fable is.
+        assert_eq!(
+            rows.iter().filter(|(_, alias)| alias.is_some()).count(),
+            codex.tiers.len()
+        );
+    }
+
     /// A tier that selects its model some other way keeps a two-part row
     /// rather than printing a guessed id.
     #[test]

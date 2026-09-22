@@ -74,4 +74,83 @@ repos:
         assert_eq!(rendered, lazybox_core::AgentPolicies::builtin().render());
         assert!(!rendered.is_empty());
     }
+
+    /// Every agent lazybox can spawn must actually *receive* the rules —
+    /// the regression this whole mechanism exists for. An agent gets the
+    /// briefing through one of two channels, decided by the agent itself:
+    /// a native startup flag (`session_context_args`, which Claude and Codex
+    /// implement) or, when it has none, a prefix on its first prompt. Cursor
+    /// and any YAML-declared `GenericCli` take the second. Walk every kind
+    /// and follow whichever channel it actually uses.
+    #[test]
+    fn both_standing_rules_reach_every_agent_kind() {
+        let cfg = lazybox_config::Config::default();
+        let rules = standing_rules(&cfg, None);
+        let briefing = lazybox_agents::lazybox_session_context(&rules);
+
+        let mut registry = lazybox_agents::registry();
+        registry.register(std::sync::Arc::new(
+            lazybox_agents::agent::builtins::GenericCli {
+                id: "house-cli".into(),
+                display_name: "House CLI".into(),
+                spawn_cmd: vec!["house-cli".into()],
+                resume_cmd: None,
+                asking_patterns: vec![],
+            },
+        ));
+
+        let ids: Vec<String> = registry.ids().map(str::to_string).collect();
+        assert!(
+            ids.len() >= 4,
+            "expected claude/codex/cursor plus the GenericCli: {ids:?}"
+        );
+        for id in ids {
+            let agent = registry.get(&id).expect("registered");
+            let native = agent.session_context_args(&briefing);
+            let delivered = if native.is_empty() {
+                lazybox_agents::lazybox_session_prompt(&rules, "do the work")
+            } else {
+                native.join(" ")
+            };
+            for needle in [
+                "without the user's explicit go-ahead",
+                "one self-contained pull request",
+            ] {
+                assert!(
+                    delivered.contains(needle),
+                    "agent `{id}` must be told {needle:?}: {delivered}"
+                );
+            }
+        }
+    }
+
+    /// ...and an override reaches them by the same route: turning a rule off
+    /// removes it from every kind, not just the one whose channel was tested.
+    #[test]
+    fn an_override_reaches_every_agent_kind_too() {
+        let cfg = lazybox_config::Config::parse(
+            "policies:\n  one-self-contained-pr: false\n  ask-before-filing-a-record: Ask Antoine.\n",
+        )
+        .expect("parse");
+        let rules = standing_rules(&cfg, None);
+        let briefing = lazybox_agents::lazybox_session_context(&rules);
+        let registry = lazybox_agents::registry();
+        for id in registry.ids().map(str::to_string).collect::<Vec<_>>() {
+            let agent = registry.get(&id).expect("registered");
+            let native = agent.session_context_args(&briefing);
+            let delivered = if native.is_empty() {
+                lazybox_agents::lazybox_session_prompt(&rules, "do the work")
+            } else {
+                native.join(" ")
+            };
+            assert!(
+                delivered.contains("Ask Antoine."),
+                "agent `{id}` must get the replacement wording: {delivered}"
+            );
+            assert!(
+                !delivered.contains("one self-contained pull request"),
+                "agent `{id}` must not get the rule the user turned off: {delivered}"
+            );
+        }
+    }
 }

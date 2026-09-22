@@ -2300,7 +2300,12 @@ pub struct AgentSection {
     /// of use reached tens of GB across never-reaped sessions). Reaped
     /// sessions stop being restored at startup too; `w w` respawns one
     /// fresh in a keystroke, prompt history persists either way.
-    /// Unset → 48h. `0s` disables reaping entirely.
+    ///
+    /// **Opt-in.** Unset (and `0s`) → no reaping, ever. Reaping kills a
+    /// tmux session, which destroys its scrollback — the user's own work
+    /// — and nothing unattended may do that (#1869). Setting a duration
+    /// here is the user asking for it; [`DEFAULT_REAP_CLOSED_AFTER`] is
+    /// the suggested one.
     #[serde(with = "duration_human_opt", default)]
     pub reap_closed_after: Option<Duration>,
     /// Scheduling niceness for spawned agent processes (and their
@@ -2332,10 +2337,14 @@ pub const DEFAULT_MAX_EPIC_WORKERS: usize = 6;
 /// Default for [`AgentSection::max_live_agents`] when unset.
 pub const DEFAULT_MAX_LIVE_AGENTS: usize = 32;
 
-/// Default for [`AgentSection::reap_closed_after`] when unset: two days
-/// of grace after a PR/issue closes before its sessions are reaped —
-/// long enough to hand off or recall an agent's context, short enough
-/// to stop the fleet ratchet (#1198).
+/// Suggested value for [`AgentSection::reap_closed_after`] when a user
+/// opts in: two days of grace after a PR/issue closes — long enough to
+/// hand off or recall an agent's context, short enough to stop the fleet
+/// ratchet (#1198).
+///
+/// NOT a default. Unset means no reaping at all (#1869): an unattended
+/// sweep that kills tmux sessions destroys the user's scrollback without
+/// anyone asking, and only an explicit action may remove a session.
 pub const DEFAULT_REAP_CLOSED_AFTER: Duration = Duration::from_secs(48 * 3600);
 
 /// Default per-terminal ring buffer size (bytes). 2 MiB provides adequate
@@ -2401,14 +2410,22 @@ impl AgentSection {
         self.nice.unwrap_or(10).clamp(0, 20)
     }
 
-    /// Effective closed-workspace session-reap grace: unset →
-    /// [`DEFAULT_REAP_CLOSED_AFTER`], explicit `0s` → `None` (never
-    /// reap).
+    /// Effective closed-workspace session-reap grace: **unset → `None`**
+    /// (never reap), explicit `0s` → `None` too, any other duration →
+    /// that duration.
+    ///
+    /// Unset used to mean [`DEFAULT_REAP_CLOSED_AFTER`], which made an
+    /// hourly background sweep destroy tmux sessions nobody asked it to
+    /// touch. A tmux session is the user's work — its scrollback is often
+    /// the only surviving record of what an agent did — and a session is
+    /// removed on an explicit user action alone (#1869). Reaping is now
+    /// strictly opt-in: writing a duration into the config IS the user
+    /// saying so, and the constant remains as the suggested value.
     pub fn reap_closed_after(&self) -> Option<Duration> {
         match self.reap_closed_after {
             Some(d) if d.is_zero() => None,
             Some(d) => Some(d),
-            None => Some(DEFAULT_REAP_CLOSED_AFTER),
+            None => None,
         }
     }
 
@@ -4241,9 +4258,23 @@ mod tests {
     /// #1198: unset → 48h default, explicit `0s` opts out entirely, an
     /// explicit duration wins, and the human form parses from YAML.
     #[test]
-    fn reap_closed_after_defaults_and_opt_out() {
+    fn reap_closed_after_is_opt_in() {
         let unset = AgentSection::default();
-        assert_eq!(unset.reap_closed_after(), Some(DEFAULT_REAP_CLOSED_AFTER));
+        assert_eq!(
+            unset.reap_closed_after(),
+            None,
+            "#1869: killing a tmux session is an explicit user action — \
+             an unconfigured lazybox must never reap one",
+        );
+        assert_eq!(
+            AgentSection {
+                reap_closed_after: Some(DEFAULT_REAP_CLOSED_AFTER),
+                ..AgentSection::default()
+            }
+            .reap_closed_after(),
+            Some(DEFAULT_REAP_CLOSED_AFTER),
+            "the suggested grace still applies once the user opts in",
+        );
 
         let off = Config::parse("agent:\n  reap_closed_after: 0s\n").unwrap();
         assert_eq!(off.agent.reap_closed_after(), None);

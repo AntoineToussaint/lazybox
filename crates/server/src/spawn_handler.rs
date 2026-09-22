@@ -10515,6 +10515,9 @@ pub async fn recover_sessions(config: &ServerConfig) {
     let attach_permits =
         std::sync::Arc::new(tokio::sync::Semaphore::new(RECOVERY_ATTACH_CONCURRENCY));
     let resource_warning_emitted = std::sync::Arc::new(AtomicBool::new(false));
+    // Sessions that outlived their program and are waiting for the user to
+    // decide what to do with them (#1869). Collected, never reaped.
+    let mut dormant_survivors: Vec<String> = Vec::new();
     for key in keys {
         let (session_key, kind) = load_terminal_meta(config, &key)
             .await
@@ -10543,6 +10546,27 @@ pub async fn recover_sessions(config: &ServerConfig) {
             }
             let generation = load_agent_state_generation(config, &key).await;
             sweep_terminal_persisted_fields(config, &key, generation).await;
+            continue;
+        }
+        // A surviving session whose pane is DEAD is a corpse the user has
+        // not disposed of yet: its program exited while the daemon was
+        // down, and `remain-on-exit on` deliberately kept the pane, its
+        // scrollback and the session (#1869). Do not reattach it — a dead
+        // pane never EOFs its attach client, so binding a terminal to one
+        // would show an exited agent as live forever. Do NOT kill it
+        // either: nobody asked. Leave it on the tmux server, name it in
+        // the log, and count it for the one summary notice below.
+        //
+        // `is_alive` fails safe: an inconclusive probe reads as alive, so
+        // a slow or unreachable tmux gets the normal reattach, never a
+        // silent skip.
+        if matches!(config.backend.is_alive(&key).await, Ok(false)) {
+            tracing::info!(
+                backend_key = %key,
+                %session_key,
+                "recover: session survives with an exited program — not reattaching, not removing",
+            );
+            dormant_survivors.push(key.clone());
             continue;
         }
         let access = load_terminal_access(config, &key).await;
@@ -10827,6 +10851,27 @@ pub async fn recover_sessions(config: &ServerConfig) {
                 }
                 tokio::time::sleep(retry_after).await;
             }
+        });
+    }
+    // Dormant survivors are retained on purpose, so say so ONCE per start
+    // rather than let them pile up invisibly. Nothing here removes them —
+    // the notice exists precisely because nothing automatic may (#1869).
+    if !dormant_survivors.is_empty() {
+        let socket = lazybox_core::paths::tmux_socket_name();
+        tracing::info!(
+            count = dormant_survivors.len(),
+            sessions = %dormant_survivors.join(", "),
+            "recover: retained tmux session(s) whose program exited",
+        );
+        let _ = config.bus.send(Event::Notification {
+            title: "lazybox".into(),
+            body: format!(
+                "{} tmux session(s) outlived the program that ran in them and were kept, \
+                 scrollback intact · read one with `tmux -L {socket} attach -t <name>` \
+                 (`{}`) · remove one with `tmux -L {socket} kill-session -t <name>`",
+                dormant_survivors.len(),
+                dormant_survivors.join("`, `"),
+            ),
         });
     }
     // Reconcile persisted terminals whose tmux session is GONE (register them

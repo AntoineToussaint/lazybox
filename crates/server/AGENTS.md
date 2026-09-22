@@ -29,6 +29,42 @@ its pane, which drives `Command::Resize` alone. Bytes must parse at the size
 they were laid out for; every client-side attempt to infer the size instead
 produced duplicated lines in scrollback.
 
+## Nothing unattended destroys a tmux session
+
+A tmux session is the user's work. Its scrollback is routinely the only
+surviving record of what an agent did, and it is how they get back in. So
+**only an explicit user action removes a backend** — `]]x`, `x k`, `x x`, an
+explicit workspace delete. No exit code, no poll tick, no sweep, no
+background timer.
+
+`code 0` is not consent. An agent that exits one second after spawning
+exited zero, and reaping its session destroyed the only evidence of why
+(#1869: `claude` exited 0 on every respawn and a session with a 928-prompt
+transcript was lost). The daemon therefore spawns panes under
+`remain-on-exit on`: the program dies, the pane stays dead-but-intact, the
+session survives, and the user reads it or closes it themselves.
+
+That breaks the exit signal, so it is restored deliberately. Exit reaches the
+daemon as the attach client's EOF; a session that outlives its program never
+EOFs. `TmuxBackend` arms a **per-session** `pane-died` hook whose command is
+`detach-client -s "<key>"` with the key written in literally — tmux expands no
+`#{…}` in a hook argument, and a global bare `detach-client` detaches
+whichever client the server saw last (measured on 3.7c: it detached a
+different, still-running session). Detaching, not killing, turns pane death
+into the ordinary EOF the whole lifecycle already speaks: `release` drops
+lazybox's conduit and nothing else.
+
+`is_alive` is the other half. Under `remain-on-exit` existence no longer
+implies a running program, so it reports a dead pane as not-alive — and an
+inconclusive probe as alive, never as gone. `recover_sessions` reads it and
+**skips** a dead-paned survivor: it does not reattach (a dead pane never
+EOFs, so the corpse would render as a live agent forever) and it does not
+kill (nobody asked). It names them in one notice instead.
+
+Retention is unbounded on purpose. If dead sessions accumulate, the answer is
+a user-visible way to remove them — never a reaper. `agent.reap_closed_after`
+is opt-in for the same reason: unset, lazybox reaps nothing.
+
 ## A deep-scrollback capture names a watermark it already covers
 
 `SessionBackend::scrollback` returns `(history, seq)`, and `seq` promises the

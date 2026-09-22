@@ -513,9 +513,9 @@ pub enum Id {
     /// auto-work spawns use it; per-spawn tier chords (`w S`) still
     /// override. Each row carries its tier alias as a
     /// [`ChoicePayload::OptText`] (`None` = the agent-default row); the
-    /// target agent lives in `default_model_agent`. Esc keeps the
+    /// target agent lives in `strength_agent`. Esc keeps the
     /// current tier.
-    DefaultModelPicker,
+    StrengthPicker,
     /// Confirm-with-preview for an action the Ask Lazybox help agent
     /// proposed (#353) — `add_snippet` or `edit_config`. The pending
     /// intent lives in `ModalFlow::HelpAction`; `Msg::Confirmed(true)`
@@ -681,7 +681,7 @@ impl Id {
                 | Id::ViewPicker
                 | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
-                | Id::DefaultModelPicker
+                | Id::StrengthPicker
                 | Id::WorkAgentPicker
                 // The issue browser (#1436) is a local navigation/filter
                 // picker. Its `l`/`r`/`n` keys only *open* the label / reply
@@ -1725,11 +1725,29 @@ pub enum PaneFocus {
     Terminals,
 }
 
-/// `badge_letter → label` of every agent's default tier: the YAML
-/// `agents.<id>.models.default` alias when set, else the built-in default
-/// alias, resolved against the agent's declared tiers (falling back to the
-/// built-in tier list). Agents with no resolvable default are absent, so
-/// their runs always badge (#1502).
+/// The agent roster a config enables, or the built-in trio when it names
+/// none — so the zero-config `a c` / `a x` / `a u` chords still work out
+/// of the box. Using the enabled set rather than unioning it with the
+/// built-ins avoids binding both `cursor` and `cursor-agent` to `u`.
+///
+/// Shared by the boot path and [`Model::reload_agent_models`]: both
+/// derive the roster and the per-agent menus from the *same* config read,
+/// so a reload can't pair a fresh menu with a stale roster and leave a
+/// newly enabled agent with no row.
+pub(crate) fn enabled_agents(config: &lazybox_config::Config) -> Vec<String> {
+    if config.setup.agents.is_empty() {
+        ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        config.setup.agents.iter().cloned().collect()
+    }
+}
+
+/// `badge_letter → label` of every agent's default strength — the tier
+/// `agents.<id>.models.default` names. Agents whose strength doesn't
+/// resolve are absent, so their runs always badge (#1502).
 pub(crate) fn default_model_labels(
     models: &std::collections::BTreeMap<String, lazybox_core::AgentModels>,
 ) -> std::collections::HashMap<char, String> {
@@ -1748,18 +1766,7 @@ pub(crate) fn default_tier_labels(
 ) -> Vec<(String, String)> {
     models
         .iter()
-        .filter_map(|(agent_id, m)| {
-            let builtin = lazybox_core::AgentModels::builtin(agent_id);
-            let alias = m
-                .default
-                .clone()
-                .or_else(|| builtin.as_ref().and_then(|b| b.default.clone()))?;
-            let label = m
-                .tier(&alias)
-                .or_else(|| builtin.as_ref().and_then(|b| b.tier(&alias)))
-                .map(|t| t.label.clone())?;
-            Some((agent_id.clone(), label))
-        })
+        .filter_map(|(agent_id, m)| Some((agent_id.clone(), m.default_tier()?.label.clone())))
         .collect()
 }
 
@@ -2686,9 +2693,9 @@ pub struct Model<T: TerminalAdapter> {
     /// The first question, held until the diff reply lands so it enters
     /// the run's opening (and only context-bearing) turn.
     pr_chat_held_question: Option<(String, HelpQuestionKind)>,
-    /// Agent id the active `DefaultModelPicker` persists against —
+    /// Agent id the active `StrengthPicker` persists against —
     /// stashed at mount so a pick can't land on a drifted default.
-    pub(crate) default_model_agent: Option<String>,
+    pub(crate) strength_agent: Option<String>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
     /// the onboarding coach should auto-launch once the panes are
     /// visible. Cleared the moment the coach starts so it never
@@ -3086,7 +3093,7 @@ impl<T: TerminalAdapter> Model<T> {
             pr_chat_diff: None,
             pr_chat_diff_target: None,
             pr_chat_held_question: None,
-            default_model_agent: None,
+            strength_agent: None,
             auto_tour_pending: false,
             coach: None,
             coach_ascii: false,
@@ -3653,22 +3660,10 @@ impl<T: TerminalAdapter> Model<T> {
             user_config.auto_fix.opt_out_labels.clone(),
         );
         // Generate the per-agent SpawnAgent catalog rows (#102 P2):
-        // exactly the agents the wizard enabled. An unconfigured user
-        // (empty `setup.agents`) falls back to the built-in trio so the
-        // zero-config `a c` / `a x` / `a u` chords still work out of
-        // the box.
-        // Using the enabled set (rather than unioning it with the
-        // built-ins) avoids binding both `cursor` and `cursor-agent` to
-        // `u`. Per-agent key remaps live in `ui.action_keys` under
-        // `spawn_agent.<id>`.
-        let agents: Vec<String> = if user_config.setup.agents.is_empty() {
-            ["claude", "codex", "cursor"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        } else {
-            user_config.setup.agents.iter().cloned().collect()
-        };
+        // exactly the agents the wizard enabled — see [`enabled_agents`]
+        // for the roster rule. Per-agent key remaps live in
+        // `ui.action_keys` under `spawn_agent.<id>`.
+        let agents = enabled_agents(user_config);
         self.set_agents(agents.clone());
         // Keymap = the selected in-tree preset (#102 P4) as a base
         // layer, with the user's explicit `ui.action_keys` on top so
@@ -4897,15 +4892,16 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::DefaultAgentPicker, modal);
     }
 
-    /// Mount the default-model picker — the second step of the
-    /// default-agent flow, offering `agent_id`'s declared tiers plus an
-    /// "agent default" row, opened on the current default tier. Pick →
+    /// Mount the strength picker — the second step of the default-agent
+    /// flow, offering `agent_id`'s declared tiers plus an "agent
+    /// default" row, opened on the current one. Pick →
     /// `handle_choice_picked` persists `agents.<id>.models.default` so
     /// bare spawns use it (per-spawn tier chords still override); Esc
-    /// keeps the current tier. No-op for an agent with no tier menu.
-    pub(crate) fn mount_default_model_picker(&mut self, agent_id: &str) {
+    /// keeps the current strength. No-op for an agent with no tier menu
+    /// — [`Self::open_strength`] is the entry point that handles that.
+    pub(crate) fn mount_strength_picker(&mut self, agent_id: &str) {
         use crate::realm::components::choice::Choice;
-        if matches!(self.modal_stack.last(), Some(Id::DefaultModelPicker)) {
+        if matches!(self.modal_stack.last(), Some(Id::StrengthPicker)) {
             return;
         }
         let Some(models) = self.agent_models.get(agent_id) else {
@@ -4914,19 +4910,63 @@ impl<T: TerminalAdapter> Model<T> {
         if models.tiers.is_empty() {
             return;
         }
-        let items = default_model_rows(agent_id, models);
+        let items = strength_rows(agent_id, models);
         let start = models
             .default
             .as_ref()
             .and_then(|d| items.iter().position(|(_, a)| a.as_ref() == Some(d)))
             .unwrap_or(0);
-        self.default_model_agent = Some(agent_id.to_string());
-        let modal = Choice::single("Used by bare spawns · `w S/M/L` still overrides", items)
-            .title(format!("Default model · {agent_id}"))
-            .label(|(label, _): &ModelRow| label.clone())
-            .payload_for(|(_, alias): &ModelRow| ChoicePayload::OptText(alias.clone()))
-            .select_index(start);
-        self.mount_modal(Id::DefaultModelPicker, modal);
+        self.strength_agent = Some(agent_id.to_string());
+        let modal = Choice::single(
+            "The strength bare spawns run at · `w S/M/L` picks another for one run",
+            items,
+        )
+        .title(format!("Strength · {agent_id}"))
+        .label(|(label, _): &ModelRow| label.clone())
+        .payload_for(|(_, alias): &ModelRow| ChoicePayload::OptText(alias.clone()))
+        .select_index(start);
+        self.mount_modal(Id::StrengthPicker, modal);
+    }
+
+    /// Open `agent_id`'s strength: its tier menu when it declares one,
+    /// otherwise the config file at the key that would declare it.
+    /// A menu-less agent used to hit an early return and do nothing
+    /// visible, which left the user with no way to tell "this agent runs
+    /// whatever its CLI defaults to" from "this setting is broken".
+    pub(crate) fn open_strength(&mut self, agent_id: &str) {
+        if self
+            .agent_models
+            .get(agent_id)
+            .is_some_and(|m| !m.tiers.is_empty())
+        {
+            self.mount_strength_picker(agent_id);
+            return;
+        }
+        self.open_config_for_strength(agent_id);
+    }
+
+    /// Open `config.yaml` in the configured editor and name the key that
+    /// declares `agent_id`'s strengths. lazybox ships built-in menus only
+    /// for agents whose model flag takes stable aliases, so for the rest
+    /// the file *is* the editor.
+    fn open_config_for_strength(&mut self, agent_id: &str) {
+        let path = lazybox_core::paths::config_yaml();
+        let key = format!("agents.{agent_id}.models.tiers");
+        if self.setup.editors.is_empty() {
+            self.flash_info(format!(
+                "{agent_id} declares no strengths — add `{key}` in {}",
+                path.display(),
+            ));
+            return;
+        }
+        let editor = self.setup.editors[0].clone();
+        match crate::editors::open_file(&editor, &path, None, None) {
+            Ok(_) => self.flash_info(format!(
+                "declare `{key}` in {} — reopen Settings to pick one",
+                path.display(),
+            )),
+            Err(error) => self.flash_error(format!("failed to open {}: {error}", path.display())),
+        }
     }
 
     /// Update the default agent both panes resolve `w` against, live —
@@ -5058,6 +5098,69 @@ impl<T: TerminalAdapter> Model<T> {
             .set_default_model_labels(default_tier_labels(&models).into_iter().collect());
         self.agent_models = models;
         self.rebuild_catalog();
+    }
+
+    /// Re-read every enabled agent's tier menu from
+    /// `~/.lazybox/config.yaml` and re-derive everything keyed off it
+    /// (chords, sidebar badges, tab strip). The same wiring the startup
+    /// path does, re-runnable so a hand edit — or a save from another
+    /// lazybox — lands without a restart.
+    ///
+    /// A config that doesn't parse keeps the menus already loaded and
+    /// says so. `unwrap_or_default()` here would be worse than doing
+    /// nothing: one YAML typo would re-key every chord and badge to the
+    /// built-in menus, presenting fallback defaults as though the user's
+    /// config had applied.
+    pub(crate) fn reload_agent_models(&mut self) -> Option<lazybox_config::Config> {
+        let cfg = match lazybox_config::Config::load() {
+            Ok(cfg) => cfg,
+            Err(error) => {
+                self.flash_error(format!(
+                    "{} didn't parse ({error}) — keeping the models already loaded",
+                    lazybox_core::paths::config_yaml().display(),
+                ));
+                return None;
+            }
+        };
+        // Roster and menus from the one read, through the same rule the
+        // boot path uses. Iterating the startup roster here instead left
+        // an agent added by a hand edit with a menu nobody asked for and
+        // no row at all, out of a file lazybox had just parsed.
+        let agents = enabled_agents(&cfg);
+        let models = agents
+            .iter()
+            .map(|id| (id.clone(), cfg.agent_models(id)))
+            .collect();
+        if agents != self.agents {
+            // `set_agents` keeps the default agent inside the roster by
+            // reassigning it to the first entry when a roster omits it.
+            // That is right on a boot path and silent here: a refresh
+            // triggered by opening Settings would otherwise move which
+            // agent bare `w` spawns, mid-session, with the config still
+            // naming the old one. Report it, because the user did not ask
+            // for it and nothing else on screen would say.
+            let before = self.sidebar.default_agent().to_string();
+            self.set_agents(agents);
+            let after = self.sidebar.default_agent();
+            if after != before {
+                let moved = format!(
+                    "default agent {before} is not in `setup.agents` — using {after} for this session",
+                );
+                self.flash_info(moved);
+            }
+        }
+        self.set_agent_models(models);
+        Some(cfg)
+    }
+
+    /// The label of the strength `agent_id` currently runs at — the tier
+    /// its `models.default` names. `None` when nothing is pinned or the
+    /// agent declares no menu, which the caller renders differently.
+    pub(crate) fn strength_label(&self, agent_id: &str) -> Option<String> {
+        self.agent_models
+            .get(agent_id)?
+            .default_tier()
+            .map(|tier| tier.label.clone())
     }
 
     fn rebuild_catalog(&mut self) {
@@ -6849,7 +6952,14 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
 
-        let actions = self.build_settings_actions();
+        // Re-read the per-agent menus from disk before building the
+        // rows, and build every row from that one snapshot. The rows and
+        // the pickers they open used to read different snapshots — the
+        // row a fresh `Config::load()`, the picker the cached map — so a
+        // hand-edited YAML showed the new strength on the row and offered
+        // the old menu in the editor.
+        let reloaded = self.reload_agent_models();
+        let actions = self.build_settings_actions(reloaded);
         if actions.is_empty() {
             // No persisted setup → fall back to the full wizard.
             self.reopen_setup();
@@ -6875,7 +6985,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// Build the visible actions from the user's cached persisted
     /// setup. Per-provider actions only appear if the provider is
     /// enabled. Always includes the "full setup" escape hatch.
-    fn build_settings_actions(&self) -> Vec<SettingsAction> {
+    fn build_settings_actions(
+        &self,
+        reloaded: Option<lazybox_config::Config>,
+    ) -> Vec<SettingsAction> {
         let Some(p) = &self.setup.persisted else {
             return Vec::new();
         };
@@ -6897,36 +7010,31 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
-        // One fresh load feeds every config-backed row below, so even a
-        // hand-edited YAML shows its current values without a restart.
-        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        // One read feeds every config-backed row below, so even a
+        // hand-edited YAML shows its current values without a restart —
+        // and so no two rows can disagree about what the file says. The
+        // caller's snapshot is that read; `None` means it didn't parse
+        // (already reported), and the defaults stand in for the rows that
+        // have nothing better to show.
+        let cfg = reloaded.unwrap_or_default();
         let default_agent = self.sidebar.default_agent().to_string();
-        let models = cfg.agent_models(&default_agent);
-        let default_tier = models
-            .default
-            .as_deref()
-            .and_then(|a| models.tier(a))
-            .map(|t| t.label.clone());
         actions.push(SettingsAction::EditDefaultAgent {
-            current: default_agent,
-            tier: default_tier,
+            current: default_agent.clone(),
         });
-        // One direct default-model row per enabled agent with a tier
-        // menu — picking a default model must not require making that
-        // agent the default first.
+        // One strength row per enabled agent — picking one must not
+        // require making that agent the default first, and an agent
+        // with no tier menu gets a row saying so rather than no row at
+        // all. The default agent needs no special case: `set_agents`
+        // reassigns it into the roster whenever a roster omits it, so it
+        // is always one of these.
         for agent_id in &self.agents {
-            let models = cfg.agent_models(agent_id);
-            if models.tiers.is_empty() {
-                continue;
-            }
-            let tier = models
-                .default
-                .as_deref()
-                .and_then(|a| models.tier(a))
-                .map(|t| t.label.clone());
-            actions.push(SettingsAction::EditDefaultModel {
+            actions.push(SettingsAction::EditStrength {
+                strength: self.strength_label(agent_id),
+                configurable: self
+                    .agent_models
+                    .get(agent_id)
+                    .is_some_and(|m| !m.tiers.is_empty()),
                 agent_id: agent_id.clone(),
-                tier,
             });
         }
         actions.push(SettingsAction::ToggleSkipPermissions {
@@ -7029,11 +7137,11 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_default_agent_picker();
             return;
         }
-        // Per-agent default-model picker — same modal as the second
-        // step of the default-agent flow, minus the agent switch.
-        if let SettingsAction::EditDefaultModel { agent_id, .. } = &action {
+        // Per-agent strength picker — same modal as the second step of
+        // the default-agent flow, minus the agent switch.
+        if let SettingsAction::EditStrength { agent_id, .. } = &action {
             let agent_id = agent_id.clone();
-            self.mount_default_model_picker(&agent_id);
+            self.open_strength(&agent_id);
             return;
         }
         // Agent-CLI update actions are fire-and-forget daemon commands;
@@ -7082,7 +7190,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::SetUpSandbox { .. } => return,
             SettingsAction::ShellCommand { .. } => return,
             SettingsAction::EditDefaultAgent { .. } => return,
-            SettingsAction::EditDefaultModel { .. } => return,
+            SettingsAction::EditStrength { .. } => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.
@@ -8169,13 +8277,10 @@ fn user_skills_root() -> Option<std::path::PathBuf> {
 /// (`None` = unpin, the agent's own default — the payload at #512).
 pub(crate) type ModelRow = (String, Option<String>);
 
-/// The rows `mount_default_model_picker` offers. Extracted so the row
+/// The rows `mount_strength_picker` offers. Extracted so the row
 /// *strings* are testable: the label is the only thing distinguishing two
 /// rows with different payloads, and nothing covered it (#1568).
-pub(crate) fn default_model_rows(
-    agent_id: &str,
-    models: &lazybox_core::AgentModels,
-) -> Vec<ModelRow> {
+pub(crate) fn strength_rows(agent_id: &str, models: &lazybox_core::AgentModels) -> Vec<ModelRow> {
     // Row 0 unpins the YAML override. With a built-in default in play
     // that lands back on the built-in tier, not on the agent's ambient
     // model — say so in the label. It names the tier and the model, but

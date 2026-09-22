@@ -40,12 +40,41 @@ after the agent's own cell glyph (Claude `⏺`, Codex `■`), outside any markdo
 fence. Agents here routinely print, diff and quote error strings, so a bare
 substring table has them classifying each other as broken.
 
-## Model tiers
+## Model tiers — and "strength", which is the same thing
 
 Tiers are declared per agent under `agents.<id>.models` in YAML — an ordered
 `alias → { label, args }` menu plus a `default` tier for bare spawns. Claude and
-Codex ship built-in menus; other agents declare their own. The rules that are easy
-to get wrong:
+Codex ship built-in menus; other agents declare their own.
+
+**"Strength" is this menu's user-facing name, not a second concept** (#1797).
+A tier already carries everything a strength needs: the `alias` is the handle
+(and the chord key), the `label` is what the UI shows, and the `args` are how
+that choice reaches the CLI — model id *and* its reasoning flags, since
+`--model opus --reasoning-effort max` is one tier's argv, not a tier plus a
+separate thinking setting. So there is no `profiles:` key, no `thinking:` key,
+and `agents.<id>.models.default` is the one place a user's chosen strength is
+stored. Adding a parallel spelling is the failure mode to avoid: config would
+have two sources of truth for one decision and the UI would show whichever it
+read.
+
+Two things are deliberately *not* strength:
+
+- **`capability`** (`best`/`high`/`medium`/`low`) is what a *task* declares,
+  not what a user chose. It maps a label or body marker onto an alias in this
+  menu. Calling it strength in a UI re-introduces exactly the priority reading
+  #1598 removed — it ranks nothing.
+- **Session policy** (fresh conversation vs inject into the running one)
+  belongs to the action being run, not to the model choice. Injecting text into
+  a live process cannot change its model, so a strength that claimed to carry
+  session behaviour would be lying about half of itself.
+
+[`AgentModels::default_tier`](../core/src/agent.rs) is the single resolver for
+"which strength does this agent run at". Ask it rather than re-deriving from
+`default` + `tier()`: the callers that did disagreed, and one of them
+second-guessed the alias against the built-in menu *after* the merge, labelling
+a deliberately restricted `replace: true` menu with a tier it had dropped.
+
+The rules that are easy to get wrong:
 
 - A user `models:` block **overlays** the built-in menu — a declared alias
   replaces the same-alias tier in place, a new alias appends. `replace: true`

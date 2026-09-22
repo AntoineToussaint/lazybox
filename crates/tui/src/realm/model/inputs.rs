@@ -1609,8 +1609,8 @@ showing keybinding search only",
                 }
                 self.redraw = true;
             }
-            Some(Id::DefaultModelPicker) => {
-                self.default_model_agent = None;
+            Some(Id::StrengthPicker) => {
+                self.strength_agent = None;
             }
             Some(Id::Setup) => {
                 // Esc on the (non-runner) Settings window — drop the

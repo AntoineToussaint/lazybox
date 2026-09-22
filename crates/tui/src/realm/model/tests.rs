@@ -9156,7 +9156,7 @@ mod stale_input_tests {
                 | Id::ViewPicker
                 | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
-                | Id::DefaultModelPicker
+                | Id::StrengthPicker
                 | Id::MergeHistory
                 | Id::WorkAgentPicker
                 | Id::IssueBrowser => true,
@@ -9334,7 +9334,7 @@ mod stale_input_tests {
             Id::ConvertSessionRole,
             Id::RolePicker,
             Id::DefaultAgentPicker,
-            Id::DefaultModelPicker,
+            Id::StrengthPicker,
             Id::HelpActionConfirm,
             Id::WorkAgentPicker,
             Id::DescriptionModal,
@@ -9957,7 +9957,6 @@ mod modal_input_responsiveness_tests {
         let mut m = build_model();
         m.dispatch_settings_action(SettingsAction::EditDefaultAgent {
             current: "claude".into(),
-            tier: None,
         });
         assert_eq!(m.modal_stack.last(), Some(&Id::DefaultAgentPicker));
         m.dispatch_modal_key(key(Key::Esc));
@@ -9970,12 +9969,17 @@ mod modal_input_responsiveness_tests {
     /// the aliases + target agent for the pick. Esc releases both
     /// without changing anything. Disk-free: mounting only reads the
     /// in-memory tier menus.
-    /// `default_model_labels` resolves each agent's default tier to the
-    /// label the sidebar badge compares against (#1502): the YAML default
-    /// alias wins, the built-in default is the fallback, and an alias no
-    /// tier declares yields no entry (so that agent always badges).
+    /// `default_model_labels` resolves each agent's strength to the
+    /// label the sidebar badge compares against (#1502) — through the
+    /// one core resolver, against the menu it was handed and nothing
+    /// else. A menu whose `default` names no tier it declares has no
+    /// label (so that agent always badges) rather than borrowing the
+    /// built-in menu's: `Config::agent_models` has already folded the
+    /// built-in menu in by this point, so a second fallback here could
+    /// only fire for a menu that deliberately dropped that tier —
+    /// labelling a Sonnet-only `replace: true` menu "Opus" (#1797).
     #[test]
-    fn default_model_labels_resolve_yaml_then_builtin_default() {
+    fn default_model_labels_resolve_only_the_menus_own_default() {
         use super::super::default_model_labels;
         let mut pinned = lazybox_core::AgentModels::builtin("claude").unwrap();
         pinned.default = Some("L".into());
@@ -9983,13 +9987,27 @@ mod modal_input_responsiveness_tests {
         let labels = default_model_labels(&[("claude".to_string(), pinned)].into());
         assert_eq!(labels.get(&'C'), Some(&expected));
 
-        let mut builtin = lazybox_core::AgentModels::builtin("claude").unwrap();
-        builtin.default = None;
-        let fallback = lazybox_core::AgentModels::builtin("claude")
-            .and_then(|b| b.default)
-            .and_then(|a| builtin.tier(&a).map(|t| t.label.clone()));
-        let labels = default_model_labels(&[("claude".to_string(), builtin)].into());
-        assert_eq!(labels.get(&'C'), fallback.as_ref());
+        let mut unpinned = lazybox_core::AgentModels::builtin("claude").unwrap();
+        unpinned.default = None;
+        let labels = default_model_labels(&[("claude".to_string(), unpinned)].into());
+        assert!(labels.get(&'C').is_none(), "no default pinned, no label");
+
+        let restricted = lazybox_core::AgentModels {
+            replace: true,
+            default: Some("L".into()),
+            tiers: vec![lazybox_core::ModelTier {
+                alias: "M".into(),
+                label: "Sonnet".into(),
+                short: None,
+                args: vec!["--model".into(), "claude-sonnet-5".into()],
+            }],
+            ..Default::default()
+        };
+        let labels = default_model_labels(&[("claude".to_string(), restricted)].into());
+        assert!(
+            labels.get(&'C').is_none(),
+            "a menu that dropped `L` must not be labelled with the built-in `L`",
+        );
 
         let mut unknown = lazybox_core::AgentModels::builtin("claude").unwrap();
         unknown.default = Some("nope".into());
@@ -10001,28 +10019,29 @@ mod modal_input_responsiveness_tests {
     }
 
     #[test]
-    fn default_model_picker_offers_tiers_and_cancels_clean() {
+    fn strength_picker_offers_tiers_and_cancels_clean() {
         let mut m = build_model();
         let mut models = lazybox_core::AgentModels::builtin("claude").unwrap();
         models.default = Some("L".into());
         m.set_agent_models([("claude".to_string(), models)].into());
 
-        m.mount_default_model_picker("claude");
-        assert_eq!(m.modal_stack.last(), Some(&Id::DefaultModelPicker));
-        assert_eq!(m.default_model_agent.as_deref(), Some("claude"));
+        m.mount_strength_picker("claude");
+        assert_eq!(m.modal_stack.last(), Some(&Id::StrengthPicker));
+        assert_eq!(m.strength_agent.as_deref(), Some("claude"));
 
         m.dispatch_modal_key(key(Key::Esc));
         assert!(m.top_modal().is_none(), "Esc closes the picker");
-        assert!(m.default_model_agent.is_none(), "agent stash is released");
+        assert!(m.strength_agent.is_none(), "agent stash is released");
     }
 
-    /// An agent with no declared tier menu has nothing to pick — the
-    /// default-model step is skipped entirely (no modal mounts).
+    /// An agent with no declared tier menu has nothing to pick, so the
+    /// low-level mount is a no-op. `open_strength` is the entry point
+    /// that turns that into something the user can see.
     #[test]
-    fn default_model_picker_skips_agents_without_tiers() {
+    fn strength_picker_mount_skips_agents_without_tiers() {
         let mut m = build_model();
-        m.mount_default_model_picker("codex");
-        assert!(m.top_modal().is_none(), "no tier menu → no second step");
+        m.mount_strength_picker("cursor");
+        assert!(m.top_modal().is_none(), "no tier menu → no picker");
     }
 
     /// End-to-end settings flow on a temp `LAZYBOX_HOME`: picking the
@@ -10054,7 +10073,7 @@ mod modal_input_responsiveness_tests {
         let _ = m.handle_choice_picked(vec![ChoicePayload::Text("claude".into())]);
         assert_eq!(
             m.modal_stack.last(),
-            Some(&Id::DefaultModelPicker),
+            Some(&Id::StrengthPicker),
             "agent pick chains into the tier picker",
         );
 
@@ -10068,6 +10087,256 @@ mod modal_input_responsiveness_tests {
             m.agent_models["claude"].default.as_deref(),
             Some("L"),
             "mirrored into the in-memory menu",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The reload derives the roster and the menus from the SAME config
+    /// read. It used to iterate the startup roster while reading a fresh
+    /// file, so an agent added by a hand edit got no menu and no Strength
+    /// row out of a config lazybox had just parsed (#1797 review).
+    #[test]
+    fn reload_picks_up_an_agent_added_to_the_roster_by_a_hand_edit() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-roster-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+
+        std::fs::write(
+            home.join("config.yaml"),
+            concat!(
+                "setup:\n  agents: [claude, aider]\n",
+                "agents:\n  aider:\n    command: aider\n",
+                "    models:\n      default: H\n      tiers:\n",
+                "        - alias: H\n          label: House\n",
+                "          args: [--model, house]\n",
+            ),
+        )
+        .unwrap();
+
+        m.open_settings();
+        assert_eq!(
+            m.strength_label("aider").as_deref(),
+            Some("House"),
+            "the agent named by the edited roster gets its menu",
+        );
+        let rows: Vec<String> = m
+            .setup
+            .settings_actions
+            .iter()
+            .filter_map(|a| match a {
+                SettingsAction::EditStrength { agent_id, .. } => Some(agent_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(rows.contains(&"aider".to_string()), "{rows:?}");
+        assert!(
+            !rows.contains(&"cursor".to_string()),
+            "an agent the edited roster drops loses its row too: {rows:?}",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A roster that omits the configured default agent makes
+    /// `set_agents` reassign the default to the roster's first entry.
+    /// That is the existing invariant — so every agent with a Strength
+    /// row is rostered, and the default is one of them — but reaching it
+    /// by *opening Settings* moves which agent bare `w` spawns, so the
+    /// refresh has to say it did (#1797 review).
+    #[test]
+    fn a_roster_that_drops_the_default_agent_reports_the_move() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-offroster-default-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        std::fs::write(
+            home.join("config.yaml"),
+            "setup:\n  agents: [claude]\n  default_agent: codex\n",
+        )
+        .unwrap();
+        m.set_default_agent("codex");
+
+        m.open_settings();
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a silent change of `w`'s target is the bug");
+        assert!(
+            notice.message.contains("codex") && notice.message.contains("claude"),
+            "the notice must name both agents: {}",
+            notice.message,
+        );
+
+        let rows: Vec<String> = m
+            .setup
+            .settings_actions
+            .iter()
+            .filter_map(|a| match a {
+                SettingsAction::EditStrength { agent_id, .. } => Some(agent_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["claude".to_string()],
+            "one row per rostered agent, no duplicate for the old default: {rows:?}",
+        );
+        assert!(
+            m.setup.settings_actions.iter().any(|a| matches!(
+                a,
+                SettingsAction::EditDefaultAgent { current } if current == "claude"
+            )),
+            "the default-agent row names the agent actually in use",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Invalid YAML must not be presented as applied. The reload keeps
+    /// the menus it already has and says the file didn't parse —
+    /// `unwrap_or_default()` would silently re-key every chord and badge
+    /// to the built-in menus over one typo.
+    #[test]
+    fn reload_keeps_the_loaded_menus_when_config_does_not_parse() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-strength-badyaml-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let restricted = lazybox_core::AgentModels {
+            replace: true,
+            default: Some("M".into()),
+            tiers: vec![lazybox_core::ModelTier {
+                alias: "M".into(),
+                label: "House blend".into(),
+                short: None,
+                args: vec!["--model".into(), "house".into()],
+            }],
+            ..Default::default()
+        };
+        m.set_agent_models([("claude".to_string(), restricted)].into());
+
+        std::fs::write(home.join("config.yaml"), "agents: [not, a, map\n").unwrap();
+        m.reload_agent_models();
+
+        assert_eq!(
+            m.strength_label("claude").as_deref(),
+            Some("House blend"),
+            "a config that doesn't parse must not replace the loaded menus",
+        );
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("the parse failure surfaces");
+        assert!(
+            notice.message.contains("didn't parse"),
+            "the notice must say the file didn't parse: {}",
+            notice.message,
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Saving a strength re-derives everything keyed off the tier menus,
+    /// not just the map entry. The save used to `insert` straight into
+    /// `agent_models`, bypassing `set_agent_models` — so the sidebar kept
+    /// comparing runs against the PREVIOUS default tier and badged a run
+    /// at the strength the user had just chosen as a deviation from it,
+    /// until restart.
+    #[test]
+    fn saving_a_strength_refreshes_the_badge_comparison() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-strength-badge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.reload_agent_models();
+        assert_eq!(
+            m.sidebar.default_model_label('C'),
+            Some("Opus"),
+            "the built-in default is what a run is compared against",
+        );
+
+        m.mount_strength_picker("claude");
+        let _ = m.handle_choice_picked(vec![ChoicePayload::OptText(Some("M".into()))]);
+        assert_eq!(
+            m.sidebar.default_model_label('C'),
+            Some("Sonnet"),
+            "the badge must compare against the strength just saved",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Switching the default agent to one with no tier menu still ends
+    /// the flow visibly: no picker to show, but a notice naming the key
+    /// that would declare its strengths. Before, the second step
+    /// early-returned and the flow just stopped.
+    #[test]
+    fn default_agent_pick_without_a_menu_explains_the_missing_strength() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-menuless-agent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.mount_default_agent_picker();
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("cursor".into())]);
+        assert!(m.top_modal().is_none(), "no menu, no second step");
+        let notice = m.status.notice.as_ref().expect("a notice explains why");
+        assert!(
+            notice.message.contains("agents.cursor.models.tiers"),
+            "the notice must name the key: {}",
+            notice.message,
+        );
+        let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
+        assert_eq!(
+            cfg.setup.default_agent.as_deref(),
+            Some("cursor"),
+            "the agent switch still persisted",
         );
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
@@ -10923,7 +11192,7 @@ mod modal_input_responsiveness_tests {
             )]
             .into(),
         );
-        m.mount_default_model_picker("claude");
+        m.mount_strength_picker("claude");
         // Row 0 unpins → OptText(None), the "agent default" payload.
         let _ = m.handle_choice_picked(vec![ChoicePayload::OptText(None)]);
 
@@ -10948,9 +11217,9 @@ mod modal_input_responsiveness_tests {
     /// model too, but must NOT name an alias it doesn't pin, and must not
     /// read as a duplicate of the real tier row.
     #[test]
-    fn default_model_picker_rows_show_the_resolved_model_id() {
+    fn strength_picker_rows_show_the_resolved_model_id() {
         let claude = lazybox_core::AgentModels::builtin("claude").unwrap();
-        let rows = crate::realm::model::default_model_rows("claude", &claude);
+        let rows = crate::realm::model::strength_rows("claude", &claude);
         let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
             labels,
@@ -10973,12 +11242,24 @@ mod modal_input_responsiveness_tests {
             !row_zero.ends_with(row_l),
             "row 0 duplicates the L row: {row_zero}"
         );
+        // A strength respects `excluded_from_default` (#1797): the
+        // built-in menu declares an `XL` Fable tier, which stays
+        // spawnable through its chord but is never offered as the
+        // strength an agent runs at by default.
+        assert!(
+            claude.tier("XL").is_some_and(|t| t.excluded_from_default()),
+            "the built-in menu must still carry the excluded tier for this to prove anything",
+        );
+        assert!(
+            !labels.iter().any(|l| l.contains("Fable")),
+            "a writing-class tier must not be offered as a strength: {labels:?}",
+        );
     }
 
     /// A tier that selects its model some other way keeps a two-part row
     /// rather than printing a guessed id.
     #[test]
-    fn default_model_picker_row_omits_an_unreadable_model() {
+    fn strength_picker_row_omits_an_unreadable_model() {
         let models = lazybox_core::AgentModels {
             default: Some("X".into()),
             tiers: vec![lazybox_core::ModelTier {
@@ -10989,7 +11270,7 @@ mod modal_input_responsiveness_tests {
             }],
             ..Default::default()
         };
-        let rows = crate::realm::model::default_model_rows("codex", &models);
+        let rows = crate::realm::model::strength_rows("codex", &models);
         assert_eq!(rows[1].0, "House  ·  X");
     }
 
@@ -11034,7 +11315,7 @@ mod modal_input_responsiveness_tests {
     /// still mounts; the filtered set is verified via the same
     /// predicate the mount loop applies.
     #[test]
-    fn default_model_picker_excludes_fable_tiers() {
+    fn strength_picker_excludes_fable_tiers() {
         let mut m = build_model();
         let mut models = lazybox_core::AgentModels::builtin("claude").unwrap();
         let fable = lazybox_core::ModelTier {
@@ -11064,19 +11345,19 @@ mod modal_input_responsiveness_tests {
         models.tiers.push(fable);
         m.set_agent_models([("claude".to_string(), models)].into());
 
-        m.mount_default_model_picker("claude");
+        m.mount_strength_picker("claude");
         assert_eq!(
             m.modal_stack.last(),
-            Some(&Id::DefaultModelPicker),
+            Some(&Id::StrengthPicker),
             "the picker still mounts with the Fable tier filtered out",
         );
         m.dispatch_modal_key(key(Key::Esc));
     }
 
-    /// The per-agent "Default model" settings row opens the tier
-    /// picker for that agent directly — no default-agent step first.
+    /// The per-agent "Strength" settings row opens the tier picker for
+    /// that agent directly — no default-agent step first.
     #[test]
-    fn edit_default_model_action_mounts_the_picker_for_that_agent() {
+    fn edit_strength_action_mounts_the_picker_for_that_agent() {
         use crate::realm::setup_ctx::SettingsAction;
         let mut m = build_model();
         m.set_agent_models(
@@ -11086,20 +11367,21 @@ mod modal_input_responsiveness_tests {
             )]
             .into(),
         );
-        m.dispatch_settings_action(SettingsAction::EditDefaultModel {
+        m.dispatch_settings_action(SettingsAction::EditStrength {
             agent_id: "claude".into(),
-            tier: None,
+            strength: None,
+            configurable: true,
         });
-        assert_eq!(m.modal_stack.last(), Some(&Id::DefaultModelPicker));
-        assert_eq!(m.default_model_agent.as_deref(), Some("claude"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::StrengthPicker));
+        assert_eq!(m.strength_agent.as_deref(), Some("claude"));
         m.dispatch_modal_key(key(Key::Esc));
     }
 
-    /// The Settings palette lists one "Default model" row per enabled
-    /// agent with a tier menu, badged with the current default tier —
-    /// Opus out of the box for Claude.
+    /// The Settings palette lists one "Strength" row per enabled agent,
+    /// badged with the strength it currently runs at — Opus out of the
+    /// box for Claude.
     #[test]
-    fn settings_lists_a_default_model_row_per_tiered_agent() {
+    fn settings_lists_a_strength_row_per_agent() {
         use crate::realm::setup_ctx::SettingsAction;
         let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!("lazybox-model-rows-{}", std::process::id()));
@@ -11119,17 +11401,154 @@ mod modal_input_responsiveness_tests {
             .settings_actions
             .iter()
             .find_map(|a| match a {
-                SettingsAction::EditDefaultModel { agent_id, tier } if agent_id == "claude" => {
-                    Some(tier.clone())
-                }
+                SettingsAction::EditStrength {
+                    agent_id, strength, ..
+                } if agent_id == "claude" => Some(strength.clone()),
                 _ => None,
             })
-            .expect("claude gets a direct default-model row");
+            .expect("claude gets a direct strength row");
         assert_eq!(
             row.as_deref(),
             Some("Opus"),
             "the badge names the pinned built-in default",
         );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Every enabled agent gets a strength row, including one lazybox
+    /// ships no menu for. Skipping those rows was how "default agent:
+    /// <that agent>" left the strength unmentioned anywhere in Settings,
+    /// so it silently ran whatever its CLI defaults to.
+    ///
+    /// The fixture is `cursor` because it is the enabled agent
+    /// `AgentModels::builtin` returns `None` for. Claude and Codex both
+    /// ship pinned defaults (#1857), so neither can play this role — if a
+    /// later change gives cursor a built-in menu too, move this fixture
+    /// to an agent that still has none rather than dropping the case.
+    #[test]
+    fn settings_lists_a_strength_row_for_an_agent_with_no_menu() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-menuless-strength-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        m.open_settings();
+        let row = m
+            .setup
+            .settings_actions
+            .iter()
+            .find_map(|a| match a {
+                SettingsAction::EditStrength {
+                    agent_id,
+                    strength,
+                    configurable,
+                } if agent_id == "cursor" => Some((strength.clone(), *configurable)),
+                _ => None,
+            })
+            .expect("cursor gets a strength row even with no built-in menu");
+        assert_eq!(row, (None, false));
+        assert_eq!(
+            m.setup
+                .settings_actions
+                .iter()
+                .find(|a| matches!(a, SettingsAction::EditStrength { agent_id, .. } if agent_id == "cursor"))
+                .map(|a| a.label()),
+            Some("Strength · cursor · not configured".to_string()),
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Picking that row names the config key instead of doing nothing.
+    /// The old per-agent row early-returned inside the picker mount, so
+    /// Enter on a menu-less agent was indistinguishable from a dead key.
+    #[test]
+    fn strength_row_without_a_menu_names_the_key_to_declare() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let mut m = build_model();
+        m.set_agent_models(
+            [(
+                "claude".to_string(),
+                lazybox_core::AgentModels::builtin("claude").unwrap(),
+            )]
+            .into(),
+        );
+        m.dispatch_settings_action(SettingsAction::EditStrength {
+            agent_id: "cursor".into(),
+            strength: None,
+            configurable: false,
+        });
+        assert!(m.top_modal().is_none(), "no menu, no picker");
+        let notice = m.status.notice.as_ref().expect("a notice explains why");
+        assert!(
+            notice.message.contains("agents.cursor.models.tiers"),
+            "the notice must name the key: {}",
+            notice.message,
+        );
+    }
+
+    /// Opening Settings re-reads the tier menus from disk, so the rows
+    /// AND the picker they open describe the same config. They used to
+    /// read different snapshots — the row a fresh `Config::load()`, the
+    /// picker the map cached at startup — so a hand-edited YAML showed
+    /// the new strength on the row and offered the old menu to change it.
+    #[test]
+    fn open_settings_rereads_the_menus_from_disk() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-strength-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        m.open_settings();
+        assert_eq!(m.strength_label("claude").as_deref(), Some("Opus"));
+        m.dispatch_modal_key(key(Key::Esc));
+
+        // A hand edit outside lazybox: pin the strength to Sonnet.
+        std::fs::write(
+            home.join("config.yaml"),
+            "agents:\n  claude:\n    models:\n      default: M\n",
+        )
+        .unwrap();
+
+        m.open_settings();
+        assert_eq!(
+            m.strength_label("claude").as_deref(),
+            Some("Sonnet"),
+            "the reopened Settings reads the edit",
+        );
+        let row = m
+            .setup
+            .settings_actions
+            .iter()
+            .find_map(|a| match a {
+                SettingsAction::EditStrength {
+                    agent_id, strength, ..
+                } if agent_id == "claude" => Some(strength.clone()),
+                _ => None,
+            })
+            .expect("claude strength row");
+        assert_eq!(row.as_deref(), Some("Sonnet"));
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
         let _ = std::fs::remove_dir_all(&home);

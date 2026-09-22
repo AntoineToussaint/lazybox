@@ -459,26 +459,6 @@ impl<T: TerminalAdapter> Model<T> {
             self.inspect_notice();
             return;
         }
-        // ── Override a refused delete ───────────────────────────────
-        // The worktree safety gate refuses to remove a workspace whose
-        // checkout still holds uncommitted changes or unpushed commits,
-        // and that refusal is correct — but "commit, stash or push,
-        // then retry" is not an answer when the user wants the work
-        // gone, and the row came back every time. The
-        // `ForceWipeWorkspace` binding (default `Shift-Z`, remappable)
-        // is the escape hatch, armed ONLY while such a refusal is the
-        // notice on screen (`wipe_offer`) — with no offer the key keeps
-        // its pane meaning. Sequenced with the other notice branches,
-        // after dismiss/inspect, and it yields to a live terminal for
-        // the same reason they do. It opens a typed confirmation; it
-        // never wipes on the keystroke alone.
-        if self.wipe_offer().is_some()
-            && self.resolve_focus_for_keys().is_some()
-            && self.matches_force_wipe(&key)
-        {
-            self.prompt_force_wipe();
-            return;
-        }
         // ── Cancel an in-flight spawn (#1372) ───────────────────────
         // The invariant is that no spawn leaves the UI stuck forever, so
         // `Esc` must be a way out. Sequenced HERE — after the multi-select
@@ -1862,23 +1842,6 @@ impl<T: TerminalAdapter> Model<T> {
     fn matches_inspect_notice(&self, key: &RealmKey) -> bool {
         use lazybox_tui_core::action::{ActionDef, ActionKind};
         let Some(chord) = ActionDef::for_kind(ActionKind::InspectNotice)
-            .effective_chord(&self.action_key_overrides)
-        else {
-            return false;
-        };
-        let Some(input) = key_event_to_stroke(realm_key_to_crossterm(key)) else {
-            return false;
-        };
-        &input == chord.head()
-    }
-
-    /// Whether `key` is the effective `ForceWipeWorkspace` binding
-    /// (default `Shift-Z`, overridable via
-    /// `ui.action_keys.force_wipe_workspace`). A single keystroke — no
-    /// `Seq` — so we compare the chord head.
-    fn matches_force_wipe(&self, key: &RealmKey) -> bool {
-        use lazybox_tui_core::action::{ActionDef, ActionKind};
-        let Some(chord) = ActionDef::for_kind(ActionKind::ForceWipeWorkspace)
             .effective_chord(&self.action_key_overrides)
         else {
             return false;
@@ -3365,11 +3328,6 @@ pub(super) const PANE_NATIVE_KINDS: &[(lazybox_tui_core::action::ActionKind, &st
         (
             K::InspectNotice,
             "handle_pane_key's inspect-notice branch (keys.rs) — override honored",
-            true,
-        ),
-        (
-            K::ForceWipeWorkspace,
-            "handle_pane_key's force-wipe branch (keys.rs) — override honored",
             true,
         ),
         (

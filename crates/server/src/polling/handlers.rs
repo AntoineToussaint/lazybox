@@ -3149,6 +3149,10 @@ pub(crate) async fn prompt_merged_pr_removal_with(
                 config,
                 key,
                 crate::workspace::WorkspaceRemovalReason::ClosedAuto,
+                // Unattended: nobody asked for this one, so it keeps
+                // failing closed. (It is reached only for a session-less
+                // row, so there is nothing on disk for the gate to find.)
+                crate::workspace::RemovalForce::Gated,
             )
             .await
         {
@@ -3218,7 +3222,7 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     // commits still exist only here — the confirm modal has to warn
     // before it destroys them. That is why this is a separate fact from
     // the blockers above and comes off the same inspection.
-    let has_local_work = outlook.map(|o| o.destroys_work).unwrap_or(true);
+    let has_local_work = outlook.map(|o| o.destroys_work()).unwrap_or(true);
 
     tracing::info!(
         workspace = %key,
@@ -3253,8 +3257,9 @@ pub(crate) async fn prompt_merged_pr_removal_with(
 /// the red permanent-error footer the repeated refusal was raising, and
 /// not a modal demanding an answer the user cannot give. The row itself
 /// stays in the inbox showing its merged/closed state, and `x x` removes
-/// it (offering the "WIPE IT ANYWAY" override) whenever the user is
-/// ready.
+/// it whenever the user is ready — that path is an explicit delete
+/// ([`crate::workspace::RemovalForce::Explicit`]), so the gate that
+/// refused this unattended cleanup does not refuse it.
 async fn park_blocked_cleanup(
     config: &ServerConfig,
     key: &WorkspaceKey,
@@ -3306,10 +3311,15 @@ pub async fn remove_merged_workspace(
     config: &ServerConfig,
     key: &WorkspaceKey,
 ) -> Option<crate::workspace::Reclaimed> {
+    // A human read the prompt — which already names the local work it
+    // would lose — and pressed Yes. That is an explicit delete, so the
+    // cleanliness gate does not get to refuse it and send the row back
+    // to an inbox the user just cleared.
     remove_merged_workspace_with(
         config,
         key,
         crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+        crate::workspace::RemovalForce::Explicit,
     )
     .await
 }
@@ -3324,6 +3334,7 @@ pub(crate) async fn remove_merged_workspace_with(
     config: &ServerConfig,
     key: &WorkspaceKey,
     reason: crate::workspace::WorkspaceRemovalReason,
+    force: crate::workspace::RemovalForce,
 ) -> Option<crate::workspace::Reclaimed> {
     // Kills backing terminals, removes the row, and reclaims each
     // session's worktree dir; `reason` decides whether the next poll
@@ -3331,6 +3342,7 @@ pub(crate) async fn remove_merged_workspace_with(
     // lifecycle/store path already emitted a precise error — keep the
     // removal-prompt memory intact so the user can retry.
     let reclaimed = crate::workspace::WorkspaceLifecycle::new(config)
+        .forcing(force)
         .remove(key, reason)
         .await?;
 
@@ -5321,6 +5333,66 @@ mod inspect_tests {
         );
     }
 
+    /// The explicit delete's preflight reports what the removal
+    /// DESTROYS, not what blocks it.
+    ///
+    /// Same merged-PR shape as the test above: the unpushed tip does
+    /// not block (the gate relaxes it — the work is upstream under
+    /// another SHA), so a preflight built from the blockers would hand
+    /// the confirm an empty list and the user would answer "yes" to a
+    /// prompt that named nothing while local-only commits disappeared.
+    #[tokio::test]
+    async fn the_removal_preflight_names_work_the_gate_does_not_block_on() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "preflight", "feat").await;
+        std::fs::write(wt.join("local.txt"), "local\n").unwrap();
+        run(&wt, &["add", "."]).await;
+        run(&wt, &["commit", "-q", "-m", "local only"]).await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
+        let mut rx = config.bus.subscribe();
+
+        // The gate itself would let this removal through.
+        let outlook = crate::workspace::removal_outlook_with(
+            &config,
+            &lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf()),
+            &load_workspace(&config, &key).expect("workspace"),
+        )
+        .await
+        .expect("outlook");
+        assert!(!outlook.is_blocked(), "the merged relaxation un-blocks it");
+
+        crate::workspace::inspect_removal_risks(
+            &config,
+            lazybox_ipc::RemovalTarget::Workspace((&key).into()),
+        )
+        .await;
+
+        let evt = drain_until(&mut rx, |e| {
+            matches!(e, Event::RemovalRisksInspected { .. })
+        })
+        .await;
+        let Event::RemovalRisksInspected { risks, error, .. } = evt else {
+            unreachable!()
+        };
+        assert_eq!(error, None, "the inspection ran");
+        let reasons: Vec<String> = risks.iter().flat_map(|r| r.reasons.clone()).collect();
+        assert!(
+            reasons.iter().any(|r| r.contains("unpushed")),
+            "the confirm must name commits no remote has: {risks:?}",
+        );
+        assert!(
+            risks.iter().any(|r| r.path.ends_with("preflight")),
+            "and the checkout they are in: {risks:?}",
+        );
+    }
+
     /// Regression for #1867 — the loop itself. A merged workspace the
     /// gate refuses is announced ONCE and then stays silent across every
     /// later sweep, with the reprompt throttle expired each time so the
@@ -6083,6 +6155,7 @@ mod inspect_tests {
             &config,
             &key,
             crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+            crate::workspace::RemovalForce::Explicit,
         )
         .await;
 
@@ -6192,10 +6265,13 @@ mod inspect_tests {
         );
     }
 
-    /// A confirmation is intent, not a stale cleanliness capability: work
-    /// added after the modal opened must still survive the server-side gate.
+    /// The **unattended** half of the removal contract: a gated removal
+    /// re-inspects and preserves a dirty checkout. Nothing with no human
+    /// in the loop may destroy work no remote has, so this must keep
+    /// refusing even though the user-confirmed path above no longer does
+    /// (`remove_merged_workspace` passes `RemovalForce::Explicit`).
     #[tokio::test]
-    async fn remove_merged_reinspects_and_preserves_dirty_worktree() {
+    async fn unattended_merged_removal_reinspects_and_preserves_dirty_worktree() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "remove-dirty", "feat").await;
         delete_remote_ref(&fx, "feat").await;
@@ -6213,6 +6289,7 @@ mod inspect_tests {
             &config,
             &key,
             crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+            crate::workspace::RemovalForce::Gated,
         )
         .await;
 
@@ -6221,6 +6298,113 @@ mod inspect_tests {
         assert!(
             load_workspace(&config, &key).is_some(),
             "row must remain reachable for retry"
+        );
+    }
+
+    /// The user-confirmed half of the merged-PR cleanup. #1867 keeps the
+    /// prompt from being raised at all when the gate would refuse it, so
+    /// this is the race it cannot cover: the checkout went dirty while
+    /// the modal was open. A human read the prompt and pressed Yes, so
+    /// the removal is explicit and the gate does not send the row back
+    /// to an inbox the user just cleared.
+    #[tokio::test]
+    async fn a_confirmed_merged_removal_deletes_a_dirty_checkout() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "confirmed-dirty", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("README.md"), "edited while the modal was open\n").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
+
+        assert!(
+            remove_merged_workspace(&config, &key).await.is_some(),
+            "a confirmed removal deletes — a refusal here is the bug",
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        assert!(!wt.exists(), "and the checkout with it");
+    }
+
+    /// The same unattended contract for a **modified tracked file** —
+    /// the shape the user's explicit delete now destroys on purpose.
+    /// With nobody in the loop the edit is kept, byte for byte.
+    #[tokio::test]
+    async fn unattended_merged_removal_preserves_modified_tracked_files() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "remove-tracked", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("README.md"), "edited, never committed\n").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
+
+        let removed = remove_merged_workspace_with(
+            &config,
+            &key,
+            crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+            crate::workspace::RemovalForce::Gated,
+        )
+        .await;
+
+        assert!(removed.is_none(), "an uncommitted edit must refuse removal");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("README.md")).unwrap(),
+            "edited, never committed\n",
+            "the edit survives untouched",
+        );
+        assert!(
+            load_workspace(&config, &key).is_some(),
+            "row must remain reachable for retry"
+        );
+    }
+
+    /// And for a checkout nothing can classify: severing the worktree's
+    /// admin directory leaves git unable to say whether it holds work.
+    /// The explicit path removes it (`x x`); an unattended cleanup must
+    /// not, because "I could not read it" is not "it is empty".
+    #[tokio::test]
+    async fn unattended_merged_removal_preserves_an_uninspectable_checkout() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "remove-severed", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("unsaved.txt"), "content nobody vetted").unwrap();
+        // `.git` still names a gitdir; the gitdir is gone.
+        std::fs::remove_dir_all(fx.bare.join("worktrees")).unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
+
+        let removed = remove_merged_workspace_with(
+            &config,
+            &key,
+            crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+            crate::workspace::RemovalForce::Gated,
+        )
+        .await;
+
+        assert!(
+            removed.is_none(),
+            "nothing unattended may destroy what it could not classify",
+        );
+        config.drain_maintenance_tasks().await;
+        assert!(
+            wt.join("unsaved.txt").exists(),
+            "and every byte of it survives",
         );
     }
 

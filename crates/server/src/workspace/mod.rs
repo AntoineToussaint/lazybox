@@ -1975,15 +1975,31 @@ pub(crate) struct RemovalOutlook {
     /// `require_stopped = false`: a live terminal is not a blocker here
     /// because the removal stops it before re-inspecting.
     pub(crate) blockers: Vec<WorkspaceRemovalRisk>,
-    /// Any reclaimed checkout holds uncommitted, untracked or unpushed
-    /// work — what the confirm modal warns about before a force-delete.
-    pub(crate) destroys_work: bool,
+    /// What the removal would destroy, per checkout, in the same words
+    /// the blockers use. Named with NO relaxation applied: the
+    /// merged-PR one un-blocks an unpushed tip, it does not make those
+    /// commits exist anywhere else, and a confirm that omitted them
+    /// would be the false assurance this type exists to prevent.
+    ///
+    /// The per-path list, not a bool, because an explicit delete's one
+    /// confirm renders it: "which checkout, and what kind of work" is
+    /// the whole content of that prompt.
+    pub(crate) destroyed: Vec<WorkspaceRemovalRisk>,
 }
 
 impl RemovalOutlook {
     /// The gate would refuse this removal as it stands.
     pub(crate) fn is_blocked(&self) -> bool {
         !self.blockers.is_empty()
+    }
+
+    /// Any reclaimed checkout holds uncommitted, untracked or unpushed
+    /// work — what the confirm modal warns about before a delete. Read
+    /// off [`Self::destroyed`] rather than derived beside it: two
+    /// derivations of "would this destroy anything?" drift, and the
+    /// drift is a prompt that says nothing while work disappears.
+    pub(crate) fn destroys_work(&self) -> bool {
+        !self.destroyed.is_empty()
     }
 
     /// The blocking state in the refusal's own words — the string the
@@ -2054,22 +2070,29 @@ async fn inspect_workspace_outlook(
     for path in paths {
         let Some(row) = by_path.get(&canonical_or_self(&path)) else {
             // Unaccounted for: a warning, never a clean bill of health.
-            outlook.destroys_work = true;
-            outlook.blockers.push(WorkspaceRemovalRisk {
+            let risk = WorkspaceRemovalRisk {
                 path,
                 reasons: vec!["checkout could not be verified by the worktree inspector".into()],
                 preserves_work: false,
-            });
+            };
+            outlook.destroyed.push(risk.clone());
+            outlook.blockers.push(risk);
             continue;
         };
         // What a removal would destroy is asked of the row directly,
         // independently of what BLOCKS the removal: the merged-PR
         // relaxation below un-blocks an unpushed tip, it does not make
-        // those commits exist anywhere else.
-        outlook.destroys_work |= row.has_tracked_modifications
-            || row.has_untracked_work
-            || row.has_unpushed_commits
-            || row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked);
+        // those commits exist anywhere else. Same naming function, so
+        // the confirm and the refusal can never describe one checkout
+        // two different ways — only the relaxations differ.
+        let destroyed = workspace_removal_reasons(row, false, false);
+        if !destroyed.reasons.is_empty() {
+            outlook.destroyed.push(WorkspaceRemovalRisk {
+                path: path.clone(),
+                reasons: destroyed.reasons,
+                preserves_work: destroyed.preserves_work,
+            });
+        }
         if row.is_safe_to_delete {
             continue;
         }
@@ -2172,7 +2195,7 @@ mod removal_classification_tests {
     use lazybox_store::{MemoryStore, Store, StoreError, StoreMutation, WorkspaceRecord};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct FailingWorkspaceListStore;
+    pub(super) struct FailingWorkspaceListStore;
 
     impl lazybox_store::Store for FailingWorkspaceListStore {
         fn list_workspaces(
@@ -2536,15 +2559,34 @@ async fn reclaim_workspace_worktrees(
 /// inspector and the delete boundary re-probes locked/dirty/unpushed state
 /// under the repo lock. Missing or unverifiable inspection rows are preserved.
 ///
-/// [`RemovalForce::WipeAnyway`] suppresses only the cleanliness half of
-/// that boundary. It has to: the row is already gone by this point, so a
-/// forced removal that still preserved the checkout would leave a dirty
+/// [`RemovalForce::Explicit`] suppresses only the cleanliness half of
+/// that boundary. It has to: the row is already gone by this point, so an
+/// explicit removal that still preserved the checkout would leave a dirty
 /// directory nothing in the UI points at — the dead end moved onto disk
 /// rather than ended. The re-provision guard is NOT suppressed; that one
 /// protects a checkout someone else now owns, which no confirmation of
-/// this removal covers. An uninspectable path is still preserved (named
-/// in the log): the deletion boundary needs an inspection row, and the
-/// user can remove a named directory.
+/// this removal covers.
+///
+/// An **uninspectable** checkout is the case that used to survive every
+/// override. It has two shapes, and one of them had no way out at all:
+///
+/// - The inspector produced a row but could not vet the contents (no
+///   bare clone lists the directory, a severed `.git`). The deletion
+///   boundary takes `force` here, so this already worked.
+/// - The inspection could not be built *at all* — the tracked-session
+///   scan or the probe itself failed. There is then no row for any
+///   path, the workspace row is already gone, and #1865's force never
+///   reached the boundary: every checkout was stranded with nothing in
+///   the UI pointing at it. On the explicit path those are removed by
+///   [`force_remove_unverifiable`].
+///
+/// That is an `rm` no inspection authorized, so state its bounds: the
+/// paths came from [`lifecycle_worktree_paths`], which required each to
+/// exist, to sit inside the daemon-owned `<root>/<scope>/<slug>`
+/// namespace, and not to be the repo's shared main checkout; the
+/// namespace check is re-asserted at the `rm` rather than assumed; and
+/// the re-provision guard still runs under the ownership lock. A
+/// *gated* removal preserves both shapes, named in the log.
 /// Returns the task handle for tests to await; the deletion path
 /// fire-and-forgets it.
 fn spawn_worktree_removal(
@@ -2580,25 +2622,37 @@ fn spawn_worktree_removal(
         let by_path: std::collections::HashMap<_, _>;
         {
             let _ownership_guard = config.worktree_ownership_lock.lock().await;
-            tracked = match collect_tracked_sessions(&config).await {
-                Ok(tracked) => tracked,
-                Err(error) => {
-                    tracing::warn!(
-                        workspace = %key,
-                        %error,
-                        "delete_workspace: could not classify tracked worktrees — preserving them",
-                    );
+            // An inspection failure is reported out of the guarded scope,
+            // never handled inside it: the explicit-delete response is
+            // `force_remove_unverifiable`, which takes this very same
+            // (non-reentrant) ownership lock to re-run the re-provision
+            // check. Acting on the failure here would deadlock the
+            // maintenance task against itself, and the shutdown drain
+            // waits on its latch.
+            let scanned = match collect_tracked_sessions(&config).await {
+                Ok(tracked) => Ok(tracked),
+                Err(error) => Err((error, "could not classify tracked worktrees")),
+            };
+            match scanned {
+                Ok(rows) => tracked = rows,
+                Err(failure) => {
+                    drop(_ownership_guard);
+                    preserve_or_remove_uninspectable(&config, &key, &paths, force, failure).await;
                     return;
                 }
-            };
+            }
             let inspections = match mgr.inspect_paths(&paths, &tracked).await {
                 Ok(inspections) => inspections,
                 Err(error) => {
-                    tracing::warn!(
-                        workspace = %key,
-                        %error,
-                        "delete_workspace: deferred safety inspection failed — preserving worktrees",
-                    );
+                    drop(_ownership_guard);
+                    preserve_or_remove_uninspectable(
+                        &config,
+                        &key,
+                        &paths,
+                        force,
+                        (error.to_string(), "deferred safety inspection failed"),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -2611,18 +2665,37 @@ fn spawn_worktree_removal(
 
         for path in paths {
             let Some(row) = by_path.get(&canonical_or_self(&path)) else {
-                tracing::warn!(
-                    workspace = %key,
-                    worktree = %path.display(),
-                    "delete_workspace: worktree is not inspectable — preserving it",
-                );
+                // Narrow, but the row is already gone by now, so it
+                // cannot be a preserve: `lifecycle_worktree_paths`
+                // required the path to exist and `inspect_paths` builds
+                // a row for every directory, so reaching here means the
+                // path stopped being a directory between the two. The
+                // reachable shape of "no inspection at all" is the
+                // whole-scan failure handled above; this arm is its
+                // per-path fail-safe, and it must not strand a
+                // directory the user explicitly asked to delete.
+                if force.is_explicit() {
+                    tracing::warn!(
+                        workspace = %key,
+                        worktree = %path.display(),
+                        "delete_workspace: worktree is not inspectable — removing it anyway \
+                         on an explicit delete",
+                    );
+                    force_remove_unverifiable(&config, &key, &path).await;
+                } else {
+                    tracing::warn!(
+                        workspace = %key,
+                        worktree = %path.display(),
+                        "delete_workspace: worktree is not inspectable — preserving it",
+                    );
+                }
                 continue;
             };
             let guard_config = config.clone();
             let guard_key = key.clone();
             let guard_path = path.clone();
             match mgr
-                .delete_inspected_if(row, force.wipes(), move || {
+                .delete_inspected_if(row, force.is_explicit(), move || {
                     !worktree_path_is_reclaimed(&guard_config, &guard_key, &guard_path)
                 })
                 .await
@@ -2676,6 +2749,115 @@ fn spawn_worktree_removal(
             }
         }
     })
+}
+
+/// Remove a worktree directory the inspector could not vet, on an
+/// explicit delete only.
+///
+/// This is the one `rm` in the teardown that no inspection row
+/// authorizes, so state what does bound it. The path is not arbitrary:
+/// it came from [`lifecycle_worktree_paths`], which already required it
+/// to exist, to sit inside the daemon-owned
+/// `<root>/<scope>/<slug>` namespace (`is_managed_worktree_path`), and
+/// not to be the repo's shared `_main` checkout — an imported or
+/// on-main checkout in the user's own clone can never reach here. The
+/// namespace check is re-asserted below rather than assumed, because
+/// this function is the only caller that deletes without an inspection,
+/// and the re-provision guard is re-run under the ownership lock so a
+/// freshly provisioned session at the same deterministic slug is never
+/// deleted underneath its owner.
+///
+/// What it does NOT prove is that the directory is disposable — that is
+/// exactly what the missing inspection row means. The user asked for
+/// this workspace to be deleted and confirmed it; the contents are
+/// named in the log, which is the only record left of them.
+async fn force_remove_unverifiable(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    path: &std::path::Path,
+) {
+    if !config.worktree_manager().is_managed_worktree_path(path) {
+        tracing::warn!(
+            workspace = %key,
+            worktree = %path.display(),
+            "delete_workspace: refusing to force-remove a path outside the managed \
+             worktree namespace",
+        );
+        return;
+    }
+    let _ownership_guard = config.worktree_ownership_lock.lock().await;
+    if worktree_path_is_reclaimed(config, key, path) {
+        tracing::info!(
+            workspace = %key,
+            worktree = %path.display(),
+            "delete_workspace: uninspectable worktree was re-provisioned before removal — \
+             left in place",
+        );
+        return;
+    }
+    if !path.exists() {
+        return;
+    }
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => tracing::warn!(
+            workspace = %key,
+            worktree = %path.display(),
+            "delete_workspace: removed an uninspectable checkout on an explicit delete — \
+             its contents could not be classified and are gone",
+        ),
+        Err(error) => tracing::error!(
+            workspace = %key,
+            worktree = %path.display(),
+            %error,
+            "delete_workspace: could not remove the uninspectable checkout",
+        ),
+    }
+}
+
+/// [`force_remove_unverifiable`] over every path of a removal whose
+/// inspection could not be built at all (the scan or the probe failed),
+/// rather than per-path.
+async fn force_remove_unverifiable_all(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    paths: &[std::path::PathBuf],
+) {
+    for path in paths {
+        force_remove_unverifiable(config, key, path).await;
+    }
+}
+
+/// What a removal does when it could not build an inspection at all:
+/// preserve every path (gated) or remove them (explicit), with one log
+/// line naming the failure either way.
+///
+/// Must be called with the worktree ownership lock RELEASED —
+/// [`force_remove_unverifiable`] retakes it.
+async fn preserve_or_remove_uninspectable(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    paths: &[std::path::PathBuf],
+    force: RemovalForce,
+    (error, what_failed): (String, &'static str),
+) {
+    if force.is_explicit() {
+        // A gated removal fails closed. An explicit one cannot: the row
+        // is already gone, and "I could not classify it" is not a reason
+        // to leave behind the directory the user just asked to delete.
+        tracing::warn!(
+            workspace = %key,
+            %error,
+            "delete_workspace: {what_failed} — removing the checkouts anyway on an \
+             explicit delete",
+        );
+        force_remove_unverifiable_all(config, key, paths).await;
+    } else {
+        tracing::warn!(
+            workspace = %key,
+            %error,
+            "delete_workspace: {what_failed} — preserving the checkouts",
+        );
+    }
 }
 
 /// True when a torn-down workspace's worktree `path` has been re-claimed
@@ -2840,6 +3022,124 @@ mod reclaim_worktree_tests {
     fn seed_worktree(dir: &std::path::Path, bytes: usize) {
         std::fs::create_dir_all(dir).expect("create worktree dir");
         std::fs::write(dir.join("payload"), vec![0u8; bytes]).expect("write payload");
+    }
+
+    /// The inspection-failure branch of the explicit path. When the
+    /// tracked-session scan itself fails there is no inspection row for
+    /// ANY path, and #1865's force never reached the deletion boundary
+    /// — the row was already gone, so the checkouts were stranded with
+    /// nothing in the UI pointing at them. An explicit delete removes
+    /// them; the `rm` is bounded by the managed namespace, asserted
+    /// separately in `force_remove_unverifiable_refuses_an_unmanaged_path`.
+    #[tokio::test]
+    async fn explicit_removal_reclaims_worktrees_it_could_not_classify() {
+        let root = tempfile::tempdir().expect("worktree root");
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(super::removal_classification_tests::FailingWorkspaceListStore),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let wt = root.path().join("o-r").join("pr-1");
+        seed_worktree(&wt, 2048);
+
+        // Bounded on purpose. The first cut of this path called
+        // `force_remove_unverifiable` — which retakes the worktree
+        // ownership lock — from inside the scope that already held it,
+        // and the task deadlocked against itself with no output at all.
+        // A hang is the worst failure mode to debug, so assert the
+        // removal *finishes*, not merely that it eventually would.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            spawn_worktree_removal(
+                &config,
+                WorkspaceKey::new("github:o/r#1"),
+                vec![wt.clone()],
+                RemovalForce::Explicit,
+            ),
+        )
+        .await
+        .expect("the removal task must not deadlock on the ownership lock")
+        .expect("removal task");
+
+        assert!(
+            !wt.exists(),
+            "an explicit delete must not strand a checkout it could not classify",
+        );
+    }
+
+    /// The same failure, unattended: preserved, every byte.
+    #[tokio::test]
+    async fn gated_removal_preserves_worktrees_it_could_not_classify() {
+        let root = tempfile::tempdir().expect("worktree root");
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(super::removal_classification_tests::FailingWorkspaceListStore),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let wt = root.path().join("o-r").join("pr-1");
+        seed_worktree(&wt, 2048);
+
+        spawn_worktree_removal(
+            &config,
+            WorkspaceKey::new("github:o/r#1"),
+            vec![wt.clone()],
+            RemovalForce::Gated,
+        )
+        .await
+        .expect("removal task");
+
+        assert!(wt.exists(), "a gated removal fails closed");
+    }
+
+    /// A managed directory git cannot account for at all — no bare
+    /// clone lists it, so there is nothing to verify the contents
+    /// against. That is the "cleanliness could not be proven" shape a
+    /// user meets as a checkout they cannot get rid of. An explicit
+    /// delete removes it; the namespace bound is what keeps this from
+    /// being an unbounded `rm`.
+    #[tokio::test]
+    async fn explicit_removal_reclaims_a_managed_unaccountable_checkout() {
+        let config = ServerConfig::in_memory();
+        let wt = config.worktree_root_path().join("o-r").join("pr-9");
+        seed_worktree(&wt, 2048);
+
+        spawn_worktree_removal(
+            &config,
+            WorkspaceKey::new("github:o/r#9"),
+            vec![wt.clone()],
+            RemovalForce::Explicit,
+        )
+        .await
+        .expect("removal task");
+
+        assert!(
+            !wt.exists(),
+            "an explicit delete must not strand a managed checkout it could not classify",
+        );
+    }
+
+    /// Same directory, unattended: preserved. Paired with the test
+    /// above so "explicit removes it" can never be satisfied by a gate
+    /// that stopped protecting anything.
+    #[tokio::test]
+    async fn gated_removal_preserves_a_managed_unaccountable_checkout() {
+        let config = ServerConfig::in_memory();
+        let wt = config.worktree_root_path().join("o-r").join("pr-9");
+        seed_worktree(&wt, 2048);
+
+        spawn_worktree_removal(
+            &config,
+            WorkspaceKey::new("github:o/r#9"),
+            vec![wt.clone()],
+            RemovalForce::Gated,
+        )
+        .await
+        .expect("removal task");
+
+        assert!(
+            wt.exists(),
+            "nothing unattended removes what it cannot read"
+        );
     }
 
     #[tokio::test]
@@ -3075,16 +3375,17 @@ mod reclaim_worktree_tests {
     /// The escape hatch from the refusal above. The gate is right to
     /// refuse by default, but "commit, stash or push, then retry" is a
     /// dead end for a user who wants the work gone: the row came back
-    /// every time and there was no override at all. `WipeAnyway` is the
-    /// override — it must actually remove the row and the checkout the
-    /// gate was protecting.
+    /// every time and there was no override at all.
+    /// [`RemovalForce::Explicit`] is what an explicit delete now carries
+    /// — it must actually remove the row and the checkout the gate was
+    /// protecting.
     #[tokio::test]
     async fn forced_workspace_delete_overrides_the_local_work_gate() {
         let (_root, config, key, worktree) = managed_checkout_fixture(true).await;
         let mut events = config.bus.subscribe();
 
         assert!(
-            delete_workspace(&config, &key, RemovalForce::WipeAnyway)
+            delete_workspace(&config, &key, RemovalForce::Explicit)
                 .await
                 .is_some(),
             "the user asked for the wipe after being shown the risk",
@@ -3154,6 +3455,141 @@ mod reclaim_worktree_tests {
         );
     }
 
+    /// The user requirement, at the seam that used to deny it: "when I
+    /// say I want to delete a workspace I want to delete a workspace."
+    ///
+    /// A checkout with **modified tracked files** was the second of the
+    /// four causes that all surfaced as "commit, stash or push, then
+    /// retry". On the explicit path the confirm the user already
+    /// answered is the whole ceremony — the row and the checkout go.
+    #[tokio::test]
+    async fn explicit_delete_destroys_modified_tracked_files() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
+        std::fs::write(worktree.join("README.md"), "edited, never committed\n")
+            .expect("modify a tracked file");
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Explicit)
+                .await
+                .is_some(),
+            "an explicit delete deletes — modified tracked files are not a veto",
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        assert!(!worktree.exists(), "and the checkout with it");
+    }
+
+    /// The **unpushed commits** half of the same requirement, on the
+    /// ordinary explicit path rather than through an escape hatch.
+    #[tokio::test]
+    async fn explicit_delete_destroys_unpushed_commits() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(true).await;
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Explicit)
+                .await
+                .is_some(),
+            "an explicit delete deletes — unpushed commits are not a veto",
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        assert!(!worktree.exists(), "and the checkout with it");
+    }
+
+    /// The unattended pair of the test above: the same modified tracked
+    /// file refuses a removal nobody asked for, and the edit survives.
+    #[tokio::test]
+    async fn gated_delete_still_refuses_modified_tracked_files() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
+        std::fs::write(worktree.join("README.md"), "edited, never committed\n")
+            .expect("modify a tracked file");
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_none(),
+            "nothing unattended may destroy an uncommitted edit",
+        );
+        assert!(load_workspace(&config, &key).is_some(), "row survives");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("README.md")).expect("readme"),
+            "edited, never committed\n",
+            "and the edit survives byte for byte",
+        );
+    }
+
+    /// The case #1865 deliberately left behind: a worktree whose `.git`
+    /// points at an admin directory that no longer exists. Nothing can
+    /// classify it ("cleanliness could not be proven"), so the deletion
+    /// boundary had nothing to authorize and the directory the user
+    /// explicitly asked to remove stayed on disk forever — the dead end
+    /// moved from the inbox onto the filesystem.
+    #[tokio::test]
+    async fn explicit_delete_removes_an_uninspectable_checkout() {
+        let (root, config, key, worktree) = managed_checkout_fixture(false).await;
+        std::fs::write(worktree.join("unsaved.txt"), "content nobody vetted").expect("content");
+        // Sever the checkout: `.git` still names a gitdir, the gitdir is
+        // gone. Every probe that would run git *inside* this tree fails.
+        std::fs::remove_dir_all(root.path().join("repos/o/r.git/worktrees"))
+            .expect("remove the worktree admin dir");
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Explicit)
+                .await
+                .is_some(),
+            "a checkout nobody can read is still a checkout the user asked to delete",
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        // The deferred reclaim is a detached task; wait for the
+        // maintenance latch rather than racing it.
+        config.drain_maintenance_tasks().await;
+        assert!(
+            !worktree.exists(),
+            "the unverifiable directory must not be stranded on disk",
+        );
+    }
+
+    /// The other half of the contract, and the one that must not move:
+    /// with no human in the loop the gate still refuses an unverifiable
+    /// checkout and leaves every byte of it in place.
+    #[tokio::test]
+    async fn a_gated_delete_still_preserves_an_uninspectable_checkout() {
+        let (root, config, key, worktree) = managed_checkout_fixture(false).await;
+        std::fs::write(worktree.join("unsaved.txt"), "content nobody vetted").expect("content");
+        std::fs::remove_dir_all(root.path().join("repos/o/r.git/worktrees"))
+            .expect("remove the worktree admin dir");
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_none(),
+            "nothing unattended may destroy what it could not classify",
+        );
+        assert!(load_workspace(&config, &key).is_some(), "row survives");
+        config.drain_maintenance_tasks().await;
+        assert!(
+            worktree.join("unsaved.txt").exists(),
+            "and the content survives",
+        );
+    }
+
+    /// `force_remove_unverifiable` is the one `rm` no inspection
+    /// authorizes, so its namespace bound is asserted directly: a path
+    /// outside the daemon-owned worktree root is refused even on the
+    /// explicit path.
+    #[tokio::test]
+    async fn force_remove_unverifiable_refuses_an_unmanaged_path() {
+        let config = ServerConfig::in_memory();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside = tmp.path().join("someones-own-clone");
+        seed_worktree(&outside, 2048);
+
+        force_remove_unverifiable(&config, &WorkspaceKey::new("local:scratch"), &outside).await;
+
+        assert!(
+            outside.exists(),
+            "an explicit delete still never reaches outside the managed namespace",
+        );
+    }
+
     /// The same shape plus one uncommitted file an agent wrote: still
     /// refused, and nothing on disk is touched.
     #[tokio::test]
@@ -3194,7 +3630,7 @@ mod reclaim_worktree_tests {
         );
         assert!(worktree.exists(), "and preserves its checkout");
 
-        delete_project(&config, &project_key, RemovalForce::WipeAnyway).await;
+        delete_project(&config, &project_key, RemovalForce::Explicit).await;
         assert!(
             load_workspace(&config, &key).is_none(),
             "the forced cascade removes the child the preflight refused",
@@ -3605,7 +4041,15 @@ fn io_lock_holder_fields(config: &ServerConfig, backend_key: &str) -> (String, u
     }
 }
 
-/// Whether a removal may override the fresh worktree safety gate.
+/// Who asked for this removal — which is what decides whether the
+/// fresh worktree safety gate may refuse it.
+///
+/// The line is drawn at the *caller*, not at what the checkout
+/// contains. An explicit delete is an instruction; refusing it and
+/// telling the user to "commit, stash or push, then retry" overrides
+/// them with advice they may have no way to act on, and the row then
+/// cannot be deleted at all. An unattended removal has nobody to ask,
+/// so it keeps failing closed.
 ///
 /// A named type, not a bare `bool`, for the same reason
 /// `WorkspaceRemovalReason` is one: this decides whether work no
@@ -3613,14 +4057,20 @@ fn io_lock_holder_fields(config: &ServerConfig, backend_key: &str) -> (String, u
 /// destructive call site says nothing about which way is safe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemovalForce {
-    /// The default. A checkout with uncommitted changes or unpushed
-    /// commits refuses the removal and the row stays in the inbox.
+    /// No human is in the loop — the merged-PR terminal-state sweep,
+    /// the closed-issue auto-reap, rescope, background GC. A checkout
+    /// with uncommitted changes or unpushed commits refuses the
+    /// removal and the row stays in the inbox. Nothing unattended may
+    /// destroy work no remote has.
     Gated,
-    /// The user saw exactly what would be destroyed and asked for it
-    /// anyway ("WIPE IT ANYWAY"). Skips the *cleanliness* gate only —
-    /// terminal teardown, archive policy and worktree reclaim are
-    /// unchanged — and logs the overridden risks at `warn`.
-    WipeAnyway,
+    /// A human pressed a key and confirmed: `x x`, the project delete,
+    /// a Yes on a removal prompt. The delete happens — the cleanliness
+    /// gate is *inspected* but never refuses, so the confirm the user
+    /// already answered is the whole ceremony. Terminal teardown,
+    /// archive policy and worktree reclaim are unchanged; the
+    /// overridden risks are logged at `warn`, which is the only record
+    /// left of the destroyed work.
+    Explicit,
 }
 
 impl RemovalForce {
@@ -3629,12 +4079,81 @@ impl RemovalForce {
     /// cannot invent a third meaning for the flag.
     #[must_use]
     pub fn from_wire(force: bool) -> Self {
-        if force { Self::WipeAnyway } else { Self::Gated }
+        if force { Self::Explicit } else { Self::Gated }
     }
 
-    fn wipes(self) -> bool {
-        matches!(self, Self::WipeAnyway)
+    /// Whether the cleanliness gate must yield to the caller.
+    fn is_explicit(self) -> bool {
+        matches!(self, Self::Explicit)
     }
+}
+
+/// Handle [`lazybox_ipc::Command::InspectRemovalRisks`]: freshly
+/// classify what deleting `target` would destroy and broadcast
+/// [`Event::RemovalRisksInspected`].
+///
+/// Read-only, and deliberately the `require_stopped = false` variant of
+/// the gate: this runs while the user's sessions are still live, so
+/// "the checkout is still active" is not a risk to report — it is the
+/// normal state of a workspace someone is about to archive. Only local
+/// work and an unprovable checkout are.
+///
+/// It is a *preflight for a prompt*, never an authority: the removal
+/// re-inspects after stopping the terminals, which is the answer that
+/// counts. A failed inspection is reported as an error, because an
+/// empty risk list means "nothing found", and a confirm that renders
+/// "nothing will be lost" over a checkout nobody could read is the
+/// exact false assurance this whole path exists to stop giving.
+pub async fn inspect_removal_risks(config: &ServerConfig, target: lazybox_ipc::RemovalTarget) {
+    let keys: Vec<WorkspaceKey> = match &target {
+        lazybox_ipc::RemovalTarget::Workspace(session_key) => {
+            vec![WorkspaceKey::new(session_key.as_str().to_string())]
+        }
+        lazybox_ipc::RemovalTarget::Project(project_key) => match config.store.list_workspaces() {
+            Ok(records) => records
+                .into_iter()
+                .filter_map(|record| record.workspace_json)
+                .filter_map(|json| serde_json::from_str::<Workspace>(&json).ok())
+                .filter(|workspace| workspace.project_key.as_ref() == Some(project_key))
+                .map(|workspace| workspace.key)
+                .collect(),
+            Err(error) => {
+                let _ = config.bus.send(Event::RemovalRisksInspected {
+                    target,
+                    risks: Vec::new(),
+                    error: Some(format!("could not list the project's workspaces: {error}")),
+                });
+                return;
+            }
+        },
+    };
+
+    let mut risks = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for key in keys {
+        let Some(workspace) = load_workspace(config, &key) else {
+            continue;
+        };
+        // `destroyed`, not `blockers`: on the explicit path nothing
+        // blocks, so the only useful thing to tell the user is what
+        // stops existing — including an unpushed tip the gate relaxes
+        // for a merged PR, which is upstream under a different SHA and
+        // therefore gone from here for good.
+        match removal_outlook_with(config, &config.worktree_manager(), &workspace).await {
+            Ok(outlook) => risks.extend(outlook.destroyed.into_iter().map(|risk| {
+                lazybox_ipc::RemovalRiskDto {
+                    path: risk.path,
+                    reasons: risk.reasons,
+                }
+            })),
+            Err(error) => errors.push(format!("{key}: {error}")),
+        }
+    }
+    let _ = config.bus.send(Event::RemovalRisksInspected {
+        target,
+        risks,
+        error: (!errors.is_empty()).then(|| errors.join("; ")),
+    });
 }
 
 /// Delete a workspace, returning the worktree space reclaimed on success
@@ -3700,7 +4219,8 @@ impl<'a> WorkspaceLifecycle<'a> {
         }
     }
 
-    /// Carry the user's "WIPE IT ANYWAY" decision into this removal.
+    /// Carry who asked for this removal into it. Only an explicit,
+    /// user-confirmed delete passes [`RemovalForce::Explicit`].
     pub(crate) fn forcing(mut self, force: RemovalForce) -> Self {
         self.force = force;
         self
@@ -4072,24 +4592,24 @@ impl<'a> WorkspaceLifecycle<'a> {
         // capability: the checkout may have changed while the modal was open,
         // and a just-finished agent commonly leaves committed-but-unpushed work.
         // Every destructive entry point funnels through this exact gate before
-        // archive/store mutation. `RemovalForce::WipeAnyway` is the ONLY way
-        // past it: the user was shown the very risks below and asked for the
-        // wipe anyway. It skips the refusal, not the inspection — the override
-        // is logged with the full detail so the destroyed work is named in
+        // archive/store mutation. `RemovalForce::Explicit` is the ONLY way
+        // past it: a human asked for this removal and confirmed a prompt that
+        // named the very risks below. It skips the refusal, not the
+        // inspection — the destroyed work is logged with full detail to
         // /tmp/lazybox.log, which is the only record left of it.
         if let Some(workspace) = workspace_snapshot.as_ref() {
             match inspect_workspace_removal_risks(config, workspace).await {
                 Ok(risks) if risks.is_empty() => {}
-                Ok(risks) if self.force.wipes() => {
+                Ok(risks) if self.force.is_explicit() => {
                     let detail = describe_removal_risks(&risks);
                     tracing::warn!(
                         workspace = %key,
                         ?reason,
                         risk_count = risks.len(),
                         %detail,
-                        "FORCED workspace removal — the worktree safety gate refused this \
-                         removal and the user overrode it; uncommitted changes and unpushed \
-                         commits in the paths above are being destroyed",
+                        "EXPLICIT workspace removal — the worktree safety gate found local \
+                         work and does not refuse a delete the user asked for; uncommitted \
+                         changes and unpushed commits in the paths above are being destroyed",
                     );
                 }
                 Ok(risks) => {
@@ -4127,17 +4647,18 @@ impl<'a> WorkspaceLifecycle<'a> {
                     config.deleted_workspaces.lock().remove(key_str);
                     return None;
                 }
-                Err(error) if self.force.wipes() => {
-                    // Fail-closed is the gate's rule, but a forced wipe has
-                    // already accepted losing whatever is there — refusing
-                    // because we could not enumerate it would re-create the
-                    // exact dead end the override exists to end.
+                Err(error) if self.force.is_explicit() => {
+                    // Fail-closed is the gate's rule, and it is the right
+                    // rule for an unattended sweep. But refusing an explicit
+                    // delete because we could not enumerate what it destroys
+                    // re-creates the exact dead end this path exists to end:
+                    // the user is told to act on something nobody can name.
                     tracing::warn!(
                         workspace = %key,
                         ?reason,
                         %error,
-                        "FORCED workspace removal — worktrees could not be inspected; \
-                         wiping without knowing what is being destroyed",
+                        "EXPLICIT workspace removal — worktrees could not be inspected; \
+                         deleting without knowing what is being destroyed",
                     );
                 }
                 Err(error) => {
@@ -4423,11 +4944,11 @@ pub async fn delete_project(
     // but this first pass prevents a known-dirty later workspace from
     // turning one project action into a silent partial cascade.
     for workspace in &children {
-        // A forced cascade skips the preflight outright: the user was shown
-        // the refusal this pass produced and chose the wipe. Each child's own
-        // gate below is forced too, or the preflight would just be re-run
+        // An explicit cascade skips the preflight outright: the user
+        // confirmed a prompt that named what it destroys. Each child's own
+        // gate below is explicit too, or the preflight would just be re-run
         // per child and refuse there instead.
-        if force.wipes() {
+        if force.is_explicit() {
             break;
         }
         match inspect_workspace_local_risks(config, workspace).await {

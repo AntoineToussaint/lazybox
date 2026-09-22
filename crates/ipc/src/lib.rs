@@ -995,6 +995,33 @@ pub struct SnippetRef {
     pub category: String,
 }
 
+/// What a removal (and its [`Command::InspectRemovalRisks`]
+/// preflight) targets: one workspace row, or a project and the cascade
+/// under it. Modelled as an enum rather than two optional keys so a
+/// preflight reply can be matched back to the confirm that asked for
+/// it without the "both set / neither set" cases existing at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum RemovalTarget {
+    Workspace(SessionKey),
+    Project(lazybox_core::ProjectKey),
+}
+
+/// One checkout a removal would destroy, as the confirm renders it.
+///
+/// The daemon owns the classification (it is the only side that can
+/// run git), and the client owns the wording, so the risk is carried
+/// as its parts rather than as a pre-rendered sentence: the path, and
+/// the reason tags (`uncommitted changes to tracked files`, `unpushed
+/// commits`, `cleanliness could not be proven`, …) exactly as the
+/// removal gate names them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct RemovalRiskDto {
+    pub path: std::path::PathBuf,
+    pub reasons: Vec<String>,
+}
+
 /// One row of `Event::WorktreesInspected`. Mirrors
 /// `lazybox_git_ops::WorktreeInspection` as a wire-friendly value type
 /// (no `SystemTime`, no library-specific enum). `reasons` carries the
@@ -1380,19 +1407,31 @@ pub enum Command {
     /// Drop a workspace: kill its sessions, archive the row, reclaim
     /// only the checkouts the safety gate cleared.
     ///
-    /// `force` is the "WIPE IT ANYWAY" override. The daemon
-    /// refuses a removal whose checkout still holds uncommitted changes
-    /// or unpushed commits, and that refusal is the default — it is the
-    /// only thing standing between a keystroke and work no remote has.
-    /// With `force: true` the daemon skips *that cleanliness gate only*
-    /// (terminal teardown, reclaim and archive still run) and logs the
-    /// overridden risk detail at `warn`, so a wipe is forensically
-    /// visible in the daemon log. The field is not `#[serde(default)]`
-    /// on purpose: every construction site must choose, and bincode
-    /// would not apply a default anyway.
+    /// `force` says **who asked**, not how hard to try. `true` is an
+    /// explicit, user-confirmed delete: the daemon still inspects the
+    /// checkout, but it may not refuse — it deletes, worktree included,
+    /// and logs the destroyed risk detail at `warn`, which is the only
+    /// record left of it. `false` is an unattended removal, which fails
+    /// closed on uncommitted changes or unpushed commits.
+    ///
+    /// The field is not `#[serde(default)]` on purpose: every
+    /// construction site must choose, and bincode would not apply a
+    /// default anyway.
     Kill {
         session_key: SessionKey,
         force: bool,
+    },
+    /// Read-only preflight for a removal the user is about to confirm:
+    /// freshly inspect the target's backing checkouts and reply with
+    /// [`Event::RemovalRisksInspected`].
+    ///
+    /// This exists so the one confirm an explicit delete costs can name
+    /// what it destroys. Nothing is mutated and no terminal is stopped
+    /// — it is the `require_stopped = false` variant of the same gate
+    /// the removal itself runs, so an answer of "no risks" is about
+    /// this instant and is never carried forward as authority.
+    InspectRemovalRisks {
+        target: RemovalTarget,
     },
     /// Answer to a `MergedPrRemovable` event (the user confirmed the
     /// "this PR merged — remove its workspace and worktree?" modal).
@@ -1412,10 +1451,10 @@ pub enum Command {
     /// ActionConfirm modal on the TUI side.
     DeleteProject {
         project_key: lazybox_core::ProjectKey,
-        /// The same "WIPE IT ANYWAY" override as [`Command::Kill`],
-        /// applied to the cascade: it skips the project-wide local-work
-        /// preflight AND each child's own gate. Without it one dirty
-        /// child refuses the whole project, which is the default.
+        /// The same "who asked" flag as [`Command::Kill`], applied to
+        /// the cascade: an explicit delete skips the project-wide
+        /// local-work preflight AND each child's own refusal. An
+        /// unattended one refuses the whole project on one dirty child.
         force: bool,
     },
     /// Manually collapse an issue workspace into the PR workspace
@@ -3255,6 +3294,20 @@ pub enum Event {
     /// path-sorted order. Drives the in-app inspector modal.
     WorktreesInspected {
         inspections: Vec<WorktreeInspectionDto>,
+    },
+    /// `Command::InspectRemovalRisks` finished: what deleting `target`
+    /// right now would destroy.
+    ///
+    /// An **empty** `risks` means the preflight ran and found nothing —
+    /// not that it could not run. `error` carries the reason it could
+    /// not, and a client that gets one must not render "nothing will be
+    /// lost": an uninspectable checkout is precisely the case where the
+    /// user most needs to be told the content could not be classified.
+    RemovalRisksInspected {
+        target: RemovalTarget,
+        risks: Vec<RemovalRiskDto>,
+        #[serde(default)]
+        error: Option<String>,
     },
     /// `Command::InspectWorkspaceDiff` finished. `diff` is absent when
     /// the workspace/target disappeared or git could not read it.

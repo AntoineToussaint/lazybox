@@ -521,8 +521,10 @@ pub enum DesktopCommand {
     },
     /// Archive the workspace: kill its sessions and drop the row (the TUI's
     /// `x x` on a workspace). Maps to [`Command::Kill`] with the local-work
-    /// gate ON — the desktop shell has no "wipe anyway" affordance to show
-    /// the user what a force would destroy, so it never sends one.
+    /// gate ON. The TUI's `x x` is an *explicit* delete and sends
+    /// `force: true`, but only because its confirm renders the removal-risk
+    /// preflight first; the desktop shell has no such prompt, so it must not
+    /// claim the user was shown what the delete destroys.
     Archive {
         session_key: lazybox_core::SessionKey,
     },

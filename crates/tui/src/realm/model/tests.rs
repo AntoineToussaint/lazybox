@@ -9180,11 +9180,6 @@ mod stale_input_tests {
                 | Id::WorktreeRecreateConfirm
                 | Id::WorktreeRenameBlockingConfirm
                 | Id::WorktreeBranchName
-                // Typed confirmation for a force-delete: a stale Enter
-                // must never reach it (it can't — the validator rejects
-                // anything but `WIPE` — but the classification says so
-                // deliberately rather than by luck).
-                | Id::ForceWipeConfirm
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
                 // (HeaderContext's entries are all local/reversible, but
@@ -12993,10 +12988,15 @@ mod merge_focus_follow_tests {
         // running agent.
         m.update(Msg::HopperDeleteRequested(key.clone()));
         assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "delete must wait for confirmation before dispatching Kill"
-        );
+        // The confirm's read-only risk preflight is allowed — it is what
+        // lets the prompt name what the delete destroys — but nothing
+        // destructive may leave before the answer.
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            assert!(
+                matches!(cmd, IpcCommand::InspectRemovalRisks { .. }),
+                "delete must wait for confirmation before dispatching Kill, got {cmd:?}",
+            );
+        }
     }
 
     /// Issue #224: default work (`w w`) whose only running agent is
@@ -29258,6 +29258,39 @@ mod optimistic_mutation_tests {
         ws_key
     }
 
+    /// A project row the `Archive` chord can target from a repo header.
+    fn seed_project(m: &mut TestModel) -> lazybox_core::ProjectKey {
+        let project = lazybox_core::Project::github("owner", "repo", Utc::now());
+        let project_key = project.key.clone();
+        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(project)));
+        project_key
+    }
+
+    /// The text the mounted `ActionConfirm` actually paints. The prompt
+    /// is what the user decides on, so the assertions read the rendered
+    /// frame rather than a string the model happens to hold.
+    fn render_modal_text(m: &mut TestModel) -> String {
+        render_modal_text_of(m, Id::ActionConfirm)
+    }
+
+    fn render_modal_text_of(m: &mut TestModel, id: Id) -> String {
+        use tuirealm::ratatui::layout::Rect;
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| m.app.view(&id, frame, Rect::new(0, 0, 120, 40)))
+            .expect("render confirm");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn reviewers_of(m: &TestModel, sk: &SessionKey) -> Vec<String> {
         m.sidebar
             .workspace_by_key(sk)
@@ -29491,174 +29524,233 @@ mod optimistic_mutation_tests {
         );
     }
 
-    /// The refusal used to end there: "commit, stash or push, then
-    /// retry" and a row that came back on every attempt. It now arms the
-    /// override — on the focus-aware footer hint, not baked into the
-    /// message — and the offer names the workspace and the work at risk.
+    /// The explicit delete: `x x`, one confirm, gone.
+    ///
+    /// The daemon's cleanliness gate may not refuse what a human asked
+    /// for, so the confirmed archive has to reach it as an explicit
+    /// removal (`force: true`). This is the whole user requirement —
+    /// "when I say I want to delete a workspace I want to delete a
+    /// workspace" — expressed at the one place the client controls.
     #[test]
-    fn local_work_refusal_arms_the_wipe_escape_hatch() {
+    fn a_confirmed_archive_sends_an_explicit_delete() {
         let mut m = build_model();
-        let refused = seed_pr_workspace(&mut m, "github:owner/repo#7");
-        let sk: SessionKey = (&refused).into();
-        m.dispatch_action_confirmed(
-            &Action::Archive,
-            &ActionConfirmTarget::Workspace(sk.clone()),
-        );
-        m.handle_daemon_event(provider_error(
-            "store:local-work",
-            &format!(
-                "commit, stash or push, then retry \u{2014} delete refused, workspace \
-                 {refused} has local work: /wt/owner-repo/pr-7 (uncommitted changes)"
-            ),
-        ));
-
-        let offer = m.wipe_offer().expect("the refusal offers a way out");
-        assert_eq!(
-            offer.target,
-            WipeTarget::Workspace(sk.clone()),
-            "the wipe targets the row the refusal named, taken from the rollback stash",
-        );
-        assert_eq!(
-            offer.detail, "/wt/owner-repo/pr-7 (uncommitted changes)",
-            "the risk detail is carried so the confirm can quote it",
-        );
-        let prompt = offer.prompt();
-        assert!(
-            prompt.contains(sk.as_str()) && prompt.contains("uncommitted changes"),
-            "the prompt must name the workspace AND the work it destroys: {prompt:?}",
-        );
-        assert!(
-            prompt.contains("Type WIPE to confirm"),
-            "the prompt states the guard: {prompt:?}",
-        );
-        assert!(
-            m.notice_action_hints()
-                .iter()
-                .any(|b| b.label.contains("wipe anyway")),
-            "the escape hatch rides the focus-aware hint, not the message text",
-        );
-    }
-
-    /// Only a local-work refusal arms it. A disk-full `store` failure is
-    /// not a case for destroying anything, and a stale offer under an
-    /// unrelated error would be a force-delete armed under a message
-    /// that says nothing about it.
-    #[test]
-    fn other_delete_failures_offer_no_wipe() {
-        let mut m = build_model();
-        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#8");
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#7");
         let sk: SessionKey = (&ws_key).into();
-        m.dispatch_action_confirmed(
+
+        let cmds = m.dispatch_action_confirmed(
             &Action::Archive,
             &ActionConfirmTarget::Workspace(sk.clone()),
         );
-        m.handle_daemon_event(provider_error(
-            "store",
-            &format!("could not delete workspace {ws_key}: disk full"),
-        ));
 
-        assert!(
-            m.wipe_offer().is_none(),
-            "no wipe for a plain store failure"
-        );
-        assert!(
-            !m.notice_action_hints()
-                .iter()
-                .any(|b| b.label.contains("wipe anyway")),
-        );
-    }
-
-    /// The offer lives and dies with the notice that explains it.
-    #[test]
-    fn the_wipe_offer_dies_with_its_notice() {
-        let mut m = build_model();
-        let refused = seed_pr_workspace(&mut m, "github:owner/repo#9");
-        let sk: SessionKey = (&refused).into();
-        m.dispatch_action_confirmed(
-            &Action::Archive,
-            &ActionConfirmTarget::Workspace(sk.clone()),
-        );
-        m.handle_daemon_event(provider_error(
-            "store:local-work",
-            &format!(
-                "commit, stash or push, then retry \u{2014} delete refused, workspace \
-                 {refused} has local work: /wt/x (unpushed commits)"
-            ),
-        ));
-        assert!(m.wipe_offer().is_some());
-
-        m.status.notice = None;
-        assert!(
-            m.wipe_offer().is_none(),
-            "dismissing the refusal disarms the override",
-        );
-        m.flash_error("\u{2717} something else failed".to_string());
-        assert!(
-            m.wipe_offer().is_none(),
-            "an unrelated error must not inherit the wipe",
-        );
-    }
-
-    /// The whole point: the override actually reaches the daemon as a
-    /// forced removal — and only after the word is typed. `Confirm` here
-    /// would not have been a guard at all (it always highlights Yes, so
-    /// Enter accepts), which is why this is a typed prompt.
-    #[test]
-    fn typing_wipe_sends_a_forced_kill() {
-        let mut m = build_model();
-        let refused = seed_pr_workspace(&mut m, "github:owner/repo#10");
-        let sk: SessionKey = (&refused).into();
-        m.dispatch_action_confirmed(
-            &Action::Archive,
-            &ActionConfirmTarget::Workspace(sk.clone()),
-        );
-        m.handle_daemon_event(provider_error(
-            "store:local-work",
-            &format!(
-                "commit, stash or push, then retry \u{2014} delete refused, workspace \
-                 {refused} has local work: /wt/x (uncommitted changes)"
-            ),
-        ));
-
-        // The key opens a prompt; it never wipes on the keystroke.
-        m.dispatch_key(tuirealm::event::KeyEvent::new(
-            tuirealm::event::Key::Char('Z'),
-            tuirealm::event::KeyModifiers::NONE,
-        ));
-        assert_eq!(
-            m.modal_stack.last(),
-            Some(&Id::ForceWipeConfirm),
-            "the hint opens the typed confirmation",
-        );
-
-        // Anything but the word is refused, even though the modal's own
-        // validator would already have swallowed it.
-        assert!(
-            m.handle_input_submitted("yes".into()).is_empty(),
-            "only the typed word wipes",
-        );
-        m.handle_daemon_event(provider_error(
-            "store:local-work",
-            &format!(
-                "commit, stash or push, then retry \u{2014} delete refused, workspace \
-                 {refused} has local work: /wt/x (uncommitted changes)"
-            ),
-        ));
-        m.dispatch_key(tuirealm::event::KeyEvent::new(
-            tuirealm::event::Key::Char('Z'),
-            tuirealm::event::KeyModifiers::NONE,
-        ));
-        let cmds = m.handle_input_submitted("WIPE".into());
         match cmds.as_slice() {
             [IpcCommand::Kill { session_key, force }] => {
                 assert_eq!(session_key, &sk);
-                assert!(force, "the wipe must actually override the daemon's gate");
+                assert!(
+                    force,
+                    "an explicit delete must not be gated — a refusal is the bug",
+                );
             }
-            other => panic!("expected a forced Kill, got {other:?}"),
+            other => panic!("expected an explicit Kill, got {other:?}"),
         }
+    }
+
+    /// The same for a project header: the cascade must not stop on one
+    /// dirty child either.
+    #[test]
+    fn a_confirmed_project_delete_is_explicit_too() {
+        let mut m = build_model();
+        let project = seed_project(&mut m);
+
+        let cmds = m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Project(project.clone()),
+        );
+
+        match cmds.as_slice() {
+            [IpcCommand::DeleteProject { project_key, force }] => {
+                assert_eq!(project_key, &project);
+                assert!(force, "a confirmed project delete deletes");
+            }
+            other => panic!("expected an explicit DeleteProject, got {other:?}"),
+        }
+    }
+
+    /// Mounting the delete confirm asks the daemon what the checkout
+    /// holds, so the one prompt the user answers can name it.
+    #[test]
+    fn mounting_the_delete_confirm_preflights_its_risks() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#11");
+        let sk: SessionKey = (&ws_key).into();
+
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(sk.clone())],
+            None,
+        );
+
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        let pending = m
+            .pending_removal_risk
+            .as_ref()
+            .expect("the confirm arms a preflight");
+        assert_eq!(
+            pending.target,
+            lazybox_ipc::RemovalTarget::Workspace(sk.clone()),
+        );
+    }
+
+    /// And the reply lands *in that prompt*: the paths and the kinds of
+    /// work, not a generic "this may destroy something". No second
+    /// chord, no typed word — the user decides once, with the facts.
+    #[test]
+    fn the_preflight_reply_names_the_damage_in_the_open_confirm() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#12");
+        let sk: SessionKey = (&ws_key).into();
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(sk.clone())],
+            None,
+        );
+
+        m.handle_daemon_event(IpcEvent::RemovalRisksInspected {
+            target: lazybox_ipc::RemovalTarget::Workspace(sk.clone()),
+            risks: vec![lazybox_ipc::RemovalRiskDto {
+                path: std::path::PathBuf::from("/wt/owner-repo/pr-12"),
+                reasons: vec![
+                    "uncommitted changes to tracked files".into(),
+                    "unpushed commits".into(),
+                ],
+            }],
+            error: None,
+        });
+
+        let rendered = render_modal_text(&mut m);
         assert!(
-            m.wipe_offer().is_none(),
-            "the offer is spent once the wipe is sent",
+            rendered.contains("pr-12"),
+            "the confirm must name the checkout it destroys: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("uncommitted changes to tracked files"),
+            "and the kind of work in it: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("unpushed"),
+            "including the commits no remote has: {rendered:?}",
+        );
+        // Answering is still one key, and it still fires the explicit
+        // delete the prompt described.
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            matches!(cmds.as_slice(), [IpcCommand::Kill { force: true, .. }],),
+            "got {cmds:?}",
+        );
+    }
+
+    /// A checkout the daemon could not read at all is the case where
+    /// silence would mislead most — an empty risk list reads as "clean".
+    #[test]
+    fn an_uninspectable_checkout_is_named_in_the_confirm() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#13");
+        let sk: SessionKey = (&ws_key).into();
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(sk.clone())],
+            None,
+        );
+
+        m.handle_daemon_event(IpcEvent::RemovalRisksInspected {
+            target: lazybox_ipc::RemovalTarget::Workspace(sk.clone()),
+            risks: vec![],
+            error: Some("could not inspect worktrees safely: gitdir is missing".into()),
+        });
+
+        let rendered = render_modal_text(&mut m);
+        assert!(
+            rendered.contains("could not be inspected"),
+            "an unreadable checkout must be said out loud: {rendered:?}",
+        );
+    }
+
+    /// The daemon-raised out-of-scope prompt is an explicit removal too
+    /// — its Yes sends `force: true`, so it may not be the one prompt
+    /// that deletes unpushed work without saying so.
+    ///
+    /// It cannot derive that from the event: `WorkspaceOutOfScope`
+    /// carries no local-work fact at all. The preflight is what closes
+    /// that gap, and this pins both halves — the copy names the work,
+    /// and Yes is explicit.
+    #[test]
+    fn the_out_of_scope_prompt_names_its_damage_and_deletes() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#21");
+        let sk: SessionKey = (&ws_key).into();
+
+        m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+            workspace_key: ws_key.clone(),
+            label: "owner/repo#21".into(),
+            title: None,
+            active_terminal_count: 1,
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::RemoveOutOfScope));
+
+        m.handle_daemon_event(IpcEvent::RemovalRisksInspected {
+            target: lazybox_ipc::RemovalTarget::Workspace(sk.clone()),
+            risks: vec![lazybox_ipc::RemovalRiskDto {
+                path: std::path::PathBuf::from("/wt/owner-repo/pr-21"),
+                reasons: vec!["unpushed commits".into()],
+            }],
+            error: None,
+        });
+
+        let rendered = render_modal_text_of(&mut m, Id::RemoveOutOfScope);
+        assert!(
+            rendered.contains("pr-21") && rendered.contains("unpushed"),
+            "the prompt must name the work its Yes destroys: {rendered:?}",
+        );
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [IpcCommand::Kill {
+                    force: true,
+                    session_key
+                }] if session_key == &sk,
+            ),
+            "got {cmds:?}",
+        );
+    }
+
+    /// A reply for a different row must not repaint this prompt.
+    #[test]
+    fn a_stale_preflight_reply_is_ignored() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#14");
+        let other = seed_pr_workspace(&mut m, "github:owner/repo#15");
+        let sk: SessionKey = (&ws_key).into();
+        let other_sk: SessionKey = (&other).into();
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(sk.clone())],
+            None,
+        );
+
+        m.handle_daemon_event(IpcEvent::RemovalRisksInspected {
+            target: lazybox_ipc::RemovalTarget::Workspace(other_sk),
+            risks: vec![lazybox_ipc::RemovalRiskDto {
+                path: std::path::PathBuf::from("/wt/somebody-else"),
+                reasons: vec!["unpushed commits".into()],
+            }],
+            error: None,
+        });
+
+        let rendered = render_modal_text(&mut m);
+        assert!(
+            !rendered.contains("somebody-else"),
+            "another row's risks must never appear in this confirm: {rendered:?}",
         );
     }
 

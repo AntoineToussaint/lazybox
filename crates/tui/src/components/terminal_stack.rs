@@ -1244,63 +1244,113 @@ struct TerminalSlot {
     /// every wheel notch into a multi-megabyte capture, including the
     /// notches that land while the first reply is still in flight.
     last_scrollback_fetch: Option<std::time::Instant>,
-    /// Live output delivered since the current visit's capture was
-    /// armed. A capture is a snapshot of an older instant, and adopting
-    /// it replaces the whole grid — so without this the output that
-    /// arrived while the fetch was in flight was erased from the screen
-    /// and never re-delivered (`last_seq` had already moved past it).
-    /// [`Self::apply_scrollback`] re-feeds the part of this the capture
-    /// does not cover. `None` when no fetch is outstanding.
-    scrollback_catchup: Option<ScrollbackCatchup>,
+    /// Rolling seq-tagged tail of this terminal's live output. A
+    /// deep-scrollback capture is a snapshot of an older instant and
+    /// adopting it replaces the whole grid, so the output delivered
+    /// since has to come from somewhere — this is it
+    /// ([`Self::apply_scrollback`] re-feeds the part above the reply's
+    /// watermark). Always on, and deliberately not tied to a fetch
+    /// being in flight: a capture can land after the visit ended or
+    /// after a second fetch was armed, and gating the tail on either
+    /// state threw away exactly the batches those replies still needed.
+    scrollback_catchup: ScrollbackCatchup,
 }
 
 /// Minimum spacing between two deep-scrollback re-fetches for the same
 /// terminal while its output keeps flowing.
 const SCROLLBACK_REFETCH_MIN: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Cap on the live output retained across one in-flight deep-scrollback
-/// fetch ([`ScrollbackCatchup`]). The window is a single request/reply
-/// round trip, so this is generous; past it the capture is refused
-/// outright rather than adopted with a hole in the middle.
-const SCROLLBACK_CATCHUP_CAP: usize = 4 * 1024 * 1024;
+/// Byte ceiling on a terminal's retained output tail
+/// ([`ScrollbackCatchup`]). Sized for a capture's request/reply round
+/// trip; a busy terminal that outruns it is not mis-rebuilt, it just
+/// raises the tail's floor and the next capture is refused.
+const SCROLLBACK_CATCHUP_CAP: usize = 256 * 1024;
 
-/// Live output delivered while a deep-scrollback capture is in flight,
-/// kept per delivered batch so the capture's watermark can select the
-/// suffix it does not cover.
-#[derive(Default)]
+/// Ceiling on the *number* of retained batches, independent of their
+/// bytes. `TerminalOutput` is one event per PTY read, so a token-by-token
+/// agent stream arrives as many tiny batches whose per-batch bookkeeping
+/// (tuple slot plus one heap allocation each) dwarfs their payload — the
+/// byte ceiling alone does not bound that.
+const SCROLLBACK_CATCHUP_BATCHES: usize = 4096;
+
+/// A terminal's retained live output, per delivered batch, so a
+/// capture's watermark can select the suffix it does not cover.
+///
+/// The tail is lossy by design and `floor` is what keeps that safe: it
+/// is the highest sequence the tail can no longer account for, so a
+/// capture at or below it is *refused* rather than adopted with a hole.
+/// Correctness therefore never depends on the size of the tail, only on
+/// `floor` being maintained — the caps are a quality knob.
 struct ScrollbackCatchup {
     /// `(end_seq, cols, rows, bytes)` per `TerminalOutput` batch, in
     /// delivery order. The size travels with the bytes: a batch is
     /// re-fed at the PTY size it was produced for, never the grid's
     /// current one (#1547).
-    batches: Vec<(u64, u16, u16, Vec<u8>)>,
+    batches: std::collections::VecDeque<(u64, u16, u16, Vec<u8>)>,
     bytes: usize,
-    /// Set once what survives here is no longer a faithful continuation
-    /// of the capture in flight — [`SCROLLBACK_CATCHUP_CAP`] was hit and
-    /// a batch went unrecorded, or a ring resync rebuilt the grid from a
-    /// different baseline underneath it. Re-feeding either would corrupt
-    /// the grid, so the capture is refused instead and the local grid —
-    /// which holds every byte, just less history — stands.
-    unusable: bool,
+    /// Highest sequence whose content this tail can no longer supply —
+    /// because the batch was evicted, or because the grid was rebuilt
+    /// from another baseline (a ring resync) and the batch stream is no
+    /// longer the whole story.
+    floor: u64,
 }
 
 impl ScrollbackCatchup {
-    fn record(&mut self, seq: u64, cols: u16, rows: u16, bytes: &[u8]) {
-        if self.unusable {
-            return;
+    fn new(last_seq: u64) -> Self {
+        Self {
+            batches: std::collections::VecDeque::new(),
+            bytes: 0,
+            // Nothing before the slot existed can be supplied from here.
+            floor: last_seq,
         }
-        if self.bytes.saturating_add(bytes.len()) > SCROLLBACK_CATCHUP_CAP {
-            self.invalidate();
-            return;
-        }
-        self.bytes += bytes.len();
-        self.batches.push((seq, cols, rows, bytes.to_vec()));
     }
 
-    fn invalidate(&mut self) {
-        self.unusable = true;
+    fn record(&mut self, seq: u64, cols: u16, rows: u16, bytes: &[u8]) {
+        self.bytes += bytes.len();
+        self.batches.push_back((seq, cols, rows, bytes.to_vec()));
+        while self.bytes > SCROLLBACK_CATCHUP_CAP || self.batches.len() > SCROLLBACK_CATCHUP_BATCHES
+        {
+            let Some((evicted_seq, _, _, evicted)) = self.batches.pop_front() else {
+                break;
+            };
+            self.bytes -= evicted.len();
+            self.floor = self.floor.max(evicted_seq);
+        }
+    }
+
+    /// Whether a capture whose watermark is `seq` can be topped up from
+    /// this tail — i.e. every batch above `seq` is still retained.
+    fn covers(&self, seq: u64) -> bool {
+        seq >= self.floor
+    }
+
+    /// The batches a capture at `seq` does not account for, in delivery
+    /// order.
+    fn uncovered(&self, seq: u64) -> impl Iterator<Item = &(u64, u16, u16, Vec<u8>)> {
+        self.batches.iter().filter(move |(end, _, _, _)| *end > seq)
+    }
+
+    /// A capture at `seq` was just adopted, so the grid now holds
+    /// everything at or below it: those batches are spent. The rest stay
+    /// — a later capture, or one already in flight, still needs them.
+    fn prune_through(&mut self, seq: u64) {
+        while let Some((end, _, _, _)) = self.batches.front() {
+            if *end > seq {
+                break;
+            }
+            let (_, _, _, evicted) = self.batches.pop_front().expect("front just checked");
+            self.bytes -= evicted.len();
+        }
+        self.floor = self.floor.max(seq);
+    }
+
+    /// The grid was rebuilt from a source other than this batch stream
+    /// (a ring replay), so nothing retained here continues it. Any
+    /// capture predating `seq` must now be refused.
+    fn rebased(&mut self, seq: u64) {
         self.batches.clear();
         self.bytes = 0;
+        self.floor = self.floor.max(seq);
     }
 }
 
@@ -1319,24 +1369,23 @@ impl TerminalSlot {
                 .is_none_or(|at| at.elapsed() >= SCROLLBACK_REFETCH_MIN)
     }
 
-    /// Mark a deep-scrollback capture as outstanding and start retaining
-    /// the live output it will race. Stamped at the request, not the
-    /// reply: the notches that land while the capture is in flight must
-    /// not each ship another multi-megabyte fetch (11 in 700 ms was
-    /// observed).
+    /// Mark a deep-scrollback capture as outstanding. Stamped at the
+    /// request, not the reply: the notches that land while the capture
+    /// is in flight must not each ship another multi-megabyte fetch (11
+    /// in 700 ms was observed). The retained output tail is untouched —
+    /// a reply to the *previous* fetch is still on the wire and still
+    /// needs the batches recorded before this arm.
     fn arm_scrollback_fetch(&mut self) {
         self.deep_scrollback_requested = true;
         self.last_scrollback_fetch = Some(std::time::Instant::now());
-        self.scrollback_catchup = Some(ScrollbackCatchup::default());
     }
 
-    /// The viewport is back at the live bottom. The next visit re-fetches
-    /// so its history is current, and retaining output for a capture that
-    /// may never arrive — a raw-PTY pane answers `FetchScrollback` with
-    /// nothing at all — stops here.
+    /// The viewport is back at the live bottom, so the next visit
+    /// re-fetches. The retained tail keeps running: a capture requested
+    /// during the visit can still land after it, and it rebuilds the
+    /// grid whatever the viewport is doing.
     fn end_scrollback_visit(&mut self) {
         self.deep_scrollback_requested = false;
-        self.scrollback_catchup = None;
     }
 
     /// Append one char to the composing buffer when it fits within
@@ -3561,13 +3610,10 @@ impl TerminalStack {
             let excess = slot.recent.len() - RECENT_OUTPUT_CAP;
             slot.recent.drain(..excess);
         }
-        // Retain the batch while a capture is outstanding: the reply
-        // rebuilds the grid from an instant that predates it, and
-        // `apply_scrollback` puts back whatever the capture's watermark
-        // says it missed.
-        if let Some(catchup) = slot.scrollback_catchup.as_mut() {
-            catchup.record(seq, cols, rows, bytes);
-        }
+        // A capture already on the wire rebuilds the grid from an
+        // instant that predates this batch; `apply_scrollback` puts back
+        // whatever the reply's watermark says it missed.
+        slot.scrollback_catchup.record(seq, cols, rows, bytes);
         slot.last_seq = seq;
     }
 
@@ -3628,6 +3674,18 @@ impl TerminalStack {
         if !slot.sync.is_desynced() && seq == slot.last_seq {
             return;
         }
+        // The replay carries the inner program's own escape stream, but
+        // only as far back as the ring still reaches. A program sets its
+        // modes once at startup, and for a long-running agent that DECSET
+        // scrolled out of the ring long ago — so a reset-and-refeed loses
+        // modes the program still believes are on. Carried across the
+        // rebuild the same way `apply_scrollback` carries them, and
+        // re-asserted BEFORE the replay so any mode change the replay
+        // does carry still wins.
+        let preserved: Vec<(u16, bool)> = PRESERVED_DEC_MODES
+            .iter()
+            .filter_map(|m| slot.vt.terminal.mode(*m).ok().map(|on| (m.value(), on)))
+            .collect();
         if !slot.vt.reset() {
             // The replay was authoritative, but the local parser could
             // not adopt it. Keep the last coherent grid and immediately
@@ -3645,6 +3703,12 @@ impl TerminalStack {
             self.pending_resync_requests.push(id);
             return;
         }
+        let mut modes = Vec::with_capacity(preserved.len() * 8);
+        for (value, on) in preserved {
+            let flag = if on { 'h' } else { 'l' };
+            modes.extend_from_slice(format!("\x1b[?{value}{flag}").as_bytes());
+        }
+        slot.vt.feed(&modes);
         slot.feed_sized(replay, sizes);
         // The reset parser restarted its revision counter — a stale
         // cached frame keyed to the old counter must never blit.
@@ -3665,13 +3729,12 @@ impl TerminalStack {
         // backoff so the next episode starts fast again.
         slot.resync_retry_at = None;
         slot.resync_retry_backoff = RESYNC_RETRY_INITIAL;
-        // The grid this rebuild produced is not the one the in-flight
-        // capture's watermark describes, so its retained live output is
-        // no longer a continuation of that capture. Refuse the reply
-        // when it lands rather than splicing two baselines together.
-        if let Some(catchup) = slot.scrollback_catchup.as_mut() {
-            catchup.invalidate();
-        }
+        // The grid came from the ring, not from the batch stream, so
+        // nothing retained in the tail continues it. Rebase the tail on
+        // this replay: a capture predating it is refused rather than
+        // spliced onto the wrong baseline, while one taken after it is
+        // still serviceable.
+        slot.scrollback_catchup.rebased(seq);
         // The raw-stream rebuild just replaced any capture-fed deep
         // scrollback with the ring's shallow history, so the current
         // scrollback visit's fetch is spent. Release the latch: the
@@ -3720,15 +3783,16 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
-        let catchup = slot.scrollback_catchup.take();
-        // A batch went unrecorded, so what survives is a stream with a
-        // hole and re-feeding it would corrupt the grid. The local grid
-        // still holds every byte — it is only shallower — so keep it and
+        // The tail can no longer account for everything above this
+        // watermark — batches were evicted, or a ring resync rebased it —
+        // so adopting the capture would leave a hole. The local grid
+        // still holds every byte, it is only shallower, so keep it and
         // let the next upward scroll re-capture.
-        if catchup.as_ref().is_some_and(|c| c.unusable) {
+        if !slot.scrollback_catchup.covers(seq) {
             tracing::debug!(
                 terminal_id = ?id,
                 seq,
+                floor = slot.scrollback_catchup.floor,
                 "deep-scrollback capture refused — the live output it predates can no longer be re-fed"
             );
             return;
@@ -3800,12 +3864,15 @@ impl TerminalStack {
         // These bytes were OSC 52-forwarded on first delivery, so they
         // go straight into the parser — `forward_osc52` must not see
         // them twice.
-        let uncovered: Vec<&(u64, u16, u16, Vec<u8>)> = catchup
-            .iter()
-            .flat_map(|c| c.batches.iter())
-            .filter(|(end_seq, _, _, _)| *end_seq > seq)
+        // Copied out because the tail and the parser are two fields of
+        // the same slot; bounded by SCROLLBACK_CATCHUP_CAP, against a
+        // capture parse that is orders of magnitude larger.
+        let uncovered: Vec<(u16, u16, Vec<u8>)> = slot
+            .scrollback_catchup
+            .uncovered(seq)
+            .map(|(_, cols, rows, bytes)| (*cols, *rows, bytes.clone()))
             .collect();
-        for (_, cols, rows, bytes) in &uncovered {
+        for (cols, rows, bytes) in &uncovered {
             slot.adopt_pty_size(*cols, *rows);
             slot.vt.feed(bytes);
         }
@@ -3836,7 +3903,7 @@ impl TerminalStack {
         slot.recent.clear();
         let tail_start = replay.len().saturating_sub(RECENT_OUTPUT_CAP);
         slot.recent.extend_from_slice(&replay[tail_start..]);
-        for (_, _, _, bytes) in &uncovered {
+        for (_, _, bytes) in &uncovered {
             slot.recent.extend_from_slice(bytes);
         }
         if slot.recent.len() > RECENT_OUTPUT_CAP {
@@ -3849,6 +3916,11 @@ impl TerminalStack {
         // Their content is not lost with it: the batches above put it
         // back on the grid.
         slot.last_seq = slot.last_seq.max(seq);
+        // The grid now holds everything at or below the watermark, so
+        // those batches are spent. The ones above it stay: a second
+        // capture — one already in flight, or the next visit's — rebuilds
+        // the grid again and needs them again.
+        slot.scrollback_catchup.prune_through(seq);
         // This visit's history is tmux's again, as of now.
         slot.scrollback_stale = false;
         slot.last_scrollback_fetch = Some(std::time::Instant::now());
@@ -3899,7 +3971,7 @@ impl TerminalStack {
             deep_scrollback_requested: false,
             scrollback_stale: false,
             last_scrollback_fetch: None,
-            scrollback_catchup: None,
+            scrollback_catchup: ScrollbackCatchup::new(last_seq),
         }
     }
 
@@ -10399,10 +10471,145 @@ mod deep_scrollback_tests {
         );
     }
 
-    /// Live output that outruns the retained window leaves a stream with
-    /// a hole, which cannot be spliced onto the capture. The capture is
-    /// refused rather than adopted lossily — the local grid holds every
-    /// byte already, it is only shallower.
+    /// A second fetch inside the same visit (the debounced re-fetch
+    /// `live_output_after_a_fetch_rearms_the_next_upward_scroll` drives)
+    /// must not throw away what the FIRST fetch still needs — its reply
+    /// is on the wire and rebuilds the grid when it lands.
+    #[test]
+    fn a_second_fetch_does_not_discard_what_the_first_reply_still_needs() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"start\r\n", 1, 1);
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id), "fetch #1");
+        feed(&mut stack, id, b"BETWEEN-ARMS\r\n", 2, 2);
+
+        // The debounce elapses and live output made the visit stale, so
+        // the next upward scroll arms a second fetch.
+        stack.terminals.get_mut(&id).unwrap().last_scrollback_fetch = std::time::Instant::now()
+            .checked_sub(SCROLLBACK_REFETCH_MIN + std::time::Duration::from_secs(1));
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id), "fetch #2");
+        feed(&mut stack, id, b"AFTER-SECOND-ARM\r\n", 3, 3);
+
+        // Fetch #1's reply lands — nothing cancelled it.
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep_history(200),
+            seq: 1,
+        });
+
+        let text = grid_text(&stack, id);
+        assert!(text.contains("BETWEEN-ARMS"), "{text}");
+        assert!(text.contains("AFTER-SECOND-ARM"), "{text}");
+        // And it was ADOPTED, not merely refused: dropping the tail on
+        // the second arm is safe (the floor turns it into a refusal) but
+        // it costs the user the deep history they scrolled up for.
+        let after = scrollbar(&stack, id);
+        assert!(after.total > after.len, "capture adopted: {after:?}");
+    }
+
+    /// Returning to the live bottom ends the visit, but the capture it
+    /// asked for is still on the wire and still replaces the grid when
+    /// it arrives. The retained tail has to outlive the visit, or the
+    /// user is punished for scrolling back down.
+    #[test]
+    fn output_survives_a_capture_that_lands_after_the_visit_ended() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"start\r\n", 1, 1);
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id));
+        feed(&mut stack, id, b"IMPORTANT\r\n", 2, 2);
+        let _ = stack.scroll_to_bottom();
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep_history(200),
+            seq: 1,
+        });
+
+        assert!(
+            grid_text(&stack, id).contains("IMPORTANT"),
+            "output that raced the capture must survive returning to the tail",
+        );
+        let after = scrollbar(&stack, id);
+        assert!(
+            after.total > after.len,
+            "and the capture is adopted, not refused into a shallow grid: {after:?}",
+        );
+    }
+
+    /// Two captures in one visit: the second must also be topped up.
+    /// Adopting the first spends only the batches it covers, never the
+    /// ones still above its watermark.
+    #[test]
+    fn a_second_capture_is_topped_up_too() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"start\r\n", 1, 1);
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id));
+        feed(&mut stack, id, b"FIRST-RACER\r\n", 2, 2);
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep_history(200),
+            seq: 1,
+        });
+        assert!(grid_text(&stack, id).contains("FIRST-RACER"));
+
+        feed(&mut stack, id, b"SECOND-RACER\r\n", 3, 3);
+        // A later capture, still taken before either racer.
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep_history(210),
+            seq: 1,
+        });
+
+        let text = grid_text(&stack, id);
+        assert!(text.contains("FIRST-RACER"), "{text}");
+        assert!(text.contains("SECOND-RACER"), "{text}");
+        let after = scrollbar(&stack, id);
+        assert!(after.total > after.len, "second capture adopted: {after:?}");
+    }
+
+    /// The retained tail is bounded by batch COUNT as well as bytes: one
+    /// event per PTY read means a token-by-token agent stream arrives as
+    /// many tiny batches whose bookkeeping dwarfs their payload.
+    #[test]
+    fn the_retained_tail_is_bounded_by_batch_count_not_just_bytes() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        for i in 0..(SCROLLBACK_CATCHUP_BATCHES as u64 + 500) {
+            feed(&mut stack, id, b".", i + 1, i + 1);
+        }
+        let catchup = &stack.terminals[&id].scrollback_catchup;
+        assert!(
+            catchup.batches.len() <= SCROLLBACK_CATCHUP_BATCHES,
+            "batch count bounded: {}",
+            catchup.batches.len()
+        );
+        assert!(
+            catchup.bytes < SCROLLBACK_CATCHUP_CAP,
+            "byte ceiling never reached, so only the count bound could evict",
+        );
+        assert!(
+            catchup.floor > 0,
+            "eviction raises the floor so a stale capture is refused",
+        );
+    }
+
+    /// Live output that outruns the retained tail evicts from its front,
+    /// so the tail can no longer account for everything above an older
+    /// watermark. That capture is refused rather than adopted lossily —
+    /// the local grid holds every byte already, it is only shallower.
     #[test]
     fn a_capture_is_refused_when_the_racing_output_cannot_be_re_fed() {
         let sk = SessionKey::new("s");
@@ -10431,6 +10638,69 @@ mod deep_scrollback_tests {
         assert_eq!(
             after.total, before.total,
             "the capture was refused, so the grid is untouched"
+        );
+    }
+
+    /// A long-running program sets its terminal modes once, at startup,
+    /// and a ring replay only reaches as far back as the ring still
+    /// holds — so a resync's reset-and-refeed loses modes the program
+    /// still believes are on. Bracketed paste is the load-bearing one:
+    /// `handle_paste` frames a human paste only when it is set, so
+    /// losing it turns a multi-line paste into one submit per line.
+    #[test]
+    fn a_resync_keeps_the_modes_its_replay_no_longer_reaches() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(
+            &mut stack,
+            id,
+            b"\x1b[?2004h\x1b[?1002hagent started\r\n",
+            1,
+            1,
+        );
+        assert!(mode(&stack, id, vt::terminal::Mode::BRACKETED_PASTE));
+        assert!(mode(&stack, id, vt::terminal::Mode::BUTTON_MOUSE));
+
+        // The replay window no longer reaches back to those escapes.
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: b"later output only\r\n".to_vec(),
+            seq: 9,
+            sizes: Vec::new(),
+        });
+
+        assert!(
+            mode(&stack, id, vt::terminal::Mode::BRACKETED_PASTE),
+            "the program still has bracketed paste on; the client must agree",
+        );
+        assert!(
+            mode(&stack, id, vt::terminal::Mode::BUTTON_MOUSE),
+            "same for mouse tracking",
+        );
+    }
+
+    /// A mode the replay DOES carry wins over the carried-over state —
+    /// the re-assertion goes in before the replay, not after, so a
+    /// program that turned a mode off stays off.
+    #[test]
+    fn a_resync_lets_its_replay_override_a_carried_mode() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"\x1b[?2004h", 1, 1);
+        assert!(mode(&stack, id, vt::terminal::Mode::BRACKETED_PASTE));
+
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: b"\x1b[?2004lplain again\r\n".to_vec(),
+            seq: 9,
+            sizes: Vec::new(),
+        });
+
+        assert!(
+            !mode(&stack, id, vt::terminal::Mode::BRACKETED_PASTE),
+            "the replay turned it off and that is the newer truth",
         );
     }
 

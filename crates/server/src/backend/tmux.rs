@@ -1231,11 +1231,21 @@ impl SessionBackend for TmuxBackend {
                 }
                 _ => {}
             }
-            let pty = {
+            // A session the daemon no longer tracks has no PTY to read a
+            // watermark from, and a capture without a truthful watermark
+            // is exactly what this fetch must not serve. Report it as
+            // "no history source" rather than an error: that is the arm
+            // the caller probes `history_disabled` on, so a pane whose
+            // session went away can still tell the user to reopen it
+            // instead of silently serving nothing. (Reading the mark
+            // before the capture moved this lookup ahead of the
+            // empty-seed short circuit, which used to reach that arm.)
+            let Some(pty) = ({
                 let map = self.sessions.lock().await;
-                map.get(key)
-                    .map(|s| s.client.clone())
-                    .ok_or_else(|| BackendError::NotFound(key.into()))?
+                map.get(key).map(|s| s.client.clone())
+            }) else {
+                tracing::debug!(key, "scrollback fetch skipped — session not tracked");
+                return Ok(None);
             };
             // Read the high-water mark BEFORE capturing, because only a
             // mark read before the capture is one the capture is

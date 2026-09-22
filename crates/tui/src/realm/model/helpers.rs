@@ -2089,40 +2089,71 @@ pub(crate) fn emit_clipboard_copy(text: &str) -> ClipboardDelivery {
 #[cfg(target_os = "macos")]
 const NATIVE_CLIPBOARD_DEADLINE: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// One request for the native helper: the text, and where to report
+/// whether it landed.
+#[cfg(target_os = "macos")]
+type NativeClipboardRequest = (String, std::sync::mpsc::SyncSender<bool>);
+
 /// Hand `text` to macOS's `pbcopy`, reporting whether it took it.
 ///
-/// Runs off the UI thread and is abandoned at
-/// [`NATIVE_CLIPBOARD_DEADLINE`]: the caller is the single thread that
-/// repaints, and both the pipe write and the child's exit can block
-/// indefinitely on a wedged pasteboard server. An abandoned helper
-/// leaves its thread parked on that write until the pasteboard recovers
-/// — one parked thread, rather than a frozen UI.
+/// The work happens on a single long-lived worker, not a thread per
+/// copy: the caller is the one thread that repaints, and both the pipe
+/// write and the child's exit can block indefinitely on a wedged
+/// pasteboard server. So a wedge parks exactly one thread however many
+/// times the user copies, and every copy after it fails the rendezvous
+/// immediately and falls back to OSC 52 rather than each waiting out
+/// [`NATIVE_CLIPBOARD_DEADLINE`] and stacking another thread behind the
+/// same wedge.
+///
+/// Two honest limits. A copy that times out is reported as *not*
+/// delivered while its `pbcopy` may still be running, so it can land on
+/// the clipboard after we already fell back — understating delivery,
+/// which is the safe direction, and the fallback carries the same text.
+/// And the rendezvous is unbuffered, so a copy issued in the instant
+/// between the worker finishing one request and blocking on the next
+/// takes the OSC 52 path even though nothing is wrong; that costs a
+/// best-effort transport for one copy, never a lost one.
 #[cfg(target_os = "macos")]
 fn native_clipboard_copy(text: &str) -> bool {
-    use std::io::Write as _;
-    let payload = text.to_string();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let spawned = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        let delivered = match spawned {
-            Ok(mut child) => {
-                let wrote = child
-                    .stdin
-                    .take()
-                    .is_some_and(|mut pipe| pipe.write_all(payload.as_bytes()).is_ok());
-                // `pbcopy` writes the pasteboard on EOF, which the
-                // dropped pipe above just delivered.
-                wrote && child.wait().is_ok_and(|status| status.success())
+    use std::sync::OnceLock;
+    use std::sync::mpsc::{SyncSender, sync_channel};
+    static WORKER: OnceLock<SyncSender<NativeClipboardRequest>> = OnceLock::new();
+    let worker = WORKER.get_or_init(|| {
+        let (tx, rx) = sync_channel::<NativeClipboardRequest>(0);
+        std::thread::spawn(move || {
+            for (payload, reply) in rx {
+                let _ = reply.send(pbcopy(&payload));
             }
-            Err(_) => false,
-        };
-        let _ = tx.send(delivered);
+        });
+        tx
     });
-    rx.recv_timeout(NATIVE_CLIPBOARD_DEADLINE).unwrap_or(false)
+    let (reply_tx, reply_rx) = sync_channel(1);
+    if worker.try_send((text.to_string(), reply_tx)).is_err() {
+        return false;
+    }
+    reply_rx
+        .recv_timeout(NATIVE_CLIPBOARD_DEADLINE)
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn pbcopy(payload: &str) -> bool {
+    use std::io::Write as _;
+    let Ok(mut child) = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let wrote = child
+        .stdin
+        .take()
+        .is_some_and(|mut pipe| pipe.write_all(payload.as_bytes()).is_ok());
+    // `pbcopy` writes the pasteboard on EOF, which the dropped pipe
+    // above just delivered.
+    wrote && child.wait().is_ok_and(|status| status.success())
 }
 
 #[cfg(not(target_os = "macos"))]

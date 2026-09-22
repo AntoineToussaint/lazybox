@@ -1945,6 +1945,7 @@ showing keybinding search only",
                     skill: None,
                     provider: None,
                     next: Vec::new(),
+                    action: None,
                     origin: Default::default(),
                 };
                 match lazybox_config::Snippets::upsert_global_snippet(&key, &snippet) {

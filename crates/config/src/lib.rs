@@ -13,8 +13,8 @@ pub use skills::{
     validate_skill_name,
 };
 pub use snippets::{
-    Snippet, SnippetOrigin, SnippetState, Snippets, SnippetsError, body_hash, classify_snippet,
-    export_body_hash, keep_mine_target,
+    Snippet, SnippetAction, SnippetOrigin, SnippetState, Snippets, SnippetsError, body_hash,
+    classify_snippet, export_body_hash, keep_mine_target,
 };
 
 use serde::{Deserialize, Serialize};

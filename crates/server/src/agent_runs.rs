@@ -141,10 +141,23 @@ pub async fn handle_start_agent_run(
         }
     };
     let mut argv = agent_impl.spawn(&spawn_ctx);
-    if let Ok(workspace) = crate::spawn_handler::load_workspace(
+    let workspace = crate::spawn_handler::load_workspace(
         config,
         &lazybox_core::WorkspaceKey::new(resolved_session_key.as_str()),
-    ) && let Some(context) = crate::workspace::floating::coordination_prompt(&workspace, &yaml)
+    )
+    .ok();
+    // The standing rules are resolved here, against this run's own repo, and
+    // handed to the driver as prose: the injection point sits at the provider
+    // boundary, far from any `Config`.
+    let standing_rules = crate::session_briefing::standing_rules(
+        &yaml,
+        workspace
+            .as_ref()
+            .and_then(lazybox_core::Workspace::repo_slug)
+            .as_deref(),
+    );
+    if let Some(workspace) = workspace.as_ref()
+        && let Some(context) = crate::workspace::floating::coordination_prompt(workspace, &yaml)
     {
         argv.extend(agent_impl.session_context_args(&context));
     }
@@ -230,6 +243,7 @@ pub async fn handle_start_agent_run(
             spawner,
             input_rx,
             bus.clone(),
+            standing_rules,
         )
         .await;
         // The handle in `runs` is the single token for the terminal
@@ -533,13 +547,14 @@ async fn drive_agent_stream(
     spawner: Arc<dyn AgentStreamSpawner>,
     input_rx: mpsc::Receiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
+    standing_rules: String,
 ) -> DriveOutcome {
     match protocol {
         StructuredAgentProtocol::ClaudeStreamJson => {
-            drive_persistent_stream(run_id, protocol, io, input_rx, bus).await
+            drive_persistent_stream(run_id, protocol, io, input_rx, bus, standing_rules).await
         }
         StructuredAgentProtocol::CodexExecJson => {
-            drive_codex_exec(run_id, io, config, spawner, input_rx, bus).await
+            drive_codex_exec(run_id, io, config, spawner, input_rx, bus, standing_rules).await
         }
     }
 }
@@ -551,6 +566,7 @@ async fn drive_persistent_stream(
     io: AgentStreamIo,
     mut input_rx: mpsc::Receiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
+    standing_rules: String,
 ) -> DriveOutcome {
     let AgentStreamIo {
         mut stdin,
@@ -568,7 +584,12 @@ async fn drive_persistent_stream(
                     input_closed = true;
                     continue;
                 };
-                let input = match input_with_session_context(protocol, input, session_context_pending) {
+                let input = match input_with_session_context(
+                    protocol,
+                    input,
+                    session_context_pending,
+                    &standing_rules,
+                ) {
                     Ok(Some(input)) => input,
                     Ok(None) => continue,
                     Err(e) => {
@@ -637,6 +658,7 @@ async fn drive_codex_exec(
     spawner: Arc<dyn AgentStreamSpawner>,
     mut input_rx: mpsc::Receiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
+    standing_rules: String,
 ) -> DriveOutcome {
     let protocol = StructuredAgentProtocol::CodexExecJson;
     let mut first_io = Some(first_io);
@@ -645,7 +667,12 @@ async fn drive_codex_exec(
     let mut session_context_pending = true;
 
     while let Some(input) = input_rx.recv().await {
-        let input = match input_with_session_context(protocol, input, session_context_pending) {
+        let input = match input_with_session_context(
+            protocol,
+            input,
+            session_context_pending,
+            &standing_rules,
+        ) {
             Ok(Some(input)) => input,
             Ok(None) => continue,
             Err(error) => {
@@ -770,6 +797,7 @@ fn input_with_session_context(
     protocol: StructuredAgentProtocol,
     mut input: AgentInputMessage,
     inject: bool,
+    standing_rules: &str,
 ) -> Result<Option<AgentInputMessage>, crate::ServerError> {
     if input.text.is_none() && input.json.is_none() {
         return Ok(None);
@@ -778,8 +806,8 @@ fn input_with_session_context(
         return Ok(Some(input));
     }
 
-    let briefing = lazybox_agents::lazybox_session_context();
-    let prefix = lazybox_agents::lazybox_session_prompt;
+    let briefing = lazybox_agents::lazybox_session_context(standing_rules);
+    let prefix = |text: &str| lazybox_agents::lazybox_session_prompt(standing_rules, text);
     if let Some(text) = input.text.take() {
         input.text = Some(prefix(&text));
         return Ok(Some(input));
@@ -1098,6 +1126,10 @@ fn question_choices(raw: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Stand-in for the rendered policy block the run resolves from config,
+    /// passed explicitly so these tests do not depend on what is on disk.
+    const RULES: &str = "Standing rules:\n  - Ask before filing anything.";
+
     use super::*;
     use serde_json::json;
 
@@ -1120,7 +1152,7 @@ mod tests {
             crate::spawn_plan::resolve_model_for_agent(&cfg, codex.as_ref(), "codex", None)
                 .unwrap()
                 .args,
-            vec!["--model".to_string(), "gpt-5.5".to_string()]
+            vec!["--model".to_string(), "gpt-5.6-sol".to_string()]
         );
         assert_eq!(
             crate::spawn_plan::resolve_model_for_agent(&cfg, claude.as_ref(), "claude", Some("M"),)
@@ -1144,11 +1176,16 @@ mod tests {
                 json: None,
             },
             true,
+            RULES,
         )
         .expect("inject briefing")
         .expect("non-empty input");
         let first = first.text.expect("text remains text");
         assert!(first.contains("lazybox log"), "briefing missing: {first}");
+        assert!(
+            first.contains("Ask before filing anything."),
+            "the caller's standing rules ride the structured injection too: {first}"
+        );
         assert!(first.ends_with("---\n\nreview this PR"));
 
         let follow_up = input_with_session_context(
@@ -1158,6 +1195,7 @@ mod tests {
                 json: None,
             },
             false,
+            RULES,
         )
         .expect("preserve follow-up")
         .expect("non-empty input");
@@ -1179,16 +1217,24 @@ mod tests {
                 .to_string(),
             ),
         };
-        let injected =
-            input_with_session_context(StructuredAgentProtocol::ClaudeStreamJson, input, true)
-                .expect("inject raw Claude message")
-                .expect("non-empty input");
+        let injected = input_with_session_context(
+            StructuredAgentProtocol::ClaudeStreamJson,
+            input,
+            true,
+            RULES,
+        )
+        .expect("inject raw Claude message")
+        .expect("non-empty input");
         let value: Value = serde_json::from_str(injected.json.as_deref().expect("raw JSON"))
             .expect("still valid JSON");
         let text = value["message"]["content"][0]["text"]
             .as_str()
             .expect("text block");
         assert!(text.contains("lazybox log"), "briefing missing: {text}");
+        assert!(
+            text.contains("Ask before filing anything."),
+            "the caller's standing rules ride the raw-JSON injection too: {text}"
+        );
         assert!(text.ends_with("---\n\ninspect the failure"));
         assert_eq!(value["message"]["content"].as_array().unwrap().len(), 1);
     }

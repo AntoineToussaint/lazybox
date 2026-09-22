@@ -81,7 +81,28 @@ prompt — in any repo, including ones with no agent-context file of their own.
 It is user-visible text with tests over it (`crates/core/tests/`), so treat a
 wording change as a behaviour change: it must not promise a workspace for a
 filed issue, and it must keep naming the coordination tools, since a session
-that does not know they exist will not look for them. The base half also has
+that does not know they exist will not look for them.
+
+**Two kinds of content, and only one of them is ours to write.** The
+mechanics — what `working` means, that `@lazybox` spawns an agent, where
+`.lazybox/task.json` is — are facts about lazybox, and a user who "turned one
+off" would simply be lied to; those stay as literals here. A *standing rule*
+("ask before filing an issue", "prefer one PR over a stack") is an opinion
+about how the user wants work done, so it lives in
+`lazybox_core::agent_policy` as a named, individually overridable policy and
+arrives here **already rendered**, as a `standing_rules: &str`. This crate
+depends on no config crate on purpose: its job is to *say* the rules, not to
+resolve them. The daemon resolves them once per spawn (global `policies:`,
+then `repos.<owner/name>.policies:`) in `lazybox_server::session_briefing` and
+hands the same block to all four channels below — a second resolution would
+be a second answer to the same session. An empty block omits the section
+whole; never render a header with no bullets under it.
+
+Placement is load-bearing too: rules read *between* the opening paragraph and
+the mechanics half, because a rule appended after 5 KB of reference material
+is a rule the model skims. The byte cap in `context_stays_tight` measures
+only the text this crate owns — the user's own rules are their own budget,
+capped next to their prose in core. The base half also has
 to keep pointing at `.lazybox/task.json` and saying not to `gh issue view` the
 record it already holds — the GitHub budget it protects is the daemon's own
 (#1799). Global response/formatting rules live here too, once per session;

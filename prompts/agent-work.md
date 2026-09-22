@@ -93,8 +93,17 @@ and the PR that closes it share that one row rather than splitting into two.
 Work on a tracked item happens **there**.
 
 So a fresh line of work — a side-investigation, a follow-up, a slice you
-carved out — starts by filing the record, not by opening a workspace beside
-it:
+carved out — belongs in a record of its own, never in a workspace beside one.
+
+**Whether you may open that record is a standing rule, not a step in this
+checklist.** The session briefing you were given carries the rules in force
+on this box, and lazybox's shipped default is that filing needs the user's
+explicit go-ahead: say what you would file, and wait for the answer. (The
+user can relax or replace that rule — `policies:` in `~/.lazybox/config.yaml`
+— so read the briefing rather than assuming either way.) An instruction that
+names the filed issue as its own deliverable is itself that go-ahead.
+
+Once you have it, file the record — never a workspace beside it:
 
 ```
 gh issue create --repo <owner/repo> --title <title> --body <body>

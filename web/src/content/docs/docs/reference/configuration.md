@@ -40,6 +40,7 @@ which is the canonical source of truth for defaults and field names.
 | [`auto_fix`](#auto_fix) | Auto-fix PRs on CI failure / conflict |
 | [`merge_on_green`](#merge_on_green) | Opt bot authors into merge-on-green |
 | [`conventions`](#conventions) | Commit / PR conventions injected into the agent-work brief |
+| [`policies`](#policies) | Standing rules stated in every spawned agent's briefing |
 | [`shell`](#shell) | Shell command for the `s` spawn |
 | [`sandbox`](#sandbox) | Remote dev-box lifecycle for `lazybox sandbox …` and the `r`-spawn |
 | [`remote`](#remote) | Client-side `--connect` port-forward supervisor (`remote.tunnel`) |
@@ -270,6 +271,12 @@ Provide either `content` or `source` per script, never both.
 | Type | Description |
 | --- | --- |
 | string | Override [`worktree.branch_prefix`](#worktree) for this repo. `"at"` → `at/issue-42`; `""` drops the prefix (`issue-42`); omit to inherit the global value. |
+
+### `policies`
+
+| Type | Description |
+| --- | --- |
+| map of policy id → bool \| string | Standing agent rules for this repo, layered **on top** of the box-wide [`policies`](#policies) block. Same shape and same ids. |
 
 See [Per-repo env & mounts](/docs/how-to/per-repo-env-and-mounts/) for a
 walkthrough.
@@ -731,6 +738,58 @@ and on the interactive `w` work command.
 | `commit_style` | `conventional` \| `none` \| `custom` | `conventional` | Commit-message / PR-title-prefix style. `conventional` = [Conventional Commits](https://www.conventionalcommits.org/); `none` = no convention; `custom` = use `custom_instruction`. An unknown value falls back to `conventional`. |
 | `custom_instruction` | string | _(unset)_ | House style injected verbatim when `commit_style: custom`. A blank value falls back to the default guidance. |
 | `include_closes` | bool | `true` | Keep the `Closes #N.` body line that collapses an issue and its PR. Set `false` to have the brief tell the agent NOT to add it (repos that close issues manually). |
+
+## `policies`
+
+The **standing rules** lazybox states in every spawned agent's briefing — one
+named rule per entry, each one individually overridable. They ride the
+spawn-intrinsic briefing, so they reach every agent kind (Claude, Codex,
+Cursor, a `GenericCli` you declared yourself) and a bare `a c` start as surely
+as a `w` work prompt.
+
+Two rules ship by default:
+
+| Policy id | What it says |
+| --- | --- |
+| `ask-before-filing-a-record` | Never open a GitHub issue or a Linear ticket without the user's explicit go-ahead. Say what you would file and wait for a yes; once given, the filed record is the deliverable and its URL is what gets reported. |
+| `one-self-contained-pr` | Prefer one self-contained pull request, even a large one, over a stack of dependent PRs. Split only when the user asks. |
+
+Each entry is keyed by policy id, and its value is one of:
+
+| Value | Effect |
+| --- | --- |
+| `false` | Drop the rule — it is not stated at all. |
+| `true` | Keep lazybox's own wording. Useful per repo, to re-assert a rule the box-wide block turned off. |
+| a string | Replace the wording. An id no built-in defines **adds** a rule of your own, in the same block. |
+| `""` (blank) | Same as `false` — an empty bullet is noise, not a policy. |
+
+```yaml
+policies:
+  one-self-contained-pr: false                      # drop it box-wide
+  ask-before-filing-a-record: "Ask me before filing anything, anywhere."
+  house-rule: "Never push to `main`; always open a PR."
+```
+
+`repos.<owner/name>.policies` takes the same shape and layers **on top** of the
+box-wide block for work in that repo:
+
+```yaml
+repos:
+  acme/api:
+    policies:
+      one-self-contained-pr: true       # ...but keep it here
+      ask-before-filing-a-record: false # this repo wants issues filed freely
+```
+
+Turning every rule off removes the section from the briefing entirely — no
+header, no blank gap. The rules a session was given are prose in its own
+context, so an agent can quote back which ones it is following.
+
+Repo-scoped rules reach a session through the spawn-side channels, which know
+the workspace. Claude's `SessionStart` hook runs as its own process,
+correlated to a terminal rather than a workspace, so it states the box-wide
+set; on a repo that overrides a rule, the override still arrives via the
+spawn's own briefing.
 
 ## `shell`
 

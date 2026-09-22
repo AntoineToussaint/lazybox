@@ -157,6 +157,24 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub conventions: lazybox_core::Conventions,
+    /// Standing agent policies — the house rules lazybox states in every
+    /// spawned agent's briefing. A map from policy id to `false` (drop
+    /// the rule), `true` (keep lazybox's wording), or replacement prose;
+    /// an id no built-in defines adds a rule of your own. Layered under
+    /// `repos.<owner/name>.policies`. See
+    /// [`lazybox_core::AgentPolicies`].
+    ///
+    /// ```yaml
+    /// policies:
+    ///   one-self-contained-pr: false
+    ///   ask-before-filing-a-record: "Ask me before filing anything."
+    ///   house-rule: "Never touch `main` directly."
+    /// ```
+    #[serde(
+        default,
+        skip_serializing_if = "lazybox_core::AgentPolicyOverrides::is_empty"
+    )]
+    pub policies: lazybox_core::AgentPolicyOverrides,
 }
 
 /// `setup:` block — wizard-driven user config. Mirrors
@@ -1892,6 +1910,22 @@ pub struct RepoConfig {
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<bool>,
+    /// Per-repo standing agent policies, layered ON TOP of the global
+    /// `policies:` map — so a repo can drop a rule the box keeps, or
+    /// re-assert with `true` one the box turned off. Same shape as the
+    /// global map.
+    ///
+    /// ```yaml
+    /// repos:
+    ///   acme/api:
+    ///     policies:
+    ///       ask-before-filing-a-record: false   # this repo wants the issues
+    /// ```
+    #[serde(
+        default,
+        skip_serializing_if = "lazybox_core::AgentPolicyOverrides::is_empty"
+    )]
+    pub policies: lazybox_core::AgentPolicyOverrides,
 }
 
 /// Per-repo approval policy (`repos.<owner/name>.approval`). Maps to the
@@ -2796,6 +2830,24 @@ impl Config {
     ///
     /// The deprecated `models.priority` key is already folded into
     /// `capability` by `Config::parse` (#1598), so this reads one map.
+    /// The standing agent policies in force for work in `repo`
+    /// (`owner/name`), or box-wide when `repo` is `None` / unknown:
+    /// lazybox's built-ins with the global `policies:` map applied, then
+    /// the repo's own on top.
+    ///
+    /// Resolved here rather than at each spawn site so the global→repo
+    /// layering has exactly one implementation — the briefing reaches an
+    /// agent through four different channels (Claude's hook, Codex's
+    /// `developer_instructions`, a prompt prefix, a structured run) and
+    /// they must all state the same rules.
+    pub fn agent_policies(&self, repo: Option<&str>) -> lazybox_core::AgentPolicies {
+        let mut layers = vec![&self.policies];
+        if let Some(entry) = repo.and_then(|repo| self.repos.get(repo)) {
+            layers.push(&entry.policies);
+        }
+        lazybox_core::AgentPolicies::resolve(layers)
+    }
+
     pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
         let builtin = lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default();
         let mut models = match self.agents.get(agent_id) {
@@ -6233,7 +6285,7 @@ ui:
         assert!(!cfg.agent_models("codex").tiers.is_empty());
         assert_eq!(
             cfg.agent_models("codex").resolve_args(None),
-            vec!["--model".to_string(), "gpt-5.5".to_string()]
+            vec!["--model".to_string(), "gpt-5.6-sol".to_string()]
         );
         assert!(cfg.agent_models("no-such-agent").tiers.is_empty());
     }
@@ -6299,7 +6351,7 @@ agents:
         assert_eq!(models.default.as_deref(), Some("L"));
         assert_eq!(
             models.resolve_args(None),
-            vec!["--model".to_string(), "gpt-5.5".to_string()],
+            vec!["--model".to_string(), "gpt-5.6-sol".to_string()],
             "a bare Codex spawn always pins Lazybox's explicit model"
         );
     }
@@ -7087,5 +7139,89 @@ open_with:
         let dumped = serde_yaml::to_string(&cfg).expect("dump");
         let back: Config = serde_yaml::from_str(&dumped).expect("reparse");
         assert_eq!(back.ui.views, cfg.ui.views);
+    }
+
+    #[test]
+    fn policies_parse_from_yaml_in_both_spellings() {
+        let cfg = Config::parse(
+            r#"
+policies:
+  one-self-contained-pr: false
+  ask-before-filing-a-record: Ask me before filing anything.
+  house-rule: Never touch `main` directly.
+"#,
+        )
+        .expect("parse");
+        let policies = cfg.agent_policies(None);
+        assert!(policies.text("one-self-contained-pr").is_none());
+        assert_eq!(
+            policies.text("ask-before-filing-a-record"),
+            Some("Ask me before filing anything.")
+        );
+        assert_eq!(
+            policies.text("house-rule"),
+            Some("Never touch `main` directly.")
+        );
+    }
+
+    #[test]
+    fn an_unset_policies_block_is_lazyboxs_builtins() {
+        let cfg = Config::parse("").expect("parse");
+        assert_eq!(
+            cfg.agent_policies(None),
+            lazybox_core::AgentPolicies::builtin()
+        );
+        // ...and never written back into a config file the user did not
+        // ask for it in.
+        assert!(
+            !serde_yaml::to_string(&cfg)
+                .expect("dump")
+                .contains("policies")
+        );
+    }
+
+    #[test]
+    fn a_repo_policies_block_layers_over_the_global_one() {
+        let cfg = Config::parse(
+            r#"
+policies:
+  one-self-contained-pr: false
+repos:
+  acme/api:
+    policies:
+      one-self-contained-pr: true
+      ask-before-filing-a-record: This repo wants the issues.
+"#,
+        )
+        .expect("parse");
+        // Box-wide, the rule is off.
+        assert!(
+            cfg.agent_policies(None)
+                .text("one-self-contained-pr")
+                .is_none()
+        );
+        // In the repo, it is back — and the other rule is reworded.
+        let repo = cfg.agent_policies(Some("acme/api"));
+        assert_eq!(
+            repo.text("one-self-contained-pr"),
+            lazybox_core::AgentPolicies::builtin().text("one-self-contained-pr")
+        );
+        assert_eq!(
+            repo.text("ask-before-filing-a-record"),
+            Some("This repo wants the issues.")
+        );
+        // A repo with no block of its own reads the global layer only.
+        assert_eq!(
+            cfg.agent_policies(Some("acme/other")),
+            cfg.agent_policies(None)
+        );
+    }
+
+    #[test]
+    fn policies_survive_a_write_read_round_trip() {
+        let cfg = Config::parse("policies:\n  house-rule: Never touch main.\n").expect("parse");
+        let back: Config =
+            serde_yaml::from_str(&serde_yaml::to_string(&cfg).expect("dump")).expect("reparse");
+        assert_eq!(back.agent_policies(None), cfg.agent_policies(None));
     }
 }

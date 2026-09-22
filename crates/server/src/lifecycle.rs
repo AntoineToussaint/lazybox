@@ -181,7 +181,11 @@ async fn ingest_hook_inner(args: &[String]) {
     // `SessionStart` hook's stdout, which Claude adds to the model's context.
     // Printed before the daemon send so a stopped daemon still injects it, and
     // independent of it so the existing state path is untouched.
-    if let Some(text) = session_context_to_emit(args, &hook) {
+    // The hook runs as its own short-lived process, out-of-band of the
+    // daemon, so it reads config off disk here — once, at the emit site, so
+    // the decision function below stays pure and testable.
+    let standing_rules = crate::session_briefing::standing_rules_from_disk(None);
+    if let Some(text) = session_context_to_emit(args, &hook, &standing_rules) {
         print!("{text}");
         let _ = std::io::stdout().flush();
     }
@@ -398,15 +402,27 @@ pub fn parse_hook_correlation(args: &[String]) -> (Option<String>, Option<u64>) 
 /// session actually wired to the MCP bus (`SpawnFlags::mcp_wired`). A ReadOnly
 /// "Ask lazybox" launch is never provisioned, so it gets the base blurb but is
 /// not told about tools it cannot call.
-fn session_context_to_emit(args: &[String], hook: &lazybox_ipc::HookEvent) -> Option<String> {
+///
+/// `standing_rules` arrives already rendered. Repo-scoped rules are not
+/// resolvable on this path: the hook is correlated to a terminal by backend
+/// key, not to a workspace, so it emits the box-wide set. A per-repo override
+/// still reaches the session through the spawn-side channels, which do know
+/// the repo.
+fn session_context_to_emit(
+    args: &[String],
+    hook: &lazybox_ipc::HookEvent,
+    standing_rules: &str,
+) -> Option<String> {
     let marked = args.iter().any(|arg| arg == "--emit-session-context");
     if hook.kind != lazybox_ipc::HookEventKind::SessionStart || !marked {
         return None;
     }
     if args.iter().any(|arg| arg == "--emit-mcp-context") {
-        Some(lazybox_agents::lazybox_session_context_with_mcp())
+        Some(lazybox_agents::lazybox_session_context_with_mcp(
+            standing_rules,
+        ))
     } else {
-        Some(lazybox_agents::lazybox_session_context().to_string())
+        Some(lazybox_agents::lazybox_session_context(standing_rules))
     }
 }
 
@@ -419,6 +435,11 @@ fn read_stdin_to_string() -> String {
 #[cfg(test)]
 mod hook_tests {
     use super::*;
+
+    /// Stand-in for the rendered policy block the emit site resolves from
+    /// config. Passed explicitly so these tests stay hermetic — the decision
+    /// this function makes is about the markers, not about what is on disk.
+    const RULES: &str = "Standing rules:\n  - Ask before filing anything.";
 
     #[test]
     fn hook_correlation_accepts_backend_key_and_legacy_terminal() {
@@ -453,17 +474,17 @@ mod hook_tests {
         // Marked SessionStart, no MCP marker → the base capability blurb, and
         // NOT the bus paragraph (this is the ReadOnly/unprovisioned case).
         assert_eq!(
-            session_context_to_emit(&marked, &hook("SessionStart")),
-            Some(lazybox_agents::lazybox_session_context().to_string()),
+            session_context_to_emit(&marked, &hook("SessionStart"), RULES),
+            Some(lazybox_agents::lazybox_session_context(RULES)),
         );
         // Every other event stays silent, even when marked.
         for other in ["Stop", "UserPromptSubmit", "PreToolUse", "Notification"] {
-            assert_eq!(session_context_to_emit(&marked, &hook(other)), None);
+            assert_eq!(session_context_to_emit(&marked, &hook(other), RULES), None);
         }
         // Codex omits the marker → even SessionStart stays a no-op.
         let unmarked = vec!["--backend-key".to_string(), "lzb-1".to_string()];
         assert_eq!(
-            session_context_to_emit(&unmarked, &hook("SessionStart")),
+            session_context_to_emit(&unmarked, &hook("SessionStart"), RULES),
             None
         );
     }
@@ -480,11 +501,11 @@ mod hook_tests {
 
         // Wired spawn (both markers) → base + coordination paragraph.
         assert_eq!(
-            session_context_to_emit(&with_mcp, &hook("SessionStart")),
-            Some(lazybox_agents::lazybox_session_context_with_mcp()),
+            session_context_to_emit(&with_mcp, &hook("SessionStart"), RULES),
+            Some(lazybox_agents::lazybox_session_context_with_mcp(RULES)),
         );
         // Base-only emission never names a bus-only tool.
-        let base_text = session_context_to_emit(&base, &hook("SessionStart")).expect("base");
+        let base_text = session_context_to_emit(&base, &hook("SessionStart"), RULES).expect("base");
         assert!(
             !base_text.contains("post_note") && !base_text.contains("blackboard"),
             "unwired briefing must not advertise the bus: {base_text}"

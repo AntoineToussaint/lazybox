@@ -52,6 +52,11 @@ fn preamble_keeps_the_tracker_record_section() {
 
 #[test]
 fn preamble_starts_new_work_from_the_tracker_record() {
+    // This guards *where* new work goes, not *whether* to open it — the
+    // second question moved to a standing rule (see
+    // `preamble_defers_permission_to_file_to_the_standing_rules`). Filing,
+    // once permitted, still has exactly one correct shape.
+    //
     // #1586: the preamble used to tell every agent to run `lazybox
     // workspace create --name …` "instead of filing an issue", which is
     // exactly the split the rule forbids — the branch, activity, cost,
@@ -71,6 +76,48 @@ fn preamble_starts_new_work_from_the_tracker_record() {
             .lines()
             .any(|line| as_command_line(line).starts_with("lazybox workspace create")),
         "preamble must not offer `lazybox workspace create` as a command to run"
+    );
+}
+
+#[test]
+fn preamble_defers_permission_to_file_to_the_standing_rules() {
+    // #1586 made the filed issue the deliverable for a follow-up an agent
+    // noticed. That settled *where* new work goes (its own record, never a
+    // second workspace) but also, by omission, settled *whether* to open it
+    // — the preamble read as "file it", and fleets filed. The default is now
+    // the opposite, and it is a `policies:` rule rather than prose here, so
+    // that a user can relax it without editing lazybox.
+    //
+    // The preamble therefore must NOT restate the rule as its own absolute:
+    // two copies of a rule, one overridable and one not, disagree the moment
+    // anyone overrides it. It must point at the briefing instead, and it must
+    // still say which way lazybox's default falls — an agent that is told
+    // only "consult a rule" and never told the shipped default will guess.
+    let text = flowed();
+    for needle in [
+        "Whether you may open that record is a standing rule",
+        "The session briefing you were given carries the rules in force",
+        "filing needs the user's explicit go-ahead",
+        // The override channel, named so a user reading an agent's
+        // explanation can find the knob.
+        "`policies:` in `~/.lazybox/config.yaml`",
+    ] {
+        assert!(
+            text.contains(needle),
+            "the preamble must defer the filing decision to the standing rules; missing {needle:?}"
+        );
+    }
+    // The gate is on the decision, not on the mechanics: everything that
+    // makes a *correct* filing — the command, the cross-repo parent form,
+    // the no-row caveat — must survive it. Those have their own guards
+    // below; what this one adds is that the gate reads before them.
+    let gate = text
+        .find("Whether you may open that record")
+        .expect("the gate");
+    let command = text.find("gh issue create").expect("the command");
+    assert!(
+        gate < command,
+        "the permission gate must read before the command it gates"
     );
 }
 

@@ -136,9 +136,24 @@
           "label": "Codex",
           "models": [
             {
+              "alias": "S",
+              "excluded_from_default": false,
+              "label": "Luna"
+            },
+            {
+              "alias": "M",
+              "excluded_from_default": false,
+              "label": "Terra"
+            },
+            {
               "alias": "L",
               "excluded_from_default": false,
-              "label": "GPT-5.5"
+              "label": "Sol"
+            },
+            {
+              "alias": "XL",
+              "excluded_from_default": false,
+              "label": "Astra"
             }
           ]
         },

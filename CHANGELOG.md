@@ -6,6 +6,29 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Standing agent policies.** The rules lazybox states in every spawned
+  agent's briefing are now named, individually overridable policies rather
+  than one string. Two ship by default: **never open a GitHub issue or a
+  Linear ticket without the user's explicit go-ahead** (this reverses the
+  previous default, which told agents to treat a filed issue as the
+  deliverable for any follow-up they noticed), and **prefer one
+  self-contained pull request, even a large one, over a stack**. Override
+  either from `policies:` in `~/.lazybox/config.yaml` — `false` drops a
+  rule, a string rewords it, and an id lazybox does not define adds one of
+  your own. `repos.<owner/name>.policies` layers on top per repo.
+
+### Fixed
+
+- Codex spawns on the current coding ladder instead of a migrated model id.
+  The pinned `gpt-5.5` has been superseded by `gpt-5.6-sol` in the Codex
+  CLI's own migration table, and the one-tier menu meant "default model" and
+  "only model" were the same setting. Codex now ships the same S/M/L/XL
+  strengths as Claude — Luna, Terra, Sol, Astra — so `w S`/`w M`, the
+  `best`/`high`/`medium`/`low` capability words and the Settings default-model
+  picker all select a real model for a Codex default agent.
+
 ## [0.1.17] - 2026-09-19
 
 ### Added

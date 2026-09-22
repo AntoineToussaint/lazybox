@@ -68,10 +68,21 @@ one, in the PR body.
 
 **The tracker record is the workspace.** A GitHub issue or PR, a Linear or
 Jira ticket, is worked in the one workspace it already has — an issue and the
-PR that closes it share that row. New work starts by filing the record
+PR that closes it share that row. New work goes in a record of its own
 (`gh issue create --repo <owner/repo>`, under an epic `--parent <url>`), never
-by opening a second workspace beside it. Named workspaces are repo-less
-scratch only.
+in a second workspace beside one. Named workspaces are repo-less scratch only.
+
+**Filing that record needs the user's explicit go-ahead**, and so does a
+Linear ticket. This is a *standing rule*, not a hardcoded string: the rules
+lazybox states in every agent's briefing are named, individually overridable
+policies (`lazybox_core::agent_policy`, `policies:` in
+`~/.lazybox/config.yaml`, `repos.<owner/name>.policies:` per repo). Two ship
+by default — ask before filing a record, and prefer one self-contained PR
+over a stack. Agent-facing text elsewhere must *defer* to them rather than
+restate them: a second, non-overridable copy of a rule disagrees with the
+first the moment anyone overrides it. An instruction whose own stated
+deliverable is the filed issue — the `carve` snippet, a Planner role spawn —
+is itself the go-ahead.
 
 **Some GitHub labels are live coordination state**, not metadata: `working` /
 `lazybox:w:…` (a running agent owns this task), `no-auto-fix` /

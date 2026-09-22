@@ -52,6 +52,12 @@ pub struct SpawnOptions {
 #[derive(Debug)]
 pub(crate) struct SpawnPlanInput {
     pub session_key: SessionKey,
+    /// The user's standing rules, already rendered and already resolved
+    /// against this spawn's repo by the caller. Carried on the input rather
+    /// than resolved here so the native-startup-arg channel below and the
+    /// first-prompt channel in `spawn_handler` cannot state different rules
+    /// to the same session. Empty when every rule is turned off.
+    pub standing_rules: String,
     pub kind: TerminalKind,
     pub cwd: PathBuf,
     pub agent_worktree: PathBuf,
@@ -181,6 +187,7 @@ pub(crate) fn build_spawn_plan(
 ) -> Result<SpawnPlan, SpawnPlanError> {
     let SpawnPlanInput {
         session_key,
+        standing_rules,
         kind,
         cwd,
         agent_worktree,
@@ -247,6 +254,7 @@ pub(crate) fn build_spawn_plan(
         resume,
         provider_session_id.as_deref(),
         access,
+        &standing_rules,
     )?;
     // Inject the coordination MCP server (#1420) into a supporting agent's
     // argv when the caller provisioned a config. Server-side (not in the
@@ -443,6 +451,7 @@ pub(crate) fn argv_for(
     resume: bool,
     provider_session_id: Option<&str>,
     access: AgentRunAccess,
+    standing_rules: &str,
 ) -> Result<Vec<String>, SpawnPlanError> {
     match kind {
         TerminalKind::Agent(agent_id) => {
@@ -466,7 +475,7 @@ pub(crate) fn argv_for(
                 agent.spawn(&ctx)
             };
             if ctx.hook_settings_path.is_none() || ctx.access == AgentRunAccess::ReadOnly {
-                let mut context = lazybox_agents::lazybox_session_context().to_string();
+                let mut context = lazybox_agents::lazybox_session_context(standing_rules);
                 if let Some(extra) = coordination_context {
                     context.push_str("\n\n");
                     context.push_str(extra);
@@ -649,6 +658,7 @@ mod tests {
     fn input(kind: TerminalKind) -> SpawnPlanInput {
         SpawnPlanInput {
             session_key: SessionKey::from("github-acme-widget-657"),
+            standing_rules: lazybox_core::AgentPolicies::builtin().render(),
             kind,
             cwd: PathBuf::from("/worktrees/widget-657"),
             agent_worktree: PathBuf::from("/worktrees/widget-657"),
@@ -885,7 +895,7 @@ mod tests {
                 .expect("bare Codex spawn and resume carry native startup context");
             assert_eq!(
                 serde_json::from_str::<String>(context_arg).expect("quoted briefing"),
-                lazybox_agents::lazybox_session_context()
+                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render())
             );
         }
     }
@@ -903,11 +913,13 @@ mod tests {
                 &Registry::default_builtins(),
             )
             .expect("hookless Claude plan");
-            assert!(plan.argv.windows(2).any(|args| args
-                == [
-                    "--append-system-prompt",
-                    lazybox_agents::lazybox_session_context()
-                ]));
+            let expected =
+                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render());
+            assert!(
+                plan.argv
+                    .windows(2)
+                    .any(|args| args == ["--append-system-prompt", expected.as_str()])
+            );
         }
     }
 

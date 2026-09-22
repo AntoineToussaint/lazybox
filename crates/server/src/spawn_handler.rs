@@ -2285,18 +2285,33 @@ async fn handle_spawn_inner(
     let hook_settings = exe.as_deref().and_then(|exe| {
         write_hook_settings(config, &kind, terminal_id, &hook_command_placeholder(exe))
     });
+    // The user's standing rules, resolved once for this spawn against its own
+    // repo. Every channel the briefing can ride below — a native startup flag,
+    // a first-prompt prefix, the coordination-context fallback — reads this
+    // one value, so they cannot state different rules to the same session.
+    let standing_rules = crate::session_briefing::standing_rules(
+        &cfg,
+        load_workspace(config, &WorkspaceKey::new(session_key.as_str()))
+            .ok()
+            .as_ref()
+            .and_then(lazybox_core::Workspace::repo_slug)
+            .as_deref(),
+    );
     // Native context flags also cover bare starts (Codex and hookless Claude).
     // Other adapters receive the same briefing before their first task.
     if let TerminalKind::Agent(agent_id) = &kind
         && hook_settings.is_none()
         && config.agents.get(agent_id).is_some_and(|agent| {
             agent
-                .session_context_args(lazybox_agents::lazybox_session_context())
+                .session_context_args(&lazybox_agents::lazybox_session_context(&standing_rules))
                 .is_empty()
         })
         && let Some(prompt) = initial_prompt.take()
     {
-        initial_prompt = Some(lazybox_agents::lazybox_session_prompt(&prompt));
+        initial_prompt = Some(lazybox_agents::lazybox_session_prompt(
+            &standing_rules,
+            &prompt,
+        ));
         tracing::info!(
             ?terminal_id,
             ?kind,
@@ -2344,7 +2359,7 @@ async fn handle_spawn_inner(
     {
         initial_prompt = Some(match initial_prompt.take() {
             Some(prompt) => format!("{context}\n\n{prompt}"),
-            None => lazybox_agents::lazybox_session_prompt(context),
+            None => lazybox_agents::lazybox_session_prompt(&standing_rules, context),
         });
     }
     // #1523: stamp an in-band role (the `E p` / `E c` role spawns carry one)
@@ -2423,6 +2438,7 @@ async fn handle_spawn_inner(
     let will_inject = initial_prompt.is_some();
     let plan = match build_spawn_plan(
         SpawnPlanInput {
+            standing_rules: standing_rules.clone(),
             session_key,
             kind,
             cwd: cwd_path,
@@ -12962,6 +12978,7 @@ mod tests {
             resume,
             None,
             AgentRunAccess::Default,
+            &lazybox_core::AgentPolicies::builtin().render(),
         )
         .ok()
     }
@@ -13491,6 +13508,7 @@ mod tests {
         let cwd = std::env::current_dir().expect("current directory");
         let plan = build_spawn_plan(
             SpawnPlanInput {
+                standing_rules: lazybox_core::AgentPolicies::builtin().render(),
                 session_key: session_key.clone(),
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: cwd.clone(),
@@ -15122,6 +15140,7 @@ mod tests {
                 bringup: None,
                 approval: Default::default(),
                 sandbox: None,
+                policies: Default::default(),
             },
         );
 
@@ -19069,7 +19088,7 @@ mod tests {
                 "claude".to_string(),
                 "--dangerously-skip-permissions".to_string(),
                 "--append-system-prompt".to_string(),
-                lazybox_agents::lazybox_session_context().to_string(),
+                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render()),
             ],
             "unattended argv inherits the user's MCP setup by default (#1183)",
         );
@@ -19091,7 +19110,7 @@ mod tests {
             vec![
                 "claude".to_string(),
                 "--append-system-prompt".to_string(),
-                lazybox_agents::lazybox_session_context().to_string()
+                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render())
             ]
         );
 
@@ -19198,7 +19217,7 @@ mod tests {
             vec![
                 "claude".to_string(),
                 "--append-system-prompt".to_string(),
-                lazybox_agents::lazybox_session_context().to_string(),
+                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render()),
                 "--model".to_string(),
                 "claude-opus-5".to_string(),
             ]
@@ -19231,7 +19250,7 @@ mod tests {
                 "claude".to_string(),
                 "--continue".to_string(),
                 "--append-system-prompt".to_string(),
-                lazybox_agents::lazybox_session_context().to_string()
+                lazybox_agents::lazybox_session_context(&lazybox_core::AgentPolicies::builtin().render())
             ]
         );
 
@@ -19966,6 +19985,7 @@ mod tests {
                 bringup: None,
                 approval: Default::default(),
                 sandbox: None,
+                policies: Default::default(),
             },
         );
         // Different case should miss.

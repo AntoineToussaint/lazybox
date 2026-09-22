@@ -368,6 +368,23 @@ mod tests {
     }
 
     #[test]
+    fn the_builtin_block_stays_inside_its_own_budget() {
+        // The rendered block rides in every agent's context on every
+        // launch, alongside the mechanics blurb that has its own cap in
+        // `lazybox-agents`. Each half guards its own bytes: this one is
+        // the prose lazybox ships, so it is the half a change *here*
+        // can grow. ~900 bytes is two paragraph-length rules with room
+        // for a third; a set that needs more than that has stopped
+        // being a set of standing rules and become a manual.
+        let rendered = AgentPolicies::builtin().render();
+        assert!(
+            rendered.len() <= 900,
+            "the built-in standing rules should stay tight: {} bytes",
+            rendered.len()
+        );
+    }
+
+    #[test]
     fn overrides_parse_in_both_spellings_and_round_trip() {
         // The YAML spelling is covered where `serde_yaml` lives
         // (`lazybox-config`); this pins the untagged shape itself —

@@ -10040,7 +10040,7 @@ mod modal_input_responsiveness_tests {
     #[test]
     fn strength_picker_mount_skips_agents_without_tiers() {
         let mut m = build_model();
-        m.mount_strength_picker("codex");
+        m.mount_strength_picker("cursor");
         assert!(m.top_modal().is_none(), "no tier menu → no picker");
     }
 
@@ -10324,18 +10324,18 @@ mod modal_input_responsiveness_tests {
 
         let mut m = build_model();
         m.mount_default_agent_picker();
-        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("codex".into())]);
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("cursor".into())]);
         assert!(m.top_modal().is_none(), "no menu, no second step");
         let notice = m.status.notice.as_ref().expect("a notice explains why");
         assert!(
-            notice.message.contains("agents.codex.models.tiers"),
+            notice.message.contains("agents.cursor.models.tiers"),
             "the notice must name the key: {}",
             notice.message,
         );
         let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
         assert_eq!(
             cfg.setup.default_agent.as_deref(),
-            Some("codex"),
+            Some("cursor"),
             "the agent switch still persisted",
         );
 
@@ -11419,8 +11419,14 @@ mod modal_input_responsiveness_tests {
 
     /// Every enabled agent gets a strength row, including one lazybox
     /// ships no menu for. Skipping those rows was how "default agent:
-    /// codex" left the strength unmentioned anywhere in Settings, so
-    /// codex silently ran whatever its CLI defaults to.
+    /// <that agent>" left the strength unmentioned anywhere in Settings,
+    /// so it silently ran whatever its CLI defaults to.
+    ///
+    /// The fixture is `cursor` because it is the enabled agent
+    /// `AgentModels::builtin` returns `None` for. Claude and Codex both
+    /// ship pinned defaults (#1857), so neither can play this role — if a
+    /// later change gives cursor a built-in menu too, move this fixture
+    /// to an agent that still has none rather than dropping the case.
     #[test]
     fn settings_lists_a_strength_row_for_an_agent_with_no_menu() {
         use crate::realm::setup_ctx::SettingsAction;
@@ -11447,18 +11453,18 @@ mod modal_input_responsiveness_tests {
                     agent_id,
                     strength,
                     configurable,
-                } if agent_id == "codex" => Some((strength.clone(), *configurable)),
+                } if agent_id == "cursor" => Some((strength.clone(), *configurable)),
                 _ => None,
             })
-            .expect("codex gets a strength row even with no built-in menu");
+            .expect("cursor gets a strength row even with no built-in menu");
         assert_eq!(row, (None, false));
         assert_eq!(
             m.setup
                 .settings_actions
                 .iter()
-                .find(|a| matches!(a, SettingsAction::EditStrength { agent_id, .. } if agent_id == "codex"))
+                .find(|a| matches!(a, SettingsAction::EditStrength { agent_id, .. } if agent_id == "cursor"))
                 .map(|a| a.label()),
-            Some("Strength · codex · not configured".to_string()),
+            Some("Strength · cursor · not configured".to_string()),
         );
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
@@ -11480,14 +11486,14 @@ mod modal_input_responsiveness_tests {
             .into(),
         );
         m.dispatch_settings_action(SettingsAction::EditStrength {
-            agent_id: "codex".into(),
+            agent_id: "cursor".into(),
             strength: None,
             configurable: false,
         });
         assert!(m.top_modal().is_none(), "no menu, no picker");
         let notice = m.status.notice.as_ref().expect("a notice explains why");
         assert!(
-            notice.message.contains("agents.codex.models.tiers"),
+            notice.message.contains("agents.cursor.models.tiers"),
             "the notice must name the key: {}",
             notice.message,
         );

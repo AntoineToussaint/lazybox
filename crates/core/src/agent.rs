@@ -201,6 +201,73 @@ mod tests {
         );
     }
 
+    /// Claude's ladder is bare-id-pinned (above); Codex's is pinned to the
+    /// four general coding models its own CLI catalog declares. Both are
+    /// asserted by exact id and in ladder order, because a pinned model id
+    /// is not a detail that may drift quietly: a spawn passes it verbatim,
+    /// and a wrong one fails at the provider with an error the user reads as
+    /// lazybox being broken.
+    #[test]
+    fn builtin_codex_tiers_pin_the_current_coding_ladder() {
+        let m = AgentModels::builtin("codex").unwrap();
+        assert_eq!(
+            m.tiers
+                .iter()
+                .map(|t| (t.alias.as_str(), t.model_id().expect("every tier pins a model")))
+                .collect::<Vec<_>>(),
+            vec![
+                ("S", "gpt-5.6-luna"),
+                ("M", "gpt-5.6-terra"),
+                ("L", "gpt-5.6-sol"),
+                ("XL", "gpt-6-astra"),
+            ]
+        );
+        // `L` is the bare-spawn default, and it is a real rung — the
+        // one-tier menu this replaced made `default` and "the only model"
+        // the same fact, which is why nothing noticed the pin going stale.
+        assert_eq!(m.default.as_deref(), Some("L"));
+        // The whole ladder is reachable by strength, not just the default.
+        assert_eq!(m.alias_for_capability(crate::CapabilityTier::Best), Some("XL"));
+        assert_eq!(m.alias_for_capability(crate::CapabilityTier::High), Some("L"));
+        assert_eq!(
+            m.alias_for_capability(crate::CapabilityTier::Medium),
+            Some("M")
+        );
+        assert_eq!(m.alias_for_capability(crate::CapabilityTier::Low), Some("S"));
+        // Unlike Claude's XL (Fable, a writing model), Codex's top rung is a
+        // coding model: nothing may quietly exclude it.
+        assert!(m.tiers.iter().all(|t| !t.excluded_from_default()));
+    }
+
+    /// Every rung of every built-in ladder resolves to a distinct model —
+    /// the failure mode a one-tier menu hides, where "pick a strength"
+    /// silently runs the same model four times.
+    #[test]
+    fn builtin_ladders_map_each_strength_to_a_distinct_model() {
+        for agent in ["claude", "codex"] {
+            let m = AgentModels::builtin(agent).expect("built-in menu");
+            let ids: Vec<&str> = crate::CapabilityTier::ALL
+                .into_iter()
+                .map(|tier| {
+                    let alias = m
+                        .alias_for_capability(tier)
+                        .unwrap_or_else(|| panic!("{agent}: {tier:?} maps to no tier"));
+                    m.tier(alias)
+                        .and_then(ModelTier::model_id)
+                        .unwrap_or_else(|| panic!("{agent}: {alias} pins no model"))
+                })
+                .collect();
+            let mut unique = ids.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(
+                unique.len(),
+                ids.len(),
+                "{agent}: strengths must not collapse onto one model: {ids:?}"
+            );
+        }
+    }
+
     #[test]
     fn model_id_reads_both_flag_spellings() {
         let tier = |args: &[&str]| ModelTier {
@@ -927,24 +994,59 @@ impl AgentModels {
                 deprecated_priority: CapabilityAliases::default(),
                 unknown: Default::default(),
             }),
-            // Codex gets one conservative built-in tier rather than a menu
-            // of provider-moving aliases. Users can overlay more tiers, but
-            // the shipped default is enough to guarantee that every bare
-            // interactive and structured launch carries an explicit model.
+            // Codex ships the same S/M/L/XL ladder as Claude, so "agent +
+            // strength" is expressible for both built-ins: a one-tier menu
+            // made the strength half of that choice a no-op, and left the
+            // `w S`/`w M` chords keyed to nothing for a Codex default agent.
+            //
+            // The ids are the four general coding models the installed Codex
+            // CLI's own embedded catalog declares, with that catalog's own
+            // descriptions deciding the rung: Luna "fast and affordable",
+            // Terra "balanced … for everyday work", Sol "latest frontier
+            // agentic coding model", Astra "our most capable model for
+            // complex, demanding work".
+            //
+            // `L` stays the default and `gpt-5.6-sol` is what it names,
+            // because the CLI's own migration table maps the id lazybox used
+            // to pin — `gpt-5.5` — onto exactly that: this is the successor
+            // of the pin, not a new opinion about which model to run. Astra
+            // is a rung above rather than the default; unlike Claude's XL it
+            // is a coding model, so nothing excludes it from a bare spawn and
+            // `best` routes to it.
             "codex" => Some(AgentModels {
                 default: Some("L".into()),
                 replace: false,
-                tiers: vec![ModelTier {
-                    alias: "L".into(),
-                    label: "GPT-5.5".into(),
-                    short: Some("G".into()),
-                    args: vec!["--model".into(), "gpt-5.5".into()],
-                }],
+                tiers: vec![
+                    ModelTier {
+                        alias: "S".into(),
+                        label: "Luna".into(),
+                        short: Some("Lu".into()),
+                        args: vec!["--model".into(), "gpt-5.6-luna".into()],
+                    },
+                    ModelTier {
+                        alias: "M".into(),
+                        label: "Terra".into(),
+                        short: Some("Te".into()),
+                        args: vec!["--model".into(), "gpt-5.6-terra".into()],
+                    },
+                    ModelTier {
+                        alias: "L".into(),
+                        label: "Sol".into(),
+                        short: Some("So".into()),
+                        args: vec!["--model".into(), "gpt-5.6-sol".into()],
+                    },
+                    ModelTier {
+                        alias: "XL".into(),
+                        label: "Astra".into(),
+                        short: Some("As".into()),
+                        args: vec!["--model".into(), "gpt-6-astra".into()],
+                    },
+                ],
                 capability: CapabilityAliases {
-                    best: Some("L".into()),
+                    best: Some("XL".into()),
                     high: Some("L".into()),
-                    medium: Some("L".into()),
-                    low: Some("L".into()),
+                    medium: Some("M".into()),
+                    low: Some("S".into()),
                 },
                 deprecated_priority: CapabilityAliases::default(),
                 unknown: Default::default(),

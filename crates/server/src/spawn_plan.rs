@@ -882,12 +882,12 @@ mod tests {
             assert!(
                 plan.argv
                     .windows(2)
-                    .any(|args| args == ["--model", "gpt-5.5"]),
+                    .any(|args| args == ["--model", "gpt-5.6-sol"]),
                 "Codex launch must carry Lazybox's model pin: {:?}",
                 plan.argv
             );
             assert_eq!(plan.model_alias.as_deref(), Some("L"));
-            assert_eq!(plan.model_label.as_deref(), Some("GPT-5.5"));
+            assert_eq!(plan.model_label.as_deref(), Some("Sol"));
             let context_arg = plan
                 .argv
                 .iter()

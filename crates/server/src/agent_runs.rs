@@ -1152,7 +1152,7 @@ mod tests {
             crate::spawn_plan::resolve_model_for_agent(&cfg, codex.as_ref(), "codex", None)
                 .unwrap()
                 .args,
-            vec!["--model".to_string(), "gpt-5.5".to_string()]
+            vec!["--model".to_string(), "gpt-5.6-sol".to_string()]
         );
         assert_eq!(
             crate::spawn_plan::resolve_model_for_agent(&cfg, claude.as_ref(), "claude", Some("M"),)

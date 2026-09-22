@@ -6279,7 +6279,7 @@ ui:
         assert!(!cfg.agent_models("codex").tiers.is_empty());
         assert_eq!(
             cfg.agent_models("codex").resolve_args(None),
-            vec!["--model".to_string(), "gpt-5.5".to_string()]
+            vec!["--model".to_string(), "gpt-5.6-sol".to_string()]
         );
         assert!(cfg.agent_models("no-such-agent").tiers.is_empty());
     }
@@ -6345,7 +6345,7 @@ agents:
         assert_eq!(models.default.as_deref(), Some("L"));
         assert_eq!(
             models.resolve_args(None),
-            vec!["--model".to_string(), "gpt-5.5".to_string()],
+            vec!["--model".to_string(), "gpt-5.6-sol".to_string()],
             "a bare Codex spawn always pins Lazybox's explicit model"
         );
     }

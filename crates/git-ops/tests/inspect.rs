@@ -796,6 +796,101 @@ async fn merged_and_deleted_upstream_branch_is_still_safe() {
     );
 }
 
+/// The unpushed FALSE POSITIVE that never cleared: the PR merged into
+/// `main`, but `origin/<branch>` was never advanced, so the branch's
+/// own remote-tracking ref stays behind its tip forever.
+///
+/// Real shape (workspace `cleanup-6`, branch `engine-postgres`, commit
+/// `2c5aa4c`, the merge of PR #141): the tip is already an ancestor of
+/// `origin/main`, so every commit is on the remote — yet tier 1 counted
+/// it ahead of `origin/engine-postgres` and the removal gate refused
+/// with "commit, stash or push, then retry". There is nothing the user
+/// could commit, stash or push that would change that count: the work
+/// IS pushed, on a ref the probe never looked at.
+#[tokio::test]
+async fn a_merge_the_branch_ref_never_took_is_not_unpushed() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "cleanup-6", "engine-postgres", "main").await;
+
+    // The branch's own work, and the PR it became.
+    std::fs::write(wt.join("engine.rs"), "postgres engine\n").unwrap();
+    run(&wt, &["add", "."]).await;
+    run(&wt, &["commit", "-q", "-m", "engine: postgres"]).await;
+    run(
+        &wt,
+        &["push", "-q", "origin", "engine-postgres:refs/heads/pr-141"],
+    )
+    .await;
+
+    // Upstream merges it into `main` with a merge commit, the way a
+    // non-squash "Merge pull request #141" lands.
+    run(
+        &fx.upstream_path,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge pull request #141",
+            "pr-141",
+        ],
+    )
+    .await;
+    run(
+        &fx.bare,
+        &["fetch", "-q", "origin", "+main:refs/remotes/origin/main"],
+    )
+    .await;
+    // The checkout follows main, so its tip IS the merge commit.
+    run(
+        &wt,
+        &["merge", "-q", "--ff-only", "refs/remotes/origin/main"],
+    )
+    .await;
+
+    // The premise: nobody ever advanced the branch's own remote ref, so
+    // the tip is (and stays) ahead of it.
+    let ahead = run_capture(
+        &wt,
+        &[
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/engine-postgres..HEAD",
+        ],
+    )
+    .await;
+    assert_ne!(
+        ahead.trim(),
+        "0",
+        "the fixture must reproduce a tip ahead of its own remote ref",
+    );
+
+    let row = inspect_row(&fx, "cleanup-6").await;
+    assert!(
+        !row.has_unpushed_commits,
+        "the tip is an ancestor of origin/main — the commits are on the remote",
+    );
+}
+
+/// The other side of that relaxation, and the one that must not move:
+/// work the remote has never seen is still unpushed, even though the
+/// branch's remote ref exists and the tip is merely ahead of it.
+#[tokio::test]
+async fn work_no_remote_ref_reaches_is_still_unpushed() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "ahead", "ahead", "main").await;
+
+    std::fs::write(wt.join("only-here.txt"), "never pushed\n").unwrap();
+    run(&wt, &["add", "."]).await;
+    run(&wt, &["commit", "-q", "-m", "only here"]).await;
+
+    let row = inspect_row(&fx, "ahead").await;
+    assert!(
+        row.has_unpushed_commits,
+        "a tip no remote-tracking ref contains is the real unpushed case",
+    );
+}
+
 /// Bulk safety: with a mix of safe + unsafe entries, only the safe
 /// ones get deleted when the caller filters on `is_safe_to_delete`.
 #[tokio::test]

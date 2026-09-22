@@ -1353,6 +1353,7 @@ impl Server {
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
                         lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
                         lazybox_ipc::Command::Kill { .. } => "Kill",
+                        lazybox_ipc::Command::InspectRemovalRisks { .. } => "InspectRemovalRisks",
                         lazybox_ipc::Command::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
                         lazybox_ipc::Command::KeepMergedWorkspace { .. } => "KeepMergedWorkspace",
                         lazybox_ipc::Command::DeleteProject { .. } => "DeleteProject",
@@ -2939,6 +2940,9 @@ pub async fn dispatch_command(
             if let Some(reclaimed) = workspace::delete_workspace(config, &key, force).await {
                 workspace::notify_reclaimed(config, "Workspace removed", reclaimed);
             }
+        }
+        lazybox_ipc::Command::InspectRemovalRisks { target } => {
+            workspace::inspect_removal_risks(config, target).await;
         }
         lazybox_ipc::Command::KeepMergedWorkspace { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());

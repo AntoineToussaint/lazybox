@@ -692,7 +692,6 @@ pub enum ActionKind {
     OpenHopper,
     DismissNotice,
     InspectNotice,
-    ForceWipeWorkspace,
     OpenSettings,
     OpenThemePicker,
     OpenSnippets,
@@ -756,7 +755,6 @@ impl ActionKind {
         Self::OpenHopper,
         Self::DismissNotice,
         Self::InspectNotice,
-        Self::ForceWipeWorkspace,
         // The three Jump actions sit together so the help panel reads
         // them as one coherent group.
         Self::JumpToWorkspace,
@@ -1189,13 +1187,6 @@ impl ActionDef {
                 describe: "Open the current footer error in a full-text detail modal. The footer pill width-caps its message, so a long error (a merge rejection, a spawn failure) shows truncated; this pops the whole thing, wrapped and readable. Only active while a sticky error notice is up; Enter keeps its normal pane meaning otherwise.",
                 section: Section::Global,
             },
-            ActionKind::ForceWipeWorkspace => &Self {
-                kind: ActionKind::ForceWipeWorkspace,
-                default_keys: "Shift-Z",
-                label: "wipe anyway",
-                describe: "Override a refused delete. When the daemon refuses to remove a workspace because its checkout still holds uncommitted changes or unpushed commits, this offers the escape hatch the refusal otherwise lacks: it names the workspace and the exact work at risk, then requires you to type WIPE to confirm. Only active while such a refusal is on screen; the key does nothing otherwise, and the removal it forces destroys work no remote has.",
-                section: Section::Global,
-            },
             ActionKind::OpenSettings => &Self {
                 kind: ActionKind::OpenSettings,
                 default_keys: ",",
@@ -1599,7 +1590,7 @@ impl ActionDef {
                 kind: ActionKind::Archive,
                 default_keys: "x x",
                 label: "archive",
-                describe: "Drop the workspace and kill any sessions. Destructive.",
+                describe: "Delete the workspace: kill any sessions, remove its worktree, drop the row. The confirm names any uncommitted changes or unpushed commits in the checkout before you answer; answering yes destroys them. Destructive, and never refused — an explicit delete deletes.",
                 section: Section::Workspace,
             },
             ActionKind::CloseIssue => &Self {
@@ -2341,10 +2332,17 @@ impl ActionDef {
     pub fn guard(&self) -> Guard {
         match self.kind {
             ActionKind::Quit => Guard::DoublePress,
-            // Kills live sessions and drops the row — no undo.
+            // The one step an explicit delete costs, and the only one.
+            // It names the
+            // worktree because that is what leaves the disk, and the
+            // daemon's removal-risk preflight appends the specific
+            // checkouts and the kinds of work in them as soon as it
+            // answers — there is no second prompt and no refusal after
+            // this.
             ActionKind::Archive => Guard::Confirm {
-                prompt: "Archive the focused workspace? Active sessions \
-                 are killed and the row drops from the inbox.",
+                prompt: "Delete the focused workspace? Active sessions are \
+                 killed, its worktree is removed, and the row drops from \
+                 the inbox.",
             },
             // Mutates the upstream issue (reopen on GitHub to undo).
             ActionKind::CloseIssue => Guard::Confirm {
@@ -2592,7 +2590,6 @@ impl ActionKind {
             ActionKind::OpenHopper => "open_hopper",
             ActionKind::DismissNotice => "dismiss_notice",
             ActionKind::InspectNotice => "inspect_notice",
-            ActionKind::ForceWipeWorkspace => "force_wipe_workspace",
             ActionKind::OpenSettings => "open_settings",
             ActionKind::OpenThemePicker => "open_theme_picker",
             ActionKind::OpenSnippets => "open_snippets",
@@ -3669,10 +3666,6 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenHopper
         | ActionKind::DismissNotice
         | ActionKind::InspectNotice
-        // Gated on a live local-work refusal, which the catalog cannot
-        // see — the key branch and the footer hint both check it, and
-        // the key is inert without one.
-        | ActionKind::ForceWipeWorkspace
         | ActionKind::OpenSettings
         | ActionKind::OpenThemePicker
         | ActionKind::OpenSnippets

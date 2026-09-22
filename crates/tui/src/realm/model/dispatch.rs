@@ -836,9 +836,14 @@ impl<T: TerminalAdapter> Model<T> {
                         // `WorkspaceRemoved` echo. A failed delete
                         // re-inserts it (#476).
                         self.optimistic_remove_workspace(session_key);
+                        // `force: true` because a human pressed `x x`
+                        // and answered the confirm — which names the
+                        // local work it destroys. An explicit delete
+                        // deletes; the daemon may not send the row back
+                        // with advice the user has no way to act on.
                         vec![IpcCommand::Kill {
                             session_key: session_key.clone(),
-                            force: false,
+                            force: true,
                         }]
                     }
                     Action::CloseIssue => match workspace.as_ref() {
@@ -975,9 +980,11 @@ impl<T: TerminalAdapter> Model<T> {
                             self.optimistic_remove_workspace(session_key);
                             vec![
                                 IpcCommand::DeleteOrClose { workspace_key },
+                                // Explicit + confirmed: same rule as
+                                // `Action::Archive` above.
                                 IpcCommand::Kill {
                                     session_key: session_key.clone(),
-                                    force: false,
+                                    force: true,
                                 },
                             ]
                         }
@@ -1112,9 +1119,11 @@ impl<T: TerminalAdapter> Model<T> {
                         // rows now; a failed cascade re-inserts them all
                         // (#476).
                         self.optimistic_remove_project(project_key);
+                        // Explicit + confirmed, so the cascade does not
+                        // refuse on one dirty child either.
                         vec![IpcCommand::DeleteProject {
                             project_key: project_key.clone(),
-                            force: false,
+                            force: true,
                         }]
                     }
                     other => self.dispatch_action_unchecked(other),
@@ -1787,13 +1796,13 @@ impl<T: TerminalAdapter> Model<T> {
                     self.optimistic_remove_workspace(&sk);
                     cmds.push(IpcCommand::Kill {
                         session_key: sk,
-                        force: false,
+                        force: true,
                     });
                 } else if let Some(project_key) = self.sidebar.focused_project_key() {
                     self.optimistic_remove_project(&project_key);
                     cmds.push(IpcCommand::DeleteProject {
                         project_key,
-                        force: false,
+                        force: true,
                     });
                 }
             }

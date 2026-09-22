@@ -328,6 +328,39 @@ fn out_of_scope_copy(prompt: &super::RemovalPrompt) -> String {
     }
 }
 
+/// The "and this is what goes with it" paragraph appended to a delete
+/// confirm, or `None` when there is nothing to add.
+///
+/// Facts, not a warning. The daemon names each checkout and the kinds
+/// of work in it ("uncommitted changes to tracked files", "unpushed
+/// commits", "cleanliness could not be proven"); this only lays them
+/// out. An inspection *failure* is reported too, and separately: a
+/// checkout nobody could read is the case where silence would be the
+/// most misleading, since an empty risk list otherwise reads as "clean".
+pub(super) fn removal_risk_block(
+    risks: &[lazybox_ipc::RemovalRiskDto],
+    error: Option<&str>,
+) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for risk in risks {
+        lines.push(format!(
+            "  {} — {}",
+            risk.path.display(),
+            risk.reasons.join(", ")
+        ));
+    }
+    if let Some(error) = error.filter(|e| !e.trim().is_empty()) {
+        lines.push(format!("  a checkout could not be inspected — {error}"));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "This also destroys, permanently:\n{}",
+        lines.join("\n")
+    ))
+}
+
 /// Confirm copy for a workspace whose task reached a terminal state —
 /// `verb` is "merged" (PR) or "closed" (issue). Always names the
 /// worktree deletion; appends a warning when there are live terminals
@@ -2695,6 +2728,20 @@ impl<T: TerminalAdapter> Model<T> {
         // Every confirm defaults to Yes now (fast to accept), and this one
         // wears the warning border + `⚠` title so an unsolicited
         // merged/closed removal reads as dangerous before Enter.
+        //
+        // Yes on any of these three is an explicit removal the daemon
+        // may not refuse, so the prompt has to name what it destroys.
+        // The out-of-scope copy in particular cannot derive that
+        // itself: `WorkspaceOutOfScope` carries no local-work fact at
+        // all (`has_local_work: false`, always), which is exactly why
+        // the answer comes from the daemon's own preflight instead of
+        // from the event.
+        self.arm_removal_risk_preflight_for(
+            lazybox_ipc::RemovalTarget::Workspace((&prompt.workspace_key).into()),
+            &copy,
+            true,
+            Id::RemoveOutOfScope,
+        );
         let modal = Confirm::new(copy).destructive();
         self.set_modal_flow(ModalFlow::RemovalPrompt {
             workspace: prompt.workspace_key,
@@ -2827,6 +2874,12 @@ impl<T: TerminalAdapter> Model<T> {
                 .unwrap_or("Confirm action?")
                 .to_string()
         });
+        let destructive = !def.confirm_is_benign_gate();
+        // Ask the daemon what this delete would destroy, so the one
+        // confirm it costs can say so. Armed before the mount, and only
+        // for a single target: a bulk archive would fan out one probe
+        // per row and amend the prompt N times.
+        self.arm_removal_risk_preflight(&action, &targets, &prompt, destructive);
         self.set_modal_flow(ModalFlow::ActionConfirm { action, targets });
         // Every confirm defaults to Yes now — the chord/event is itself
         // the intent, so Enter completes it. A benign awareness gate (the
@@ -2834,12 +2887,111 @@ impl<T: TerminalAdapter> Model<T> {
         // destructive action (archive / merge / delete / close / reset)
         // wears the warning coloring so the danger shows before Enter.
         let modal = Confirm::new(&prompt);
-        let modal = if def.confirm_is_benign_gate() {
-            modal.default_yes()
-        } else {
+        let modal = if destructive {
             modal.destructive()
+        } else {
+            modal.default_yes()
         };
         self.mount_modal(Id::ActionConfirm, modal);
+    }
+
+    /// Fire the removal-risk preflight for a delete confirm that is
+    /// about to mount, and remember what it asked about.
+    ///
+    /// Only `Archive` (the `x x` workspace delete and the project
+    /// delete behind the same chord) is a removal, and only a
+    /// single-target confirm gets a probe: the copy this amends names
+    /// one row, and a bulk prompt already lists its members.
+    fn arm_removal_risk_preflight(
+        &mut self,
+        action: &lazybox_tui_core::action::Action,
+        targets: &[super::ActionConfirmTarget],
+        prompt: &str,
+        destructive: bool,
+    ) {
+        use lazybox_tui_core::action::Action;
+        self.pending_removal_risk = None;
+        if !matches!(action, Action::Archive) {
+            return;
+        }
+        let [target] = targets else {
+            return;
+        };
+        let target = match target {
+            super::ActionConfirmTarget::Workspace(key) => {
+                lazybox_ipc::RemovalTarget::Workspace(key.clone())
+            }
+            super::ActionConfirmTarget::Project(key) => {
+                lazybox_ipc::RemovalTarget::Project(key.clone())
+            }
+        };
+        self.arm_removal_risk_preflight_for(target, prompt, destructive, Id::ActionConfirm);
+    }
+
+    /// Ask the daemon what removing `target` would destroy, and
+    /// remember which modal the answer amends.
+    ///
+    /// Shared by every confirm whose Yes is an explicit removal — the
+    /// `x x` / project confirm and the daemon-raised removal prompts —
+    /// because they all now send `force: true`. A prompt that deletes
+    /// without refusing has to be the one place the damage is named,
+    /// and naming it is the same question at every one of them.
+    pub(super) fn arm_removal_risk_preflight_for(
+        &mut self,
+        target: lazybox_ipc::RemovalTarget,
+        prompt: &str,
+        destructive: bool,
+        id: Id,
+    ) {
+        self.send_cmd(lazybox_ipc::Command::InspectRemovalRisks {
+            target: target.clone(),
+        });
+        self.pending_removal_risk = Some(super::PendingRemovalRisk {
+            target,
+            base_prompt: prompt.to_string(),
+            destructive,
+            id,
+        });
+    }
+
+    /// Re-render the open delete confirm with what the daemon just
+    /// found in the checkout.
+    ///
+    /// Dropped unless this reply answers the probe THIS confirm sent
+    /// and that confirm is still the modal on top — a late reply must
+    /// not repaint a prompt the user has moved past, and must not
+    /// resurrect one they dismissed. The amended copy is built from the
+    /// stored base prompt, so a second reply replaces the risk block
+    /// rather than appending another.
+    pub(super) fn apply_removal_risks(
+        &mut self,
+        target: &lazybox_ipc::RemovalTarget,
+        risks: &[lazybox_ipc::RemovalRiskDto],
+        error: Option<&str>,
+    ) {
+        use crate::realm::components::confirm::Confirm;
+        let Some(pending) = self.pending_removal_risk.as_ref() else {
+            return;
+        };
+        if &pending.target != target || self.modal_stack.last() != Some(&pending.id) {
+            return;
+        }
+        let Some(block) = removal_risk_block(risks, error) else {
+            return;
+        };
+        let prompt = format!("{}\n\n{block}", pending.base_prompt);
+        let destructive = pending.destructive;
+        let id = pending.id.clone();
+        let modal = Confirm::new(prompt);
+        let modal = if destructive {
+            modal.destructive()
+        } else {
+            modal.default_yes()
+        };
+        // Remount in place. `mount_modal` replaces the component under
+        // the same id and leaves `modal_flow` alone, so the action and
+        // its targets — the thing Yes actually fires — are untouched.
+        self.mount_modal(id, modal);
     }
 
     /// Offer the one-key merge-conflict resolve flow (issue #947).

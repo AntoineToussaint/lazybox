@@ -810,54 +810,6 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_info(format!("view saved: {name} — recall with x V"));
                 }
             }
-            Some(Id::ForceWipeConfirm) => {
-                // Reached only with a validated `WIPE` (the Input's
-                // validator gates Enter), and the target is the one the
-                // refusal named at mount time, so a sidebar that moved
-                // under the modal cannot redirect the wipe.
-                //
-                // The optimistic removal is NOT re-applied: the row was
-                // already restored when the refusal rolled it back, and
-                // it leaves on the daemon's `WorkspaceRemoved` echo. A
-                // second optimistic take would make a forced delete that
-                // still fails vanish silently.
-                // Re-check the typed word here as well as in the modal's
-                // validator. The validator is what the user meets, but it
-                // lives in a component this arm cannot see — and the one
-                // command that deletes unpushed work should not be one
-                // refactor away from firing on any submitted string.
-                if let Some(ModalFlow::ForceWipe { offer }) = self.modal_flow.take()
-                    && text.trim() == "WIPE"
-                {
-                    match &offer.target {
-                        crate::realm::model::WipeTarget::Workspace(session_key) => {
-                            tracing::warn!(
-                                workspace = %session_key,
-                                detail = %offer.detail,
-                                "force-wiping a workspace the safety gate refused",
-                            );
-                            cmds.push(IpcCommand::Kill {
-                                session_key: session_key.clone(),
-                                force: true,
-                            });
-                        }
-                        crate::realm::model::WipeTarget::Project(project_key) => {
-                            tracing::warn!(
-                                project = %project_key,
-                                detail = %offer.detail,
-                                "force-wiping a project the safety gate refused",
-                            );
-                            cmds.push(IpcCommand::DeleteProject {
-                                project_key: project_key.clone(),
-                                force: true,
-                            });
-                        }
-                    }
-                    self.pending_wipe = None;
-                    self.status.notice = None;
-                    self.flash_info("wiping — local work in that checkout is gone");
-                }
-            }
             Some(Id::WorktreeBranchName) => {
                 // The typed name resolves the collision and resumes the
                 // spawn that failed, carrying the agent, model and prompt
@@ -1526,6 +1478,10 @@ showing keybinding search only",
         // Dispatch by which modal was on top BEFORE the pop so we
         // route the "no" decision correctly.
         let top = self.modal_stack.last().cloned();
+        // An Esc'd delete confirm takes its risk preflight with it.
+        if top == Some(Id::ActionConfirm) || top == Some(Id::RemoveOutOfScope) {
+            self.pending_removal_risk = None;
+        }
         self.pop_modal();
         // Cancelling any modal drops its [`ModalFlow`] continuation.
         // This one line replaces the ~two-dozen per-variant clears that
@@ -1664,17 +1620,22 @@ showing keybinding search only",
                 }
             }
             Some(Id::RemoveOutOfScope) => {
+                // The risk preflight dies with the prompt it amends,
+                // answered either way.
+                self.pending_removal_risk = None;
                 if let Some(ModalFlow::RemovalPrompt { workspace, reason }) = self.modal_flow.take()
                 {
                     let workspace_key = workspace;
                     let session_key: lazybox_core::SessionKey = (&workspace_key).into();
                     match (yes, reason) {
                         // Out-of-scope: drop the row + kill terminals
-                        // (worktree left on disk).
+                        // (worktree left on disk). `force: true` — the
+                        // user read this prompt and said yes, so the
+                        // cleanliness gate may not put the row back.
                         (true, super::RemovalReason::OutOfScope) => {
                             cmds.push(IpcCommand::Kill {
                                 session_key,
-                                force: false,
+                                force: true,
                             });
                         }
                         // Merged/Closed: also delete the worktree.
@@ -1735,6 +1696,11 @@ showing keybinding search only",
                 // stashed at mount time (the sidebar selection may
                 // have drifted while the modal was up). No / Esc →
                 // drop the stash silently.
+                //
+                // The risk preflight dies with the prompt it was
+                // amending, either way: a reply landing after the
+                // answer has nothing left to render into.
+                self.pending_removal_risk = None;
                 let pending = self.modal_flow.take();
                 if yes && let Some(ModalFlow::ActionConfirm { action, targets }) = pending {
                     // A single target keeps the exact per-target path (and

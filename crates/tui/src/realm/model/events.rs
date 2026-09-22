@@ -1327,6 +1327,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
                 | IpcEvent::WorkspaceDiffInspected { .. }
+                | IpcEvent::RemovalRisksInspected { .. }
                 | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
@@ -2505,6 +2506,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::CleanWorktreesCompleted { .. }
             | IpcEvent::WorktreesInspected { .. }
             | IpcEvent::WorkspaceDiffInspected { .. }
+                | IpcEvent::RemovalRisksInspected { .. }
             | IpcEvent::CheckoutsDiscovered { .. }
             | IpcEvent::OrphanedWorktreeDeleted { .. }
             | IpcEvent::AgentRunStarted { .. }
@@ -2724,7 +2726,7 @@ impl<T: TerminalAdapter> Model<T> {
                         // / close-issue), so the flash above still stands.
                         self.rollback_optimistic_chip(source);
                     } else if is_removal_failure_source(source)
-                        && let Some(wipe_target) = self.rollback_optimistic_removal(message)
+                        && self.rollback_optimistic_removal(message)
                     {
                         // An optimistic archive/delete the daemon
                         // rejected: the row (and, for a project, its
@@ -2732,7 +2734,8 @@ impl<T: TerminalAdapter> Model<T> {
                         // and surface why (#476). Delete failures arrive
                         // as `store` (archive/db), `store:<why>` (a refusal
                         // the daemon classified — today the worktree safety
-                        // gate) or `terminal` (a backing agent that couldn't
+                        // gate, which only an UNATTENDED removal can now
+                        // hit) or `terminal` (a backing agent that couldn't
                         // be stopped) errors naming the key; one naming no
                         // pending removal keeps its quiet sync-log-only
                         // handling.
@@ -2753,21 +2756,7 @@ impl<T: TerminalAdapter> Model<T> {
                             // fixed "delete failed —" ahead of it would
                             // spend the head budget on ceremony, and middle
                             // truncation would halve what's left.
-                            let notice = format!("✗ {message}");
-                            // Arm the escape hatch. "commit, stash or push"
-                            // is sound advice and a dead end when the user
-                            // does not want the work: without an override
-                            // the same row refuses forever, which is what
-                            // made this refusal read as broken. The offer
-                            // rides `notice_action_hints` (focus-aware,
-                            // advertised only while its key fires) and is
-                            // pinned to this exact notice.
-                            self.pending_wipe = Some(crate::realm::model::PendingWipe {
-                                target: wipe_target,
-                                detail: local_work_detail(message),
-                                notice: notice.clone(),
-                            });
-                            self.flash_error_leading(notice);
+                            self.flash_error_leading(format!("✗ {message}"));
                         } else {
                             self.flash_error(format!("✗ delete failed — {message}"));
                         }
@@ -2900,6 +2889,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
                 | IpcEvent::WorkspaceDiffInspected { .. }
+                | IpcEvent::RemovalRisksInspected { .. }
                 | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
@@ -3076,6 +3066,16 @@ impl<T: TerminalAdapter> Model<T> {
             } else {
                 self.flash_error(format!("✗ {display_name} update failed — {message}"));
             }
+        }
+        // The delete confirm's preflight came back: repaint the open
+        // prompt with the checkouts this delete would destroy.
+        if let IpcEvent::RemovalRisksInspected {
+            target,
+            risks,
+            error,
+        } = &event
+        {
+            self.apply_removal_risks(target, risks, error.as_deref());
         }
         // Worktree inspector replied. Swap the placeholder for the
         // real list. `mount_inspect_list` is idempotent — calling it
@@ -3971,23 +3971,6 @@ impl<T: TerminalAdapter> Model<T> {
 /// daemon adds must not silently stop rolling back, which would leave
 /// the row gone from the UI while the daemon still has it, with no
 /// notice, until the next poll re-upserts it.
-/// The risk half of a `store:local-work` refusal: everything after
-/// `has local work:`, which is the daemon's `WorkspaceRemovalRisk`
-/// list (`<path> (<reason>, …)`, `;`-separated).
-///
-/// Prose, so parsed defensively: a message that does not carry the
-/// marker falls back to the whole text. The confirm prompt it feeds is
-/// the user's last look at the work, so showing too much is the safe
-/// failure and showing nothing is not.
-fn local_work_detail(message: &str) -> String {
-    message
-        .split_once(" has local work: ")
-        .map(|(_, detail)| detail.trim())
-        .filter(|detail| !detail.is_empty())
-        .unwrap_or(message)
-        .to_string()
-}
-
 fn is_removal_failure_source(source: &str) -> bool {
     source == "store" || source == "terminal" || source.starts_with("store:")
 }

@@ -1981,10 +1981,18 @@ async fn rev_list_count(git: &dyn GitRunner, worktree: &Path, range: &str) -> Op
 ///    own remote ref is immune — and when tracking IS the branch's own
 ///    counterpart (the PR shape `checkout_at` records), `@{u}` maps
 ///    through the refspec to this very ref, so the two tiers agree.
-/// 2. [`branch_tip_on_remote`] — the branch's remote ref is gone, but
-///    the tip is reachable from *some* remote-tracking ref, proving the
-///    commits reached the remote (merged + branch auto-deleted
-///    upstream): pushed.
+///    Being *ahead* of that ref is not the same as being absent from
+///    the remote, so an ahead count falls through to tier 2 rather than
+///    concluding: see [`branch_tip_on_remote`].
+/// 2. [`branch_tip_on_remote`] — the tip is reachable from *some*
+///    remote-tracking ref, proving the commits reached the remote:
+///    pushed. Two shapes need it. The branch's remote ref is gone
+///    (merged + branch auto-deleted upstream), or the branch's remote
+///    ref still exists and was simply never advanced — the PR was
+///    merged into `main` and `origin/<branch>` stayed where it was, so
+///    tier 1 counts the merge commit as ahead although `origin/main`
+///    already contains it. That second shape reported such a checkout
+///    unpushed forever, with no state change that could ever clear it.
 /// 3. `@{u}..HEAD` — the configured upstream, for worktrees whose
 ///    branch the caller doesn't know (detached HEAD, callers without a
 ///    branch column). Needs the bare clone's `remote.origin.fetch`
@@ -2013,7 +2021,22 @@ async fn unpushed(
         let remote_ref = format!("refs/remotes/origin/{branch}");
         if ref_exists(git, bare, &remote_ref).await {
             if let Some(n) = rev_list_count(git, worktree, &format!("{remote_ref}..HEAD")).await {
-                return n > 0;
+                if n == 0 {
+                    return false;
+                }
+                // Ahead of its own remote ref — but that ref is not the
+                // only place the remote keeps these commits. A PR merged
+                // into `main` leaves `origin/<branch>` exactly where it
+                // was while `origin/main` grows to contain the tip; the
+                // count above is then positive forever, and no commit,
+                // stash or push the user could perform would change it.
+                // `--contains` answers the question that actually
+                // matters: is this tip an ancestor of anything the
+                // remote has? Only a "no" is unpushed. The probe is the
+                // same one tier 2 already trusts for the same
+                // conclusion, and it runs only on the ahead path — the
+                // one that was about to refuse.
+                return !branch_tip_on_remote(git, bare, branch).await;
             }
         } else if branch_tip_on_remote(git, bare, branch).await {
             return false;
@@ -2058,8 +2081,14 @@ async fn branch_has_upstream_config(git: &dyn GitRunner, bare: &Path, branch: &s
 
 /// Whether the branch tip is reachable from ANY remote-tracking ref —
 /// i.e. its commits made it to the remote at some point (covers
-/// worktrees created before upstream config was recorded, as long as
-/// the merge wasn't a squash).
+/// worktrees created before upstream config was recorded, and merges
+/// the branch's own remote ref never took, as long as the merge wasn't
+/// a squash).
+///
+/// A non-empty answer is proof, not a heuristic: `--contains` lists a
+/// remote-tracking ref only when the tip is an ancestor of it, and a
+/// remote-tracking ref mirrors what the remote holds. Everything
+/// reachable from the tip is therefore on the remote.
 async fn branch_tip_on_remote(git: &dyn GitRunner, bare: &Path, branch: &str) -> bool {
     let Ok(output) = git
         .run(

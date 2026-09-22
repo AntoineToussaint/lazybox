@@ -294,6 +294,19 @@ fn all_commands() -> Vec<Command> {
             session_key: key.clone(),
             force: false,
         },
+        // An explicit, user-confirmed delete. Same tag as the row above
+        // (the corpus dedups by tag), so the `force: true` shape is
+        // round-tripped without adding a variant.
+        Command::Kill {
+            session_key: key.clone(),
+            force: true,
+        },
+        Command::InspectRemovalRisks {
+            target: lazybox_ipc::RemovalTarget::Workspace(key.clone()),
+        },
+        Command::InspectRemovalRisks {
+            target: lazybox_ipc::RemovalTarget::Project(lazybox_core::ProjectKey::github("o", "r")),
+        },
         Command::RemoveMergedWorkspace {
             session_key: key.clone(),
         },
@@ -1145,6 +1158,25 @@ fn all_events() -> Vec<Event> {
             removed: 3,
             skipped: 1,
         },
+        Event::RemovalRisksInspected {
+            target: lazybox_ipc::RemovalTarget::Workspace(key.clone()),
+            risks: vec![],
+            error: None,
+        },
+        // The two halves a client must tell apart: risks found, and a
+        // checkout that could not be read at all. Same tag as the row
+        // above, so the corpus round-trips both shapes.
+        Event::RemovalRisksInspected {
+            target: lazybox_ipc::RemovalTarget::Project(lazybox_core::ProjectKey::github("o", "r")),
+            risks: vec![lazybox_ipc::RemovalRiskDto {
+                path: std::path::PathBuf::from("/tmp/wt"),
+                reasons: vec![
+                    "uncommitted changes to tracked files".into(),
+                    "unpushed commits".into(),
+                ],
+            }],
+            error: Some("github:o/r#2: could not inspect worktrees safely".into()),
+        },
         Event::WorktreesInspected {
             inspections: vec![],
         },
@@ -1544,6 +1576,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::Close { .. } => "Close",
         Command::IngestHook { .. } => "IngestHook",
         Command::Kill { .. } => "Kill",
+        Command::InspectRemovalRisks { .. } => "InspectRemovalRisks",
         Command::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
         Command::DeleteProject { .. } => "DeleteProject",
         Command::CollapseIntoPr { .. } => "CollapseIntoPr",
@@ -1700,6 +1733,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::PollProgress { .. } => "PollProgress",
         Event::Notification { .. } => "Notification",
         Event::CleanWorktreesCompleted { .. } => "CleanWorktreesCompleted",
+        Event::RemovalRisksInspected { .. } => "RemovalRisksInspected",
         Event::WorktreesInspected { .. } => "WorktreesInspected",
         Event::WorkspaceDiffInspected { .. } => "WorkspaceDiffInspected",
         Event::CheckoutsDiscovered { .. } => "CheckoutsDiscovered",
@@ -1769,12 +1803,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        106,
+        107,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        112,
+        113,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

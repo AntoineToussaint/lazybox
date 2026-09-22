@@ -1,15 +1,23 @@
-//! Reap persistent sessions whose work is over (#1198).
+//! Reap persistent sessions whose work is over (#1198) — **only when the
+//! user has asked for it**.
 //!
 //! Sessions are persistent *intent* — "there should be a claude here" —
 //! and the daemon deliberately restores them across restarts. But once a
 //! workspace's PR merges or its issue closes, that intent has expired:
 //! the agent sits idle at ~110 MB forever (tmux never reaps), and a week
 //! of normal use was measured at tens of GB across dozens of stale
-//! sessions. This module closes the loop:
+//! sessions.
+//!
+//! Closing that loop by default was a data-loss bug (#1869). Killing a
+//! session destroys its tmux scrollback, which is frequently the only
+//! record of what an agent did, and an hourly background sweep is nobody
+//! asking. `agent.reap_closed_after` is therefore **opt-in**: unset, this
+//! whole module does nothing. Writing a duration into the config is the
+//! user saying so, and then:
 //!
 //! - A periodic sweep kills the live terminals of workspaces whose
 //!   PR/issue has been closed/merged longer than
-//!   `agent.reap_closed_after` (default 48h, `0s` disables).
+//!   `agent.reap_closed_after` (unset and `0s` both disable).
 //! - Startup restore consults the same predicate (`closed_beyond`) so
 //!   a reaped session isn't resurrected at the next boot only to be
 //!   reaped again.

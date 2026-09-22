@@ -145,6 +145,17 @@ fn transparent_conf(history_limit: u32) -> String {
     // flowing where history is retained — the pane-side counterpart of
     // the attach-side `smcup@/rmcup@` stripping below.
     conf.push_str("set -g alternate-screen off\n");
+    // NEVER let a process exit destroy its session. tmux's default
+    // closes the pane — and with it the window and the whole session —
+    // the instant the pane's command returns, taking the scrollback with
+    // it. That is unattended destruction of the one artifact the user
+    // needs when an agent dies on arrival: `code 0` cannot distinguish
+    // "work finished" from "failed to start one second in", and the
+    // second case left nothing to attach to and nothing to read (#1869).
+    // `remain-on-exit on` keeps the dead pane, its history, and the
+    // session; only an explicit user action removes a backend now.
+    // Exit is still observed promptly — see `pane_died_hook_cmd`.
+    conf.push_str("set -g remain-on-exit on\n");
     conf.push_str(
         "set -g default-terminal \"xterm-256color\"\n\
          set -g escape-time 0\n\
@@ -246,6 +257,11 @@ fn server_option_cmds(history_limit: u32) -> Vec<Vec<String>> {
     // sessions spawned after the push (a pane already inside the alt
     // screen stays there until its program leaves it).
     let no_alt_screen = cmd(&["set-option", "-g", "alternate-screen", "off"]);
+    // A server started by an older lazybox still destroys a session the
+    // moment its pane command exits. Push the survival option so every
+    // session spawned after this point keeps its pane, its scrollback
+    // and its session when the agent dies (#1869).
+    let remain_on_exit = cmd(&["set-option", "-g", "remain-on-exit", "on"]);
     // `terminal-features` is independent of scrollback handling — an
     // already-running server must learn the client speaks OSC 8 either
     // way, else surviving sessions keep stripping hyperlinks.
@@ -280,8 +296,35 @@ fn server_option_cmds(history_limit: u32) -> Vec<Vec<String>> {
     cmds.extend(clipboard);
     cmds.push(focus_events);
     cmds.push(no_alt_screen);
+    cmds.push(remain_on_exit);
     cmds.push(history);
     cmds
+}
+
+/// The `pane-died` hook body armed on every lazybox session.
+///
+/// `remain-on-exit on` keeps a session alive after its program exits, which
+/// is the whole point — but it also means the attach client never EOFs, and
+/// the attach client's EOF is how the daemon learns a terminal ended. Without
+/// this hook a dead agent would show as `Working` forever.
+///
+/// The hook is armed **per session, with the session name written in
+/// literally**, and that is load-bearing. tmux does not expand `#{…}` in a
+/// hook command's arguments, so a global `detach-client -s "#{session_name}"`
+/// silently targets nothing; and a global bare `detach-client` resolves "the
+/// current client" from whatever client the server saw last — measured on
+/// tmux 3.7c detaching a *different, still-running* session's conduit while
+/// the dying one stayed attached. One hook per session, naming its own
+/// session, is the only form that detaches exactly the right client.
+///
+/// Detaching (never killing) converts pane death into the ordinary
+/// conduit-EOF the whole lifecycle already speaks: the pump observes the
+/// exit, `teardown_exited_terminal` marks the terminal `Exited`, and
+/// [`SessionBackend::release`] drops only lazybox's attach client. The tmux
+/// session, its dead pane and its full history stay on the server, ready to
+/// `tmux -L <socket> attach -t <key>`.
+fn pane_died_hook_cmd(key: &str) -> String {
+    format!("detach-client -s \"{key}\"")
 }
 
 use super::{DEFAULT_COLS, DEFAULT_ROWS};
@@ -597,6 +640,49 @@ impl TmuxBackend {
         (cols > 0 && rows > 0).then_some((cols, rows))
     }
 
+    /// Arm this session's `pane-died` hook (see [`pane_died_hook_cmd`]).
+    ///
+    /// Called at spawn and again on every reattach, because a session that
+    /// survived a daemon restart — or that an older lazybox created — carries
+    /// no hook, and without one its exit would never be observed. Setting it
+    /// twice is a plain overwrite.
+    ///
+    /// Best-effort by necessity (there is nothing to fall back to), but a
+    /// failure is logged at ERROR: it does not lose the session — nothing
+    /// does any more — it makes an exited agent linger in the UI as live
+    /// until the user closes the pane.
+    async fn arm_pane_died_hook(&self, key: &str) {
+        let hook = pane_died_hook_cmd(key);
+        if let Err(error) = self
+            .tmux(&["set-hook", "-t", key, "pane-died", &hook])
+            .await
+        {
+            tracing::error!(
+                key,
+                %error,
+                "tmux set-hook pane-died failed — this session's exit will not be \
+                 observed until the user closes it (the session itself is safe)",
+            );
+        }
+    }
+
+    /// Whether this session's pane has died — its program exited and
+    /// `remain-on-exit on` kept the corpse (and the scrollback) in place.
+    ///
+    /// `None` is "could not tell", never "no": an unreachable or slow tmux
+    /// must not be read as a dead backend.
+    async fn pane_dead(&self, key: &str) -> Option<bool> {
+        let out = self
+            .tmux(&["display-message", "-p", "-t", key, "#{pane_dead}"])
+            .await
+            .ok()?;
+        match String::from_utf8_lossy(&out.stdout).trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        }
+    }
+
     /// Whether the pane is alternate and how many history lines tmux
     /// currently retains. `None` when tmux cannot report the state.
     async fn pane_history_state(&self, key: &str) -> Option<(bool, u64)> {
@@ -814,6 +900,11 @@ impl SessionBackend for TmuxBackend {
             let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
             self.tmux(&arg_refs).await?;
 
+            // The session now outlives its program (`remain-on-exit on`), so
+            // arm the hook that turns pane death into a client detach — the
+            // signal the daemon's lifecycle already speaks.
+            self.arm_pane_died_hook(&key).await;
+
             // Server is definitely up now — make sure its options
             // match this backend's scrollback mode before the attach
             // client connects (terminal-overrides binds at attach).
@@ -956,6 +1047,11 @@ impl SessionBackend for TmuxBackend {
             // conduit slot — never `kill-session`: on a detach the
             // underlying tmux session may still be alive, and it must
             // stay discoverable for restart recovery.
+            //
+            // This is now the ONLY thing an agent's own exit does to a
+            // backend. With `remain-on-exit on` the pane, its scrollback
+            // and its session all survive; `kill` below is reached from
+            // explicit user actions alone (#1869).
             self.sessions.lock().await.remove(key);
         })
     }
@@ -1068,6 +1164,10 @@ impl SessionBackend for TmuxBackend {
                 // WITHOUT the sessions lock held: `capture-pane` is a tmux
                 // round trip, and the hot reuse path above must never wait
                 // on it.
+                // A session that survived a daemon restart, or one an older
+                // lazybox spawned, carries no `pane-died` hook. Re-arm before
+                // opening the conduit so this attach can observe an exit.
+                self.arm_pane_died_hook(key).await;
                 let seed = self.capture_history(key).await;
                 // Attach at the pane's CURRENT size, not a hardcoded
                 // default. The surviving pane still carries the viewport
@@ -1188,7 +1288,16 @@ impl SessionBackend for TmuxBackend {
         Box::pin(async move {
             let out = self.tmux_output(&["has-session", "-t", key]).await?;
             if out.status.success() {
-                return Ok(true);
+                // The session exists — but under `remain-on-exit on` it
+                // outlives its program on purpose, so existence alone no
+                // longer means a process is running. A dead pane is a dead
+                // session for liveness purposes; the session itself is NOT
+                // destroyed for it (that is the whole point), it is simply
+                // reported honestly so a corpse cannot masquerade as live.
+                //
+                // `None` is "could not tell" and reads as alive: an
+                // inconclusive probe must never be promoted into "gone".
+                return Ok(!self.pane_dead(key).await.unwrap_or(false));
             }
             let stderr = String::from_utf8_lossy(&out.stderr);
             if stderr.contains("can't find session")
@@ -1370,8 +1479,45 @@ mod tests {
                 clipboard[1].clone(),
                 focus_events,
                 no_alt_screen,
+                owned(&["set-option", "-g", "remain-on-exit", "on"]),
                 history,
             ]
+        );
+    }
+
+    /// #1869: a session must outlive the program running in it. Without
+    /// `remain-on-exit on` tmux destroys the pane, the window and the
+    /// session the instant the agent returns — the scrollback the user
+    /// needs to see WHY it returned goes with it.
+    #[test]
+    fn conf_and_server_options_keep_a_session_after_its_program_exits() {
+        assert!(transparent_conf(DEFAULT_HISTORY_LIMIT).contains("set -g remain-on-exit on\n"));
+        assert!(
+            server_option_cmds(DEFAULT_HISTORY_LIMIT).contains(&vec![
+                "set-option".to_string(),
+                "-g".to_string(),
+                "remain-on-exit".to_string(),
+                "on".to_string(),
+            ]),
+            "a tmux server started by an older lazybox must be brought in line too",
+        );
+    }
+
+    /// The hook names its own session literally. tmux expands no `#{…}` in
+    /// a hook command's arguments, and a bare `detach-client` in a global
+    /// hook detaches whichever client the server saw last — measured
+    /// detaching a different, still-running session (tmux 3.7c).
+    #[test]
+    fn pane_died_hook_targets_its_own_session_by_name() {
+        let hook = pane_died_hook_cmd("lazybox-gcp-claude-14159-6");
+        assert_eq!(hook, "detach-client -s \"lazybox-gcp-claude-14159-6\"");
+        assert!(
+            !hook.contains("#{"),
+            "a format in a hook argument is never expanded — it would target nothing",
+        );
+        assert!(
+            !hook.contains("kill"),
+            "pane death must detach lazybox's conduit, never destroy the session",
         );
     }
 

@@ -139,6 +139,112 @@ where
     })
 }
 
+/// The stable identity of a snippet that participates in a persisted workflow
+/// (#1732).
+///
+/// Most snippets are text injection and stay that way: a body goes to the
+/// agent, nothing else happens. A *workflow* snippet is different — it is one
+/// step of a handoff that outlives the session, so something has to recognize
+/// it as that step. `action` is that handle, and it is deliberately a declared
+/// field rather than a name match: dispatching on the key `"fixall"` or on
+/// phrases in the body would break the moment a user renames their copy or
+/// rewrites the prose, and would silently mis-fire on an unrelated snippet
+/// that happened to mention a review.
+///
+/// Declaring one is also how a *user's own* review snippet joins the workflow:
+/// the artifact contract ([`Snippet::delivery_body`]) is appended from the
+/// action, not from the built-in key, so `action: deep_review` on a hand-written
+/// body gets the same persistence obligation the shipped one carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetAction {
+    /// Produces a review whose findings must be persisted before the session
+    /// ends.
+    DeepReview,
+    /// Consumes a persisted review: binds one report, fixes its findings, and
+    /// records what happened to each.
+    FixAll,
+}
+
+impl SnippetAction {
+    /// The obligation delivered with a snippet carrying this action — the half
+    /// of the prompt that makes the handoff durable rather than conversational.
+    ///
+    /// Kept out of the bodies for the same reason the output contract is
+    /// (#1697): it names specific tools, and the tools are the daemon's, not
+    /// the prompt's. A body that spelled them out would drift the moment a tool
+    /// gained an argument, in every user's overridden copy at once.
+    pub fn artifact_contract(self) -> &'static str {
+        match self {
+            Self::DeepReview => DEEP_REVIEW_CONTRACT,
+            Self::FixAll => FIX_ALL_CONTRACT,
+        }
+    }
+
+    /// Stable wire name, matching the YAML the user writes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeepReview => "deep_review",
+            Self::FixAll => "fix_all",
+        }
+    }
+}
+
+/// Delivered with every `deep_review` snippet. States the one thing that makes
+/// a review survive its session, and closes the two gaps that read as success:
+/// a clean review skipping the call (indistinguishable, later, from no review)
+/// and a rejected draft being mistaken for an accepted report.
+const DEEP_REVIEW_CONTRACT: &str =
+    "ARTIFACT CONTRACT (persist the findings if you can, and say so if you cannot)
+Your findings must outlive this session: a fixer may be a different agent, at a
+different strength, days later, with none of this conversation. Nothing you leave
+in the terminal reaches it.
+If you have the lazybox MCP tools, call `submit_review` when you are done, with:
+the readable report verbatim; `scope` — a label naming what you reviewed,
+`base_sha` and `head_sha` from `git rev-parse`, and — when the worktree is dirty
+— `dirty_digest`, a digest of the uncommitted diff (`git diff HEAD | shasum`);
+and one `findings` entry per finding carrying its severity, `file:line` anchors, the
+evidence that makes it real, and the remediation you suggest. Write the evidence
+for a reader who never saw this review — it is the reasoning, not a label.
+Zero findings is a complete review: submit the empty findings list rather than
+skipping the call, so a fixer can tell a clean tree from a review that never ran.
+A malformed or incomplete submission is kept as a DRAFT that no fixer will bind;
+the reply names each defect, so fix them and submit again before you finish.
+If you do NOT have those tools, they do not exist for this session: do not fake
+the call and do not stop over it. Deliver the review as prose exactly as you
+otherwise would, and add one line saying the findings were not persisted, so
+nobody assumes a later fixer can pick them up.";
+
+/// Delivered with every `fix_all` snippet. The binding step is first and
+/// explicit because the failure it prevents is silent: a fixer that starts from
+/// an empty memory still finishes, still reports success, and has fixed nothing.
+const FIX_ALL_CONTRACT: &str = "ARTIFACT CONTRACT (work from the review, not from memory of it)
+If you have the lazybox MCP tools, bind a report before you change anything: do
+not work from scrollback or from a review you believe happened. Call
+`list_reviews`, passing the tree as it is now
+(`head_sha`, plus `dirty_digest` when it is dirty). Obey its `selection`:
+- `missing` — STOP. There is nothing to fix from. Say a deep review must run
+  first; never start an empty fixer and never substitute your own reading.
+- `ambiguous` — name the candidate reports and ask which one to use. Do not pick
+  the newest yourself.
+- `bound` — read it in full with `get_review` and work from ITS findings, at the
+  anchors it names. A bound report with zero findings means the tree was clean;
+  that is a result, not an error.
+When the bound report is not current — its head moved, or its worktree changed —
+revalidate each finding against the code as it is now before acting on it, and
+record one that no longer holds as `already_resolved` rather than dropping it.
+When you are done, call `submit_review_result` with the bound report id and one
+outcome per finding — `fixed`, `already_resolved`, `blocked` or `refuted` — each
+with the evidence behind it and the commits and checks that back it. Every
+finding needs one, including the ones you refute: a result that skips a finding
+is kept as a draft naming it. The original report is never modified.
+If you do NOT have those tools, this session has no artifact channel and none of
+the calls above exist for you — so do not stop over it, and do not invent them.
+Work from the review in this conversation exactly as you would have before, and
+say in your verdict that you worked from
+conversation memory rather than a bound report,
+so the difference is visible to whoever reads it.";
+
 /// Single snippet definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Snippet {
@@ -207,6 +313,13 @@ pub struct Snippet {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub next: Vec<String>,
+    /// The workflow step this snippet is, when it is one (#1732). `None` —
+    /// the default, and every ordinary snippet — means plain text injection.
+    /// `Some` adds the action's artifact contract to the delivered text, so
+    /// the step's persistence obligation travels with the prompt. See
+    /// [`SnippetAction`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<SnippetAction>,
     /// Provenance — which file the entry came from. Hand-set by the
     /// loader; serde ignores it on the way in / out. Used by the
     /// picker to show "global" vs "repo" hints alongside each row,
@@ -554,6 +667,7 @@ impl Snippets {
             skill: None,
             provider: None,
             next: Vec::new(),
+            action: None,
             origin: SnippetOrigin::BuiltIn,
         };
         // Provider-scoped built-in: only surfaces on a workspace whose task
@@ -566,6 +680,7 @@ impl Snippets {
             skill: None,
             provider: Some(provider.to_string()),
             next: Vec::new(),
+            action: None,
             origin: SnippetOrigin::BuiltIn,
         };
         // Scope on the canonical provider ids so config can't drift from
@@ -805,8 +920,9 @@ impl Snippets {
                 entry(
                     "Review",
                     "Apply the review findings you just produced",
-                    "Take the findings from the review you just produced and \
-                     *implement* them — the deliverable is a clean, tested diff, not a \
+                    "Take the review findings for this workspace — the report you \
+                     bound if there is one, otherwise the review from this \
+                     conversation — and *implement* them — the deliverable is a clean, tested diff, not a \
                      list. \"Here are the changes I would make\" is not an acceptable \
                      output; apply them. Go in severity order, highest first, and for \
                      each finding fix the *real cause* at the `file:line` it names, \
@@ -1812,6 +1928,32 @@ impl Snippets {
                 snippet.next = vec![next.to_string()];
             }
         }
+        // The built-ins that are steps of the persisted review workflow
+        // (#1732). Declared here rather than matched by key at dispatch: a
+        // user who renames or overrides one of these keys keeps whatever
+        // `action` their own entry declares, and nothing downstream has to
+        // recognize a snippet by its name or its prose.
+        //
+        // A key that names no built-in is skipped in silence, so
+        // `builtin_workflow_steps_declare_their_action` also proves every
+        // listed key resolves.
+        for (key, action) in [
+            ("deepreview", SnippetAction::DeepReview),
+            ("fixall", SnippetAction::FixAll),
+        ] {
+            if let Some(snippet) = by_key.get_mut(key) {
+                snippet.action = Some(action);
+                // The contract goes in the BODY, not onto delivery. #1857
+                // made `delivery_body` a pass-through — global response
+                // rules moved to the spawn-time briefing, and a snippet
+                // carries only its task-specific instruction. An artifact
+                // obligation is exactly that: it binds this step, so it is
+                // part of what this snippet asks for, not policy layered
+                // over it. `snippet_delivery_adds_no_global_response_contract`
+                // holds.
+                snippet.body = format!("{}\n\n{}", snippet.body, action.artifact_contract());
+            }
+        }
         Self { by_key }
     }
 
@@ -2367,6 +2509,194 @@ snippets:
             for check in checks {
                 assert!(body.contains(check), "{key}: {check}");
             }
+        }
+    }
+
+    /// The two workflow steps declare their action, so nothing downstream has
+    /// to recognize them by key or by prose (#1732). A renamed built-in fails
+    /// here rather than silently leaving the workflow unwired.
+    #[test]
+    fn builtin_workflow_steps_declare_their_action() {
+        let b = Snippets::builtin();
+        assert_eq!(
+            b.get("deepreview").expect("deepreview").action,
+            Some(SnippetAction::DeepReview)
+        );
+        assert_eq!(
+            b.get("fixall").expect("fixall").action,
+            Some(SnippetAction::FixAll)
+        );
+        // Every other built-in stays plain text injection.
+        for (key, snippet) in b.all() {
+            if key == "deepreview" || key == "fixall" {
+                continue;
+            }
+            assert_eq!(snippet.action, None, "{key} declares an unexpected action");
+        }
+    }
+
+    /// The review half names the tool that persists it, and says the two
+    /// things that otherwise read as success: a skipped call on a clean tree,
+    /// and a rejected draft mistaken for an accepted report.
+    #[test]
+    fn the_deep_review_contract_demands_ingestion() {
+        let delivered = Snippets::builtin()
+            .get("deepreview")
+            .expect("deepreview")
+            .delivery_body();
+        for needle in [
+            "submit_review",
+            "head_sha",
+            "dirty_digest",
+            "Zero findings is a complete review",
+            "DRAFT",
+        ] {
+            assert!(delivered.contains(needle), "deepreview contract: {needle}");
+        }
+    }
+
+    /// FIXALL binds before it fixes, and each selection outcome has exactly
+    /// one stated move — `missing` in particular must stop the run, since an
+    /// empty fixer finishes green having done nothing.
+    #[test]
+    fn the_fix_all_contract_binds_a_report_before_fixing() {
+        let delivered = Snippets::builtin()
+            .get("fixall")
+            .expect("fixall")
+            .delivery_body();
+        for needle in [
+            "list_reviews",
+            "get_review",
+            "submit_review_result",
+            "`missing` — STOP",
+            "ambiguous",
+            "revalidate each finding",
+            "conversation memory rather than a bound report",
+        ] {
+            assert!(delivered.contains(needle), "fixall contract: {needle}");
+        }
+    }
+
+    /// The #1732 premise: FIXALL may run in a session that never saw the
+    /// review, so its body must not claim otherwise — and, symmetrically, it
+    /// must not claim a bound report is the ONLY source, because the artifact
+    /// channel does not reach every agent.
+    #[test]
+    fn fixall_names_both_a_bound_report_and_this_conversation() {
+        let builtins = Snippets::builtin();
+        let body = &builtins.get("fixall").expect("fixall").body;
+        assert!(
+            !body.contains("you just produced"),
+            "fixall must not assume same-conversation memory is the only source"
+        );
+        assert!(body.contains("bound"), "fixall must name the bound report");
+        assert!(
+            body.contains("conversation"),
+            "fixall must still work for an agent with no artifact channel"
+        );
+    }
+
+    /// The regression this pair exists to prevent (#1831 review).
+    ///
+    /// `delivery_body` appends the artifact contract from the declared
+    /// `action` alone, and nothing on the delivery path knows whether the
+    /// receiving agent can call an MCP tool — `Agent::supports_mcp_config`
+    /// defaults to false and only Claude overrides it, and `lazybox-tui`
+    /// cannot depend on `lazybox-agents` to ask. So the contract reaches
+    /// agents that have no such tools, and an unconditional "call
+    /// `list_reviews` … `missing` — STOP" told those agents to stop doing
+    /// work they previously did from conversation memory.
+    ///
+    /// The capability is therefore stated as a condition the agent resolves
+    /// about itself, and both branches are mandatory text.
+    #[test]
+    fn artifact_contracts_carry_a_branch_for_an_agent_without_the_tools() {
+        for action in [SnippetAction::DeepReview, SnippetAction::FixAll] {
+            let contract = action.artifact_contract();
+            assert!(
+                contract.contains("If you have the lazybox MCP tools"),
+                "{} must gate its tool calls on having them",
+                action.as_str()
+            );
+            assert!(
+                contract.contains("do NOT have those tools"),
+                "{} must say what to do without them",
+                action.as_str()
+            );
+            assert!(
+                contract.contains("do not stop"),
+                "{} must not leave a toolless agent stopping",
+                action.as_str()
+            );
+        }
+        // The STOP that remains is scoped to a real `missing` selection, which
+        // only an agent that actually called `list_reviews` can receive.
+        let fixall = SnippetAction::FixAll.artifact_contract();
+        let stop = fixall.find("`missing` — STOP").expect("missing branch");
+        let gate = fixall
+            .find("If you have the lazybox MCP tools")
+            .expect("capability gate");
+        assert!(
+            gate < stop,
+            "the STOP must sit inside the tools-available branch"
+        );
+    }
+
+    /// A user's own snippet may declare an action, and is still delivered
+    /// exactly as authored.
+    ///
+    /// The declaration is metadata — it is what lets anything downstream
+    /// recognize the step without matching a key or a phrase. It is NOT a
+    /// licence to append lazybox's text to someone's prompt: #1857 moved
+    /// global policy to the spawn-time briefing precisely so a delivery
+    /// carries only its author's task-specific instruction.
+    #[test]
+    fn a_user_snippet_may_declare_an_action_and_is_delivered_as_authored() {
+        let path = write_tmp(
+            "action-parse",
+            "snippets:\n  \
+             myreview:\n    action: deep_review\n    body: my own review prompt\n  \
+             plain:\n    body: just text\n",
+        );
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("loads");
+        let mine = loaded.get("myreview").expect("myreview");
+        assert_eq!(mine.action, Some(SnippetAction::DeepReview));
+        assert_eq!(mine.delivery_body(), "my own review prompt");
+
+        let plain = loaded.get("plain").expect("plain");
+        assert_eq!(plain.action, None);
+        assert_eq!(plain.delivery_body(), "just text");
+    }
+
+    /// An unknown `action:` is a parse error rather than a silently ignored
+    /// field: a user who meant to join the workflow and mistyped it would
+    /// otherwise get a snippet that looks wired and persists nothing.
+    #[test]
+    fn an_unknown_action_is_refused() {
+        let path = write_tmp(
+            "action-unknown",
+            "snippets:\n  bad:\n    action: fixall\n    body: text\n",
+        );
+        assert!(Snippets::load_from(&path, SnippetOrigin::Global).is_err());
+    }
+
+    /// The action round-trips through the YAML a save writes.
+    #[test]
+    fn action_round_trips_through_yaml() {
+        let mut snippet = Snippets::builtin().get("fixall").expect("fixall").clone();
+        snippet.origin = SnippetOrigin::Unknown;
+        let yaml = serde_yaml::to_string(&snippet).expect("encode");
+        assert!(yaml.contains("action: fix_all"), "{yaml}");
+        let back: Snippet = serde_yaml::from_str(&yaml).expect("decode");
+        assert_eq!(back.action, Some(SnippetAction::FixAll));
+        // `as_str` is the same name the serde rename writes, so a future
+        // rename cannot leave the two disagreeing.
+        for action in [SnippetAction::DeepReview, SnippetAction::FixAll] {
+            assert!(
+                serde_yaml::to_string(&action)
+                    .expect("encode")
+                    .contains(action.as_str())
+            );
         }
     }
 
@@ -2946,6 +3276,7 @@ snippets:
             skill: None,
             provider: None,
             next: Vec::new(),
+            action: None,
             origin: SnippetOrigin::Unknown,
         }
     }

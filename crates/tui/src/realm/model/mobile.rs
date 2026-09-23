@@ -222,7 +222,12 @@ impl<T: TerminalAdapter> Model<T> {
             }
             RailAction::Prioritize { source, target } => {
                 self.refresh_mobile_sessions();
-                if !self.mobile_sessions.prioritize(source, target) {
+                if self.mobile_sessions.prioritize(source, target) {
+                    let order = self.mobile_sessions.saved_order();
+                    lazybox_config::Config::save_with_async(move |config| {
+                        config.ui.mobile_session_order = order;
+                    });
+                } else {
                     self.flash_info("That session has ended");
                 }
                 self.mobile_rail.update(self.mobile_sessions.rows());
@@ -490,6 +495,33 @@ mod tests {
 
     #[test]
     fn priority_and_enter_use_highlight_without_touching_running_terminal() {
+        let _env = super::super::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        struct ConfigHome(Option<std::ffi::OsString>, tempfile::TempDir);
+        impl Drop for ConfigHome {
+            fn drop(&mut self) {
+                let _ =
+                    lazybox_config::Config::flush_pending_saves(std::time::Duration::from_secs(5));
+                // SAFETY: the crate's ENV_LOCK is held until after this guard drops.
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("LAZYBOX_HOME", value),
+                        None => std::env::remove_var("LAZYBOX_HOME"),
+                    }
+                }
+                lazybox_config::Config::invalidate_cache();
+            }
+        }
+        let home = ConfigHome(
+            std::env::var_os("LAZYBOX_HOME"),
+            tempfile::tempdir().unwrap(),
+        );
+        // SAFETY: serialize home changes with the other model config tests.
+        unsafe {
+            std::env::set_var("LAZYBOX_HOME", home.1.path());
+        }
+        lazybox_config::Config::invalidate_cache();
         let (mut m, mut server, workspace) = fixture();
         for id in [7, 8, 9] {
             spawn(&mut m, workspace.clone(), id);
@@ -514,6 +546,30 @@ mod tests {
         assert_eq!(m.terminals.focused_terminal_id(), Some(TerminalId(7)));
         assert!(m.mobile_rail.is_open());
         assert_eq!(m.mobile_rail.highlighted(), Some(TerminalId(9)));
+        assert!(lazybox_config::Config::flush_pending_saves(
+            std::time::Duration::from_secs(5)
+        ));
+        let saved = lazybox_config::Config::load().unwrap();
+        let (mut fresh, _connection, fresh_workspace) = fixture();
+        fresh.apply_client_config(&saved);
+        // Attachment streams terminal events, potentially in another order.
+        // Empty and partial rosters must not discard the remaining priorities.
+        fresh.refresh_mobile_sessions();
+        for id in [8, 7, 9] {
+            spawn(&mut fresh, fresh_workspace.clone(), id);
+            fresh.refresh_mobile_sessions();
+        }
+        assert_eq!(
+            fresh
+                .mobile_sessions
+                .rows()
+                .iter()
+                .map(|r| r.terminal_id.0)
+                .collect::<Vec<_>>(),
+            [9, 7, 8]
+        );
+        fresh.dispatch_key(KeyEvent::from(Key::Enter));
+        assert_eq!(fresh.terminals.focused_terminal_id(), Some(TerminalId(9)));
         m.dispatch_key(key('p'));
         m.dispatch_key(key('j'));
         m.dispatch_key(KeyEvent::from(Key::Esc));

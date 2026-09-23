@@ -8,7 +8,7 @@
 /// would let two modules' mutators race. Held for the whole body of
 /// each such test.
 #[cfg(test)]
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Seed a bare workspace into the sidebar's workspace map so a removal
 /// prompt targeting `key` passes the mount-time liveness gate

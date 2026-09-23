@@ -7953,7 +7953,7 @@ mod focused_row_identity_tests {
     }
 
     #[test]
-    fn focused_pr_row_keeps_every_column_and_trails_its_source() {
+    fn focused_pr_row_keeps_every_column_and_its_source() {
         let (mut sb, key) = sidebar_with_pr();
         let under_header = row_containing(&mut sb, 120, "orion");
         // The identity cluster is whatever the row shows under its repo
@@ -7983,12 +7983,13 @@ mod focused_row_identity_tests {
             );
         }
 
-        // Narrow: the cue is the redundant half, so it is what gives way —
-        // the number, role, agent, CI and age all survive.
+        // Narrow: the title truncates. The repo is the one thing a focused
+        // row cannot get from a header, so it stays — and the number, role,
+        // agent, CI and age all survive beside it.
         let narrow = row_containing(&mut sb, 60, "orion");
         assert!(
-            !narrow.contains(REPO),
-            "the source cue must shed before the row's own columns: {narrow:?}",
+            narrow.contains("…") && narrow.contains("lazybox"),
+            "the title truncates and the source cue stays: {narrow:?}",
         );
         for column in ["⇄ 798 A", "X", "✗", "13h"] {
             assert!(

@@ -1026,6 +1026,18 @@ fn enclosing_repo_root(cwd: &std::path::Path) -> Option<PathBuf> {
 /// surfaced (non-zero exit): the caller asked for a workspace and deserves to
 /// know if the daemon wasn't reachable or the record couldn't be resolved.
 async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
+    // `init_tracing` redirects this process's stderr into the log file, so a
+    // returned `Err` would never reach the caller — the same trap `lazybox
+    // log` and `auth_cli` already work around. An agent that mistypes
+    // `--agent` must see why nothing happened, not silence.
+    if let Err(error) = run_workspace_create(args).await {
+        println!("lazybox workspace create: {error:#}");
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn run_workspace_create(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
     let name = take_value(&mut args, "--name");
     let record = take_value(&mut args, "--issue")
@@ -1058,6 +1070,22 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
     }
     if let Some(agent) = agent.as_deref() {
         validate_agent_id(agent)?;
+    }
+    // Every flag this verb knows has been taken by now. Anything left is a
+    // typo or a flag that does not exist here, and accepting it silently is
+    // how a spawn that ignored `--tier` looks exactly like one that honored
+    // it. The hook path stays tolerant on purpose (a build-skewed daemon may
+    // pass a flag this binary predates); a human- or agent-typed command does
+    // not get that latitude.
+    if !args.is_empty() {
+        anyhow::bail!(
+            "unknown workspace create argument(s): {}; usage: lazybox workspace create \
+             (--issue|--pr|--ticket <owner/repo#N|URL|KEY> | --name <name> --scratch) \
+             [--project <key> | --repo <owner/repo>] [--agent <id>] [--cwd <path>] \
+             [--socket <path>]. To pick a model tier, label the task `model:<tier>` \
+             rather than passing a flag",
+            args.join(" "),
+        );
     }
     let cwd = match cwd {
         Some(path) => path,

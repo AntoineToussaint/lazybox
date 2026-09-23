@@ -292,12 +292,76 @@ async fn workspace_create_rejects_an_unknown_agent_without_connecting() {
         !output.status.success(),
         "unknown --agent must fail the command"
     );
+    // `init_tracing` redirects stderr into the log file, so the reason has to
+    // come out on stdout or the caller sees a silent no-op and believes the
+    // spawn worked.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("unknown --agent") && stdout.contains("known agents"),
+        "the refusal must name the bad agent and the real ones on stdout, got: {stdout:?}"
+    );
 
     // The CLI bailed at validation, so the accept never completes.
     let connected = tokio::time::timeout(Duration::from_millis(500), server).await;
     assert!(
         connected.is_err(),
         "unknown --agent must not connect to the daemon"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_create_refuses_a_flag_it_does_not_know() {
+    // A flag this verb does not define used to be dropped in silence: the
+    // command attached, printed its success line, and ignored what you asked
+    // for. `--tier xhigh` reads exactly like a spawn that honored the tier,
+    // which is how an agent ends up running on the wrong model believing
+    // otherwise. Refuse it, and point at the mechanism that does work.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp.path().join("daemon.sock");
+    let listener = transport::Listener::bind(&socket_path)
+        .await
+        .expect("bind test socket");
+    let server = fake_daemon(listener, "github-acme-widget-7");
+
+    let binary = env!("CARGO_BIN_EXE_lazybox");
+    let child = run_workspace_create(
+        binary,
+        &[
+            "--issue",
+            "https://github.com/acme/widget/issues/7",
+            "--repo",
+            "acme/widget",
+            "--agent",
+            "claude",
+            "--tier",
+            "xhigh",
+            "--cwd",
+            &temp.path().to_string_lossy(),
+            "--socket",
+            &socket_path.to_string_lossy(),
+        ],
+        temp.path().join("home"),
+    );
+
+    let output = tokio::time::timeout(Duration::from_secs(10), child)
+        .await
+        .expect("cli exits")
+        .expect("cli task");
+    assert!(
+        !output.status.success(),
+        "an unknown flag must fail the command rather than be ignored"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--tier") && stdout.contains("model:<tier>"),
+        "the refusal must name the offending flag and the label that does work, got: {stdout:?}"
+    );
+
+    // Refused at parse time, so the daemon is never dialled.
+    let connected = tokio::time::timeout(Duration::from_millis(500), server).await;
+    assert!(
+        connected.is_err(),
+        "an unknown flag must not reach the daemon"
     );
 }
 

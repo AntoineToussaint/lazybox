@@ -12,14 +12,15 @@ use tuirealm::{
     },
 };
 
-// Navigation, creation, rename and delete consume letters. Keep the map shared by
+// Navigation, creation, rename, priority and delete consume letters. Keep the map shared by
 // keyboard lookup and both render modes so labels can never disagree.
-const SELECTORS: &[u8] = b"abcdefghilmopqstuvwyz";
+const SELECTORS: &[u8] = b"abcdefghilmoqstuvwyz";
 const LETTERS: usize = SELECTORS.len();
 
 #[derive(Default)]
 pub(crate) struct MobileRail {
     open: bool,
+    priority: Option<TerminalId>,
     initialized: bool,
     // Snapshot identities, not positions in the live list: a spawn/exit must
     // never change what the next letter will select while this is open.
@@ -38,6 +39,10 @@ pub(crate) enum RailAction {
     Close,
     Select(TerminalId),
     New,
+    Prioritize {
+        source: TerminalId,
+        target: TerminalId,
+    },
     Rename(TerminalId),
     Delete(TerminalId),
     Quit,
@@ -49,6 +54,7 @@ impl MobileRail {
     }
 
     pub(crate) fn open(&mut self, rows: &[SessionRow]) {
+        self.priority = None;
         self.targets = rows.iter().map(|r| r.terminal_id).collect();
         self.group = 0;
         self.scroll = 0;
@@ -81,8 +87,9 @@ impl MobileRail {
     }
 
     pub(crate) fn highlight_initial(&mut self, id: TerminalId) {
-        if let Some(index) = self.targets.iter().take(LETTERS).position(|t| *t == id) {
+        if let Some(index) = self.targets.iter().position(|t| *t == id) {
             self.cursor = index;
+            self.group = index / LETTERS;
         }
     }
 
@@ -94,6 +101,7 @@ impl MobileRail {
 
     pub(crate) fn close(&mut self) {
         self.open = false;
+        self.priority = None;
     }
 
     fn group_len(&self) -> usize {
@@ -132,14 +140,25 @@ impl MobileRail {
             return RailAction::None;
         }
         match key.code {
-            Key::Esc | Key::Enter => return RailAction::Close,
-            Key::Char('n') => return RailAction::New,
-            Key::Char('r') => {
+            Key::Esc => {
+                if self.priority.take().is_none() {
+                    return RailAction::Close;
+                }
+            }
+            Key::Enter => {
+                return self
+                    .highlighted()
+                    .map(|id| self.choose(id))
+                    .unwrap_or(RailAction::None);
+            }
+            Key::Char('p') if self.priority.is_none() => self.priority = self.highlighted(),
+            Key::Char('n') if self.priority.is_none() => return RailAction::New,
+            Key::Char('r') if self.priority.is_none() => {
                 if let Some(id) = self.highlighted() {
                     return RailAction::Rename(id);
                 }
             }
-            Key::Char('x') => {
+            Key::Char('x') if self.priority.is_none() => {
                 if let Some(id) = self.highlighted() {
                     return RailAction::Delete(id);
                 }
@@ -156,12 +175,46 @@ impl MobileRail {
                 if let Some(index) = SELECTORS.iter().position(|letter| char::from(*letter) == c)
                     && let Some(id) = self.targets.get(self.group * LETTERS + index)
                 {
-                    return RailAction::Select(*id);
+                    return self.choose(*id);
                 }
             }
             _ => (),
         }
         RailAction::None
+    }
+
+    pub(crate) fn is_prioritizing(&self) -> bool {
+        self.priority.is_some()
+    }
+
+    pub(crate) fn choose(&mut self, target: TerminalId) -> RailAction {
+        match self.priority.take() {
+            Some(source) => RailAction::Prioritize { source, target },
+            None => RailAction::Select(target),
+        }
+    }
+
+    /// The same action labels and hit regions serve the portal and overlay.
+    pub(crate) fn footer(&self) -> &'static str {
+        if self.is_prioritizing() {
+            "Pick position · Esc cancel"
+        } else {
+            "n new r rename x del p priority"
+        }
+    }
+
+    pub(crate) fn footer_key(&self, column: u16) -> Option<KeyEvent> {
+        if self.is_prioritizing() {
+            return None;
+        }
+        let c = match column {
+            0..=4 => 'n',
+            6..=13 => 'r',
+            15..=19 => 'x',
+            21..=30 => 'p',
+            _ => return None,
+        };
+        Some(KeyEvent::from(Key::Char(c)))
     }
 
     pub(crate) fn move_highlight(&mut self, delta: isize) {
@@ -284,14 +337,19 @@ impl MobileRail {
         if inner.is_empty() {
             return;
         }
+        let heading = if self.is_prioritizing() {
+            "Priority"
+        } else {
+            "Sessions"
+        };
         let title = if self.targets.len() > LETTERS {
             format!(
-                "Sessions {}/{}",
+                "{heading} {}/{} j/k",
                 self.group + 1,
                 self.targets.len().div_ceil(LETTERS)
             )
         } else {
-            "Sessions".into()
+            format!("{heading} j/k move")
         };
         frame.render_widget(
             Paragraph::new(title).style(Style::default().fg(theme.accent)),
@@ -377,7 +435,18 @@ impl MobileRail {
                 .find(|r| Some(r.terminal_id) == self.highlighted())
         {
             frame.render_widget(
-                Paragraph::new(row.detail.as_str()).style(Style::default().fg(if row.attention {
+                Paragraph::new(if let Some(source) = self.priority {
+                    format!(
+                        "Move {}",
+                        rows.iter()
+                            .find(|r| r.terminal_id == source)
+                            .map(|r| r.title.as_str())
+                            .unwrap_or("ended session")
+                    )
+                } else {
+                    row.detail.clone()
+                })
+                .style(Style::default().fg(if row.attention {
                     theme.warn
                 } else {
                     theme.text_dim
@@ -386,16 +455,12 @@ impl MobileRail {
             );
         }
         if inner.height > 1 {
-            let hint = if self.group_len() > self.visible {
-                format!(
-                    "{}-{}/{} ↑↓",
-                    self.scroll + 1,
-                    (self.scroll + self.visible).min(self.group_len()),
-                    self.group_len()
-                )
+            let hint = if self.is_prioritizing() {
+                "Enter move Esc back"
             } else {
-                "Enter/Esc close".into()
-            };
+                "Enter open Esc back"
+            }
+            .to_string();
             let hint = if self.targets.len() > LETTERS {
                 format!("{hint} [ ]")
             } else {
@@ -466,14 +531,65 @@ mod tests {
         rail.key(&KeyEvent::from(Key::Char(']')));
         assert!(matches!(
             rail.key(&KeyEvent::from(Key::Char('a'))),
-            RailAction::Select(TerminalId(22))
+            RailAction::Select(TerminalId(21))
         ));
         rail.key(&KeyEvent::from(Key::Char('[')));
         assert!(matches!(
             rail.key(&KeyEvent::from(Key::Char('z'))),
-            RailAction::Select(TerminalId(21))
+            RailAction::Select(TerminalId(20))
         ));
     }
+    #[test]
+    fn priority_captures_source_and_destination_ids_and_can_cancel() {
+        let mut rail = MobileRail::default();
+        rail.open(&rows());
+        rail.highlight_initial(TerminalId(40));
+        assert!(matches!(
+            rail.key(&KeyEvent::from(Key::Enter)),
+            RailAction::Select(TerminalId(40))
+        ));
+        rail.key(&KeyEvent::from(Key::Char('p')));
+        rail.key(&KeyEvent::from(Key::Char('[')));
+        rail.key(&KeyEvent::from(Key::Char('j')));
+        assert!(matches!(
+            rail.key(&KeyEvent::from(Key::Enter)),
+            RailAction::Prioritize {
+                source: TerminalId(40),
+                target: TerminalId(2)
+            }
+        ));
+        assert!(!rail.is_prioritizing());
+        rail.key(&KeyEvent::from(Key::Char('p')));
+        rail.key(&KeyEvent::from(Key::Char('j')));
+        // Pressing p again must not replace the captured source.
+        rail.key(&KeyEvent::from(Key::Char('p')));
+        assert!(matches!(
+            rail.key(&KeyEvent::from(Key::Char('a'))),
+            RailAction::Prioritize {
+                source: TerminalId(2),
+                target: TerminalId(1)
+            }
+        ));
+        rail.key(&KeyEvent::from(Key::Char('p')));
+        assert!(matches!(
+            rail.key(&KeyEvent::from(Key::Esc)),
+            RailAction::None
+        ));
+        assert!(!rail.is_prioritizing());
+        assert!(rail.is_open());
+        assert!(matches!(
+            rail.key(&KeyEvent::from(Key::Esc)),
+            RailAction::Close
+        ));
+        rail.open(&[]);
+        rail.key(&KeyEvent::from(Key::Char('p')));
+        assert!(!rail.is_prioritizing());
+        assert!(matches!(
+            rail.key(&KeyEvent::from(Key::Enter)),
+            RailAction::None
+        ));
+    }
+
     #[test]
     fn jk_moves_highlight_without_selecting_a_session() {
         let mut rail = MobileRail::default();
@@ -490,10 +606,10 @@ mod tests {
         assert_eq!(rail.highlighted(), Some(TerminalId(1)));
     }
     #[test]
-    fn selector_map_reserves_j_k_n_r_x_in_every_group() {
+    fn selector_map_reserves_j_k_n_p_r_x_in_every_group() {
         let mut rail = MobileRail::default();
         rail.open(&rows());
-        for (i, c) in "abcdefghilmopqstuvwyz".chars().enumerate() {
+        for (i, c) in "abcdefghilmoqstuvwyz".chars().enumerate() {
             assert!(
                 matches!(rail.key(&KeyEvent::from(Key::Char(c))), RailAction::Select(TerminalId(id)) if id == i as u64 + 1)
             );
@@ -516,14 +632,14 @@ mod tests {
             RailAction::Rename(TerminalId(2))
         ));
         rail.key(&KeyEvent::from(Key::Char(']')));
-        for (i, c) in "abcdefghilmopqstuvwyz".chars().enumerate() {
+        for (i, c) in "abcdefghilmoqstuvwyz".chars().enumerate() {
             assert!(
-                matches!(rail.key(&KeyEvent::from(Key::Char(c))), RailAction::Select(TerminalId(id)) if id == i as u64 + 22)
+                matches!(rail.key(&KeyEvent::from(Key::Char(c))), RailAction::Select(TerminalId(id)) if id == i as u64 + 21)
             );
         }
         assert!(matches!(
             rail.key(&KeyEvent::from(Key::Enter)),
-            RailAction::Close
+            RailAction::Select(TerminalId(21))
         ));
         assert!(matches!(
             rail.key(&KeyEvent::new(Key::Char('q'), KeyModifiers::CONTROL)),

@@ -42,14 +42,14 @@ impl Input {
         let inner = block.inner(modal);
         frame.render_widget(Clear, modal);
         frame.render_widget(block, modal);
-        if inner.height < 2 {
+        if inner.height < 3 {
             return;
         }
         let prompt = Rect::new(
             inner.x,
             inner.y,
             inner.width,
-            inner.height.saturating_sub(2),
+            inner.height.saturating_sub(3),
         );
         frame.render_widget(
             Paragraph::new(self.prompt.as_str())
@@ -67,6 +67,10 @@ impl Input {
         }
         frame.render_widget(
             Paragraph::new(&display[start..]).style(Style::default().fg(theme.text_strong)),
+            Rect::new(inner.x, inner.bottom() - 3, inner.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("Ctrl-X clear").style(Style::default().fg(theme.text_dim)),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
         );
         frame.render_widget(
@@ -229,6 +233,16 @@ impl AppComponent<Msg, UserEvent> for Input {
                 modifiers,
                 ..
             }) if modifiers.contains(KeyModifiers::CONTROL) => Some(Msg::ModalDismissed),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('x'),
+                modifiers,
+                ..
+            }) if self.presentation == crate::realm::presentation::Presentation::Mobile
+                && *modifiers == KeyModifiers::CONTROL =>
+            {
+                self.input.clear();
+                None
+            }
             Event::Keyboard(KeyEvent {
                 code: Key::Enter, ..
             }) => {

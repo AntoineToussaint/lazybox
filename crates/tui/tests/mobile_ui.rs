@@ -352,11 +352,27 @@ fn mobile_rail_and_delete_confirmation_fit_phone_screens() {
                 expanded.contains("● a") && expanded.contains("! b") && expanded.contains("✓ c"),
                 "{expanded}"
             );
-            assert!(expanded.contains("Enter/Esc close"), "{expanded}");
+            assert!(expanded.contains("Enter open Esc back"), "{expanded}");
         }
         if w == 39 {
             insta::assert_snapshot!("mobile_rail_collapsed_39x18", collapsed);
             insta::assert_snapshot!("mobile_rail_expanded_39x18", expanded);
+        }
+        m.dispatch_key(key('p'));
+        let priority = screen(&mut m);
+        if w > 1 {
+            assert!(priority.contains("Priority j/k"), "{priority}");
+            assert!(priority.contains("Enter move Esc back"), "{priority}");
+        }
+        if w == 39 {
+            insta::assert_snapshot!("mobile_priority_39x18", priority);
+        }
+        if w == 32 {
+            insta::assert_snapshot!("mobile_priority_32x12", priority);
+        }
+        m.dispatch_key(KeyEvent::from(Key::Esc));
+        if w > 1 {
+            assert!(screen(&mut m).contains("Sessions j/k"));
         }
         m.dispatch_key(key('b'));
         m.dispatch_key(KeyEvent::new(Key::Char('t'), KeyModifiers::CONTROL));

@@ -59,8 +59,10 @@ flowchart TD
   Launch["lb -m"] --> Portal[Sessions portal]
   Portal -->|session letter| Terminal[Current terminal + thin status rail]
   Terminal -->|Ctrl-T| Sessions[Compact Sessions overlay]
-  Sessions -->|session letter| Terminal
-  Sessions -->|Enter / Escape / Ctrl-T| Terminal
+  Sessions -->|letter / Enter: highlighted session| Terminal
+  Sessions -->|Escape / Ctrl-T: current terminal| Terminal
+  Sessions -->|p| Priority
+  Priority -->|letter / Enter: move; Escape: cancel| Sessions
   Portal -->|n| Area[No repository or known repository]
   Sessions -->|n| Area
   Area --> Runner[Enabled agent or Shell]

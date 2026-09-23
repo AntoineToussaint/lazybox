@@ -2,8 +2,8 @@
 source: crates/tui/tests/mobile_ui.rs
 expression: out
 ---
-Sessions (1) · letters open · ↑↓       
-Sessions                               
+Sessions (1) · j/k move · Enter open   
+Sessions j/k move                      
 ● a Phone notes · codex                
                                        
                                        
@@ -18,5 +18,5 @@ Sessions
                                        
                                        
 working · codex                        
-Enter/Esc close                        
-n new r rename x delete ^Q quit
+Enter open Esc back                    
+n new r rename x del p priority

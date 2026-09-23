@@ -7579,7 +7579,7 @@ impl<T: TerminalAdapter> Model<T> {
                 let label = match mobile_focus {
                     PaneFocus::Sidebar | PaneFocus::Right => {
                         format!(
-                            "Sessions ({}) · letters open · ↑↓",
+                            "Sessions ({}) · j/k move · Enter open",
                             self.mobile_sessions.len()
                         )
                     }
@@ -7798,7 +7798,7 @@ impl<T: TerminalAdapter> Model<T> {
                 use tuirealm::ratatui::{style::Style, widgets::Paragraph};
                 let theme = crate::theme::current();
                 let hint = if self.mobile_rail.is_open() || mobile_focus != PaneFocus::Terminals {
-                    "n new r rename x delete ^Q quit"
+                    self.mobile_rail.footer()
                 } else {
                     "^T sessions ^G settings ^D end"
                 };

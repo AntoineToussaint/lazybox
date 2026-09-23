@@ -33037,3 +33037,162 @@ mod clipboard_and_paste_tests {
         );
     }
 }
+
+/// A provisioning checklist belongs to whoever asked for the spawn.
+///
+/// `Event::WorktreeProgress` is broadcast to every connected client and
+/// its `SpawnOrigin` only says whether a *human* was in the loop
+/// anywhere — not whether that human is at this keyboard. An agent
+/// running `lazybox workspace create --issue … --agent codex` sends a
+/// correlated `CreateWorkspace`, so its provisioning is `Interactive`,
+/// and it used to mount this modal over a user who asked for nothing.
+mod worktree_progress_ownership_tests {
+    use super::super::{Id, ModalFlow, Model};
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{
+        Command as IpcCommand, Event as IpcEvent, SpawnOrigin, WorktreeStep, WorktreeStepStatus,
+        channel,
+    };
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn progress(key: &SessionKey, status: WorktreeStepStatus) -> IpcEvent {
+        IpcEvent::WorktreeProgress {
+            session_key: key.clone(),
+            step: WorktreeStep::Clone,
+            status,
+            origin: SpawnOrigin::Interactive,
+        }
+    }
+
+    /// The bug, as reported: "when lazybox create workspace, don't show
+    /// modal, only show modal when it's created by the user".
+    #[test]
+    fn a_workspace_this_client_did_not_create_provisions_without_a_modal() {
+        let mut m = build_model();
+        let elsewhere = SessionKey::from("github:obin-ai/module-document-store#326");
+
+        for step in [WorktreeStep::Clone, WorktreeStep::Fetch, WorktreeStep::Setup] {
+            m.handle_daemon_event(IpcEvent::WorktreeProgress {
+                session_key: elsewhere.clone(),
+                step,
+                status: WorktreeStepStatus::Started,
+                origin: SpawnOrigin::Interactive,
+            });
+        }
+
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "a provision this client never asked for must not mount a modal",
+        );
+        assert!(
+            m.worktree_progress.is_none(),
+            "nor accumulate a checklist behind it",
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "and it must not be swapped for a notice either — the row \
+             appearing in the inbox is the signal",
+        );
+    }
+
+    /// The other half of the rule: the user's own `x n` still mounts its
+    /// checklist, driven through the real flow (submit → correlated
+    /// `CreateWorkspace` → `WorkspaceCreated` → provisioning).
+    #[test]
+    fn the_users_own_new_workspace_still_mounts_its_checklist() {
+        let mut m = build_model();
+        let project = lazybox_core::ProjectKey::github("AntoineToussaint", "lazybox");
+
+        m.modal_stack.push(Id::NewWorkspace);
+        m.modal_flow = Some(ModalFlow::NewWorkspaceProject {
+            project: project.clone(),
+        });
+        let commands = m.handle_input_submitted("Spike".into());
+        let request_id = match commands.as_slice() {
+            [
+                IpcCommand::CreateWorkspace {
+                    client_request_id: Some(request_id),
+                    ..
+                },
+            ] => request_id.clone(),
+            other => panic!("expected one correlated CreateWorkspace, got {other:?}"),
+        };
+
+        let allocated = lazybox_core::WorkspaceKey::new("spike");
+        m.handle_daemon_event(IpcEvent::WorkspaceCreated {
+            client_request_id: request_id,
+            workspace_key: allocated.clone(),
+        });
+        m.handle_daemon_event(progress(
+            &SessionKey::from(&allocated),
+            WorktreeStepStatus::Started,
+        ));
+
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "the workspace the user just created keeps its checklist",
+        );
+    }
+
+    /// `x F` is the same rule on the floating path — a different command
+    /// (`CreateFloatingWorkspace`) arming the same follow pin.
+    #[test]
+    fn the_users_own_floating_workspace_still_mounts_its_checklist() {
+        let mut m = build_model();
+
+        m.modal_stack.push(Id::NewWorkspace);
+        m.modal_flow = Some(ModalFlow::FloatingWorkspace {
+            kind: lazybox_core::FloatingWorkspaceKind::Coordination,
+        });
+        let commands = m.handle_input_submitted("Coordinate".into());
+        let request_id = match commands.as_slice() {
+            [
+                IpcCommand::CreateFloatingWorkspace {
+                    client_request_id: Some(request_id),
+                    ..
+                },
+            ] => request_id.clone(),
+            other => panic!("expected one correlated CreateFloatingWorkspace, got {other:?}"),
+        };
+
+        let allocated = lazybox_core::WorkspaceKey::new("coordinate");
+        m.handle_daemon_event(IpcEvent::WorkspaceCreated {
+            client_request_id: request_id,
+            workspace_key: allocated.clone(),
+        });
+        m.handle_daemon_event(progress(
+            &SessionKey::from(&allocated),
+            WorktreeStepStatus::Started,
+        ));
+
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "a floating workspace the user created keeps its checklist",
+        );
+    }
+
+    /// Silence applies to the *working* path only. A provision that
+    /// genuinely broke still reaches the checklist whoever asked for it
+    /// — unchanged by this rule, and the reason #594 put the recovery
+    /// affordance there. A quiet failure would be a swallowed error.
+    #[test]
+    fn a_failed_provision_still_surfaces_for_a_spawn_this_client_did_not_ask_for() {
+        let mut m = build_model();
+        let elsewhere = SessionKey::from("github:obin-ai/module-document-store#326");
+
+        m.handle_daemon_event(progress(
+            &elsewhere,
+            WorktreeStepStatus::Failed("disk full".into()),
+        ));
+
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "a broken provision is never swallowed, whoever asked for it",
+        );
+    }
+}

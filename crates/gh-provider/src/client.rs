@@ -8866,9 +8866,11 @@ mod tests {
     async fn a_member_past_the_page_cap_resumes_under_a_tighter_window() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let uri = spawn_matching_response_server(
-            // The re-windowed walk is the only one carrying a ceiling.
+            // The re-windowed walk is the only one carrying a ceiling —
+            // the upper half of the single `updated:<floor>..<ceiling>`
+            // range term, since this spec has a floor.
             vec![(
-                "updated:<=",
+                "+00:00..",
                 pr_page_updated_at(2, "2026-09-10T08:00:00Z", false),
             )],
             pr_page_updated_at(1, "2026-09-15T08:00:00Z", true),
@@ -8913,7 +8915,7 @@ mod tests {
         assert_eq!(
             bodies
                 .iter()
-                .filter(|body| body.contains("updated:<="))
+                .filter(|body| body.contains("+00:00.."))
                 .count(),
             1,
             "one re-window was enough; it must not keep walking"
@@ -8952,7 +8954,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .filter(|body| body.contains("updated:<="))
+            .filter(|body| body.contains("+00:00.."))
             .count();
         assert!(
             (1..=REPO_SWEEP_MAX_PAGES).contains(&retried),

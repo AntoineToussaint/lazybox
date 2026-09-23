@@ -2262,14 +2262,15 @@ pub async fn role_prompt_ctx(
 
 /// Record a declared blocker on `workspace` (the caller's own), then recompute
 /// so the epic status reflects it immediately. Backs the `report_blocker` MCP
-/// tool.
+/// tool, which must not claim a blocker was recorded when it wasn't — `Err`
+/// when the write failed.
 pub async fn report_blocker(
     config: &ServerConfig,
     workspace: WorkspaceKey,
     reason: String,
     kind: BlockerKind,
     owner: BlockerOwner,
-) {
+) -> Result<(), String> {
     let blocker = DeclaredBlocker {
         workspace,
         reason,
@@ -2282,19 +2283,21 @@ pub async fn report_blocker(
             "epics: report_blocker for {} failed: {e}",
             blocker.workspace
         );
-        return;
+        return Err(e);
     }
     recompute_all(config).await;
+    Ok(())
 }
 
 /// Clear `workspace`'s declared blocker (if any), then recompute. Backs the
 /// `clear_blocker` MCP tool.
-pub async fn clear_blocker(config: &ServerConfig, workspace: &str) {
+pub async fn clear_blocker(config: &ServerConfig, workspace: &str) -> Result<(), String> {
     if let Err(e) = clear_declared(config, workspace) {
         tracing::warn!("epics: clear_blocker for {workspace} failed: {e}");
-        return;
+        return Err(e.to_string());
     }
     recompute_all(config).await;
+    Ok(())
 }
 
 /// Create or overwrite an epic record, then recompute so the new/changed epic
@@ -4822,13 +4825,14 @@ mod tests {
             BlockerKind::Review,
             BlockerOwner::Agent(WorkspaceKey::new("w")),
         )
-        .await;
+        .await
+        .expect("report");
         let snaps = all_snapshots(&config).await;
         let m = &snaps.iter().find(|s| s.key == "e").expect("epic e").members[0];
         assert_eq!(m.status, EpicMemberStatus::Blocked);
         assert!(m.blockers.iter().any(|b| b.kind == BlockerKind::Review));
 
-        clear_blocker(&config, "w").await;
+        clear_blocker(&config, "w").await.expect("clear");
         let snaps = all_snapshots(&config).await;
         let m = &snaps.iter().find(|s| s.key == "e").expect("epic e").members[0];
         assert_eq!(m.status, EpicMemberStatus::Ready);
@@ -4922,7 +4926,8 @@ mod tests {
             BlockerKind::Review,
             BlockerOwner::Operator,
         )
-        .await;
+        .await
+        .expect("report");
 
         let after: Workspace = serde_json::from_str(
             config
@@ -4989,7 +4994,8 @@ mod tests {
                 BlockerKind::Review,
                 BlockerOwner::Operator,
             )
-            .await;
+            .await
+            .expect("report");
         });
 
         // Give the recompute time to snapshot "w" and park on the held lock. Its

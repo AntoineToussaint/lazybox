@@ -374,6 +374,12 @@ async fn run_case(case: Case) {
         terminal_ids.len(),
         "one backend session per spawned terminal",
     );
+    // The agent's MCP bearer, as spawn provisioning binds it: to the issue
+    // key it spawned under (#1837).
+    config.mcp.tokens().register(
+        "fold-agent-bearer",
+        lazybox_core::SessionKey::from(&issue_key),
+    );
     for key in &backend_keys {
         mock.emit(key, "scrollback-marker").await;
     }
@@ -483,6 +489,13 @@ async fn run_case(case: Case) {
     assert!(
         rebadged.is_some(),
         "collapse must broadcast TerminalsRebadged issue→PR",
+    );
+    // #1837: the bearer follows the agent onto the PR row, or every MCP call
+    // it makes from here resolves to a workspace that no longer exists.
+    assert_eq!(
+        config.mcp.tokens().resolve("fold-agent-bearer"),
+        Some(pr_sk.clone()),
+        "the agent's MCP token must be rebadged with its terminal",
     );
     let merged = wait_for(
         &mut client,

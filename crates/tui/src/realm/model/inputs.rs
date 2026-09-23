@@ -1470,7 +1470,13 @@ showing keybinding search only",
             self.drain_queued_daemon_prompts();
             return Vec::new();
         }
-        if let Some(mut runner) = self.setup.runner.take() {
+        // Only a dismissal OF the setup modal belongs to the runner. Another
+        // modal stacked over it (a failed provision's checklist, a confirm)
+        // used to hand its Esc to the runner, which cancelled the whole flow
+        // and popped the wrong modal, stranding the checklist's state.
+        if matches!(self.modal_stack.last(), Some(Id::Setup | Id::Splash))
+            && let Some(mut runner) = self.setup.runner.take()
+        {
             let step = runner.step_dismissed();
             self.handle_runner_step(runner, step);
             return Vec::new();
@@ -2318,27 +2324,33 @@ showing keybinding search only",
         &mut self,
         component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
     ) {
-        // Unmount whatever's on top — setup is a one-modal-at-a-time
-        // flow; the same Id::Setup gets re-mounted for each wizard
-        // step.
-        if let Some(top) = self.modal_stack.last().cloned() {
-            let _ = self.app.umount(&top);
-            self.modal_stack.pop();
-        }
+        // Replace the setup modal — the splash or the previous step — and
+        // nothing else: setup is one modal at a time, re-mounted under
+        // Id::Setup for each step. Popping "whatever's on top" removed an
+        // unrelated modal that had been stacked over the flow.
+        self.remove_setup_modals();
         self.mount_modal_boxed(Id::Setup, component);
     }
 
     /// Drop whatever setup-related modal is on top of the stack.
     /// Called on Finish / Cancel.
     pub(super) fn unmount_setup_modal(&mut self) {
-        if let Some(top) = self.modal_stack.last().cloned() {
-            let _ = self.app.umount(&top);
-            self.modal_stack.pop();
-        }
+        self.remove_setup_modals();
         if let Some(top) = self.modal_stack.last() {
             let _ = self.app.active(top);
         }
         self.redraw = true;
+    }
+
+    /// Unmount the setup flow's own modals (`Setup`, `Splash`) wherever
+    /// they sit on the stack, leaving every other modal in place.
+    fn remove_setup_modals(&mut self) {
+        for id in [Id::Setup, Id::Splash] {
+            if self.modal_stack.contains(&id) {
+                let _ = self.app.umount(&id);
+                self.modal_stack.retain(|mounted| mounted != &id);
+            }
+        }
     }
 }
 

@@ -24161,6 +24161,40 @@ mod inspect_list_remount_tests {
 }
 
 #[cfg(test)]
+mod setup_modal_scope_tests {
+    use super::super::{Id, Model};
+    use crate::realm::components::confirm::Confirm;
+    use crate::setup_flow::{PartialEntry, SetupOutcome, SetupRunner};
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    /// Esc on a modal stacked OVER the setup flow closes that modal only.
+    /// It used to be routed to the setup runner, which cancelled the whole
+    /// Settings flow and popped the modal on top — never the setup modal.
+    #[test]
+    fn dismissing_a_modal_over_the_setup_flow_leaves_the_flow_alone() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        let (runner, _) = SetupRunner::at_partial(
+            SetupOutcome::default_enabled(crate::setup::SetupReport { tools: Vec::new() }),
+            ["github".to_string()].into_iter().collect(),
+            PartialEntry::EditScopes("github".into()),
+        );
+        m.setup.runner = Some(runner);
+        m.mount_modal(Id::Setup, Confirm::new("pick orgs"));
+        m.mount_modal(Id::Error, Confirm::new("a provision failed"));
+
+        let _ = m.handle_modal_dismissed();
+
+        assert_eq!(m.modal_stack, vec![Id::Setup], "only the error closed");
+        assert!(
+            m.setup.runner.is_some(),
+            "the Settings flow is still running"
+        );
+    }
+}
+
+#[cfg(test)]
 mod modal_stack_remount_tests {
     use super::super::{Id, Model};
     use crate::realm::components::confirm::Confirm;

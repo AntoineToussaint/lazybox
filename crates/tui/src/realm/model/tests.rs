@@ -21869,7 +21869,10 @@ mod worktree_progress_recovery_tests {
     /// `w` arms. A provisioning checklist only mounts for a spawn this
     /// client requested, so a test about the checklist's own mechanics
     /// has to be the client that asked for it.
-    fn asked_for(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &lazybox_core::SessionKey) {
+    fn asked_for(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        key: &lazybox_core::SessionKey,
+    ) {
         m.spawn_follow_to = Some(key.clone());
     }
 
@@ -33076,7 +33079,11 @@ mod worktree_progress_ownership_tests {
         let mut m = build_model();
         let elsewhere = SessionKey::from("github:obin-ai/module-document-store#326");
 
-        for step in [WorktreeStep::Clone, WorktreeStep::Fetch, WorktreeStep::Setup] {
+        for step in [
+            WorktreeStep::Clone,
+            WorktreeStep::Fetch,
+            WorktreeStep::Setup,
+        ] {
             m.handle_daemon_event(IpcEvent::WorktreeProgress {
                 session_key: elsewhere.clone(),
                 step,

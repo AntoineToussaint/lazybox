@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: out
+---
+╭ Setup · filters ────────────────────╮
+│Choose inbox items                   │
+│                                     │
+│  [-] All items                      │
+│▸ [x] Pull Requests                  │
+│  [x] Authored PRs                   │
+│  [x] Review requests                │
+│                                     │
+│  [ ] Issues                         │
+│  [ ] Assigned issues                │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│j/k move  Space clear group          │
+│Enter next  h info  Esc exit         │
+╰─────────────────────────────────────╯

@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: collapsed
+---
+Ctrl-T Sessions | phone                
+●                                      
+!                                      
+✓                                      
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+^T sessions ^G settings ^U/D scroll

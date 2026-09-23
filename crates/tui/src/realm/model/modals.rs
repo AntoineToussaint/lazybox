@@ -636,10 +636,19 @@ impl<T: TerminalAdapter> Model<T> {
             target: workspace_key,
         });
 
-        let modal = Input::new("Rename this workspace")
-            .title("Rename workspace")
-            .with_input(current)
-            .with_validator(|s: &str| !s.trim().is_empty());
+        let mobile = self.presentation == crate::realm::presentation::Presentation::Mobile;
+        let modal = Input::new(if mobile {
+            "Rename this chat"
+        } else {
+            "Rename this workspace"
+        })
+        .title(if mobile {
+            "Rename chat"
+        } else {
+            "Rename workspace"
+        })
+        .with_input(current)
+        .with_validator(|s: &str| !s.trim().is_empty());
         self.mount_modal(Id::RenameWorkspace, modal);
     }
 
@@ -1884,6 +1893,26 @@ impl<T: TerminalAdapter> Model<T> {
     /// right now, not a generic alphabet. Feeds both the footer hint
     /// bar and the `?` empty prompt, so the two never disagree (#1502).
     pub(super) fn focused_pane_bindings(&self) -> Vec<crate::pane::Binding> {
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            return [
+                ("Ctrl-T", "Sessions"),
+                ("Ctrl-G", "Settings"),
+                ("Ctrl-Q", "detach from Sessions"),
+                ("Ctrl-U/D", "chat history up/down"),
+                ("j/k", "move in Sessions/settings"),
+                ("n", "new session"),
+                ("r", "rename session"),
+                ("x", "delete session"),
+                ("?", "Ask Lazybox from settings"),
+                ("Esc", "back"),
+            ]
+            .into_iter()
+            .map(|(keys, label)| crate::pane::Binding {
+                keys: keys.into(),
+                label: label.into(),
+            })
+            .collect();
+        }
         match self.focus {
             PaneFocus::Sidebar => {
                 let mut bindings = self.sidebar.contextual_bindings(&self.catalog, self.remote);
@@ -1919,7 +1948,14 @@ impl<T: TerminalAdapter> Model<T> {
         if self.modal_stack.last() == Some(&Id::HelpAsk) {
             return;
         }
-        let pane_keys = (self.focus.title(), self.focused_pane_bindings());
+        let pane_keys = (
+            if self.presentation == crate::realm::presentation::Presentation::Mobile {
+                "mobile UI"
+            } else {
+                self.focus.title()
+            },
+            self.focused_pane_bindings(),
+        );
         self.mount_modal(
             Id::HelpAsk,
             HelpAsk::new(
@@ -3861,13 +3897,22 @@ impl<T: TerminalAdapter> Model<T> {
     /// and the `ProjectUpserted` hand-off (`deferred_chat`) finishes
     /// the job.
     pub(crate) fn start_chat_cmds(&mut self) -> Vec<lazybox_ipc::Command> {
+        self.start_chat_with_runner_cmds(super::SessionRunner::Agent(
+            self.sidebar.default_agent().to_string(),
+        ))
+    }
+
+    pub(super) fn start_chat_with_runner_cmds(
+        &mut self,
+        runner: super::SessionRunner,
+    ) -> Vec<lazybox_ipc::Command> {
         let scratch = lazybox_core::ProjectKey::local(Self::SCRATCH_PROJECT);
         self.flash_info("starting a chat…");
         if self.projects.contains_key(&scratch) {
             let name = self.next_chat_name(&scratch);
-            self.create_workspace_cmds(scratch, name)
+            self.create_workspace_with_runner_cmds(scratch, name, runner)
         } else {
-            self.deferred_chat = true;
+            self.deferred_chat = Some(runner);
             self.deferred_focus_project = Some(Self::SCRATCH_PROJECT.to_string());
             vec![lazybox_ipc::Command::CreateProject {
                 name: Self::SCRATCH_PROJECT.to_string(),
@@ -3987,6 +4032,9 @@ impl<T: TerminalAdapter> Model<T> {
         status: lazybox_ipc::WorktreeStepStatus,
         origin: lazybox_ipc::SpawnOrigin,
     ) {
+        if self.mobile_worktree_progress(&session_key, &status) {
+            return;
+        }
         let trigger = match origin {
             lazybox_ipc::SpawnOrigin::Interactive => {
                 // Already tracking this session keeps a checklist this

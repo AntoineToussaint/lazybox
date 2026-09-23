@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: out
+---
+╭ Settings ────────────────────╮
+│1 Providers · h/l tabs        │
+│──────────────────────────────│
+│▸ Add / remove repos · GitHub │
+│  Edit roles + filters · GitHu│
+│  Edit providers (github / lin│
+│                              │
+│                              │
+│                              │
+│                              │
+│jk move Enter pick ? ask Esc b│
+╰──────────────────────────────╯

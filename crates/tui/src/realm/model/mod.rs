@@ -30,6 +30,7 @@ mod helpers;
 mod host_terminal;
 mod inputs;
 mod keys;
+mod mobile;
 mod modals;
 mod optimistic;
 pub(crate) mod render_writer;
@@ -90,6 +91,12 @@ type MouseCaptureRequester = dyn Fn(bool) -> std::io::Result<()> + Send + Sync;
 /// typed fields, so panes don't appear here.
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub enum Id {
+    /// Minimal mobile session creation: no repo or a known repo.
+    MobileNewSession,
+    /// Second mobile creation step: choose an enabled agent or shell.
+    MobileRunner,
+    /// Explicit confirmation to delete a single mobile terminal.
+    MobileDeleteSession,
     Splash,
     Help,
     /// "Ask Lazybox" help modal (#302), opened by pressing `?` on the
@@ -852,10 +859,17 @@ pub(crate) struct PendingConversion {
     pub(crate) phase: ConversionPhase,
 }
 
+/// What to start in a newly created workspace, without changing the default agent.
+#[derive(Debug, Clone, PartialEq)]
+enum SessionRunner {
+    Agent(String),
+    Shell,
+}
+
 #[derive(Debug, Clone)]
 struct PendingWorkspaceCreate {
     name: String,
-    spawn_agent: bool,
+    runner: SessionRunner,
     workspace_key: Option<lazybox_core::SessionKey>,
 }
 
@@ -1193,6 +1207,12 @@ pub(crate) enum ModalFlow {
     NewWorkspaceProject { project: lazybox_core::ProjectKey },
     FloatingWorkspace {
         kind: lazybox_core::FloatingWorkspaceKind,
+    },
+    /// Mobile runner picker; the area picker remains below it for Escape/back.
+    MobileRunner { project: lazybox_core::ProjectKey },
+    /// Capture the precise target before showing confirmation.
+    MobileDeleteSession {
+        terminal_id: lazybox_ipc::TerminalId,
     },
     /// Rename-workspace name input (#744), carrying the workspace to
     /// rename. Consumed by `handle_input_submitted` →
@@ -1818,6 +1838,9 @@ pub struct Model<T: TerminalAdapter> {
     pub viewer_logins: std::collections::HashMap<String, String>,
     /// Which pane has focus when no modal is active.
     focus: PaneFocus,
+    presentation: crate::realm::presentation::Presentation,
+    mobile_sessions: crate::realm::components::mobile_sessions::MobileSessions,
+    mobile_rail: crate::realm::components::mobile_rail::MobileRail,
     /// Focus mode (issue #156): when `true`, the sidebar and activity
     /// pane are hidden and the focused workspace's terminal expands to
     /// near-fullscreen behind a slim event header. Focus is pinned to
@@ -2480,7 +2503,7 @@ pub struct Model<T: TerminalAdapter> {
     /// Start sheet → Chat while the `scratch` project does not exist
     /// yet (#1502): the `ProjectUpserted` hand-off creates the chat
     /// workspace directly instead of mounting the name input.
-    deferred_chat: bool,
+    deferred_chat: Option<SessionRunner>,
     /// Issue workspace the user was viewing when it was removed by a
     /// merge. Set in the `WorkspaceRemoved` handler (before the sidebar
     /// moves the cursor off the gone row) and consumed by the matching
@@ -2894,6 +2917,9 @@ impl<T: TerminalAdapter> Model<T> {
             modal_stack: Vec::new(),
             viewer_logins: std::collections::HashMap::new(),
             focus: PaneFocus::Sidebar,
+            presentation: crate::realm::presentation::Presentation::Desktop,
+            mobile_sessions: Default::default(),
+            mobile_rail: Default::default(),
             focus_mode: false,
             visual_select: false,
             focus_layout: lazybox_config::FocusLayout::Single,
@@ -3017,7 +3043,7 @@ impl<T: TerminalAdapter> Model<T> {
                 &std::collections::BTreeMap::new(),
             ),
             deferred_focus_project: None,
-            deferred_chat: false,
+            deferred_chat: None,
             merge_follow_from: None,
             spawn_follow_to: None,
             pending_workspace_creates: std::collections::HashMap::new(),
@@ -6087,9 +6113,15 @@ impl<T: TerminalAdapter> Model<T> {
     pub fn mount_modal_boxed(
         &mut self,
         id: Id,
-        component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
+        mut component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
     ) {
         use tuirealm::subscription::{EventClause, Sub, SubClause};
+        component.attr(
+            crate::realm::presentation::MOBILE_ATTRIBUTE,
+            tuirealm::props::AttrValue::Flag(
+                self.presentation == crate::realm::presentation::Presentation::Mobile,
+            ),
+        );
         // `remount`, not `mount`: a modal re-mounted under an id that is
         // still live in the view (e.g. the `WorktreeProgress` checklist
         // re-mounting itself on every step advance) must *replace* the
@@ -6097,11 +6129,19 @@ impl<T: TerminalAdapter> Model<T> {
         // and we swallow the result, which left the first-step component
         // frozen on screen while `modal_stack` tracked it as current.
         self.modal_stack.retain(|mounted| mounted != &id);
-        let _ = self.app.remount(
-            id.clone(),
-            component,
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
+        // Mobile sheets form a back stack (area/runner, settings/help).
+        // The focused component receives every event; inactive sheets must
+        // not also act on its Enter/Escape through a global subscription.
+        let subscriptions = if self.presentation == crate::realm::presentation::Presentation::Mobile
+            || matches!(
+                id,
+                Id::MobileNewSession | Id::MobileRunner | Id::MobileDeleteSession
+            ) {
+            Vec::new()
+        } else {
+            vec![Sub::new(EventClause::Any, SubClause::Always)]
+        };
+        let _ = self.app.remount(id.clone(), component, subscriptions);
         // A modal captures the keyboard, so an armed visual-select sweep
         // must not survive it (see `push_modal`) — the mode would come
         // back live after the modal closes and eat the next j/k (#1448).
@@ -6121,6 +6161,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// observe; rendering across the short window guarantees the
     /// change is shown without a per-keystroke busy-wait.
     pub(crate) fn forward_modal_event(&mut self, ev: RealmEvent<UserEvent>) {
+        if let RealmEvent::Keyboard(key) = &ev
+            && self.mobile_modal_key(key)
+        {
+            return;
+        }
         let _ = self.modal_event_tx.send(ev);
         self.modal_redraw_until = Some(std::time::Instant::now() + MODAL_REDRAW_WINDOW);
     }
@@ -6154,6 +6199,10 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcCommand::CreateFloatingWorkspace {
                     client_request_id: Some(id),
                     ..
+                }
+                | IpcCommand::Spawn {
+                    client_request_id: Some(id),
+                    ..
                 } => Some(id.clone()),
                 _ => None,
             };
@@ -6161,8 +6210,16 @@ impl<T: TerminalAdapter> Model<T> {
                 && let Some(request_id) = workspace_create
                 && let Some(pending) = self.pending_workspace_creates.remove(&request_id)
             {
+                let failure = if pending.workspace_key.is_some() {
+                    "was created, but its terminal could not start"
+                } else {
+                    "was not created"
+                };
+                if pending.workspace_key.as_ref() == self.spawn_follow_to.as_ref() {
+                    self.spawn_follow_to = None;
+                }
                 self.flash_error(format!(
-                    "✗ workspace {} was not created — daemon command channel is unavailable",
+                    "✗ workspace {} {failure} — daemon command channel is unavailable",
                     pending.name
                 ));
             }
@@ -7081,6 +7138,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// summary line is a non-focusable header, so Tab / click / Enter
     /// route past it exactly like a hidden pane.
     pub(super) fn activity_pane_visible(&self) -> bool {
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            return false;
+        }
         self.activity_pane.visible(
             self.sidebar.selected_workspace().map(|ws| &ws.key),
             self.right.has_visible_content(),
@@ -7093,6 +7153,18 @@ impl<T: TerminalAdapter> Model<T> {
     /// height `right_top`); a `Summary` pane keeps a single slim row
     /// and hands the rest to the terminal.
     pub(super) fn effective_pane_rects(&self, area: Rect) -> (Rect, Rect, Rect) {
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            let (area, _) = split_for_footer(area);
+            let (_, area) = crate::realm::presentation::mobile_header(area);
+            return match self.focus {
+                PaneFocus::Sidebar | PaneFocus::Right => (area, Rect::default(), Rect::default()),
+                PaneFocus::Terminals => (
+                    Rect::default(),
+                    Rect::default(),
+                    crate::realm::presentation::mobile_terminal(area).1,
+                ),
+            };
+        }
         let rects = pane_areas(
             area,
             self.layout.sidebar_pct,
@@ -7156,6 +7228,11 @@ impl<T: TerminalAdapter> Model<T> {
         // Pull state out before the closure so the borrow checker is
         // happy — `terminal.draw` takes `&mut self.terminal` while we
         // also need `&mut self.app` etc. inside.
+        let mobile = self.presentation == crate::realm::presentation::Presentation::Mobile;
+        if mobile {
+            self.refresh_mobile_sessions();
+        }
+        let mobile_focus = self.focus;
         let sidebar_pct = self.layout.sidebar_pct;
         let right_top_pct = self.layout.right_top_pct;
         let sidebar_user_resized = self.layout.sidebar_user_resized;
@@ -7360,6 +7437,16 @@ impl<T: TerminalAdapter> Model<T> {
         // Resolve the header's contents out here so the draw closure
         // doesn't need to borrow `self` immutably while it also holds
         // the mutable terminal borrow.
+        let mobile_title = self
+            .terminals
+            .active_session()
+            .map(|key| {
+                self.sidebar
+                    .workspace_by_key(key)
+                    .map(|workspace| workspace.name.clone())
+                    .unwrap_or_else(|| key.to_string())
+            })
+            .unwrap_or_default();
         let focus_mode = self.focus_mode;
         let (focus_title, focus_summary, focus_hint) = if focus_mode {
             let active = self.terminals.active_session();
@@ -7457,7 +7544,7 @@ impl<T: TerminalAdapter> Model<T> {
         // the draw closure so it never occludes a pane. Resolve its
         // active/spotlight state out here (immutable borrow) so the
         // closure's disjoint `&mut self.coach` render borrow is free.
-        let coach_active = self.coach.is_some();
+        let coach_active = self.coach.is_some() && !mobile;
         let coach_spot = self.coach.as_ref().map(|c| c.current_spot());
         let coach_ascii = self.coach_ascii;
         let practice = self.practice;
@@ -7487,7 +7574,64 @@ impl<T: TerminalAdapter> Model<T> {
             captured_area = area;
             let (pane_area, footer_area) = split_for_footer(area);
             let (pane_area, coach_area) = split_coach(pane_area, coach_active);
-            let right_bottom = if focus_mode {
+            let pane_area = if mobile {
+                let (header, body) = crate::realm::presentation::mobile_header(pane_area);
+                let label = match mobile_focus {
+                    PaneFocus::Sidebar | PaneFocus::Right => {
+                        format!(
+                            "Sessions ({}) · letters open · ↑↓",
+                            self.mobile_sessions.len()
+                        )
+                    }
+                    PaneFocus::Terminals => format!("Ctrl-T Sessions | {mobile_title}"),
+                };
+                f.render_widget(
+                    tuirealm::ratatui::widgets::Paragraph::new(label).style(
+                        tuirealm::ratatui::style::Style::default()
+                            .fg(crate::theme::current().accent),
+                    ),
+                    header,
+                );
+                body
+            } else {
+                pane_area
+            };
+            let right_bottom = if mobile {
+                match mobile_focus {
+                    PaneFocus::Sidebar | PaneFocus::Right => {
+                        self.terminals.begin_focus_frame();
+                        self.mobile_rail.render(
+                            f,
+                            pane_area,
+                            self.mobile_sessions.rows(),
+                            self.terminals.focused_terminal_id(),
+                            true,
+                        );
+                        Rect::default()
+                    }
+                    PaneFocus::Terminals => {
+                        self.terminals.begin_focus_frame();
+                        let (_, terminal_area) =
+                            crate::realm::presentation::mobile_terminal(pane_area);
+                        if let Some(id) = self.terminals.focused_terminal_id() {
+                            self.terminals.render_terminal_by_id(
+                                id,
+                                terminal_area,
+                                f,
+                                !self.mobile_rail.is_open(),
+                            );
+                        } else {
+                            f.render_widget(
+                                tuirealm::ratatui::widgets::Paragraph::new(
+                                    "No terminal open. Ctrl-T for sessions.",
+                                ),
+                                pane_area,
+                            );
+                        }
+                        terminal_area
+                    }
+                }
+            } else if focus_mode {
                 let (header, body) = focus_mode_areas(pane_area);
                 crate::realm::components::focus_header::render(
                     f,
@@ -7617,20 +7761,69 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
 
+            if mobile {
+                let active = self.terminals.focused_terminal_id();
+                if mobile_focus == PaneFocus::Terminals {
+                    let (rail, _) = crate::realm::presentation::mobile_terminal(pane_area);
+                    crate::realm::components::mobile_rail::MobileRail::render_collapsed(
+                        f,
+                        rail,
+                        self.mobile_sessions.rows(),
+                        active,
+                    );
+                }
+                if self.mobile_rail.is_open()
+                    && mobile_focus == PaneFocus::Terminals
+                    && self.modal_stack.is_empty()
+                {
+                    self.mobile_rail.render(
+                        f,
+                        pane_area,
+                        self.mobile_sessions.rows(),
+                        active,
+                        false,
+                    );
+                }
+            }
+
+            if mobile && !self.modal_stack.is_empty() {
+                f.render_widget(tuirealm::ratatui::widgets::Clear, pane_area);
+            }
+
             // Footer: keymap + globals + polling status + notice. The
             // returned overflow (if any) is the `… +N more` cell + the
             // hints it hides, stashed so a click on it pops exactly those
             // (#805, #1502).
-            footer_overflow = crate::realm::components::footer::render(
-                f,
-                footer_area,
-                Some(&focus_chip),
-                &keymap,
-                &globals,
-                &evergreen,
-                polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
-                notice.as_ref(),
-            );
+            if mobile {
+                use tuirealm::ratatui::{style::Style, widgets::Paragraph};
+                let theme = crate::theme::current();
+                let hint = if self.mobile_rail.is_open() || mobile_focus != PaneFocus::Terminals {
+                    "n new r rename x delete ^Q quit"
+                } else {
+                    "^T sessions ^G settings ^U/D scroll"
+                };
+                let text = if self.mobile_rail.is_open() || mobile_focus != PaneFocus::Terminals {
+                    hint
+                } else {
+                    notice.as_ref().map(|n| n.message.as_str()).unwrap_or(hint)
+                };
+                f.render_widget(
+                    Paragraph::new(text)
+                        .style(Style::default().fg(theme.text_strong).bg(theme.fill)),
+                    footer_area,
+                );
+            } else {
+                footer_overflow = crate::realm::components::footer::render(
+                    f,
+                    footer_area,
+                    Some(&focus_chip),
+                    &keymap,
+                    &globals,
+                    &evergreen,
+                    polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
+                    notice.as_ref(),
+                );
+            }
             // The `+N more` popup (#1502): the hidden footer hints, in
             // which-key chrome, until the next key or click.
             if let Some(rows) = footer_more_rows.as_deref() {

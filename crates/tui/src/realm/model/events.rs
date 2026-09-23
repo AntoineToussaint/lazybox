@@ -1192,17 +1192,34 @@ impl<T: TerminalAdapter> Model<T> {
                 client_request_id,
                 workspace_key,
             } => {
-                if let Some(pending) = self.pending_workspace_creates.get_mut(client_request_id) {
+                if let Some(pending) = self.pending_workspace_creates.get_mut(client_request_id)
+                    && pending.workspace_key.is_none()
+                {
                     let session_key: lazybox_core::SessionKey = workspace_key.into();
                     pending.workspace_key = Some(session_key.clone());
-                    let spawn_agent = pending.spawn_agent;
+                    let shell = pending.runner == super::SessionRunner::Shell;
                     let name = pending.name.clone();
                     self.sidebar.focus_workspace_key(&session_key);
-                    if spawn_agent {
-                        self.spawn_follow_to = Some(session_key);
-                        self.flash_info(format!("created {name} — starting agent…"));
-                    } else {
-                        self.flash_info(format!("created {name}"));
+                    self.spawn_follow_to = Some(session_key.clone());
+                    let runner = if shell { "shell" } else { "agent" };
+                    self.flash_info(format!("created {name} — starting {runner}…"));
+                    if shell {
+                        // CreateWorkspace can start an agent atomically, but a shell
+                        // uses the ordinary Spawn command after durable creation.
+                        // Move tracking to a fresh request ID: the create's completion
+                        // must not report success before the shell has started, nor
+                        // may a repeated creation acknowledgement spawn another shell.
+                        if let Some(pending) =
+                            self.pending_workspace_creates.remove(client_request_id)
+                        {
+                            let spawn_id = uuid::Uuid::new_v4().hyphenated().to_string();
+                            self.pending_workspace_creates
+                                .insert(spawn_id.clone(), pending);
+                            let cmds =
+                                vec![Self::shell_spawn_cmd(session_key, None, Some(spawn_id))];
+                            self.note_spawn_feedback(&cmds);
+                            self.dispatch_cmds(cmds);
+                        }
                     }
                     self.needs_pane_sync = true;
                     self.redraw = true;
@@ -1210,12 +1227,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
             IpcEvent::CommandCompleted { client_request_id } => {
                 if let Some(pending) = self.pending_workspace_creates.remove(client_request_id) {
-                    let message = if pending.spawn_agent {
-                        format!("workspace {} ready", pending.name)
-                    } else {
-                        format!("workspace {} created", pending.name)
-                    };
-                    self.flash_info(message);
+                    self.flash_info(format!("workspace {} ready", pending.name));
                 }
             }
             IpcEvent::CommandFailed {
@@ -1226,9 +1238,14 @@ impl<T: TerminalAdapter> Model<T> {
                     if pending.workspace_key.as_ref() == self.spawn_follow_to.as_ref() {
                         self.spawn_follow_to = None;
                     }
+                    let runner = if pending.runner == super::SessionRunner::Shell {
+                        "shell"
+                    } else {
+                        "agent"
+                    };
                     let failure = if pending.workspace_key.is_some() {
                         format!(
-                            "✗ workspace {} was created, but its agent failed to start — {message}",
+                            "✗ workspace {} was created, but its {runner} failed to start — {message}",
                             pending.name
                         )
                     } else {
@@ -1553,7 +1570,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // state cleared solely here, so a `CreateProject
                 // { scratch }` whose store write fails (no
                 // `ProjectUpserted` emitted — see `create_local_project`)
-                // would otherwise leave the flag stuck `true` and let it
+                // would otherwise leave the continuation pending and let it
                 // ride the NEXT `x p` upsert, silently spawning a chat
                 // workspace in the wrong project instead of the name
                 // input. Gating the take on the scratch key means a
@@ -1561,12 +1578,12 @@ impl<T: TerminalAdapter> Model<T> {
                 // which is exactly the chat flow (#1502).
                 let is_scratch =
                     project_key == lazybox_core::ProjectKey::local(Self::SCRATCH_PROJECT);
-                if is_scratch && std::mem::take(&mut self.deferred_chat) {
+                if is_scratch && let Some(runner) = self.deferred_chat.take() {
                     // Start sheet → Chat (#1502): the scratch project
                     // just landed; create the chat workspace straight
                     // away, no name to type.
                     let name = self.next_chat_name(&project_key);
-                    let cmds = self.create_workspace_cmds(project_key, name);
+                    let cmds = self.create_workspace_with_runner_cmds(project_key, name, runner);
                     self.dispatch_cmds(cmds);
                 } else if self.sidebar.focus_project_header(&project_key) {
                     self.mount_new_workspace_input(project_key);

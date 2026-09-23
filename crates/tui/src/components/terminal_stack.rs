@@ -1069,6 +1069,16 @@ impl UsageBadge {
     }
 }
 
+/// Read-only terminal metadata for compact client-side session lists.
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalSummary {
+    pub id: TerminalId,
+    pub session_key: SessionKey,
+    pub kind: TerminalKind,
+    pub state: lazybox_ipc::AgentState,
+    pub exited: bool,
+}
+
 struct TerminalSlot {
     session_key: SessionKey,
     kind: TerminalKind,
@@ -2366,6 +2376,22 @@ impl TerminalStack {
 
     pub fn active_tab_idx(&self) -> usize {
         self.active_tab_idx
+    }
+
+    pub(crate) fn terminal_summaries(&self) -> Vec<TerminalSummary> {
+        let mut rows: Vec<_> = self
+            .terminals
+            .iter()
+            .map(|(id, slot)| TerminalSummary {
+                id: *id,
+                session_key: slot.session_key.clone(),
+                kind: slot.kind.clone(),
+                state: slot.agent_state,
+                exited: slot.exited.is_some(),
+            })
+            .collect();
+        rows.sort_by_key(|row| row.id.0);
+        rows
     }
 
     pub fn terminal_count(&self) -> usize {
@@ -5420,6 +5446,7 @@ impl TerminalStack {
     }
 
     fn drop_slot(&mut self, terminal_id: TerminalId) {
+        let keep_focus = self.focused_terminal_id().filter(|id| *id != terminal_id);
         // Removing a tile from the active grid reshuffles focus (the
         // collapse below re-points `focused` at the removed tile's
         // sibling) and can drop the tree back to Tabs — so a live zoom can
@@ -5484,6 +5511,22 @@ impl TerminalStack {
             }
         }
         self.clamp_active_tab();
+        // Removing an unfocused sibling must not change which surviving
+        // terminal the user is reading. Both tab indices and split paths can
+        // shift during pruning; restore by identity without expanding a pane.
+        if let Some(id) = keep_focus
+            && let Some(index) = self.visible_terminals().iter().position(|t| *t == id)
+        {
+            self.active_tab_idx = index;
+            match &mut self.layout {
+                lazybox_core::SessionLayout::Tabs { active } => *active = index,
+                lazybox_core::SessionLayout::Splits { tree, focused } => {
+                    if let Some(path) = tree.path_to(id.0) {
+                        *focused = path;
+                    }
+                }
+            }
+        }
         self.auto_collapse_on_emptiness();
     }
 
@@ -5656,6 +5699,18 @@ impl TerminalStack {
             });
         } else {
             cmds.push(Command::ResumeAgent { terminal_id });
+        }
+    }
+
+    /// Close a specific terminal without retargeting the active workspace/tile.
+    /// The exit event prunes live panes; already exited panes are removed locally.
+    pub(crate) fn close_terminal(&mut self, id: TerminalId, cmds: &mut Vec<Command>) {
+        if !self.terminals.contains_key(&id) || self.closing.contains(&id) {
+            return;
+        }
+        if self.queue_terminal_teardown(id, cmds) {
+            self.drop_slot(id);
+            self.persist_layout(cmds);
         }
     }
 

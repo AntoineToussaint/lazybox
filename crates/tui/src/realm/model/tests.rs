@@ -1953,7 +1953,7 @@ mod effects_tests {
             request_id.clone(),
             super::super::PendingWorkspaceCreate {
                 name: "Disconnected".into(),
-                spawn_agent: true,
+                runner: super::super::SessionRunner::Agent("claude".into()),
                 workspace_key: None,
             },
         );
@@ -2174,7 +2174,10 @@ mod effects_tests {
             matches!(&cmds[..], [IpcCommand::CreateProject { name }] if name == "scratch"),
             "chat first creates the scratch project: {cmds:?}"
         );
-        assert!(m.deferred_chat, "chat is deferred until scratch lands");
+        assert!(
+            m.deferred_chat.is_some(),
+            "chat is deferred until scratch lands"
+        );
         // The scratch store write fails on the daemon: its
         // ProjectUpserted never arrives. The user instead creates a
         // real project via `x p`, which re-aims the deferred focus.
@@ -2203,7 +2206,7 @@ mod effects_tests {
         // The leaked flag survives harmlessly — only a scratch upsert
         // consumes it, so a later real Chat still works.
         assert!(
-            m.deferred_chat,
+            m.deferred_chat.is_some(),
             "a non-scratch upsert must leave the flag for the scratch that owns it"
         );
     }
@@ -9184,7 +9187,8 @@ mod stale_input_tests {
                 // Drop — destructive-action menus / delete-routing lists.
                 // (HeaderContext's entries are all local/reversible, but
                 // a menu popped under a buffered Enter should never act.)
-                Id::SidebarContext | Id::HeaderContext | Id::InspectList
+                Id::MobileNewSession | Id::MobileRunner
+                | Id::MobileDeleteSession | Id::SidebarContext | Id::HeaderContext | Id::InspectList
                 | Id::ImportCheckoutList => false,
                 // Drop — outward-effect inputs (post/label/deliver).
                 Id::Reply
@@ -9256,6 +9260,9 @@ mod stale_input_tests {
         };
 
         for id in [
+            Id::MobileNewSession,
+            Id::MobileRunner,
+            Id::MobileDeleteSession,
             Id::Splash,
             Id::Help,
             Id::HelpAsk,
@@ -16481,6 +16488,40 @@ mod wheel_routing_tests {
             m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 4));
         }
         assert_eq!(scroll_offset(&m), bottom_offset - 18);
+    }
+
+    #[test]
+    fn mobile_wheel_scrolls_history_at_screen_edges_and_verifies_reporting() {
+        let (mut m, _server, _) = build_model_with_terminal();
+        m.presentation = crate::realm::presentation::Presentation::Mobile;
+        let bytes = (0..200)
+            .map(|i| format!("line {i}\r\n"))
+            .collect::<String>();
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: Arc::from(bytes.into_bytes()),
+            first_seq: 1,
+            seq: 1,
+            cols: 0,
+            rows: 0,
+        });
+        let mut before = scroll_offset(&m);
+        for (x, y) in [(0, 3), (4, 0), (4, m.layout.last_area.bottom() - 1), (4, 4)] {
+            m.handle_mouse(wheel_up_at(x, y));
+            assert_eq!(scroll_offset(&m), before - 3, "wheel at {x},{y}");
+            assert!(m.mouse_input_verified());
+            before -= 3;
+        }
+        m.dispatch_key(tuirealm::event::KeyEvent::new(
+            tuirealm::event::Key::Char('u'),
+            tuirealm::event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(scroll_offset(&m), before - 8);
+        m.dispatch_key(tuirealm::event::KeyEvent::new(
+            tuirealm::event::Key::Char('d'),
+            tuirealm::event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(scroll_offset(&m), before);
     }
 
     /// Agent identity is not part of wheel routing. Once the backend has

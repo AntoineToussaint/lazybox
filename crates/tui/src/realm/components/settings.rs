@@ -37,6 +37,7 @@ pub(crate) struct SettingsTab {
 
 /// Tabbed settings window.
 pub(crate) struct Settings {
+    presentation: crate::realm::presentation::Presentation,
     tabs: Vec<SettingsTab>,
     /// Active tab index into `tabs`.
     active: usize,
@@ -51,6 +52,7 @@ impl Settings {
     pub(crate) fn new(tabs: Vec<SettingsTab>) -> Self {
         let active = tabs.iter().position(|t| !t.rows.is_empty()).unwrap_or(0);
         Self {
+            presentation: Default::default(),
             tabs,
             active,
             cursor: 0,
@@ -159,7 +161,12 @@ impl Component for Settings {
             .min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
-        let modal = Rect::new(x, y, modal_w, modal_h);
+        let mobile = self.presentation == crate::realm::presentation::Presentation::Mobile;
+        let modal = if mobile {
+            area
+        } else {
+            Rect::new(x, y, modal_w, modal_h)
+        };
 
         frame.render_widget(Clear, modal);
         let block = Block::default()
@@ -175,12 +182,35 @@ impl Component for Settings {
         }
 
         let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);
-        lines.push(self.tab_bar(theme));
+        lines.push(if mobile {
+            Line::from(format!(
+                "{} {} · h/l tabs",
+                self.active + 1,
+                self.tabs
+                    .get(self.active)
+                    .map(|t| t.section.title())
+                    .unwrap_or("Settings")
+            ))
+        } else {
+            self.tab_bar(theme)
+        });
         lines.push(Line::from(Span::styled(
             "─".repeat(inner.width as usize),
             Style::default().fg(theme.chrome),
         )));
-        for (i, (label, _)) in self.active_rows().iter().enumerate() {
+        let visible = usize::from(inner.height.saturating_sub(4)).max(1);
+        let start = if mobile {
+            self.cursor.saturating_sub(visible - 1)
+        } else {
+            0
+        };
+        for (i, (label, _)) in self
+            .active_rows()
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(if mobile { visible } else { usize::MAX })
+        {
             let (caret, style) = if i == self.cursor {
                 ("▸ ", theme.row_focused())
             } else {
@@ -208,7 +238,11 @@ impl Component for Settings {
         frame.render_widget(Paragraph::new(lines), body);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "←/→ tab · ↑/↓ move · Enter pick · Esc close",
+                if mobile {
+                    "jk move Enter pick ? ask Esc back"
+                } else {
+                    "←/→ tab · ↑/↓ move · Enter pick · Esc close"
+                },
                 theme.hint(),
             ))),
             Rect {
@@ -223,7 +257,9 @@ impl Component for Settings {
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
         None
     }
-    fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.presentation.apply_attribute(attr, value);
+    }
     fn state(&self) -> State {
         State::None
     }
@@ -234,6 +270,14 @@ impl Component for Settings {
 
 impl AppComponent<Msg, UserEvent> for Settings {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
+        if let Event::Mouse(mouse) = ev {
+            match mouse.kind {
+                tuirealm::event::MouseEventKind::ScrollUp => self.move_cursor(-1),
+                tuirealm::event::MouseEventKind::ScrollDown => self.move_cursor(1),
+                _ => (),
+            }
+            return None;
+        }
         let Event::Keyboard(key) = ev else {
             return None;
         };
@@ -335,6 +379,28 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn mobile_short_settings_keeps_the_selected_row_visible() {
+        let mut comp = Settings::new(vec![SettingsTab {
+            section: SettingsSection::Agents,
+            rows: (0..20).map(|i| (format!("Setting {i}"), i)).collect(),
+        }]);
+        comp.attr(
+            crate::realm::presentation::MOBILE_ATTRIBUTE,
+            AttrValue::Flag(true),
+        );
+        for _ in 0..19 {
+            comp.on(&key(Key::Char('j')));
+        }
+        let out = render(&mut comp, 32, 10);
+        assert!(out.contains("▸ Setting 19"), "{out}");
+        assert!(out.contains("? ask"), "{out}");
+        assert_eq!(
+            comp.on(&key(Key::Enter)),
+            Some(Msg::ChoicePicked(vec![ChoicePayload::Index(19)]))
+        );
     }
 
     #[test]

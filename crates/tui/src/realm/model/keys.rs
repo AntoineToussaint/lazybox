@@ -80,6 +80,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
     pub(super) fn handle_pane_key(&mut self, key: RealmKey) {
+        if self.mobile_key(&key) {
+            return;
+        }
         // The footer's `+N more` popup is informational (#1502): any key
         // closes it and is then handled normally, so a hint the user
         // just read fires on the very next press.
@@ -1741,6 +1744,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// iteration). The wait parks inside `tick`'s `recv_timeout` —
     /// no sleep/poll spin.
     pub fn dispatch_modal_key(&mut self, key: RealmKey) {
+        if self.mobile_modal_key(&key) {
+            return;
+        }
         let _ = self.modal_event_tx.send(RealmEvent::Keyboard(key));
         let deadline = std::time::Instant::now() + Duration::from_millis(500);
         loop {
@@ -1994,10 +2000,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// don't have a useful paste-target today (reply textarea has
     /// its own keyboard path through tuirealm).
     pub fn handle_paste(&mut self, text: &str) {
-        if self.focus != PaneFocus::Terminals {
+        if self.focus != PaneFocus::Terminals || self.mobile_rail.is_open() {
             return;
         }
-        let Some(terminal_id) = self.terminals.active_terminal_id() else {
+        let Some(terminal_id) = self.terminals.focused_terminal_id() else {
             return;
         };
         // Update the pinned-recap composing buffer for agent
@@ -2091,9 +2097,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// - ScrollUp/Down over the terminal pane → move the terminal's
     ///   lazybox scrollback (libghostty handles the actual move).
     pub fn handle_mouse(&mut self, m: crossterm::event::MouseEvent) {
-        use crossterm::event::MouseEventKind;
-
         self.note_host_mouse_input();
+        if self.mobile_mouse(m) {
+            return;
+        }
+        use crossterm::event::MouseEventKind;
         if self.layout.last_area.width == 0 || self.layout.last_area.height == 0 {
             return;
         }
@@ -2110,7 +2118,9 @@ impl<T: TerminalAdapter> Model<T> {
         // hidden Activity pane: when hidden, `right_top` is zero-height
         // so mouse events there target the terminal stack (and the
         // horizontal splitter disappears).
-        let (sidebar_rect, right_top_rect, right_bottom_rect) = if self.focus_mode {
+        let (sidebar_rect, right_top_rect, right_bottom_rect) = if self.focus_mode
+            && self.presentation != crate::realm::presentation::Presentation::Mobile
+        {
             let (pane_area, _) = super::split_for_footer(self.layout.last_area);
             let (_, body) = crate::realm::layout::focus_mode_areas(pane_area);
             (Rect::default(), Rect::default(), body)
@@ -2382,13 +2392,15 @@ impl<T: TerminalAdapter> Model<T> {
                 // Splitter drag wins over both focus changes and
                 // terminal interaction — clicking a splitter resizes,
                 // it never refocuses or types into a pane.
-                if let Some(target) = self.layout.hit_test_splitter(
-                    m.column,
-                    m.row,
-                    sidebar_rect,
-                    right_top_rect,
-                    horizontal_splitter,
-                ) {
+                if self.presentation != crate::realm::presentation::Presentation::Mobile
+                    && let Some(target) = self.layout.hit_test_splitter(
+                        m.column,
+                        m.row,
+                        sidebar_rect,
+                        right_top_rect,
+                        horizontal_splitter,
+                    )
+                {
                     self.layout.active_drag = Some(target);
                     return;
                 }

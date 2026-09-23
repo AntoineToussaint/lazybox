@@ -9464,7 +9464,17 @@ async fn handle_inject_prompt_inner(
     // the Write that answers the permission/chooser gate.
     let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let _pending_injection = pending_injection;
+        // Held only across the readiness wait below — the one place
+        // duplicate waiters can pile up. It is released the moment this
+        // injection owns the terminal, NOT held through the paste's
+        // ~30s submit-confirm ladder: holding it there rejected every
+        // follow-up inject with "already waiting … answer its prompt"
+        // while no prompt existed, so `Shift-K` over agents whose first
+        // `continue` went unconfirmed had to be pressed until each
+        // ladder gave up (four presses, 2026-09-23). A later inject
+        // replaces this one's confirmation entry by design (see
+        // `confirm_prompt_submission`).
+        let pending_injection = pending_injection;
         let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
         let mut events = events;
         let mut blocked = blocked;
@@ -9526,6 +9536,7 @@ async fn handle_inject_prompt_inner(
             );
             return;
         };
+        drop(pending_injection);
         if let Some(tx) = registered_tx.take() {
             let _ = tx.send(());
         }
@@ -16008,6 +16019,74 @@ mod tests {
         })
         .await
         .expect("injection reservation released after terminal exit");
+    }
+
+    /// `Shift-K` over limit-blocked agents: the first `continue` pastes, its
+    /// Enter goes unconfirmed, and the daemon spends ~30s re-sending Enter.
+    /// A second press during that ladder must deliver, not be rejected with
+    /// "already waiting … answer its prompt" — no prompt is waiting. The
+    /// reservation exists to bound waiters behind a permission gate only.
+    #[tokio::test]
+    async fn a_submit_confirm_ladder_does_not_reject_the_next_injection() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "limited-agent")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(712);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("limited-agent"),
+            "claude",
+            Some(lazybox_ipc::AgentState::LimitReached),
+            None,
+        )
+        .await;
+        let wrote = |needle: &'static str| {
+            let mock = mock.clone();
+            let backend_key = backend_key.clone();
+            async move {
+                mock.writes_for(&backend_key)
+                    .await
+                    .iter()
+                    .any(|w| String::from_utf8_lossy(w).contains(needle))
+            }
+        };
+
+        // Nothing ever confirms the submit, so the first injection's
+        // confirm ladder keeps running for the rest of this test.
+        handle_inject_prompt(&config, id, "first-continue", None, true).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !wrote("first-continue").await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first prompt is pasted");
+        assert!(
+            config.spawn.pending_prompt_injections.lock().is_empty(),
+            "a pasted injection no longer holds the waiter reservation",
+        );
+
+        let mut events = config.bus.subscribe();
+        handle_inject_prompt(&config, id, "second-continue", None, true).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !wrote("second-continue").await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the second press is delivered while the first ladder runs");
+        while let Ok(event) = events.try_recv() {
+            if let Event::TerminalInputRejected { message, .. } = event {
+                assert!(
+                    !message.contains("already waiting"),
+                    "the second press must not be rejected as a duplicate waiter: {message}",
+                );
+            }
+        }
     }
 
     #[tokio::test]

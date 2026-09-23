@@ -82,7 +82,7 @@ in [mobile.md](mobile.md); selection uses a neutral theme background.
 | Screen family | Narrow-screen issue | Current treatment / remaining work |
 | --- | --- | --- |
 | Sessions / desktop Sidebar | Scope headers and multiple panes consume width | Dedicated terminal projection; shared portal/overlay with live status rail, paging and explicit selectors |
-| Terminal tabs / split tiles | Tab strip and splits crowd the terminal | Existing single-terminal renderer; desktop layout is preserved; keyboard and wheel scrollback |
+| Terminal tabs / split tiles | Tab strip and splits crowd the terminal | Existing single-terminal renderer; desktop layout is preserved; touch/wheel scrollback |
 | Splash / setup wizard | Large prose and controls below the fold | Mobile welcome and shared full-width sheets; normal mobile startup opens Sessions directly |
 | Choice: providers, agents, scopes, repositories, filters | Long descriptions, wide footer, many toggles | Shared phone layout, pinned controls, scrolling details, group/All items bulk selection |
 | Input: rename, names, tokens, paths, URLs | Wrapping can hide the insertion point and submit hint | Shared mobile input presentation, visible insertion end and pinned controls |

@@ -334,17 +334,10 @@ impl<T: TerminalAdapter> Model<T> {
             return true;
         }
         if !self.mobile_rail.is_open() && self.focus == PaneFocus::Terminals {
-            let delta = match (key.code, key.modifiers) {
-                (Key::PageUp, KeyModifiers::NONE) | (Key::Char('u'), KeyModifiers::CONTROL) => {
-                    Some(-8)
-                }
-                (Key::PageDown, KeyModifiers::NONE) | (Key::Char('d'), KeyModifiers::CONTROL) => {
-                    Some(8)
-                }
-                _ => None,
-            };
-            if let Some(delta) = delta {
-                self.scroll_mobile_history(delta);
+            if key.code == Key::Char('d') && key.modifiers == KeyModifiers::CONTROL {
+                self.terminal_selection = None;
+                let _outcome = self.terminals.scroll_to_bottom();
+                self.redraw = true;
                 return true;
             }
             let mut ct = crate::realm::keymap::realm_key_to_crossterm(key);
@@ -505,19 +498,73 @@ mod tests {
         for c in "njksraf?m]]".chars() {
             m.dispatch_key(key(c));
         }
+        m.dispatch_key(KeyEvent::new(Key::Char('u'), KeyModifiers::CONTROL));
         let mut text = Vec::new();
         while let Ok(cmd) = server.rx.try_recv() {
             if let Command::Write { bytes, .. } = cmd {
                 text.extend(bytes);
             }
         }
-        assert_eq!(text, b"njksraf?m]]");
+        assert_eq!(text, b"njksraf?m]]\x15");
         m.dispatch_key(list_key());
         assert_eq!(m.focus, PaneFocus::Terminals);
         assert!(m.mobile_rail.is_open());
         assert!(m.modal_stack.is_empty());
         while let Ok(cmd) = server.rx.try_recv() {
             assert!(!matches!(cmd, Command::Write { .. }));
+        }
+    }
+
+    #[test]
+    fn control_d_returns_from_deep_touch_scrollback_without_writing_to_the_session() {
+        let (mut m, mut server, workspace) = fixture();
+        spawn(&mut m, workspace, 7);
+        m.set_focus(PaneFocus::Terminals);
+        m.handle_daemon_event(Event::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: std::sync::Arc::<[u8]>::from(
+                (0..200)
+                    .map(|i| format!("history {i}\r\n"))
+                    .collect::<String>()
+                    .into_bytes(),
+            ),
+            first_seq: 1,
+            seq: 1,
+            cols: 38,
+            rows: 16,
+        });
+        m.view();
+        let offset = |m: &Model<TestTerminalAdapter>| -> u64 {
+            m.terminals
+                .scrollbar_summary()
+                .unwrap()
+                .split_whitespace()
+                .find_map(|part| part.strip_prefix("offset="))
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        let bottom = offset(&m);
+        assert!(bottom > 60, "fixture must have deep history");
+        for _ in 0..20 {
+            m.handle_mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::ScrollUp,
+                column: 0,
+                row: 5,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+        }
+        assert!(offset(&m) + 50 < bottom, "touch reports must scroll far up");
+        while server.rx.try_recv().is_ok() {}
+        for _ in 0..2 {
+            m.dispatch_key(KeyEvent::new(Key::Char('d'), KeyModifiers::CONTROL));
+            assert_eq!(offset(&m), bottom, "one Ctrl-D reaches the live bottom");
+            while let Ok(cmd) = server.rx.try_recv() {
+                assert!(
+                    !matches!(cmd, Command::Write { .. }),
+                    "Ctrl-D must not send EOF"
+                );
+            }
         }
     }
 

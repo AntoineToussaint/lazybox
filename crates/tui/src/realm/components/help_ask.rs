@@ -186,8 +186,6 @@ impl HelpAsk {
                 Key::Down => Some(1),
                 Key::PageUp => Some(-8),
                 Key::PageDown => Some(8),
-                Key::Char('u') if ctrl => Some(-8),
-                Key::Char('d') if ctrl => Some(8),
                 _ => None,
             };
             if let Some(delta) = delta {
@@ -645,7 +643,7 @@ impl Component for HelpAsk {
         };
         frame.render_widget(
             Paragraph::new(if mobile {
-                Line::from("Enter ask ^U/D scroll Esc back")
+                Line::from("Enter ask · swipe · Esc back")
             } else {
                 Line::from(hint)
             }),

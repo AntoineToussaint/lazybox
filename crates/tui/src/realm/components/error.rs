@@ -53,6 +53,8 @@ impl Accent {
 
 /// Diagnostic modal.
 pub struct ErrorModal {
+    presentation: crate::realm::presentation::Presentation,
+    mobile_scroll: u16,
     title: String,
     source: String,
     accent: Accent,
@@ -66,6 +68,8 @@ impl ErrorModal {
     pub fn new(source: impl Into<String>, accent: Accent, detail: impl Into<String>) -> Self {
         Self {
             title: "Error".to_string(),
+            presentation: crate::realm::presentation::Presentation::Desktop,
+            mobile_scroll: 0,
             source: source.into(),
             accent,
             detail: detail.into(),
@@ -88,6 +92,17 @@ impl ErrorModal {
 
 impl Component for ErrorModal {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            crate::realm::presentation::render_reader(
+                frame,
+                area,
+                &self.title,
+                &format!("{}\n\n{}", self.source, self.detail),
+                &mut self.mobile_scroll,
+                "j/k scroll  Enter/Esc close",
+            );
+            return;
+        }
         let theme = crate::theme::current();
         let modal_w = 90u16.min(area.width.saturating_sub(4));
         let modal_h = 22u16.min(area.height.saturating_sub(2));
@@ -144,7 +159,9 @@ impl Component for ErrorModal {
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
         None
     }
-    fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.presentation.apply_attribute(attr, value);
+    }
     fn state(&self) -> State {
         State::None
     }
@@ -155,6 +172,25 @@ impl Component for ErrorModal {
 
 impl AppComponent<Msg, UserEvent> for ErrorModal {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
+        if self.presentation == crate::realm::presentation::Presentation::Mobile
+            && let Event::Keyboard(key) = ev
+        {
+            match key.code {
+                Key::Char('j') | Key::Down => {
+                    self.mobile_scroll = self
+                        .mobile_scroll
+                        .saturating_add(1)
+                        .min(self.detail.len().min(u16::MAX as usize) as u16);
+                    return None;
+                }
+                Key::Char('k') | Key::Up => {
+                    self.mobile_scroll = self.mobile_scroll.saturating_sub(1);
+                    return None;
+                }
+                Key::Esc | Key::Enter => return Some(Msg::ModalDismissed),
+                _ => return None,
+            }
+        }
         match ev {
             Event::Keyboard(KeyEvent {
                 code: Key::Esc | Key::Enter,

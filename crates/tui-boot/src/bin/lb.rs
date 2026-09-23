@@ -6,8 +6,19 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn lazybox_sibling(current_exe: &Path) -> PathBuf {
-    current_exe.with_file_name("lazybox")
+fn lazybox_sibling(current_exe: &Path, args: &[std::ffi::OsString]) -> PathBuf {
+    // An optional side-by-side mobile build keeps the normal release intact.
+    // Source/release bundles without that alternate use the same main binary.
+    let mobile = args
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "-m" || arg == "--mobile");
+    let alternate = current_exe.with_file_name("lazybox-mobile");
+    if mobile && alternate.is_file() {
+        alternate
+    } else {
+        current_exe.with_file_name("lazybox")
+    }
 }
 
 #[cfg(unix)]
@@ -18,10 +29,9 @@ fn main() {
         eprintln!("lb: could not locate this executable: {error}");
         std::process::exit(126);
     });
-    let lazybox = lazybox_sibling(&current);
-    let error = Command::new(&lazybox)
-        .args(std::env::args_os().skip(1))
-        .exec();
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let lazybox = lazybox_sibling(&current, &args);
+    let error = Command::new(&lazybox).args(&args).exec();
     eprintln!("lb: could not execute {}: {error}", lazybox.display());
     std::process::exit(if error.kind() == std::io::ErrorKind::NotFound {
         127
@@ -36,11 +46,9 @@ fn main() {
         eprintln!("lb: could not locate this executable: {error}");
         std::process::exit(126);
     });
-    let lazybox = lazybox_sibling(&current);
-    match Command::new(&lazybox)
-        .args(std::env::args_os().skip(1))
-        .status()
-    {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let lazybox = lazybox_sibling(&current, &args);
+    match Command::new(&lazybox).args(&args).status() {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
         Err(error) => {
             eprintln!("lb: could not run {}: {error}", lazybox.display());
@@ -54,9 +62,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mobile_flag_selects_optional_side_by_side_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let lb = dir.path().join("lb");
+        let default = dir.path().join("lazybox");
+        let alternate = dir.path().join("lazybox-mobile");
+        let args = |items: &[&str]| {
+            items
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lazybox_sibling(&lb, &args(&["-m"])), default);
+        std::fs::write(&alternate, "fixture").unwrap();
+        for flag in ["-m", "--mobile"] {
+            assert_eq!(lazybox_sibling(&lb, &args(&[flag, "--connect"])), alternate);
+        }
+        assert_eq!(lazybox_sibling(&lb, &args(&["--", "-m"])), default);
+        assert_eq!(lazybox_sibling(&lb, &args(&["--version"])), default);
+    }
+
+    #[test]
     fn resolves_alias_next_to_main_binary() {
         assert_eq!(
-            lazybox_sibling(Path::new("/tmp/release/lb")),
+            lazybox_sibling(Path::new("/tmp/release/lb"), &[]),
             Path::new("/tmp/release/lazybox")
         );
     }

@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: out
+---
+Sessions (1) · letters open · ↑↓       
+Sessions                               
+● a Phone notes · codex                
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+working · codex                        
+Enter/Esc close                        
+n new r rename x delete ^Q quit

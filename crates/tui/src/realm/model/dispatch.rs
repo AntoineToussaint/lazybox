@@ -294,6 +294,28 @@ fn truncate_title(title: &str) -> String {
 }
 
 impl<T: TerminalAdapter> Model<T> {
+    /// Explicit target shared by desktop spawning, mobile, and creation hand-offs.
+    pub(super) fn shell_spawn_cmd(
+        session_key: lazybox_core::SessionKey,
+        session_id: Option<lazybox_core::SessionId>,
+        client_request_id: Option<String>,
+    ) -> IpcCommand {
+        IpcCommand::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key,
+            session_id,
+            client_request_id,
+            kind: lazybox_ipc::TerminalKind::Shell,
+            cwd: None,
+            initial_prompt: None,
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        }
+    }
+
     fn execute_dispatch_intent(
         &mut self,
         intent: crate::intent::Intent,
@@ -1404,20 +1426,7 @@ impl<T: TerminalAdapter> Model<T> {
                     return self.dispatch_bulk_agent(BulkOp::SpawnShell, None);
                 }
                 if let Some(sk) = session_key {
-                    cmds.push(IpcCommand::Spawn {
-                        model_alias: None,
-                        access: lazybox_ipc::AgentRunAccess::Default,
-                        session_key: sk,
-                        session_id,
-                        client_request_id: None,
-                        kind: lazybox_ipc::TerminalKind::Shell,
-                        cwd: None,
-                        initial_prompt: None,
-                        initial_snippet: None,
-                        on_main: false,
-                        force_new: false,
-                        role: None,
-                    });
+                    cmds.push(Self::shell_spawn_cmd(sk, session_id, None));
                 }
             }
             Action::SpawnAgent(agent_id) => {

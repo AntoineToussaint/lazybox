@@ -20,6 +20,7 @@ use tuirealm::state::State;
 /// Welcome card shown on first run. Press Enter to advance, Esc to
 /// quit.
 pub struct Splash {
+    presentation: crate::realm::presentation::Presentation,
     /// `ui.action_keys` overrides, so the "keys to know" list shows the
     /// user's EFFECTIVE bindings — a remapped user must not see wrong
     /// keys on the very first screen (#1502).
@@ -30,6 +31,7 @@ impl Splash {
     /// Construct a fresh splash.
     pub fn new() -> Self {
         Self {
+            presentation: crate::realm::presentation::Presentation::Desktop,
             overrides: std::collections::BTreeMap::new(),
         }
     }
@@ -58,6 +60,10 @@ impl Component for Splash {
         // single source of truth that drives the footer + `?` help
         // modal — and the trailing `]]` note keeps the card honest
         // about the one focus where those globals don't fire (#114).
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            crate::realm::presentation::render_welcome(frame, area);
+            return;
+        }
         let theme = crate::theme::current();
         let modal_w = 64u16.min(area.width.saturating_sub(4));
         let modal_h = 28u16.min(area.height.saturating_sub(2));
@@ -150,7 +156,9 @@ impl Component for Splash {
         None
     }
 
-    fn attr(&mut self, _attr: Attribute, _value: AttrValue) {}
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.presentation.apply_attribute(attr, value);
+    }
 
     fn state(&self) -> State {
         State::None

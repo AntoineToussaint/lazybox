@@ -15,6 +15,9 @@
 //!   `ChoicePicked(vec![payload])`.
 //! - `Choice::multi(prompt, items)` — Space toggles, Enter confirms,
 //!   returns `ChoicePicked(vec![payload, …])`.
+//!   Focus a section heading to toggle its available items together,
+//!   or the All items row to toggle the whole list. Bulk rows never
+//!   become picked payloads; Enter always confirms the selection.
 //!
 //! `with_back(true)` enables Backspace → `Msg::ChoiceBack`.
 //! `with_refresh(true)` enables `r` → `Msg::ChoiceRefresh`.
@@ -38,6 +41,15 @@ enum Mode {
     Multi,
 }
 
+/// Navigation and hit-testing share these targets. Bulk controls stay
+/// separate from item indices, preserving every caller's payload mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChoiceRow {
+    All,
+    Section(usize),
+    Item(usize),
+}
+
 type LabelFn<T> = Box<dyn Fn(&T) -> String + Send>;
 type SectionFn<T> = Box<dyn Fn(&T) -> &'static str + Send>;
 type SelectableFn<T> = Box<dyn Fn(&T) -> bool + Send>;
@@ -46,11 +58,14 @@ type PayloadFn<T> = Box<dyn Fn(&T) -> ChoicePayload + Send>;
 
 /// Single- or multi-select picker.
 pub struct Choice<T: Clone + 'static + Send> {
+    presentation: crate::realm::presentation::Presentation,
     title: String,
+    mobile_help: bool,
+    mobile_help_scroll: u16,
     prompt: String,
     items: Vec<T>,
     selected: Vec<bool>,
-    cursor: usize,
+    cursor: ChoiceRow,
     mode: Mode,
     label_for: LabelFn<T>,
     /// Derives the typed [`ChoicePayload`] reported for a picked row
@@ -94,11 +109,9 @@ pub struct Choice<T: Clone + 'static + Send> {
     /// the current selection — the mouse counterpart to Enter — so a
     /// multi-select can be completed without the keyboard (#1092).
     help_area: Rect,
-    /// Per rendered body line, the item index it displays (`None` for
-    /// prompt / section-header / hint lines). Rebuilt every `view`;
-    /// click hit-testing reads it to resolve a clicked row back to its
-    /// item.
-    line_items: Vec<Option<usize>>,
+    /// Per rendered line, the item or bulk control it displays. Prompt,
+    /// spacing and hint lines have no target. Rebuilt every `view`.
+    line_items: Vec<Option<ChoiceRow>>,
 }
 
 impl<T: Clone + 'static + Send> Choice<T> {
@@ -106,11 +119,14 @@ impl<T: Clone + 'static + Send> Choice<T> {
     pub fn single(prompt: impl Into<String>, items: Vec<T>) -> Self {
         let len = items.len();
         Self {
+            presentation: crate::realm::presentation::Presentation::Desktop,
+            mobile_help: false,
+            mobile_help_scroll: 0,
             title: "Pick one".into(),
             prompt: prompt.into(),
             items,
             selected: vec![false; len],
-            cursor: 0,
+            cursor: ChoiceRow::Item(0),
             mode: Mode::Single,
             label_for: Box::new(|_| String::new()),
             payload_for: None,
@@ -134,11 +150,14 @@ impl<T: Clone + 'static + Send> Choice<T> {
     pub fn multi(prompt: impl Into<String>, items: Vec<T>) -> Self {
         let len = items.len();
         Self {
+            presentation: crate::realm::presentation::Presentation::Desktop,
+            mobile_help: false,
+            mobile_help_scroll: 0,
             title: "Pick any".into(),
             prompt: prompt.into(),
             items,
             selected: vec![false; len],
-            cursor: 0,
+            cursor: ChoiceRow::Item(0),
             mode: Mode::Multi,
             label_for: Box::new(|_| String::new()),
             payload_for: None,
@@ -268,14 +287,16 @@ impl<T: Clone + 'static + Send> Choice<T> {
     /// [`Self::on_highlight`] so the initial preview reads this row.
     pub fn select_index(mut self, idx: usize) -> Self {
         if !self.items.is_empty() {
-            self.cursor = idx.min(self.items.len() - 1);
+            self.cursor = ChoiceRow::Item(idx.min(self.items.len() - 1));
         }
         self
     }
 
     /// Invoke the highlight callback with the item under the cursor.
     fn fire_highlight(&self) {
-        if let (Some(cb), Some(item)) = (self.on_highlight.as_ref(), self.items.get(self.cursor)) {
+        if let ChoiceRow::Item(idx) = self.cursor
+            && let (Some(cb), Some(item)) = (self.on_highlight.as_ref(), self.items.get(idx))
+        {
             cb(item);
         }
     }
@@ -287,54 +308,134 @@ impl<T: Clone + 'static + Send> Choice<T> {
         }
     }
 
-    fn move_cursor(&mut self, delta: isize) {
-        if self.items.is_empty() {
+    fn section_at(&self, idx: usize) -> &'static str {
+        self.items
+            .get(idx)
+            .and_then(|item| self.section_for.as_ref().map(|f| f(item)))
+            .unwrap_or("")
+    }
+
+    /// The same ordered rows drive keyboard movement and rendering.
+    fn rows(&self) -> Vec<ChoiceRow> {
+        let mut rows = Vec::with_capacity(self.items.len() + 1);
+        if self.mode == Mode::Multi && !self.items.is_empty() {
+            rows.push(ChoiceRow::All);
+        }
+        let mut previous = "";
+        for i in 0..self.items.len() {
+            let section = self.section_at(i);
+            if !section.is_empty() && section != previous {
+                rows.push(ChoiceRow::Section(i));
+            }
+            rows.push(ChoiceRow::Item(i));
+            previous = section;
+        }
+        rows
+    }
+
+    fn item_range(&self, row: ChoiceRow) -> std::ops::Range<usize> {
+        match row {
+            ChoiceRow::All => 0..self.items.len(),
+            ChoiceRow::Item(i) => i..(i + 1).min(self.items.len()),
+            ChoiceRow::Section(start) => {
+                let section = self.section_at(start);
+                let end = (start + 1..self.items.len())
+                    .find(|&i| self.section_at(i) != section)
+                    .unwrap_or(self.items.len());
+                start..end
+            }
+        }
+    }
+
+    /// Missing providers/tools are excluded from both bulk state and edits.
+    fn selection_counts(&self, row: ChoiceRow) -> (usize, usize) {
+        self.item_range(row)
+            .filter(|&i| self.is_selectable(i))
+            .fold((0, 0), |(selected, total), i| {
+                (selected + usize::from(self.selected[i]), total + 1)
+            })
+    }
+
+    fn row_is_selectable(&self, row: ChoiceRow) -> bool {
+        match row {
+            ChoiceRow::Item(i) => self.is_selectable(i),
+            _ => self.mode == Mode::Multi && self.selection_counts(row).1 > 0,
+        }
+    }
+
+    fn toggle_row(&mut self, row: ChoiceRow) {
+        if self.mode != Mode::Multi || !self.row_is_selectable(row) {
             return;
         }
-        let last = self.items.len() as isize - 1;
-        let cur = self.cursor as isize;
+        let (selected, total) = self.selection_counts(row);
+        let next = selected != total;
+        for i in self.item_range(row) {
+            if self.is_selectable(i) {
+                self.selected[i] = next;
+            }
+        }
+        self.show_empty_hint = false;
+    }
+
+    fn toggle_hint(&self) -> &'static str {
+        let (selected, total) = self.selection_counts(self.cursor);
+        let all = total > 0 && selected == total;
+        match self.cursor {
+            ChoiceRow::All if all => "clear all",
+            ChoiceRow::All => "select all",
+            ChoiceRow::Section(_) if all => "clear group",
+            ChoiceRow::Section(_) => "select group",
+            ChoiceRow::Item(_) => "pick",
+        }
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        let rows = self.rows();
+        if rows.is_empty() {
+            return;
+        }
+        let last = rows.len() as isize - 1;
+        let cur = rows.iter().position(|row| *row == self.cursor).unwrap_or(0) as isize;
         let target = (cur + delta).clamp(0, last) as usize;
-        self.cursor = target;
-        // After the move, if we landed on a non-selectable row,
-        // hop in the same direction until we hit a selectable one
-        // (or run off the edge — in which case fall back to the
-        // first selectable row anywhere). Stops j/k from getting
-        // stuck on inert section/header rows when those exist.
-        if !self.is_selectable(self.cursor) {
+        self.cursor = rows[target];
+        // Skip unavailable rows in the same direction, falling back
+        // to the first available row when there is none ahead.
+        if !self.row_is_selectable(self.cursor) {
             let dir: isize = if delta >= 0 { 1 } else { -1 };
-            let mut i = self.cursor as isize;
+            let mut i = target as isize;
             while i + dir >= 0 && i + dir <= last {
                 i += dir;
-                if self.is_selectable(i as usize) {
-                    self.cursor = i as usize;
+                if self.row_is_selectable(rows[i as usize]) {
+                    self.cursor = rows[i as usize];
                     return;
                 }
             }
-            // No selectable in that direction — fall back to first
-            // selectable anywhere.
-            if let Some(idx) = (0..=last as usize).find(|i| self.is_selectable(*i)) {
-                self.cursor = idx;
+            if let Some(row) = rows.into_iter().find(|row| self.row_is_selectable(*row)) {
+                self.cursor = row;
             }
         }
     }
 
-    /// Snap to the first selectable item.
+    /// Snap to the first available row (All items in a multi-select).
     fn cursor_to_first(&mut self) {
-        if self.items.is_empty() {
-            return;
-        }
-        if let Some(idx) = (0..self.items.len()).find(|i| self.is_selectable(*i)) {
-            self.cursor = idx;
+        if let Some(row) = self
+            .rows()
+            .into_iter()
+            .find(|row| self.row_is_selectable(*row))
+        {
+            self.cursor = row;
         }
     }
 
-    /// Snap to the last selectable item.
+    /// Snap to the last available item.
     fn cursor_to_last(&mut self) {
-        if self.items.is_empty() {
-            return;
-        }
-        if let Some(idx) = (0..self.items.len()).rev().find(|i| self.is_selectable(*i)) {
-            self.cursor = idx;
+        if let Some(row) = self
+            .rows()
+            .into_iter()
+            .rev()
+            .find(|row| self.row_is_selectable(*row))
+        {
+            self.cursor = row;
         }
     }
 
@@ -357,13 +458,13 @@ impl<T: Clone + 'static + Send> Choice<T> {
         }
         let picked: Vec<usize> = match self.mode {
             Mode::Single => {
-                if self.items.is_empty() {
-                    return ConfirmResult::Cancel;
-                }
-                if !self.is_selectable(self.cursor) {
+                let ChoiceRow::Item(idx) = self.cursor else {
+                    return ConfirmResult::Stay;
+                };
+                if !self.is_selectable(idx) {
                     return ConfirmResult::Stay;
                 }
-                vec![self.cursor]
+                vec![idx]
             }
             Mode::Multi => self
                 .selected
@@ -383,92 +484,108 @@ impl<T: Clone + 'static + Send> Choice<T> {
         ConfirmResult::Picked(payloads)
     }
 
-    /// Returns the laid-out lines, the line index of the cursor row
-    /// (so `view` can compute a scroll offset that keeps it on screen),
-    /// and a per-line item map (`line_items[l] == Some(i)` when body
-    /// line `l` renders item `i`, `None` for prompt / section / hint
-    /// lines). Header lines shift the item-index → line-index
-    /// relationship, so both the cursor line and the click map are
-    /// tracked here.
-    fn build_lines(&mut self, width: u16) -> (Vec<Line<'static>>, u16, Vec<Option<usize>>) {
+    fn row_label(&self, row: ChoiceRow) -> String {
+        match row {
+            ChoiceRow::All => "All items".into(),
+            ChoiceRow::Section(i) => self.section_at(i).into(),
+            ChoiceRow::Item(i) => self
+                .items
+                .get(i)
+                .map(|item| (self.label_for)(item))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn mobile_description(&self) -> String {
+        let label = self.row_label(self.cursor);
+        let scope = match self.cursor {
+            ChoiceRow::All => {
+                "Space selects all available items; when all are selected, it clears them. Enter confirms."
+            }
+            ChoiceRow::Section(_) => {
+                "Space selects all available items in this section; when all are selected, it clears them. Enter confirms."
+            }
+            ChoiceRow::Item(_) => "",
+        };
+        if scope.is_empty() {
+            format!("Selected: {label}\n\n{}", self.prompt)
+        } else {
+            format!("Selected: {label}\n\n{scope}\n\n{}", self.prompt)
+        }
+    }
+
+    /// Each line has an optional navigation/click target. Headers and
+    /// bulk controls never alter the underlying item/payload indices.
+    fn build_lines(&mut self, width: u16) -> (Vec<Line<'static>>, u16, Vec<Option<ChoiceRow>>) {
         let theme = crate::theme::current();
         let mut lines: Vec<Line> = Vec::with_capacity(self.items.len() + 4);
-        // Parallel to `lines`: which item (if any) each rendered line
-        // shows. Load-bearing for click hit-testing (#1092).
-        let mut line_items: Vec<Option<usize>> = Vec::with_capacity(self.items.len() + 4);
+        let mut line_items = Vec::with_capacity(self.items.len() + 4);
         let mut cursor_line: u16 = 0;
-        // Prompt — split on '\n' so each prompt line is its own `Line`.
-        // Without this, ratatui's wrap reflows the embedded newlines
-        // into a single rendered row count that doesn't match what we
-        // tracked for the cursor, producing an off-by-N scroll bug
-        // (cursor lands one row below the body when scrolling near
-        // the bottom).
         let prompt_style = Style::default().fg(theme.text_dim);
-        for segment in self.prompt.split('\n') {
-            lines.push(Line::from(Span::styled(segment.to_string(), prompt_style)));
+        let prompt = if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            crate::realm::presentation::wrap_text(&self.prompt, width)
+                .into_iter()
+                .take(2)
+                .collect::<Vec<_>>()
+        } else {
+            self.prompt.split('\n').map(str::to_owned).collect()
+        };
+        for segment in prompt {
+            lines.push(Line::from(Span::styled(segment, prompt_style)));
             line_items.push(None);
         }
         lines.push(Line::raw(""));
         line_items.push(None);
 
-        // Section grouping — if a `section_for` exists, walk the
-        // items printing the section header before the first item of
-        // each group.
-        let mut last_section: Option<&'static str> = None;
-        for (i, item) in self.items.iter().enumerate() {
-            if let Some(sec_fn) = self.section_for.as_ref() {
-                let section = sec_fn(item);
-                if !section.is_empty() && Some(section) != last_section {
-                    if last_section.is_some() {
-                        lines.push(Line::raw(""));
-                        line_items.push(None);
-                    }
-                    // Truncate the same way item rows are — wrap is
-                    // off, so an overlong section label would print
-                    // off the modal's right edge otherwise.
-                    let section_truncated = if section.chars().count() > width as usize {
-                        let mut s: String = section.chars().take(width as usize - 1).collect();
-                        s.push('…');
-                        s
-                    } else {
-                        section.to_string()
-                    };
-                    lines.push(Line::from(Span::styled(
-                        section_truncated,
-                        Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-                    )));
+        let mut had_section = false;
+        for row in self.rows() {
+            let section = matches!(row, ChoiceRow::Section(_));
+            if section {
+                if had_section {
+                    lines.push(Line::raw(""));
                     line_items.push(None);
-                    last_section = Some(section);
                 }
+                had_section = true;
             }
-            let is_cursor = i == self.cursor;
-            let selectable = self.is_selectable(i);
-            let selected = self.selected.get(i).copied().unwrap_or(false);
-            let prefix = match (self.mode, selected, selectable) {
-                (Mode::Multi, true, true) => "[x] ",
-                (Mode::Multi, false, true) => "[ ] ",
-                (Mode::Multi, _, false) => "[·] ",
-                (Mode::Single, _, true) => "    ",
-                (Mode::Single, _, false) => "    ",
+            let is_cursor = row == self.cursor;
+            let selectable = self.row_is_selectable(row);
+            let (selected, total) = self.selection_counts(row);
+            let prefix = match self.mode {
+                Mode::Single => "    ",
+                Mode::Multi if !selectable => "[·] ",
+                Mode::Multi if selected == 0 => "[ ] ",
+                Mode::Multi if selected == total => "[x] ",
+                Mode::Multi => "[-] ",
             };
             let cursor_caret = if is_cursor { "▸ " } else { "  " };
-            let mut style = if !selectable {
+            let mut style = if section && self.mode == Mode::Single {
+                Style::default().fg(theme.warn).bold()
+            } else if !selectable {
                 Style::default().fg(theme.text_dim)
+            } else if section || row == ChoiceRow::All {
+                Style::default().fg(theme.warn).bold()
             } else if is_cursor {
-                Style::default()
-                    .fg(theme.text_strong)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.text_strong).bold()
             } else {
                 Style::default().fg(theme.text_strong)
             };
             if is_cursor {
                 style = style.bg(theme.fill);
             }
-            let label = (self.label_for)(item);
-            let line = format!("{cursor_caret}{prefix}{label}");
-            // Truncate to width.
-            let truncated = if line.chars().count() > width as usize {
-                let mut s: String = line.chars().take(width as usize - 1).collect();
+            let label = self.row_label(row);
+            let line = if section && self.mode == Mode::Single {
+                label
+            } else {
+                format!("{cursor_caret}{prefix}{label}")
+            };
+            let truncated = if self.presentation == crate::realm::presentation::Presentation::Mobile
+            {
+                crate::util::truncate_ellipsis(&line, usize::from(width)).into_owned()
+            } else if line.chars().count() > width as usize {
+                let mut s: String = line
+                    .chars()
+                    .take(width.saturating_sub(1) as usize)
+                    .collect();
                 s.push('…');
                 s
             } else {
@@ -478,7 +595,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
                 cursor_line = lines.len() as u16;
             }
             lines.push(Line::from(Span::styled(truncated, style)));
-            line_items.push(Some(i));
+            line_items.push(Some(row));
         }
         // Empty hint
         if self.show_empty_hint {
@@ -493,11 +610,9 @@ impl<T: Clone + 'static + Send> Choice<T> {
         (lines, cursor_line, line_items)
     }
 
-    /// Resolve a click at screen `(col, row)` to the item index it
-    /// landed on, or `None` when the click is outside the body or on a
-    /// non-item line (prompt / section / hint). Reads the `body_area`,
-    /// `scroll`, and `line_items` stashed by the last `view`.
-    fn item_at_click(&self, col: u16, row: u16) -> Option<usize> {
+    /// Resolve a click to a rendered item or bulk control, accounting
+    /// for scrolling. Prompt, spacing and hint lines have no target.
+    fn row_at_click(&self, col: u16, row: u16) -> Option<ChoiceRow> {
         let b = self.body_area;
         if row < b.y || row >= b.y + b.height || col < b.x || col >= b.x + b.width {
             return None;
@@ -519,8 +634,8 @@ impl<T: Clone + 'static + Send> Choice<T> {
     /// - outside the modal box → dismiss (click-away to cancel);
     /// - on the help footer → confirm (the mouse counterpart to Enter,
     ///   so a multi-select finishes without the keyboard);
-    /// - on an item row → single-select picks it outright, multi-select
-    ///   toggles it (Enter / a help-row click then confirms).
+    /// - on a row → single-select highlights, multi-select toggles the
+    ///   item or bulk control (Enter / a help-row click then confirms).
     fn on_mouse(&mut self, m: &MouseEvent) -> Option<Msg> {
         if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
             return None;
@@ -535,12 +650,12 @@ impl<T: Clone + 'static + Send> Choice<T> {
                 ConfirmResult::Picked(picks) => Some(Msg::ChoicePicked(picks)),
             };
         }
-        let idx = self.item_at_click(m.column, m.row)?;
-        if !self.is_selectable(idx) {
+        let row = self.row_at_click(m.column, m.row)?;
+        if !self.row_is_selectable(row) {
             return None;
         }
         let prev_cursor = self.cursor;
-        self.cursor = idx;
+        self.cursor = row;
         self.show_empty_hint = false;
         // A row click never confirms a single-select. Confirm is a
         // separate, deliberate act (Enter, or a click on the help
@@ -550,9 +665,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
         // flow required Enter. A single-select click only positions the
         // cursor (and fires the live preview below); a multi-select
         // click toggles the row.
-        if self.mode == Mode::Multi {
-            self.selected[idx] = !self.selected[idx];
-        }
+        self.toggle_row(row);
         if self.cursor != prev_cursor {
             self.fire_highlight();
         }
@@ -569,22 +682,27 @@ enum ConfirmResult {
 impl<T: Clone + 'static + Send> Component for Choice<T> {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let theme = crate::theme::current();
-        let modal_w = 80u16.min(area.width.saturating_sub(4));
-        // An empty list has no rows to show, so a full-height modal
-        // would render as a large blank rectangle over the panes —
-        // the "black screen" from issue #35. Size the box to the
-        // prompt instead so the empty state reads as a small framed
-        // notice. `+ 5` covers the blank line after the prompt, the
-        // two-row body/help gap, and the borders.
-        let modal_h = if self.items.is_empty() {
-            self.prompt.split('\n').count() as u16 + 5
+        let mobile = self.presentation == crate::realm::presentation::Presentation::Mobile;
+        if mobile && self.mobile_help {
+            crate::realm::presentation::render_reader(
+                frame,
+                area,
+                &self.title,
+                &self.mobile_description(),
+                &mut self.mobile_help_scroll,
+                "j/k scroll  h/Esc back",
+            );
+            return;
+        }
+        let height = if self.items.is_empty() {
+            self.prompt.lines().count() as u16 + 5
         } else {
             24
+        };
+        let modal = self.presentation.modal(area, 80, height);
+        if modal.width < 3 || modal.height < 5 {
+            return;
         }
-        .min(area.height.saturating_sub(4));
-        let x = area.x + area.width.saturating_sub(modal_w) / 2;
-        let y = area.y + area.height.saturating_sub(modal_h) / 2;
-        let modal = Rect::new(x, y, modal_w, modal_h);
 
         frame.render_widget(Clear, modal);
         let block = Block::default()
@@ -602,7 +720,16 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
         self.line_items = line_items;
         // Help footer — an empty list can only be dismissed, so drop
         // the navigate/toggle/confirm hints that don't apply.
-        let help_spans = if self.items.is_empty() {
+        let help_spans = if mobile {
+            let hint = if self.items.is_empty() {
+                "Enter/Esc close"
+            } else if self.mode == Mode::Multi {
+                "Space pick  Enter next  Esc exit"
+            } else {
+                "j/k move  Enter pick  Esc back"
+            };
+            vec![Span::styled(hint, Style::default().fg(theme.text_dim))]
+        } else if self.items.is_empty() {
             vec![
                 Span::styled("Esc", Style::default().fg(theme.error).bold()),
                 Span::raw("/"),
@@ -619,7 +746,7 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
                     "Space",
                     Style::default().fg(theme.accent).bold(),
                 ));
-                help_spans.push(Span::raw(" toggle  "));
+                help_spans.push(Span::raw(format!(" {}  ", self.toggle_hint())));
             }
             help_spans.push(Span::styled(
                 "Enter",
@@ -643,17 +770,18 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
         };
 
         // Layout: lines occupy inner.height-2 rows; help at bottom
+        let help_height = if mobile { 2.min(inner.height) } else { 1 };
         let help_area = Rect {
             x: inner.x,
-            y: inner.y + inner.height - 1,
+            y: inner.y + inner.height.saturating_sub(help_height),
             width: inner.width,
-            height: 1,
+            height: help_height,
         };
         let body_area = Rect {
             x: inner.x,
             y: inner.y,
             width: inner.width,
-            height: inner.height - 2,
+            height: inner.height.saturating_sub(2),
         };
         // Adjust the persistent scroll offset so the cursor row stays
         // within `body_area`. Only nudges when the cursor walks past
@@ -681,7 +809,25 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
         // in `build_lines`, so line index === terminal row. That's
         // load-bearing for the scroll math above.
         frame.render_widget(Paragraph::new(lines).scroll((self.scroll, 0)), body_area);
-        frame.render_widget(Paragraph::new(Line::from(help_spans)), help_area);
+        if mobile {
+            let first = if self.mode == Mode::Multi {
+                format!("j/k move  Space {}", self.toggle_hint())
+            } else {
+                "j/k move  Enter pick".into()
+            };
+            let second = if self.mode == Mode::Multi {
+                "Enter next  h info  Esc exit"
+            } else {
+                "h info  Esc back"
+            };
+            frame.render_widget(
+                Paragraph::new(vec![Line::raw(first), Line::raw(second)])
+                    .style(Style::default().fg(theme.text_dim)),
+                help_area,
+            );
+        } else {
+            frame.render_widget(Paragraph::new(Line::from(help_spans)), help_area);
+        }
         // Stash the rects for `on()`'s mouse hit-testing (#1092).
         self.modal_rect = modal;
         self.body_area = body_area;
@@ -691,7 +837,9 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
         None
     }
-    fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.presentation.apply_attribute(attr, value);
+    }
     fn state(&self) -> State {
         State::None
     }
@@ -708,6 +856,46 @@ impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
         let Event::Keyboard(key) = ev else {
             return None;
         };
+        let mobile = self.presentation == crate::realm::presentation::Presentation::Mobile;
+        if mobile && self.mobile_help {
+            match key.code {
+                Key::Char('h') | Key::Esc | Key::Enter => self.mobile_help = false,
+                Key::Char('j') | Key::Down => {
+                    let lines = crate::realm::presentation::wrap_text(
+                        &self.mobile_description(),
+                        self.modal_rect.width.saturating_sub(2),
+                    );
+                    self.mobile_help_scroll = self
+                        .mobile_help_scroll
+                        .saturating_add(1)
+                        .min(lines.len().saturating_sub(1) as u16);
+                }
+                Key::Char('k') | Key::Up => {
+                    self.mobile_help_scroll = self.mobile_help_scroll.saturating_sub(1)
+                }
+                _ => (),
+            }
+            return None;
+        }
+        if mobile
+            && key.modifiers.is_empty()
+            && key.code == Key::Char('h')
+            && !self.prompt.is_empty()
+        {
+            self.mobile_help = true;
+            self.mobile_help_scroll = 0;
+            return None;
+        }
+        let adapted = if mobile && key.modifiers.is_empty() {
+            match key.code {
+                Key::Char('j') => tuirealm::event::KeyEvent::from(Key::Down),
+                Key::Char('k') => tuirealm::event::KeyEvent::from(Key::Up),
+                _ => *key,
+            }
+        } else {
+            *key
+        };
+        let key = &adapted;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
             return Some(Msg::ModalDismissed);
@@ -760,9 +948,7 @@ impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
                 None
             }
             Key::Char(' ') if self.mode == Mode::Multi => {
-                if !self.items.is_empty() && self.is_selectable(self.cursor) {
-                    self.selected[self.cursor] = !self.selected[self.cursor];
-                }
+                self.toggle_row(self.cursor);
                 self.show_empty_hint = false;
                 None
             }
@@ -796,6 +982,176 @@ mod tests {
             .map(|i| Item(Box::leak(format!("i{i}").into_boxed_str())))
             .collect();
         Choice::single("pick", items)
+    }
+
+    fn press(c: &mut Choice<Item>, key: Key) -> Option<Msg> {
+        c.on(&Event::Keyboard(tuirealm::event::KeyEvent::from(key)))
+    }
+
+    fn grouped() -> Choice<Item> {
+        Choice::multi(
+            "Pick filters",
+            vec![Item("a"), Item("b"), Item("c"), Item("d")],
+        )
+        .label(|i| i.0.into())
+        .section_for(|i| {
+            if matches!(i.0, "a" | "b") {
+                "PRs"
+            } else {
+                "Issues"
+            }
+        })
+    }
+
+    #[test]
+    fn section_space_clears_only_that_group_and_enter_confirms_typed_items() {
+        let mut c = grouped()
+            .selected_mask(vec![true, true, false, true])
+            .payload_for(|i| ChoicePayload::Text(i.0.into()));
+        assert_eq!(press(&mut c, Key::Up), None);
+        assert_eq!(c.cursor, ChoiceRow::Section(0));
+        assert_eq!(press(&mut c, Key::Char(' ')), None);
+        assert_eq!(c.selected, vec![false, false, false, true]);
+        assert_eq!(
+            press(&mut c, Key::Enter),
+            Some(Msg::ChoicePicked(vec![ChoicePayload::Text("d".into())]))
+        );
+    }
+
+    #[test]
+    fn all_items_selects_mixed_available_rows_then_clears_them() {
+        let mut c = grouped()
+            .selectable(|i| i.0 != "b")
+            .selected_mask(vec![false, false, true, false]);
+        press(&mut c, Key::Char('g'));
+        assert_eq!(c.cursor, ChoiceRow::All);
+        press(&mut c, Key::Char(' '));
+        assert_eq!(c.selected, vec![true, false, true, true]);
+        assert_eq!(
+            press(&mut c, Key::Enter),
+            Some(Msg::ChoicePicked(vec![
+                ChoicePayload::Index(0),
+                ChoicePayload::Index(2),
+                ChoicePayload::Index(3)
+            ]))
+        );
+        press(&mut c, Key::Char(' '));
+        assert_eq!(c.selected, vec![false; 4]);
+    }
+
+    #[test]
+    fn bulk_clear_preserves_each_callers_empty_selection_rule() {
+        for allow in [false, true] {
+            let mut c = grouped().with_selected_by(|_| true).allow_empty(allow);
+            press(&mut c, Key::Home);
+            press(&mut c, Key::Char(' '));
+            let result = press(&mut c, Key::Enter);
+            if allow {
+                assert_eq!(result, Some(Msg::ChoicePicked(vec![])));
+            } else {
+                assert_eq!(result, None);
+                assert!(c.show_empty_hint);
+            }
+            press(&mut c, Key::Char(' '));
+            assert!(!c.show_empty_hint);
+            assert_eq!(c.selected, vec![true; 4]);
+        }
+    }
+
+    #[test]
+    fn group_navigation_and_space_skip_unavailable_rows() {
+        let mut c = grouped().selectable(|i| matches!(i.0, "a" | "d"));
+        press(&mut c, Key::Down);
+        assert_eq!(c.cursor, ChoiceRow::Section(2));
+        press(&mut c, Key::Char(' '));
+        assert_eq!(c.selected, vec![false, false, false, true]);
+        press(&mut c, Key::Down);
+        assert_eq!(c.cursor, ChoiceRow::Item(3));
+        press(&mut c, Key::Up);
+        assert_eq!(c.cursor, ChoiceRow::Section(2));
+        press(&mut c, Key::Char(' '));
+        assert_eq!(c.selected, vec![false; 4]);
+    }
+
+    #[test]
+    fn empty_and_unavailable_lists_have_no_active_bulk_controls() {
+        for items in [vec![], vec![Item("a"), Item("b")]] {
+            let mut c = Choice::multi("No tools", items).selectable(|_| false);
+            for key in [
+                Key::Home,
+                Key::Down,
+                Key::End,
+                Key::Up,
+                Key::PageDown,
+                Key::PageUp,
+                Key::Char(' '),
+            ] {
+                assert_eq!(press(&mut c, key), None);
+            }
+            assert!(c.selected.iter().all(|selected| !selected));
+            assert!(!c.row_is_selectable(ChoiceRow::All));
+        }
+    }
+
+    #[test]
+    fn repeated_section_labels_toggle_only_their_contiguous_group() {
+        let mut c = grouped().section_for(|i| match i.0 {
+            "b" => "",
+            "d" => "Issues",
+            _ => "PRs",
+        });
+        c.toggle_row(ChoiceRow::Section(0));
+        assert_eq!(c.selected, vec![true, false, false, false]);
+        assert!(c.rows().contains(&ChoiceRow::Section(2)));
+        c.toggle_row(ChoiceRow::Section(2));
+        assert_eq!(c.selected, vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn single_picker_section_headings_stay_inert() {
+        let mut c = Choice::single("Pick one", vec![Item("a"), Item("b")]).section_for(|i| i.0);
+        assert!(!c.rows().contains(&ChoiceRow::All));
+        press(&mut c, Key::Down);
+        assert_eq!(c.cursor, ChoiceRow::Item(1));
+        press(&mut c, Key::Home);
+        assert_eq!(c.cursor, ChoiceRow::Item(0));
+        press(&mut c, Key::Char(' '));
+        assert_eq!(c.selected, vec![false; 2]);
+        assert_eq!(
+            press(&mut c, Key::Enter),
+            Some(Msg::ChoicePicked(vec![ChoicePayload::Index(0)]))
+        );
+    }
+
+    #[test]
+    fn scrolled_section_click_toggles_same_group_as_space_after_resize() {
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+        let items = (0..30)
+            .map(|i| Item(if i < 20 { "PR" } else { "Issue" }))
+            .collect();
+        let mut c = Choice::multi("Pick filters", items)
+            .section_for(|i| i.0)
+            .label(|i| i.0.into())
+            .select_index(20);
+        c.presentation = crate::realm::presentation::Presentation::Mobile;
+        press(&mut c, Key::Up);
+        assert_eq!(c.cursor, ChoiceRow::Section(20));
+        for (w, h) in [(39, 18), (32, 12)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| c.view(f, f.area())).unwrap();
+            let line = c
+                .line_items
+                .iter()
+                .position(|r| *r == Some(ChoiceRow::Section(20)))
+                .unwrap();
+            let row = c.body_area.y + line as u16 - c.scroll;
+            assert!(row >= c.body_area.y && row < c.body_area.y + c.body_area.height);
+            assert_eq!(c.on(&left_click(c.body_area.x + 1, row)), None);
+            assert_eq!(&c.selected[..20], &[false; 20]);
+            assert_eq!(&c.selected[20..], &[true; 10]);
+            press(&mut c, Key::Char(' '));
+            assert_eq!(c.selected, vec![false; 30]);
+        }
     }
 
     #[test]
@@ -833,9 +1189,9 @@ mod tests {
     fn move_cursor_clamps_to_range() {
         let mut c = ten();
         c.move_cursor(-5);
-        assert_eq!(c.cursor, 0);
+        assert_eq!(c.cursor, ChoiceRow::Item(0));
         c.move_cursor(100);
-        assert_eq!(c.cursor, 9);
+        assert_eq!(c.cursor, ChoiceRow::Item(9));
     }
 
     #[test]
@@ -846,10 +1202,10 @@ mod tests {
             .collect();
         // Mark indices 1 and 2 non-selectable.
         let mut c = Choice::single("p", items).selectable(|i: &Item| !matches!(i.0, "b" | "c"));
-        c.cursor = 0;
+        c.cursor = ChoiceRow::Item(0);
         c.move_cursor(1);
         // Should hop past b/c and land on d (index 3).
-        assert_eq!(c.cursor, 3);
+        assert_eq!(c.cursor, ChoiceRow::Item(3));
     }
 
     #[test]
@@ -859,10 +1215,10 @@ mod tests {
             .map(Item)
             .collect();
         let mut c = Choice::single("p", items).selectable(|i: &Item| !matches!(i.0, "b" | "c"));
-        c.cursor = 3;
+        c.cursor = ChoiceRow::Item(3);
         c.move_cursor(-1);
         // Should hop past c/b and land on a (index 0).
-        assert_eq!(c.cursor, 0);
+        assert_eq!(c.cursor, ChoiceRow::Item(0));
     }
 
     #[test]
@@ -871,9 +1227,9 @@ mod tests {
         // First selectable is 'b'; last selectable is 'c'.
         let mut c = Choice::single("p", items).selectable(|i: &Item| matches!(i.0, "b" | "c"));
         c.cursor_to_last();
-        assert_eq!(c.cursor, 2);
+        assert_eq!(c.cursor, ChoiceRow::Item(2));
         c.cursor_to_first();
-        assert_eq!(c.cursor, 1);
+        assert_eq!(c.cursor, ChoiceRow::Item(1));
     }
 
     #[test]
@@ -972,7 +1328,7 @@ mod tests {
         let line = c
             .line_items
             .iter()
-            .position(|x| *x == Some(i))
+            .position(|x| *x == Some(ChoiceRow::Item(i)))
             .expect("item rendered");
         c.body_area.y + line as u16 - c.scroll
     }
@@ -1003,7 +1359,11 @@ mod tests {
         let row = item_row(&c, 2);
         let col = c.body_area.x + 1;
         assert_eq!(c.on(&left_click(col, row)), None, "click must not confirm");
-        assert_eq!(c.cursor, 2, "click positions the cursor on the clicked row");
+        assert_eq!(
+            c.cursor,
+            ChoiceRow::Item(2),
+            "click positions the cursor on the clicked row"
+        );
         // A help-row click then confirms the highlighted row.
         render(&mut c);
         let help_row = c.help_area.y;

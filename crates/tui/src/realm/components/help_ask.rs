@@ -109,6 +109,8 @@ pub type SharedHelpConvo = Arc<Mutex<HelpConvo>>;
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub struct HelpAsk {
+    presentation: crate::realm::presentation::Presentation,
+    mobile_intro_scroll: usize,
     /// Catalog snapshot taken at mount — the search corpus.
     catalog: Vec<CatalogEntry>,
     convo: SharedHelpConvo,
@@ -143,6 +145,8 @@ impl HelpAsk {
         }
         catalog.extend(terminal_search_entries(&leader));
         Self {
+            presentation: Default::default(),
+            mobile_intro_scroll: 0,
             catalog,
             convo,
             query: String::new(),
@@ -175,6 +179,26 @@ impl HelpAsk {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
             return Some(Msg::ModalDismissed);
+        }
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            let delta = match key.code {
+                Key::Up => Some(-1isize),
+                Key::Down => Some(1),
+                Key::PageUp => Some(-8),
+                Key::PageDown => Some(8),
+                Key::Char('u') if ctrl => Some(-8),
+                Key::Char('d') if ctrl => Some(8),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                if self.convo().turns.is_empty() && self.query.is_empty() {
+                    self.mobile_intro_scroll =
+                        self.mobile_intro_scroll.saturating_add_signed(delta);
+                } else {
+                    self.scroll_up = self.scroll_up.saturating_add_signed(-delta);
+                }
+                return None;
+            }
         }
         // The assistant is the primary `?` surface. Pressing `?` again
         // from its empty prompt swaps to the compact all-shortcuts index;
@@ -296,12 +320,17 @@ impl HelpAsk {
                     format!("  Keys in the {pane}"),
                     Style::default().fg(theme.text_strong).bold(),
                 )));
-                const KEY_PAD: usize = 12;
+                let key_pad =
+                    if self.presentation == crate::realm::presentation::Presentation::Mobile {
+                        8
+                    } else {
+                        12
+                    };
                 for b in keys {
                     let mut k = b.keys.to_string();
                     let n = k.chars().count();
-                    if n < KEY_PAD {
-                        k.push_str(&" ".repeat(KEY_PAD - n));
+                    if n < key_pad {
+                        k.push_str(&" ".repeat(key_pad - n));
                     }
                     out.push(Line::from(vec![
                         Span::styled(format!("   {k}"), Style::default().fg(theme.accent).bold()),
@@ -326,6 +355,12 @@ impl HelpAsk {
                 "      “how do I act on a failing PR?”",
                 Style::default().fg(theme.text_dim).italic(),
             )));
+            if self.presentation == crate::realm::presentation::Presentation::Mobile {
+                return out
+                    .into_iter()
+                    .flat_map(|line| comment_render::wrap_one(line, width))
+                    .collect();
+            }
             return out;
         }
         for turn in &convo.turns {
@@ -456,7 +491,12 @@ impl Component for HelpAsk {
         let modal_h = 30u16.min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
-        let modal = Rect::new(x, y, modal_w, modal_h);
+        let mobile = self.presentation == crate::realm::presentation::Presentation::Mobile;
+        let modal = if mobile {
+            area
+        } else {
+            Rect::new(x, y, modal_w, modal_h)
+        };
 
         frame.render_widget(Clear, modal);
         let block = Block::default()
@@ -497,7 +537,14 @@ impl Component for HelpAsk {
             Span::styled("  Tab switch", Style::default().fg(theme.text_dim)),
         ]);
         let mode_rect = Rect { height: 1, ..inner };
-        frame.render_widget(Paragraph::new(mode_line), mode_rect);
+        frame.render_widget(
+            Paragraph::new(if mobile {
+                Line::from(format!("{} · Tab mode", next_question.input_label()))
+            } else {
+                mode_line
+            }),
+            mode_rect,
+        );
 
         let input_line = Line::from(vec![
             Span::styled(
@@ -560,6 +607,9 @@ impl Component for HelpAsk {
         // bottom so a streaming answer stays in view.
         let offset = if searching {
             0
+        } else if mobile && self.convo().turns.is_empty() && self.convo().notice.is_none() {
+            self.mobile_intro_scroll = self.mobile_intro_scroll.min(total.saturating_sub(visible));
+            self.mobile_intro_scroll
         } else {
             self.scroll_up = self.scroll_up.min(total.saturating_sub(visible));
             total.saturating_sub(visible + self.scroll_up)
@@ -593,13 +643,22 @@ impl Component for HelpAsk {
                 Span::raw(" shortcuts"),
             ]
         };
-        frame.render_widget(Paragraph::new(Line::from(hint)), help_rect);
+        frame.render_widget(
+            Paragraph::new(if mobile {
+                Line::from("Enter ask ^U/D scroll Esc back")
+            } else {
+                Line::from(hint)
+            }),
+            help_rect,
+        );
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
         None
     }
-    fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.presentation.apply_attribute(attr, value);
+    }
     fn state(&self) -> State {
         State::None
     }

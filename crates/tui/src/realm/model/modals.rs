@@ -3989,11 +3989,20 @@ impl<T: TerminalAdapter> Model<T> {
     ) {
         let trigger = match origin {
             lazybox_ipc::SpawnOrigin::Interactive => {
+                // Already tracking this session keeps a checklist this
+                // client owns advancing to its end: `TerminalSpawned`
+                // clears the follow pin (it has served its purpose), and
+                // the trailing `Setup` step must still land on the modal
+                // that is on screen rather than fall off the gate.
+                let mine = self.spawn_requested_here(&session_key)
+                    || self
+                        .worktree_progress
+                        .as_ref()
+                        .is_some_and(|state| state.session_key == session_key)
+                    || self.worktree_progress_dismissed.as_ref() == Some(&session_key);
                 if self.bulk_batch_claims(&session_key) {
                     self.report_bulk_member_progress(&session_key, status);
-                } else if self.spawn_requested_here(&session_key)
-                    || matches!(status, lazybox_ipc::WorktreeStepStatus::Failed(_))
-                {
+                } else if mine || matches!(status, lazybox_ipc::WorktreeStepStatus::Failed(_)) {
                     self.apply_worktree_progress(session_key, step, status);
                 }
                 return;

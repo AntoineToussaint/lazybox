@@ -21864,6 +21864,15 @@ mod worktree_progress_recovery_tests {
         Model::new_for_test(client, Size::new(120, 40)).expect("model init")
     }
 
+    /// Record that THIS client asked for the spawn on `key` — the
+    /// follow pin an `x n` create leaves behind, or the spawn spinner a
+    /// `w` arms. A provisioning checklist only mounts for a spawn this
+    /// client requested, so a test about the checklist's own mechanics
+    /// has to be the client that asked for it.
+    fn asked_for(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &lazybox_core::SessionKey) {
+        m.spawn_follow_to = Some(key.clone());
+    }
+
     fn terminal_snapshot(session_key: lazybox_core::SessionKey) -> TerminalSnapshot {
         TerminalSnapshot {
             model_label: None,
@@ -21888,6 +21897,7 @@ mod worktree_progress_recovery_tests {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:mind-build/mind#1");
         let session_key: lazybox_core::SessionKey = (&key).into();
+        asked_for(&mut m, &session_key);
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![Workspace::empty(key.clone(), "main", Utc::now())],
             terminals: vec![],
@@ -21943,6 +21953,7 @@ mod worktree_progress_recovery_tests {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:mind-build/mind#1");
         let session_key: lazybox_core::SessionKey = (&key).into();
+        asked_for(&mut m, &session_key);
 
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key: session_key.clone(),
@@ -22024,6 +22035,7 @@ mod worktree_progress_recovery_tests {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:mind-build/mind#1");
         let session_key: lazybox_core::SessionKey = (&key).into();
+        asked_for(&mut m, &session_key);
 
         // Mount on the first step, then drive the daemon truth forward so
         // the display has somewhere to walk to.
@@ -22062,6 +22074,7 @@ mod worktree_progress_recovery_tests {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:mind-build/mind#1");
         let session_key: lazybox_core::SessionKey = (&key).into();
+        asked_for(&mut m, &session_key);
         let other: lazybox_core::SessionKey =
             (&WorkspaceKey::new("github:mind-build/mind#2")).into();
 
@@ -22281,6 +22294,7 @@ mod worktree_progress_recovery_tests {
         });
         let key = WorkspaceKey::new("linear:OBI-1749");
         let session_key: lazybox_core::SessionKey = (&key).into();
+        asked_for(&mut m, &session_key);
         m.last_spawn = Some(remembered_spawn(session_key.clone()));
 
         // Provisioning starts — the spinner mounts.
@@ -22631,6 +22645,7 @@ mod worktree_progress_recovery_tests {
         let mut m = build_model();
         let other_key = WorkspaceKey::new("github:acme/widget#7");
         let other_session: lazybox_core::SessionKey = (&other_key).into();
+        asked_for(&mut m, &other_session);
         // A different spawn's checklist is live and still provisioning.
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key: other_session.clone(),
@@ -23490,6 +23505,11 @@ mod click_outside_modal_dismiss_tests {
         // Park the selection on WS-A so the click has to move it.
         assert!(m.__test_sidebar_mut().focus_workspace_key(&a));
 
+        // This client asked for WS-A's spawn — the follow pin an `x n`
+        // create leaves behind. Provisioning only raises a checklist for
+        // a spawn this client requested.
+        m.spawn_follow_to = Some(a.clone());
+
         // The provisioning checklist for WS-A mounts.
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key: a.clone(),
@@ -23543,6 +23563,9 @@ mod click_outside_modal_dismiss_tests {
         let (sidebar_rect, _, _) = m.effective_pane_rects(area);
         let row_b = row_of(&mut m, sidebar_rect, &b);
         assert!(m.__test_sidebar_mut().focus_workspace_key(&a));
+        // This client asked for WS-A's spawn, so its provisioning raises
+        // a checklist here.
+        m.spawn_follow_to = Some(a.clone());
 
         // Provisioning is genuinely in flight (a Started step — not
         // failed/warned), i.e. exactly the state where an Esc WOULD
@@ -26941,10 +26964,20 @@ mod worktree_progress_dismiss_tests {
         }
     }
 
+    /// Record that THIS client asked for the spawn on `key` — the
+    /// follow pin an `x n` create leaves behind, or the spawn spinner a
+    /// `w` arms. A provisioning checklist only mounts for a spawn this
+    /// client requested, so a test about the checklist's own mechanics
+    /// has to be the client that asked for it.
+    fn asked_for(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &SessionKey) {
+        m.spawn_follow_to = Some(key.clone());
+    }
+
     #[test]
     fn dismissed_checklist_does_not_resurrect_on_next_progress_event() {
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
+        asked_for(&mut m, &key);
 
         m.handle_daemon_event(progress(
             &key,
@@ -26982,6 +27015,7 @@ mod worktree_progress_dismiss_tests {
     fn esc_mid_provision_sends_cancel_spawn() {
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
+        asked_for(&mut m, &key);
 
         m.handle_daemon_event(progress(
             &key,
@@ -27006,6 +27040,7 @@ mod worktree_progress_dismiss_tests {
         use crate::realm::components::footer::NoticeSeverity;
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
+        asked_for(&mut m, &key);
 
         m.handle_daemon_event(progress(
             &key,
@@ -27060,6 +27095,7 @@ mod worktree_progress_dismiss_tests {
         use crate::realm::components::footer::NoticeSeverity;
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
+        asked_for(&mut m, &key);
 
         m.handle_daemon_event(progress(
             &key,
@@ -27089,6 +27125,7 @@ mod worktree_progress_dismiss_tests {
         let mut m = build_model();
         let a = SessionKey::from("github:o/r#1");
         let b = SessionKey::from("github:o/r#2");
+        asked_for(&mut m, &a);
 
         m.handle_daemon_event(progress(
             &a,
@@ -27097,6 +27134,9 @@ mod worktree_progress_dismiss_tests {
         ));
         let _ = m.handle_modal_dismissed();
 
+        // The user starts a second workspace: a separate request of
+        // their own, so it gets its own checklist.
+        asked_for(&mut m, &b);
         m.handle_daemon_event(progress(
             &b,
             WorktreeStep::Clone,
@@ -27115,6 +27155,7 @@ mod worktree_progress_dismiss_tests {
     fn completion_releases_the_dismissal_marker() {
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
+        asked_for(&mut m, &key);
 
         m.handle_daemon_event(progress(
             &key,
@@ -27138,6 +27179,9 @@ mod worktree_progress_dismiss_tests {
             "op completed — the dismissal must not outlive it"
         );
 
+        // The user asks again (`w` on the same row): a second request,
+        // so a second checklist.
+        asked_for(&mut m, &key);
         m.handle_daemon_event(progress(
             &key,
             WorktreeStep::Clone,

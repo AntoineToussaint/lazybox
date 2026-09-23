@@ -3968,6 +3968,18 @@ impl<T: TerminalAdapter> Model<T> {
     /// a modal. A genuine *failure* still routes to the checklist modal
     /// regardless of origin, since it carries the recovery affordance
     /// (#594) and needs a decision.
+    ///
+    /// `Interactive` answers "was a human in the loop at all?", which is
+    /// all the daemon can know — it is the origin of the *request*, not
+    /// of this client. `WorktreeProgress` is broadcast to every
+    /// connected client, so an `Interactive` provision started somewhere
+    /// else (a `lazybox workspace create --agent …` an agent ran, the
+    /// desktop app, a second TUI) used to mount this modal over a user
+    /// who asked for nothing. Who *this* client asked for is the second
+    /// half of the answer, and only this client can give it
+    /// ([`Self::spawn_requested_here`]): an unrequested provision is
+    /// silent here, and the row appearing in the inbox is the signal
+    /// that it happened.
     pub(super) fn route_worktree_progress(
         &mut self,
         session_key: lazybox_core::SessionKey,
@@ -3979,7 +3991,9 @@ impl<T: TerminalAdapter> Model<T> {
             lazybox_ipc::SpawnOrigin::Interactive => {
                 if self.bulk_batch_claims(&session_key) {
                     self.report_bulk_member_progress(&session_key, status);
-                } else {
+                } else if self.spawn_requested_here(&session_key)
+                    || matches!(status, lazybox_ipc::WorktreeStepStatus::Failed(_))
+                {
                     self.apply_worktree_progress(session_key, step, status);
                 }
                 return;
@@ -4010,6 +4024,40 @@ impl<T: TerminalAdapter> Model<T> {
         if finished {
             self.autonomous_spawn_notified.remove(&session_key);
         }
+    }
+
+    /// Whether *this* client asked for the spawn now provisioning
+    /// `session_key` — the client-side half of "who asked".
+    ///
+    /// Every client receives every `TerminalSpawned` and every
+    /// `WorktreeProgress`, so "a human asked" ([`SpawnOrigin::Interactive`])
+    /// does not mean "the human at this keyboard asked". The four stashes
+    /// below are the complete record of what this client put in flight:
+    /// the spawn spinner (`w` / `a` / a terminal chord, armed by
+    /// `note_spawn_feedback` when the `Spawn` command is sent), the
+    /// spawn-follow pin (`x n` / `x F` / `x c` / the Start sheet, armed
+    /// on `WorkspaceCreated` for a create this client correlated), and
+    /// the two deferred-launch stashes (`e` / open-with on a
+    /// worktreeless row). Anything else provisioning is somebody else's
+    /// request and must not interrupt this user.
+    ///
+    /// [`SpawnOrigin::Interactive`]: lazybox_ipc::SpawnOrigin::Interactive
+    pub(super) fn spawn_requested_here(&self, session_key: &lazybox_core::SessionKey) -> bool {
+        self.status
+            .spawning
+            .as_ref()
+            .is_some_and(|sp| &sp.session_key == session_key)
+            || self.spawn_follow_to.as_ref() == Some(session_key)
+            || self
+                .setup
+                .pending_editor_launch
+                .as_ref()
+                .is_some_and(|(k, _)| k == session_key)
+            || self
+                .setup
+                .pending_open_with_launch
+                .as_ref()
+                .is_some_and(|(k, _)| k == session_key)
     }
 
     /// Whether a live bulk fan-out (#1636) still owns `session_key`'s

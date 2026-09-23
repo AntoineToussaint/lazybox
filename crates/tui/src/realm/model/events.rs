@@ -3205,23 +3205,9 @@ impl<T: TerminalAdapter> Model<T> {
             // provisioning checklist is exempt from the modal guard:
             // it's a progress overlay for this very spawn, and the
             // whole point of `w` is landing in the agent behind it.
-            let requested_here = spawned.as_ref().is_some_and(|(sk, _)| {
-                self.status
-                    .spawning
-                    .as_ref()
-                    .is_some_and(|sp| &sp.session_key == sk)
-                    || self.spawn_follow_to.as_ref() == Some(sk)
-                    || self
-                        .setup
-                        .pending_editor_launch
-                        .as_ref()
-                        .is_some_and(|(k, _)| k == sk)
-                    || self
-                        .setup
-                        .pending_open_with_launch
-                        .as_ref()
-                        .is_some_and(|(k, _)| k == sk)
-            });
+            let requested_here = spawned
+                .as_ref()
+                .is_some_and(|(sk, _)| self.spawn_requested_here(sk));
             let interactive_modal_up = self
                 .modal_stack
                 .iter()

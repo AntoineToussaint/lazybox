@@ -2214,6 +2214,16 @@ impl LazyboxMcp {
             crate::spawn_handler::SpawnOptions {
                 initial_prompt: Some(brief),
                 autonomous: true,
+                // A Coordinator agent dispatched this worker into its
+                // epic — no human pressed anything. `SpawnOptions`
+                // defaults `origin` to `Interactive`, which would claim
+                // the local user asked and mount the provisioning
+                // checklist modal over them; this is the same epic
+                // worker dispatch the `AUTO` latch performs, so it
+                // announces as that one-line footer notice instead.
+                origin: lazybox_ipc::SpawnOrigin::Autonomous(
+                    lazybox_ipc::AutonomousTrigger::EpicAuto,
+                ),
                 ..Default::default()
             },
         )

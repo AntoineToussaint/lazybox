@@ -2261,6 +2261,7 @@ fn worktree_progress_event_mounts_the_checklist_modal() {
     use lazybox_ipc::{WorktreeStep, WorktreeStepStatus};
     let mut m = build_model();
     let sk = SessionKey::new("github:o/r#42");
+    m.__test_asked_for_spawn(sk.clone());
     assert!(m.modal_stack.is_empty());
     m.handle_daemon_event(IpcEvent::WorktreeProgress {
         session_key: sk,
@@ -2280,6 +2281,7 @@ fn progress_events_remount_in_place_without_stacking() {
     use lazybox_ipc::{WorktreeStep, WorktreeStepStatus};
     let mut m = build_model();
     let sk = SessionKey::new("github:o/r#42");
+    m.__test_asked_for_spawn(sk.clone());
     for step in [
         WorktreeStep::Clone,
         WorktreeStep::Fetch,
@@ -2315,6 +2317,7 @@ fn terminal_spawned_mid_checklist_walks_every_step_before_dismissing() {
     use lazybox_tui::realm::components::worktree_progress::MIN_STEP_DWELL;
     let mut m = build_model();
     let sk = SessionKey::new("github:o/r#42");
+    m.__test_asked_for_spawn(sk.clone());
     // The provision has only just started (clone kicked off) when the
     // session goes live — `TerminalSpawned` arrives mid-checklist.
     m.handle_daemon_event(IpcEvent::WorktreeProgress {
@@ -2373,6 +2376,7 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
     use lazybox_tui::realm::components::worktree_progress::MIN_STEP_DWELL;
     let mut m = build_model();
     let sk = SessionKey::new("github:o/r#42");
+    m.__test_asked_for_spawn(sk.clone());
 
     m.handle_daemon_event(IpcEvent::WorktreeProgress {
         session_key: sk.clone(),

@@ -3693,6 +3693,17 @@ impl<T: TerminalAdapter> Model<T> {
         &self.sidebar
     }
 
+    /// Test-only: record that THIS client asked for the spawn on
+    /// `session_key` — the follow pin an `x n` create leaves behind, or
+    /// the spawn spinner a `w` arms. A provisioning checklist mounts
+    /// only for a spawn this client requested (see
+    /// `route_worktree_progress`), so an out-of-crate test about the
+    /// checklist's own mechanics has to be the client that asked.
+    #[doc(hidden)]
+    pub fn __test_asked_for_spawn(&mut self, session_key: lazybox_core::SessionKey) {
+        self.spawn_follow_to = Some(session_key);
+    }
+
     /// Test-only: whether the right pane is painting a repo / Space
     /// overview instead of a workspace (issue #1442).
     #[doc(hidden)]

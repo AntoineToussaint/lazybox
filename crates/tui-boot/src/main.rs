@@ -2272,7 +2272,7 @@ async fn run_embedded_realm(
     //   2. No persisted setup → run detection, hand the wizard to
     //      the realm `Model`, and wire the on-complete hook to fire
     //      polling once the user finishes.
-    let persisted = persisted_setup(&*config.store);
+    let persisted = persisted_setup(&*config.store)?;
     let returning_sources: Vec<String> = persisted
         .as_ref()
         .map(|p| p.enabled_providers.iter().cloned().collect())
@@ -2290,7 +2290,7 @@ async fn run_embedded_realm(
     // asks, so neither a slow launch nor a bad GitHub minute can leave
     // the session without repo editing.
     let setup_sources = std::sync::Arc::new(build_scope_sources());
-    let needs_wizard = persisted_setup(&*config.store).is_none();
+    let needs_wizard = persisted.is_none();
     let wizard_seed = if needs_wizard {
         Some((setup_report.clone(), setup_sources.clone()))
     } else {
@@ -2517,8 +2517,24 @@ fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
     vec![Box::new(lazybox_gh::GhScopes::lazy(host))]
 }
 
-fn persisted_setup(store: &dyn lazybox_store::Store) -> Option<lazybox_core::PersistedSetup> {
-    setup_persist::load_persisted(store)
+/// The persisted setup, or an error that stops the launch.
+///
+/// A `config.yaml` that exists but does not parse must never be read as
+/// "no setup": the first-run wizard it would open ends by moving the file
+/// aside and writing a fresh one, and — having loaded no subscriptions to
+/// compare against — skips the unsubscribe confirm, so the rescope sweep
+/// deletes the workspaces of every repo the user doesn't re-tick. Stop
+/// and name the problem instead; the file is left exactly as it is.
+fn persisted_setup(
+    store: &dyn lazybox_store::Store,
+) -> anyhow::Result<Option<lazybox_core::PersistedSetup>> {
+    setup_persist::load_persisted(store).map_err(|error| {
+        anyhow::anyhow!(
+            "{error}\n\nlazybox did not start, and did not touch the file: running first-time \
+             setup over it would replace your settings and drop your repo subscriptions. \
+             Fix the error above (or move the file aside to start fresh), then relaunch."
+        )
+    })
 }
 
 /// Read the optional `editors:` list from `~/.lazybox/config.yaml`.

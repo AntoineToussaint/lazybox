@@ -759,13 +759,16 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
             });
             return;
         }
-        let held = crate::epics::held_by(config, &workspace_key);
-        if !held.is_empty() {
-            let names = held
+        let held = match crate::epics::held_by(config, &workspace_key) {
+            Ok(held) => held
                 .iter()
-                .map(|k| k.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+                .map(|k| k.as_str().to_string())
+                .collect::<Vec<_>>(),
+            // Fail closed: name why instead of merging past an unknown hold.
+            Err(error) => vec![format!("the epic graph could not be read ({error})")],
+        };
+        if !held.is_empty() {
+            let names = held.join(", ");
             let label = pr_label
                 .clone()
                 .unwrap_or_else(|| workspace_key.as_str().to_string());

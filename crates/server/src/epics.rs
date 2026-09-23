@@ -2018,19 +2018,21 @@ pub async fn all_snapshots(config: &ServerConfig) -> Vec<EpicSnapshot> {
 ///
 /// Cheap in the common case: with no epic records the prefix scan returns empty
 /// before any workspace load.
-pub fn held_by(config: &ServerConfig, key: &WorkspaceKey) -> Vec<WorkspaceKey> {
-    let records = match list_all(config) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("epics: held_by list failed: {e}");
-            return Vec::new();
-        }
-    };
+///
+/// `Err` when the epic store cannot be read. That is not "held by nothing":
+/// an unreadable store used to answer an empty list, which released every
+/// merge-after hold and let auto-merge land members out of order. Callers
+/// treat `Err` as held.
+pub fn held_by(config: &ServerConfig, key: &WorkspaceKey) -> Result<Vec<WorkspaceKey>, String> {
+    let records = list_all(config).map_err(|e| {
+        tracing::warn!("epics: held_by list failed: {e}");
+        e.to_string()
+    })?;
     if records.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let workspaces = crate::load_workspaces(&*config.store).values;
-    held_by_in(&records, &workspaces, key)
+    Ok(held_by_in(&records, &workspaces, key))
 }
 
 /// Is `key` a member of a live epic whose merge-in-order (`E M`) latch is
@@ -2977,14 +2979,26 @@ fn labels_opt_out(ws: &Workspace, opt_out_labels: &[String]) -> bool {
 /// Whether the merge of `key` is held by a blocking review (#1525). Checked
 /// beside [`held_by`] on the auto-merge and manual-merge paths, so a PR the
 /// Reviewer flagged does not land while the findings stand.
+///
+/// Fails closed: a review row that cannot be read or decoded holds the
+/// merge. It used to read as "no review", so a store hiccup or a row from
+/// a newer schema released a Reviewer's blocking verdict and auto-merge
+/// landed the PR it had flagged.
 pub fn review_blocks_merge(config: &ServerConfig, key: &WorkspaceKey) -> bool {
-    config
-        .store
-        .get_kv(&review_storage_key(key.as_str()))
-        .ok()
-        .flatten()
-        .and_then(|json| serde_json::from_str::<ReviewState>(&json).ok())
-        .is_some_and(|state| state.blocking)
+    match config.store.get_kv(&review_storage_key(key.as_str())) {
+        Ok(None) => false,
+        Ok(Some(json)) => match serde_json::from_str::<ReviewState>(&json) {
+            Ok(state) => state.blocking,
+            Err(error) => {
+                tracing::warn!(workspace = %key, %error, "review row undecodable — holding the merge");
+                true
+            }
+        },
+        Err(error) => {
+            tracing::warn!(workspace = %key, %error, "review row unreadable — holding the merge");
+            true
+        }
+    }
 }
 
 /// A blackboard note just landed. When it is a Reviewer's verdict for a member
@@ -5652,6 +5666,21 @@ mod tests {
     /// End-to-end through `post_note`'s hook: a Reviewer's `blocking` verdict
     /// records the hold (which gates the merge and shows as `ReviewBlocked`),
     /// and a later `clean` verdict releases it.
+    /// A review row that no longer decodes (a newer schema, a torn write)
+    /// holds the merge. It used to read as "no review" and release a
+    /// Reviewer's blocking verdict to auto-merge.
+    #[test]
+    fn an_undecodable_review_row_holds_the_merge() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("w");
+        assert!(!review_blocks_merge(&config, &key), "no row, no hold");
+        config
+            .store
+            .set_kv(&review_storage_key(key.as_str()), "{\"blocking\": tru")
+            .unwrap();
+        assert!(review_blocks_merge(&config, &key));
+    }
+
     #[tokio::test]
     async fn a_review_note_records_then_releases_the_hold() {
         let config = ServerConfig::in_memory();

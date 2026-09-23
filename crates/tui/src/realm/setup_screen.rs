@@ -452,6 +452,30 @@ mod tests {
             RunnerStep::Finish(_) => panic!("an unlistable provider finished the flow silently"),
             _ => panic!("expected an Info screen"),
         }
+        // Closing that screen must not Finish either: Finish re-saves the
+        // untouched config and raises the polling modal.
+        assert!(matches!(runner.step_dismissed(), RunnerStep::Cancel));
+    }
+
+    /// An org listing that succeeds but is empty used to Finish at once in
+    /// "Add / remove repos" — the modal vanished and config was re-saved.
+    #[tokio::test]
+    async fn edit_scopes_with_an_empty_org_list_explains_then_cancels() {
+        use crate::setup_flow::{PartialEntry, RunnerStep, SetupOutcome, SetupRunner};
+        let (mut runner, _) = SetupRunner::at_partial(
+            SetupOutcome::default_enabled(setup::SetupReport { tools: Vec::new() }),
+            ["github".to_string()].into_iter().collect(),
+            PartialEntry::EditScopes("github".into()),
+        );
+        match runner.step_loading_resolved(LoadResult::Scopes(Ok(Vec::new()))) {
+            RunnerStep::Show {
+                screen: Screen::Info { .. },
+                ..
+            } => {}
+            RunnerStep::Finish(_) => panic!("an empty org list finished the flow silently"),
+            _ => panic!("expected an Info screen"),
+        }
+        assert!(matches!(runner.step_dismissed(), RunnerStep::Cancel));
     }
 
     #[test]

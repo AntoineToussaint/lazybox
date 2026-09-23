@@ -984,6 +984,15 @@ impl SetupRunner {
                 RunnerStep::show(screen)
             }
             (ExpectingStep::ScopeLoadFor(provider_id), LoadResult::Scopes(res)) => match res {
+                // Settings → "Add / remove repos" exists to show this list.
+                // Moving on from an empty one there is a silent Finish: the
+                // modal vanished and the unchanged config was re-saved. Say
+                // what happened instead; the wizard may still move on.
+                Ok(scopes) if scopes.is_empty() && self.edit_scopes => {
+                    let screen = empty_orgs_screen(&provider_id);
+                    self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
+                    RunnerStep::show(screen)
+                }
                 Ok(scopes) if scopes.is_empty() => self.next_scope_step(),
                 Ok(scopes) => {
                     let screen = self.screen_scope_pick(&provider_id, scopes);
@@ -1033,6 +1042,11 @@ impl SetupRunner {
     pub fn step_dismissed(&mut self) -> RunnerStep {
         match self.expecting.clone() {
             ExpectingStep::InfoFor(prev) => match *prev {
+                // In "Add / remove repos" there is nothing left to do once
+                // the org list couldn't be shown: cancel, don't Finish —
+                // Finish re-saved the untouched config and raised the
+                // polling modal as if the user had changed something.
+                ExpectingStep::ScopeLoadFor(_) if self.edit_scopes => RunnerStep::Cancel,
                 ExpectingStep::ScopeLoadFor(_) => {
                     self.expecting = ExpectingStep::ScopeLoadFor(String::new());
                     self.next_scope_step()
@@ -1270,6 +1284,21 @@ fn scope_error_screen(provider_id: &str, what: &str, err: &ProviderError) -> Scr
     Screen::Info {
         title: provider_id.to_string(),
         kind,
+        body,
+    }
+}
+
+/// Info screen for "no orgs to show" in Settings → "Add / remove repos".
+fn empty_orgs_screen(provider_id: &str) -> Screen {
+    let body = format!(
+        "{provider_id} returned no organizations or accounts to pick from.\n\n\
+         This usually means the token can't list your memberships, or the \
+         provider answered with nothing. Your current subscriptions are \
+         unchanged.\n\nPress any key to close."
+    );
+    Screen::Info {
+        title: provider_id.to_string(),
+        kind: InfoKind::Retryable,
         body,
     }
 }

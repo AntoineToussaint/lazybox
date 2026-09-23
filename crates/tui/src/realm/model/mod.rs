@@ -1413,6 +1413,11 @@ pub enum Msg {
     /// or a stalled task). Flash a notice so the modal doesn't just vanish
     /// unexplained, then dismiss it.
     LoadingTimedOut,
+    /// The `Loading` modal's producer died without an answer (a panicked
+    /// task, a dropped sender). It used to surface as `ModalDismissed` —
+    /// indistinguishable from the user pressing Esc — so a flow like
+    /// Settings → "Add / remove repos" vanished with only a log line.
+    LoadingFailed,
     /// Spinner heartbeat from the `WorktreeProgress` modal. Carries no
     /// data — its only job is to be a non-empty message so the run loop
     /// repaints the advancing spinner during the silent checkout.
@@ -7828,6 +7833,14 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::LoadingTimedOut => {
                 self.flash(
                     "a background step timed out with no response — dismissing",
+                    crate::realm::components::footer::NoticeSeverity::Retryable,
+                );
+                let cmds = self.handle_modal_dismissed();
+                self.dispatch_cmds(cmds);
+            }
+            Msg::LoadingFailed => {
+                self.flash(
+                    "a background step failed without an answer (see /tmp/lazybox.log) — dismissing",
                     crate::realm::components::footer::NoticeSeverity::Retryable,
                 );
                 let cmds = self.handle_modal_dismissed();

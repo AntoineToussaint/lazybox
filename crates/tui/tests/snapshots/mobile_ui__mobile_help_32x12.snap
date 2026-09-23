@@ -11,6 +11,6 @@ expression: out
 │   Ctrl-G   Settings          │
 │   Ctrl-Q   detach from       │
 │Sessions                      │
-│   Ctrl-U/D chat history      │
-│Enter ask ^U/D scroll Esc back│
+│   Swipe    scroll chat       │
+│Enter ask · swipe · Esc back  │
 ╰──────────────────────────────╯

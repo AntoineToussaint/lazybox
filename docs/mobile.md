@@ -49,11 +49,13 @@ installation/authentication status; enable Claude there before choosing it in
 Escape returns to settings. Letters remain text in question and other text inputs.
 
 Creation and settings sheets hide the Sessions list without losing its cursor.
-**Ctrl-U / Ctrl-D** or **Page Up / Page Down** scroll running chat history. Wheel
-reports scroll vertically across the whole mobile viewport, including its rail,
-header and footer. Sessions wheel reports move the highlight. Termius must forward
-mouse reports for touch scrolling; native whole-screen panning does not generate
-Lazybox scroll events. Keyboard scrolling is available independently.
+**Swipe** to scroll running chat history. Mouse wheel reports scroll vertically
+across the whole mobile viewport, including its rail, header and footer. In
+Sessions, swiping moves the highlight. Termius must forward mouse reports for
+touch scrolling; native whole-screen panning does not generate Lazybox scroll
+events. **Ctrl-D** jumps all the way to the live bottom without sending input to
+the running program. Mobile does not bind Ctrl-U or Page Up/Page Down to chat
+scrolling; those keys reach the running agent or shell.
 
 Ordinary letters, Escape and Tab reach the running program. Create shells through
 `n` → area → Shell.

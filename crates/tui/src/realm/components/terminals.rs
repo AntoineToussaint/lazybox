@@ -419,6 +419,11 @@ impl Terminals {
         self.inner.scroll_active(delta)
     }
 
+    /// Jump the focused terminal to live output and end its scrollback visit.
+    pub fn scroll_to_bottom(&mut self) -> crate::components::terminal_stack::ScrollOutcome {
+        self.inner.scroll_to_bottom()
+    }
+
     /// Crossterm `(col, row)` → screen-absolute grid coords
     /// `(col, screen_row)` for terminal `id`, clamped into `id`'s grid. The
     /// anchor / focus of a lazybox drag-selection are stored in this space

@@ -16512,16 +16512,6 @@ mod wheel_routing_tests {
             assert!(m.mouse_input_verified());
             before -= 3;
         }
-        m.dispatch_key(tuirealm::event::KeyEvent::new(
-            tuirealm::event::Key::Char('u'),
-            tuirealm::event::KeyModifiers::CONTROL,
-        ));
-        assert_eq!(scroll_offset(&m), before - 8);
-        m.dispatch_key(tuirealm::event::KeyEvent::new(
-            tuirealm::event::Key::Char('d'),
-            tuirealm::event::KeyModifiers::CONTROL,
-        ));
-        assert_eq!(scroll_offset(&m), before);
     }
 
     /// Agent identity is not part of wheel routing. Once the backend has

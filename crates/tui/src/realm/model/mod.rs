@@ -7800,7 +7800,7 @@ impl<T: TerminalAdapter> Model<T> {
                 let hint = if self.mobile_rail.is_open() || mobile_focus != PaneFocus::Terminals {
                     "n new r rename x delete ^Q quit"
                 } else {
-                    "^T sessions ^G settings ^U/D scroll"
+                    "^T sessions ^G settings ^D end"
                 };
                 let text = if self.mobile_rail.is_open() || mobile_focus != PaneFocus::Terminals {
                     hint

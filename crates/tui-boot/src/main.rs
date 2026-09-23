@@ -2286,18 +2286,10 @@ async fn run_embedded_realm(
     // a `spawn_blocking` task. Both calls are read-only + cheap-ish
     // (sub-second on a warm cache).
     let setup_report = setup_detect::detect_all().await;
-    // Scope-source discovery does network IO (GitHub credential +
-    // client build). Bounded so a stalled network can't hold the UI
-    // hostage pre-paint; the wizard degrades to no scope suggestions.
-    let setup_sources = std::sync::Arc::new(
-        match tokio::time::timeout(Duration::from_secs(10), build_scope_sources()).await {
-            Ok(sources) => sources,
-            Err(_) => {
-                tracing::warn!("build_scope_sources timed out after 10s — continuing without");
-                Vec::new()
-            }
-        },
-    );
+    // No network here: each source authenticates when the picker first
+    // asks, so neither a slow launch nor a bad GitHub minute can leave
+    // the session without repo editing.
+    let setup_sources = std::sync::Arc::new(build_scope_sources());
     let needs_wizard = persisted_setup(&*config.store).is_none();
     let wizard_seed = if needs_wizard {
         Some((setup_report.clone(), setup_sources.clone()))
@@ -2513,22 +2505,16 @@ async fn run_embedded_realm(
 
 /// Build the scope sources used by the setup wizard. GitHub today;
 /// Linear ships without a scope-discovery API so the wizard skips it.
-async fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
-    let mut sources: Vec<Box<dyn lazybox_core::ScopeSource>> = Vec::new();
+///
+/// Nothing here touches the network: the GitHub source resolves its
+/// credential and client when the picker first asks, so a launch that
+/// hits a slow or rate-limited GitHub does not strip the session of
+/// repo editing (see [`lazybox_gh::GhScopes::lazy`]).
+fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
     let host = lazybox_config::Config::load()
         .unwrap_or_default()
         .github_host();
-    if let Ok(cred) = lazybox_gh::credential_chain(host.as_deref())
-        .resolve(&lazybox_gh::credential_scope(host.as_deref()))
-        .await
-        && let Ok(client) =
-            lazybox_gh::GhClient::from_credential_with_host(cred, host.as_deref()).await
-    {
-        sources.push(Box::new(lazybox_gh::GhScopes::new(std::sync::Arc::new(
-            client,
-        ))));
-    }
-    sources
+    vec![Box::new(lazybox_gh::GhScopes::lazy(host))]
 }
 
 fn persisted_setup(store: &dyn lazybox_store::Store) -> Option<lazybox_core::PersistedSetup> {

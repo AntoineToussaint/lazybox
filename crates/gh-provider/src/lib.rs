@@ -134,16 +134,55 @@ pub fn credential_scope(host: Option<&str>) -> String {
 /// render its picker against any provider via `dyn ScopeSource`
 /// without leaking GitHub-specific types.
 ///
-/// Constructed by the daemon at setup time from an authenticated
-/// `GhClient`; tests use `lazybox_core::MockScopeSource` instead so
-/// no real token is needed.
+/// The client is resolved on first use, not when the adapter is
+/// built: the TUI builds its scope sources once at launch, and a
+/// launch that lands in a bad minute — GitHub slow, `/user` timing
+/// out, `gh auth token` failing — used to leave the whole session with
+/// no GitHub source at all, so Settings → "Add / remove repos" read an
+/// empty org list and closed without a word. A failed resolution is
+/// returned to the caller (the picker shows it) and retried on the
+/// next call; a successful one is kept for the session.
+///
+/// Tests use `lazybox_core::MockScopeSource` instead so no real token
+/// is needed.
 pub struct GhScopes {
-    client: Arc<GhClient>,
+    client: tokio::sync::OnceCell<Arc<GhClient>>,
+    host: Option<String>,
 }
 
 impl GhScopes {
+    /// Wrap an already-authenticated client.
     pub fn new(client: Arc<GhClient>) -> Self {
-        Self { client }
+        Self {
+            client: tokio::sync::OnceCell::new_with(Some(client)),
+            host: None,
+        }
+    }
+
+    /// Resolve the credential and build the client on first use,
+    /// against `host` (`None` = github.com).
+    pub fn lazy(host: Option<String>) -> Self {
+        Self {
+            client: tokio::sync::OnceCell::new(),
+            host,
+        }
+    }
+
+    async fn client(&self) -> Result<&Arc<GhClient>, ProviderError> {
+        self.client
+            .get_or_try_init(|| async {
+                let host = self.host.as_deref();
+                let cred = credential_chain(host)
+                    .resolve(&credential_scope(host))
+                    .await
+                    .map_err(|e| ProviderError::Auth {
+                        source: SOURCE.to_string(),
+                        detail: e.to_string(),
+                    })?;
+                let client = GhClient::from_credential_with_host(cred, host).await?;
+                Ok(Arc::new(client))
+            })
+            .await
     }
 }
 
@@ -155,7 +194,10 @@ impl ScopeSource for GhScopes {
     fn list_scopes<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Scope>, ProviderError>> + Send + 'a>> {
-        Box::pin(async move { self.client.list_scopes().await.map_err(Into::into) })
+        Box::pin(async move {
+            let client = self.client().await?;
+            client.list_scopes().await.map_err(Into::into)
+        })
     }
 
     fn list_children<'a>(
@@ -163,7 +205,8 @@ impl ScopeSource for GhScopes {
         parent_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Scope>, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
-            self.client
+            let client = self.client().await?;
+            client
                 .list_repos_in_org(parent_id)
                 .await
                 .map_err(Into::into)

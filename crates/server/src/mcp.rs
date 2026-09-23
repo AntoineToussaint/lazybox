@@ -809,17 +809,25 @@ impl LazyboxMcp {
         // concurrent posts to this scope can't both claim the same seq and
         // have the second silently overwrite the first.
         let _seq_guard = self.config.mcp.notes_write().lock().await;
-        let existing: Vec<String> = self
-            .list_scope_notes(&prefix)
-            .await?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect();
-        let seq = existing
+        let under_prefix = self.list_scope_notes(&prefix).await?;
+        // The sequence is allocated across everything under the prefix, so a
+        // key is unique even when two scopes sanitize to the same prefix.
+        let seq = under_prefix
             .iter()
-            .filter_map(|key| note_seq(key))
+            .filter_map(|(key, _)| note_seq(key))
             .max()
             .map_or(0, |max| max + 1);
+        // But retention counts and prunes THIS scope's notes only (#1836):
+        // `sanitize_key` is lossy (`a/b` and `a:b` share a prefix), and
+        // pruning by prefix let one scope's posts evict another scope's
+        // notes — on the blackboard, the fleet's coordination medium.
+        let existing: Vec<String> = under_prefix
+            .into_iter()
+            .filter(|(_, value)| {
+                serde_json::from_str::<Note>(value).is_ok_and(|note| note.scope == scope)
+            })
+            .map(|(key, _)| key)
+            .collect();
         let note = Note {
             author: author.as_str().to_string(),
             scope: scope.clone(),
@@ -4807,6 +4815,51 @@ mod tests {
             .map(|note| note["text"].as_str().unwrap())
             .collect();
         assert_eq!(texts, vec!["db note", "api note"]);
+    }
+
+    /// #1836: `a/b` and `a:b` sanitize to the same key prefix. Filling one
+    /// to its retention cap must not evict the other's notes.
+    #[tokio::test]
+    async fn retention_never_prunes_a_colliding_scopes_notes() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let author = SessionKey::from("author");
+        assert_eq!(
+            note_key_prefix("a/b"),
+            note_key_prefix("a:b"),
+            "fixture: prefixes collide"
+        );
+        handler
+            .post_note_payload(&author, "keep me".into(), Some("a:b"), vec![], 0)
+            .await
+            .expect("post");
+        for i in 0..NOTES_PER_SCOPE + 3 {
+            handler
+                .post_note_payload(
+                    &author,
+                    format!("noise {i}"),
+                    Some("a/b"),
+                    vec![],
+                    1 + i as i64,
+                )
+                .await
+                .expect("post");
+        }
+        let kept = handler
+            .read_notes_payload(&author, Some("a:b"), &[], None)
+            .await
+            .expect("read");
+        let texts: Vec<&str> = kept["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["keep me"], "the other scope's note survives");
+        let noisy = handler
+            .read_notes_payload(&author, Some("a/b"), &[], None)
+            .await
+            .expect("read");
+        assert_eq!(noisy["notes"].as_array().unwrap().len(), NOTES_PER_SCOPE);
     }
 
     #[tokio::test]

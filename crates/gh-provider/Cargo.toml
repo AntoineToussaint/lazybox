@@ -31,7 +31,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 # octocrab's `.app()` takes, and `secrecy` unwraps the `SecretString` octocrab
 # returns for an installation token. Both versions match octocrab's own pins
 # so neither adds a second copy to the tree.
-jsonwebtoken = { version = "10", default-features = false, features = ["use_pem"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"] }
 secrecy = "0.10"
 
 [dev-dependencies]

@@ -4244,8 +4244,7 @@ impl<T: TerminalAdapter> Model<T> {
         state.set_pr_head(pr_head);
         state.apply(step, status);
         let modal = WorktreeProgress::from_state(state);
-        self.modal_stack.retain(|id| id != &Id::WorktreeProgress);
-        self.mount_modal(Id::WorktreeProgress, modal);
+        self.remount_modal_in_place(Id::WorktreeProgress, modal);
     }
 
     /// Queue dismissal of the worktree-progress checklist for
@@ -4336,8 +4335,7 @@ impl<T: TerminalAdapter> Model<T> {
                 .as_ref()
                 .expect("present: tick borrowed it");
             let modal = WorktreeProgress::from_state(state);
-            self.modal_stack.retain(|id| id != &Id::WorktreeProgress);
-            self.mount_modal(Id::WorktreeProgress, modal);
+            self.remount_modal_in_place(Id::WorktreeProgress, modal);
             self.redraw = true;
         }
     }
@@ -4436,8 +4434,7 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = WorktreeProgress::from_state(
             self.worktree_progress.as_ref().expect("just assigned Some"),
         );
-        self.modal_stack.retain(|id| id != &Id::WorktreeProgress);
-        self.mount_modal(Id::WorktreeProgress, modal);
+        self.remount_modal_in_place(Id::WorktreeProgress, modal);
         self.redraw = true;
         true
     }

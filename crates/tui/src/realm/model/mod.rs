@@ -6089,25 +6089,46 @@ impl<T: TerminalAdapter> Model<T> {
         id: Id,
         component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
     ) {
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
         // `remount`, not `mount`: a modal re-mounted under an id that is
         // still live in the view (e.g. the `WorktreeProgress` checklist
         // re-mounting itself on every step advance) must *replace* the
         // stale component. `mount` errors with `ComponentAlreadyMounted`
         // and we swallow the result, which left the first-step component
         // frozen on screen while `modal_stack` tracked it as current.
+        // Subscriptions: see [`modal_subscriptions`].
+        let _ = self
+            .app
+            .remount(id.clone(), component, modal_subscriptions());
         self.modal_stack.retain(|mounted| mounted != &id);
-        let _ = self.app.remount(
-            id.clone(),
-            component,
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
         // A modal captures the keyboard, so an armed visual-select sweep
         // must not survive it (see `push_modal`) — the mode would come
         // back live after the modal closes and eat the next j/k (#1448).
         self.visual_select = false;
         self.modal_stack.push(id.clone());
         let _ = self.app.active(&id);
+        self.redraw = true;
+    }
+
+    /// Re-render a modal that may already be on the stack WITHOUT moving
+    /// it. A modal that refreshes itself — the worktree checklist
+    /// advancing a step — must not jump above a modal stacked on it (the
+    /// branch-name input of its own recovery flow): that covered the input
+    /// and stole its focus mid-typing. Not on the stack yet: mounts on top
+    /// like [`Self::mount_modal`].
+    pub(super) fn remount_modal_in_place<C>(&mut self, id: Id, component: C)
+    where
+        C: tuirealm::component::AppComponent<Msg, UserEvent> + 'static,
+    {
+        if !self.modal_stack.contains(&id) {
+            self.mount_modal(id, component);
+            return;
+        }
+        let _ = self
+            .app
+            .remount(id, Box::new(component), modal_subscriptions());
+        if let Some(top) = self.modal_stack.last() {
+            let _ = self.app.active(top);
+        }
         self.redraw = true;
     }
 
@@ -8137,4 +8158,26 @@ fn tier_row_label(tier: &lazybox_core::ModelTier) -> String {
         Some(model) => format!("{}  ·  {}  ·  {}", tier.label, tier.alias, model),
         None => format!("{}  ·  {}", tier.label, tier.alias),
     }
+}
+
+/// What a mounted modal subscribes to: ticks, resizes and daemon events —
+/// never keys or mouse. tuirealm hands the FOCUSED component every event
+/// and then forwards it to every other subscriber, so the old catch-all
+/// subscription delivered each key to every modal on the stack: Esc on the
+/// update notice over the first-run splash also reached the splash, which
+/// quit lazybox; typing `r` into a branch-name input over the worktree
+/// checklist fired the checklist's retry. Input belongs to the top modal
+/// alone (it holds focus: `app.active` on every push and pop); ticks and
+/// daemon events still reach the modals beneath, which animate and track
+/// state from them.
+fn modal_subscriptions() -> Vec<tuirealm::subscription::Sub<Id, UserEvent>> {
+    use tuirealm::subscription::{EventClause, Sub, SubClause};
+    let daemon = UserEvent::Daemon(std::sync::Arc::new(lazybox_ipc::Event::AgentSearchText {
+        entries: Vec::new(),
+    }));
+    vec![
+        Sub::new(EventClause::Tick, SubClause::Always),
+        Sub::new(EventClause::WindowResize, SubClause::Always),
+        Sub::new(EventClause::Discriminant(daemon), SubClause::Always),
+    ]
 }

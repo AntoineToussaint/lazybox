@@ -1066,6 +1066,49 @@ mod effects_tests {
 
     // Dismissing routes through the daemon (`SetUpdateDismissal`) instead of
     // a client-local store write, so it sticks across clients/restarts (#548).
+    /// Keys belong to the top modal alone. Every modal used to subscribe
+    /// to every event, so Esc on the update notice (mounted by the first
+    /// snapshot) also reached the first-run splash beneath it, which maps
+    /// Esc to "quit" — first launch closed lazybox.
+    #[test]
+    fn esc_on_a_stacked_modal_never_reaches_the_one_beneath() {
+        use crate::realm::components::splash::Splash;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (client, _server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        m.mount_modal(Id::Splash, Splash::new());
+        m.handle_daemon_event(empty_snapshot());
+        m.show_update_if_new(release_update("v0.2.0"));
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Update),
+            "update notice over the splash"
+        );
+
+        m.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        // Give a leaked key every chance to surface from the modal below.
+        for _ in 0..5 {
+            if let Ok(messages) = m.app.tick(tuirealm::application::PollStrategy::Once(
+                std::time::Duration::from_millis(20),
+            )) {
+                for msg in messages {
+                    m.update(msg);
+                }
+            }
+        }
+
+        assert!(
+            !m.quit,
+            "Esc on the update notice must not quit via the splash"
+        );
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Splash),
+            "only the update notice closed"
+        );
+    }
+
     #[test]
     fn update_dismissal_routes_through_the_daemon() {
         use tuirealm::event::{Key, KeyEvent, KeyModifiers};

@@ -6,22 +6,29 @@ in the session list, without the provider onboarding wizard or an action menu.
 
 The startup portal and **Ctrl-T Sessions** share one renderer and these bindings:
 
-- **Session letter**: open that exact terminal. Labels are `a b c d e f g h i l m o p q s t u v w y z`.
-  **j, k, n, r, x are reserved** and never label sessions. `q` and `s` remain selectors.
+- **Session letter**: open that exact terminal. Labels are `a b c d e f g h i l m o q s t u v w y z`.
+  **j, k, n, p, r, x are reserved** and never label sessions. `q` and `s` remain selectors.
 - **k / j** or **Up / Down**: highlight a session without switching the running terminal.
   Page Up/Down and the mouse wheel also move the highlight. **[ / ]** or
-  Shift-Tab / Tab move through groups of 21 sessions when there is overflow.
+  Shift-Tab / Tab move through groups of 20 sessions when there is overflow.
 - **`n`**: create a session. Choose **No repository** or a known repository,
   then an enabled coding agent or **Shell**. Shell always remains available.
   The configured default agent comes first; choosing another does not change it.
 - **`r`**: rename the highlighted chat. Its agent and shell entries share the name.
+  **Ctrl-X** clears the input; Enter saves, Escape discards the edit.
 - **`x`**: delete only the highlighted terminal after confirmation. **y**
   confirms; **n**, **Enter**, or **Escape** cancels. Workspace files and sibling
   sessions are kept. The confirmation captures the exact terminal ID.
-- **Enter**, **Escape**, or **Ctrl-T**: close Sessions and return to the current
-  terminal. On the startup portal, if no terminal is current yet, this opens
-  its selected session. With no sessions, the portal stays ready for `n`.
-- **Ctrl-Q**: detach the client while keeping sessions running (`^Q` in the footer).
+- **`p`**: set the highlighted session's priority. Press a displayed letter to
+  move it into that position (`a` for first, `b` for second), shifting the other
+  sessions. Or use **j/k**, then **Enter**. **Escape** cancels priority mode.
+  Labels skip the same reserved keys as Sessions; **[ / ]** pages destinations.
+  The running terminal stays focused. Order survives roster updates within this
+  mobile client; a newly launched client starts with the daemon's normal order.
+- **Enter**: open the highlighted session (also from the startup portal).
+- **Escape** or **Ctrl-T**: close Sessions and return to the current terminal.
+  With no sessions, the portal stays ready for `n`.
+- **Ctrl-Q**: detach from Sessions while keeping processes running.
 
 The one-column left rail shows live terminal states. Ctrl-T expands it into a
 compact overlay without resizing or reflowing the running terminal. Tapping the

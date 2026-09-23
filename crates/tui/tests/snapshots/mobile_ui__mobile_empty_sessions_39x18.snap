@@ -2,8 +2,8 @@
 source: crates/tui/tests/mobile_ui.rs
 expression: screen(&mut m)
 ---
-Sessions (0) · letters open · ↑↓       
-Sessions                               
+Sessions (0) · j/k move · Enter open   
+Sessions j/k move                      
 No sessions yet.                       
 Press n to start one.                  
 A repository is optional.              
@@ -18,5 +18,5 @@ A repository is optional.
                                        
                                        
                                        
-Enter/Esc close                        
-n new r rename x delete ^Q quit
+Enter open Esc back                    
+n new r rename x del p priority

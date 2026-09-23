@@ -42,11 +42,23 @@ impl SessionRow {
 pub(crate) struct MobileSessions {
     rows: Vec<SessionRow>,
     selected: Option<TerminalId>,
+    // Presentation preference for this client; never reorders daemon terminals.
+    order: Vec<TerminalId>,
 }
 
 impl MobileSessions {
-    pub(crate) fn update(&mut self, rows: Vec<SessionRow>) {
+    pub(crate) fn update(&mut self, mut rows: Vec<SessionRow>) {
         let old_position = self.position();
+        self.order
+            .retain(|id| rows.iter().any(|row| row.terminal_id == *id));
+        if !self.order.is_empty() {
+            rows.sort_by_key(|row| {
+                self.order
+                    .iter()
+                    .position(|id| *id == row.terminal_id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
         self.rows = rows;
         if !self
             .rows
@@ -58,6 +70,21 @@ impl MobileSessions {
                 .get(old_position.min(self.rows.len().saturating_sub(1)))
                 .map(|r| r.terminal_id);
         }
+    }
+
+    /// Move into the target's position, shifting intervening rows. Both IDs
+    /// come from the painted list; a vanished destination must not redirect it.
+    pub(crate) fn prioritize(&mut self, source: TerminalId, target: TerminalId) -> bool {
+        let Some(from) = self.rows.iter().position(|r| r.terminal_id == source) else {
+            return false;
+        };
+        let Some(to) = self.rows.iter().position(|r| r.terminal_id == target) else {
+            return false;
+        };
+        let row = self.rows.remove(from);
+        self.rows.insert(to, row);
+        self.order = self.rows.iter().map(|r| r.terminal_id).collect();
+        true
     }
 
     pub(crate) fn rows(&self) -> &[SessionRow] {
@@ -89,7 +116,7 @@ impl MobileSessions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn row(id: u64) -> SessionRow {
+    pub(super) fn row(id: u64) -> SessionRow {
         SessionRow {
             terminal_id: TerminalId(id),
             session_key: SessionKey::new(format!("session-{id}")),
@@ -113,5 +140,44 @@ mod tests {
         assert_eq!(list.selected().unwrap().terminal_id, TerminalId(3));
         list.update(vec![]);
         assert!(list.selected().is_none());
+    }
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::{tests::row, *};
+    #[test]
+    fn priority_inserts_in_both_directions_and_survives_roster_refresh() {
+        let mut list = MobileSessions::default();
+        list.update(vec![row(1), row(2), row(3)]);
+        list.select(TerminalId(2));
+        assert!(list.prioritize(TerminalId(3), TerminalId(1)));
+        list.update(vec![row(1), row(2), row(3), row(4)]);
+        assert_eq!(
+            list.rows
+                .iter()
+                .map(|r| r.terminal_id.0)
+                .collect::<Vec<_>>(),
+            [3, 1, 2, 4]
+        );
+        assert_eq!(list.selected().unwrap().terminal_id, TerminalId(2));
+        assert!(list.prioritize(TerminalId(3), TerminalId(2)));
+        assert_eq!(
+            list.rows
+                .iter()
+                .map(|r| r.terminal_id.0)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert!(!list.prioritize(TerminalId(9), TerminalId(2)));
+        assert!(!list.prioritize(TerminalId(2), TerminalId(9)));
+        list.update(vec![row(4), row(2)]);
+        assert_eq!(
+            list.rows
+                .iter()
+                .map(|r| r.terminal_id.0)
+                .collect::<Vec<_>>(),
+            [2, 4]
+        );
     }
 }

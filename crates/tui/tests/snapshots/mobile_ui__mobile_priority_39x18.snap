@@ -1,14 +1,14 @@
 ---
 source: crates/tui/tests/mobile_ui.rs
-expression: expanded
+expression: priority
 ---
 Ctrl-T Sessions | phone                
-Sessions j/k move        │             
+Priority j/k move        │             
 ● a phone · codex        │             
 ! b phone · codex        │             
 ✓ c phone · codex        │             
-working · codex          │             
-Enter open Esc back      │             
+Move phone               │             
+Enter move Esc back      │             
                                        
                                        
                                        
@@ -19,4 +19,4 @@ Enter open Esc back      │
                                        
                                        
                                        
-n new r rename x del p priority
+Pick position · Esc cancel

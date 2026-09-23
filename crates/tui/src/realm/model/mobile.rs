@@ -220,6 +220,14 @@ impl<T: TerminalAdapter> Model<T> {
                     self.open_mobile_selection();
                 }
             }
+            RailAction::Prioritize { source, target } => {
+                self.refresh_mobile_sessions();
+                if !self.mobile_sessions.prioritize(source, target) {
+                    self.flash_info("That session has ended");
+                }
+                self.mobile_rail.update(self.mobile_sessions.rows());
+                self.mobile_rail.highlight_initial(source);
+            }
             RailAction::New => self.new_mobile_session(),
             RailAction::Quit => self.quit = true,
             RailAction::Rename(id) | RailAction::Delete(id) => {
@@ -373,26 +381,17 @@ impl<T: TerminalAdapter> Model<T> {
                     if m.row == area.bottom().saturating_sub(1) =>
                 {
                     // Same pinned actions in the overlay and startup portal.
-                    let action = match m.column.saturating_sub(area.x) {
-                        0..=4 => RailAction::New,
-                        6..=13 => self
-                            .mobile_rail
-                            .highlighted()
-                            .map(RailAction::Rename)
-                            .unwrap_or(RailAction::None),
-                        15..=22 => self
-                            .mobile_rail
-                            .highlighted()
-                            .map(RailAction::Delete)
-                            .unwrap_or(RailAction::None),
-                        24..=30 => RailAction::Quit,
-                        _ => RailAction::None,
-                    };
+                    let action = self
+                        .mobile_rail
+                        .footer_key(m.column.saturating_sub(area.x))
+                        .map(|key| self.mobile_rail.key(&key))
+                        .unwrap_or(RailAction::None);
                     self.apply_mobile_rail_action(action);
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(id) = self.mobile_rail.at(m.column, m.row) {
-                        self.apply_mobile_rail_action(RailAction::Select(id));
+                        let action = self.mobile_rail.choose(id);
+                        self.apply_mobile_rail_action(action);
                     } else if self.mobile_rail.is_open()
                         && !self.mobile_rail.contains(m.column, m.row)
                     {
@@ -487,6 +486,82 @@ mod tests {
     }
     fn list_key() -> KeyEvent {
         KeyEvent::new(Key::Char('t'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn priority_and_enter_use_highlight_without_touching_running_terminal() {
+        let (mut m, mut server, workspace) = fixture();
+        for id in [7, 8, 9] {
+            spawn(&mut m, workspace.clone(), id);
+        }
+        m.terminals.focus_terminal(TerminalId(7));
+        m.set_focus(PaneFocus::Terminals);
+        m.view();
+        while server.rx.try_recv().is_ok() {}
+        m.dispatch_key(rail_key());
+        for c in ['j', 'j', 'p', 'a'] {
+            m.dispatch_key(key(c));
+        }
+        m.view();
+        assert_eq!(
+            m.mobile_sessions
+                .rows()
+                .iter()
+                .map(|r| r.terminal_id.0)
+                .collect::<Vec<_>>(),
+            [9, 7, 8]
+        );
+        assert_eq!(m.terminals.focused_terminal_id(), Some(TerminalId(7)));
+        assert!(m.mobile_rail.is_open());
+        assert_eq!(m.mobile_rail.highlighted(), Some(TerminalId(9)));
+        m.dispatch_key(key('p'));
+        m.dispatch_key(key('j'));
+        m.dispatch_key(KeyEvent::from(Key::Esc));
+        assert!(!m.mobile_rail.is_prioritizing());
+        assert!(m.mobile_rail.is_open());
+        assert_eq!(m.mobile_sessions.rows()[0].terminal_id, TerminalId(9));
+        m.dispatch_key(key('j'));
+        m.dispatch_key(KeyEvent::from(Key::Enter));
+        assert_eq!(m.terminals.focused_terminal_id(), Some(TerminalId(8)));
+        assert!(!m.mobile_rail.is_open());
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                !matches!(
+                    cmd,
+                    Command::Write { .. } | Command::Close { .. } | Command::Resize { .. }
+                ),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rename_clear_requires_save_and_escape_preserves_original() {
+        let (mut m, mut server, workspace) = fixture();
+        spawn(&mut m, workspace, 7);
+        let original_name = m.sidebar.selected_workspace().unwrap().name.clone();
+        m.set_focus(PaneFocus::Terminals);
+        m.dispatch_key(rail_key());
+        m.dispatch_key(key('r'));
+        assert_eq!(m.top_modal(), Some(&Id::RenameWorkspace));
+        while server.rx.try_recv().is_ok() {}
+        m.dispatch_modal_key(KeyEvent::new(Key::Char('x'), KeyModifiers::CONTROL));
+        m.dispatch_modal_key(KeyEvent::from(Key::Enter));
+        assert_eq!(m.top_modal(), Some(&Id::RenameWorkspace));
+        m.dispatch_modal_key(KeyEvent::from(Key::Esc));
+        assert_eq!(m.sidebar.selected_workspace().unwrap().name, original_name);
+        m.dispatch_key(key('r'));
+        assert_eq!(m.top_modal(), Some(&Id::RenameWorkspace));
+        m.dispatch_modal_key(KeyEvent::new(Key::Char('x'), KeyModifiers::CONTROL));
+        for c in "box".chars() {
+            m.dispatch_modal_key(key(c));
+        }
+        m.dispatch_modal_key(KeyEvent::from(Key::Enter));
+        assert!(m.top_modal().is_none());
+        let commands: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        assert!(
+            matches!(commands.as_slice(), [Command::RenameWorkspace { name, .. }] if name == "box")
+        );
     }
 
     #[test]

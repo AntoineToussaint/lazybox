@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use lazybox_core::{QualifiedWorkingClaim, SessionId, Task, TaskId, Workspace, WorkspaceKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -522,13 +523,17 @@ async fn maintain_once(config: &ServerConfig, now: DateTime<Utc>) {
     if !config.working_claims_enabled {
         return;
     }
-    let records = match list_records(config) {
+    let mut records = match list_records(config) {
         Ok(records) => records,
         Err(error) => {
             tracing::warn!(%error, "working claim maintenance could not enumerate provenance");
             return;
         }
     };
+    rotate_for_fairness(
+        &mut records,
+        MAINTENANCE_CYCLE.fetch_add(1, Ordering::Relaxed),
+    );
     let backend_keys = config.backend.list().await;
     let live_structured = config
         .agent_runs
@@ -571,6 +576,22 @@ async fn maintain_once(config: &ServerConfig, now: DateTime<Utc>) {
     }
     cleanup_expired(config, now).await;
     prune_idle_locks(config);
+}
+
+/// Maintenance passes started by this process, for [`rotate_for_fairness`].
+static MAINTENANCE_CYCLE: AtomicUsize = AtomicUsize::new(0);
+
+/// Start each maintenance pass one record further along. Every label call
+/// in a pass shares the daemon's paced GitHub budget with the poller, so
+/// whatever sits at the END of the list waits longest — in a fixed order
+/// that was the same claims every cycle, which failed ~100 cycles in a row
+/// while a handful at the front renewed 58 times (2026-09-23). Rotating
+/// spreads the wait so no live claim is starved past its TTL.
+fn rotate_for_fairness<T>(records: &mut [T], cycle: usize) {
+    if !records.is_empty() {
+        let start = cycle % records.len();
+        records.rotate_left(start);
+    }
 }
 
 /// Drop per-holder lock entries that are neither currently held nor backed by
@@ -708,14 +729,26 @@ fn load_record(config: &ServerConfig, key: &str) -> Result<Option<WorkingClaimRe
         .transpose()
 }
 
+/// Every claim record. A row that no longer decodes is skipped with a
+/// warning rather than failing the whole list: one bad row used to stop
+/// maintenance for EVERY claim, so every live agent's `lazybox:w:` label
+/// lapsed past its TTL and the fleet double-spawned on their tasks. Only
+/// the store itself being unreadable fails the call.
 fn list_records(config: &ServerConfig) -> Result<Vec<WorkingClaimRecord>, String> {
-    config
+    let rows = config
         .store
         .list_kv_prefix(CLAIM_KEY_PREFIX)
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    Ok(rows
         .into_iter()
-        .map(|(_, json)| serde_json::from_str(&json).map_err(|error| error.to_string()))
-        .collect()
+        .filter_map(|(key, json)| match serde_json::from_str(&json) {
+            Ok(record) => Some(record),
+            Err(error) => {
+                tracing::warn!(%key, %error, "skipping an undecodable working claim record");
+                None
+            }
+        })
+        .collect())
 }
 
 /// The claim labels this daemon is currently renewing — the ones whose record
@@ -789,6 +822,41 @@ async fn lock_holder(config: &ServerConfig, key: &str) -> tokio::sync::OwnedMute
 
 #[cfg(test)]
 mod tests {
+
+    /// One corrupt row must not hide the healthy ones from maintenance —
+    /// that stopped every renewal at once.
+    #[test]
+    fn an_undecodable_claim_row_does_not_hide_the_healthy_ones() {
+        let config = ServerConfig::in_memory();
+        let healthy = record(Utc::now());
+        persist_record(&config, &healthy).expect("seed a healthy row");
+        config
+            .store
+            .set_kv(&format!("{CLAIM_KEY_PREFIX}zz-corrupt"), "{not json")
+            .expect("seed a corrupt row");
+        assert_eq!(
+            list_records(&config).expect("store is readable"),
+            vec![healthy],
+        );
+    }
+
+    /// Each pass starts one record later, so across `n` passes every record
+    /// is first once — no claim is permanently at the back of the budget
+    /// queue.
+    #[test]
+    fn maintenance_order_rotates_so_no_claim_is_always_last() {
+        let base = vec!["a", "b", "c"];
+        let mut lasts = Vec::new();
+        for cycle in 0..3 {
+            let mut records = base.clone();
+            super::rotate_for_fairness(&mut records, cycle);
+            lasts.push(*records.last().unwrap());
+        }
+        lasts.sort_unstable();
+        assert_eq!(lasts, vec!["a", "b", "c"]);
+        let mut empty: Vec<&str> = Vec::new();
+        super::rotate_for_fairness(&mut empty, 7);
+    }
     use super::*;
     use chrono::TimeZone;
 

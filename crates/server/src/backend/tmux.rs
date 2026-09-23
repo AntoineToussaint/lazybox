@@ -832,12 +832,23 @@ fn new_session_args(
 /// fix takes effect the moment the daemon carrying it spawns a session, with no
 /// server restart. The launcher dir is passed as an argument (`$1`), never
 /// interpolated into the script, so a path with shell metacharacters is inert.
+///
+/// The `gh` shim directory (#1801) is lost the same way — the spawn plan
+/// puts it on `PATH` right after the launcher dir, and tmux dropped both. So
+/// every agent's `gh` bypassed the daemon's read cache and quota (zero
+/// `GhAdmit` in 28h of log, 2026-09-23). Unlike `PATH`, a novel `-e` variable
+/// DOES reach the pane, and the spawn plan exports the shim dir as
+/// `LAZYBOX_GH_SHIM_DIR`; the wrapper re-inserts it from there when set, in
+/// the same position, so the pane's `PATH` matches what the plan built.
 fn prepend_launcher_to_path(argv: &[String]) -> Vec<String> {
     let bin_dir = lazybox_core::paths::bin_dir();
     let mut wrapped = vec![
         "/bin/sh".to_string(),
         "-c".to_string(),
-        "PATH=\"$1:$PATH\"; export PATH; shift; exec \"$@\"".to_string(),
+        format!(
+            "PATH=\"$1:${{{shim}:+${shim}:}}$PATH\"; export PATH; shift; exec \"$@\"",
+            shim = lazybox_ipc::gh_shim::SHIM_DIR_ENV,
+        ),
         "lazybox-path-shim".to_string(),
         bin_dir.to_string_lossy().into_owned(),
     ];
@@ -1649,7 +1660,7 @@ mod tests {
             &["/bin/sh".to_string(), "-c".to_string()][..]
         );
         assert!(
-            wrapped[2].contains("PATH=\"$1:$PATH\"") && wrapped[2].contains("exec \"$@\""),
+            wrapped[2].starts_with("PATH=\"$1:") && wrapped[2].contains("exec \"$@\""),
             "shim must prepend $1 to PATH and exec the real argv: {}",
             wrapped[2],
         );
@@ -1660,6 +1671,42 @@ mod tests {
             &wrapped[5..],
             &["claude".to_string(), "--flag".to_string()][..],
             "original argv must follow unchanged",
+        );
+    }
+
+    /// #1801 under tmux: the pane gets the tmux server's PATH, so the gh shim
+    /// directory the spawn plan put there was gone and every agent's `gh`
+    /// skipped the daemon. Runs the real wrapper through `/bin/sh`.
+    #[test]
+    fn the_path_wrapper_restores_the_gh_shim_dir_when_the_spawn_set_one() {
+        let run = |shim: Option<&str>| {
+            let wrapped = prepend_launcher_to_path(&[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf %s \"$PATH\"".to_string(),
+            ]);
+            let mut command = std::process::Command::new(&wrapped[0]);
+            command.args(&wrapped[1..]).env("PATH", "/usr/bin:/bin");
+            command.env_remove(lazybox_ipc::gh_shim::SHIM_DIR_ENV);
+            if let Some(dir) = shim {
+                command.env(lazybox_ipc::gh_shim::SHIM_DIR_ENV, dir);
+            }
+            let out = command.output().expect("run the wrapper");
+            String::from_utf8(out.stdout).expect("utf-8 PATH")
+        };
+        let bin_dir = lazybox_core::paths::bin_dir()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(
+            run(Some("/tmp/lb-shims")),
+            format!("{bin_dir}:/tmp/lb-shims:/usr/bin:/bin"),
+            "the shim dir follows the launcher dir, ahead of the real gh",
+        );
+        assert_eq!(
+            run(None),
+            format!("{bin_dir}:/usr/bin:/bin"),
+            "no shim installed: no empty PATH segment (which would mean cwd)",
         );
     }
 

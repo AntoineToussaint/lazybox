@@ -2,7 +2,7 @@
 # Add lb -m while keeping plain lb on the installed desktop release.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-build_dir="${LAZYBOX_BUILD_DIR:-${root}/target/debug}"
+build_dir="${LAZYBOX_BUILD_DIR:-${CARGO_TARGET_DIR:-${root}/target}/debug}"
 prefix="${LAZYBOX_MOBILE_PREFIX:-${HOME}/.local}"
 for binary in lazybox lb; do
   test -x "${build_dir}/${binary}" || { echo "Build first: make build" >&2; exit 1; }

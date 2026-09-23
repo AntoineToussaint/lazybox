@@ -113,3 +113,6 @@ The installer adds a small `lb` dispatcher and a separate mobile binary, retains
 the official `lazybox` executable for plain `lb`, and removes the previous managed
 `lb-m` / `lazybox-m` aliases. The original `lb` launcher is saved under
 `~/.local/lib/lazybox-mobile/lb.desktop-original` on the first such installation.
+
+The installer honors `CARGO_TARGET_DIR`. Set `LAZYBOX_BUILD_DIR` to use a specific
+directory containing the built `lazybox` and `lb` executables.

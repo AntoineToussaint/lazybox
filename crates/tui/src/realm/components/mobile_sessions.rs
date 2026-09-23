@@ -43,19 +43,22 @@ pub(crate) struct MobileSessions {
     rows: Vec<SessionRow>,
     selected: Option<TerminalId>,
     // Presentation preference for this client; never reorders daemon terminals.
-    order: Vec<TerminalId>,
+    order: Vec<lazybox_config::MobileSessionTab>,
 }
 
 impl MobileSessions {
     pub(crate) fn update(&mut self, mut rows: Vec<SessionRow>) {
         let old_position = self.position();
-        self.order
-            .retain(|id| rows.iter().any(|row| row.terminal_id == *id));
+        // The daemon streams its roster during attachment. Do not discard
+        // saved identities just because their spawn event has not arrived yet.
         if !self.order.is_empty() {
             rows.sort_by_key(|row| {
                 self.order
                     .iter()
-                    .position(|id| *id == row.terminal_id)
+                    .position(|tab| {
+                        tab.terminal_id == row.terminal_id.0
+                            && tab.session_key == row.session_key.as_str()
+                    })
                     .unwrap_or(usize::MAX)
             });
         }
@@ -83,8 +86,25 @@ impl MobileSessions {
         };
         let row = self.rows.remove(from);
         self.rows.insert(to, row);
-        self.order = self.rows.iter().map(|r| r.terminal_id).collect();
+        self.order = self
+            .rows
+            .iter()
+            .map(|row| lazybox_config::MobileSessionTab {
+                session_key: row.session_key.as_str().to_owned(),
+                terminal_id: row.terminal_id.0,
+            })
+            .collect();
         true
+    }
+
+    pub(crate) fn restore_order(&mut self, order: Vec<lazybox_config::MobileSessionTab>) {
+        self.order = order;
+        let rows = std::mem::take(&mut self.rows);
+        self.update(rows);
+    }
+
+    pub(crate) fn saved_order(&self) -> Vec<lazybox_config::MobileSessionTab> {
+        self.order.clone()
     }
 
     pub(crate) fn rows(&self) -> &[SessionRow] {
@@ -146,6 +166,35 @@ mod tests {
 #[cfg(test)]
 mod priority_tests {
     use super::{tests::row, *};
+    #[test]
+    fn saved_priority_survives_empty_and_partial_rosters_and_checks_workspace() {
+        let mut list = MobileSessions::default();
+        list.restore_order(vec![
+            lazybox_config::MobileSessionTab {
+                session_key: "session-3".into(),
+                terminal_id: 3,
+            },
+            lazybox_config::MobileSessionTab {
+                session_key: "session-1".into(),
+                terminal_id: 1,
+            },
+        ]);
+        list.update(vec![]);
+        list.update(vec![row(1)]);
+        list.update(vec![row(1), row(2), row(3)]);
+        assert_eq!(
+            list.rows
+                .iter()
+                .map(|r| r.terminal_id.0)
+                .collect::<Vec<_>>(),
+            [3, 1, 2]
+        );
+        let mut reused = row(3);
+        reused.session_key = SessionKey::new("another-workspace");
+        list.update(vec![reused, row(1)]);
+        assert_eq!(list.rows[0].terminal_id, TerminalId(1));
+    }
+
     #[test]
     fn priority_inserts_in_both_directions_and_survives_roster_refresh() {
         let mut list = MobileSessions::default();

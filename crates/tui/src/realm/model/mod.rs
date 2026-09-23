@@ -3592,6 +3592,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// wizard seeding, editor/open-with discovery) stays with the boot
     /// paths.
     pub fn apply_client_config(&mut self, user_config: &lazybox_config::Config) {
+        self.mobile_sessions
+            .restore_order(user_config.ui.mobile_session_order.clone());
         // Apply the persisted theme before the first render so the UI
         // boots in the user's palette. An unknown name (theme renamed /
         // removed since they picked it) leaves the default active.

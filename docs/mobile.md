@@ -23,8 +23,11 @@ The startup portal and **Ctrl-T Sessions** share one renderer and these bindings
   move it into that position (`a` for first, `b` for second), shifting the other
   sessions. Or use **j/k**, then **Enter**. **Escape** cancels priority mode.
   Labels skip the same reserved keys as Sessions; **[ / ]** pages destinations.
-  The running terminal stays focused. Order survives roster updates within this
-  mobile client; a newly launched client starts with the daemon's normal order.
+  The running terminal stays focused. Priority is saved in the current Lazybox
+  profile (`ui.mobile_session_order`) and restored on subsequent launches.
+  Existing tabs keep their order while the startup roster loads; new terminals
+  append after saved tabs. Renaming a chat does not change its position.
+  Desktop layout is unaffected. The last mobile reorder saved wins.
 - **Enter**: open the highlighted session (also from the startup portal).
 - **Escape** or **Ctrl-T**: close Sessions and return to the current terminal.
   With no sessions, the portal stays ready for `n`.

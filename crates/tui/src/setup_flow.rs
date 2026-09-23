@@ -174,6 +174,9 @@ pub fn save_persisted_yaml(
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
     use anyhow::Context;
 
+    // Same cross-process lock as `Config::save_with`: this is a
+    // read-modify-write of the whole file (#1828).
+    let _lock = lazybox_config::Config::lock_for_update(path).context("config.yaml lock failed")?;
     let mut backed_up: Option<std::path::PathBuf> = None;
     let mut cfg: lazybox_config::Config = match std::fs::read_to_string(path) {
         Ok(raw) => match lazybox_config::Config::parse(&raw) {
@@ -246,6 +249,7 @@ pub fn save_persisted_yaml(
 /// hand-authored file just to write back what it already says.
 pub fn clear_persisted_yaml(path: &std::path::Path) -> anyhow::Result<bool> {
     use anyhow::Context;
+    let _lock = lazybox_config::Config::lock_for_update(path).context("config.yaml lock failed")?;
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),

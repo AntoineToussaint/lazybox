@@ -3377,6 +3377,12 @@ impl Config {
         use std::sync::Mutex;
         static SAVE_LOCK: Mutex<()> = Mutex::new(());
         let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The in-process mutex orders this process's writers; the file lock
+        // orders them against every OTHER process — a second TUI, the
+        // desktop app, the daemon (#1828). Without it two processes each
+        // loaded, mutated their own copy and renamed it into place, and
+        // the later rename silently discarded the earlier change.
+        let _file_lock = Self::lock_for_update(path)?;
         let mut cfg = if path.exists() {
             Self::load_from(path)?
         } else {
@@ -3388,6 +3394,29 @@ impl Config {
 
     pub fn default_path() -> PathBuf {
         lazybox_core::paths::config_yaml()
+    }
+
+    /// Take the cross-process lock that serializes every read-modify-write
+    /// of the config at `path`, held until the returned handle drops.
+    ///
+    /// It locks a stable sibling (`config.yaml.lock`), never the YAML
+    /// itself: [`Self::save_to`] replaces the YAML's inode by rename, so a
+    /// lock on it would guard a file that is about to stop existing (the
+    /// same reasoning as the snippets file lock). Anything that loads the
+    /// config, changes it and writes it back outside [`Self::save_with`]
+    /// must hold this across the whole cycle.
+    pub fn lock_for_update(path: &Path) -> Result<std::fs::File, ConfigError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path.with_extension("yaml.lock"))?;
+        fs2::FileExt::lock_exclusive(&lock)?;
+        Ok(lock)
     }
 }
 
@@ -4545,6 +4574,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #1828: `save_with` serialized only within one process. Another
+    /// process (modelled by an independent lock handle, as `flock` locks
+    /// are per open file) writing between our load and our rename had its
+    /// change silently discarded. The save must wait for the lock and then
+    /// apply its mutation ON TOP of the other writer's result.
+    #[test]
+    fn a_save_waits_for_another_writer_and_keeps_its_change() {
+        let dir = std::env::temp_dir().join(format!("lazybox-config-xproc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("config.yaml");
+        Config::default().save_to(&path).expect("seed");
+
+        let other = Config::lock_for_update(&path).expect("the other writer locks");
+        let saver = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                Config::save_with_at(&path, |c| c.ui.coach_step = 7).expect("save");
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(
+            !saver.is_finished(),
+            "the save must wait for the other writer's lock"
+        );
+        // The other writer finishes its own read-modify-write, then releases.
+        let mut theirs = Config::load_from(&path).expect("load");
+        theirs.ui.theme = Some("Gruvbox Dark".into());
+        theirs.save_to(&path).expect("their write");
+        drop(other);
+        saver.join().expect("saver thread");
+
+        let merged = Config::load_from(&path).expect("load");
+        assert_eq!(
+            merged.ui.theme.as_deref(),
+            Some("Gruvbox Dark"),
+            "their change survives"
+        );
+        assert_eq!(merged.ui.coach_step, 7, "and ours landed on top of it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Regression (#tmp-name race): `save_to` used a FIXED sibling
     /// temp path (`config.yaml.tmp`), so two lazybox processes —
     /// explicitly supported — racing a save could interleave writes
@@ -4602,7 +4673,9 @@ mod tests {
             .expect("read dir")
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n != "config.yaml" && n != "config.yaml.tmp")
+            // The cross-process lock file is permanent by design: it must
+            // be a stable inode that no rename replaces (#1828).
+            .filter(|n| n != "config.yaml" && n != "config.yaml.tmp" && n != "config.yaml.lock")
             .collect();
         assert!(strays.is_empty(), "no stray temp files: {strays:?}");
 

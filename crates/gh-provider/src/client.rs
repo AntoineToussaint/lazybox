@@ -4653,7 +4653,7 @@ impl GhClient {
             .await
     }
 
-    /// [`fetch_pr_search_paginated`] with an explicit request `class` and
+    /// [`Self::fetch_pr_search_paginated`] with an explicit request `class` and
     /// metrics `label`. The class drives the rate-budget accounting — the
     /// lightweight author probe (#discovery) is a distinct, cheap class so
     /// it isn't priced like the heavy `involves:` sweep.

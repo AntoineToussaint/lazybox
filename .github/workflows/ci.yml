@@ -1,10 +1,12 @@
-# Linux builds and tests every Rust PR. The merge queue adds the expensive
-# macOS and MSRV lanes against the exact candidate tree before it reaches main.
+# Linux builds and tests every Rust PR. The expensive macOS, MSRV, loaded and
+# benchmark lanes run on every push to main and in the merge queue — NOT on
+# pull requests.
 #
-# Test breadth cannot compensate for a stale PR base: two independently-green
-# PRs may still fail when composed. Keep `merge_group` enabled here and require
-# CI on the repository's merge queue (or require branches be up to date) so
-# GitHub tests the exact candidate tree before advancing main.
+# main has no branch protection and no merge queue today, so those lanes are
+# a post-merge signal, not a gate: nothing is "required", and a PR merges on
+# its Linux lanes alone. They used to be `merge_group`-only, which meant they
+# never ran at all. Turning them into a gate is a repository setting (a merge
+# queue ruleset requiring CI), not something this file can do.
 #
 # The stable Linux gates — clippy, nextest, rustdoc, and the benchmark link
 # check — each compile an independent artifact set (check .rmeta vs test bins vs
@@ -136,7 +138,7 @@ jobs:
   msrv:
     name: msrv (Rust 1.88.0)
     needs: changes
-    if: github.event_name == 'merge_group' && needs.changes.outputs.rust == 'true'
+    if: github.event_name != 'pull_request' && needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -189,7 +191,7 @@ jobs:
   macos:
     name: test (macos-14)
     needs: changes
-    if: github.event_name == 'merge_group' && needs.changes.outputs.rust == 'true'
+    if: github.event_name != 'pull_request' && needs.changes.outputs.rust == 'true'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
@@ -215,7 +217,7 @@ jobs:
     # other expensive lanes: it is a second full run of the suite.
     name: test under load (ubuntu-22.04)
     needs: changes
-    if: github.event_name == 'merge_group' && needs.changes.outputs.rust == 'true'
+    if: github.event_name != 'pull_request' && needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -430,7 +432,7 @@ jobs:
     # `test` gets faster, which is the entire point of the changes above.
     name: benches
     needs: changes
-    if: github.event_name == 'merge_group' && needs.changes.outputs.rust == 'true'
+    if: github.event_name != 'pull_request' && needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7

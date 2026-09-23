@@ -273,7 +273,7 @@ impl GqlError {
     /// True when GitHub is rate-limiting this mutation. GitHub signals it
     /// inside the GraphQL `errors` array (HTTP 200) either with a
     /// top-level `type: "RATE_LIMITED"` or a message naming the
-    /// secondary / abuse limit. Distinct from [`is_not_visible`] so the
+    /// secondary / abuse limit. Distinct from [`Self::is_not_visible`] so the
     /// mutation path can queue + retry against the reset window instead of
     /// hard-failing with the raw error.
     pub fn is_rate_limited(&self) -> bool {

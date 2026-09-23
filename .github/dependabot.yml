@@ -21,8 +21,13 @@
 version: 2
 
 updates:
+  # apps/desktop/src-tauri is its own cargo workspace with its own
+  # Cargo.lock; bumping only the root left it stale and `--locked` refused
+  # it. Listing both directories keeps them in one grouped pull request.
   - package-ecosystem: cargo
-    directory: /
+    directories:
+      - /
+      - /apps/desktop/src-tauri
     schedule:
       interval: weekly
     open-pull-requests-limit: 1
@@ -30,6 +35,13 @@ updates:
       cargo:
         patterns:
           - '*'
+    ignore:
+      # octocrab's `Builder::app()` takes jsonwebtoken 10's `EncodingKey`
+      # (crates/gh-provider/src/app_auth.rs), so gh-provider must stay on
+      # octocrab's major. Remove once octocrab moves to jsonwebtoken 11.
+      - dependency-name: jsonwebtoken
+        update-types:
+          - version-update:semver-major
   - package-ecosystem: npm
     directory: /web
     schedule:
@@ -39,6 +51,25 @@ updates:
       npm:
         patterns:
           - '*'
+    ignore:
+      # @astrojs/check peers typescript `^5 || ^6`; a major bump fails
+      # `npm ci` with ERESOLVE. Remove once it accepts the next major.
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      npm-desktop:
+        patterns:
+          - '*'
+    ignore:
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
   - package-ecosystem: github-actions
     directory: /
     schedule:

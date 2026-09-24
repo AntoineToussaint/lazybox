@@ -16864,6 +16864,117 @@ mod input_priority_tests {
         assert!(redraw_is_input, "a discrete key arms the immediate paint");
     }
 
+    #[test]
+    fn mobile_delayed_agent_typing_survives_a_busy_frame() {
+        for agent in ["claude", "codex"] {
+            let (mut m, mut server) = model_with_focused_agent();
+            m.presentation = crate::realm::presentation::Presentation::Mobile;
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                terminal_id: TID,
+                session_key: SessionKey::new("github:o/r#1"),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                agent_state: None,
+            });
+            drain_startup(&mut server);
+            m.redraw = true;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+            for code in [
+                KeyCode::Char('h'),
+                KeyCode::Char('i'),
+                KeyCode::Backspace,
+                KeyCode::Char('o'),
+                KeyCode::Enter,
+            ] {
+                tx.try_send(TimedInput {
+                    read_at: Instant::now() - std::time::Duration::from_secs(2),
+                    event: CtEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+                })
+                .expect("room");
+            }
+            drain_priority_input(
+                &mut m,
+                &mut rx,
+                &mut StaleInputTally::default(),
+                &mut PerfMonitor::new(),
+                &mut PhaseTimings::default(),
+                &mut false,
+            );
+            assert_eq!(
+                written_bytes(&mut server),
+                b"hi\x7fo\r",
+                "{agent} typing was lost"
+            );
+        }
+    }
+
+    #[test]
+    fn mobile_delayed_management_and_exited_terminal_keys_stay_guarded() {
+        for state in ["sessions", "settings", "exited", "control-t", "control-g"] {
+            let (mut m, mut server) = model_with_focused_agent();
+            m.presentation = crate::realm::presentation::Presentation::Mobile;
+            match state {
+                "sessions" => m.open_mobile_sessions(),
+                "settings" => {
+                    m.cache_persisted_setup(lazybox_core::PersistedSetup::default());
+                    m.open_settings();
+                    assert!(!m.modal_stack.is_empty());
+                }
+                "exited" => m.handle_daemon_event(IpcEvent::TerminalExited {
+                    terminal_id: TID,
+                    exit_code: Some(0),
+                    last_output: None,
+                }),
+                _ => (),
+            }
+            drain_startup(&mut server);
+            let modal = m.modal_stack.last().cloned();
+            let rail_open = m.mobile_rail.is_open();
+            m.redraw = true;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            let key = match state {
+                "control-t" => KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+                "control-g" => KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+                "sessions" => KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                _ => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            };
+            tx.try_send(TimedInput {
+                read_at: Instant::now() - std::time::Duration::from_secs(2),
+                event: CtEvent::Key(key),
+            })
+            .expect("room");
+            if matches!(state, "control-t" | "control-g") {
+                tx.try_send(TimedInput {
+                    read_at: Instant::now() - std::time::Duration::from_secs(2),
+                    event: CtEvent::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)),
+                })
+                .expect("room");
+            }
+            drain_priority_input(
+                &mut m,
+                &mut rx,
+                &mut StaleInputTally::default(),
+                &mut PerfMonitor::new(),
+                &mut PhaseTimings::default(),
+                &mut false,
+            );
+            if state == "settings" {
+                // Settings already retains its keys; its async metadata
+                // requests are allowed, but input must never leak to a PTY.
+                assert!(written_bytes(&mut server).is_empty());
+            } else {
+                assert!(
+                    server.rx.try_recv().is_err(),
+                    "{state}: stale input emitted a command"
+                );
+            }
+            assert_eq!(m.modal_stack.last(), modal.as_ref(), "{state}");
+            assert_eq!(m.mobile_rail.is_open(), rail_open, "{state}");
+        }
+    }
+
     /// A no-op unless a build is pending — with nothing to render there is
     /// no frame to jump ahead of, so the key rides the normal post-wait
     /// path and the buffer is left untouched.

@@ -327,6 +327,28 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Live mobile terminals own ordinary keys as input, just like a paste.
+    /// A slow frame must not erase that input. Management keys and exited
+    /// panes retain the stale-action guard (Enter can restart an exited pane).
+    pub(super) fn mobile_retains_buffered_key(&self, event: &crossterm::event::Event) -> bool {
+        use crossterm::event::{Event, KeyCode, KeyModifiers};
+        let Event::Key(key) = event else {
+            return false;
+        };
+        if self.presentation != Presentation::Mobile
+            || !self.modal_stack.is_empty()
+            || self.mobile_rail.is_open()
+            || self.focus != PaneFocus::Terminals
+            || (key.modifiers == KeyModifiers::CONTROL
+                && matches!(key.code, KeyCode::Char('t' | 'g')))
+        {
+            return false;
+        }
+        self.terminals.terminal_summaries().iter().any(|terminal| {
+            Some(terminal.id) == self.terminals.focused_terminal_id() && !terminal.exited
+        })
+    }
+
     pub(super) fn mobile_key(&mut self, key: &KeyEvent) -> bool {
         if self.presentation != Presentation::Mobile {
             return false;

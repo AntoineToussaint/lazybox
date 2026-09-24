@@ -67,8 +67,10 @@ events. **Ctrl-D** jumps all the way to the live bottom without sending input to
 the running program. Mobile does not bind Ctrl-U or Page Up/Page Down to chat
 scrolling; those keys reach the running agent or shell.
 
-Ordinary letters, Escape and Tab reach the running program. Create shells through
-`n` → area → Shell.
+Ordinary letters, Escape and Tab reach the running program. Buffered typing in
+live mobile terminals survives slow frames rather than being discarded after
+half a second. Sessions/settings shortcuts and stopped-terminal actions retain
+the stale-input guard. Create shells through `n` → area → Shell.
 
 Current rail indicators use the desktop state **colors**, with these symbol
 simplifications (default theme colors are shown; other themes supply their own):

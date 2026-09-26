@@ -2361,6 +2361,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenMessages => {
                 self.mount_messages();
             }
+            Action::OpenArchive => {
+                self.mount_archive_browser();
+            }
             Action::OpenErrorInbox => {
                 self.mount_error_inbox();
             }

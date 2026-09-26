@@ -409,6 +409,12 @@ pub enum Action {
     /// the session-only messages log, it survives restart and can turn
     /// an error class into an issue, an agent run, or a JSONL export.
     OpenErrorInbox,
+    /// Open the archive browser (#1824) — the keys `x x` tombstoned, each
+    /// with the keys its row absorbed, and the restore that takes a set
+    /// back out. Without it an archived record is in no mailbox at all:
+    /// `x x` deletes the row, and the tombstone stops the poll re-creating
+    /// it.
+    OpenArchive,
     /// Open the usage-stats view (#1339) — a day/week breakdown of what
     /// you've done (agent sessions, prompts, merges, turns, tokens,
     /// cost) built from the daemon's persisted event accumulator.
@@ -692,6 +698,7 @@ pub enum ActionKind {
     OpenSyncStatus,
     OpenMessages,
     OpenErrorInbox,
+    OpenArchive,
     OpenStats,
     OpenHopper,
     DismissNotice,
@@ -755,6 +762,7 @@ impl ActionKind {
         Self::OpenSyncStatus,
         Self::OpenMessages,
         Self::OpenErrorInbox,
+        Self::OpenArchive,
         Self::OpenStats,
         Self::OpenHopper,
         Self::DismissNotice,
@@ -1022,6 +1030,7 @@ impl Action {
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
             Action::OpenMessages => ActionKind::OpenMessages,
             Action::OpenErrorInbox => ActionKind::OpenErrorInbox,
+            Action::OpenArchive => ActionKind::OpenArchive,
             Action::OpenStats => ActionKind::OpenStats,
             Action::OpenHopper => ActionKind::OpenHopper,
             Action::DismissNotice => ActionKind::DismissNotice,
@@ -1163,6 +1172,13 @@ impl ActionDef {
                 default_keys: "Shift-E",
                 label: "errors",
                 describe: "Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. Sorted by frequency, filterable by source; the selected class shows its full raw + humanized detail. Turn a class into a GitHub issue (`i`), route it to an agent (`a`), or export the set as JSONL (`x`); `d` deletes one class, `c` clears all.",
+                section: Section::Global,
+            },
+            ActionKind::OpenArchive => &Self {
+                kind: ActionKind::OpenArchive,
+                default_keys: "x U",
+                label: "archived",
+                describe: "Open the archive browser — every workspace `x x` archived, each with the keys its row stood in for (a PR row takes the issues it closed with it). `u` or Enter restores the selected set: the tombstone goes, and the record's row returns on the next poll. Under the same `x` leader as the archive it undoes.",
                 section: Section::Global,
             },
             ActionKind::OpenStats => &Self {
@@ -2604,6 +2620,7 @@ impl ActionKind {
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenMessages => "open_messages",
             ActionKind::OpenErrorInbox => "open_error_inbox",
+            ActionKind::OpenArchive => "open_archive",
             ActionKind::OpenStats => "open_stats",
             ActionKind::OpenHopper => "open_hopper",
             ActionKind::DismissNotice => "dismiss_notice",
@@ -2890,7 +2907,8 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ResetAgentContext
         | ActionKind::ToggleMetering
         | ActionKind::ToggleContextCompaction
-        | ActionKind::CollapseIntoPr => Some("workspace"),
+        | ActionKind::CollapseIntoPr
+        | ActionKind::OpenArchive => Some("workspace"),
         // The `E` epic leader (#1521): dependency-graph navigation. `E j`
         // jumps to the next blocked workspace; the group grows as later
         // epic slices land. `Shift-E` is the Error Inbox and `e` the
@@ -3713,6 +3731,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenMessages
         | ActionKind::OpenErrorInbox
+        | ActionKind::OpenArchive
         | ActionKind::OpenStats
         | ActionKind::OpenHopper
         | ActionKind::DismissNotice

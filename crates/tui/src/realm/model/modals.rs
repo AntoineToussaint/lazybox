@@ -2279,6 +2279,35 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::ErrorInboxClearConfirm, modal);
     }
 
+    /// Open the archive browser (#1824). Mounts immediately in a loading
+    /// state and asks the daemon for the tombstoned set; the answer
+    /// (`Event::ArchivedWorkspaces`) repaints it via
+    /// [`Model::update_archive_browser`].
+    pub(super) fn mount_archive_browser(&mut self) {
+        use crate::realm::components::archive_browser::ArchiveBrowser;
+
+        if self.modal_stack.last() == Some(&Id::ArchiveBrowser) {
+            return;
+        }
+        self.mount_modal(Id::ArchiveBrowser, ArchiveBrowser::new(Vec::new(), true));
+        self.send_cmd(lazybox_ipc::Command::ListArchivedWorkspaces);
+    }
+
+    /// Repaint a live archive browser with a fresh daemon snapshot — the
+    /// list a restore leaves behind. A snapshot that arrives after the
+    /// window was closed is dropped.
+    pub(super) fn update_archive_browser(
+        &mut self,
+        records: Vec<lazybox_ipc::ArchivedWorkspaceRecord>,
+    ) {
+        use crate::realm::components::archive_browser::ArchiveBrowser;
+
+        if self.modal_stack.last() != Some(&Id::ArchiveBrowser) {
+            return;
+        }
+        self.mount_modal(Id::ArchiveBrowser, ArchiveBrowser::new(records, false));
+    }
+
     /// Repaint a live Error Inbox with a fresh daemon snapshot. A
     /// snapshot that arrives after the window was closed is dropped.
     pub(super) fn update_error_inbox(&mut self, errors: Vec<lazybox_ipc::ErrorInboxRecord>) {

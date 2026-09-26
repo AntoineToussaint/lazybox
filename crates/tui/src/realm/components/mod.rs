@@ -5,6 +5,7 @@
 //! from the originals; the trait surface changes from
 //! `tui_kit::Pane`/`Modal` to `tuirealm::Component` + `AppComponent`.
 
+pub mod archive_browser;
 pub mod choice;
 pub mod confirm;
 pub mod diff_review;

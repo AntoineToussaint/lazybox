@@ -32,9 +32,15 @@ pub enum AttachError {
          the record is visible to your token"
     )]
     Unresolved(TaskId),
+    // The suggested command takes the task's KEY, not its `Display` — that
+    // carries the `<source>:` prefix, and `parse_task_ref` would read
+    // `github:owner/repo#7` as repo `github:owner/repo`, resolving a record
+    // that does not exist.
     #[error(
-        "{task} was archived in lazybox (`x x`), so it has no workspace to attach to — unarchive \
-         it from the Inactive mailbox (`Shift-S`) rather than filing a duplicate record"
+        "{task} was archived in lazybox (`x x`), so it has no workspace to attach to — run \
+         `lazybox workspace unarchive {reference}` (or `x U` in the TUI) and attach again, \
+         rather than filing a duplicate record",
+        reference = .task.key,
     )]
     Archived { task: TaskId },
 }
@@ -535,6 +541,14 @@ mod tests {
         assert!(
             message.contains("archived") && message.contains("duplicate"),
             "the refusal must name the real cause and steer away from re-filing: {message}"
+        );
+        // And it must name a surface that exists (#1824): the advice used to
+        // be "unarchive it from the Inactive mailbox", which holds rows that
+        // still exist — an archived record is in no mailbox at all, so the
+        // reader found nothing and filed the duplicate anyway.
+        assert!(
+            message.contains("workspace unarchive acme/widget#7"),
+            "the refusal must name the restore the reader can actually run: {message}"
         );
     }
 

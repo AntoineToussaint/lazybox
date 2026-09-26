@@ -2397,6 +2397,25 @@ pub enum Command {
         request_id: u64,
         needles: Vec<String>,
     },
+    /// Request the set of archived workspace keys — the tombstones `x x`
+    /// writes, which the poll then skips instead of re-creating the row
+    /// (#1824). The daemon replies with [`Event::ArchivedWorkspaces`], and
+    /// re-broadcasts it after a [`Command::UnarchiveWorkspace`] so an open
+    /// browser refreshes. Appended last (bincode is ordinal-sensitive).
+    ListArchivedWorkspaces,
+    /// Drop one archived key's tombstone — and the tombstones of the keys
+    /// that row absorbed — so the record can return to the inbox (#1824).
+    ///
+    /// `key` is a workspace key as [`Event::ArchivedWorkspaces`] lists it,
+    /// which for a tracker record is `lazybox_core::workspace_key_for_id` of
+    /// its id — so a CLI caller holding `owner/repo#N` can name it without
+    /// having listed first. Appended last (bincode is ordinal-sensitive).
+    UnarchiveWorkspace {
+        key: String,
+        /// Correlates [`Event::CommandCompleted`] / [`Event::CommandFailed`]
+        /// for a caller that needs to know the tombstone is really gone.
+        client_request_id: Option<String>,
+    },
 }
 
 /// How a branch-namespace collision should be cleared (#1742). Both arms
@@ -2524,6 +2543,22 @@ pub struct ErrorInboxRecord {
     pub count: u64,
     pub first_seen: chrono::DateTime<chrono::Utc>,
     pub last_seen: chrono::DateTime<chrono::Utc>,
+}
+
+/// One archived workspace key: a tombstone `x x` wrote, which suppresses
+/// the row the next poll would otherwise re-create (#1824).
+///
+/// `absorbed` are the keys this row was standing in for — the standalone
+/// key of every task a PR row had folded in (`Closes #40`) — which an
+/// unarchive of `key` takes back out with it. They are listed under their
+/// owner and never as entries of their own, because they have no separate
+/// existence: nothing can restore one without restoring the row that
+/// absorbed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ArchivedWorkspaceRecord {
+    pub key: String,
+    pub absorbed: Vec<String>,
 }
 
 /// One rolled-up daily usage bucket, mirrored onto the wire from the
@@ -3979,6 +4014,12 @@ pub enum Event {
         workspace_key: lazybox_core::WorkspaceKey,
         artifacts: Vec<lazybox_core::Artifact>,
         hidden: usize,
+    },
+    /// Reply to [`Command::ListArchivedWorkspaces`], and re-broadcast after
+    /// a [`Command::UnarchiveWorkspace`] so an open archive browser
+    /// refreshes (#1824). Appended last (bincode is ordinal-sensitive).
+    ArchivedWorkspaces {
+        records: Vec<ArchivedWorkspaceRecord>,
     },
 }
 

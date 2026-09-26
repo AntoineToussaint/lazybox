@@ -21,6 +21,8 @@
 //!                                  via the daemon socket (--issue/--pr/--ticket
 //!                                  <owner/repo#N|URL|KEY>; --name + --scratch
 //!                                  for repo-less scratch; --agent spawns into it)
+//!   lazybox workspace archived      list the workspaces `x x` archived; `workspace
+//!                                  unarchive <REF>` puts one back
 //!   lazybox sandbox ensure          provision a remote dev box (terraform);
 //!                                  wake/sleep/status/connect/destroy manage
 //!                                  its lifecycle (GCP; per-worktree handle)
@@ -515,6 +517,12 @@ Remote & services:
                               --agent <id> spawns an agent into it; --socket
                               <path> targets a non-default daemon. An argument
                               this verb does not know is refused, never ignored)
+  lazybox workspace archived  list the workspaces `x x` archived, each with the
+                              keys its row absorbed (they have no row and appear
+                              in no mailbox, so this is the only CLI view of them)
+  lazybox workspace unarchive <REF>
+                              drop an archived record's tombstone so its row can
+                              return (--key <workspace-key> for a raw key)
   lazybox snippet export <key>
                               write a snippet out as a portable SKILL.md so the
                               workflow travels to any agent that reads the format
@@ -875,7 +883,7 @@ fn terminal_selection_script(bundle_id: &str, terminal_tty: &str) -> Option<Stri
 /// into a strict parser.
 /// `lazybox workspace <verb>` — the agent-facing surface over the running
 /// daemon. Lets a spawned agent (or a script) drive lazybox itself, not just
-/// the repo. Today the only verb is `create`.
+/// the repo. Verbs: `create`, `archived`, `unarchive`.
 ///
 /// Errors print to stdout before they are returned, for the reason
 /// [`run_workspace_create`] documents: this runs after `init_tracing`, so an
@@ -899,11 +907,201 @@ async fn workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
 async fn run_workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("create") => run_workspace_create(&args[1..]).await,
+        Some("archived") => run_workspace_archived(&args[1..]).await,
+        Some("unarchive") => run_workspace_unarchive(&args[1..]).await,
         other => {
             anyhow::bail!(
-                "unknown `lazybox workspace` verb {:?}; usage: {WORKSPACE_CREATE_USAGE}",
+                "unknown `lazybox workspace` verb {:?}; usage: \
+                 {WORKSPACE_CREATE_USAGE}, {WORKSPACE_ARCHIVED_USAGE}, or \
+                 {WORKSPACE_UNARCHIVE_USAGE}",
                 other.unwrap_or("<none>"),
             );
+        }
+    }
+}
+
+const WORKSPACE_ARCHIVED_USAGE: &str = "lazybox workspace archived [--socket <path>]";
+
+const WORKSPACE_UNARCHIVE_USAGE: &str = "lazybox workspace unarchive \
+     (<owner/repo#N|URL|KEY> | --key <workspace-key>) [--repo <owner/repo>] \
+     [--socket <path>]";
+
+/// `lazybox workspace archived [--socket <path>]` — list the tombstones `x x`
+/// wrote (#1824).
+///
+/// An archived record has no row and appears in no mailbox: `x x` deletes the
+/// row, and the tombstone stops the next poll re-creating it. This is the CLI
+/// half of the archive browser (`x U`), and the only way to see the set from
+/// outside the TUI. Each line is a key, followed by the keys that row
+/// absorbed — a PR row stands in for the issues it closes, and an unarchive
+/// takes that whole set back out.
+async fn run_workspace_archived(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let socket_path = strict_value(&mut args, "--socket", WORKSPACE_ARCHIVED_USAGE)?
+        .map(PathBuf::from)
+        .unwrap_or_else(lifecycle::socket_path);
+    reject_unknown_arguments(&mut args, "archived", WORKSPACE_ARCHIVED_USAGE)?;
+    let mut client = connect_subscribed(&socket_path).await?;
+    client
+        .send(lazybox_ipc::Command::ListArchivedWorkspaces)
+        .map_err(|e| anyhow::anyhow!("send ListArchivedWorkspaces: {e}"))?;
+    let records = await_archived_set(&mut client).await?;
+    if records.is_empty() {
+        println!("Nothing archived.");
+        return Ok(());
+    }
+    for record in &records {
+        match record.absorbed.as_slice() {
+            [] => println!("{}", record.key),
+            absorbed => println!("{}  + {}", record.key, absorbed.join(", ")),
+        }
+    }
+    Ok(())
+}
+
+/// `lazybox workspace unarchive (<REF> | --key <workspace-key>) [--repo
+/// <owner/repo>] [--socket <path>]` — drop an archived record's tombstone so
+/// its row can come back (#1824).
+///
+/// Takes the record the way every other surface does (`owner/repo#N`, a
+/// GitHub URL, `#N` beside `--repo`, a Linear identifier) — the shape an
+/// agent that just hit "archived in lazybox" already holds — or `--key` for a
+/// raw workspace key as `workspace archived` prints it.
+///
+/// Removing the tombstone is what lets the record be materialized again; the
+/// row itself returns on the next poll, or immediately from a following
+/// `workspace create --issue <REF>`.
+async fn run_workspace_unarchive(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let explicit_key = strict_value(&mut args, "--key", WORKSPACE_UNARCHIVE_USAGE)?;
+    let repo = strict_value(&mut args, "--repo", WORKSPACE_UNARCHIVE_USAGE)?;
+    let socket_path = strict_value(&mut args, "--socket", WORKSPACE_UNARCHIVE_USAGE)?
+        .map(PathBuf::from)
+        .unwrap_or_else(lifecycle::socket_path);
+    // The reference is positional, so take it before the unknown-argument
+    // check — which then reports a mistyped flag rather than letting it read
+    // as the record.
+    let reference = args
+        .iter()
+        .position(|a| !a.starts_with("--") && !a.trim().is_empty())
+        .map(|pos| args.remove(pos).trim().to_string());
+    reject_unknown_arguments(&mut args, "unarchive", WORKSPACE_UNARCHIVE_USAGE)?;
+    let key = match (explicit_key, reference) {
+        (Some(key), _) => key.trim().to_string(),
+        (None, Some(reference)) => {
+            let anchor = lazybox_core::task_ref::parse_task_ref(&reference, repo.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not read {reference:?} as a tracker record — pass `owner/repo#N`, \
+                         a GitHub issue/PR URL, `#N` alongside --repo, a Linear identifier like \
+                         `ENG-45`, or --key <workspace-key> as `workspace archived` prints it; \
+                         usage: {WORKSPACE_UNARCHIVE_USAGE}"
+                    )
+                })?;
+            lazybox_core::workspace_key_for_id(&anchor)
+        }
+        (None, None) => anyhow::bail!(
+            "workspace unarchive needs a tracker record or --key; usage: \
+             {WORKSPACE_UNARCHIVE_USAGE}",
+        ),
+    };
+
+    let mut client = connect_subscribed(&socket_path).await?;
+    let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+    client
+        .send(lazybox_ipc::Command::UnarchiveWorkspace {
+            key: key.clone(),
+            client_request_id: Some(client_request_id.clone()),
+        })
+        .map_err(|e| anyhow::anyhow!("send UnarchiveWorkspace: {e}"))?;
+    await_correlated_ack(&mut client, &client_request_id, Duration::from_secs(10)).await?;
+    println!(
+        "Restored {key} — its row returns on the next poll; `lazybox workspace create` on the \
+         record brings it back now."
+    );
+    Ok(())
+}
+
+/// One flag of an archive verb, taken strictly: a `--flag` with nothing
+/// usable after it is refused rather than silently defaulted (the reason
+/// [`take_value_strict`] exists — a dropped `--socket` talks to the wrong
+/// daemon while reporting success).
+fn strict_value(args: &mut Vec<String>, flag: &str, usage: &str) -> anyhow::Result<Option<String>> {
+    match take_value_strict(args, flag) {
+        FlagValue::Absent => Ok(None),
+        FlagValue::Value(value) => Ok(Some(value)),
+        FlagValue::Dangling => Err(anyhow::anyhow!("{flag} needs a value; usage: {usage}")),
+    }
+}
+
+/// Refuse whatever this verb did not consume. Same contract as
+/// `workspace create`: a typo accepted in silence is how `--sockett` looks
+/// exactly like a command that reached the daemon you meant. An empty argv
+/// element carries no instruction, so it is dropped rather than refused.
+fn reject_unknown_arguments(args: &mut Vec<String>, verb: &str, usage: &str) -> anyhow::Result<()> {
+    args.retain(|arg| !arg.trim().is_empty());
+    if args.is_empty() {
+        return Ok(());
+    }
+    let leftovers: Vec<String> = args.iter().map(|arg| format!("{arg:?}")).collect();
+    anyhow::bail!(
+        "unknown workspace {verb} argument(s): {}; usage: {usage}",
+        leftovers.join(", "),
+    )
+}
+
+/// Connect to the daemon and wait out the post-`Subscribe` snapshot, so a
+/// correlated reply can't race ahead of the live stream.
+async fn connect_subscribed(socket_path: &std::path::Path) -> anyhow::Result<lazybox_ipc::Client> {
+    let (mut client, _peer) = socket::connect(socket_path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "connect to daemon at {}: {e} (is lazybox running?)",
+            socket_path.display(),
+        )
+    })?;
+    client
+        .send(lazybox_ipc::Command::Subscribe)
+        .map_err(|e| anyhow::anyhow!("subscribe to daemon: {e}"))?;
+    await_workspace_snapshot(&mut client).await?;
+    Ok(client)
+}
+
+/// Wait for the daemon's archived-set broadcast.
+async fn await_archived_set(
+    client: &mut lazybox_ipc::Client,
+) -> anyhow::Result<Vec<lazybox_ipc::ArchivedWorkspaceRecord>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::ArchivedWorkspaces { records })) => return Ok(records),
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("daemon closed the connection before answering"),
+            Err(_) => anyhow::bail!("timed out waiting for the archived set"),
+        }
+    }
+}
+
+/// Wait for the `CommandCompleted` / `CommandFailed` pair a correlated
+/// command answers with, so the CLI never prints success for a write the
+/// daemon refused.
+async fn await_correlated_ack(
+    client: &mut lazybox_ipc::Client,
+    client_request_id: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::CommandCompleted {
+                client_request_id: id,
+            })) if id == client_request_id => return Ok(()),
+            Ok(Some(lazybox_ipc::Event::CommandFailed {
+                client_request_id: id,
+                message,
+            })) if id == client_request_id => anyhow::bail!("{message}"),
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("daemon closed the connection before answering"),
+            Err(_) => anyhow::bail!("timed out waiting for the daemon to answer"),
         }
     }
 }
@@ -3492,6 +3690,52 @@ mod argv_tests {
                 "`lazybox --help` must name `{flag}` too, or the refusal points nowhere"
             );
         }
+    }
+
+    #[test]
+    fn the_archive_verbs_refuse_what_they_do_not_understand() {
+        // Same contract as `workspace create` (#1875): a mistyped flag
+        // accepted in silence is how `--sockett` looks exactly like a command
+        // that reached the daemon you meant, and a dangling `--key` would
+        // unarchive nothing while reporting success.
+        let mut leftovers = args(&["--sockett", "/tmp/s"]);
+        let refusal =
+            reject_unknown_arguments(&mut leftovers, "archived", WORKSPACE_ARCHIVED_USAGE)
+                .expect_err("an unknown flag must be refused, not ignored")
+                .to_string();
+        assert!(refusal.contains("--sockett"), "{refusal}");
+        assert!(refusal.contains(WORKSPACE_ARCHIVED_USAGE), "{refusal}");
+
+        // An empty argv element carries no instruction to honor or ignore, so
+        // a wrapper passing a quoted-but-unset "$EXTRA" keeps working.
+        let mut blank = args(&["", "  "]);
+        assert!(
+            reject_unknown_arguments(&mut blank, "unarchive", WORKSPACE_UNARCHIVE_USAGE).is_ok()
+        );
+
+        let mut dangling = args(&["--key"]);
+        let refusal = strict_value(&mut dangling, "--key", WORKSPACE_UNARCHIVE_USAGE)
+            .expect_err("a flag with no value must be refused, never defaulted")
+            .to_string();
+        assert!(refusal.contains("--key needs a value"), "{refusal}");
+    }
+
+    #[test]
+    fn help_and_usage_agree_on_the_archive_verb_flags() {
+        assert!(
+            WORKSPACE_ARCHIVED_USAGE.contains("--socket"),
+            "usage must name `--socket`: {WORKSPACE_ARCHIVED_USAGE}"
+        );
+        for flag in ["--key", "--repo", "--socket"] {
+            assert!(
+                WORKSPACE_UNARCHIVE_USAGE.contains(flag),
+                "usage must name `{flag}`: {WORKSPACE_UNARCHIVE_USAGE}"
+            );
+        }
+        // The help screen has to name both verbs, or the refusal above points
+        // the caller at a command they cannot look up.
+        assert!(HELP.contains("workspace archived"), "{HELP}");
+        assert!(HELP.contains("workspace unarchive"), "{HELP}");
     }
 
     #[test]

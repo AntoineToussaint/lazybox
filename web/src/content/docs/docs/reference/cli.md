@@ -321,6 +321,28 @@ itself. A dropped flag is indistinguishable from an honored one: `--tier
 xhigh` used to report success and start the agent on its default model. There
 is no tier flag — put a `model:<token>` label on the record instead.
 
+`x x` archives a workspace: the row is deleted and the key tombstoned, so the
+next poll skips it and the record appears in no mailbox. These two verbs are
+what reverse it (the TUI's archive browser, `x U`, is the same surface).
+
+```bash
+lazybox workspace archived
+lazybox workspace unarchive owner/repo#40
+```
+
+| Command / option | Effect |
+| --- | --- |
+| `workspace archived` | List the archived keys, each followed by the keys its row absorbed |
+| `workspace unarchive <ref>` | Drop that record's tombstone: `owner/repo#N`, a GitHub URL, `#N` beside `--repo`, or a Linear key |
+| `--key <workspace-key>` | Name a raw workspace key instead, as `workspace archived` prints it |
+| `--repo <owner/repo>` | Repo used to resolve the bare `#N` / `N` forms |
+| `--socket <path>` | Daemon socket to send to (defaults to the standard socket) |
+
+A PR row stands in for the issues it closes, so archiving it tombstones them
+too; restoring the PR key takes that whole set back out. The row itself returns
+on the next poll — or immediately from a following `workspace create --issue
+<ref>`, which an archived record refuses outright.
+
 ## `lazybox task status`
 
 Answers **"is anyone working on `owner/repo#N`?"** — the supported lookup for a

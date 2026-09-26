@@ -1360,6 +1360,8 @@ impl Server {
                         lazybox_ipc::Command::GhAdmit { .. } => "GhAdmit",
                         lazybox_ipc::Command::GhCompleted { .. } => "GhCompleted",
                         lazybox_ipc::Command::SearchAgentOutput { .. } => "SearchAgentOutput",
+                        lazybox_ipc::Command::ListArchivedWorkspaces => "ListArchivedWorkspaces",
+                        lazybox_ipc::Command::UnarchiveWorkspace { .. } => "UnarchiveWorkspace",
                         lazybox_ipc::Command::SetMetered { .. } => "SetMetered",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
                         lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
@@ -3170,6 +3172,15 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::UpdateAgentClis => {
             agent_updates::handle_update_all(config);
+        }
+        lazybox_ipc::Command::ListArchivedWorkspaces => {
+            workspace::broadcast_archived(config);
+        }
+        lazybox_ipc::Command::UnarchiveWorkspace {
+            key,
+            client_request_id,
+        } => {
+            workspace::handle_unarchive(config, &key, client_request_id);
         }
         lazybox_ipc::Command::ListErrors => {
             error_inbox::handle_list(config).await;

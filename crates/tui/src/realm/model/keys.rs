@@ -3253,6 +3253,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
         ActionKind::OpenMessages => Action::OpenMessages,
         ActionKind::OpenErrorInbox => Action::OpenErrorInbox,
+        ActionKind::OpenArchive => Action::OpenArchive,
         ActionKind::OpenStats => Action::OpenStats,
         ActionKind::OpenHopper => Action::OpenHopper,
         // DismissNotice is deliberately absent: it's routed through the

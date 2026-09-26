@@ -427,6 +427,61 @@ mod effects_tests {
         ));
     }
 
+    /// #1824: `x x` deletes the row and tombstones the key, so an archived
+    /// record is in no mailbox. The browser is the only surface that shows
+    /// the set, and its restore is the only caller of the daemon's
+    /// unarchive — so the round trip (ask → repaint → restore) is what makes
+    /// `x x` reversible at all.
+    #[test]
+    fn archive_browser_lists_the_tombstones_and_restores_one() {
+        use lazybox_tui_core::action::Action;
+
+        let (client, mut server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        m.handle_daemon_event(empty_snapshot());
+        while server.rx.try_recv().is_ok() {}
+
+        m.dispatch_action(&Action::OpenArchive);
+        assert_eq!(m.top_modal(), Some(&Id::ArchiveBrowser));
+        assert!(
+            std::iter::from_fn(|| server.rx.try_recv().ok())
+                .any(|cmd| matches!(cmd, IpcCommand::ListArchivedWorkspaces)),
+            "opening the browser asks the daemon for the archived set",
+        );
+
+        m.handle_daemon_event(lazybox_ipc::Event::ArchivedWorkspaces {
+            records: vec![lazybox_ipc::ArchivedWorkspaceRecord {
+                key: "github-o-r-42".into(),
+                absorbed: vec!["github-o-r-40".into()],
+            }],
+        });
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::ArchiveBrowser),
+            "the snapshot repaints the browser rather than closing it",
+        );
+
+        // `u` on the row restores the whole set the row stands for; the
+        // daemon's refreshed broadcast is what reports the outcome.
+        m.dispatch_modal_key(tuirealm::event::KeyEvent::new(
+            tuirealm::event::Key::Char('u'),
+            tuirealm::event::KeyModifiers::NONE,
+        ));
+        let restored = std::iter::from_fn(|| server.rx.try_recv().ok()).find_map(|cmd| match cmd {
+            IpcCommand::UnarchiveWorkspace { key, .. } => Some(key),
+            _ => None,
+        });
+        assert_eq!(restored.as_deref(), Some("github-o-r-42"));
+    }
+
+    /// A snapshot that lands after the browser closed must not re-mount it.
+    #[test]
+    fn a_late_archived_snapshot_does_not_reopen_the_browser() {
+        let mut m = build_model();
+        m.handle_daemon_event(lazybox_ipc::Event::ArchivedWorkspaces { records: vec![] });
+        assert!(m.top_modal().is_none());
+    }
+
     /// The empty-inbox doctor's sync facts must track real poll events end
     /// to end (#1461): an auth error makes the empty inbox a sign-in
     /// problem, and a *later* successful poll for the same provider must
@@ -9283,6 +9338,11 @@ mod stale_input_tests {
                 | Id::Messages
                 | Id::Legend
                 | Id::ErrorInbox
+                // The archive browser's one immediate key (`u`) restores a
+                // row — reversible (`x x` re-archives it), but classified
+                // drop with the other read-only overlays: a stale buffered
+                // key needn't reach it.
+                | Id::ArchiveBrowser
                 | Id::Stats
                 | Id::InspectLoading
                 | Id::WorktreeProgress
@@ -9355,6 +9415,7 @@ mod stale_input_tests {
             Id::SyncStatus,
             Id::Messages,
             Id::ErrorInbox,
+            Id::ArchiveBrowser,
             Id::ErrorInboxClearConfirm,
             Id::WorktreeProgress,
             Id::JumpPicker,

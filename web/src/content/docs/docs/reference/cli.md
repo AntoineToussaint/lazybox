@@ -291,24 +291,35 @@ The agent-facing surface over the running daemon: lets a spawned agent (or a
 script) create a workspace in lazybox itself, not just act on the repo.
 
 ```bash
-lazybox workspace create --name "spike auth" --repo owner/repo --agent claude
+lazybox workspace create --issue owner/repo#7 --agent claude
+lazybox workspace create --name "spike auth" --scratch --repo owner/repo
 ```
 
 | Command / option | Effect |
 | --- | --- |
-| `workspace create` | Create a taskless pre-PR workspace by sending `CreateWorkspace` to the daemon |
-| `--name <name>` | Workspace display name. Required (non-empty). |
+| `workspace create` | Attach to a tracker record's workspace — or create a scratch one — by sending `CreateWorkspace` to the daemon |
+| `--issue` / `--pr` / `--ticket <ref>` | The record to attach to: `owner/repo#N`, a GitHub issue/PR URL, `#N` beside `--repo`, or a Linear key like `ENG-45`. Three names for one flag, each reading better at its call site |
+| `--name <name>` | Workspace display name, for repo-less scratch work. Not combinable with a record |
+| `--scratch` | Allow a bare `--name` under a tracker-backed project — it says this really is scratch work with no record behind it |
 | `--project <key>` | Target an existing project by key |
 | `--repo <owner/repo>` | Target a repo (an alternative to `--project`) |
-| `--agent <id>` | Spawn this agent into the fresh workspace so a live session lands in it |
+| `--agent <id>` | Spawn this agent into the resolved workspace so a live session lands in it |
 | `--cwd <path>` | Directory used to infer the project when neither `--project` nor `--repo` is given (default: the process cwd) |
 | `--socket <path>` | Daemon socket to send to (defaults to the standard socket) |
 
 The project resolves from `--project` / `--repo`, else it is inferred from the
-checkout at `--cwd` — so an agent running inside a worktree needs only `--name`.
-Unlike fire-and-forget hooks, a failure exits non-zero: the caller asked for a
-workspace and is told if the daemon was unreachable or the project couldn't be
-resolved.
+checkout at `--cwd` — so an agent running inside a worktree needs only the
+record. Unlike fire-and-forget hooks, a failure exits non-zero: the caller
+asked for a workspace and is told if the daemon was unreachable or the project
+couldn't be resolved. The message goes to **stdout**, because `lazybox`
+redirects its own stderr into the log file.
+
+**This verb refuses an argument it does not know**, rather than ignoring it —
+including a flag that is given with no value, and the launch flags (`--fresh`,
+`--test`, `--demo`, `--workspace`, `--session`) that belong to `lazybox`
+itself. A dropped flag is indistinguishable from an honored one: `--tier
+xhigh` used to report success and start the agent on its default model. There
+is no tier flag — put a `model:<token>` label on the record instead.
 
 ## `lazybox task status`
 

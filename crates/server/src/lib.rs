@@ -1387,6 +1387,7 @@ impl Server {
                         lazybox_ipc::Command::FetchRepoMergeHistory { .. } => {
                             "FetchRepoMergeHistory"
                         }
+                        lazybox_ipc::Command::FetchArtifact { .. } => "FetchArtifact",
                         lazybox_ipc::Command::SetSessionLayout { .. } => "SetSessionLayout",
                         lazybox_ipc::Command::StartAgentRun { .. } => "StartAgentRun",
                         lazybox_ipc::Command::SendAgentInput { .. } => "SendAgentInput",
@@ -2341,6 +2342,7 @@ pub async fn dispatch_command(
                     workspace_key,
                     artifacts: found.artifacts,
                     hidden: found.hidden,
+                    unlisted: found.unlisted,
                 });
             }
             // Keep the auto-fix policy as the last post-subscribe push so
@@ -3132,6 +3134,13 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::FetchRepoMergeHistory { repo } => {
             polling::handle_fetch_repo_merge_history(config, repo).await;
+        }
+        lazybox_ipc::Command::FetchArtifact {
+            workspace_key,
+            worktree,
+            name,
+        } => {
+            artifacts::fetch(config, workspace_key, &worktree, &name).await;
         }
         lazybox_ipc::Command::CleanWorktrees => {
             polling::handle_clean_worktrees(config).await;

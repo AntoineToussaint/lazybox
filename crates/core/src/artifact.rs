@@ -21,6 +21,21 @@
 //! from the body, since the reader paints it in the frame — and otherwise the
 //! file stem. An agent that knows nothing about this format still produces a
 //! correctly-titled artifact by writing ordinary markdown.
+//!
+//! ## Which spool, and which artifact (#1855)
+//!
+//! A workspace with two sessions has two worktrees and so two spools. A file
+//! name is unique within one spool and not within the workspace, so
+//! [`Artifact::name`] alone cannot name an artifact and two `plan.md` files
+//! render as two identical headings. Every artifact therefore carries the
+//! [`Artifact::worktree`] it came from, `(worktree, name)` is the identity a
+//! picker selects by, and [`qualified_titles`] adds a qualifier to exactly the
+//! labels that would otherwise collide.
+//!
+//! The bounds below cap what one broadcast carries, which used to mean the
+//! artifacts past them were named in a count and reachable by nothing. They
+//! are now carried as [`ArtifactRef`]s — name and title, no body — so the
+//! picker lists every artifact in the spool and the body is read on demand.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -60,13 +75,42 @@ pub const ARTIFACT_MAX_PER_WORKSPACE: usize = 24;
 /// count cap does.
 pub const ARTIFACT_MAX_TOTAL_BYTES: usize = 1024 * 1024;
 
+/// Longest reader title carried, in characters.
+///
+/// A title is a markdown heading line, which nothing bounds: a file whose
+/// first line is `# ` followed by 200 KiB of prose has a 200 KiB title. That
+/// was harmless while the title only ever rode alongside its own body, and is
+/// not once [`ArtifactRef`] carries titles *without* bodies — the index's size
+/// would be set by the worst heading in the spool. Truncated with an ellipsis
+/// rather than rejected: a long heading is still the best name the file has.
+pub const ARTIFACT_MAX_TITLE_CHARS: usize = 120;
+
+/// Most artifacts one workspace's index names — the bodies it carries
+/// ([`ARTIFACT_MAX_PER_WORKSPACE`]) plus the [`ArtifactRef`]s past them.
+///
+/// The refs are what make a capped-out artifact reachable, so this is the
+/// bound on reachability itself and is deliberately far above the body caps:
+/// a ref is a few hundred bytes, so naming every artifact in a spool costs a
+/// fraction of one carried document. Past it the remainder is still *counted*
+/// (`unlisted`), because a channel an agent writes to unprompted must never
+/// let a file vanish silently.
+pub const ARTIFACT_MAX_INDEXED: usize = 256;
+
 /// One markdown document an agent spooled for its workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct Artifact {
-    /// Spool file name (`plan.md`) — the artifact's identity within a
-    /// workspace, so rewriting the same file replaces rather than appends.
+    /// Spool file name (`plan.md`) — unique within one spool, so rewriting
+    /// the same file replaces rather than appends. Not unique within a
+    /// *workspace*: see [`Self::worktree`].
     pub name: String,
+    /// Directory name of the worktree whose spool this came from.
+    ///
+    /// A workspace with two sessions has two worktrees, so `(worktree, name)`
+    /// rather than `name` is what identifies an artifact within a workspace —
+    /// the key a picker selects by, and what tells two `plan.md` files apart
+    /// in the reader (#1855).
+    pub worktree: String,
     /// Reader title: the leading `# …` heading, else the humanised stem.
     pub title: String,
     /// Markdown body, with the title heading removed when it supplied the
@@ -79,13 +123,15 @@ pub struct Artifact {
 impl Artifact {
     /// Parse one spool file into the title/body pair the reader needs.
     pub fn from_markdown(
+        worktree: impl Into<String>,
         name: impl Into<String>,
         contents: &str,
         written_at: DateTime<Utc>,
     ) -> Self {
-        let name = name.into();
+        let (worktree, name) = (worktree.into(), name.into());
         match leading_heading(contents) {
             Some((title, rest)) => Self {
+                worktree,
                 name,
                 title,
                 body: rest,
@@ -93,10 +139,22 @@ impl Artifact {
             },
             None => Self {
                 title: humanise_stem(&name),
+                worktree,
                 name,
                 body: contents.trim_start_matches('\n').to_string(),
                 written_at,
             },
+        }
+    }
+
+    /// The `(worktree, name)` pair that identifies this artifact within its
+    /// workspace, as [`ArtifactRef`] carries it.
+    pub fn as_ref(&self) -> ArtifactRef {
+        ArtifactRef {
+            worktree: self.worktree.clone(),
+            name: self.name.clone(),
+            title: self.title.clone(),
+            written_at: self.written_at,
         }
     }
 
@@ -107,7 +165,12 @@ impl Artifact {
     /// writes to unprompted, so a file that is present but unreadable has to
     /// say so. Logging it and dropping it reads to the user as lazybox never
     /// having noticed, which is the one outcome this channel must not have.
-    pub fn unreadable(name: impl Into<String>, reason: &str, written_at: DateTime<Utc>) -> Self {
+    pub fn unreadable(
+        worktree: impl Into<String>,
+        name: impl Into<String>,
+        reason: &str,
+        written_at: DateTime<Utc>,
+    ) -> Self {
         let name = name.into();
         let body = format!(
             "lazybox could not read this artifact: {reason}\n\nIt is in the worktree at \
@@ -115,6 +178,7 @@ impl Artifact {
         );
         Self {
             title: humanise_stem(&name),
+            worktree: worktree.into(),
             name,
             body,
             written_at,
@@ -125,7 +189,12 @@ impl Artifact {
     /// ([`ARTIFACT_MAX_BYTES`]). Attached in the file's place so the user
     /// learns the artifact exists and where to read it, rather than being
     /// shown nothing.
-    pub fn oversized(name: impl Into<String>, bytes: u64, written_at: DateTime<Utc>) -> Self {
+    pub fn oversized(
+        worktree: impl Into<String>,
+        name: impl Into<String>,
+        bytes: u64,
+        written_at: DateTime<Utc>,
+    ) -> Self {
         let name = name.into();
         let body = format!(
             "This artifact is {bytes} bytes, past lazybox's {ARTIFACT_MAX_BYTES}-byte limit, so \
@@ -134,11 +203,110 @@ its contents are not shown here.\n\nRead it in the worktree at \
         );
         Self {
             title: humanise_stem(&name),
+            worktree: worktree.into(),
             name,
             body,
             written_at,
         }
     }
+}
+
+/// One artifact named without its body — what the picker lists (#1855).
+///
+/// The body caps bound what a broadcast carries; a ref is what makes the
+/// artifacts past them reachable anyway. The reader gets the body by asking
+/// the daemon for this `(worktree, name)`, which is also the pick's payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ArtifactRef {
+    /// Directory name of the worktree whose spool holds the file.
+    pub worktree: String,
+    /// Spool file name (`plan.md`).
+    pub name: String,
+    /// Reader title, as [`Artifact::title`] derives it.
+    pub title: String,
+    /// The spool file's modification time, as the daemon last read it.
+    pub written_at: DateTime<Utc>,
+}
+
+impl From<&Artifact> for ArtifactRef {
+    fn from(artifact: &Artifact) -> Self {
+        artifact.as_ref()
+    }
+}
+
+/// What one workspace's spools currently hold, as the daemon last read them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceArtifacts {
+    /// Carried with their bodies, newest first, within the body caps.
+    pub artifacts: Vec<Artifact>,
+    /// Every artifact past those caps, newest first, named but not carried —
+    /// the picker's remaining rows, fetched on demand.
+    pub hidden: Vec<ArtifactRef>,
+    /// How many artifacts [`ARTIFACT_MAX_INDEXED`] left out of `hidden`
+    /// entirely. Counted rather than forgotten, the same rule the body caps
+    /// follow.
+    pub unlisted: usize,
+}
+
+impl WorkspaceArtifacts {
+    /// Every artifact the picker can offer, newest first: the carried ones
+    /// named, then the rest.
+    pub fn index(&self) -> Vec<ArtifactRef> {
+        self.artifacts
+            .iter()
+            .map(ArtifactRef::from)
+            .chain(self.hidden.iter().cloned())
+            .collect()
+    }
+
+    /// How many artifacts the workspace has, including the ones no body and
+    /// no ref was carried for — what the row badge counts.
+    pub fn total(&self) -> usize {
+        self.artifacts.len() + self.hidden.len() + self.unlisted
+    }
+
+    /// How many the combined reader document is not showing.
+    pub fn not_shown(&self) -> usize {
+        self.hidden.len() + self.unlisted
+    }
+}
+
+/// Reader labels for `entries`, qualified only where they would collide.
+///
+/// A title is a markdown heading, and nothing stops two artifacts from
+/// sharing one — two worktrees of a workspace each holding `plan.md`, or one
+/// agent writing `plan.md` and `plan-v2.md` both opening `# The plan`. A
+/// picker listing two identical rows, or a document with two identical
+/// headings, cannot be acted on (#1855).
+///
+/// So each label escalates only as far as it must: the bare title, else the
+/// title and the file that differs, else the title and the full
+/// `worktree/name` identity. A workspace with one spool and distinct titles —
+/// the ordinary case — is left exactly as it reads today.
+pub fn qualified_titles(entries: &[ArtifactRef]) -> Vec<String> {
+    use std::collections::HashMap;
+    let mut by_title: HashMap<&str, usize> = HashMap::new();
+    let mut by_file: HashMap<(&str, &str), usize> = HashMap::new();
+    for entry in entries {
+        *by_title.entry(entry.title.as_str()).or_default() += 1;
+        *by_file
+            .entry((entry.title.as_str(), entry.name.as_str()))
+            .or_default() += 1;
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let title = entry.title.as_str();
+            if by_title.get(title) == Some(&1) {
+                entry.title.clone()
+            } else if by_file.get(&(title, entry.name.as_str())) == Some(&1) {
+                format!("{title} · {}", entry.name)
+            } else {
+                format!("{title} · {}/{}", entry.worktree, entry.name)
+            }
+        })
+        .collect()
 }
 
 /// The `(title, body)` pair the markdown reader opens for a workspace's
@@ -147,32 +315,40 @@ its contents are not shown here.\n\nRead it in the worktree at \
 /// One artifact opens under its own title. Several open as one document,
 /// newest first, each under its own `#` heading — the reader already
 /// scrolls, and a set of artifacts from one session is read together far
-/// more often than one is picked out of it. `hidden` is the count past
-/// [`ARTIFACT_MAX_PER_WORKSPACE`], named in a closing line so a truncated
-/// set never reads as the whole set.
+/// more often than one is picked out of it. Headings come from
+/// [`qualified_titles`], so two artifacts that share a title are told apart
+/// rather than repeated.
+///
+/// `not_shown` is how many artifacts the body caps left out of this document
+/// ([`WorkspaceArtifacts::not_shown`]). They are named in a closing line
+/// which points at the picker `picker_keys` opens — each of them is listed
+/// there and can be read, so the line is a route rather than the dead end a
+/// bare count was (#1855).
 pub fn artifact_document(
     workspace_name: &str,
     artifacts: &[Artifact],
-    hidden: usize,
+    not_shown: usize,
+    picker_keys: &str,
 ) -> Option<(String, String)> {
     let (first, rest) = artifacts.split_first()?;
-    let footer = (hidden > 0).then(|| {
+    let footer = (not_shown > 0).then(|| {
         format!(
-            "\n\n---\n\n*{hidden} older artifact(s) not shown — the newest \
-{ARTIFACT_MAX_PER_WORKSPACE} are listed. All of them are in the worktree at \
+            "\n\n---\n\n*{not_shown} older artifact(s) not shown here. `{picker_keys}` lists \
+every artifact in this workspace and opens the one you pick; they are also in the worktree at \
 `{ARTIFACT_SPOOL_RELATIVE_PATH}/`.*"
         )
     });
+    let headings = qualified_titles(&artifacts.iter().map(ArtifactRef::from).collect::<Vec<_>>());
     if rest.is_empty() && footer.is_none() {
-        return Some((first.title.clone(), first.body.clone()));
+        return Some((headings[0].clone(), first.body.clone()));
     }
     let mut body = String::new();
-    for artifact in artifacts {
+    for (artifact, heading) in artifacts.iter().zip(&headings) {
         if !body.is_empty() {
             body.push_str("\n\n");
         }
         body.push_str("# ");
-        body.push_str(&artifact.title);
+        body.push_str(heading);
         body.push_str("\n\n");
         body.push_str(&close_unterminated_fence(artifact.body.trim()));
     }
@@ -180,7 +356,7 @@ pub fn artifact_document(
         body.push_str(&footer);
     }
     let title = if rest.is_empty() {
-        first.title.clone()
+        headings[0].clone()
     } else {
         format!("{} artifacts · {workspace_name}", artifacts.len())
     };
@@ -249,7 +425,16 @@ fn leading_heading(contents: &str) -> Option<(String, String)> {
         .split_once(first)
         .map(|(_, after)| after.trim_start_matches('\n').to_string())
         .unwrap_or_default();
-    Some((title.to_string(), rest))
+    Some((clamp_title(title), rest))
+}
+
+/// Hold a title to [`ARTIFACT_MAX_TITLE_CHARS`], counting characters rather
+/// than bytes so the cut never lands inside one.
+fn clamp_title(title: &str) -> String {
+    match title.char_indices().nth(ARTIFACT_MAX_TITLE_CHARS) {
+        Some((cut, _)) => format!("{}…", title[..cut].trim_end()),
+        None => title.to_string(),
+    }
 }
 
 /// `design-notes.md` → `design notes`. The fallback title when the file
@@ -261,9 +446,9 @@ fn humanise_stem(name: &str) -> String {
     let humanised = stem.replace(['-', '_'], " ");
     let humanised = humanised.trim();
     if humanised.is_empty() {
-        name.to_string()
+        clamp_title(name)
     } else {
-        humanised.to_string()
+        clamp_title(humanised)
     }
 }
 
@@ -279,14 +464,14 @@ mod tests {
 
     #[test]
     fn leading_heading_becomes_the_title_and_leaves_the_body() {
-        let a = Artifact::from_markdown("plan.md", "# The plan\n\nStep one.\n", at());
+        let a = Artifact::from_markdown("wt", "plan.md", "# The plan\n\nStep one.\n", at());
         assert_eq!(a.title, "The plan");
         assert_eq!(a.body, "Step one.\n");
     }
 
     #[test]
     fn blank_lines_before_the_heading_do_not_hide_it() {
-        let a = Artifact::from_markdown("plan.md", "\n\n# Title\n\nbody\n", at());
+        let a = Artifact::from_markdown("wt", "plan.md", "\n\n# Title\n\nbody\n", at());
         assert_eq!(a.title, "Title");
         assert_eq!(a.body, "body\n");
     }
@@ -295,7 +480,8 @@ mod tests {
     fn a_heading_further_down_is_body_not_title() {
         // Retitling an artifact with its second section would be worse than
         // no title at all — the stem is at least honest about the file.
-        let a = Artifact::from_markdown("review-notes.md", "Intro line.\n\n# Section\n", at());
+        let a =
+            Artifact::from_markdown("wt", "review-notes.md", "Intro line.\n\n# Section\n", at());
         assert_eq!(a.title, "review notes");
         assert!(a.body.contains("# Section"));
         assert!(a.body.starts_with("Intro line."));
@@ -303,20 +489,20 @@ mod tests {
 
     #[test]
     fn a_deeper_heading_is_not_a_title() {
-        let a = Artifact::from_markdown("x.md", "## Sub\n\nbody\n", at());
+        let a = Artifact::from_markdown("wt", "x.md", "## Sub\n\nbody\n", at());
         assert_eq!(a.title, "x");
         assert!(a.body.starts_with("## Sub"));
     }
 
     #[test]
     fn an_empty_heading_falls_back_to_the_stem() {
-        let a = Artifact::from_markdown("notes.md", "#\n\nbody\n", at());
+        let a = Artifact::from_markdown("wt", "notes.md", "#\n\nbody\n", at());
         assert_eq!(a.title, "notes");
     }
 
     #[test]
     fn oversized_names_the_file_and_the_limit() {
-        let a = Artifact::oversized("huge.md", ARTIFACT_MAX_BYTES + 1, at());
+        let a = Artifact::oversized("wt", "huge.md", ARTIFACT_MAX_BYTES + 1, at());
         assert_eq!(a.title, "huge");
         assert!(a.body.contains(".lazybox/artifacts/huge.md"));
         assert!(a.body.contains(&ARTIFACT_MAX_BYTES.to_string()));
@@ -324,17 +510,18 @@ mod tests {
 
     #[test]
     fn one_artifact_opens_under_its_own_title() {
-        let a = Artifact::from_markdown("plan.md", "# The plan\n\nStep one.\n", at());
-        let (title, body) = artifact_document("ws", std::slice::from_ref(&a), 0).expect("document");
+        let a = Artifact::from_markdown("wt", "plan.md", "# The plan\n\nStep one.\n", at());
+        let (title, body) =
+            artifact_document("ws", std::slice::from_ref(&a), 0, "a P").expect("document");
         assert_eq!(title, "The plan");
         assert_eq!(body, "Step one.\n");
     }
 
     #[test]
     fn several_artifacts_open_as_one_titled_document() {
-        let a = Artifact::from_markdown("plan.md", "# Plan\n\nStep one.\n", at());
-        let b = Artifact::from_markdown("findings.md", "# Findings\n\nIt works.\n", at());
-        let (title, body) = artifact_document("issue-7", &[a, b], 0).expect("document");
+        let a = Artifact::from_markdown("wt", "plan.md", "# Plan\n\nStep one.\n", at());
+        let b = Artifact::from_markdown("wt", "findings.md", "# Findings\n\nIt works.\n", at());
+        let (title, body) = artifact_document("issue-7", &[a, b], 0, "a P").expect("document");
         assert_eq!(title, "2 artifacts · issue-7");
         assert!(body.starts_with("# Plan\n\nStep one."));
         assert!(body.contains("# Findings\n\nIt works."));
@@ -342,9 +529,14 @@ mod tests {
 
     #[test]
     fn hidden_artifacts_are_named_rather_than_silently_dropped() {
-        let a = Artifact::from_markdown("plan.md", "# Plan\n\nStep one.\n", at());
-        let (_, body) = artifact_document("ws", &[a], 3).expect("document");
+        let a = Artifact::from_markdown("wt", "plan.md", "# Plan\n\nStep one.\n", at());
+        let (_, body) = artifact_document("ws", &[a], 3, "x Y").expect("document");
         assert!(body.contains("3 older artifact(s) not shown"), "{body}");
+        // The count used to be the end of the road. It now names the chord
+        // that lists every one of them.
+        // Quoted from the argument, not a chord core knows: the caller
+        // resolves the user's own keymap.
+        assert!(body.contains("`x Y` lists"), "{body}");
     }
 
     #[test]
@@ -352,9 +544,10 @@ mod tests {
         // Per CommonMark an unclosed fence runs to end-of-document, so
         // concatenating bodies let one artifact caught mid-write hide every
         // artifact after it — and the hidden-count footer with them.
-        let broken = Artifact::from_markdown("broken.md", "# Broken\n\n```rust\nfn x() {}\n", at());
-        let intact = Artifact::from_markdown("intact.md", "# Intact\n\nVisible.\n", at());
-        let (_, body) = artifact_document("ws", &[broken, intact], 2).expect("document");
+        let broken =
+            Artifact::from_markdown("wt", "broken.md", "# Broken\n\n```rust\nfn x() {}\n", at());
+        let intact = Artifact::from_markdown("wt", "intact.md", "# Intact\n\nVisible.\n", at());
+        let (_, body) = artifact_document("ws", &[broken, intact], 2, "a P").expect("document");
         let after_fence = body
             .split("# Intact")
             .nth(1)
@@ -371,23 +564,23 @@ mod tests {
 
     #[test]
     fn a_properly_closed_fence_is_left_alone() {
-        let closed = Artifact::from_markdown("a.md", "# A\n\n```\ncode\n```\n", at());
-        let other = Artifact::from_markdown("b.md", "# B\n\nx\n", at());
-        let (_, body) = artifact_document("ws", &[closed, other], 0).expect("document");
+        let closed = Artifact::from_markdown("wt", "a.md", "# A\n\n```\ncode\n```\n", at());
+        let other = Artifact::from_markdown("wt", "b.md", "# B\n\nx\n", at());
+        let (_, body) = artifact_document("ws", &[closed, other], 0, "a P").expect("document");
         assert_eq!(body.matches("```").count(), 2, "no fence was added: {body}");
     }
 
     #[test]
     fn a_tilde_fence_is_closed_with_tildes() {
-        let broken = Artifact::from_markdown("a.md", "# A\n\n~~~~\ncode\n", at());
-        let other = Artifact::from_markdown("b.md", "# B\n\nx\n", at());
-        let (_, body) = artifact_document("ws", &[broken, other], 0).expect("document");
+        let broken = Artifact::from_markdown("wt", "a.md", "# A\n\n~~~~\ncode\n", at());
+        let other = Artifact::from_markdown("wt", "b.md", "# B\n\nx\n", at());
+        let (_, body) = artifact_document("ws", &[broken, other], 0, "a P").expect("document");
         assert!(body.contains("~~~~\ncode\n~~~~"), "{body}");
     }
 
     #[test]
     fn unreadable_names_the_file_and_the_reason() {
-        let a = Artifact::unreadable("junk.md", "stream did not contain valid UTF-8", at());
+        let a = Artifact::unreadable("wt", "junk.md", "stream did not contain valid UTF-8", at());
         assert_eq!(a.title, "junk");
         assert!(a.body.contains(".lazybox/artifacts/junk.md"));
         assert!(a.body.contains("valid UTF-8"));
@@ -395,6 +588,110 @@ mod tests {
 
     #[test]
     fn no_artifacts_opens_nothing() {
-        assert!(artifact_document("ws", &[], 0).is_none());
+        assert!(artifact_document("ws", &[], 0, "a P").is_none());
+    }
+
+    #[test]
+    fn two_worktrees_holding_one_filename_are_told_apart() {
+        // The #1855 case: a workspace with two sessions has two spools, and
+        // `plan.md` in both used to render as two identical `# The plan`
+        // headings with nothing saying which session wrote which.
+        let mine = Artifact::from_markdown("issue-7", "plan.md", "# The plan\n\nMine.\n", at());
+        let theirs = Artifact::from_markdown("main", "plan.md", "# The plan\n\nTheirs.\n", at());
+        let (title, body) = artifact_document("ws", &[mine, theirs], 0, "a P").expect("document");
+        assert_eq!(title, "2 artifacts · ws");
+        assert!(body.contains("# The plan · issue-7/plan.md"), "{body}");
+        assert!(body.contains("# The plan · main/plan.md"), "{body}");
+        assert!(
+            !body.contains("# The plan\n"),
+            "no heading may be the bare colliding title: {body}"
+        );
+    }
+
+    #[test]
+    fn one_spool_with_two_files_under_one_title_is_told_apart_by_file() {
+        // Same collision, one worktree: the worktree cannot disambiguate, so
+        // the label escalates to the file name instead.
+        let a = Artifact::from_markdown("wt", "plan.md", "# The plan\n\nA.\n", at());
+        let b = Artifact::from_markdown("wt", "plan-v2.md", "# The plan\n\nB.\n", at());
+        let (_, body) = artifact_document("ws", &[a, b], 0, "a P").expect("document");
+        assert!(body.contains("# The plan · plan.md"), "{body}");
+        assert!(body.contains("# The plan · plan-v2.md"), "{body}");
+        assert!(
+            !body.contains("wt/plan.md"),
+            "no worktree needed here: {body}"
+        );
+    }
+
+    #[test]
+    fn distinct_titles_are_never_qualified() {
+        // The ordinary case must read exactly as it did before #1855.
+        let a = Artifact::from_markdown("wt", "plan.md", "# Plan\n\nA.\n", at());
+        let b = Artifact::from_markdown("other", "findings.md", "# Findings\n\nB.\n", at());
+        let (_, body) = artifact_document("ws", &[a, b], 0, "a P").expect("document");
+        assert!(body.contains("# Plan\n\nA."), "{body}");
+        assert!(body.contains("# Findings\n\nB."), "{body}");
+        assert!(!body.contains(" · "), "{body}");
+    }
+
+    #[test]
+    fn one_artifact_title_is_qualified_only_against_the_rest() {
+        let only = Artifact::from_markdown("wt", "plan.md", "# The plan\n\nx.\n", at());
+        let (title, _) = artifact_document("ws", &[only], 0, "a P").expect("document");
+        assert_eq!(title, "The plan");
+    }
+
+    #[test]
+    fn a_title_longer_than_the_cap_is_clamped() {
+        // A heading is unbounded markdown, and `ArtifactRef` carries titles
+        // with no body to dominate them — so the index's size would be set by
+        // the worst heading in the spool.
+        let long = "x".repeat(ARTIFACT_MAX_TITLE_CHARS * 3);
+        let a = Artifact::from_markdown("wt", "plan.md", &format!("# {long}\n\nbody\n"), at());
+        assert_eq!(a.title.chars().count(), ARTIFACT_MAX_TITLE_CHARS + 1);
+        assert!(a.title.ends_with('…'));
+        // The body is untouched — only the title is bounded.
+        assert_eq!(a.body, "body\n");
+    }
+
+    #[test]
+    fn clamping_a_title_never_splits_a_character() {
+        let long = "é".repeat(ARTIFACT_MAX_TITLE_CHARS + 5);
+        let a = Artifact::from_markdown("wt", "p.md", &format!("# {long}\n"), at());
+        assert_eq!(a.title.chars().count(), ARTIFACT_MAX_TITLE_CHARS + 1);
+    }
+
+    #[test]
+    fn a_ref_carries_the_identity_and_drops_the_body() {
+        let a = Artifact::from_markdown("issue-7", "plan.md", "# Plan\n\nStep one.\n", at());
+        let r = ArtifactRef::from(&a);
+        assert_eq!(
+            (r.worktree.as_str(), r.name.as_str()),
+            ("issue-7", "plan.md")
+        );
+        assert_eq!(r.title, "Plan");
+        assert_eq!(r.written_at, a.written_at);
+    }
+
+    #[test]
+    fn the_index_names_carried_and_hidden_artifacts_alike() {
+        // The picker's whole point: one list over both halves, so an artifact
+        // past the body caps is reachable rather than merely counted.
+        let carried = Artifact::from_markdown("wt", "new.md", "# New\n\nx\n", at());
+        let found = WorkspaceArtifacts {
+            artifacts: vec![carried],
+            hidden: vec![ArtifactRef {
+                worktree: "wt".to_string(),
+                name: "old.md".to_string(),
+                title: "Old".to_string(),
+                written_at: at(),
+            }],
+            unlisted: 2,
+        };
+        let index = found.index();
+        let names: Vec<&str> = index.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["new.md", "old.md"]);
+        assert_eq!(found.total(), 4, "the badge counts what it cannot name too");
+        assert_eq!(found.not_shown(), 3, "the reader's footer counts both");
     }
 }

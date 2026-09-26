@@ -2610,6 +2610,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenArtifacts => {
                 self.open_workspace_artifacts();
             }
+            Action::PickArtifact => {
+                cmds.extend(self.open_artifact_picker());
+            }
             Action::RequestReviewers => {
                 if let Some(cmd) = self.begin_request_reviewers() {
                     cmds.push(cmd);

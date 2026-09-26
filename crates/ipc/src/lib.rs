@@ -2397,6 +2397,19 @@ pub enum Command {
         request_id: u64,
         needles: Vec<String>,
     },
+    /// Ask the daemon to read one spooled artifact and broadcast it back via
+    /// [`Event::ArtifactBody`] (#1855).
+    ///
+    /// `(worktree, name)` is an artifact's identity within a workspace, as the
+    /// picker's rows carry it: `worktree` is the *directory name* of one of the
+    /// workspace's watched worktrees, never a path — the daemon resolves it
+    /// against its own watch set, so a client cannot name a file outside the
+    /// spool it is asking about. Appended last (bincode is ordinal-sensitive).
+    FetchArtifact {
+        workspace_key: lazybox_core::WorkspaceKey,
+        worktree: String,
+        name: String,
+    },
 }
 
 /// How a branch-namespace collision should be cleared (#1742). Both arms
@@ -3971,14 +3984,33 @@ pub enum Event {
     /// workspace carrying one, so a client that connects between two changes
     /// still seeds the row's badge. An empty `artifacts` clears it.
     ///
-    /// `hidden` counts the artifacts past `ARTIFACT_MAX_PER_WORKSPACE`: they
-    /// are still on disk, and the reader names them rather than presenting a
-    /// truncated set as the whole one. Appended last (bincode is
-    /// ordinal-sensitive).
+    /// `artifacts` carries the bodies within the caps; `hidden` *names* every
+    /// artifact past them without its body, so a capped-out artifact is
+    /// reachable through the picker rather than only counted (#1855), and
+    /// `unlisted` counts what `ARTIFACT_MAX_INDEXED` left out of even that.
+    /// Appended last (bincode is ordinal-sensitive).
     WorkspaceArtifacts {
         workspace_key: lazybox_core::WorkspaceKey,
         artifacts: Vec<lazybox_core::Artifact>,
-        hidden: usize,
+        hidden: Vec<lazybox_core::ArtifactRef>,
+        unlisted: usize,
+    },
+    /// One artifact's body, read fresh from its spool file in answer to
+    /// [`Command::FetchArtifact`] (#1855).
+    ///
+    /// The picker resolves a pick to a `(worktree, name)` and asks for it
+    /// rather than reading a body out of the last broadcast: the artifacts
+    /// past the caps have no carried body at all, and one path that is always
+    /// current beats two that differ in whether they can be stale.
+    ///
+    /// `artifact` is `None` when the file is no longer there — a spool an
+    /// agent rewrote between the broadcast and the pick — which the reader
+    /// reports rather than opening an empty document. Appended last.
+    ArtifactBody {
+        workspace_key: lazybox_core::WorkspaceKey,
+        worktree: String,
+        name: String,
+        artifact: Option<lazybox_core::Artifact>,
     },
 }
 

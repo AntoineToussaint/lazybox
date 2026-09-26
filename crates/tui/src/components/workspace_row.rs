@@ -186,7 +186,8 @@ pub struct WorkspaceRowCtx<'a> {
     /// Markdown artifacts this workspace's agents spooled into
     /// `.lazybox/artifacts/` (#1822). Renders a dim ` ▤N ` badge in the
     /// passive cluster so output the agent handed over is visible without
-    /// opening the row; nothing when zero. `a A` reads them.
+    /// opening the row; nothing when zero. `a A` reads them as one document,
+    /// `a P` lists them to open one.
     pub artifacts: usize,
     /// A declared `Blocked on:` reason exists on some task. Renders ` ⊗! `
     /// when there are no dependency blockers, else folds into the count

@@ -12,6 +12,7 @@
 //! events.rs) read the stashed state and execute on submit.
 
 use super::{ChoicePayload, ConversionDraft, HandoffDraft, Id, ModalFlow, Model, PaneFocus};
+use lazybox_core::ARTIFACT_SPOOL_RELATIVE_PATH;
 use tuirealm::terminal::TerminalAdapter;
 
 /// Fallback display name for an editor entry with no explicit `display:`
@@ -2018,13 +2019,26 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         let (key, name) = (ws.key.clone(), ws.name.clone());
-        let Some((artifacts, hidden)) = self.artifacts.get(&key) else {
+        let Some(found) = self.artifacts.get(&key) else {
             self.flash_info(
                 "no artifacts here — an agent writes them to .lazybox/artifacts/ in its worktree",
             );
             return;
         };
-        let Some((title, body)) = lazybox_core::artifact_document(&name, artifacts, *hidden) else {
+        // The footer names the chord that lists the artifacts this document is
+        // too full to show, resolved through the user's own keymap rather than
+        // hardcoded: a rebound `a P` must not be quoted as `a P`.
+        let picker_keys = lazybox_tui_core::action::ActionDef::for_kind(
+            lazybox_tui_core::action::ActionKind::PickArtifact,
+        )
+        .effective_keys_display(&self.action_key_overrides)
+        .to_string();
+        let Some((title, body)) = lazybox_core::artifact_document(
+            &name,
+            &found.artifacts,
+            found.not_shown(),
+            &picker_keys,
+        ) else {
             return;
         };
         // The artifact reader IS the description reader: `Id::consumes_scroll`
@@ -2040,6 +2054,92 @@ impl<T: TerminalAdapter> Model<T> {
         // The reader's `a` (ask about this) resolves against the selection,
         // which is exactly the workspace these came from.
         self.mount_description_modal(title, body, None);
+    }
+
+    /// Open one fetched artifact in the reader (#1855) — the reply to a pick.
+    ///
+    /// Titled by the file as well as the heading, because the picker is where
+    /// two same-titled artifacts are told apart and the reader must not undo
+    /// that the moment one of them is opened.
+    pub(crate) fn open_one_artifact(&mut self, artifact: &lazybox_core::Artifact) {
+        let title = format!("{} · {}", artifact.title, artifact.name);
+        if self.modal_stack.last() == Some(&Id::DescriptionModal) {
+            self.pop_modal();
+        }
+        self.mount_description_modal(title, artifact.body.clone(), None);
+    }
+
+    /// Mount the artifact picker (`a P`, #1855).
+    ///
+    /// Lists every artifact the workspace has — the ones the last broadcast
+    /// carried a body for and the ones its caps left named only — so an
+    /// artifact past the caps is reachable rather than merely counted in the
+    /// combined reader's footer. Rows carry the `(worktree, name)` identity
+    /// rather than a position: the daemon re-broadcasts the set every few
+    /// seconds, and an index would then open a different document than the one
+    /// the user highlighted.
+    pub(crate) fn open_artifact_picker(&mut self) -> Option<lazybox_ipc::Command> {
+        use crate::realm::components::choice::Choice;
+        use lazybox_tui_core::choice::ARTIFACT_PICK_SEPARATOR;
+        let key = self.sidebar.selected_workspace()?.key.clone();
+        let Some(found) = self.artifacts.get(&key) else {
+            self.flash_info(
+                "no artifacts here — an agent writes them to .lazybox/artifacts/ in its worktree",
+            );
+            return None;
+        };
+        let entries = found.index();
+        let unlisted = found.unlisted;
+        // One artifact is not a choice. Open it rather than making the user
+        // confirm the only row — the same reason `]]u` skips the URL picker
+        // for a single on-screen link.
+        if let [only] = entries.as_slice()
+            && unlisted == 0
+        {
+            let (worktree, name) = (only.worktree.clone(), only.name.clone());
+            return Some(self.fetch_artifact(key, worktree, name));
+        }
+        // Qualified once, here, so the rows the user compares are the strings
+        // that differ — two `plan.md` from two sessions must not be two
+        // identical rows.
+        let labels = lazybox_core::qualified_titles(&entries);
+        let rows: Vec<(String, lazybox_core::ArtifactRef)> =
+            labels.into_iter().zip(entries).collect();
+        let hint = if unlisted > 0 {
+            format!(
+                "Enter opens the highlighted artifact · {unlisted} more are in the worktree at \
+                 {ARTIFACT_SPOOL_RELATIVE_PATH}/"
+            )
+        } else {
+            "Enter opens the highlighted artifact".to_string()
+        };
+        let modal = Choice::single(hint, rows)
+            .title("Artifacts")
+            .label(|(label, _): &(String, lazybox_core::ArtifactRef)| label.clone())
+            .payload_for(|(_, entry): &(String, lazybox_core::ArtifactRef)| {
+                ChoicePayload::Text(format!(
+                    "{}{ARTIFACT_PICK_SEPARATOR}{}",
+                    entry.worktree, entry.name
+                ))
+            });
+        self.mount_modal(Id::ArtifactPicker, modal);
+        None
+    }
+
+    /// Ask the daemon for one artifact's body and remember the request, so
+    /// the broadcast reply is opened here and only here (#1855).
+    pub(crate) fn fetch_artifact(
+        &mut self,
+        workspace: lazybox_core::WorkspaceKey,
+        worktree: String,
+        name: String,
+    ) -> lazybox_ipc::Command {
+        self.pending_artifact = Some((workspace.clone(), worktree.clone(), name.clone()));
+        lazybox_ipc::Command::FetchArtifact {
+            workspace_key: workspace,
+            worktree,
+            name,
+        }
     }
 
     /// Open the repo merge-history ledger (#1432) in its loading state.

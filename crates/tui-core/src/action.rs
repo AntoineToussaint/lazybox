@@ -263,6 +263,10 @@ pub enum Action {
     /// Open the markdown artifacts this workspace's agents spooled into
     /// `.lazybox/artifacts/` (#1822) in the description reader.
     OpenArtifacts,
+    /// List this workspace's spooled artifacts one per row and open the
+    /// picked one (#1855) — including the ones past the caps that the
+    /// combined reader can only count.
+    PickArtifact,
 
     // ── Sidebar list management ────────────────────────────────────
     // These act on the sidebar's list/view rather than a single
@@ -650,6 +654,7 @@ pub enum ActionKind {
     MarkReady,
     EditNotes,
     OpenArtifacts,
+    PickArtifact,
     // Sidebar list management
     OpenFilterMenu,
     CycleSort,
@@ -844,6 +849,7 @@ impl ActionKind {
         Self::Reply,
         Self::EditNotes,
         Self::OpenArtifacts,
+        Self::PickArtifact,
         Self::SetRole,
         Self::SpawnPlanner,
         Self::SpawnCoordinator,
@@ -1007,6 +1013,7 @@ impl Action {
             Action::Reply => ActionKind::Reply,
             Action::EditNotes => ActionKind::EditNotes,
             Action::OpenArtifacts => ActionKind::OpenArtifacts,
+            Action::PickArtifact => ActionKind::PickArtifact,
             Action::SelectRow => ActionKind::SelectRow,
             Action::ToggleDescription => ActionKind::ToggleDescription,
             Action::UndoMarkRead => ActionKind::UndoMarkRead,
@@ -1973,6 +1980,18 @@ impl ActionDef {
                 describe: "Read the markdown artifacts this workspace's agents wrote to `.lazybox/artifacts/` — a plan, a findings write-up, anything a paragraph in the terminal could not carry. Opens in the description reader.",
                 section: Section::Workspace,
             },
+            ActionKind::PickArtifact => &Self {
+                kind: ActionKind::PickArtifact,
+                // The list half of `a A`, under the same agent leader and
+                // uppercase for the same reason. `P` for pick: `L` reads
+                // better for "list" and is already the Opus tier's chord in
+                // this namespace (`tier_chord_stroke` derives `a S`/`a M`/`a L`
+                // from the tier aliases).
+                default_keys: "a P",
+                label: "list artifacts",
+                describe: "List this workspace's spooled artifacts one per row — every one of them, including any the combined reader is too full to show — and open the one you pick.",
+                section: Section::Workspace,
+            },
             ActionKind::SelectRow => &Self {
                 kind: ActionKind::SelectRow,
                 default_keys: "Space",
@@ -2589,6 +2608,7 @@ impl ActionKind {
             ActionKind::Reply => "reply",
             ActionKind::EditNotes => "edit_notes",
             ActionKind::OpenArtifacts => "open_artifacts",
+            ActionKind::PickArtifact => "pick_artifact",
             ActionKind::SelectRow => "select_row",
             ActionKind::ToggleDescription => "toggle_description",
             ActionKind::UndoMarkRead => "undo_mark_read",
@@ -2859,6 +2879,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::SpawnAgent
         | ActionKind::RecoverAllAgentCredit
         | ActionKind::OpenArtifacts
+        | ActionKind::PickArtifact
         | ActionKind::RestartRateLimited => Some("agent"),
         ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
@@ -3619,6 +3640,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // that exited still leaves its spool behind. The dispatcher says so
         // when the workspace has none; the catalog cannot see the spool.
         | ActionKind::OpenArtifacts
+        | ActionKind::PickArtifact
         // Role attaches to any workspace under the cursor — the Choice
         // modal picks one of five roles or clears it (#1523). Gate on
         // the workspace's existence like EditNotes/RenameWorkspace.

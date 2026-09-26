@@ -665,6 +665,11 @@ fn all_commands() -> Vec<Command> {
             request_id: 7,
             needles: vec!["cannot borrow".into(), "deadlock".into()],
         },
+        Command::FetchArtifact {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            worktree: "issue-1".into(),
+            name: "plan.md".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -1568,11 +1573,29 @@ fn all_events() -> Vec<Event> {
         Event::WorkspaceArtifacts {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             artifacts: vec![lazybox_core::Artifact::from_markdown(
+                "issue-1",
                 "plan.md",
                 "# The plan\n\nStep one.\n",
                 sample_time(),
             )],
-            hidden: 2,
+            hidden: vec![lazybox_core::ArtifactRef {
+                worktree: "issue-1".into(),
+                name: "older.md".into(),
+                title: "Older".into(),
+                written_at: sample_time(),
+            }],
+            unlisted: 2,
+        },
+        Event::ArtifactBody {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            worktree: "issue-1".into(),
+            name: "older.md".into(),
+            artifact: Some(lazybox_core::Artifact::from_markdown(
+                "issue-1",
+                "older.md",
+                "# Older\n\nBody.\n",
+                sample_time(),
+            )),
         },
     ]
 }
@@ -1690,6 +1713,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::GhAdmit { .. } => "GhAdmit",
         Command::GhCompleted { .. } => "GhCompleted",
         Command::SearchAgentOutput { .. } => "SearchAgentOutput",
+        Command::FetchArtifact { .. } => "FetchArtifact",
     }
 }
 
@@ -1815,6 +1839,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::GhShimReply { .. } => "GhShimReply",
         Event::AgentOutputMatches { .. } => "AgentOutputMatches",
         Event::WorkspaceArtifacts { .. } => "WorkspaceArtifacts",
+        Event::ArtifactBody { .. } => "ArtifactBody",
     }
 }
 
@@ -1826,12 +1851,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        108,
+        109,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        115,
+        116,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

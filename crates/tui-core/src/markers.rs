@@ -265,7 +265,7 @@ const ROW_BADGES: &[MarkerDoc] = &[
     },
     MarkerDoc {
         label: "▤N",
-        meaning: "Count of markdown artifacts this workspace's agents wrote to `.lazybox/artifacts/`; `a A` reads them.",
+        meaning: "Count of markdown artifacts this workspace's agents wrote to `.lazybox/artifacts/`; `a A` reads them as one document, `a P` lists them to open one.",
         when: "Shows once an agent has spooled at least one artifact.",
     },
     MarkerDoc {

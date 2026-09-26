@@ -33,8 +33,9 @@ use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
 use lazybox_core::{
-    ARTIFACT_EXTENSION, ARTIFACT_MAX_BYTES, ARTIFACT_MAX_PER_WORKSPACE, ARTIFACT_MAX_TOTAL_BYTES,
-    ARTIFACT_SPOOL_RELATIVE_PATH, Artifact, Workspace, WorkspaceKey,
+    ARTIFACT_EXTENSION, ARTIFACT_MAX_BYTES, ARTIFACT_MAX_INDEXED, ARTIFACT_MAX_PER_WORKSPACE,
+    ARTIFACT_MAX_TOTAL_BYTES, ARTIFACT_SPOOL_RELATIVE_PATH, Artifact, ArtifactRef, Workspace,
+    WorkspaceArtifacts, WorkspaceKey,
 };
 use lazybox_ipc::Event;
 
@@ -53,16 +54,6 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(3);
 /// time. A constant, because the value is compared for equality by the
 /// broadcast's change gate — see [`scan_worktree`].
 const UNDATED: DateTime<Utc> = DateTime::UNIX_EPOCH;
-
-/// What one workspace's spool currently holds, as the daemon last read it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorkspaceArtifacts {
-    /// Newest first, capped at [`ARTIFACT_MAX_PER_WORKSPACE`].
-    pub artifacts: Vec<Artifact>,
-    /// How many older artifacts the cap left out. Carried rather than
-    /// discarded so the reader can say a set is partial.
-    pub hidden: usize,
-}
 
 /// The watch set and the attached artifacts derived from it.
 ///
@@ -125,6 +116,21 @@ struct Inner {
 /// first scan retires it.
 fn watch_key(worktree: &Path) -> PathBuf {
     std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf())
+}
+
+/// How an artifact names the worktree it came from: that directory's own
+/// name, which for lazybox's `<root>/<scope>/<slug>` layout is the slug and
+/// for the shared `on main` checkout is its directory.
+///
+/// A *name*, not a path: it is broadcast to clients and shown in the reader,
+/// and it is what [`Command::FetchArtifact`](lazybox_ipc::Command::FetchArtifact)
+/// resolves against the watch set — so a client can only ever name a worktree
+/// the daemon already watches for that workspace.
+fn worktree_label(worktree: &Path) -> String {
+    worktree
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| worktree.to_string_lossy().into_owned())
 }
 
 impl ArtifactSpool {
@@ -246,6 +252,22 @@ impl ArtifactSpool {
             .insert(worktree.to_path_buf(), scan);
     }
 
+    /// The watched worktree of `key` whose directory name is `label`.
+    ///
+    /// This is the whole of the trust boundary for [`fetch`]: the client names
+    /// a worktree by the label the broadcast gave it, and only a worktree the
+    /// daemon already watches *for that workspace* resolves. A label that is
+    /// really a path, a traversal, or another workspace's worktree matches
+    /// nothing and the fetch answers "gone".
+    fn worktree_named(&self, key: &WorkspaceKey, label: &str) -> Option<PathBuf> {
+        self.inner
+            .lock()
+            .watched
+            .iter()
+            .find(|(path, owner)| *owner == key && worktree_label(path) == label)
+            .map(|(path, _)| path.clone())
+    }
+
     /// Drop a worktree that no longer exists, with its cached scan. A
     /// removed workspace or a pruned session leaves the watch set
     /// self-healing rather than re-scanning a vanished path forever.
@@ -353,29 +375,111 @@ async fn sweep_once(config: &ServerConfig) {
                 workspace_key: key,
                 artifacts: found.artifacts,
                 hidden: found.hidden,
+                unlisted: found.unlisted,
             });
         }
     }
 }
 
-/// Order newest-first and apply [`ARTIFACT_MAX_PER_WORKSPACE`].
+/// Handle `Command::FetchArtifact` (#1855): read one spooled artifact and
+/// broadcast it back as `Event::ArtifactBody`.
+///
+/// The picker's rows name artifacts the broadcast may never have carried a
+/// body for, so a pick cannot be served from the last event. It is served
+/// from the file, which also means every pick opens what is on disk *now*
+/// rather than what the last sweep happened to see.
+pub async fn fetch(config: &ServerConfig, workspace_key: WorkspaceKey, worktree: &str, name: &str) {
+    let artifact = match config.artifacts.worktree_named(&workspace_key, worktree) {
+        Some(path) => {
+            let (path, name, worktree) = (path, name.to_string(), worktree.to_string());
+            tokio::task::spawn_blocking(move || read_artifact(&path, &worktree, &name))
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "artifacts: fetch task failed");
+                    None
+                })
+        }
+        None => {
+            tracing::debug!(
+                workspace = %workspace_key,
+                worktree,
+                name,
+                "artifacts: fetch named a worktree this workspace does not watch"
+            );
+            None
+        }
+    };
+    let _ = config.bus.send(Event::ArtifactBody {
+        workspace_key,
+        worktree: worktree.to_string(),
+        name: name.to_string(),
+        artifact,
+    });
+}
+
+/// Read one artifact out of `worktree`'s spool by file name.
+///
+/// `name` arrives from a client, so it is matched against the spool's own
+/// entries rather than joined onto the path: a name carrying `/` or `..`
+/// cannot address a file, and only a `.md` file the sweep would itself pick
+/// up can be returned.
+fn read_artifact(worktree: &Path, label: &str, name: &str) -> Option<Artifact> {
+    let spool = worktree.join(ARTIFACT_SPOOL_RELATIVE_PATH);
+    let entry = std::fs::read_dir(&spool)
+        .ok()?
+        .flatten()
+        .find(|entry| entry.file_name().to_string_lossy() == name)?;
+    let path = entry.path();
+    if path.extension().and_then(|e| e.to_str()) != Some(ARTIFACT_EXTENSION) {
+        return None;
+    }
+    let meta = entry.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let written_at = meta.modified().ok().map(DateTime::from).unwrap_or(UNDATED);
+    if meta.len() > ARTIFACT_MAX_BYTES {
+        return Some(Artifact::oversized(label, name, meta.len(), written_at));
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Some(Artifact::from_markdown(label, name, &contents, written_at)),
+        Err(error) => Some(Artifact::unreadable(
+            label,
+            name,
+            &error.to_string(),
+            written_at,
+        )),
+    }
+}
+
+/// Order newest-first, apply the body caps, and *name* what they left out.
+///
+/// The caps bound what one broadcast carries. They used to bound
+/// reachability with it — the artifacts past them survived only as a count,
+/// so the reader could say "3 older artifacts" and offer no way to open one
+/// (#1855). The remainder is now carried as [`ArtifactRef`]s, which have no
+/// body and so cost a few hundred bytes each: the picker lists every artifact
+/// in the spool and the daemon reads the body when one is picked.
 fn collate(mut artifacts: Vec<Artifact>) -> WorkspaceArtifacts {
     // Name breaks a mtime tie so the order is stable across ticks — two
     // files written in the same second must not swap places and look like a
-    // change on every sweep.
+    // change on every sweep. The worktree joins the tie-break because two
+    // spools of one workspace can hold the same file name.
     artifacts.sort_by(|a, b| {
         b.written_at
             .cmp(&a.written_at)
             .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.worktree.cmp(&b.worktree))
     });
-    let total = artifacts.len();
-    artifacts.truncate(ARTIFACT_MAX_PER_WORKSPACE);
+    // Nothing is discarded here any more: past the caps an artifact becomes a
+    // ref rather than disappearing, so only the *body-carrying* prefix is
+    // bounded by the count cap.
+    let by_count = ARTIFACT_MAX_PER_WORKSPACE.min(artifacts.len());
     // The count cap alone leaves the event's size to the *product* of the two
     // per-file bounds — 6 MiB, which nobody chose. Admit newest-first until
-    // the decided total is reached; the rest are hidden exactly as the count
-    // cap hides them, so the reader still says how many it is not showing.
+    // the decided total is reached; the rest are named rather than carried.
     let mut carried = 0usize;
-    let keep = artifacts
+    let keep = artifacts[..by_count]
         .iter()
         .take_while(|artifact| {
             carried += artifact.body.len();
@@ -386,10 +490,19 @@ fn collate(mut artifacts: Vec<Artifact>) -> WorkspaceArtifacts {
         // dropping it would leave a workspace whose only artifact is
         // invisible, which is the failure the bounds exist to avoid.
         .max(1)
-        .min(artifacts.len());
-    artifacts.truncate(keep);
-    let hidden = total.saturating_sub(artifacts.len());
-    WorkspaceArtifacts { artifacts, hidden }
+        .min(by_count);
+    let rest = artifacts.split_off(keep);
+    // The index is itself bounded — a ref is small but an agent can write
+    // arbitrarily many files. Past it the remainder is still counted, the
+    // same rule the body caps follow.
+    let indexable = ARTIFACT_MAX_INDEXED.saturating_sub(artifacts.len());
+    let unlisted = rest.len().saturating_sub(indexable);
+    let hidden = rest.iter().take(indexable).map(ArtifactRef::from).collect();
+    WorkspaceArtifacts {
+        artifacts,
+        hidden,
+        unlisted,
+    }
 }
 
 /// Read one worktree's spool, or `None` when the worktree itself is gone.
@@ -408,6 +521,7 @@ fn scan_worktree(worktree: &Path, cached: Option<&SpoolScan>) -> Option<SpoolSca
     if !worktree.is_dir() {
         return None;
     }
+    let label = worktree_label(worktree);
     let spool = worktree.join(ARTIFACT_SPOOL_RELATIVE_PATH);
     let Ok(entries) = std::fs::read_dir(&spool) else {
         return Some(SpoolScan::default());
@@ -449,7 +563,7 @@ fn scan_worktree(worktree: &Path, cached: Option<&SpoolScan>) -> Option<SpoolSca
                 bytes = len,
                 "artifacts: spool file past the size limit — attaching a notice in its place"
             );
-            artifacts.push(Artifact::oversized(name, len, written_at));
+            artifacts.push(Artifact::oversized(&label, name, len, written_at));
             continue;
         }
         match std::fs::read_to_string(&path) {
@@ -475,7 +589,7 @@ fn scan_worktree(worktree: &Path, cached: Option<&SpoolScan>) -> Option<SpoolSca
                         artifacts: cached.map(|c| c.artifacts.clone()).unwrap_or_default(),
                     });
                 }
-                artifacts.push(Artifact::from_markdown(name, &contents, written_at));
+                artifacts.push(Artifact::from_markdown(&label, name, &contents, written_at));
             }
             Err(error) => {
                 // Announced, not dropped — the same rule `Artifact::oversized`
@@ -487,7 +601,12 @@ fn scan_worktree(worktree: &Path, cached: Option<&SpoolScan>) -> Option<SpoolSca
                     %error,
                     "artifacts: could not read a spool file — attaching a notice in its place"
                 );
-                artifacts.push(Artifact::unreadable(name, &error.to_string(), written_at));
+                artifacts.push(Artifact::unreadable(
+                    &label,
+                    name,
+                    &error.to_string(),
+                    written_at,
+                ));
             }
         }
     }
@@ -568,11 +687,11 @@ mod tests {
     fn collation_is_newest_first_and_names_what_the_cap_hid() {
         let at = |secs: i64| DateTime::from_timestamp(secs, 0).expect("timestamp");
         let artifacts: Vec<Artifact> = (0..ARTIFACT_MAX_PER_WORKSPACE + 3)
-            .map(|i| Artifact::from_markdown(format!("a{i}.md"), "body", at(i as i64)))
+            .map(|i| Artifact::from_markdown("wt", format!("a{i}.md"), "body", at(i as i64)))
             .collect();
         let collated = collate(artifacts);
         assert_eq!(collated.artifacts.len(), ARTIFACT_MAX_PER_WORKSPACE);
-        assert_eq!(collated.hidden, 3);
+        assert_eq!(collated.hidden.len(), 3);
         assert_eq!(
             collated.artifacts[0].name,
             format!("a{}.md", ARTIFACT_MAX_PER_WORKSPACE + 2),
@@ -587,12 +706,12 @@ mod tests {
         // workspace forever.
         let at = DateTime::from_timestamp(10, 0).expect("timestamp");
         let one = collate(vec![
-            Artifact::from_markdown("b.md", "x", at),
-            Artifact::from_markdown("a.md", "x", at),
+            Artifact::from_markdown("wt", "b.md", "x", at),
+            Artifact::from_markdown("wt", "a.md", "x", at),
         ]);
         let two = collate(vec![
-            Artifact::from_markdown("a.md", "x", at),
-            Artifact::from_markdown("b.md", "x", at),
+            Artifact::from_markdown("wt", "a.md", "x", at),
+            Artifact::from_markdown("wt", "b.md", "x", at),
         ]);
         assert_eq!(one, two);
     }
@@ -602,7 +721,7 @@ mod tests {
         let spool = ArtifactSpool::default();
         let key = WorkspaceKey::new("github:o/r#1");
         let at = DateTime::from_timestamp(10, 0).expect("timestamp");
-        let found = collate(vec![Artifact::from_markdown("a.md", "# A\n\nx", at)]);
+        let found = collate(vec![Artifact::from_markdown("wt", "a.md", "# A\n\nx", at)]);
         assert!(
             spool.record(&key, found.clone()).is_some(),
             "the first set is news"
@@ -628,7 +747,7 @@ mod tests {
         let at = DateTime::from_timestamp(10, 0).expect("timestamp");
         spool.record(
             &key,
-            collate(vec![Artifact::from_markdown("a.md", "x", at)]),
+            collate(vec![Artifact::from_markdown("wt", "a.md", "x", at)]),
         );
         assert!(
             spool.record(&key, WorkspaceArtifacts::default()).is_some(),
@@ -797,7 +916,12 @@ mod tests {
         write_artifact(dir.path(), "plan.md", "# The plan\n\nStep one.\n");
         let unstable = SpoolScan {
             fingerprints: Vec::new(),
-            artifacts: vec![Artifact::from_markdown("plan.md", "# Stale\n", UNDATED)],
+            artifacts: vec![Artifact::from_markdown(
+                "wt",
+                "plan.md",
+                "# Stale\n",
+                UNDATED,
+            )],
         };
         let next = scan_worktree(dir.path(), Some(&unstable)).expect("scan");
         assert_eq!(next.artifacts[0].title, "The plan");
@@ -835,8 +959,8 @@ mod tests {
         // rather than silently re-broadcasting the workspace every tick.
         const STABLE: DateTime<Utc> = UNDATED;
         assert_eq!(
-            Artifact::from_markdown("a.md", "x", STABLE),
-            Artifact::from_markdown("a.md", "x", UNDATED)
+            Artifact::from_markdown("wt", "a.md", "x", STABLE),
+            Artifact::from_markdown("wt", "a.md", "x", UNDATED)
         );
         assert_ne!(UNDATED, Utc::now(), "and it is not a clock reading");
     }
@@ -848,7 +972,7 @@ mod tests {
         let at = |secs: i64| DateTime::from_timestamp(secs, 0).expect("timestamp");
         let big = "x".repeat(ARTIFACT_MAX_TOTAL_BYTES / 4);
         let artifacts: Vec<Artifact> = (0..ARTIFACT_MAX_PER_WORKSPACE)
-            .map(|i| Artifact::from_markdown(format!("a{i}.md"), &big, at(i as i64)))
+            .map(|i| Artifact::from_markdown("wt", format!("a{i}.md"), &big, at(i as i64)))
             .collect();
         let collated = collate(artifacts);
         let carried: usize = collated.artifacts.iter().map(|a| a.body.len()).sum();
@@ -856,7 +980,7 @@ mod tests {
             carried <= ARTIFACT_MAX_TOTAL_BYTES,
             "carried {carried} bytes past the total bound"
         );
-        assert!(collated.hidden > 0, "and it must say how many it hid");
+        assert!(!collated.hidden.is_empty(), "and it must name what it hid");
     }
 
     /// One artifact larger than the whole budget is still carried: dropping
@@ -865,9 +989,9 @@ mod tests {
     fn a_single_oversized_body_is_still_carried() {
         let at = DateTime::from_timestamp(0, 0).expect("timestamp");
         let body = "x".repeat(ARTIFACT_MAX_TOTAL_BYTES * 2);
-        let collated = collate(vec![Artifact::from_markdown("a.md", &body, at)]);
+        let collated = collate(vec![Artifact::from_markdown("wt", "a.md", &body, at)]);
         assert_eq!(collated.artifacts.len(), 1);
-        assert_eq!(collated.hidden, 0);
+        assert!(collated.hidden.is_empty());
     }
 
     #[tokio::test]
@@ -887,11 +1011,17 @@ mod tests {
                 workspace_key,
                 artifacts,
                 hidden,
+                unlisted,
             } => {
                 assert_eq!(workspace_key, key);
-                assert_eq!(hidden, 0);
+                assert!(hidden.is_empty());
+                assert_eq!(unlisted, 0);
                 assert_eq!(artifacts.len(), 1);
                 assert_eq!(artifacts[0].title, "The plan");
+                assert_eq!(
+                    artifacts[0].worktree, "wt",
+                    "the artifact must name the spool it came from"
+                );
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -908,5 +1038,197 @@ mod tests {
             config.artifacts.targets().is_empty(),
             "a vanished worktree must leave the watch set"
         );
+    }
+
+    /// Each spool stamps its own worktree, so a workspace with two sessions
+    /// holding the same file name yields two distinguishable artifacts (#1855).
+    #[test]
+    fn two_spools_holding_one_filename_yield_distinguishable_artifacts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mine = dir.path().join("issue-7");
+        let shared = dir.path().join("main");
+        for worktree in [&mine, &shared] {
+            std::fs::create_dir_all(worktree).expect("mkdir");
+            write_artifact(worktree, "plan.md", "# The plan\n\nx\n");
+        }
+        let found = collate(
+            scan(&mine)
+                .expect("mine")
+                .into_iter()
+                .chain(scan(&shared).expect("shared"))
+                .collect(),
+        );
+        let mut worktrees: Vec<&str> = found
+            .artifacts
+            .iter()
+            .map(|a| a.worktree.as_str())
+            .collect();
+        worktrees.sort_unstable();
+        assert_eq!(worktrees, vec!["issue-7", "main"]);
+        // Both are `plan.md`, so the name alone cannot tell them apart — the
+        // pair is what identifies one.
+        assert_eq!(found.artifacts[0].name, found.artifacts[1].name);
+    }
+
+    /// The artifacts past the body caps are *named*, not merely counted —
+    /// that is what makes them reachable from the picker (#1855).
+    #[test]
+    fn artifacts_past_the_caps_are_named_so_the_picker_can_reach_them() {
+        let at = |secs: i64| DateTime::from_timestamp(secs, 0).expect("timestamp");
+        let artifacts: Vec<Artifact> = (0..ARTIFACT_MAX_PER_WORKSPACE + 3)
+            .map(|i| Artifact::from_markdown("wt", format!("a{i}.md"), "body", at(i as i64)))
+            .collect();
+        let found = collate(artifacts);
+        assert_eq!(found.artifacts.len(), ARTIFACT_MAX_PER_WORKSPACE);
+        let hidden: Vec<&str> = found.hidden.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(hidden, vec!["a2.md", "a1.md", "a0.md"], "oldest last");
+        assert_eq!(found.unlisted, 0);
+        assert_eq!(found.total(), ARTIFACT_MAX_PER_WORKSPACE + 3);
+        // Every artifact in the spool is in the index exactly once.
+        assert_eq!(found.index().len(), ARTIFACT_MAX_PER_WORKSPACE + 3);
+    }
+
+    /// The index is bounded too, and what it cannot name it still counts.
+    #[test]
+    fn past_the_index_cap_the_remainder_is_counted_not_forgotten() {
+        let at = |secs: i64| DateTime::from_timestamp(secs, 0).expect("timestamp");
+        let artifacts: Vec<Artifact> = (0..ARTIFACT_MAX_INDEXED + 5)
+            .map(|i| Artifact::from_markdown("wt", format!("a{i:04}.md"), "body", at(i as i64)))
+            .collect();
+        let found = collate(artifacts);
+        assert_eq!(
+            found.artifacts.len() + found.hidden.len(),
+            ARTIFACT_MAX_INDEXED
+        );
+        assert_eq!(found.unlisted, 5);
+        assert_eq!(found.total(), ARTIFACT_MAX_INDEXED + 5);
+    }
+
+    #[tokio::test]
+    async fn a_fetch_reads_the_body_of_an_artifact_no_broadcast_carried() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree = dir.path().join("issue-7");
+        std::fs::create_dir_all(&worktree).expect("mkdir");
+        write_artifact(&worktree, "old.md", "# Old\n\nStill readable.\n");
+        let config = ServerConfig::with_store(Arc::new(MemoryStore::new()));
+        let key = WorkspaceKey::new("github:o/r#1");
+        config.artifacts.watch(&key, &worktree);
+        let mut events = config.bus.subscribe();
+
+        fetch(&config, key.clone(), "issue-7", "old.md").await;
+        match events.try_recv().expect("a body event") {
+            Event::ArtifactBody {
+                workspace_key,
+                worktree,
+                name,
+                artifact,
+            } => {
+                assert_eq!(workspace_key, key);
+                assert_eq!((worktree.as_str(), name.as_str()), ("issue-7", "old.md"));
+                let artifact = artifact.expect("the file is there");
+                assert_eq!(artifact.title, "Old");
+                assert!(artifact.body.contains("Still readable."));
+                assert_eq!(artifact.worktree, "issue-7");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// `worktree` and `name` arrive from a client. Neither is joined onto a
+    /// path: the worktree is looked up in the watch set for *that* workspace
+    /// and the name is matched against the spool's own entries, so nothing
+    /// outside the spool is addressable.
+    #[tokio::test]
+    async fn a_fetch_cannot_name_a_file_outside_the_spool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree = dir.path().join("issue-7");
+        std::fs::create_dir_all(&worktree).expect("mkdir");
+        write_artifact(&worktree, "plan.md", "# Plan\n");
+        std::fs::write(worktree.join("secret.md"), "# Secret\n").expect("write outside the spool");
+        let config = ServerConfig::with_store(Arc::new(MemoryStore::new()));
+        let key = WorkspaceKey::new("github:o/r#1");
+        config.artifacts.watch(&key, &worktree);
+        let other = WorkspaceKey::new("github:o/r#2");
+        let mut events = config.bus.subscribe();
+
+        for (workspace, spool, name) in [
+            // A traversal out of the spool.
+            (&key, "issue-7", "../secret.md"),
+            (&key, "issue-7", "../../etc/passwd"),
+            // A worktree named as a path rather than by its label.
+            (&key, worktree.to_string_lossy().as_ref(), "plan.md"),
+            (&key, "..", "plan.md"),
+            // Another workspace's worktree.
+            (&other, "issue-7", "plan.md"),
+            // A worktree that is not watched at all.
+            (&key, "elsewhere", "plan.md"),
+        ] {
+            fetch(&config, workspace.clone(), spool, name).await;
+            match events.try_recv().expect("a body event") {
+                Event::ArtifactBody { artifact, .. } => assert!(
+                    artifact.is_none(),
+                    "{spool}/{name} must not resolve to a file"
+                ),
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+
+        // The legitimate request still works, so the refusals above are the
+        // boundary and not a broken lookup.
+        fetch(&config, key, "issue-7", "plan.md").await;
+        match events.try_recv().expect("a body event") {
+            Event::ArtifactBody { artifact, .. } => {
+                assert_eq!(artifact.expect("present").title, "Plan")
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// A spool an agent rewrote between the broadcast and the pick answers
+    /// "gone" rather than opening an empty document.
+    #[tokio::test]
+    async fn a_fetch_for_a_removed_artifact_answers_that_it_is_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree = dir.path().join("issue-7");
+        std::fs::create_dir_all(&worktree).expect("mkdir");
+        write_artifact(&worktree, "plan.md", "# Plan\n");
+        let config = ServerConfig::with_store(Arc::new(MemoryStore::new()));
+        let key = WorkspaceKey::new("github:o/r#1");
+        config.artifacts.watch(&key, &worktree);
+        let mut events = config.bus.subscribe();
+
+        fetch(&config, key.clone(), "issue-7", "vanished.md").await;
+        match events.try_recv().expect("a body event") {
+            Event::ArtifactBody { artifact, name, .. } => {
+                assert_eq!(name, "vanished.md");
+                assert!(artifact.is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// A fetch reads the file, not the last sweep's copy — so a pick opens
+    /// what is on disk now.
+    #[tokio::test]
+    async fn a_fetch_reads_the_file_rather_than_the_cached_scan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree = dir.path().join("issue-7");
+        std::fs::create_dir_all(&worktree).expect("mkdir");
+        write_artifact(&worktree, "plan.md", "# Plan\n\nFirst.\n");
+        let config = ServerConfig::with_store(Arc::new(MemoryStore::new()));
+        let key = WorkspaceKey::new("github:o/r#1");
+        config.artifacts.watch(&key, &worktree);
+        sweep_once(&config).await;
+        write_artifact(&worktree, "plan.md", "# Plan\n\nSecond.\n");
+        let mut events = config.bus.subscribe();
+
+        fetch(&config, key, "issue-7", "plan.md").await;
+        match events.try_recv().expect("a body event") {
+            Event::ArtifactBody { artifact, .. } => assert!(
+                artifact.expect("present").body.contains("Second."),
+                "the fetch must not serve the swept copy"
+            ),
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

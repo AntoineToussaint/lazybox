@@ -22,6 +22,11 @@ use crate::{
 /// deadline instead of arithmetic on an absurd span.
 pub const SOURCE_MUTE_SENTINEL: Duration = Duration::MAX;
 
+/// Separates a worktree from a file name in the artifact picker's row payload
+/// (#1855). A unit separator, because both halves are free-form strings a
+/// filesystem chose and any printable delimiter could appear inside one.
+pub const ARTIFACT_PICK_SEPARATOR: char = '\u{1f}';
+
 /// Text payloads for the workspace snooze picker's event-conditional
 /// rows (#scale, B4). Both the picker construction and the resolution
 /// use these constants so they can't drift.
@@ -129,6 +134,14 @@ pub enum PickFlow {
     },
     Jump,
     Url,
+    /// Artifact picker (`a P`, #1855). Rows carry each artifact's
+    /// `worktree`-[`ARTIFACT_PICK_SEPARATOR`]-`name` identity as a text
+    /// payload, because the set can be re-broadcast between mount and pick and
+    /// a positional index would then open a different document than the one
+    /// highlighted.
+    Artifact {
+        workspace: Option<lazybox_core::WorkspaceKey>,
+    },
     Theme,
     DefaultAgent,
     /// The strength picker for `agent_id` — which tier in that agent's
@@ -361,6 +374,15 @@ pub enum PickOutcome<F> {
     },
     Jump(SessionKey),
     OpenUrl(String),
+    /// Read one spooled artifact and open it in the reader (#1855). A fetch
+    /// rather than a lookup in the client's own copy: the artifacts past the
+    /// broadcast's caps have no carried body at all, so serving the pick from
+    /// the file is the one path that works for every row.
+    FetchArtifact {
+        workspace: lazybox_core::WorkspaceKey,
+        worktree: String,
+        name: String,
+    },
     SaveTheme(String),
     SaveDefaultAgent(String),
     /// Persist `agents.<agent_id>.models.default`. `alias: None` unpins
@@ -553,6 +575,17 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
             .and_then(P::session)
             .map(PickOutcome::Jump)
             .unwrap_or(PickOutcome::NoOp),
+        PickFlow::Artifact { workspace } => match (workspace, picks.first().and_then(P::as_text)) {
+            (Some(workspace), Some(id)) => match id.split_once(ARTIFACT_PICK_SEPARATOR) {
+                Some((worktree, name)) => PickOutcome::FetchArtifact {
+                    workspace,
+                    worktree: worktree.to_string(),
+                    name: name.to_string(),
+                },
+                None => PickOutcome::NoOp,
+            },
+            _ => PickOutcome::NoOp,
+        },
         PickFlow::Url => picks
             .first()
             .and_then(P::as_text)

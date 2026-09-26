@@ -94,6 +94,9 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Id::JumpPicker => PickFlow::Jump,
             Id::UrlPicker => PickFlow::Url,
+            Id::ArtifactPicker => PickFlow::Artifact {
+                workspace: self.sidebar.selected_workspace().map(|ws| ws.key.clone()),
+            },
             Id::ThemePicker => PickFlow::Theme,
             Id::DefaultAgentPicker => PickFlow::DefaultAgent,
             Id::StrengthPicker => PickFlow::Strength {
@@ -435,6 +438,11 @@ impl<T: TerminalAdapter> Model<T> {
             }
             PickOutcome::Jump(key) => self.jump_to_workspace_key(&key),
             PickOutcome::OpenUrl(url) => self.open_external_url(&url),
+            PickOutcome::FetchArtifact {
+                workspace,
+                worktree,
+                name,
+            } => cmds.push(self.fetch_artifact(workspace, worktree, name)),
             PickOutcome::SaveTheme(name) => {
                 crate::theme::set_by_name(&name);
                 match lazybox_config::Config::save_with(|config| {

@@ -9191,6 +9191,7 @@ mod stale_input_tests {
                 | Id::JumpPicker
                 | Id::PromptHistoryPicker
                 | Id::UrlPicker
+                | Id::ArtifactPicker
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
@@ -12915,12 +12916,22 @@ mod merge_focus_follow_tests {
         m.handle_daemon_event(IpcEvent::WorkspaceArtifacts {
             workspace_key: ws_key.clone(),
             artifacts: vec![
-                Artifact::from_markdown("findings.md", "# Findings\n\nIt works.\n", at),
-                Artifact::from_markdown("plan.md", "# The plan\n\nStep one.\n", at),
+                Artifact::from_markdown("wt", "findings.md", "# Findings\n\nIt works.\n", at),
+                Artifact::from_markdown("wt", "plan.md", "# The plan\n\nStep one.\n", at),
             ],
-            hidden: 1,
+            hidden: vec![lazybox_core::ArtifactRef {
+                worktree: "wt".into(),
+                name: "older.md".into(),
+                title: "Older".into(),
+                written_at: at,
+            }],
+            unlisted: 0,
         });
-        assert_eq!(m.sidebar.artifact_count(&session), 2);
+        assert_eq!(
+            m.sidebar.artifact_count(&session),
+            3,
+            "the badge counts what `a P` can reach, not only the carried bodies"
+        );
 
         m.dispatch_action(&lazybox_tui_core::action::Action::OpenArtifacts);
         assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
@@ -12955,13 +12966,277 @@ mod merge_focus_follow_tests {
         m.handle_daemon_event(IpcEvent::WorkspaceArtifacts {
             workspace_key: ws_key,
             artifacts: vec![],
-            hidden: 0,
+            hidden: vec![],
+            unlisted: 0,
         });
         assert_eq!(
             m.sidebar.artifact_count(&session),
             0,
             "a cleared spool stops badging"
         );
+    }
+
+    /// Render whatever `id` paints, for the picker-row assertions below.
+    fn rendered_modal(
+        model: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        id: Id,
+    ) -> String {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| model.app.view(&id, frame, Rect::new(0, 0, 100, 24)))
+            .expect("render modal");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Seed a workspace focused in the sidebar, for the artifact tests.
+    fn model_with_focused_workspace() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_core::WorkspaceKey,
+    ) {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        (m, ws_key)
+    }
+
+    fn artifact_ref(worktree: &str, name: &str, title: &str) -> lazybox_core::ArtifactRef {
+        lazybox_core::ArtifactRef {
+            worktree: worktree.into(),
+            name: name.into(),
+            title: title.into(),
+            written_at: chrono::Utc::now(),
+        }
+    }
+
+    fn fetch_artifact_cmds(cmds: &[IpcCommand]) -> Vec<(String, String)> {
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                IpcCommand::FetchArtifact { worktree, name, .. } => {
+                    Some((worktree.clone(), name.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The gap #1855 opens with: the reader *names* artifacts past the caps
+    /// and offers no way to open one. `a P` lists every artifact the workspace
+    /// has — carried or not — and picking a hidden one fetches its body.
+    #[test]
+    fn the_picker_reaches_an_artifact_the_caps_left_out() {
+        use lazybox_core::Artifact;
+        let (mut m, ws_key) = model_with_focused_workspace();
+        let at = chrono::Utc::now();
+        m.handle_daemon_event(IpcEvent::WorkspaceArtifacts {
+            workspace_key: ws_key.clone(),
+            artifacts: vec![Artifact::from_markdown("wt", "new.md", "# New\n\nx\n", at)],
+            hidden: vec![artifact_ref("wt", "old.md", "Old")],
+            unlisted: 0,
+        });
+
+        let cmds = m.dispatch_action(&lazybox_tui_core::action::Action::PickArtifact);
+        assert_eq!(m.top_modal(), Some(&Id::ArtifactPicker));
+        assert!(
+            fetch_artifact_cmds(&cmds).is_empty(),
+            "mounting the picker must not fetch anything yet"
+        );
+
+        let rendered = rendered_modal(&mut m, Id::ArtifactPicker);
+        assert!(rendered.contains("New"), "{rendered}");
+        assert!(
+            rendered.contains("Old"),
+            "an artifact past the caps must be a row, not a footnote: {rendered}"
+        );
+
+        // Pick the hidden one. It has no carried body anywhere in the client,
+        // so the only honest outcome is a fetch for its identity.
+        let cmds = m.choice_picked_inner(
+            vec![crate::realm::ChoicePayload::Text(format!(
+                "wt{}old.md",
+                lazybox_tui_core::choice::ARTIFACT_PICK_SEPARATOR
+            ))],
+            true,
+        );
+        assert_eq!(
+            fetch_artifact_cmds(&cmds),
+            vec![("wt".to_string(), "old.md".to_string())],
+        );
+
+        // The daemon answers with the body it read, and the reader opens it.
+        m.handle_daemon_event(IpcEvent::ArtifactBody {
+            workspace_key: ws_key,
+            worktree: "wt".into(),
+            name: "old.md".into(),
+            artifact: Some(Artifact::from_markdown(
+                "wt",
+                "old.md",
+                "# Old\n\nStill readable.\n",
+                at,
+            )),
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+        let rendered = rendered_description_modal(&mut m);
+        assert!(rendered.contains("Still readable."), "{rendered}");
+    }
+
+    /// Two worktrees of one workspace can hold the same file name. The picker
+    /// must not list two identical rows, and the combined reader must not show
+    /// two identical headings (#1855).
+    #[test]
+    fn same_named_artifacts_from_two_worktrees_are_distinguishable() {
+        use lazybox_core::Artifact;
+        let (mut m, ws_key) = model_with_focused_workspace();
+        let at = chrono::Utc::now();
+        m.handle_daemon_event(IpcEvent::WorkspaceArtifacts {
+            workspace_key: ws_key,
+            artifacts: vec![
+                Artifact::from_markdown("issue-7", "plan.md", "# The plan\n\nMine.\n", at),
+                Artifact::from_markdown("main", "plan.md", "# The plan\n\nTheirs.\n", at),
+            ],
+            hidden: vec![],
+            unlisted: 0,
+        });
+
+        m.dispatch_action(&lazybox_tui_core::action::Action::PickArtifact);
+        let rendered = rendered_modal(&mut m, Id::ArtifactPicker);
+        assert!(rendered.contains("issue-7/plan.md"), "{rendered}");
+        assert!(rendered.contains("main/plan.md"), "{rendered}");
+
+        // And the same in the combined reader.
+        m.update(Msg::ModalDismissed);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenArtifacts);
+        let rendered = rendered_description_modal(&mut m);
+        assert!(rendered.contains("issue-7/plan.md"), "{rendered}");
+        assert!(rendered.contains("main/plan.md"), "{rendered}");
+    }
+
+    /// A single artifact is not a choice: `a P` opens it rather than making
+    /// the user confirm the only row.
+    #[test]
+    fn the_picker_skips_itself_for_a_lone_artifact() {
+        use lazybox_core::Artifact;
+        let (mut m, ws_key) = model_with_focused_workspace();
+        m.handle_daemon_event(IpcEvent::WorkspaceArtifacts {
+            workspace_key: ws_key,
+            artifacts: vec![Artifact::from_markdown(
+                "wt",
+                "plan.md",
+                "# Plan\n\nx\n",
+                chrono::Utc::now(),
+            )],
+            hidden: vec![],
+            unlisted: 0,
+        });
+
+        let cmds = m.dispatch_action(&lazybox_tui_core::action::Action::PickArtifact);
+        assert_ne!(m.top_modal(), Some(&Id::ArtifactPicker));
+        assert_eq!(
+            fetch_artifact_cmds(&cmds),
+            vec![("wt".to_string(), "plan.md".to_string())],
+        );
+    }
+
+    /// `a P` on a workspace with no spool says so, exactly as `a A` does —
+    /// the catalog gates the chord on the workspace, not on its spool.
+    #[test]
+    fn the_picker_on_an_empty_workspace_says_so() {
+        let (mut m, _) = model_with_focused_workspace();
+        let cmds = m.dispatch_action(&lazybox_tui_core::action::Action::PickArtifact);
+        assert_ne!(m.top_modal(), Some(&Id::ArtifactPicker));
+        assert!(fetch_artifact_cmds(&cmds).is_empty());
+    }
+
+    /// `Event::ArtifactBody` is a broadcast, so it reaches clients that never
+    /// asked. Only the client with that request outstanding opens the reader.
+    #[test]
+    fn an_artifact_body_nobody_here_asked_for_opens_nothing() {
+        use lazybox_core::Artifact;
+        let (mut m, ws_key) = model_with_focused_workspace();
+        let at = chrono::Utc::now();
+        m.handle_daemon_event(IpcEvent::ArtifactBody {
+            workspace_key: ws_key.clone(),
+            worktree: "wt".into(),
+            name: "plan.md".into(),
+            artifact: Some(Artifact::from_markdown(
+                "wt",
+                "plan.md",
+                "# Plan\n\nx\n",
+                at,
+            )),
+        });
+        assert_ne!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+
+        // A reply for a *different* artifact than the one asked for is not
+        // ours either — the pick that is still outstanding must win.
+        let _ = m.fetch_artifact(ws_key.clone(), "wt".into(), "wanted.md".into());
+        m.handle_daemon_event(IpcEvent::ArtifactBody {
+            workspace_key: ws_key,
+            worktree: "wt".into(),
+            name: "other.md".into(),
+            artifact: Some(Artifact::from_markdown(
+                "wt",
+                "other.md",
+                "# Other\n\ny\n",
+                at,
+            )),
+        });
+        assert_ne!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+    }
+
+    /// An artifact the agent removed between the broadcast and the pick is
+    /// reported, not opened as an empty document.
+    #[test]
+    fn a_vanished_artifact_is_reported_rather_than_opened_empty() {
+        let (mut m, ws_key) = model_with_focused_workspace();
+        let _ = m.fetch_artifact(ws_key.clone(), "wt".into(), "gone.md".into());
+        m.handle_daemon_event(IpcEvent::ArtifactBody {
+            workspace_key: ws_key,
+            worktree: "wt".into(),
+            name: "gone.md".into(),
+            artifact: None,
+        });
+        assert_ne!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+    }
+
+    /// The combined reader's footer routes to the picker instead of dead-ending
+    /// in a count, and it quotes the chord the user actually has.
+    #[test]
+    fn the_reader_footer_names_the_chord_that_lists_the_rest() {
+        use lazybox_core::Artifact;
+        let (mut m, ws_key) = model_with_focused_workspace();
+        m.handle_daemon_event(IpcEvent::WorkspaceArtifacts {
+            workspace_key: ws_key,
+            artifacts: vec![Artifact::from_markdown(
+                "wt",
+                "new.md",
+                "# New\n\nx\n",
+                chrono::Utc::now(),
+            )],
+            hidden: vec![artifact_ref("wt", "old.md", "Old")],
+            unlisted: 2,
+        });
+
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenArtifacts);
+        let rendered = rendered_description_modal(&mut m);
+        assert!(
+            rendered.contains("3 older artifact(s) not shown"),
+            "the ref and the unlisted count are both artifacts it is not showing: {rendered}"
+        );
+        assert!(rendered.contains("a P"), "{rendered}");
     }
 
     /// `E A` arms auto-dispatch — but only behind a confirm that names the

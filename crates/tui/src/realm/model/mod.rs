@@ -430,6 +430,14 @@ pub enum Id {
     /// [`ChoicePayload::Text`]. Pick → open it in the browser. A single
     /// on-screen URL skips the picker and opens directly.
     UrlPicker,
+    /// Artifact picker (`a P`, #1855). Single-pick `Choice` over every
+    /// artifact this workspace's agents spooled — the ones the last broadcast
+    /// carried a body for *and* the ones its caps left named only, which the
+    /// combined `a A` reader can do no more than count. Each row carries the
+    /// artifact's `worktree`/`name` identity as a [`ChoicePayload::Text`]; the
+    /// pick asks the daemon for that body (`Command::FetchArtifact`) and
+    /// `Event::ArtifactBody` opens it in the reader.
+    ArtifactPicker,
     /// Theme picker (`t`, or the `,` Settings palette). Single-pick
     /// `Choice` over `theme::list()` with live preview on highlight:
     /// arrowing applies a palette at once, Enter keeps it and writes
@@ -668,6 +676,10 @@ impl Id {
                 | Id::JumpPicker
                 | Id::PromptHistoryPicker
                 | Id::UrlPicker
+                // The artifact picker (#1855) only ever opens a read-only
+                // markdown reader, so a retained stale key cannot post an
+                // irreversible effect — the bar this allowlist sets.
+                | Id::ArtifactPicker
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
@@ -2582,13 +2594,23 @@ pub struct Model<T: TerminalAdapter> {
     /// DAG (`E g`) readouts render from this cache, and the held-merge
     /// confirm on `g m` consults it to name unmerged predecessors.
     pub(crate) epic_snapshots: std::collections::HashMap<String, lazybox_ipc::EpicSnapshot>,
-    /// Markdown artifacts agents spooled per workspace (#1822) and the count
-    /// the daemon's cap left out, from `Event::WorkspaceArtifacts` (seeded on
-    /// connect, refreshed on every spool change). `a A` renders these through
-    /// the description reader. Not persisted: the spool files in the worktree
-    /// are the durable copy, and the daemon re-derives this from them.
+    /// Markdown artifacts agents spooled per workspace (#1822) and what the
+    /// daemon's caps left out, from `Event::WorkspaceArtifacts` (seeded on
+    /// connect, refreshed on every spool change). `a A` renders the carried
+    /// bodies through the description reader; `a P` lists every artifact,
+    /// including the ones past the caps that `hidden` names without a body.
+    /// Not persisted: the spool files in the worktree are the durable copy,
+    /// and the daemon re-derives this from them.
     pub(crate) artifacts:
-        std::collections::HashMap<lazybox_core::WorkspaceKey, (Vec<lazybox_core::Artifact>, usize)>,
+        std::collections::HashMap<lazybox_core::WorkspaceKey, lazybox_core::WorkspaceArtifacts>,
+    /// The artifact a `Command::FetchArtifact` is outstanding for (#1855),
+    /// as `(workspace, worktree, name)`.
+    ///
+    /// `Event::ArtifactBody` is a broadcast, so it reaches every client and
+    /// arrives after the user may have moved on. Mounting the reader only for
+    /// the request still recorded here keeps a reply from popping a modal over
+    /// whatever they did next, and keeps one client's pick out of another's UI.
+    pub(crate) pending_artifact: Option<(lazybox_core::WorkspaceKey, String, String)>,
     /// Skill names triggered this session, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Feeds the skills picker's "Recent" group so
     /// a repeated skill is one `]]k` + `Enter` away, mirroring
@@ -3125,6 +3147,7 @@ impl<T: TerminalAdapter> Model<T> {
             mastery: std::collections::HashMap::new(),
             epic_snapshots: std::collections::HashMap::new(),
             artifacts: std::collections::HashMap::new(),
+            pending_artifact: None,
             recent_skills: Vec::new(),
             dismissed_updates: Vec::new(),
             snippet_keepmine: Vec::new(),

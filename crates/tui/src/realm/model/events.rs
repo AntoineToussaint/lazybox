@@ -11,6 +11,7 @@
 //! the "things the run loop calls between keystrokes" surface.
 
 use super::{Id, ModalFlow, Model, Msg, PaneFocus, ShellCommandConfig};
+use lazybox_core::ARTIFACT_SPOOL_RELATIVE_PATH;
 use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent};
 use std::time::Duration;
 use tuirealm::terminal::TerminalAdapter;
@@ -1091,19 +1092,53 @@ impl<T: TerminalAdapter> Model<T> {
             workspace_key,
             artifacts,
             hidden,
+            unlisted,
         } = &event
         {
+            let found = lazybox_core::WorkspaceArtifacts {
+                artifacts: artifacts.clone(),
+                hidden: hidden.clone(),
+                unlisted: *unlisted,
+            };
+            // The badge counts every artifact the workspace has, not only the
+            // ones a body was carried for: `a P` reaches all of them, so a
+            // count that stopped at the caps would under-report what the user
+            // can actually open (#1855).
             self.sidebar.set_artifact_count(
                 lazybox_core::SessionKey::from(workspace_key.as_str()),
-                artifacts.len(),
+                found.total(),
             );
-            if artifacts.is_empty() {
+            if found.total() == 0 {
                 self.artifacts.remove(workspace_key);
             } else {
-                self.artifacts
-                    .insert(workspace_key.clone(), (artifacts.clone(), *hidden));
+                self.artifacts.insert(workspace_key.clone(), found);
             }
             self.redraw = true;
+        }
+        // One artifact's body, in answer to this client's pick (#1855). The
+        // reply is a broadcast, so it is opened only for the request still
+        // outstanding here — see `Model::pending_artifact`.
+        if let IpcEvent::ArtifactBody {
+            workspace_key,
+            worktree,
+            name,
+            artifact,
+        } = &event
+        {
+            let ours = self.pending_artifact.as_ref().is_some_and(|pending| {
+                pending.0 == *workspace_key && pending.1 == *worktree && pending.2 == *name
+            });
+            if ours {
+                self.pending_artifact = None;
+                match artifact {
+                    Some(artifact) => self.open_one_artifact(artifact),
+                    None => self.flash_info(format!(
+                        "{name} is no longer in {ARTIFACT_SPOOL_RELATIVE_PATH}/ — the agent \
+                         removed or renamed it"
+                    )),
+                }
+                self.redraw = true;
+            }
         }
         if let IpcEvent::EpicGone { key } = &event {
             self.epic_snapshots.remove(key);
@@ -1431,6 +1466,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // Spooled artifacts (#1822) are read off the worktree, not a
                 // provider poll, and are consumed earlier in this function.
                 | IpcEvent::WorkspaceArtifacts { .. }
+                | IpcEvent::ArtifactBody { .. }
                 // `task_status` (#1785) is request/response: the daemon answers
                 // on the asking connection, so this never reaches a TUI client.
                 // The arm exists because `Event` is one shared exhaustive enum.
@@ -2616,6 +2652,7 @@ impl<T: TerminalAdapter> Model<T> {
             // Spooled artifacts (#1822) are read off the worktree, not a
             // provider poll, and are consumed earlier in this function.
             | IpcEvent::WorkspaceArtifacts { .. }
+            | IpcEvent::ArtifactBody { .. }
             // `task_status` (#1785) is request/response: the daemon answers
             // on the asking connection, so this never reaches a TUI client.
             // The arm exists because `Event` is one shared exhaustive enum.
@@ -3001,6 +3038,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // Spooled artifacts (#1822) are read off the worktree, not a
                 // provider poll, and are consumed earlier in this function.
                 | IpcEvent::WorkspaceArtifacts { .. }
+                | IpcEvent::ArtifactBody { .. }
                 // `task_status` (#1785) is request/response: the daemon answers
                 // on the asking connection, so this never reaches a TUI client.
                 // The arm exists because `Event` is one shared exhaustive enum.

@@ -20,6 +20,7 @@ type Validator = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// Single-line text input.
 pub struct Input {
+    presentation: crate::realm::presentation::Presentation,
     title: String,
     prompt: String,
     placeholder: String,
@@ -30,9 +31,58 @@ pub struct Input {
 }
 
 impl Input {
+    fn view_mobile(&self, frame: &mut Frame, area: Rect) {
+        let theme = crate::theme::current();
+        let modal = self.presentation.modal(area, 60, 9);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(format!(" {} ", self.title))
+            .border_style(theme.modal_border());
+        let inner = block.inner(modal);
+        frame.render_widget(Clear, modal);
+        frame.render_widget(block, modal);
+        if inner.height < 3 {
+            return;
+        }
+        let prompt = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height.saturating_sub(3),
+        );
+        frame.render_widget(
+            Paragraph::new(self.prompt.as_str())
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(theme.text_dim)),
+            prompt,
+        );
+        let display = self.display_string();
+        let mut start = 0;
+        while crate::util::visual_width(&display[start..]) > usize::from(inner.width) {
+            let Some(ch) = display[start..].chars().next() else {
+                break;
+            };
+            start += ch.len_utf8();
+        }
+        frame.render_widget(
+            Paragraph::new(&display[start..]).style(Style::default().fg(theme.text_strong)),
+            Rect::new(inner.x, inner.bottom() - 3, inner.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("Ctrl-X clear").style(Style::default().fg(theme.text_dim)),
+            Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("Enter save  Esc cancel").style(Style::default().fg(theme.accent)),
+            Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+        );
+    }
+
     /// Build a prompt asking for `prompt`.
     pub fn new(prompt: impl Into<String>) -> Self {
         Self {
+            presentation: crate::realm::presentation::Presentation::Desktop,
             title: "Input".to_string(),
             prompt: prompt.into(),
             placeholder: String::new(),
@@ -104,6 +154,10 @@ impl Input {
 
 impl Component for Input {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            self.view_mobile(frame, area);
+            return;
+        }
         let theme = crate::theme::current();
         let modal_w = 60u16.min(area.width.saturating_sub(4));
         let modal_h = 7u16;
@@ -159,7 +213,9 @@ impl Component for Input {
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
         None
     }
-    fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.presentation.apply_attribute(attr, value);
+    }
     fn state(&self) -> State {
         State::None
     }
@@ -177,6 +233,16 @@ impl AppComponent<Msg, UserEvent> for Input {
                 modifiers,
                 ..
             }) if modifiers.contains(KeyModifiers::CONTROL) => Some(Msg::ModalDismissed),
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('x'),
+                modifiers,
+                ..
+            }) if self.presentation == crate::realm::presentation::Presentation::Mobile
+                && *modifiers == KeyModifiers::CONTROL =>
+            {
+                self.input.clear();
+                None
+            }
             Event::Keyboard(KeyEvent {
                 code: Key::Enter, ..
             }) => {

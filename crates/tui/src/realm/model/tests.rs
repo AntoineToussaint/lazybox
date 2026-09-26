@@ -8,7 +8,7 @@
 /// would let two modules' mutators race. Held for the whole body of
 /// each such test.
 #[cfg(test)]
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Seed a bare workspace into the sidebar's workspace map so a removal
 /// prompt targeting `key` passes the mount-time liveness gate
@@ -1953,7 +1953,7 @@ mod effects_tests {
             request_id.clone(),
             super::super::PendingWorkspaceCreate {
                 name: "Disconnected".into(),
-                spawn_agent: true,
+                runner: super::super::SessionRunner::Agent("claude".into()),
                 workspace_key: None,
             },
         );
@@ -2174,7 +2174,10 @@ mod effects_tests {
             matches!(&cmds[..], [IpcCommand::CreateProject { name }] if name == "scratch"),
             "chat first creates the scratch project: {cmds:?}"
         );
-        assert!(m.deferred_chat, "chat is deferred until scratch lands");
+        assert!(
+            m.deferred_chat.is_some(),
+            "chat is deferred until scratch lands"
+        );
         // The scratch store write fails on the daemon: its
         // ProjectUpserted never arrives. The user instead creates a
         // real project via `x p`, which re-aims the deferred focus.
@@ -2203,7 +2206,7 @@ mod effects_tests {
         // The leaked flag survives harmlessly — only a scratch upsert
         // consumes it, so a later real Chat still works.
         assert!(
-            m.deferred_chat,
+            m.deferred_chat.is_some(),
             "a non-scratch upsert must leave the flag for the scratch that owns it"
         );
     }
@@ -9148,6 +9151,7 @@ mod stale_input_tests {
                 | Id::JumpPicker
                 | Id::PromptHistoryPicker
                 | Id::UrlPicker
+                | Id::MobileLinks
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
@@ -9184,7 +9188,8 @@ mod stale_input_tests {
                 // Drop — destructive-action menus / delete-routing lists.
                 // (HeaderContext's entries are all local/reversible, but
                 // a menu popped under a buffered Enter should never act.)
-                Id::SidebarContext | Id::HeaderContext | Id::InspectList
+                Id::MobileNewSession | Id::MobileRunner
+                | Id::MobileDeleteSession | Id::SidebarContext | Id::HeaderContext | Id::InspectList
                 | Id::ImportCheckoutList => false,
                 // Drop — outward-effect inputs (post/label/deliver).
                 Id::Reply
@@ -9256,6 +9261,9 @@ mod stale_input_tests {
         };
 
         for id in [
+            Id::MobileNewSession,
+            Id::MobileRunner,
+            Id::MobileDeleteSession,
             Id::Splash,
             Id::Help,
             Id::HelpAsk,
@@ -16483,6 +16491,30 @@ mod wheel_routing_tests {
         assert_eq!(scroll_offset(&m), bottom_offset - 18);
     }
 
+    #[test]
+    fn mobile_wheel_scrolls_history_at_screen_edges_and_verifies_reporting() {
+        let (mut m, _server, _) = build_model_with_terminal();
+        m.presentation = crate::realm::presentation::Presentation::Mobile;
+        let bytes = (0..200)
+            .map(|i| format!("line {i}\r\n"))
+            .collect::<String>();
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: Arc::from(bytes.into_bytes()),
+            first_seq: 1,
+            seq: 1,
+            cols: 0,
+            rows: 0,
+        });
+        let mut before = scroll_offset(&m);
+        for (x, y) in [(0, 3), (4, 0), (4, m.layout.last_area.bottom() - 1), (4, 4)] {
+            m.handle_mouse(wheel_up_at(x, y));
+            assert_eq!(scroll_offset(&m), before - 3, "wheel at {x},{y}");
+            assert!(m.mouse_input_verified());
+            before -= 3;
+        }
+    }
+
     /// Agent identity is not part of wheel routing. Once the backend has
     /// exposed retained history, both Codex and Claude scroll it through
     /// the same local viewport path even when they request mouse clicks.
@@ -16831,6 +16863,117 @@ mod input_priority_tests {
         );
         assert!(irx.try_recv().is_err(), "the input buffer is drained");
         assert!(redraw_is_input, "a discrete key arms the immediate paint");
+    }
+
+    #[test]
+    fn mobile_delayed_agent_typing_survives_a_busy_frame() {
+        for agent in ["claude", "codex"] {
+            let (mut m, mut server) = model_with_focused_agent();
+            m.presentation = crate::realm::presentation::Presentation::Mobile;
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                terminal_id: TID,
+                session_key: SessionKey::new("github:o/r#1"),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                agent_state: None,
+            });
+            drain_startup(&mut server);
+            m.redraw = true;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+            for code in [
+                KeyCode::Char('h'),
+                KeyCode::Char('i'),
+                KeyCode::Backspace,
+                KeyCode::Char('o'),
+                KeyCode::Enter,
+            ] {
+                tx.try_send(TimedInput {
+                    read_at: Instant::now() - std::time::Duration::from_secs(2),
+                    event: CtEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+                })
+                .expect("room");
+            }
+            drain_priority_input(
+                &mut m,
+                &mut rx,
+                &mut StaleInputTally::default(),
+                &mut PerfMonitor::new(),
+                &mut PhaseTimings::default(),
+                &mut false,
+            );
+            assert_eq!(
+                written_bytes(&mut server),
+                b"hi\x7fo\r",
+                "{agent} typing was lost"
+            );
+        }
+    }
+
+    #[test]
+    fn mobile_delayed_management_and_exited_terminal_keys_stay_guarded() {
+        for state in ["sessions", "settings", "exited", "control-t", "control-g"] {
+            let (mut m, mut server) = model_with_focused_agent();
+            m.presentation = crate::realm::presentation::Presentation::Mobile;
+            match state {
+                "sessions" => m.open_mobile_sessions(),
+                "settings" => {
+                    m.cache_persisted_setup(lazybox_core::PersistedSetup::default());
+                    m.open_settings();
+                    assert!(!m.modal_stack.is_empty());
+                }
+                "exited" => m.handle_daemon_event(IpcEvent::TerminalExited {
+                    terminal_id: TID,
+                    exit_code: Some(0),
+                    last_output: None,
+                }),
+                _ => (),
+            }
+            drain_startup(&mut server);
+            let modal = m.modal_stack.last().cloned();
+            let rail_open = m.mobile_rail.is_open();
+            m.redraw = true;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            let key = match state {
+                "control-t" => KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+                "control-g" => KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+                "sessions" => KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                _ => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            };
+            tx.try_send(TimedInput {
+                read_at: Instant::now() - std::time::Duration::from_secs(2),
+                event: CtEvent::Key(key),
+            })
+            .expect("room");
+            if matches!(state, "control-t" | "control-g") {
+                tx.try_send(TimedInput {
+                    read_at: Instant::now() - std::time::Duration::from_secs(2),
+                    event: CtEvent::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)),
+                })
+                .expect("room");
+            }
+            drain_priority_input(
+                &mut m,
+                &mut rx,
+                &mut StaleInputTally::default(),
+                &mut PerfMonitor::new(),
+                &mut PhaseTimings::default(),
+                &mut false,
+            );
+            if state == "settings" {
+                // Settings already retains its keys; its async metadata
+                // requests are allowed, but input must never leak to a PTY.
+                assert!(written_bytes(&mut server).is_empty());
+            } else {
+                assert!(
+                    server.rx.try_recv().is_err(),
+                    "{state}: stale input emitted a command"
+                );
+            }
+            assert_eq!(m.modal_stack.last(), modal.as_ref(), "{state}");
+            assert_eq!(m.mobile_rail.is_open(), rail_open, "{state}");
+        }
     }
 
     /// A no-op unless a build is pending — with nothing to render there is

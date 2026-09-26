@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: screen(&mut m)
+---
+Sessions (0) · j/k move · Enter open   
+Sessions j/k move                      
+No sessions yet.                       
+Press n to start one.                  
+A repository is optional.              
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+Enter open Esc back                    
+n new r name x del p sort / URLs

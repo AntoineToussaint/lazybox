@@ -47,6 +47,12 @@ impl Terminals {
         self.inner.apply_ui_defaults(ui);
     }
 
+    pub(crate) fn terminal_summaries(
+        &self,
+    ) -> Vec<crate::components::terminal_stack::TerminalSummary> {
+        self.inner.terminal_summaries()
+    }
+
     /// Current new-terminal layout preference (tab vs split for auto
     /// spawns). Read by the `]]` leader popup to label the `]]t` row.
     pub fn terminal_new_layout(&self) -> lazybox_config::NewTerminalLayout {
@@ -339,6 +345,10 @@ impl Terminals {
 
     /// `]]x` — close the focused terminal (tile or active tab) and
     /// its PTY.
+    pub(crate) fn close_terminal(&mut self, id: TerminalId, cmds: &mut Vec<IpcCommand>) {
+        self.inner.close_terminal(id, cmds);
+    }
+
     pub fn close_focused_tile(&mut self, cmds: &mut Vec<IpcCommand>) {
         self.inner.close_focused_tile(cmds);
     }
@@ -407,6 +417,11 @@ impl Terminals {
         delta: isize,
     ) -> crate::components::terminal_stack::ScrollOutcome {
         self.inner.scroll_active(delta)
+    }
+
+    /// Jump the focused terminal to live output and end its scrollback visit.
+    pub fn scroll_to_bottom(&mut self) -> crate::components::terminal_stack::ScrollOutcome {
+        self.inner.scroll_to_bottom()
     }
 
     /// Crossterm `(col, row)` → screen-absolute grid coords

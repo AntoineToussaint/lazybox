@@ -16,6 +16,16 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(top) = self.modal_stack.last().cloned() else {
             return Vec::new();
         };
+        if top == Id::MobileNewSession {
+            return self.mobile_new_session_picked(&picks);
+        }
+        if top == Id::MobileLinks {
+            self.mobile_link_picked(&picks);
+            return Vec::new();
+        }
+        if top == Id::MobileRunner {
+            return self.mobile_runner_picked(&picks);
+        }
         // Sandbox onboarding drives its own draft state machine rather than
         // the tui-core PickFlow catalog (#1112).
         if top == Id::SandboxProviderPick {

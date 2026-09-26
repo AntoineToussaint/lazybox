@@ -49,6 +49,7 @@ mod auth_cli;
 mod build_guard;
 mod device_cli;
 mod gh_cli;
+mod mobile_launch;
 mod practice;
 mod relay_e2e;
 mod remote_box;
@@ -468,6 +469,7 @@ Getting started:
                               inbox where agents work and reply to you, with no
                               GitHub, no network, and nothing written to your
                               real ~/.lazybox; press every key with no consequence
+  lb -m                      mobile-friendly sessions (Ctrl-T opens Sessions)
   lazybox --test              try the UI on a throwaway seeded workspace, no GitHub
   lazybox --help, -h          show this help
   lazybox --version, -V       print the version
@@ -636,15 +638,24 @@ async fn main() -> anyhow::Result<()> {
         return notification_click_subcommand(&args[1..]).await;
     }
 
+    let mobile = take_flag(&mut args, "--mobile") | take_flag(&mut args, "-m");
     let fresh = take_flag(&mut args, "--fresh");
     let test_mode = take_flag(&mut args, "--test");
     let demo_mode = take_flag(&mut args, "--demo");
     let preselect_workspace = take_value(&mut args, "--workspace");
     let preselect_session = take_value(&mut args, "--session");
-    let preselect = preselect_workspace.map(|w| lazybox_tui::realm::model::Preselect {
+    let target = preselect_workspace.map(|w| lazybox_tui::realm::model::Preselect {
         workspace_key: lazybox_core::SessionKey::from(w),
         session_id_raw: preselect_session,
     });
+    let preselect = UiLaunch {
+        target,
+        presentation: if mobile {
+            lazybox_tui::realm::presentation::Presentation::Mobile
+        } else {
+            lazybox_tui::realm::presentation::Presentation::Desktop
+        },
+    };
     if fresh {
         wipe_state_db();
         clear_persisted_setup();
@@ -678,6 +689,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("--connect-relay") => run_connect_relay(&args[1..], preselect).await,
         other => match classify_top_level_fallback(other) {
+            TopLevelFallback::Launch if mobile => {
+                let socket = mobile_launch::ensure_daemon().await?;
+                run_remote(&socket, preselect).await
+            }
             TopLevelFallback::Launch => run_embedded_realm(preselect).await,
             TopLevelFallback::ShowHelp => {
                 println!("{HELP}");
@@ -1556,11 +1571,17 @@ pub(crate) fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
     None
 }
 
+/// UI options stay local to the attaching client, including over SSH/relay.
+struct UiLaunch {
+    target: Option<lazybox_tui::realm::model::Preselect>,
+    presentation: lazybox_tui::realm::presentation::Presentation,
+}
+
 /// `lazybox --test` boots against a throwaway tempdir repo + one
 /// pre-seeded workspace. No setup screen, no provider polling, no
 /// disk writes. The fixture (which owns the TempDir) is held in
 /// scope for the whole TUI session — drop = `rm -rf` the tempdir.
-async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> anyhow::Result<()> {
+async fn run_test(preselect: UiLaunch) -> anyhow::Result<()> {
     let fixture = test_mode::TestFixture::new_with_seeded_session()?;
     eprintln!("--test repo at {}", fixture.repo.path().display());
 
@@ -1581,8 +1602,9 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
     spawn_terminal_restore_on_signal(None);
     let snippets = fixture.snippets.clone();
     tokio::task::spawn_blocking(move || {
-        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
-        if let Some(p) = preselect {
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?
+            .with_presentation(preselect.presentation);
+        if let Some(p) = preselect.target {
             model = model.with_preselect(p);
         }
         lazybox_tui::realm::model::run_loop_with_model(model)
@@ -1604,7 +1626,7 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
 /// and the bus → client relay), so this is the production event path fed
 /// synthetic events, not a bypass. See `scenario.rs` for the harness and its
 /// documented interface gaps.
-async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> anyhow::Result<()> {
+async fn run_demo(preselect: UiLaunch) -> anyhow::Result<()> {
     let fixture = scenario::DemoFixture::seed()?;
     let repos: std::collections::BTreeSet<&str> =
         fixture.workspaces.iter().map(|w| w.repo.as_str()).collect();
@@ -1627,9 +1649,7 @@ async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
 /// throwaway `LAZYBOX_HOME` so nothing touches the real profile, driven by the
 /// reactor instead of a script (so the world responds to what the user does),
 /// and marked with the permanent practice banner.
-async fn run_practice(
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
-) -> anyhow::Result<()> {
+async fn run_practice(preselect: UiLaunch) -> anyhow::Result<()> {
     // Enter the sandbox BEFORE seeding or booting: from here every
     // `LAZYBOX_HOME`-derived path — including the client's own config writes —
     // resolves inside the temp dir, and is deleted when `_sandbox` drops.
@@ -1658,7 +1678,7 @@ async fn boot_scenario_world(
     fixture: scenario::DemoFixture,
     steps: Vec<scenario::Step>,
     mode: ScenarioMode,
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
+    preselect: UiLaunch,
 ) -> anyhow::Result<()> {
     let _ = std::env::set_current_dir(fixture.repo.path());
 
@@ -1708,8 +1728,9 @@ async fn boot_scenario_world(
     let snippets = fixture.snippets.clone();
     let practice = mode == ScenarioMode::Reactive;
     tokio::task::spawn_blocking(move || {
-        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
-        if let Some(p) = preselect {
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?
+            .with_presentation(preselect.presentation);
+        if let Some(p) = preselect.target {
             model = model.with_preselect(p);
         }
         if practice {
@@ -1915,10 +1936,7 @@ async fn bring_up_tunnel(
 /// broken tunnel fails within this window rather than hanging the launch.
 const TUNNEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 
-async fn run_remote(
-    socket_path: &std::path::Path,
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
-) -> anyhow::Result<()> {
+async fn run_remote(socket_path: &std::path::Path, preselect: UiLaunch) -> anyhow::Result<()> {
     let config = lazybox_config::Config::load().ok();
 
     // A configured `remote.tunnel` replaces the operator-run `autossh` of
@@ -1943,7 +1961,12 @@ async fn run_remote(
     // remote `--connect` client that was a fresh, unrelated database. The
     // store here only backs the build guard's release-check cache, which is
     // a bounded, throwaway optimization; a failed open just skips it.
-    let update_check = tokio::spawn(async {
+    let check_updates =
+        preselect.presentation != lazybox_tui::realm::presentation::Presentation::Mobile;
+    let update_check = tokio::spawn(async move {
+        if !check_updates {
+            return None;
+        }
         let open_store = tokio::task::spawn_blocking(lazybox_server::open_store);
         let store = match tokio::time::timeout(Duration::from_millis(500), open_store).await {
             Ok(Ok(Ok(store))) => Some(store),
@@ -2001,7 +2024,7 @@ async fn run_realm_client(
     config: Option<lazybox_config::Config>,
     notify_socket: Option<PathBuf>,
     available_update: Option<lazybox_tui::build_guard::AvailableUpdate>,
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
+    preselect: UiLaunch,
 ) -> anyhow::Result<()> {
     spawn_terminal_restore_on_signal(None);
     // The attach client owns the same client-side config the embedded
@@ -2021,13 +2044,25 @@ async fn run_realm_client(
     let realm_result = tokio::task::spawn_blocking(move || {
         let snippets =
             lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref());
-        let mut model = lazybox_tui::realm::Model::new(client, snippets)?.with_remote();
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?
+            .with_presentation(preselect.presentation)
+            .with_remote();
         model.apply_client_config(&user_config);
+        if preselect.presentation == lazybox_tui::realm::presentation::Presentation::Mobile
+            && let Some(setup) = lazybox_tui::setup_flow::load_from_yaml(
+                &lazybox_tui::setup_flow::config_yaml_path(),
+            )
+        {
+            // Offer subscribed repos immediately, including ones with no inbox items yet.
+            model.cache_persisted_setup(setup);
+        }
         model.note_daemon_build(&daemon.build);
-        if let Some(update) = available_update {
+        if preselect.presentation == lazybox_tui::realm::presentation::Presentation::Desktop
+            && let Some(update) = available_update
+        {
             model.show_update_if_new(update);
         }
-        if let Some(p) = preselect {
+        if let Some(p) = preselect.target {
             model = model.with_preselect(p);
         }
         lazybox_tui::realm::model::run_loop_with_model(model)
@@ -2047,10 +2082,7 @@ async fn run_realm_client(
 /// attach a TUI to a box reached through a rendezvous relay. Connects
 /// through the relay, runs the E2E handshake pinned to the box's channel
 /// key, and drives the daemon over the encrypted, ciphertext-only tunnel.
-async fn run_connect_relay(
-    args: &[String],
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
-) -> anyhow::Result<()> {
+async fn run_connect_relay(args: &[String], preselect: UiLaunch) -> anyhow::Result<()> {
     let mut rest = args.to_vec();
     let smoke = take_flag(&mut rest, "--smoke");
     let relay_addr = take_value(&mut rest, "--relay")
@@ -2121,7 +2153,7 @@ async fn run_remote_relay(
     relay_addr: String,
     box_id: String,
     box_key_hex: String,
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
+    preselect: UiLaunch,
 ) -> anyhow::Result<()> {
     let box_key = relay_e2e::parse_box_key(&box_key_hex)?;
     let config = lazybox_config::Config::load().ok();
@@ -2158,9 +2190,7 @@ async fn run_remote_relay(
 /// Realm-based default boot path. Spawns the daemon, runs detection
 /// if no setup exists (kicks the wizard), kicks the polling loop on
 /// completion, runs the realm UI on a blocking task.
-async fn run_embedded_realm(
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
-) -> anyhow::Result<()> {
+async fn run_embedded_realm(preselect: UiLaunch) -> anyhow::Result<()> {
     let (client, server) = channel::pair();
     let config = server_config_from_user().await?;
     // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
@@ -2345,7 +2375,8 @@ async fn run_embedded_realm(
     let realm_result = tokio::task::spawn_blocking(move || {
         let snippets =
             lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref());
-        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?
+            .with_presentation(preselect.presentation);
         // Attach the lazy `r`-spawn box (Design A: the client holds a
         // connection per remote daemon; here one whose far end is the
         // box worker). Its presence is what makes the `r <agent>` chords
@@ -2387,7 +2418,7 @@ async fn run_embedded_realm(
         let detector: lazybox_tui::realm::SetupDetector =
             std::sync::Arc::new(|| Box::pin(setup_detect::detect_all()));
         model = model.with_setup_detector(detector);
-        if let Some(p) = preselect {
+        if let Some(p) = preselect.target {
             model = model.with_preselect(p);
         }
         // Cache so the in-session `,` reopens the wizard without

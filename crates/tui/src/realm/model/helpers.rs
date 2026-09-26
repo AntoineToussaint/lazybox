@@ -918,6 +918,9 @@ pub(super) fn is_scroll_event(event: &crossterm::event::Event) -> bool {
 pub(super) struct StaleInputTally {
     dropped: usize,
     oldest: Duration,
+    // Keep queued suffixes of a discarded management chord from becoming
+    // terminal text (e.g. stale Ctrl-T followed by a session letter).
+    key_discarded_at: Option<std::time::Instant>,
 }
 
 impl StaleInputTally {
@@ -1848,7 +1851,18 @@ fn service_buffered_input<T: TerminalAdapter>(
         .modal_stack
         .last()
         .is_some_and(super::Id::retains_stale_keys);
-    if should_drop_stale_input(&timed.event, age, modal_retains_keys) {
+    // Mobile's live-terminal route forwards keys literally. Treat those
+    // bytes as user content, like bracketed paste, instead of dropping a
+    // half-typed prompt when a busy frame exceeds the stale-action deadline.
+    if should_drop_stale_input(&timed.event, age, modal_retains_keys)
+        && (stale_tally
+            .key_discarded_at
+            .is_some_and(|barrier| timed.read_at <= barrier)
+            || !model.mobile_retains_buffered_key(&timed.event))
+    {
+        if matches!(timed.event, crossterm::event::Event::Key(_)) {
+            stale_tally.key_discarded_at = Some(std::time::Instant::now());
+        }
         stale_tally.note(age);
         return None;
     }

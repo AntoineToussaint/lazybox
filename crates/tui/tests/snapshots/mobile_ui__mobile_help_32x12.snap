@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: out
+---
+╭ Ask Lazybox ─────────────────╮
+│New question · Tab mode       │
+│New question › ▌              │
+│──────────────────────────────│
+│  Keys in the mobile UI       │
+│   Ctrl-T   Sessions          │
+│   Ctrl-G   Settings          │
+│   Ctrl-Q   detach from       │
+│Sessions                      │
+│   Swipe    scroll chat       │
+│Enter ask · swipe · Esc back  │
+╰──────────────────────────────╯

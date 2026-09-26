@@ -1069,6 +1069,16 @@ impl UsageBadge {
     }
 }
 
+/// Read-only terminal metadata for compact client-side session lists.
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalSummary {
+    pub id: TerminalId,
+    pub session_key: SessionKey,
+    pub kind: TerminalKind,
+    pub state: lazybox_ipc::AgentState,
+    pub exited: bool,
+}
+
 struct TerminalSlot {
     session_key: SessionKey,
     kind: TerminalKind,
@@ -2368,6 +2378,22 @@ impl TerminalStack {
         self.active_tab_idx
     }
 
+    pub(crate) fn terminal_summaries(&self) -> Vec<TerminalSummary> {
+        let mut rows: Vec<_> = self
+            .terminals
+            .iter()
+            .map(|(id, slot)| TerminalSummary {
+                id: *id,
+                session_key: slot.session_key.clone(),
+                kind: slot.kind.clone(),
+                state: slot.agent_state,
+                exited: slot.exited.is_some(),
+            })
+            .collect();
+        rows.sort_by_key(|row| row.id.0);
+        rows
+    }
+
     pub fn terminal_count(&self) -> usize {
         self.terminals.len()
     }
@@ -3296,42 +3322,96 @@ impl TerminalStack {
         // Reflect every byte received, not just what arrived on screen —
         // mirrors `visible_text` / `target_at`.
         slot.flush_pending();
-        // A snapshot-read failure is not "no terminal" — the terminal is
-        // right here, we just couldn't extract its grid. Report it as an
-        // empty scan so the caller says "no URLs", not "no terminal".
-        let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) else {
+        let terminal = &slot.vt.terminal;
+        let (Ok(scrollbar), Ok(cols), Ok(total)) =
+            (terminal.scrollbar(), terminal.cols(), terminal.total_rows())
+        else {
             return Some(Vec::new());
         };
-        let Ok(mut row_iter) = slot.vt.row_iter.update(&snapshot) else {
+        if total == 0 || cols == 0 {
             return Some(Vec::new());
-        };
-        let mut rows: Vec<(String, bool)> = Vec::new();
-        while let Some(r) = row_iter.next() {
-            let wrapped = r
-                .raw_row()
-                .ok()
-                .and_then(|raw| raw.is_wrapped().ok())
-                .unwrap_or(false);
-            let (text, _) = row_text_and_starts(&mut slot.vt.cell_iter, r);
-            rows.push((text, wrapped));
+        }
+        let point = |x, y| vt::terminal::Point::Screen(vt::terminal::PointCoordinate { x, y });
+        let row_at = |y| terminal.grid_ref(point(0, y)).ok()?.row().ok();
+        let mut start = scrollbar.offset as u32;
+        let mut end = (scrollbar.offset + scrollbar.len)
+            .saturating_sub(1)
+            .min((total - 1) as u64) as u32;
+        // Read the WHOLE logical lines intersecting the viewport. A link may
+        // begin in scrollback or continue below the visible bottom. Never
+        // move/resize the viewport just to reconstruct it.
+        while start > 0 && row_at(start).is_some_and(|r| r.is_wrap_continuation().unwrap_or(false))
+        {
+            start -= 1;
+        }
+        while (end as usize) + 1 < total
+            && row_at(end).is_some_and(|r| r.is_wrapped().unwrap_or(false))
+        {
+            end += 1;
         }
         let mut urls: Vec<String> = Vec::new();
-        let mut i = 0;
-        while i < rows.len() {
-            // Fold this row and any it wraps into one logical line.
-            let mut line = rows[i].0.clone();
-            while rows[i].1 && i + 1 < rows.len() {
-                i += 1;
-                line.push_str(&rows[i].0);
-            }
-            i += 1;
-            for url in scan_urls(&line) {
-                // Keep the URL at its LATEST position: drop any earlier
-                // sighting before re-appending, so recency ordering holds.
-                if let Some(prev) = urls.iter().position(|u| u == url) {
-                    urls.remove(prev);
+        let mut line = String::new();
+        let mut explicit = Vec::new();
+        let mut chars = vec!['\0'; 8];
+        for row in start..=end {
+            let Some(raw_row) = row_at(row) else {
+                continue;
+            };
+            let has_links = raw_row.has_hyperlink().unwrap_or(false);
+            for col in 0..cols {
+                let Ok(cell) = terminal.grid_ref(point(col, row)) else {
+                    continue;
+                };
+                if has_links && let Some(uri) = hyperlink_uri_from_grid(&cell) {
+                    // Explicit hyperlinks override URL-shaped display labels.
+                    line.push(' ');
+                    if (uri.starts_with("https://") || uri.starts_with("http://"))
+                        && !explicit.contains(&uri)
+                    {
+                        explicit.push(uri);
+                    }
+                    continue;
                 }
-                urls.push(url.to_string());
+                if matches!(
+                    cell.cell().and_then(|c| c.wide()),
+                    Ok(vt::screen::CellWide::SpacerHead | vt::screen::CellWide::SpacerTail)
+                ) {
+                    continue;
+                }
+                loop {
+                    match cell.graphemes(&mut chars) {
+                        Ok(0) => {
+                            line.push(' ');
+                            break;
+                        }
+                        Ok(n) => {
+                            line.extend(&chars[..n]);
+                            break;
+                        }
+                        Err(vt::error::Error::OutOfSpace { required })
+                            if required > chars.len() =>
+                        {
+                            chars.resize(required, '\0')
+                        }
+                        Err(_) => {
+                            line.push(' ');
+                            break;
+                        }
+                    }
+                }
+            }
+            if !raw_row.is_wrapped().unwrap_or(false) || row == end {
+                for url in scan_urls(&line)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .chain(explicit.drain(..))
+                {
+                    if let Some(prev) = urls.iter().position(|u| u == &url) {
+                        urls.remove(prev);
+                    }
+                    urls.push(url);
+                }
+                line.clear();
             }
         }
         Some(urls)
@@ -5420,6 +5500,7 @@ impl TerminalStack {
     }
 
     fn drop_slot(&mut self, terminal_id: TerminalId) {
+        let keep_focus = self.focused_terminal_id().filter(|id| *id != terminal_id);
         // Removing a tile from the active grid reshuffles focus (the
         // collapse below re-points `focused` at the removed tile's
         // sibling) and can drop the tree back to Tabs — so a live zoom can
@@ -5484,6 +5565,22 @@ impl TerminalStack {
             }
         }
         self.clamp_active_tab();
+        // Removing an unfocused sibling must not change which surviving
+        // terminal the user is reading. Both tab indices and split paths can
+        // shift during pruning; restore by identity without expanding a pane.
+        if let Some(id) = keep_focus
+            && let Some(index) = self.visible_terminals().iter().position(|t| *t == id)
+        {
+            self.active_tab_idx = index;
+            match &mut self.layout {
+                lazybox_core::SessionLayout::Tabs { active } => *active = index,
+                lazybox_core::SessionLayout::Splits { tree, focused } => {
+                    if let Some(path) = tree.path_to(id.0) {
+                        *focused = path;
+                    }
+                }
+            }
+        }
         self.auto_collapse_on_emptiness();
     }
 
@@ -5656,6 +5753,18 @@ impl TerminalStack {
             });
         } else {
             cmds.push(Command::ResumeAgent { terminal_id });
+        }
+    }
+
+    /// Close a specific terminal without retargeting the active workspace/tile.
+    /// The exit event prunes live panes; already exited panes are removed locally.
+    pub(crate) fn close_terminal(&mut self, id: TerminalId, cmds: &mut Vec<Command>) {
+        if !self.terminals.contains_key(&id) || self.closing.contains(&id) {
+            return;
+        }
+        if self.queue_terminal_teardown(id, cmds) {
+            self.drop_slot(id);
+            self.persist_layout(cmds);
         }
     }
 
@@ -6968,6 +7077,10 @@ fn hyperlink_uri_at(
         y: row as u32,
     });
     let grid_ref = terminal.grid_ref(point).ok()?;
+    hyperlink_uri_from_grid(&grid_ref)
+}
+
+fn hyperlink_uri_from_grid(grid_ref: &vt::screen::GridRef<'_>) -> Option<String> {
     let mut buf = vec![0u8; 256];
     loop {
         match grid_ref.hyperlink_uri(&mut buf) {
@@ -9027,6 +9140,80 @@ mod selection_offset_tests {
                 "https://b.example.com/a/long/wrapping/path".to_string(),
             ]),
         );
+    }
+
+    #[test]
+    fn focused_urls_preserves_osc8_targets_and_ignores_their_display_labels() {
+        let sk = SessionKey::new("links");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 12);
+        let url = format!(
+            "https://example.com/{}?a=1&b=2#section",
+            "long-path/".repeat(30)
+        );
+        slot.vt.feed(
+            format!("\x1b]8;;{url}\x1b\\https://different.example/label\x1b]8;;\x1b\\\r\n")
+                .as_bytes(),
+        );
+        slot.vt.feed(b"https://plain.example/wrapped/path\r\n");
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        assert_eq!(
+            stack.focused_urls(),
+            Some(vec![url, "https://plain.example/wrapped/path".into()])
+        );
+    }
+
+    #[test]
+    fn focused_urls_reconstructs_links_across_both_viewport_edges_without_scrolling() {
+        let sk = SessionKey::new("long-link");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 4);
+        let url = format!("https://example.com/{}?x=1&y=2#end", "segment/".repeat(30));
+        slot.vt.feed(format!("界 é {url}\r\nnext\r\n").as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        for top in [false, true] {
+            if top {
+                let _ = stack.scroll_to_top();
+            }
+            let before = stack.terminals[&TerminalId(1)]
+                .vt
+                .terminal
+                .scrollbar()
+                .unwrap()
+                .offset;
+            assert_eq!(stack.focused_urls(), Some(vec![url.clone()]));
+            assert_eq!(
+                stack.terminals[&TerminalId(1)]
+                    .vt
+                    .terminal
+                    .scrollbar()
+                    .unwrap()
+                    .offset,
+                before
+            );
+        }
     }
 
     #[test]

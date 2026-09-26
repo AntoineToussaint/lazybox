@@ -40,6 +40,7 @@ pub mod components;
 pub mod keymap;
 pub(crate) mod layout;
 pub mod model;
+pub mod presentation;
 pub(crate) mod setup_ctx;
 pub(crate) mod setup_screen;
 pub(crate) mod status_ctx;

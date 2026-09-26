@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: expanded
+---
+Ctrl-T Sessions | phone                
+Sessions j/k move        │             
+● a phone · codex        │             
+! b phone · codex        │             
+✓ c phone · codex        │             
+working · codex          │             
+Enter open Esc back      │             
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+                                       
+n new r name x del p sort / URLs

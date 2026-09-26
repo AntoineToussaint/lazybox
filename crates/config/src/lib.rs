@@ -1214,6 +1214,13 @@ pub struct LensSection {
     pub mailbox: Option<String>,
 }
 
+/// Stable identity of one terminal tab in the saved mobile presentation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileSessionTab {
+    pub session_key: String,
+    pub terminal_id: u64,
+}
+
 /// `ui:` block — user-facing view state lazybox writes back so UI
 /// preferences survive restart.
 ///
@@ -1224,6 +1231,10 @@ pub struct LensSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiSection {
+    /// Mobile tab priority, shared by launches using this config profile.
+    /// Terminal IDs survive daemon reconnects; workspace keys guard identities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mobile_session_order: Vec<MobileSessionTab>,
     /// Repo names whose workspace rows should start collapsed.
     pub collapsed_repos: std::collections::BTreeSet<String>,
     /// Repo names the user has pinned to the top of the sidebar, in
@@ -1494,6 +1505,7 @@ fn default_true() -> bool {
 impl Default for UiSection {
     fn default() -> Self {
         Self {
+            mobile_session_order: Vec::new(),
             collapsed_repos: std::collections::BTreeSet::new(),
             pinned_repos: Vec::new(),
             focused_workspaces: Vec::new(),
@@ -7254,5 +7266,39 @@ repos:
         let back: Config =
             serde_yaml::from_str(&serde_yaml::to_string(&cfg).expect("dump")).expect("reparse");
         assert_eq!(back.agent_policies(None), cfg.agent_policies(None));
+    }
+}
+
+#[cfg(test)]
+mod mobile_order_tests {
+    use super::*;
+    #[test]
+    fn mobile_session_order_round_trips_and_defaults_for_older_configs() {
+        let mut config = Config::default();
+        config.ui.mobile_session_order = vec![
+            MobileSessionTab {
+                session_key: "scratch:second".into(),
+                terminal_id: 8,
+            },
+            MobileSessionTab {
+                session_key: "scratch:first".into(),
+                terminal_id: 7,
+            },
+        ];
+        let written = serde_yaml::to_string(&config).unwrap();
+        assert_eq!(
+            serde_yaml::from_str::<Config>(&written)
+                .unwrap()
+                .ui
+                .mobile_session_order,
+            config.ui.mobile_session_order
+        );
+        assert!(
+            serde_yaml::from_str::<Config>("ui: {}\n")
+                .unwrap()
+                .ui
+                .mobile_session_order
+                .is_empty()
+        );
     }
 }

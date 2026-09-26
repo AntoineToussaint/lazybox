@@ -2981,10 +2981,15 @@ pub async fn dispatch_command(
             // watched repo) no longer pins it and re-runs the sweep every
             // tick.
             //
-            // An explicit refresh also clears the command-credential
-            // cache: a user who just ran `gh auth login` and hit
-            // refresh must not wait out a failure-backoff window.
-            lazybox_auth::invalidate_command_credential_cache();
+            // An explicit refresh also forgets cached credential failures:
+            // a user who just ran `gh auth login` and hit refresh must not
+            // wait out a failure-backoff window. Both caches have to go,
+            // not just the command provider's — `CredentialChain` memoises
+            // its own copy of that outcome for 5 minutes and is consulted
+            // first, so clearing the command cache alone left the refresh
+            // serving the same stale error without running a thing.
+            // Successes are kept, so a healthy token is not re-resolved.
+            lazybox_auth::invalidate_failed_credentials();
             // Force the sweep on the client that RUNS it: with a GitHub App
             // carrying the sweep, the cached user client is a different
             // client with its own hot-freshness and dependency caches, and

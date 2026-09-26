@@ -339,6 +339,7 @@ mod tests {
                     skill: None,
                     provider: None,
                     next: Vec::new(),
+                    action: None,
                     origin: SnippetOrigin::BuiltIn,
                 },
                 lazybox_config::SnippetState::Builtin,
@@ -352,6 +353,7 @@ mod tests {
                     skill: None,
                     provider: None,
                     next: Vec::new(),
+                    action: None,
                     origin: SnippetOrigin::Global,
                 },
                 lazybox_config::SnippetState::OverrideStale,
@@ -387,6 +389,7 @@ mod tests {
             skill: None,
             provider: None,
             next: Vec::new(),
+            action: None,
             origin: SnippetOrigin::BuiltIn,
         }
     }
@@ -443,6 +446,7 @@ mod tests {
                     skill: None,
                     provider: None,
                     next: Vec::new(),
+                    action: None,
                     origin: SnippetOrigin::Global,
                 },
                 // No badge: this test exercises body wrapping, not the
@@ -518,6 +522,7 @@ mod tests {
                         skill: None,
                         provider: None,
                         next: Vec::new(),
+                        action: None,
                         origin: SnippetOrigin::BuiltIn,
                     },
                     lazybox_config::SnippetState::Builtin,

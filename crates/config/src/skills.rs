@@ -1253,6 +1253,7 @@ mod export_tests {
             skill: None,
             provider: None,
             next: Vec::new(),
+            action: None,
             origin: SnippetOrigin::BuiltIn,
         }
     }

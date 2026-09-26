@@ -6,18 +6,53 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-09-26
+
+### Highlights
+
+- **GitHub sync stops starving itself.** A windowed search sent two separate
+  `updated:` qualifiers, which GitHub silently ignores together, so one busy
+  repo failed every sweep and was re-fetched in full every rotation (about a
+  quarter of all poll calls). Budget refusals no longer fan out into dozens
+  of single fetches, working-claim upkeep paces instead of failing (live
+  agents' claims no longer lapse, so the fleet stops double-spawning on
+  their tasks), and the #1801 `gh` shim now actually reaches agents running
+  under tmux.
+- **Safety gates fail closed.** A `config.yaml` that doesn't parse no longer
+  resolves `approval: human` repos to the default policy (so a bot approval
+  can't auto-merge them), and no longer drops you into first-run setup that
+  would replace your config and remove workspaces — lazybox refuses to start
+  and names the parse error. Unreadable epic and review state now holds a
+  merge instead of releasing it.
+- **Standing agent policies.** The rules lazybox states in every spawned
+  agent's briefing are named, individually overridable policies. Two ship by
+  default: never open a GitHub issue or a Linear ticket without the user's
+  explicit go-ahead (reversing the old "file it" default), and prefer one
+  self-contained PR over a stack. Override from `policies:` in
+  `~/.lazybox/config.yaml`; `repos.<owner/name>.policies` layers per repo.
+- **Search what the agent said.** `agent:` / `said:` now scan agent terminal
+  output, not only the prompts you sent.
+- **Review findings persist.** A review's findings are stored as a record, so
+  `fixall` can run in a fresh or cheaper agent instead of depending on the
+  reviewer's scrollback.
+
 ### Added
 
-- **Standing agent policies.** The rules lazybox states in every spawned
-  agent's briefing are now named, individually overridable policies rather
-  than one string. Two ship by default: **never open a GitHub issue or a
-  Linear ticket without the user's explicit go-ahead** (this reverses the
-  previous default, which told agents to treat a filed issue as the
-  deliverable for any follow-up they noticed), and **prefer one
-  self-contained pull request, even a large one, over a stack**. Override
-  either from `policies:` in `~/.lazybox/config.yaml` — `false` drops a
-  rule, a string rewords it, and an id lazybox does not define adds one of
-  your own. `repos.<owner/name>.policies` layers on top per repo.
+- `x F` creates a floating workspace in a fresh persistent folder without
+  inheriting a repository; `x n` stays the project-scoped new workspace. `x c`
+  creates a coordination workspace with a built-in brief for epics,
+  cross-repo contracts and blockers (override with
+  `agent.coordination_prompt`). Close-issue moves from `x c` to `x Shift-C`.
+- A "WIPE IT ANYWAY" override for a refused workspace delete, and an explicit
+  delete now always deletes.
+- `x x` (archive) can be undone: `x U` opens an archive browser (`u` / Enter
+  restores a row), and `lazybox workspace archived` / `lazybox workspace
+  unarchive <ref>` do the same from the CLI.
+- `clarify` comes in three levels: `goal` (one or two lines), `clarify` (at
+  most five short lines) and `deepclarify` (the full explanation).
+- **Agent artifacts.** An agent can write markdown into `.lazybox/artifacts/`
+  in its worktree and lazybox renders it in the reader (`a A`) — a report, a
+  plan, a findings page — without it landing in the repo or the terminal.
 
 ### Changed
 
@@ -37,43 +72,47 @@ contain explicitly documented compatibility changes.
 
 ### Fixed
 
-- Codex spawns on the current coding ladder instead of a migrated model id.
-  The pinned `gpt-5.5` has been superseded by `gpt-5.6-sol` in the Codex
-  CLI's own migration table, and the one-tier menu meant "default model" and
-  "only model" were the same setting. Codex now ships the same S/M/L/XL
-  strengths as Claude — Luna, Terra, Sol, Astra — so `w S`/`w M`, the
-  `best`/`high`/`medium`/`low` capability words and the Settings default-model
-  picker all select a real model for a Codex default agent.
-
-## [0.1.17] - 2026-09-19
-
-### Added
-
-- `x n` now creates a floating workspace in a fresh persistent folder without
-  inheriting a repository. `x c` creates a coordination workspace with a built-in
-  brief for epics, cross-repo contracts, blockers, and minimal issue count;
-  override it with `agent.coordination_prompt`.
-- Close-issue moves from `x c` to `x Shift-C` to make room for coordination.
-
-### Fixed
-
-- Claude and Codex launches now always use Lazybox's selected/default model,
-  including headless runs and resumed sessions. Codex ships a pinned GPT-5.5
-  default; invalid model selections fail before launch.
-- Lazybox's response rules and mechanics are available from session startup,
-  including bare Codex terminals. Snippets no longer append a separate output
-  contract, and their previews no longer advertise status-card endings.
-- Repository-scoped GitHub polling now splits repositories between the GitHub
-  App installation and user credentials according to actual access, preserving
-  polling coverage while keeping agent traffic off the installation's budget.
+- Settings → "Add / remove repos" no longer closes silently when GitHub was
+  slow or rate-limited at launch; an empty or failed org list is explained,
+  and dismissing it no longer re-saves your config.
+- `Shift-K` resumes limit-blocked agents on the first press instead of
+  rejecting presses while an earlier `continue` was still being confirmed.
+- ★ Focused rows always show their repo, including issue and PR rows.
+- Keys reach only the top modal: Esc on the update notice at first launch no
+  longer quits lazybox through the setup splash beneath it.
+- The setup flow only ever closes its own modal.
+- An agent's MCP token follows its workspace through the issue→PR fold and
+  survives a daemon restart; `report_blocker` refuses instead of pretending
+  when the caller's workspace row is gone.
+- Prompt history is never overwritten when its stored row can't be read.
+- Blackboard note retention no longer lets one scope evict another's notes.
+- Config writes are serialized across processes (a second TUI, the desktop
+  app, the daemon), not just threads.
+- Strength chords name the model they will actually run, for the target agent.
+- A user-initiated credential retry actually retries.
+- `lazybox workspace create` refuses unknown flags and prints its errors.
+- A provisioning checklist appears only in the client that asked for it.
+- A tmux session is never destroyed unattended.
+- Live terminal output survives a scrollback capture, and copy/paste reports
+  what it did.
+- Regenerable build output (`target/`) no longer blocks a workspace delete, and
+  a merged cleanup the gate always refuses stops re-prompting.
+- Claude and Codex launches always use lazybox's selected or default model,
+  including headless and resumed sessions; Codex ships the same S/M/L/XL
+  strengths as Claude on the current model ladder.
+- Repository-scoped GitHub polling splits repositories between the GitHub App
+  installation and user credentials by actual access.
 
 ### Upgrade notes
 
 - Upgrade the daemon and clients together: the wire contract and persisted
   workspace schema changed. Older binaries cannot read newly saved schema-14
   workspace records.
-- Archived floating folders retain their contents; archiving does not delete
-  your notes or other files.
+- A `config.yaml` that fails to parse now stops the launch with the error
+  instead of starting first-run setup. Fix the file (or move it aside) and
+  relaunch.
+- Existing agent panes keep their old `PATH`; the `gh` shim reaches agents
+  spawned after the upgrade.
 - Desktop frontend build/test failures remain tracked in #1858. This release
   does not claim desktop frontend validation.
 

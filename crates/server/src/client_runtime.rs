@@ -65,6 +65,7 @@ impl ClientRuntime {
         tasks.push(crate::polling::spawn(config.clone(), options.poll_interval));
         tasks.push(crate::working_claims::spawn(config.clone()));
         tasks.push(crate::working_watchdog::spawn(&config));
+        tasks.push(crate::artifacts::spawn(&config));
         log_model_pin_warnings();
         // Take the context-hygiene snapshot while the config is known to
         // parse: a file broken later must freeze the dial where the user left

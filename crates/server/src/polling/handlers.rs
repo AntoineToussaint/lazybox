@@ -116,6 +116,21 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws, options).await,
         }
     }
+    pub async fn record_merged_trailers(
+        &self,
+        ws: &lazybox_core::Workspace,
+        trailers: &lazybox_core::PrTrailers,
+        policy: &lazybox_core::TrailerPolicy,
+    ) -> lazybox_core::TrailerOutcome {
+        match self {
+            Self::Github(c) => {
+                lazybox_core::TaskProvider::record_merged_trailers(c, ws, trailers, policy).await
+            }
+            Self::Linear(c) => {
+                lazybox_core::TaskProvider::record_merged_trailers(c, ws, trailers, policy).await
+            }
+        }
+    }
     pub async fn update_branch(
         &self,
         ws: &lazybox_core::Workspace,

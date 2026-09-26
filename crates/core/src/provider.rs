@@ -618,6 +618,24 @@ pub trait TaskProvider: Send + Sync {
         Err(ProviderError::unsupported(self.name(), "merge"))
     }
 
+    /// Record `trailers` on the workspace's PR after it was merged by
+    /// something other than lazybox's own merge call — the host's native
+    /// auto-merge, an agent's `gh pr merge`, the web UI. None of those let
+    /// lazybox write the commit body, so the record goes out of band. The
+    /// provider applies `policy` (it knows the repo's visibility).
+    ///
+    /// The default records nothing: a provider without PRs has no merge to
+    /// annotate.
+    async fn record_merged_trailers(
+        &self,
+        workspace: &Workspace,
+        trailers: &crate::PrTrailers,
+        policy: &crate::TrailerPolicy,
+    ) -> TrailerOutcome {
+        let _ = (workspace, trailers, policy);
+        TrailerOutcome::Nothing
+    }
+
     /// Update the workspace's PR branch by merging the base branch into
     /// it — the "Update branch" button on github.com. Providers dispatch
     /// to the backend's branch-update mutation.

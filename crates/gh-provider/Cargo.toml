@@ -30,7 +30,9 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 # GitHub App auth (`app_auth.rs`). `jsonwebtoken` builds the RSA signing key
 # octocrab's `.app()` takes, and `secrecy` unwraps the `SecretString` octocrab
 # returns for an installation token. Both versions match octocrab's own pins
-# so neither adds a second copy to the tree.
+# so neither adds a second copy to the tree — and they MUST: `.app()` takes
+# jsonwebtoken 10's `EncodingKey`, so a lone major bump here does not compile.
+# `.github/dependabot.yml` holds jsonwebtoken majors back until octocrab moves.
 jsonwebtoken = { version = "10", default-features = false, features = ["use_pem"] }
 secrecy = "0.10"
 

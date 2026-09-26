@@ -208,10 +208,12 @@ pub trait Store: Send + Sync {
         Ok(None)
     }
 
-    /// Write a string value. Concrete stores persist it; the default
-    /// drops it on the floor (test stubs / read-only stores).
+    /// Write a string value. A backend that does not persist kv must say
+    /// so: the default reports unsupported rather than answer `Ok` for a
+    /// write it dropped, which let a partial backend (or a test stub)
+    /// claim durability it never provided (#1689).
     fn set_kv(&self, _key: &str, _value: &str) -> Result<(), StoreError> {
-        Ok(())
+        Err(StoreError::Unsupported("kv write"))
     }
 
     /// Insert `value` only when `key` is absent, returning whatever is
@@ -221,19 +223,18 @@ pub trait Store: Send + Sync {
     /// What matters is that the *decision* is atomic: two callers racing to
     /// seed the same key must both come away with the single winner, not
     /// each with the value it proposed. A backend whose conditional insert
-    /// is atomic should override this; the default is a read-then-write for
-    /// stubs that keep no kv at all.
-    fn set_kv_if_absent(&self, key: &str, value: &str) -> Result<String, StoreError> {
-        if let Some(existing) = self.get_kv(key)? {
-            return Ok(existing);
-        }
-        self.set_kv(key, value)?;
-        Ok(value.to_string())
+    /// is atomic MUST override this. A read-then-write default would hand
+    /// two racing callers two different "winners" while documenting one,
+    /// so the default reports unsupported instead (#1689).
+    fn set_kv_if_absent(&self, _key: &str, _value: &str) -> Result<String, StoreError> {
+        Err(StoreError::Unsupported("atomic kv insert-if-absent"))
     }
 
-    /// Remove a kv entry. Idempotent — missing key is not an error.
+    /// Remove a kv entry. Idempotent — missing key is not an error. The
+    /// default reports unsupported rather than claim a delete it never
+    /// made (#1689).
     fn delete_kv(&self, _key: &str) -> Result<(), StoreError> {
-        Ok(())
+        Err(StoreError::Unsupported("kv delete"))
     }
 
     /// List every key/value pair whose key begins with `prefix`.
@@ -375,5 +376,34 @@ pub trait Store: Send + Sync {
     /// for `project:*` prefixes.
     fn list_projects(&self) -> Result<Vec<ProjectRecord>, StoreError> {
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod default_honesty_tests {
+    use super::{Store, StoreError};
+
+    /// A backend that implements nothing.
+    struct Bare;
+    impl Store for Bare {}
+
+    /// #1689: the kv write defaults used to answer `Ok(())` for writes
+    /// they dropped, and the insert-if-absent default was a non-atomic
+    /// read-then-write documented as atomic. A backend that keeps no kv
+    /// must say so.
+    #[test]
+    fn kv_write_defaults_report_unsupported_instead_of_claiming_success() {
+        assert!(matches!(
+            Bare.set_kv("k", "v"),
+            Err(StoreError::Unsupported(_))
+        ));
+        assert!(matches!(
+            Bare.delete_kv("k"),
+            Err(StoreError::Unsupported(_))
+        ));
+        assert!(matches!(
+            Bare.set_kv_if_absent("k", "v"),
+            Err(StoreError::Unsupported(_))
+        ));
     }
 }

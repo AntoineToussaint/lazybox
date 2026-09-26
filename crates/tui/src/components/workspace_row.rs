@@ -724,6 +724,13 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ctx.theme,
     ));
     spans.extend(labels);
+    // The agent-text match cue is the cell's outer tail (#1774): it
+    // explains a result the user is already looking at, so it outranks
+    // nothing — not the chips, not the title — and is the first thing a
+    // narrowing row gives up.
+    let excerpt = agent_excerpt_spans(ctx);
+    let cue = excerpt.len();
+    spans.extend(excerpt);
     // A `★ Focused` row is lifted out of its repo group, so it has no repo
     // header to say where it came from — name the source inline (#1450).
     // It trails the title rather than leading it: the row must open with
@@ -732,28 +739,28 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // `owner/repo · Bug` compound that swallows the name (#1747). Dim so
     // it reads as a cue rather than competing with the title, but legible
     // (no forced dim) on the cursor row, mirroring the title and the tree
-    // prefix. It is the cell's outer tail: a narrow pane sheds it whole,
-    // and before the label chips, so starring a row never costs it the
-    // chips it shows under its repo header — never the title either.
-    let mut cue = 0;
+    // prefix.
+    //
+    // It is PINNED, never shed: it used to be the first thing a narrow
+    // row dropped, which kept it on a short task-less name and lost it on
+    // every long issue / PR title — so exactly the agents working on
+    // tracked work showed no repo. The title truncates to make room; the
+    // chips and the excerpt still go first.
+    let mut cell = Cell::new(spans).atomic_tail(tail).outer_tail(cue);
     if let Some(repo) = &ctx.source_repo {
         let cue_style = if ctx.is_cursor {
             ctx.row_style()
         } else {
             ctx.row_style().fg(ctx.theme.text_dim)
         };
-        spans.push(Span::styled(format!(" · {repo}"), cue_style));
-        cue = 1;
+        let short = repo
+            .rsplit_once('/')
+            .map_or(repo.as_str(), |(_, name)| name);
+        cell = cell
+            .pinned(vec![Span::styled(format!(" · {repo}"), cue_style)])
+            .pinned_compact(vec![Span::styled(format!(" · {short}"), cue_style)]);
     }
-    // The agent-text match cue joins that same outer tail, outermost of
-    // all (#1774): it explains a result the user is already looking at,
-    // so it outranks nothing — not the chips, not the source cue, and
-    // certainly not the title. Trailing the source cue keeps #1747's
-    // reading intact: the row still opens as `Bug · owner/repo`.
-    let excerpt = agent_excerpt_spans(ctx);
-    cue += excerpt.len();
-    spans.extend(excerpt);
-    Cell::new(spans).atomic_tail(tail).outer_tail(cue)
+    cell
 }
 
 /// The agent-text match cue: a dim `⌕ …excerpt…` trailing the row
@@ -2366,7 +2373,7 @@ mod tests {
 
     /// #1747: the source cue trails the title. The cell opens with the
     /// title exactly as it renders under the row's own repo header, and
-    /// the dim ` · repo` follows it as a droppable tail.
+    /// the dim ` · repo` follows it, pinned so it is never shed.
     #[test]
     fn cell_title_appends_dim_source_repo_when_set() {
         let task = make_task("owner/repo#1", "Fix the thing");
@@ -2376,10 +2383,11 @@ mod tests {
         ctx.source_repo = Some("owner/repo".into());
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), "Fix the thing");
-        let cue = cell.spans.last().expect("cue span");
+        let cue = cell.pinned.last().expect("cue span");
         assert_eq!(cue.content.as_ref(), " · owner/repo");
         assert_eq!(cue.style.fg, Some(theme.text_dim));
-        assert_eq!(cell.outer_tail, 1, "the cue is the outer, first-shed tail");
+        assert_eq!(cell.pinned_compact[0].content.as_ref(), " · repo");
+        assert_eq!(cell.outer_tail, 0, "the cue is pinned, not a shed tail");
         assert_eq!(cell.atomic_tail, 0);
     }
 
@@ -2402,7 +2410,7 @@ mod tests {
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), "Bug");
         assert_eq!(
-            cell.spans[1].content.as_ref(),
+            cell.pinned[0].content.as_ref(),
             " · AntoineToussaint/lazybox"
         );
     }
@@ -2416,41 +2424,63 @@ mod tests {
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans.len(), 1);
         assert_eq!(cell.spans[0].content.as_ref(), "Fix the thing");
+        assert!(cell.pinned.is_empty());
     }
 
     /// #1450 regression: the original fix put the `repo · ` prefix ahead
     /// of the title in the same cell, and right-edge truncation then ate
-    /// the title and left only the prefix on a narrow pane. The cue is a
-    /// droppable atomic tail, so it sheds whole and the title stays.
+    /// the title and left only the prefix on a narrow pane. The pin keeps a
+    /// readable head of the title, falling back to the bare repo name when
+    /// `owner/repo` would crowd it out.
     #[test]
     fn focused_source_never_evicts_the_title_on_a_narrow_pane() {
         let task = make_task("owner/repo#1", "Fix the thing");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
-        // A long owner/repo that, kept at any cost, would have shoved the
-        // title off the row entirely.
         ctx.source_repo = Some("AntoineToussaint/lazybox".into());
         let columns = build_columns(4);
         let lines = crate::components::table::render_table(&[build_row(&ctx)], &columns, 30);
         let text = line_text(&lines[0]);
         assert!(
-            text.contains("Fix the thing"),
-            "the title must stay whole, not be crowded out by the cue: {text:?}",
+            text.contains("Fix the"),
+            "the title head must survive beside the cue: {text:?}",
         );
         assert!(
-            !text.contains("AntoineToussaint"),
-            "the long repo cue must shed, not swallow the title: {text:?}",
+            text.contains("· lazybox"),
+            "the repo is still named, compactly: {text:?}",
         );
     }
 
-    /// #1747: the cue sheds BEFORE the label chips. Starring a labelled
-    /// row must not cost it the chips it shows under its repo header, so
-    /// at a width where title + chips fit but the cue does not, the chips
-    /// stay and only the cue goes; with room for all of it, the title
-    /// leads and chips then source follow.
+    /// The reported inconsistency: a focused task-less row (short name)
+    /// showed its repo, while a focused issue / PR row — a long title —
+    /// always shed it, so exactly the agents on tracked work had no repo.
+    /// A long title now truncates to keep the repo.
     #[test]
-    fn focused_source_sheds_before_the_label_chips() {
+    fn a_long_focused_title_keeps_its_repo() {
+        let task = make_task(
+            "owner/repo#1",
+            "Workspace cannot be deleted: squash-merged branches read as unpushed commits forever",
+        );
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.source_repo = Some("AntoineToussaint/lazybox".into());
+        let columns = build_columns(4);
+        let text =
+            line_text(&crate::components::table::render_table(&[build_row(&ctx)], &columns, 60)[0]);
+        assert!(
+            text.contains("… · AntoineToussaint/lazybox"),
+            "the title truncates, the repo stays: {text:?}",
+        );
+    }
+
+    /// Chips now shed BEFORE the repo: a focused row's repo is the one cue
+    /// it cannot get from a header, while its chips are one keystroke away.
+    /// With room for everything, the title leads and chips then source
+    /// follow (#1747's reading order is unchanged).
+    #[test]
+    fn focused_source_outlasts_the_label_chips() {
         let mut task = make_task("owner/repo#1", "Fix the thing");
         task.labels = vec![lazybox_core::Label {
             name: "bug".into(),
@@ -2465,21 +2495,14 @@ mod tests {
                 &crate::components::table::render_table(&[build_row(ctx)], &columns, width)[0],
             )
         };
-        let under_header = render(&ctx, 46);
-        assert!(
-            under_header.contains("Fix the thing [bug]"),
-            "fixture: the chips fit under the repo header at 46: {under_header:?}",
-        );
-
         ctx.source_repo = Some("owner/repo".into());
         let cell = cell_title(&ctx);
         assert_eq!(cell.atomic_tail, label_spans(&ctx).len());
-        assert_eq!(cell.outer_tail, 1);
 
-        let starred = render(&ctx, 46);
+        let narrow = render(&ctx, 46);
         assert!(
-            starred.contains("Fix the thing [bug]") && !starred.contains("owner/repo"),
-            "starred at 46: chips survive, only the cue sheds: {starred:?}",
+            narrow.contains("owner/repo"),
+            "at 46 the repo survives: {narrow:?}",
         );
         let wide = render(&ctx, 80);
         assert!(
@@ -2501,7 +2524,7 @@ mod tests {
         ctx.source_repo = Some("owner/repo".into());
         ctx.is_cursor = true;
         let cell = cell_title(&ctx);
-        let cue = cell.spans.last().expect("cue span");
+        let cue = cell.pinned.last().expect("cue span");
         assert_eq!(cue.content.as_ref(), " · owner/repo");
         assert_ne!(
             cue.style.fg,

@@ -100,6 +100,24 @@ impl TokenRegistry {
         self.inner.write().retain(|_, bound| bound != key);
     }
 
+    /// Move every token bound to `from` onto `to`, returning whether any
+    /// moved. The issue→PR fold re-keys a live agent's workspace; its bearer
+    /// was minted for the issue key, so without this every MCP call it made
+    /// after the fold resolved to a row that no longer exists (`whoami`
+    /// empty, `report_blocker` written under a dead key and pruned) — and
+    /// after a restart the token was dropped outright, because no terminal
+    /// wore the issue key any more (#1837).
+    pub fn rebadge(&self, from: &SessionKey, to: &SessionKey) -> bool {
+        let mut moved = false;
+        for bound in self.inner.write().values_mut() {
+            if bound == from {
+                *bound = to.clone();
+                moved = true;
+            }
+        }
+        moved
+    }
+
     /// Resolve a token to its session, if still registered.
     pub fn resolve(&self, token: &str) -> Option<SessionKey> {
         self.inner.read().get(token).cloned()
@@ -809,17 +827,25 @@ impl LazyboxMcp {
         // concurrent posts to this scope can't both claim the same seq and
         // have the second silently overwrite the first.
         let _seq_guard = self.config.mcp.notes_write().lock().await;
-        let existing: Vec<String> = self
-            .list_scope_notes(&prefix)
-            .await?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect();
-        let seq = existing
+        let under_prefix = self.list_scope_notes(&prefix).await?;
+        // The sequence is allocated across everything under the prefix, so a
+        // key is unique even when two scopes sanitize to the same prefix.
+        let seq = under_prefix
             .iter()
-            .filter_map(|key| note_seq(key))
+            .filter_map(|(key, _)| note_seq(key))
             .max()
             .map_or(0, |max| max + 1);
+        // But retention counts and prunes THIS scope's notes only (#1836):
+        // `sanitize_key` is lossy (`a/b` and `a:b` share a prefix), and
+        // pruning by prefix let one scope's posts evict another scope's
+        // notes — on the blackboard, the fleet's coordination medium.
+        let existing: Vec<String> = under_prefix
+            .into_iter()
+            .filter(|(_, value)| {
+                serde_json::from_str::<Note>(value).is_ok_and(|note| note.scope == scope)
+            })
+            .map(|(key, _)| key)
+            .collect();
         let note = Note {
             author: author.as_str().to_string(),
             scope: scope.clone(),
@@ -1882,6 +1908,18 @@ impl LazyboxMcp {
             lazybox_ipc::BlockerKind::parse,
         );
         let workspace = lazybox_core::WorkspaceKey::new(caller.as_str());
+        // A blocker on a row that doesn't exist is recorded, then pruned by the
+        // next recompute — while the tool told the agent it was reported
+        // (#1793). Refuse instead, and say why.
+        if self.load_workspace(&workspace).is_none() {
+            return Err(McpError::invalid_request(
+                format!(
+                    "no workspace row for {} — the blocker would be dropped, so it was not recorded",
+                    caller.as_str()
+                ),
+                None,
+            ));
+        }
         crate::epics::report_blocker(
             &self.config,
             workspace,
@@ -1889,7 +1927,8 @@ impl LazyboxMcp {
             kind,
             lazybox_ipc::BlockerOwner::Operator,
         )
-        .await;
+        .await
+        .map_err(|error| McpError::internal_error(format!("record blocker: {error}"), None))?;
         Ok(serde_json::json!({
             "reported": true,
             "workspace": caller.as_str(),
@@ -1899,9 +1938,14 @@ impl LazyboxMcp {
     }
 
     /// Clear the caller's own declared blocker (a no-op if none is set).
-    async fn clear_blocker_payload(&self, caller: &SessionKey) -> serde_json::Value {
-        crate::epics::clear_blocker(&self.config, caller.as_str()).await;
-        serde_json::json!({ "cleared": true, "workspace": caller.as_str() })
+    async fn clear_blocker_payload(
+        &self,
+        caller: &SessionKey,
+    ) -> Result<serde_json::Value, McpError> {
+        crate::epics::clear_blocker(&self.config, caller.as_str())
+            .await
+            .map_err(|error| McpError::internal_error(format!("clear blocker: {error}"), None))?;
+        Ok(serde_json::json!({ "cleared": true, "workspace": caller.as_str() }))
     }
 
     /// Load a workspace from the store, strict-decoding its persisted JSON.
@@ -2380,7 +2424,7 @@ impl LazyboxMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let caller = self.caller(&ctx)?;
-        Ok(json_result(self.clear_blocker_payload(&caller).await))
+        Ok(json_result(self.clear_blocker_payload(&caller).await?))
     }
 
     #[tool(
@@ -2639,6 +2683,28 @@ pub(crate) async fn persist_tokens(config: &ServerConfig) {
     .await
     {
         tracing::warn!("mcp: persist token map: {error}");
+    }
+}
+
+/// Follow a live agent's workspace through the issue→PR fold: re-key its
+/// MCP bearer from `from` to `to` and persist the map at once, so a restart
+/// restores the token under the key its terminal now wears. Blocking —
+/// called from the fold's commit, which already runs on `spawn_blocking`.
+pub(crate) fn rebadge_session_tokens_blocking(
+    config: &ServerConfig,
+    from: &SessionKey,
+    to: &SessionKey,
+) {
+    if !config.mcp.tokens().rebadge(from, to) {
+        return;
+    }
+    match serde_json::to_string(&config.mcp.tokens().snapshot()) {
+        Ok(payload) => {
+            if let Err(error) = config.store.set_kv(TOKENS_KV_KEY, &payload) {
+                tracing::warn!("mcp: persist rebadged token map: {error}");
+            }
+        }
+        Err(error) => tracing::warn!("mcp: serialize token map: {error}"),
     }
 }
 
@@ -3927,7 +3993,7 @@ mod tests {
         );
 
         // Clear — back to Ready, no blockers.
-        let cleared = handler.clear_blocker_payload(&caller).await;
+        let cleared = handler.clear_blocker_payload(&caller).await.expect("clear");
         assert_eq!(cleared["cleared"], true);
         let status = handler.epic_status_payload(Some("e")).await;
         let member = &status["epics"][0]["members"][0];
@@ -3949,7 +4015,9 @@ mod tests {
 
     #[tokio::test]
     async fn report_blocker_payload_parses_explicit_kind() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let config = ServerConfig::in_memory();
+        seed_workspace(&config, "w");
+        let handler = LazyboxMcp::new(config);
         let caller = SessionKey::from("w");
         let reported = handler
             .report_blocker_payload(&caller, "need the API key", Some("credential"))
@@ -4623,6 +4691,63 @@ mod tests {
         );
     }
 
+    /// #1793: a blocker reported for a workspace that has no row was stored,
+    /// then pruned by the next recompute, while the tool answered
+    /// `"reported": true`. It must refuse and say why.
+    #[tokio::test]
+    async fn report_blocker_refuses_a_caller_with_no_workspace_row() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let error = handler
+            .report_blocker_payload(&SessionKey::from("github:o/r#7"), "need a call", None)
+            .await
+            .expect_err("no row, no blocker");
+        assert!(
+            error.message.contains("no workspace row"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// #1837: the issue→PR fold re-keys a live agent's workspace (and its
+    /// terminal metadata). Its bearer must follow — resolving to the PR key
+    /// now, and restored under it after a restart. Before, the token stayed
+    /// on the dead issue key and restart dropped it, so every MCP call the
+    /// agent made failed.
+    #[tokio::test]
+    async fn a_folded_agents_token_follows_it_to_the_pr_and_survives_restart() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "folded")
+            .await
+            .expect("spawn mock session");
+        let issue = SessionKey::from("github:o/r#7");
+        let pr = SessionKey::from("github:o/r#8");
+        config.mcp.tokens().register("agent-tok", issue.clone());
+        persist_tokens(&config).await;
+
+        // The fold: terminal metadata now wears the PR key; tokens follow.
+        let meta = serde_json::to_string(&(
+            pr.as_str().to_string(),
+            lazybox_ipc::TerminalKind::Agent("claude".to_string()),
+        ))
+        .unwrap();
+        config
+            .store
+            .set_kv(&format!("terminal:{backend_key}"), &meta)
+            .unwrap();
+        rebadge_session_tokens_blocking(&config, &issue, &pr);
+        assert_eq!(config.mcp.tokens().resolve("agent-tok"), Some(pr.clone()));
+
+        // Restart.
+        config.mcp.tokens().forget("agent-tok");
+        restore_tokens(&config).await;
+        assert_eq!(
+            config.mcp.tokens().resolve("agent-tok"),
+            Some(pr),
+            "the bearer survives the restart under the PR key"
+        );
+    }
+
     #[tokio::test]
     async fn bind_loopback_reuses_a_freed_port_and_falls_back_when_taken() {
         // A freed port rebinds (the restart case: old daemon gone), so a
@@ -4807,6 +4932,51 @@ mod tests {
             .map(|note| note["text"].as_str().unwrap())
             .collect();
         assert_eq!(texts, vec!["db note", "api note"]);
+    }
+
+    /// #1836: `a/b` and `a:b` sanitize to the same key prefix. Filling one
+    /// to its retention cap must not evict the other's notes.
+    #[tokio::test]
+    async fn retention_never_prunes_a_colliding_scopes_notes() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let author = SessionKey::from("author");
+        assert_eq!(
+            note_key_prefix("a/b"),
+            note_key_prefix("a:b"),
+            "fixture: prefixes collide"
+        );
+        handler
+            .post_note_payload(&author, "keep me".into(), Some("a:b"), vec![], 0)
+            .await
+            .expect("post");
+        for i in 0..NOTES_PER_SCOPE + 3 {
+            handler
+                .post_note_payload(
+                    &author,
+                    format!("noise {i}"),
+                    Some("a/b"),
+                    vec![],
+                    1 + i as i64,
+                )
+                .await
+                .expect("post");
+        }
+        let kept = handler
+            .read_notes_payload(&author, Some("a:b"), &[], None)
+            .await
+            .expect("read");
+        let texts: Vec<&str> = kept["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["keep me"], "the other scope's note survives");
+        let noisy = handler
+            .read_notes_payload(&author, Some("a/b"), &[], None)
+            .await
+            .expect("read");
+        assert_eq!(noisy["notes"].as_array().unwrap().len(), NOTES_PER_SCOPE);
     }
 
     #[tokio::test]

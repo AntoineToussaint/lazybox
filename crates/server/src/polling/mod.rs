@@ -1241,6 +1241,17 @@ impl FetchMode {
             FetchMode::Hot => "hot-targets",
         }
     }
+
+    /// Whether a tick that returned nothing deserves the "check your
+    /// filters and scopes" warning. Only an exhaustive sweep does: an
+    /// incremental or hot tick returns only what CHANGED, so zero rows is
+    /// its normal answer on a quiet minute. Warning on those buried the
+    /// log (753 of 827 such warnings in 28h were routine hot ticks) and
+    /// pointed at Settings when the real cause of a stalled inbox was
+    /// elsewhere.
+    pub fn empty_result_is_suspicious(self) -> bool {
+        matches!(self, FetchMode::Full)
+    }
 }
 
 /// Anything that can produce a flat list of `Task`s. Implementations
@@ -2360,7 +2371,7 @@ pub async fn tick_with_state(
                 // Shift-R. We still log loudly for diagnostics, and the
                 // `PollCompleted { count: 0 }` below lets the TUI show a
                 // calm "✓ sync ok — 0 tasks" notice instead.
-                if count == 0 {
+                if count == 0 && mode.empty_result_is_suspicious() {
                     tracing::warn!(
                         source = source.name(),
                         "poll returned 0 tasks — if unexpected, check `,` Settings: filter roles \
@@ -8640,5 +8651,17 @@ mod track_main_sweep_tests {
             !tmp.path().join("base").join("repos").exists(),
             "no repo should be cloned for a session-less tracked workspace"
         );
+    }
+}
+
+#[cfg(test)]
+mod empty_poll_warning_tests {
+    use super::FetchMode;
+
+    #[test]
+    fn only_an_exhaustive_sweep_warns_on_an_empty_result() {
+        assert!(FetchMode::Full.empty_result_is_suspicious());
+        assert!(!FetchMode::Incremental.empty_result_is_suspicious());
+        assert!(!FetchMode::Hot.empty_result_is_suspicious());
     }
 }

@@ -9464,7 +9464,17 @@ async fn handle_inject_prompt_inner(
     // the Write that answers the permission/chooser gate.
     let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let _pending_injection = pending_injection;
+        // Held only across the readiness wait below — the one place
+        // duplicate waiters can pile up. It is released the moment this
+        // injection owns the terminal, NOT held through the paste's
+        // ~30s submit-confirm ladder: holding it there rejected every
+        // follow-up inject with "already waiting … answer its prompt"
+        // while no prompt existed, so `Shift-K` over agents whose first
+        // `continue` went unconfirmed had to be pressed until each
+        // ladder gave up (four presses, 2026-09-23). A later inject
+        // replaces this one's confirmation entry by design (see
+        // `confirm_prompt_submission`).
+        let pending_injection = pending_injection;
         let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
         let mut events = events;
         let mut blocked = blocked;
@@ -9526,6 +9536,7 @@ async fn handle_inject_prompt_inner(
             );
             return;
         };
+        drop(pending_injection);
         if let Some(tx) = registered_tx.take() {
             let _ = tx.send(());
         }
@@ -11488,7 +11499,13 @@ pub async fn handle_record_user_message(
     let history_key = workspace_prompt_history_key(&session_key);
     let prompt = prompt.clone();
     let write = tokio::task::spawn_blocking(move || {
-        let mut history = load_prompt_history_blocking(&*store, &history_key);
+        let mut history = match try_load_prompt_history_blocking(&*store, &history_key) {
+            Ok(history) => history,
+            Err(e) => {
+                tracing::warn!("persist workspace user message: not writing over {e}");
+                return Ok(());
+            }
+        };
         history.push(prompt);
         cap_prompt_history(&mut history);
         match serde_json::to_string(&history) {
@@ -11552,13 +11569,28 @@ fn load_prompt_history_blocking(
     store: &dyn lazybox_store::Store,
     history_key: &str,
 ) -> Vec<UserPrompt> {
-    if let Ok(Some(json)) = store.get_kv(history_key) {
-        match serde_json::from_str::<Vec<UserPrompt>>(&json) {
-            Ok(history) => return history,
-            Err(e) => tracing::warn!("prompt history decode failed, resetting: {e}"),
-        }
+    try_load_prompt_history_blocking(store, history_key).unwrap_or_else(|e| {
+        tracing::warn!("prompt history unreadable, showing none: {e}");
+        Vec::new()
+    })
+}
+
+/// The persisted history for a READ-MODIFY-WRITE. Unlike
+/// [`load_prompt_history_blocking`] (fine for display), a read or decode
+/// failure is an error here, never an empty list: writers used to push
+/// the next prompt onto that empty list and overwrite up to
+/// `PROMPT_HISTORY_MAX_ENTRIES` real entries with one. A writer that gets
+/// `Err` leaves the row untouched.
+fn try_load_prompt_history_blocking(
+    store: &dyn lazybox_store::Store,
+    history_key: &str,
+) -> Result<Vec<UserPrompt>, String> {
+    match store.get_kv(history_key) {
+        Ok(None) => Ok(Vec::new()),
+        Ok(Some(json)) => serde_json::from_str::<Vec<UserPrompt>>(&json)
+            .map_err(|e| format!("decode {history_key}: {e}")),
+        Err(e) => Err(format!("read {history_key}: {e}")),
     }
-    Vec::new()
 }
 
 /// Read back the persisted workspace prompt history for `session_key`,
@@ -11759,7 +11791,15 @@ fn migrate_history_blocking(
         // Fold onto any workspace row that already exists (idempotency / a prior
         // partial run) before sorting + capping.
         let history_key = workspace_prompt_history_key(&session_key);
-        let mut merged = load_prompt_history_blocking(store, &history_key);
+        let mut merged = match try_load_prompt_history_blocking(store, &history_key) {
+            Ok(existing) => existing,
+            // Leave an unreadable row alone rather than replace it with
+            // only the legacy entries.
+            Err(e) => {
+                tracing::warn!("history rekey: skipping {session_key}: {e}");
+                continue;
+            }
+        };
         merged.append(&mut history);
         merged.sort_by_key(|prompt| prompt.timestamp_ms);
         cap_prompt_history(&mut merged);
@@ -11810,10 +11850,22 @@ pub(crate) fn rebadge_workspace_history_mutations(
     let mut mutations: Vec<StoreMutation> = Vec::new();
 
     let from_msgs = workspace_prompt_history_key(from);
-    let mut from_history = load_prompt_history_blocking(store, &from_msgs);
+    let to_msgs = workspace_prompt_history_key(to);
+    // Move only what both sides could read. An unreadable source is left
+    // in place (a later fold can still move it); an unreadable target is
+    // never overwritten with the source alone.
+    let histories = try_load_prompt_history_blocking(store, &from_msgs).and_then(|from_history| {
+        try_load_prompt_history_blocking(store, &to_msgs)
+            .map(|to_history| (from_history, to_history))
+    });
+    let (mut from_history, mut merged) = match histories {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!("history rebadge {from} → {to}: leaving history in place: {e}");
+            (Vec::new(), Vec::new())
+        }
+    };
     if !from_history.is_empty() {
-        let to_msgs = workspace_prompt_history_key(to);
-        let mut merged = load_prompt_history_blocking(store, &to_msgs);
         merged.append(&mut from_history);
         merged.sort_by_key(|prompt| prompt.timestamp_ms);
         cap_prompt_history(&mut merged);
@@ -16010,6 +16062,74 @@ mod tests {
         .expect("injection reservation released after terminal exit");
     }
 
+    /// `Shift-K` over limit-blocked agents: the first `continue` pastes, its
+    /// Enter goes unconfirmed, and the daemon spends ~30s re-sending Enter.
+    /// A second press during that ladder must deliver, not be rejected with
+    /// "already waiting … answer its prompt" — no prompt is waiting. The
+    /// reservation exists to bound waiters behind a permission gate only.
+    #[tokio::test]
+    async fn a_submit_confirm_ladder_does_not_reject_the_next_injection() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "limited-agent")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(712);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("limited-agent"),
+            "claude",
+            Some(lazybox_ipc::AgentState::LimitReached),
+            None,
+        )
+        .await;
+        let wrote = |needle: &'static str| {
+            let mock = mock.clone();
+            let backend_key = backend_key.clone();
+            async move {
+                mock.writes_for(&backend_key)
+                    .await
+                    .iter()
+                    .any(|w| String::from_utf8_lossy(w).contains(needle))
+            }
+        };
+
+        // Nothing ever confirms the submit, so the first injection's
+        // confirm ladder keeps running for the rest of this test.
+        handle_inject_prompt(&config, id, "first-continue", None, true).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !wrote("first-continue").await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first prompt is pasted");
+        assert!(
+            config.spawn.pending_prompt_injections.lock().is_empty(),
+            "a pasted injection no longer holds the waiter reservation",
+        );
+
+        let mut events = config.bus.subscribe();
+        handle_inject_prompt(&config, id, "second-continue", None, true).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !wrote("second-continue").await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the second press is delivered while the first ladder runs");
+        while let Ok(event) = events.try_recv() {
+            if let Event::TerminalInputRejected { message, .. } = event {
+                assert!(
+                    !message.contains("already waiting"),
+                    "the second press must not be rejected as a duplicate waiter: {message}",
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn credit_recovery_selects_wait_gates_on_readiness_and_confirms_submission() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
@@ -17455,6 +17575,41 @@ mod tests {
             timestamp_ms: 1,
             source: PromptSource::Typed,
         }
+    }
+
+    /// A history row the daemon cannot decode must survive the next prompt.
+    /// It used to read as empty, and the write that followed replaced up to
+    /// 200 real entries with the one new prompt.
+    #[tokio::test]
+    async fn an_unreadable_history_row_is_not_overwritten_by_the_next_prompt() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(8);
+        let session_key: SessionKey = "acme/widget#2".into();
+        config
+            .terminal
+            .register_terminal(
+                id,
+                key,
+                session_key.clone(),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        let history_key = workspace_prompt_history_key(session_key.as_str());
+        let unreadable = "[{\"text\":\"a prompt from a newer schema\",\"shape\":{}}";
+        config.store.set_kv(&history_key, unreadable).unwrap();
+
+        handle_record_user_message(&config, id, &typed("next prompt")).await;
+
+        assert_eq!(
+            config.store.get_kv(&history_key).unwrap().as_deref(),
+            Some(unreadable),
+            "the stored history must be left exactly as it was",
+        );
     }
 
     /// Issue #523: every submitted prompt recorded via

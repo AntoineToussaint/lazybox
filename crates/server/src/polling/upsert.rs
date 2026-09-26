@@ -1041,6 +1041,11 @@ pub(super) async fn commit_workspace_move(
                     config_owned
                         .agent_recovery
                         .rebadge_blocking(&plan.terminal_ids, &plan.to);
+                    crate::mcp::rebadge_session_tokens_blocking(
+                        &config_owned,
+                        &plan.from,
+                        &plan.to,
+                    );
                     let _ = config_owned.bus.send(Event::TerminalsRebadged {
                         from: plan.from,
                         to: plan.to,

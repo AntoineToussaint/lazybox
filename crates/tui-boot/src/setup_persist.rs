@@ -17,12 +17,16 @@ use lazybox_tui::setup_flow::{config_yaml_path, load_from_yaml, save_persisted_y
 /// (`KV_KEY_SETUP`). We still check that as a fallback so existing users
 /// don't lose their wizard answers on upgrade — the next save rewrites
 /// them to YAML and `polling::sources_for` finds them there going forward.
-pub fn load_persisted(store: &dyn Store) -> Option<PersistedSetup> {
-    if let Some(p) = load_from_yaml(&config_yaml_path()) {
-        return Some(p);
+///
+/// `Err` when `config.yaml` exists but cannot be read or parsed — the
+/// caller must not treat that as first run (see
+/// [`lazybox_tui::setup_flow::load_from_yaml`]).
+pub fn load_persisted(store: &dyn Store) -> Result<Option<PersistedSetup>, String> {
+    if let Some(p) = load_from_yaml(&config_yaml_path())? {
+        return Ok(Some(p));
     }
     // Legacy kv fallback. Migrates by side-effect on the next save.
-    match store.get_kv(KV_KEY_SETUP) {
+    Ok(match store.get_kv(KV_KEY_SETUP) {
         Ok(Some(raw)) if !raw.is_empty() => match serde_json::from_str::<PersistedSetup>(&raw) {
             Ok(mut p) => {
                 p.migrate_legacy_keys();
@@ -41,7 +45,7 @@ pub fn load_persisted(store: &dyn Store) -> Option<PersistedSetup> {
             tracing::warn!("legacy setup read failed: {e}");
             None
         }
-    }
+    })
 }
 
 /// Persist setup state by merging into `~/.lazybox/config.yaml`, then clear

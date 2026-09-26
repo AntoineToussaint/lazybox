@@ -103,15 +103,23 @@ pub fn config_yaml_path() -> std::path::PathBuf {
     lazybox_core::paths::config_yaml()
 }
 
-pub fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let cfg = match lazybox_config::Config::parse(&raw) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("config.yaml parse failed: {e}");
-            return None;
-        }
+/// The persisted setup in `config.yaml`, `Ok(None)` when there is none
+/// (no file, or nothing chosen yet — first run).
+///
+/// A file that exists but cannot be read or parsed is an `Err`, never
+/// "no setup": treating a one-character typo as first run sent a
+/// returning user through the wizard, whose Finish moved their config
+/// aside and wrote a fresh one — and, with nothing loaded to compare
+/// against, skipped the unsubscribe confirm, so every repo they didn't
+/// re-tick lost its workspaces to the rescope sweep.
+pub fn load_from_yaml(path: &std::path::Path) -> Result<Option<PersistedSetup>, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{} could not be read: {e}", path.display())),
     };
+    let cfg = lazybox_config::Config::parse(&raw)
+        .map_err(|e| format!("{} could not be parsed: {e}", path.display()))?;
     let s = cfg.setup;
     // The YAML schema keeps the same shape as PersistedSetup but
     // expressed as plain BTrees (no JSON parsing). Convert.
@@ -121,7 +129,7 @@ pub fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
         // Finish) overrides this: a user who completed the wizard
         // with everything un-ticked made a valid choice and must
         // not be dragged through first-run forever.
-        return None;
+        return Ok(None);
     }
     let provider_filters = s
         .filters
@@ -135,7 +143,7 @@ pub fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
         selected_scopes: s.scopes,
     };
     p.migrate_legacy_keys();
-    Some(p)
+    Ok(Some(p))
 }
 
 /// Persist setup state by merging into `~/.lazybox/config.yaml`.
@@ -166,6 +174,9 @@ pub fn save_persisted_yaml(
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
     use anyhow::Context;
 
+    // Same cross-process lock as `Config::save_with`: this is a
+    // read-modify-write of the whole file (#1828).
+    let _lock = lazybox_config::Config::lock_for_update(path).context("config.yaml lock failed")?;
     let mut backed_up: Option<std::path::PathBuf> = None;
     let mut cfg: lazybox_config::Config = match std::fs::read_to_string(path) {
         Ok(raw) => match lazybox_config::Config::parse(&raw) {
@@ -238,6 +249,7 @@ pub fn save_persisted_yaml(
 /// hand-authored file just to write back what it already says.
 pub fn clear_persisted_yaml(path: &std::path::Path) -> anyhow::Result<bool> {
     use anyhow::Context;
+    let _lock = lazybox_config::Config::lock_for_update(path).context("config.yaml lock failed")?;
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -972,6 +984,15 @@ impl SetupRunner {
                 RunnerStep::show(screen)
             }
             (ExpectingStep::ScopeLoadFor(provider_id), LoadResult::Scopes(res)) => match res {
+                // Settings → "Add / remove repos" exists to show this list.
+                // Moving on from an empty one there is a silent Finish: the
+                // modal vanished and the unchanged config was re-saved. Say
+                // what happened instead; the wizard may still move on.
+                Ok(scopes) if scopes.is_empty() && self.edit_scopes => {
+                    let screen = empty_orgs_screen(&provider_id);
+                    self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
+                    RunnerStep::show(screen)
+                }
                 Ok(scopes) if scopes.is_empty() => self.next_scope_step(),
                 Ok(scopes) => {
                     let screen = self.screen_scope_pick(&provider_id, scopes);
@@ -1021,6 +1042,11 @@ impl SetupRunner {
     pub fn step_dismissed(&mut self) -> RunnerStep {
         match self.expecting.clone() {
             ExpectingStep::InfoFor(prev) => match *prev {
+                // In "Add / remove repos" there is nothing left to do once
+                // the org list couldn't be shown: cancel, don't Finish —
+                // Finish re-saved the untouched config and raised the
+                // polling modal as if the user had changed something.
+                ExpectingStep::ScopeLoadFor(_) if self.edit_scopes => RunnerStep::Cancel,
                 ExpectingStep::ScopeLoadFor(_) => {
                     self.expecting = ExpectingStep::ScopeLoadFor(String::new());
                     self.next_scope_step()
@@ -1262,6 +1288,21 @@ fn scope_error_screen(provider_id: &str, what: &str, err: &ProviderError) -> Scr
     }
 }
 
+/// Info screen for "no orgs to show" in Settings → "Add / remove repos".
+fn empty_orgs_screen(provider_id: &str) -> Screen {
+    let body = format!(
+        "{provider_id} returned no organizations or accounts to pick from.\n\n\
+         This usually means the token can't list your memberships, or the \
+         provider answered with nothing. Your current subscriptions are \
+         unchanged.\n\nPress any key to close."
+    );
+    Screen::Info {
+        title: provider_id.to_string(),
+        kind: InfoKind::Retryable,
+        body,
+    }
+}
+
 /// Info screen for "no repos visible under {parent}". Shown instead of
 /// silently moving on so the user knows their org-level subscription is
 /// still active but per-repo narrowing didn't happen.
@@ -1347,13 +1388,13 @@ mod tests {
         cfg.ui.coach_step = 3;
         lazybox_config::Config::save_to(&cfg, &path).unwrap();
         assert!(
-            load_from_yaml(&path).is_some(),
+            load_from_yaml(&path).unwrap().is_some(),
             "setup persisted before --fresh"
         );
 
         assert!(clear_persisted_yaml(&path).unwrap());
         assert!(
-            load_from_yaml(&path).is_none(),
+            load_from_yaml(&path).unwrap().is_none(),
             "wizard replays after --fresh"
         );
         let after =
@@ -1441,7 +1482,9 @@ mod tests {
         let path = dir.path().join("config.yaml");
         cfg.save_to(&path).unwrap();
 
-        let loaded = load_from_yaml(&path).expect("non-empty yaml round-trips");
+        let loaded = load_from_yaml(&path)
+            .unwrap()
+            .expect("non-empty yaml round-trips");
         assert_eq!(loaded.enabled_providers, original.enabled_providers);
         assert_eq!(loaded.enabled_agents, original.enabled_agents);
         assert_eq!(loaded.provider_filters, original.provider_filters);
@@ -1456,7 +1499,32 @@ mod tests {
         let path = dir.path().join("config.yaml");
         let cfg = lazybox_config::Config::default();
         cfg.save_to(&path).unwrap();
-        assert!(load_from_yaml(&path).is_none());
+        assert!(load_from_yaml(&path).unwrap().is_none());
+    }
+
+    /// No file at all is first run — not an error.
+    #[test]
+    fn a_missing_config_is_first_run() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_from_yaml(&dir.path().join("config.yaml")), Ok(None));
+    }
+
+    /// A config that exists but doesn't parse is an ERROR, never "first
+    /// run": the wizard that would open replaces the user's settings and
+    /// drops their repo subscriptions without the unsubscribe confirm.
+    #[test]
+    fn a_malformed_config_is_an_error_not_first_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "setup:\n  providers: [github\n  agents: [claude]\n").unwrap();
+        let error = load_from_yaml(&path).expect_err("a typo must not read as no setup");
+        assert!(error.contains("could not be parsed"), "{error}");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("[github\n"),
+            "loading never touches the file",
+        );
     }
 
     #[test]
@@ -2387,7 +2455,9 @@ mod tests {
                 .starts_with("config.yaml.bak-"),
             "backup name carries the .bak-<timestamp> suffix: {backed_up:?}"
         );
-        let loaded = load_from_yaml(&path).expect("the fresh file parses");
+        let loaded = load_from_yaml(&path)
+            .expect("the fresh file parses")
+            .expect("and carries the saved setup");
         assert_eq!(loaded.enabled_providers, p.enabled_providers);
         assert_eq!(loaded.enabled_agents, p.enabled_agents);
     }
@@ -2408,7 +2478,7 @@ mod tests {
         let backed_up = save_persisted_yaml(&p, &path).expect("save succeeds");
         assert!(backed_up.is_none(), "no pre-existing file → no backup");
         assert!(
-            load_from_yaml(&path).is_some(),
+            load_from_yaml(&path).unwrap().is_some(),
             "an all-empty but COMPLETED setup must not re-trigger the first-run wizard"
         );
     }

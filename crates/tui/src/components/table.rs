@@ -309,31 +309,36 @@ pub fn compute_widths(
 /// row narrows, so starring a labelled row never costs it the chips it
 /// shows under its own repo header (#1747). Excluded from the floor
 /// like the tail.
+///
+/// `pinned` is the opposite of a tail: spans that are NEVER shed. They
+/// render after everything else, and when the cell overflows the body is
+/// truncated (and the tails dropped) to make room for them. The title
+/// cell's `★ Focused` source repo rides here: a focused row is lifted out
+/// of its repo group, so its repo is the one thing it cannot lose — it
+/// used to be the first thing shed, which showed the repo on a short
+/// task-less row and hid it on every long issue / PR title.
 #[derive(Debug, Clone, Default)]
 pub struct Cell {
     pub spans: Vec<ratatui::text::Span<'static>>,
     pub fill_style: Option<ratatui::style::Style>,
     pub atomic_tail: usize,
     pub outer_tail: usize,
+    pub pinned: Vec<ratatui::text::Span<'static>>,
+    /// A shorter form of `pinned` tried when the full one leaves too
+    /// little room for the body (e.g. `lazybox` for `owner/lazybox`).
+    pub pinned_compact: Vec<ratatui::text::Span<'static>>,
 }
 
 impl Cell {
     pub fn new(spans: Vec<ratatui::text::Span<'static>>) -> Self {
         Self {
             spans,
-            fill_style: None,
-            atomic_tail: 0,
-            outer_tail: 0,
+            ..Self::default()
         }
     }
 
     pub fn from_span(span: ratatui::text::Span<'static>) -> Self {
-        Self {
-            spans: vec![span],
-            fill_style: None,
-            atomic_tail: 0,
-            outer_tail: 0,
-        }
+        Self::new(vec![span])
     }
 
     pub fn empty() -> Self {
@@ -362,6 +367,20 @@ impl Cell {
         self
     }
 
+    /// Spans rendered after everything else and never shed (see the
+    /// struct doc). Chainable.
+    pub fn pinned(mut self, spans: Vec<ratatui::text::Span<'static>>) -> Self {
+        self.pinned = spans;
+        self
+    }
+
+    /// The shorter pinned form used when the full one doesn't fit beside
+    /// a readable body. Chainable.
+    pub fn pinned_compact(mut self, spans: Vec<ratatui::text::Span<'static>>) -> Self {
+        self.pinned_compact = spans;
+        self
+    }
+
     /// End index (exclusive) of the atomic tail — where the outer tail
     /// begins.
     fn tail_end(&self) -> usize {
@@ -378,18 +397,22 @@ impl Cell {
     /// display cells (not bytes). Uses unicode-width via
     /// `crate::util::visual_width` so multi-byte glyphs count once.
     pub fn width(&self) -> usize {
-        self.spans
-            .iter()
-            .map(|s| crate::util::visual_width(s.content.as_ref()))
-            .sum()
+        span_width(&self.spans) + span_width(&self.pinned)
     }
 
     /// Width of the cell excluding both tails — what a flex column is
     /// protected to. The tails render opportunistically (when slack
     /// remains) but never force a sibling column to shed, nor shield
-    /// space from the protected body they follow.
+    /// space from the protected body they follow. The pinned suffix
+    /// counts in its compact form: it is never shed, so the column is
+    /// protected to the least it needs.
     pub fn floor_width(&self) -> usize {
-        span_width(&self.spans[..self.body_end()])
+        let pin = if self.pinned_compact.is_empty() {
+            &self.pinned
+        } else {
+            &self.pinned_compact
+        };
+        span_width(&self.spans[..self.body_end()]) + span_width(pin)
     }
 }
 
@@ -611,6 +634,76 @@ fn push_padded(
     }
 }
 
+/// Narrowest body a pinned suffix is allowed to squeeze a cell down to.
+/// Below it the pin is dropped: a repo cue beside a one-letter title
+/// annotates nothing.
+const MIN_BODY_BESIDE_PINNED: usize = 8;
+
+/// Fit a cell's spans (not its pinned suffix) into `target_w`, returning
+/// the spans to draw and their width, unpadded.
+///
+/// Over-wide cells shed their droppable tails — the outer tail (the
+/// title's agent-match excerpt) first, then the atomic tail (its label
+/// chips) — WHOLE, outermost first, before the protected body is ever
+/// sliced; cutting into one would leave a dangling `[depend…`. Only when
+/// the body itself overflows is it char-truncated with a trailing `…`.
+/// Truncation always clips on the right edge regardless of align — a
+/// right-aligned over-wide cell is an unusual case and clipping the left
+/// would lose the high-signal end (e.g. a status pill's label).
+fn fit_cell(cell: &Cell, target_w: usize) -> (Vec<ratatui::text::Span<'static>>, usize) {
+    let cell_w = span_width(&cell.spans);
+    if cell_w <= target_w {
+        return (cell.spans.clone(), cell_w);
+    }
+    let body_end = cell.body_end();
+    let body_w = span_width(&cell.spans[..body_end]);
+    let tail_w = span_width(&cell.spans[body_end..cell.tail_end()]);
+    // Body + tail fits: drop only the outer tail.
+    if body_w + tail_w <= target_w {
+        return (cell.spans[..cell.tail_end()].to_vec(), body_w + tail_w);
+    }
+    // Body alone fits: drop both tails.
+    if body_w <= target_w {
+        return (cell.spans[..body_end].to_vec(), body_w);
+    }
+    if target_w == 0 {
+        return (Vec::new(), 0);
+    }
+    // Truncate: walk body spans until we've consumed `target_w - 1`
+    // cells, then push a `…` to mark the cut.
+    let mut out = Vec::new();
+    let mut consumed = 0usize;
+    let budget = target_w - 1;
+    for span in cell.spans[..body_end].iter() {
+        let span_w = crate::util::visual_width(span.content.as_ref());
+        if consumed + span_w <= budget {
+            out.push(span.clone());
+            consumed += span_w;
+        } else {
+            let remaining = budget - consumed;
+            if remaining > 0 {
+                let truncated: String = span
+                    .content
+                    .chars()
+                    .scan(0usize, |w, ch| {
+                        let cw = crate::util::char_visual_width(ch);
+                        if *w + cw > remaining {
+                            return None;
+                        }
+                        *w += cw;
+                        Some(ch)
+                    })
+                    .collect();
+                consumed += crate::util::visual_width(&truncated);
+                out.push(ratatui::text::Span::styled(truncated, span.style));
+            }
+            break;
+        }
+    }
+    out.push(ratatui::text::Span::raw("…"));
+    (out, consumed + 1)
+}
+
 fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text::Line<'static> {
     let mut spans: Vec<ratatui::text::Span<'static>> = Vec::new();
     for (i, target_w) in widths.iter().enumerate() {
@@ -628,85 +721,36 @@ fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text:
         let align = columns.get(i).map(|c| c.align).unwrap_or(Align::Left);
         // Fill resolution: cell override > row default > unstyled.
         let fill_style = cell.fill_style.or(row.fill_style).unwrap_or_default();
-        let cell_w = cell.width();
-        if cell_w <= *target_w {
-            let pad = *target_w - cell_w;
-            push_padded(
-                &mut spans,
-                cell.spans.iter().cloned(),
-                pad,
-                align,
-                fill_style,
-            );
+        // Pinned spans are never shed: the rest of the cell is fitted into
+        // what they leave. When the full pin would squeeze the body below a
+        // readable sliver its compact form is tried, and only when neither
+        // fits do they give way, rather than render a pin with no row to
+        // annotate.
+        let full = span_width(&cell.pinned);
+        let pin = if span_width(&cell.spans) + full <= *target_w
+            || (full > 0 && full + MIN_BODY_BESIDE_PINNED <= *target_w)
+        {
+            &cell.pinned
         } else {
-            // Over-wide. The droppable tails — the outer tail (the title's
-            // `★ Focused` source cue) first, then the atomic tail (its
-            // label chips) — are shed WHOLE, outermost first, before the
-            // protected body is ever sliced; cutting into one would leave
-            // a dangling `[depend…` or a repo cue that swallowed the title
-            // it annotates (#1450). Only when the body itself overflows do
-            // we char-truncate it with a trailing `…`.
-            let body_end = cell.body_end();
-            let body_w = cell.floor_width();
-            let tail_w = span_width(&cell.spans[body_end..cell.tail_end()]);
-            // Body + tail fits: drop only the outer tail.
-            if body_w + tail_w <= *target_w {
-                let pad = *target_w - (body_w + tail_w);
-                push_padded(
-                    &mut spans,
-                    cell.spans[..cell.tail_end()].iter().cloned(),
-                    pad,
-                    align,
-                    fill_style,
-                );
-                continue;
-            }
-            // Body alone fits: drop both tails.
-            if body_w <= *target_w {
-                let pad = *target_w - body_w;
-                push_padded(
-                    &mut spans,
-                    cell.spans[..body_end].iter().cloned(),
-                    pad,
-                    align,
-                    fill_style,
-                );
-                continue;
-            }
-            // Truncate: walk body spans until we've consumed `target_w - 1`
-            // cells, then push a `…` to mark the cut. Truncation always
-            // clips on the right edge regardless of align — a right-aligned
-            // over-wide cell is an unusual case and clipping the left would
-            // lose the high-signal end (e.g. a status pill's label).
-            let mut consumed = 0usize;
-            let budget = target_w.saturating_sub(1);
-            for span in cell.spans[..body_end].iter() {
-                let span_w = crate::util::visual_width(span.content.as_ref());
-                if consumed + span_w <= budget {
-                    spans.push(span.clone());
-                    consumed += span_w;
-                } else {
-                    let remaining = budget - consumed;
-                    if remaining > 0 {
-                        let truncated: String = span
-                            .content
-                            .chars()
-                            .scan(0usize, |w, ch| {
-                                let cw = crate::util::char_visual_width(ch);
-                                if *w + cw > remaining {
-                                    return None;
-                                }
-                                *w += cw;
-                                Some(ch)
-                            })
-                            .collect();
-                        spans.push(ratatui::text::Span::styled(truncated, span.style));
-                    }
-                    break;
-                }
-            }
-            spans.push(ratatui::text::Span::raw("…"));
-        }
+            &cell.pinned_compact
+        };
+        let pin_w = span_width(pin);
+        let (content, used) = if pin_w > 0
+            && pin_w + MIN_BODY_BESIDE_PINNED.min(span_width(&cell.spans)) <= *target_w
+        {
+            let (mut content, used) = fit_cell(cell, *target_w - pin_w);
+            content.extend(pin.iter().cloned());
+            (content, used + pin_w)
+        } else {
+            fit_cell(cell, *target_w)
+        };
+        push_padded(
+            &mut spans,
+            content.into_iter(),
+            target_w.saturating_sub(used),
+            align,
+            fill_style,
+        );
     }
     ratatui::text::Line::from(spans)
 }

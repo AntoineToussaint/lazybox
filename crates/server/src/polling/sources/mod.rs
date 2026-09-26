@@ -1012,6 +1012,19 @@ pub(super) fn rank_targeted_requests(
     ranked
 }
 
+/// Whether a failed hot batch should degrade to one query per target.
+///
+/// Only a genuine server rejection of the batch shape does (GHES 3.18 —
+/// see `GhClient::hot_batch_rejected`): the same targets remain reachable
+/// one at a time. Our own rate budget refusing the batch does NOT: fanning
+/// the set out as ~70 single queries cannot succeed where one request was
+/// refused, it only multiplies the refusals (509 failed targeted fetches
+/// in one minute, 2026-09-23). That refusal surfaces so the tick backs off
+/// for its `retry_after` hint, and the targets stay hot for the next tick.
+fn hot_batch_error_degrades_to_single_fetches(error: &lazybox_gh::GhError) -> bool {
+    !matches!(error, lazybox_gh::GhError::RateLimited { .. })
+}
+
 /// Split targeted requests into the hot ones the batched `nodes(ids:)`
 /// query serves (hot, node id cached from a prior poll, batch path
 /// available on this server) and the rest, fetched one at a time via
@@ -1838,12 +1851,14 @@ impl GhSource {
                         }
                     }
                 }
-                // The batch is one request for the whole hot set, so a
-                // server that rejects it (GHES 3.18 — see
-                // `GhClient::hot_batch_rejected`) used to fail every hot
-                // tick. The same targets are still reachable one at a
-                // time through the per-target queries: degrade to those
-                // rather than abort the tick.
+                Err(error) if !hot_batch_error_degrades_to_single_fetches(&error) => {
+                    tracing::warn!(
+                        "targeted: hot batch refused by the rate budget ({error}); \
+                         backing off instead of fetching {} hot target(s) individually",
+                        batched.len(),
+                    );
+                    return Err(lazybox_core::ProviderError::from(error));
+                }
                 Err(error) => {
                     tracing::warn!(
                         "targeted: hot batch fetch failed ({error}); fetching {} hot target(s) individually",
@@ -6537,4 +6552,32 @@ pub async fn default_sources(
         throwaway_client_cache,
     )
     .await
+}
+
+#[cfg(test)]
+mod hot_batch_fallback_tests {
+    use super::hot_batch_error_degrades_to_single_fetches;
+    use lazybox_gh::GhError;
+
+    /// A budget refusal of the one hot batch must not fan out into a
+    /// single query per target — each would be refused the same way.
+    #[test]
+    fn a_rate_budget_refusal_backs_off_instead_of_fanning_out() {
+        for self_throttle in [true, false] {
+            let refused = GhError::RateLimited {
+                retry_after_secs: 15,
+                reason: "local rate budget is empty".into(),
+                self_throttle,
+            };
+            assert!(!hot_batch_error_degrades_to_single_fetches(&refused));
+        }
+    }
+
+    /// A server that rejects the batch shape (GHES) still degrades to the
+    /// per-target queries that reach the same rows.
+    #[test]
+    fn a_rejected_batch_still_degrades_to_single_fetches() {
+        let rejected = GhError::Graphql("Field 'nodes' doesn't exist on type 'Query'".into());
+        assert!(hot_batch_error_degrades_to_single_fetches(&rejected));
+    }
 }

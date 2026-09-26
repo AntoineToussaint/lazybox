@@ -2619,8 +2619,15 @@ impl GhClient {
     /// working-claim label sync fires ~6 label writes per agent heartbeat
     /// — sends unspaced and trips GitHub's abuse (secondary) limit under
     /// many concurrent agents.
+    ///
+    /// Admission PACES (see [`Self::acquire_paced`]) rather than failing on
+    /// the first self-imposed wait. Every caller is a background label
+    /// convergence; failing them fast made the working-claim heartbeat lose
+    /// every race for the local bucket to the paced sweeps — 11,391 "local
+    /// rate budget is empty" claim failures in 28h, live agents' claims
+    /// lapsing past their TTL so the fleet saw their tasks as free.
     async fn acquire_rest(&self, op: &str) -> Result<tokio::sync::SemaphorePermit<'_>, GhError> {
-        self.acquire_or_block(op)?;
+        self.acquire_paced(op).await?;
         self.request_permit().await
     }
 
@@ -4653,7 +4660,7 @@ impl GhClient {
             .await
     }
 
-    /// [`fetch_pr_search_paginated`] with an explicit request `class` and
+    /// [`Self::fetch_pr_search_paginated`] with an explicit request `class` and
     /// metrics `label`. The class drives the rate-budget accounting — the
     /// lightweight author probe (#discovery) is a distinct, cheap class so
     /// it isn't priced like the heavy `involves:` sweep.
@@ -6678,6 +6685,12 @@ impl GhClient {
                     "working claim: desired label does not match its owner".into(),
                 ));
             }
+            // The one expiry renamed in place this heartbeat, if any. A rename
+            // keeps the label attached (it is the same label under a new
+            // name), so it needs neither the add below nor a delete of its
+            // old name — both were one wasted REST call per heartbeat, the
+            // delete a guaranteed 404.
+            let mut renamed: Option<&String> = None;
             if !owned.iter().any(|name| name == desired) {
                 let mut available = false;
                 if let Some(previous) = owned.first() {
@@ -6691,7 +6704,10 @@ impl GhClient {
                         )
                         .await
                     {
-                        Ok(_) => available = true,
+                        Ok(_) => {
+                            available = true;
+                            renamed = Some(previous);
+                        }
                         Err(error) if matches!(octocrab_error_status(&error), Some(404 | 422)) => {}
                         Err(error) => return Err(GhError::Api(error)),
                     }
@@ -6711,18 +6727,23 @@ impl GhClient {
                         Err(error) => return Err(GhError::Api(error)),
                     }
                 }
-                let _permit = self.acquire_rest("add working claim label").await?;
-                handler
-                    .add_labels(number, &[desired.to_string()])
-                    .await
-                    .map_err(GhError::Api)?;
+                if renamed.is_none() {
+                    let _permit = self.acquire_rest("add working claim label").await?;
+                    handler
+                        .add_labels(number, &[desired.to_string()])
+                        .await
+                        .map_err(GhError::Api)?;
+                }
             }
             // Superseded expiries are deleted at the repository level: a
             // qualified label names exactly one claim lease, so once it is
             // stale its *definition* is garbage too — detaching alone would
             // leak one dead label into the repo's label picker per heartbeat
             // (the rename path above already carried the definition forward).
-            for previous in owned.iter().filter(|name| name.as_str() != desired) {
+            for previous in owned
+                .iter()
+                .filter(|name| name.as_str() != desired && Some(*name) != renamed)
+            {
                 let _permit = self.acquire_rest("delete working claim label").await?;
                 if let Err(error) = handler.delete_label(previous).await
                     && octocrab_error_status(&error) != Some(404)
@@ -8866,9 +8887,11 @@ mod tests {
     async fn a_member_past_the_page_cap_resumes_under_a_tighter_window() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let uri = spawn_matching_response_server(
-            // The re-windowed walk is the only one carrying a ceiling.
+            // The re-windowed walk is the only one carrying a ceiling —
+            // the upper half of the single `updated:<floor>..<ceiling>`
+            // range term, since this spec has a floor.
             vec![(
-                "updated:<=",
+                "+00:00..",
                 pr_page_updated_at(2, "2026-09-10T08:00:00Z", false),
             )],
             pr_page_updated_at(1, "2026-09-15T08:00:00Z", true),
@@ -8913,7 +8936,7 @@ mod tests {
         assert_eq!(
             bodies
                 .iter()
-                .filter(|body| body.contains("updated:<="))
+                .filter(|body| body.contains("+00:00.."))
                 .count(),
             1,
             "one re-window was enough; it must not keep walking"
@@ -8952,7 +8975,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .filter(|body| body.contains("updated:<="))
+            .filter(|body| body.contains("+00:00.."))
             .count();
         assert!(
             (1..=REPO_SWEEP_MAX_PAGES).contains(&retried),
@@ -13402,6 +13425,50 @@ mod tests {
         // dead label into the repo's label picker per agent spawn.
         assert!(requests[1].starts_with("DELETE "), "{}", requests[1]);
         assert!(!requests[1].contains("/issues/"), "{}", requests[1]);
+    }
+
+    /// A heartbeat renews an attached claim by renaming it in place. The
+    /// renamed label stays attached, so the renewal is exactly one list and
+    /// one rename: re-adding it, and deleting its old (now nonexistent)
+    /// name, were two wasted REST calls per agent per heartbeat — the delete
+    /// a guaranteed 404 — at a time the claim loop was starving.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_claim_renewal_is_one_rename_with_no_add_or_delete() {
+        const OLD: &str = "lazybox:w:0123456789abcdef0123:1234567890:00000001";
+        const NEW: &str = "lazybox:w:0123456789abcdef0123:1234567890:00000002";
+        let attached = format!(
+            r#"[{{"id":1,"node_id":"LA_1","url":"https://api.github.test/repos/o/r/labels/one","name":"{OLD}","description":null,"color":"fbca04","default":false}}]"#
+        );
+        let renamed = format!(
+            r#"{{"id":1,"node_id":"LA_1","url":"https://api.github.test/repos/o/r/labels/one","name":"{NEW}","description":null,"color":"fbca04","default":false}}"#
+        );
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bodies: Vec<&'static str> = vec![
+            Box::leak(attached.into_boxed_str()),
+            Box::leak(renamed.into_boxed_str()),
+        ];
+        let base_uri = spawn_recording_response_server(bodies, requests.clone()).await;
+        let client = make_client(&base_uri);
+        let task = task_without_node_id(TaskKind::Issue);
+
+        client
+            .sync_working_claim_target(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                Some(NEW),
+                "0123456789abcdef0123",
+                "1234567890",
+            )
+            .await
+            .expect("renewing an attached claim succeeds");
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "one list plus one rename, nothing else: {requests:#?}"
+        );
+        assert!(requests[1].starts_with("PATCH "), "{}", requests[1]);
     }
 
     #[tokio::test(flavor = "current_thread")]

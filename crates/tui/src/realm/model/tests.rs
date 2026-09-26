@@ -1066,6 +1066,49 @@ mod effects_tests {
 
     // Dismissing routes through the daemon (`SetUpdateDismissal`) instead of
     // a client-local store write, so it sticks across clients/restarts (#548).
+    /// Keys belong to the top modal alone. Every modal used to subscribe
+    /// to every event, so Esc on the update notice (mounted by the first
+    /// snapshot) also reached the first-run splash beneath it, which maps
+    /// Esc to "quit" — first launch closed lazybox.
+    #[test]
+    fn esc_on_a_stacked_modal_never_reaches_the_one_beneath() {
+        use crate::realm::components::splash::Splash;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (client, _server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        m.mount_modal(Id::Splash, Splash::new());
+        m.handle_daemon_event(empty_snapshot());
+        m.show_update_if_new(release_update("v0.2.0"));
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Update),
+            "update notice over the splash"
+        );
+
+        m.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        // Give a leaked key every chance to surface from the modal below.
+        for _ in 0..5 {
+            if let Ok(messages) = m.app.tick(tuirealm::application::PollStrategy::Once(
+                std::time::Duration::from_millis(20),
+            )) {
+                for msg in messages {
+                    m.update(msg);
+                }
+            }
+        }
+
+        assert!(
+            !m.quit,
+            "Esc on the update notice must not quit via the splash"
+        );
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Splash),
+            "only the update notice closed"
+        );
+    }
+
     #[test]
     fn update_dismissal_routes_through_the_daemon() {
         use tuirealm::event::{Key, KeyEvent, KeyModifiers};
@@ -24113,6 +24156,40 @@ mod inspect_list_remount_tests {
         assert!(
             !out.contains("beta-tree"),
             "the deleted row must not linger in the re-rendered list:\n{out}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod setup_modal_scope_tests {
+    use super::super::{Id, Model};
+    use crate::realm::components::confirm::Confirm;
+    use crate::setup_flow::{PartialEntry, SetupOutcome, SetupRunner};
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    /// Esc on a modal stacked OVER the setup flow closes that modal only.
+    /// It used to be routed to the setup runner, which cancelled the whole
+    /// Settings flow and popped the modal on top — never the setup modal.
+    #[test]
+    fn dismissing_a_modal_over_the_setup_flow_leaves_the_flow_alone() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        let (runner, _) = SetupRunner::at_partial(
+            SetupOutcome::default_enabled(crate::setup::SetupReport { tools: Vec::new() }),
+            ["github".to_string()].into_iter().collect(),
+            PartialEntry::EditScopes("github".into()),
+        );
+        m.setup.runner = Some(runner);
+        m.mount_modal(Id::Setup, Confirm::new("pick orgs"));
+        m.mount_modal(Id::Error, Confirm::new("a provision failed"));
+
+        let _ = m.handle_modal_dismissed();
+
+        assert_eq!(m.modal_stack, vec![Id::Setup], "only the error closed");
+        assert!(
+            m.setup.runner.is_some(),
+            "the Settings flow is still running"
         );
     }
 }

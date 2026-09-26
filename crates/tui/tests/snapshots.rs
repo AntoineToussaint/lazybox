@@ -442,9 +442,12 @@ fn focused_group_sizes_columns_per_provider() {
 
     // The starred Linear row sits at the same column whether or not a
     // starred GitHub PR shares its Focused group — per-provider sizing.
+    // Anchored on the title's first word: at 40 columns a focused title
+    // truncates to keep its pinned source repo, so the full title is
+    // not on screen.
     assert_eq!(
-        title_column(&focused_render, "linear OBI-9"),
-        title_column(&baseline_render, "linear OBI-9"),
+        title_column(&focused_render, "linear"),
+        title_column(&baseline_render, "linear"),
         "the ★ Focused group must size columns per provider — the GitHub PR must not inflate the Linear row\nfocused:\n{focused_render}\n\nbaseline:\n{baseline_render}"
     );
 }

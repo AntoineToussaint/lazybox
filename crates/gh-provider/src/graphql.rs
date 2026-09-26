@@ -273,7 +273,7 @@ impl GqlError {
     /// True when GitHub is rate-limiting this mutation. GitHub signals it
     /// inside the GraphQL `errors` array (HTTP 200) either with a
     /// top-level `type: "RATE_LIMITED"` or a message naming the
-    /// secondary / abuse limit. Distinct from [`is_not_visible`] so the
+    /// secondary / abuse limit. Distinct from [`Self::is_not_visible`] so the
     /// mutation path can queue + retry against the reset window instead of
     /// hard-failing with the raw error.
     pub fn is_rate_limited(&self) -> bool {
@@ -941,13 +941,33 @@ fn repo_sweep_qualifiers(
     if let Some(role) = role {
         quals.push(role.to_string());
     }
-    if let Some(since) = since {
-        quals.push(updated_since_qualifier(since));
-    }
-    if let Some(until) = until {
-        quals.push(updated_until_qualifier(until));
+    match (since, until) {
+        // GitHub search ignores BOTH bounds when `updated:>=X` and
+        // `updated:<=Y` appear as separate qualifiers (verified live
+        // 2026-09-23: the pair returned 177 PRs, some updated after the
+        // ceiling, where the range returned 138). The page-cap re-window
+        // then refetched the same 100 newest items, found its ceiling
+        // unchanged and gave up, so a busy repo failed every sweep and
+        // was re-swept in full every rotation (~28% of poll calls). Both
+        // bounds MUST be one range term.
+        (Some(since), Some(until)) => quals.push(updated_range_qualifier(since, until)),
+        (Some(since), None) => quals.push(updated_since_qualifier(since)),
+        (None, Some(until)) => quals.push(updated_until_qualifier(until)),
+        (None, None) => {}
     }
     quals
+}
+
+/// `updated:<since>..<until>` — both window bounds as the single range
+/// term GitHub honours (see [`repo_sweep_qualifiers`] for why two
+/// separate terms don't work). Inclusive at both ends, like the
+/// one-sided forms.
+pub fn updated_range_qualifier(since: DateTime<Utc>, until: DateTime<Utc>) -> String {
+    format!(
+        "updated:{}..{}",
+        since.format("%Y-%m-%dT%H:%M:%S+00:00"),
+        until.format("%Y-%m-%dT%H:%M:%S+00:00")
+    )
 }
 
 /// Page order for every repo-sweep search. Relevance order — GitHub's
@@ -4931,11 +4951,48 @@ mod tests {
         let until = DateTime::parse_from_rfc3339("2026-09-05T18:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        let query = repo_sweep_pr_query("acme/widgets", None, Some(since), Some(until));
         assert_eq!(
-            repo_sweep_pr_query("acme/widgets", None, Some(since), Some(until)),
-            "is:pr archived:false repo:acme/widgets updated:>=2026-09-05T12:00:00+00:00 \
-             updated:<=2026-09-05T18:30:00+00:00 sort:updated-desc"
+            query,
+            "is:pr archived:false repo:acme/widgets \
+             updated:2026-09-05T12:00:00+00:00..2026-09-05T18:30:00+00:00 sort:updated-desc"
         );
+        // Two separate `updated:` terms make GitHub ignore both, so the
+        // re-window never narrows and the walk fails every sweep.
+        assert_eq!(
+            query
+                .split_whitespace()
+                .filter(|term| term.starts_with("updated:"))
+                .count(),
+            1,
+            "the window must be a single range term: {query}",
+        );
+    }
+
+    /// Every window shape a sweep can build carries at most one
+    /// `updated:` term — the invariant GitHub's parser needs.
+    #[test]
+    fn no_sweep_query_carries_two_updated_terms() {
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let since = at("2026-09-05T12:00:00Z");
+        let until = at("2026-09-05T18:30:00Z");
+        for (s, u) in [
+            (None, None),
+            (Some(since), None),
+            (None, Some(until)),
+            (Some(since), Some(until)),
+        ] {
+            for query in [
+                repo_sweep_pr_query("acme/widgets", None, s, u),
+                repo_sweep_pr_query("acme/widgets", Some("author:@me"), s, u),
+            ] {
+                let terms = query
+                    .split_whitespace()
+                    .filter(|term| term.starts_with("updated:"))
+                    .count();
+                assert!(terms <= 1, "{query}");
+            }
+        }
     }
 
     /// The probe is the sweep's own candidate set, newest first, minus

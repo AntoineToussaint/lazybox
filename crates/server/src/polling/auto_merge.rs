@@ -192,11 +192,25 @@ pub(crate) fn merge_on_green_policy() -> lazybox_core::MergeOnGreenPolicy {
 /// (`repos.<owner/name>.approval`). Loaded fresh at merge-attempt time,
 /// like [`merge_on_green_policy`], so an `approval: human` edit takes
 /// effect without a daemon restart.
-fn approval_policy_for(owner: &str, repo: &str) -> lazybox_core::ApprovalPolicy {
-    lazybox_config::Config::load()
-        .ok()
+///
+/// `Err` when the config cannot be read or parsed. That is NOT "no
+/// policy": a repo set to `approval: human` whose config picked up a typo
+/// used to read as the default policy and auto-merge on a bot-only
+/// approval. Callers fail closed on `Err`.
+fn approval_policy_for(owner: &str, repo: &str) -> Result<lazybox_core::ApprovalPolicy, String> {
+    approval_policy_from(lazybox_config::Config::load(), owner, repo)
+}
+
+/// [`approval_policy_for`] over an already-attempted config load, so the
+/// fail-closed decision is testable without touching the real config.
+fn approval_policy_from<E: std::fmt::Display>(
+    loaded: Result<lazybox_config::Config, E>,
+    owner: &str,
+    repo: &str,
+) -> Result<lazybox_core::ApprovalPolicy, String> {
+    loaded
         .map(|c| approval_from_config(&c, owner, repo))
-        .unwrap_or_default()
+        .map_err(|error| error.to_string())
 }
 
 /// Resolve `owner/name`'s approval policy from a parsed config, matching
@@ -318,16 +332,25 @@ pub(crate) fn on_workspace_committed(
         );
         Signal::Hold
     } else {
-        let held = crate::epics::held_by(config, key);
-        if held.is_empty() {
-            Signal::Fire
-        } else {
-            tracing::info!(
-                workspace = %key,
-                ?held,
-                "auto-merge: holding — merge-after predecessor not yet landed"
-            );
-            Signal::Hold
+        match crate::epics::held_by(config, key) {
+            Ok(held) if held.is_empty() => Signal::Fire,
+            Ok(held) => {
+                tracing::info!(
+                    workspace = %key,
+                    ?held,
+                    "auto-merge: holding — merge-after predecessor not yet landed"
+                );
+                Signal::Hold
+            }
+            // Fail closed: an unreadable epic store must not release holds.
+            Err(error) => {
+                tracing::warn!(
+                    workspace = %key,
+                    %error,
+                    "auto-merge: holding — the epic graph could not be read"
+                );
+                Signal::Hold
+            }
         }
     };
     let ticket = {
@@ -636,7 +659,20 @@ pub async fn run_attempt<B: MergeBackend>(
     // The fresh fetch doesn't know the repo's approval policy — stamp it
     // so the re-verify below honors an `approval: human` repo (a bot-only
     // approval must not auto-merge). Read fresh, like `merge_on_green_policy`.
-    fresh.approval_policy = approval_policy_for(&owner, &repo);
+    fresh.approval_policy = match approval_policy_for(&owner, &repo) {
+        Ok(policy) => policy,
+        Err(error) => {
+            // Unknown policy: stand down rather than guess the lenient one.
+            // Restore so the attempt re-runs once the config reads again.
+            tracing::warn!(
+                workspace = %key,
+                %error,
+                "auto-merge: config.yaml unreadable, approval policy unknown — not merging"
+            );
+            settle(ticket.restore.clone());
+            return;
+        }
+    };
 
     // Same head GitHub already REJECTED (conflicts, ruleset, permissions):
     // only a new commit can clear it, so don't fire the doomed mutation
@@ -992,8 +1028,13 @@ async fn native_arm_block_reason(
     if crate::epics::review_blocks_merge(config, key) {
         return Some("the review stage reported blocking findings");
     }
-    if approval_policy_for(owner, repo) == lazybox_core::ApprovalPolicy::Human {
-        return Some("this repo requires a human approval");
+    match approval_policy_for(owner, repo) {
+        Ok(lazybox_core::ApprovalPolicy::Human) => {
+            return Some("this repo requires a human approval");
+        }
+        Ok(_) => {}
+        // Fail closed, like the epic read above.
+        Err(_) => return Some("config.yaml could not be read, so its approval policy is unknown"),
     }
     if stacked_on_open_parent_in(&workspaces, pr) {
         return Some("it is stacked on a still-open parent PR");
@@ -1537,6 +1578,22 @@ mod tests {
         assert_eq!(
             approval_from_config(&config, "other", "repo"),
             ApprovalPolicy::Default,
+        );
+    }
+
+    /// An unreadable config is not "no policy". A repo on `approval: human`
+    /// whose config.yaml picked up a typo used to resolve to the default
+    /// policy and auto-merge on a bot-only approval.
+    #[test]
+    fn an_unreadable_config_leaves_the_approval_policy_unknown() {
+        let unreadable: Result<lazybox_config::Config, &str> = Err("bad indentation at line 3");
+        assert!(approval_policy_from(unreadable, "obin-ai", "obin-platform").is_err());
+
+        let readable = lazybox_config::Config::parse("repos:\n  o/r:\n    approval: human\n")
+            .map_err(|e| e.to_string());
+        assert_eq!(
+            approval_policy_from(readable, "o", "r"),
+            Ok(lazybox_core::ApprovalPolicy::Human),
         );
     }
 

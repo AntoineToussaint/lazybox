@@ -6801,22 +6801,18 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(p) = &self.setup.persisted else {
             return Vec::new();
         };
-        let mut actions = Vec::new();
-        for provider_id in &p.enabled_providers {
-            let label = match provider_id.as_str() {
-                "github" => "GitHub".to_string(),
-                "linear" => "Linear".to_string(),
-                other => other.to_string(),
-            };
-            actions.push(SettingsAction::EditScopes {
-                provider_id: provider_id.clone(),
-                label: label.clone(),
-            });
-            actions.push(SettingsAction::EditFilters {
-                provider_id: provider_id.clone(),
-                label,
-            });
-        }
+        // Only providers with a registered ScopeSource get an
+        // "Add / remove repos" row — the executor cannot enumerate orgs
+        // for the others, and a row that can only ever fail belongs
+        // gated here rather than surfaced as an error modal.
+        let scope_capable = self
+            .setup
+            .inputs
+            .as_ref()
+            .map(|(_, sources)| scope_provider_ids(sources))
+            .unwrap_or_default();
+        let mut actions =
+            crate::realm::setup_ctx::provider_setting_rows(&p.enabled_providers, &scope_capable);
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
         // One fresh load feeds every config-backed row below, so even a

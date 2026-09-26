@@ -44,6 +44,19 @@ pub fn invalidate_command_credential_cache() {
     cache().lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
+/// Drop every cached command-credential **failure**, keeping fresh
+/// successes. The `FAILURE_BACKOFF_BASE` window is a subprocess-storm
+/// guard for the poll loop, not a verdict a user-initiated retry should
+/// inherit — see [`crate::forget_failed_chain_resolutions`], which this
+/// pairs with (clearing either alone still serves a stale answer, because
+/// the chain caches its own copy of this provider's outcome).
+pub fn forget_failed_command_credentials() {
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|_, entry| entry.outcome.is_ok());
+}
+
 /// Resolves a credential by running a shell command and reading stdout.
 ///
 /// ```rust,no_run
@@ -351,6 +364,58 @@ mod tests {
         let third = provider.resolve("any").await;
         assert!(matches!(third, Err(CredentialError::Provider(_))));
         assert_eq!(runs(&marker), 2, "invalidation must allow a fresh run");
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// The failure-only invalidation reopens the backoff window too —
+    /// that is the half a user-initiated retry needs. Unlike
+    /// `invalidate_command_credential_cache` it leaves successes alone, so
+    /// an explicit refresh never costs a healthy token a respawn (proved
+    /// by the sibling test below).
+    #[tokio::test(flavor = "current_thread")]
+    async fn forgetting_failures_reopens_the_backoff_window() {
+        let marker = run_counter_path("forget-miss");
+        let _ = std::fs::remove_file(&marker);
+        let script = format!(
+            "echo run >> '{}'; echo broken >&2; exit 1",
+            marker.display()
+        );
+        let provider = CommandProvider::new("sh", &["-c", &script]);
+
+        assert!(provider.resolve("any").await.is_err());
+        assert!(provider.resolve("any").await.is_err());
+        assert_eq!(runs(&marker), 1, "backoff window must prevent a respawn");
+
+        forget_failed_command_credentials();
+        assert!(provider.resolve("any").await.is_err());
+        assert_eq!(
+            runs(&marker),
+            2,
+            "forgetting the failure must allow a fresh run"
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// A fresh success must survive failure-only invalidation: this is what
+    /// makes it safe to call on every user-initiated retry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn forgetting_failures_keeps_a_cached_success() {
+        let marker = run_counter_path("forget-hit");
+        let _ = std::fs::remove_file(&marker);
+        let script = format!("echo run >> '{}'; echo tok", marker.display());
+        let provider = CommandProvider::new("sh", &["-c", &script]);
+
+        assert_eq!(provider.resolve("any").await.expect("first").token(), "tok");
+        forget_failed_command_credentials();
+        assert_eq!(
+            provider.resolve("any").await.expect("still cached").token(),
+            "tok"
+        );
+        assert_eq!(
+            runs(&marker),
+            1,
+            "a cached success must not be respawned by a failure-only purge"
+        );
         let _ = std::fs::remove_file(&marker);
     }
 

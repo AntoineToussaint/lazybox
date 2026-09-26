@@ -239,6 +239,45 @@ impl SettingsAction {
     }
 }
 
+/// The per-provider Settings rows for `enabled` providers, in that set's
+/// order.
+///
+/// `scope_capable` is the set of provider ids that actually have a
+/// registered [`ScopeSource`], and only those get an "Add / remove repos"
+/// row. Offering it to a provider that cannot enumerate anything — Linear
+/// ships without a scope-discovery API, so it never has a source — put a
+/// row in the palette whose only possible outcome was a failure modal.
+/// `ProviderError::Unsupported`'s own documentation states the rule this
+/// follows: the surface gates the action, rather than letting the executor
+/// discover it can't be done and reporting that to the user as an error.
+///
+/// Filters are unconditional: every enabled provider has role/type
+/// filters, whether or not its orgs can be listed.
+pub fn provider_setting_rows(
+    enabled: &std::collections::BTreeSet<String>,
+    scope_capable: &std::collections::BTreeSet<String>,
+) -> Vec<SettingsAction> {
+    let mut rows = Vec::with_capacity(enabled.len() * 2);
+    for provider_id in enabled {
+        let label = match provider_id.as_str() {
+            "github" => "GitHub".to_string(),
+            "linear" => "Linear".to_string(),
+            other => other.to_string(),
+        };
+        if scope_capable.contains(provider_id) {
+            rows.push(SettingsAction::EditScopes {
+                provider_id: provider_id.clone(),
+                label: label.clone(),
+            });
+        }
+        rows.push(SettingsAction::EditFilters {
+            provider_id: provider_id.clone(),
+            label,
+        });
+    }
+    rows
+}
+
 pub(crate) struct SetupCtx {
     /// In-flight setup wizard. When `Some`, splash/choice/loading
     /// messages route through the runner's state machine instead of
@@ -322,7 +361,7 @@ impl SetupCtx {
 
 #[cfg(test)]
 mod tests {
-    use super::SettingsAction;
+    use super::{SettingsAction, provider_setting_rows};
 
     #[test]
     fn llm_gateway_label_reflects_set_state() {
@@ -423,6 +462,46 @@ mod tests {
             }
             .label(),
             "Shell · /opt/homebrew/bin/fish · configured"
+        );
+    }
+
+    /// Linear ships without a scope-discovery API, so it never has a
+    /// registered `ScopeSource` — and "Add / remove repos · Linear" could
+    /// therefore only ever end in a failure modal. It must not be offered
+    /// at all. Its filters row still must be, since filters need no
+    /// enumeration.
+    #[test]
+    fn only_scope_capable_providers_get_an_add_remove_repos_row() {
+        let enabled: std::collections::BTreeSet<String> =
+            ["github", "linear"].iter().map(|s| s.to_string()).collect();
+        let scope_capable: std::collections::BTreeSet<String> =
+            ["github"].iter().map(|s| s.to_string()).collect();
+        let labels: Vec<String> = provider_setting_rows(&enabled, &scope_capable)
+            .iter()
+            .map(|a| a.label())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Add / remove repos · GitHub".to_string(),
+                "Edit roles + filters · GitHub".to_string(),
+                "Edit roles + filters · Linear".to_string(),
+            ],
+        );
+    }
+
+    /// With no sources registered at all (`--test` / `--connect`, where
+    /// the setup inputs are never cached) no provider can enumerate
+    /// anything, so no scope row is offered — those rows were dead
+    /// already: the dispatcher bails out before building a runner.
+    #[test]
+    fn no_registered_sources_offers_no_scope_rows() {
+        let enabled: std::collections::BTreeSet<String> =
+            ["github"].iter().map(|s| s.to_string()).collect();
+        let rows = provider_setting_rows(&enabled, &std::collections::BTreeSet::new());
+        assert_eq!(
+            rows.iter().map(|a| a.label()).collect::<Vec<_>>(),
+            vec!["Edit roles + filters · GitHub".to_string()],
         );
     }
 

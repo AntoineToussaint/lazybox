@@ -200,6 +200,31 @@ pub fn invalidate_chain_cache() {
         .clear();
 }
 
+/// Drop every cached chain **failure**, keeping cached successes.
+///
+/// The failure half of `CHAIN_CACHE_TTL` exists to stop a polling loop
+/// re-running a chain that deterministically fails — it is a throughput
+/// guard, not a verdict. A *user-initiated* resolve is a fresh intent and
+/// must not be answered from it: `gh auth token` failing once at launch
+/// otherwise decides what the user sees for the next five minutes, so
+/// someone who fixes their token and immediately retries gets the stale
+/// error back with no provider run at all. That reads as "my fix did
+/// nothing" and is indistinguishable from the original fault.
+///
+/// Only failures are forgotten, so this never costs a healthy session a
+/// re-resolve: the worst case is one extra provider attempt for a scope
+/// that was already broken. Callers that must also bypass
+/// [`crate::invalidate_command_credential_cache`]'s sibling backoff should
+/// use [`crate::invalidate_failed_credentials`], which clears both — the
+/// command-provider cache is consulted *inside* the chain, so clearing one
+/// without the other still serves a stale answer.
+pub fn forget_failed_chain_resolutions() {
+    chain_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|_, entry| entry.outcome.is_ok());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +260,103 @@ mod tests {
     }
     fn exhausted() -> CredentialError {
         CredentialError::Exhausted
+    }
+
+    /// A provider that fails its first `fail_first` resolves and then
+    /// succeeds, counting every call. The counter is how these tests tell
+    /// "the chain ran its providers again" apart from "the chain answered
+    /// from cache" — the distinction the whole failure-cache question
+    /// turns on.
+    struct FlakyCounted {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fail_first: usize,
+    }
+
+    impl CredentialProvider for FlakyCounted {
+        fn name(&self) -> &str {
+            "flaky"
+        }
+        async fn resolve(&self, _scope: &str) -> Result<Credential, CredentialError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_first {
+                Err(CredentialError::Provider("keyring locked".into()))
+            } else {
+                Ok(Credential::new("recovered-token", "flaky"))
+            }
+        }
+    }
+
+    /// A user who fixes their credential and immediately retries must
+    /// actually get a retry. The failure half of `CHAIN_CACHE_TTL` is a
+    /// throughput guard for the poll loop, so without
+    /// `forget_failed_chain_resolutions` the second resolve here answers
+    /// from cache — same error, zero providers run — for five minutes, and
+    /// the user reads their own fix as having done nothing.
+    #[tokio::test]
+    async fn forgetting_failures_lets_the_next_resolve_actually_run_again() {
+        let _cache_guard = CACHE_TEST_LOCK.lock().await;
+        invalidate_chain_cache();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = CredentialChain::new().with(FlakyCounted {
+            calls: calls.clone(),
+            fail_first: 1,
+        });
+
+        assert!(
+            chain.resolve("github").await.is_err(),
+            "first resolve fails"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The sticky half: a second resolve inside the TTL is served from
+        // cache and never reaches the provider that would now succeed.
+        assert!(
+            chain.resolve("github").await.is_err(),
+            "a cached failure is served without running providers"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the cached failure must not have run the provider again"
+        );
+
+        forget_failed_chain_resolutions();
+        assert!(
+            chain.resolve("github").await.is_ok(),
+            "after forgetting the failure the retry must reach the provider"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the retry must actually have run the provider"
+        );
+        invalidate_chain_cache();
+    }
+
+    /// Forgetting failures must not cost a healthy scope a re-resolve:
+    /// a cached success stays cached, so an explicit refresh never turns
+    /// into an extra `gh auth token` subprocess for a working token.
+    #[tokio::test]
+    async fn forgetting_failures_keeps_cached_successes() {
+        let _cache_guard = CACHE_TEST_LOCK.lock().await;
+        invalidate_chain_cache();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = CredentialChain::new().with(FlakyCounted {
+            calls: calls.clone(),
+            fail_first: 0,
+        });
+
+        assert!(chain.resolve("github").await.is_ok());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        forget_failed_chain_resolutions();
+        assert!(chain.resolve("github").await.is_ok());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a cached success must survive forgetting failures"
+        );
+        invalidate_chain_cache();
     }
 
     #[tokio::test]

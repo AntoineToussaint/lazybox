@@ -19,6 +19,12 @@ The startup portal and **Ctrl-T Sessions** share one renderer and these bindings
 - **`x`**: delete only the highlighted terminal after confirmation. **y**
   confirms; **n**, **Enter**, or **Escape** cancels. Workspace files and sibling
   sessions are kept. The confirmation captures the exact terminal ID.
+- **`/`**: list links from the highlighted terminal's current view. Use **j/k**
+  and **Enter** to copy the complete URL to the phone/host clipboard through
+  OSC 52. **h** shows the highlighted URL in a scrollable reader; **Escape**
+  returns to Sessions without copying. Enter returns to the running terminal.
+  You can also tap **/ URLs** in the Sessions footer. Session letters remain
+  unchanged; `/` is ordinary input outside Sessions.
 - **`p`**: set the highlighted session's priority. Press a displayed letter to
   move it into that position (`a` for first, `b` for second), shifting the other
   sessions. Or use **j/k**, then **Enter**. **Escape** cancels priority mode.
@@ -128,3 +134,22 @@ the official `lazybox` executable for plain `lb`, and removes the previous manag
 
 The installer honors `CARGO_TARGET_DIR`. Set `LAZYBOX_BUILD_DIR` to use a specific
 directory containing the built `lazybox` and `lb` executables.
+
+### Copying links on a phone
+
+Termius's native drag selection copies the rendered screen, which includes
+Lazybox's rail and scrollbar. For a clean link, use **Ctrl-T → / → j/k → Enter**.
+The picker reads the selected terminal's underlying grid. It joins soft-wrapped
+logical lines, including their portions above/below the viewport, and honors
+explicit OSC 8 hyperlink destinations even when their displayed label differs.
+It does not scroll, resize, or type into the terminal while copying. If a very
+long link begins outside the history currently loaded by the client, thumb-scroll
+up to load that history first, then open the picker. Ctrl-D returns to the bottom.
+
+The picker lists HTTP(S) links. An application that inserts actual line breaks
+inside a URL or only prints a shortened URL without a hyperlink destination has
+not supplied enough information to reconstruct the original URL reliably.
+Clipboard delivery requires OSC 52 support/permission in the outer terminal;
+Termius iOS added this in 7.5.0 (and OSC 8 hyperlinks in 7.6.1), according to its
+[release notes](https://apps.apple.com/us/app/termius-modern-ssh-client/id549039908).
+Lazybox reports that it sent the link; the terminal controls clipboard access.

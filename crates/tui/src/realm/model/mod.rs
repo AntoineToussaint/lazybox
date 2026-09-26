@@ -95,6 +95,8 @@ pub enum Id {
     MobileNewSession,
     /// Second mobile creation step: choose an enabled agent or shell.
     MobileRunner,
+    /// Copy a complete URL from a mobile terminal, without selecting UI chrome.
+    MobileLinks,
     /// Explicit confirmation to delete a single mobile terminal.
     MobileDeleteSession,
     Splash,
@@ -675,6 +677,7 @@ impl Id {
                 | Id::JumpPicker
                 | Id::PromptHistoryPicker
                 | Id::UrlPicker
+                | Id::MobileLinks
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration

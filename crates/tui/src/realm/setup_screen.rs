@@ -183,6 +183,22 @@ pub fn render_with(
 /// `Loading` modal's own liveness backstop so this graceful path always
 /// wins; the modal timeout only covers a result that is produced but
 /// *lost* (dropped on an overflowed event channel).
+///
+/// Since `GhScopes` authenticates lazily, this budget now covers the
+/// credential resolve and the client build (a `/user` call) as well as the
+/// listing itself, where it used to cover the listing alone. Two
+/// consequences worth knowing before tuning it:
+///
+/// - A *slow* GitHub can spend most of the window on the client build and
+///   leave too little for the listing. That self-corrects on one retry:
+///   the `OnceCell` keeps a client once built, so a second attempt spends
+///   the whole window on the listing exactly as it did before.
+/// - The task spawned below outlives a dismissed modal — nothing holds its
+///   handle — so an in-flight build keeps running after Esc. A user who
+///   Escs and immediately reopens the picker waits behind that build's
+///   remaining time and gets less than the full window for their own
+///   attempt. Both attempts stay individually bounded here, so the worst
+///   case is a retryable error screen, never a hang.
 const EFFECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run an [`Effect`] in the background and deliver its [`LoadResult`]

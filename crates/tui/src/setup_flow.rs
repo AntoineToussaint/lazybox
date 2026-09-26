@@ -1000,7 +1000,7 @@ impl SetupRunner {
                     RunnerStep::show(screen)
                 }
                 Err(err) => {
-                    let screen = scope_error_screen(&provider_id, "orgs", &err);
+                    let screen = scope_error_screen(&provider_id, "orgs", &err, !self.edit_scopes);
                     self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
                     RunnerStep::show(screen)
                 }
@@ -1025,6 +1025,7 @@ impl SetupRunner {
                         &provider_id,
                         &format!("repos for {parent_label}"),
                         &err,
+                        true,
                     );
                     self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
                     RunnerStep::show(screen)
@@ -1267,7 +1268,12 @@ fn detect_step() -> RunnerStep {
 /// Returned as a pure [`Screen::Info`] instead of silently advancing —
 /// without it the user picks an org and sees the modal disappear with
 /// no explanation.
-fn scope_error_screen(provider_id: &str, what: &str, err: &ProviderError) -> Screen {
+fn scope_error_screen(
+    provider_id: &str,
+    what: &str,
+    err: &ProviderError,
+    continues: bool,
+) -> Screen {
     let kind = if err.is_auth() {
         InfoKind::Auth
     } else if err.is_retryable() {
@@ -1275,10 +1281,19 @@ fn scope_error_screen(provider_id: &str, what: &str, err: &ProviderError) -> Scr
     } else {
         InfoKind::Permanent
     };
+    // The outro has to match what dismissing actually does. Promising
+    // "setup will continue" to someone whose only step just failed is how
+    // the modal came to vanish with no explanation: nothing continues, and
+    // nothing should be written either.
+    let outro = if continues {
+        "Press any key to dismiss; setup will continue with what's been \
+         configured so far."
+    } else {
+        "Press any key to close. Nothing was changed — reopen \
+         Settings to try again."
+    };
     let body = format!(
-        "Failed to load {what} for {provider_id}.\n\n{}\n\n\
-         Press any key to dismiss; setup will continue with what's been \
-         configured so far.",
+        "Failed to load {what} for {provider_id}.\n\n{}\n\n{outro}",
         err.diagnostic()
     );
     Screen::Info {
@@ -2229,6 +2244,85 @@ mod tests {
         }
         // Dismissing the info resumes the flow rather than cancelling.
         assert!(matches!(runner.expecting, ExpectingStep::InfoFor(_)));
+    }
+
+    /// The error screen's outro has to match what dismissing actually
+    /// does. In a Settings → "Add / remove repos" entry the dismiss
+    /// cancels (nothing is written), so promising "setup will continue
+    /// with what's been configured so far" described a save that does not
+    /// happen — and read as the same unexplained vanish the error screen
+    /// was added to replace. Pinned together with the cancel so the copy
+    /// and the behaviour cannot drift apart.
+    #[test]
+    fn dismissing_a_terminal_scope_failure_cancels_instead_of_saving() {
+        let outcome = SetupOutcome::default_enabled(report());
+        let providers: BTreeSet<String> = ["github"].iter().map(|s| s.to_string()).collect();
+        let (mut runner, _load) = SetupRunner::at_partial(
+            outcome,
+            providers,
+            PartialEntry::EditScopes("github".into()),
+        );
+        let step = runner.step_loading_resolved(LoadResult::Scopes(Err(ProviderError::auth(
+            "github",
+            "token expired",
+        ))));
+        // The screen must not promise to continue when it cannot.
+        match step {
+            RunnerStep::Show {
+                screen: Screen::Info { body, .. },
+                ..
+            } => {
+                assert!(
+                    body.contains("Nothing was changed"),
+                    "a terminal failure must say nothing was changed, got: {body}"
+                );
+                assert!(
+                    !body.contains("setup will continue"),
+                    "a terminal failure must not promise to continue, got: {body}"
+                );
+            }
+            _ => panic!("expected an Info screen"),
+        }
+        assert!(
+            matches!(runner.step_dismissed(), RunnerStep::Cancel),
+            "dismissing a terminal scope failure must cancel, never Finish"
+        );
+    }
+
+    /// The full wizard keeps the old behaviour: it has later steps queued,
+    /// so a failed org listing for one provider is dismissable and setup
+    /// carries on. Only the partial entry is terminal.
+    #[test]
+    fn dismissing_a_scope_failure_mid_wizard_still_continues() {
+        let providers: BTreeSet<String> = ["github"].iter().map(|s| s.to_string()).collect();
+        let mut runner = SetupRunner::new(report(), providers);
+        let _ = runner.step_splash_confirmed();
+        runner.pending_scopes.push_back("github".into());
+        let step = runner.next_scope_step();
+        assert_loading_with(
+            &step,
+            &Effect::ListScopes {
+                provider_id: "github".into(),
+            },
+        );
+        let step = runner.step_loading_resolved(LoadResult::Scopes(Err(ProviderError::auth(
+            "github",
+            "token expired",
+        ))));
+        match step {
+            RunnerStep::Show {
+                screen: Screen::Info { body, .. },
+                ..
+            } => assert!(
+                body.contains("setup will continue"),
+                "mid-wizard the dismiss really does continue, got: {body}"
+            ),
+            _ => panic!("expected an Info screen"),
+        }
+        assert!(
+            !matches!(runner.step_dismissed(), RunnerStep::Cancel),
+            "mid-wizard dismiss must advance the flow, not cancel it"
+        );
     }
 
     #[test]

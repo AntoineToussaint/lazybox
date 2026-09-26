@@ -19,7 +19,7 @@ impl<T: TerminalAdapter> Model<T> {
         if top == Id::MobileNewSession {
             return self.mobile_new_session_picked(&picks);
         }
-        if top == Id::MobileLinks {
+        if matches!(top, Id::MobileLinks | Id::MobileCopyText) {
             self.mobile_link_picked(&picks);
             return Vec::new();
         }

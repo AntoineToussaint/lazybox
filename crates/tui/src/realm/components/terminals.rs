@@ -498,6 +498,19 @@ impl Terminals {
         self.inner.tile_grid_rect(id)
     }
 
+    /// Clipboard candidates in reverse source order, independent of terminal focus.
+    pub(crate) fn copy_items(
+        &mut self,
+        id: TerminalId,
+    ) -> Option<Vec<crate::components::copy_text::CopyItem>> {
+        self.inner.copy_items(id)
+    }
+
+    /// Snapshot logical terminal lines and the current viewport cursor for copying.
+    pub fn copy_lines(&mut self, id: TerminalId) -> Option<(Vec<String>, usize)> {
+        self.inner.copy_lines(id)
+    }
+
     /// Forward `visible_text` — dump a terminal's whole visible grid
     /// as plain text. Seeds the agent-to-agent handoff compose step
     /// (`x s`) with the source agent's on-screen output.

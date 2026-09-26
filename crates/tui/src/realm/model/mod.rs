@@ -97,6 +97,8 @@ pub enum Id {
     MobileRunner,
     /// Copy a complete URL from a mobile terminal, without selecting UI chrome.
     MobileLinks,
+    /// Select and review terminal lines for clipboard copying.
+    MobileCopyText,
     /// Explicit confirmation to delete a single mobile terminal.
     MobileDeleteSession,
     Splash,
@@ -685,6 +687,7 @@ impl Id {
                 | Id::PromptHistoryPicker
                 | Id::UrlPicker
                 | Id::MobileLinks
+                | Id::MobileCopyText
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
@@ -1607,6 +1610,10 @@ pub enum ChoicePayload {
     /// cross-struct shadow Vec that could drift from the rendered
     /// order.
     Index(usize),
+    /// Stable source terminal for a copy action.
+    Terminal(lazybox_ipc::TerminalId),
+    /// A suggested terminal block, to review before clipboard copying.
+    CopyBlock(String),
     /// A stable string value — a login, theme name, agent id, snippet
     /// key, or label. The top modal disambiguates its meaning.
     Text(String),

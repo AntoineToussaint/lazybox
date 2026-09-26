@@ -29,6 +29,7 @@ pub mod merge_history_modal;
 pub mod merge_order;
 pub mod messages;
 pub(crate) mod mobile_confirm;
+pub(crate) mod mobile_copy;
 pub(crate) mod mobile_rail;
 pub(crate) mod mobile_sessions;
 pub mod polling;

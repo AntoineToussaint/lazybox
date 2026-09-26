@@ -206,7 +206,7 @@ impl MobileRail {
         if self.is_prioritizing() {
             "Pick position · Esc cancel"
         } else {
-            "n new r name x del p sort / URLs"
+            "n new r name x del p sort / copy"
         }
     }
 
@@ -495,7 +495,7 @@ mod tests {
         let mut rail = MobileRail::default();
         rail.open(&rows());
         assert!(rail.footer().len() <= 32);
-        let start = rail.footer().find("/ URLs").unwrap();
+        let start = rail.footer().find("/ copy").unwrap();
         for col in start..rail.footer().len() {
             let key = rail.footer_key(col as u16).unwrap();
             assert!(matches!(rail.key(&key), RailAction::Links(TerminalId(1))));

@@ -1,8 +1,8 @@
 //! Minimal mobile adapter: sessions, new session, and one full-width terminal.
 use super::{ChoicePayload, Id, ModalFlow, Model, PaneFocus, SessionRunner};
 use crate::realm::components::{
-    choice::Choice, mobile_confirm::MobileConfirm, mobile_rail::RailAction,
-    mobile_sessions::SessionRow,
+    choice::Choice, mobile_confirm::MobileConfirm, mobile_copy::MobileCopy,
+    mobile_rail::RailAction, mobile_sessions::SessionRow,
 };
 use crate::realm::presentation::Presentation;
 use lazybox_ipc::{AgentState, Command, TerminalKind};
@@ -210,30 +210,62 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     pub(super) fn mobile_link_picked(&mut self, picks: &[ChoicePayload]) {
+        if let Some(ChoicePayload::CopyBlock(text)) = picks.first() {
+            self.mount_modal(Id::MobileCopyText, MobileCopy::review(text.clone()));
+            return;
+        }
+        if let Some(ChoicePayload::Terminal(id)) = picks.first() {
+            if let Some((lines, cursor)) = self.terminals.copy_lines(*id) {
+                self.mount_modal(Id::MobileCopyText, MobileCopy::new(lines, cursor));
+            }
+            return;
+        }
+        let script = self.top_modal() == Some(&Id::MobileCopyText);
         self.pop_modal();
-        if let Some(ChoicePayload::Text(url)) = picks.first() {
-            super::helpers::emit_clipboard_copy(url);
+        if let Some(ChoicePayload::Text(text)) = picks.first() {
+            if script {
+                self.pop_modal(); // the source copy picker
+            }
+            super::helpers::emit_clipboard_copy(text);
             self.apply_mobile_rail_action(RailAction::Close);
-            self.flash_hint("Link sent to terminal clipboard");
+            self.flash_hint(if script {
+                "Text sent to terminal clipboard"
+            } else {
+                "Link sent to terminal clipboard"
+            });
         }
     }
 
     fn copy_mobile_link(&mut self, terminal_id: lazybox_ipc::TerminalId) {
-        let Some(urls) = self.terminals.urls_for(terminal_id) else {
+        let Some(candidates) = self.terminals.copy_items(terminal_id) else {
             self.flash_info("That session has ended");
             return;
         };
-        let prompt = if urls.is_empty() {
-            "No links in this terminal view. Scroll to the link first. Enter/Esc back"
-        } else {
-            "Enter copies the full link · Esc back"
-        };
+        use crate::components::copy_text::CopyItem;
+        let mut items: Vec<_> = candidates
+            .into_iter()
+            .map(|item| match item {
+                CopyItem::Link(url) => (url.clone(), ChoicePayload::Text(url)),
+                CopyItem::Block(text) => {
+                    let preview = text
+                        .lines()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or("")
+                        .trim();
+                    (format!("Block: {preview}"), ChoicePayload::CopyBlock(text))
+                }
+            })
+            .collect();
+        items.push((
+            "Commands / scripts: select lines".into(),
+            ChoicePayload::Terminal(terminal_id),
+        ));
         self.mount_modal(
             Id::MobileLinks,
-            Choice::single(prompt, urls.into_iter().rev().collect())
-                .title("Copy link")
-                .label(|url: &String| url.clone())
-                .payload_for(|url: &String| ChoicePayload::Text(url.clone())),
+            Choice::single("Newest first: links / scripts", items)
+                .title("Copy")
+                .label(|item: &(String, ChoicePayload)| item.0.clone())
+                .payload_for(|item: &(String, ChoicePayload)| item.1.clone()),
         );
     }
 
@@ -698,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_links_empty_view_shows_a_dismissible_sheet() {
+    fn mobile_copy_without_links_offers_script_selection_and_cancel() {
         let (mut m, mut server, workspace) = fixture();
         spawn(&mut m, workspace, 7);
         m.set_focus(PaneFocus::Terminals);
@@ -707,6 +739,10 @@ mod tests {
         m.dispatch_key(key('/'));
         assert_eq!(m.top_modal(), Some(&Id::MobileLinks));
         m.dispatch_modal_key(KeyEvent::from(Key::Enter));
+        assert_eq!(m.top_modal(), Some(&Id::MobileCopyText));
+        m.dispatch_modal_key(KeyEvent::from(Key::Esc));
+        assert_eq!(m.top_modal(), Some(&Id::MobileLinks));
+        m.dispatch_modal_key(KeyEvent::from(Key::Esc));
         assert!(m.top_modal().is_none());
         assert!(m.mobile_rail.is_open());
         assert!(server.rx.try_recv().is_err());
@@ -757,6 +793,39 @@ mod tests {
             std::iter::from_fn(|| server.rx.try_recv().ok())
                 .any(|cmd| matches!(cmd, Command::Write { bytes, .. } if bytes == b"/"))
         );
+    }
+
+    #[test]
+    fn mobile_script_copy_targets_hovered_terminal_and_never_writes_or_resizes() {
+        let (mut m, mut server, workspace) = fixture();
+        spawn(&mut m, workspace.clone(), 7);
+        spawn(&mut m, workspace, 8);
+        m.handle_daemon_event(Event::TerminalOutput {
+            terminal_id: TerminalId(8),
+            bytes: std::sync::Arc::<[u8]>::from(b"echo hello\r\necho done".to_vec()),
+            first_seq: 1,
+            seq: 1,
+            cols: 20,
+            rows: 12,
+        });
+        m.terminals.focus_terminal(TerminalId(7));
+        m.set_focus(PaneFocus::Terminals);
+        m.dispatch_key(list_key());
+        m.dispatch_key(key('j'));
+        while server.rx.try_recv().is_ok() {}
+        m.dispatch_key(key('/'));
+        m.dispatch_modal_key(KeyEvent::from(Key::Enter));
+        assert_eq!(m.top_modal(), Some(&Id::MobileCopyText));
+        m.dispatch_modal_key(key('v'));
+        m.dispatch_modal_key(key('j'));
+        m.dispatch_modal_key(KeyEvent::from(Key::Enter)); // review only
+        assert_eq!(m.top_modal(), Some(&Id::MobileCopyText));
+        assert!(server.rx.try_recv().is_err());
+        m.dispatch_modal_key(KeyEvent::from(Key::Enter)); // clipboard only
+        assert!(m.top_modal().is_none());
+        assert!(!m.mobile_rail.is_open());
+        assert_eq!(m.terminals.focused_terminal_id(), Some(TerminalId(7)));
+        assert!(server.rx.try_recv().is_err());
     }
 
     #[test]

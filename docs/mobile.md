@@ -19,11 +19,14 @@ The startup portal and **Ctrl-T Sessions** share one renderer and these bindings
 - **`x`**: delete only the highlighted terminal after confirmation. **y**
   confirms; **n**, **Enter**, or **Escape** cancels. Workspace files and sibling
   sessions are kept. The confirmation captures the exact terminal ID.
-- **`/`**: list links from the highlighted terminal's current view. Use **j/k**
+- **`/`**: open Copy for the highlighted terminal. Links and formatted script/text blocks
+  from loaded history share one **newest-first** list. Repeated items keep their
+  newest position. Blocks open a review; **Commands / scripts: select lines**
+  remains the last entry. Use **j/k**
   and **Enter** to copy the complete URL to the phone/host clipboard through
   OSC 52. **h** shows the highlighted URL in a scrollable reader; **Escape**
   returns to Sessions without copying. Enter returns to the running terminal.
-  You can also tap **/ URLs** in the Sessions footer. Session letters remain
+  You can also tap **/ copy** in the Sessions footer. Session letters remain
   unchanged; `/` is ordinary input outside Sessions.
 - **`p`**: set the highlighted session's priority. Press a displayed letter to
   move it into that position (`a` for first, `b` for second), shifting the other
@@ -140,7 +143,8 @@ directory containing the built `lazybox` and `lb` executables.
 
 Termius's native drag selection copies the rendered screen, which includes
 Lazybox's rail and scrollbar. For a clean link, use **Ctrl-T → / → j/k → Enter**.
-The picker reads the selected terminal's underlying grid. It joins soft-wrapped
+The mobile picker reads the selected terminal's loaded history, with the most
+recent links and script/text blocks at the top. It joins soft-wrapped
 logical lines, including their portions above/below the viewport, and honors
 explicit OSC 8 hyperlink destinations even when their displayed label differs.
 It does not scroll, resize, or type into the terminal while copying. If a very
@@ -154,3 +158,34 @@ Clipboard delivery requires OSC 52 support/permission in the outer terminal;
 Termius iOS added this in 7.5.0 (and OSC 8 hyperlinks in 7.6.1), according to its
 [release notes](https://apps.apple.com/us/app/termius-modern-ssh-client/id549039908).
 Lazybox reports that it sent the link; the terminal controls clipboard access.
+
+
+### Copying recommended commands and scripts
+
+Open **Ctrl-T → /**. Recent script/text blocks appear alongside links, newest
+first. The suggestions recognize complete shell/unlabelled Markdown fences and
+indented paragraphs. Indentation alone does not prove that text is a shell script;
+review the full block before copying. A block opens the review directly; Escape
+lets you adjust the line range.
+
+For text not recognized as a block, select **Commands / scripts: select lines** (the last
+entry, reachable with **G** in the picker). This freezes a plain-text snapshot
+of the highlighted terminal's loaded history, starting at its current viewport.
+
+- **j/k** or arrows: move between logical lines; tapping a line also selects it.
+- **v** or Space: mark/unmark a range's first line. Move to its last line with
+  j/k; reverse selection works too. **g/G** goes to the beginning/end.
+- **Enter**: review the current line or marked range. In review, j/k or thumb
+  scrolling moves through the full text, including long lines.
+- **d** in review: toggle removing a common leading space margin from all
+  selected nonblank lines. The review displays exactly what will be copied.
+- **Enter** in review: send the text to the terminal clipboard. No trailing
+  newline is added. **Escape** returns to selection, then to the Copy picker.
+
+Real line breaks, blank lines and leading indentation are retained; terminal
+soft wraps and trailing screen padding are removed. Lazybox's rail and scrollbar
+are outside this snapshot. Agent-rendered prompts, fences, line numbers or borders
+remain text: select only the script and review it. Lazybox does not infer shell
+syntax, reconstruct truncated output, paste into a session or execute the script.
+If earlier lines are missing, cancel and thumb-scroll up to load history first.
+As with links, the outer terminal must allow OSC 52 clipboard writes.

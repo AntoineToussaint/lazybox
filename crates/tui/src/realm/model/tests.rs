@@ -9469,6 +9469,7 @@ mod stale_input_tests {
                 | Id::PromptHistoryPicker
                 | Id::UrlPicker
                 | Id::MobileLinks
+                | Id::MobileCopyText
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration

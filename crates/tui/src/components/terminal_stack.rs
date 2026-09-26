@@ -3292,6 +3292,50 @@ impl TerminalStack {
         ))
     }
 
+    /// Snapshot loaded terminal text for a line-range clipboard picker.
+    /// Soft wraps are joined; hard line breaks, blank lines and leading
+    /// indentation are retained. The cursor starts at the current viewport.
+    /// No viewport or PTY state is changed. Trailing screen padding is trimmed.
+    pub fn copy_lines(&mut self, id: TerminalId) -> Option<(Vec<String>, usize)> {
+        let slot = self.terminals.get_mut(&id)?;
+        slot.flush_pending();
+        let terminal = &slot.vt.terminal;
+        let offset = terminal.scrollbar().ok()?.offset;
+        let mut cursor = 0;
+        for y in 0..offset {
+            let row = terminal
+                .grid_ref(vt::terminal::Point::Screen(vt::terminal::PointCoordinate {
+                    x: 0,
+                    y: y as u32,
+                }))
+                .ok()?
+                .row()
+                .ok()?;
+            if !row.is_wrapped().unwrap_or(false) {
+                cursor += 1;
+            }
+        }
+        let mut formatter = vt::fmt::Formatter::new(
+            terminal,
+            vt::fmt::FormatterOptions {
+                format: vt::fmt::Format::Plain,
+                trim: true,
+                unwrap: true,
+                selection: None,
+            },
+        )
+        .ok()?;
+        let bytes = formatter.format_alloc(None).ok()?;
+        let text = String::from_utf8_lossy(&bytes);
+        let lines: Vec<String> = text
+            .trim_end_matches('\n')
+            .split('\n')
+            .map(str::to_owned)
+            .collect();
+        let cursor = cursor.min(lines.len().saturating_sub(1));
+        Some((lines, cursor))
+    }
+
     /// Plain-text dump of a terminal's whole visible grid — every row
     /// top to bottom, trailing spaces trimmed, pure box-drawing border
     /// rows dropped, and blank rows dropped off both ends. Seeds an
@@ -3607,6 +3651,28 @@ impl TerminalStack {
     /// sidebar `]]u` scans the cursor workspace's terminal, which may not
     /// be the focused tile (#871).
     pub fn urls_for(&mut self, id: TerminalId) -> Option<Vec<String>> {
+        Some(
+            self.positioned_links(id, false)?
+                .into_iter()
+                .map(|(url, _)| url)
+                .collect(),
+        )
+    }
+
+    /// Newest-first links and code/text blocks from loaded history for a copy menu.
+    pub(crate) fn copy_items(&mut self, id: TerminalId) -> Option<Vec<super::copy_text::CopyItem>> {
+        use super::copy_text::{CopyItem, blocks, newest_first};
+        let (lines, _) = self.copy_lines(id)?;
+        let mut items = blocks(&lines);
+        items.extend(
+            self.positioned_links(id, true)?
+                .into_iter()
+                .map(|(url, line)| (line, CopyItem::Link(url))),
+        );
+        Some(newest_first(items))
+    }
+
+    fn positioned_links(&mut self, id: TerminalId, history: bool) -> Option<Vec<(String, usize)>> {
         let slot = self.terminals.get_mut(&id)?;
         // Reflect every byte received, not just what arrived on screen —
         // mirrors `visible_text` / `target_at`.
@@ -3638,7 +3704,12 @@ impl TerminalStack {
         {
             end += 1;
         }
-        let mut urls: Vec<String> = Vec::new();
+        if history {
+            start = 0;
+            end = (total - 1) as u32;
+        }
+        let mut logical_line = 0;
+        let mut urls: Vec<(String, usize)> = Vec::new();
         let mut line = String::new();
         let mut explicit = Vec::new();
         let mut chars = vec!['\0'; 8];
@@ -3695,12 +3766,13 @@ impl TerminalStack {
                     .map(str::to_owned)
                     .chain(explicit.drain(..))
                 {
-                    if let Some(prev) = urls.iter().position(|u| u == &url) {
+                    if let Some(prev) = urls.iter().position(|(u, _)| u == &url) {
                         urls.remove(prev);
                     }
-                    urls.push(url);
+                    urls.push((url, logical_line));
                 }
                 line.clear();
+                logical_line += 1;
             }
         }
         Some(urls)
@@ -9647,6 +9719,76 @@ mod selection_offset_tests {
                 "click on wrapped row {screen_row} resolves the full URL",
             );
         }
+    }
+
+    #[test]
+    fn copy_items_order_mixed_links_and_scripts_by_latest_logical_line() {
+        use crate::components::copy_text::CopyItem;
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            SessionKey::new("copy"),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 4);
+        let script = "echo 'a long shell argument which wraps across terminal rows'\n\necho done";
+        let source = format!(
+            "https://old.example\n```bash\n{script}\n```\n\x1b]8;;https://hidden.example\x1b\\Open report\x1b]8;;\x1b\\\n  echo newest\n"
+        );
+        slot.vt.feed(source.replace('\n', "\r\n").as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        assert_eq!(
+            stack.copy_items(TerminalId(1)),
+            Some(vec![
+                CopyItem::Block("  echo newest".into()),
+                CopyItem::Link("https://hidden.example".into()),
+                CopyItem::Block(script.into()),
+                CopyItem::Link("https://old.example".into())
+            ])
+        );
+    }
+
+    #[test]
+    fn copy_lines_preserves_multiline_script_across_soft_wraps_and_history() {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            SessionKey::new("copy"),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 4);
+        let script = "#!/bin/sh\ncat <<'EOF'\n  日本語 é and a long argument that wraps\n\nEOF\nprintf '%s\\n' done";
+        slot.vt.feed(script.replace('\n', "\r\n").as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        let before = stack.terminals[&TerminalId(1)]
+            .vt
+            .terminal
+            .scrollbar()
+            .unwrap()
+            .offset;
+        let (lines, cursor) = stack.copy_lines(TerminalId(1)).unwrap();
+        assert_eq!(lines.join("\n"), script);
+        assert!(cursor > 0);
+        assert_eq!(
+            stack.terminals[&TerminalId(1)]
+                .vt
+                .terminal
+                .scrollbar()
+                .unwrap()
+                .offset,
+            before
+        );
+        assert!(stack.copy_lines(TerminalId(999)).is_none());
     }
 
     #[test]

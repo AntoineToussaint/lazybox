@@ -76,7 +76,7 @@ pub async fn report(
     }
 
     let runtimes = crate::spawn_handler::agent_runtime_snapshot(config).await;
-    let held_here = crate::working_claims::locally_held_labels(config);
+    let held_here = crate::working_claims::locally_held_claims(config);
     let now = Utc::now();
 
     let mut workspaces: Vec<WorkspaceStatus> = matches
@@ -119,7 +119,7 @@ fn workspace_status(
     workspace: Workspace,
     matched: &TaskId,
     runtimes: &[crate::spawn_handler::AgentTerminalRuntime],
-    held_here: &HashSet<String>,
+    held_here: &HashSet<(String, String)>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> WorkspaceStatus {
     let live: Vec<&crate::spawn_handler::AgentTerminalRuntime> = runtimes
@@ -216,7 +216,7 @@ fn tracker_facts(task: &Task) -> TrackerFacts {
 /// accounts for is the honest shape of "held by a worker we cannot observe".
 fn claim_facts(
     task: &Task,
-    held_here: &HashSet<String>,
+    held_here: &HashSet<(String, String)>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> ClaimFacts {
     let mut facts = ClaimFacts {
@@ -228,7 +228,7 @@ fn claim_facts(
             device: claim.device.clone(),
             session: claim.session.clone(),
             expires_at: claim.expires_at,
-            verified_locally: held_here.contains(&claim.label),
+            verified_locally: held_here.contains(&(claim.device.clone(), claim.session.clone())),
         };
         if claim.is_active_at(now) {
             facts.active.push(holder);

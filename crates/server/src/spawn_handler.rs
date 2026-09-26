@@ -1867,6 +1867,28 @@ async fn clear_branch_conflict(
     }
 }
 
+/// Whether this spawn should repeat the live-agent population advisory.
+///
+/// The cap is advisory by design — it warns, it never refuses — so the notice
+/// belongs once per excursion above it, not once per spawn. At 56 live agents
+/// against the implicit default of 32 the old unconditional warn fired an
+/// identical WARN and footer notice on every spawn, drowning the rate-budget
+/// signal it was competing with (#1870). `latch` records that the fleet is
+/// currently over; it clears the moment the fleet is back under, so the next
+/// excursion speaks up again.
+fn should_advise_live_agents(
+    latch: &std::sync::atomic::AtomicBool,
+    live_agents: usize,
+    cap: usize,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    if live_agents < cap {
+        latch.store(false, Ordering::Relaxed);
+        return false;
+    }
+    !latch.swap(true, Ordering::Relaxed)
+}
+
 async fn handle_spawn_inner(
     config: &ServerConfig,
     session_key: SessionKey,
@@ -1954,12 +1976,18 @@ async fn handle_spawn_inner(
         && let Some(cap) = cfg.agent.live_agent_cap()
     {
         let live_agents = config.terminal.live_agent_count().await;
-        if live_agents >= cap {
+        // Once per excursion above the cap, not once per spawn (#1870). The
+        // cap never refuses, so every further spawn re-reported the same
+        // advisory — 56 identical WARNs for a ceiling the user never set,
+        // competing with the signal that actually needed reading. The latch
+        // clears as soon as the fleet is back under, so the next excursion
+        // speaks up again.
+        if should_advise_live_agents(&config.live_agent_advisory, live_agents, cap) {
             tracing::warn!(
                 live_agents,
                 cap,
                 %session_key,
-                "live-agent cap exceeded — spawning anyway (advisory only)"
+                "live-agent cap reached — spawning anyway (advisory only)"
             );
             let _ = config.bus.send(Event::provider_error_retryable(
                 "spawn",
@@ -12557,6 +12585,11 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 "spawn",
                 format!("{live_agents} agents running (cap {cap}) — ]]x closes idle sessions"),
             ));
+            // Arm the latch so the first spawn into an already-over-cap
+            // recovered fleet doesn't immediately repeat what boot just said.
+            config
+                .live_agent_advisory
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -18128,6 +18161,30 @@ mod tests {
     /// agents surface — shells and still-authenticating login terminals
     /// are excluded — and each agent's durable session id is read in the
     /// same lock section it collects the rest of its metadata.
+    /// #1870: the live-agent cap is advisory by design — it never refuses a
+    /// spawn — so it must not re-report itself on every spawn. At 56 agents
+    /// against the implicit default of 32 the old unconditional warn fired an
+    /// identical WARN and footer notice 24 times over, competing with the
+    /// rate-budget warnings the user actually needed to read.
+    #[test]
+    fn the_live_agent_advisory_speaks_once_per_excursion() {
+        use std::sync::atomic::AtomicBool;
+        let latch = AtomicBool::new(false);
+
+        assert!(!should_advise_live_agents(&latch, 31, 32), "under the cap");
+        assert!(should_advise_live_agents(&latch, 32, 32), "the crossing");
+        for live in 33..=56 {
+            assert!(
+                !should_advise_live_agents(&latch, live, 32),
+                "{live} agents: the excursion was already reported"
+            );
+        }
+
+        // Back under, and the next excursion is news again.
+        assert!(!should_advise_live_agents(&latch, 20, 32));
+        assert!(should_advise_live_agents(&latch, 40, 32));
+    }
+
     #[tokio::test]
     async fn agent_runtime_snapshot_filters_to_live_agents() {
         let config = ServerConfig::in_memory();

@@ -1358,8 +1358,15 @@ fn request_profile(
 ) {
     use crate::rate_budget::{ApiResource, RequestPriority};
     match operation {
-        "notifications heartbeat" => (ApiResource::rest("core"), RequestPriority::Recent),
-        "budget-bootstrap" => (ApiResource::Graphql, RequestPriority::Recent),
+        // The inbox poll (#1870). `Sessioned` is the top scheduled tier, so
+        // these keep the whole per-tick allowance available to them while the
+        // discovery probes and the claim sweeper below yield at their own
+        // ceilings. Being `Recent` — the same tier as a 90-second probe and
+        // the auto-fix recheck — is what let the background work drain the
+        // allowance first and leave the poll that populates the user's rows
+        // refused with `poll returned 0 tasks`.
+        "notifications heartbeat" => (ApiResource::rest("core"), RequestPriority::Sessioned),
+        "budget-bootstrap" => (ApiResource::Graphql, RequestPriority::Sessioned),
         "hot-target batch query" => (ApiResource::Graphql, RequestPriority::Focused),
         // User-initiated one-node syncs (`g s`, detail fetch on focus,
         // the auto-merge pre-merge probe) — a few points each. They
@@ -1373,19 +1380,26 @@ fn request_profile(
         }
         "single-PR notification deep-fetch"
         | "single-issue notification deep-fetch"
-        | "auto-fix CI recheck"
-        | "PR details background prefetch"
         | "PR search"
-        | "authored-PR probe"
         | "issues search"
         | "review-requested"
-        | "merged-sweep"
         | "watched-repo"
         | "watched-repo issues"
         | "repo-sweep"
         | "repo-sweep probe"
         | "repo-sweep issues"
-        | "round-robin-repo" => (ApiResource::Graphql, RequestPriority::Recent),
+        | "round-robin-repo" => (ApiResource::Graphql, RequestPriority::Sessioned),
+        // Opportunistic background work: it makes the inbox *fresher*, but
+        // nothing the user is looking at waits on it, so it yields to the
+        // poll above at the `Recent` ceiling. `issue-probe` — the sibling of
+        // the authored-PR probe, on the same 90-second clock — fell through
+        // to the `_` arm below and was admitted as INTERACTIVE, bypassing the
+        // reserve, the per-tick allowance and the local bucket alike (#1870).
+        "authored-PR probe"
+        | "issue-probe"
+        | "merged-sweep"
+        | "auto-fix CI recheck"
+        | "PR details background prefetch" => (ApiResource::Graphql, RequestPriority::Recent),
         // Working-claim label sync (#1218 storm fix). These are REST label
         // reads/writes (`fbca04` "Claimed by a lazybox agent" markers), fired
         // ~6 per agent heartbeat every 15 min plus a burst at each spawn. They
@@ -1402,6 +1416,8 @@ fn request_profile(
         // are refused locally (fast, no GitHub call) instead of storming — a
         // refused heartbeat simply retries next cycle, and the 15-min heartbeat
         // vs 60-min claim TTL leaves ample slack for transient refusals.
+        // `Cold` carries the lowest per-tick ceiling (#1870), so the sweeper
+        // yields to the poll on the REST `core` bucket the same way.
         "list issue working labels"
         | "list issue working labels next page"
         | "renew working claim label"
@@ -10024,6 +10040,57 @@ mod tests {
                 "{op} must not bypass the budget gates"
             );
         }
+    }
+
+    /// #1870: the per-tick allowance is one counter shared by every
+    /// scheduled caller, so the ladder below `Interactive` is what decides
+    /// who yields first. The poll that populates the user's rows must outrank
+    /// the opportunistic probes — and no background operation may be
+    /// `Interactive`, which bypasses the reserve, the per-tick allowance and
+    /// the local bucket alike. The 90-second `issue-probe` fell through to
+    /// the catch-all arm and was spending exactly that way.
+    #[test]
+    fn the_inbox_poll_outranks_the_background_probes() {
+        use crate::rate_budget::RequestPriority;
+        for op in [
+            "notifications heartbeat",
+            "budget-bootstrap",
+            "PR search",
+            "issues search",
+            "single-PR notification deep-fetch",
+            "single-issue notification deep-fetch",
+            "review-requested",
+            "watched-repo",
+            "watched-repo issues",
+            "repo-sweep",
+            "repo-sweep probe",
+            "repo-sweep issues",
+            "round-robin-repo",
+        ] {
+            assert_eq!(
+                request_profile(op).1,
+                RequestPriority::Sessioned,
+                "{op} populates the inbox and must hold the top scheduled tier"
+            );
+        }
+        for op in [
+            "authored-PR probe",
+            "issue-probe",
+            "merged-sweep",
+            "auto-fix CI recheck",
+            "PR details background prefetch",
+        ] {
+            assert_eq!(
+                request_profile(op).1,
+                RequestPriority::Recent,
+                "{op} is opportunistic and must yield to the poll"
+            );
+        }
+        assert_eq!(
+            request_profile("hot-target batch query").1,
+            RequestPriority::Focused,
+            "the row under the cursor keeps its reserved pass-through"
+        );
     }
 
     #[test]

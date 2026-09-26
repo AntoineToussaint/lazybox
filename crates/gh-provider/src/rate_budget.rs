@@ -86,6 +86,45 @@ impl RequestPriority {
     fn is_scheduled(self) -> bool {
         !matches!(self, Self::Interactive)
     }
+
+    /// How much of a tick's scheduled allowance this priority may spend
+    /// before it starts yielding.
+    ///
+    /// A tick's allowance is ONE counter shared by every scheduled caller,
+    /// so until #1870 the ladder below `Interactive` was decorative: the
+    /// inbox poll, a 90-second discovery probe and the working-claim
+    /// sweeper raced first-come-first-served for the same points, and at
+    /// fleet scale the probes and the claim sweep drained them while the
+    /// poll that fills the user's inbox was refused. Capping each tier at
+    /// a share of the allowance reserves its top for the poll: the lower
+    /// tiers stop first and what they leave behind is still spendable by
+    /// the work the allowance exists for.
+    fn tick_share(self) -> f64 {
+        match self {
+            Self::Interactive | Self::Focused | Self::Sessioned => 1.0,
+            Self::Recent => 0.7,
+            Self::Cold => 0.4,
+        }
+    }
+
+    /// This tier's ceiling on cumulative scheduled spend within one tick.
+    /// Rounded up so a small allowance still admits something at every
+    /// tier rather than flooring the bottom tiers to zero.
+    fn tick_ceiling(self, allowance: u32) -> u32 {
+        ((f64::from(allowance) * self.tick_share()).ceil() as u32).min(allowance)
+    }
+
+    /// Stable label for the refusal message, so a log line says which tier
+    /// ran out rather than only that "the" allowance did.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Focused => "focused",
+            Self::Sessioned => "poll",
+            Self::Recent => "probe",
+            Self::Cold => "claim",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -160,8 +199,13 @@ pub enum AcquireError {
     },
     TickAllowanceExhausted {
         resource: String,
+        /// The refused tier's ceiling, not the whole tick allowance: each
+        /// scheduled priority stops at its own share of the one per-tick
+        /// counter, leaving the top of the allowance for the inbox poll.
         allowance: u32,
         spent: u32,
+        /// Which priority tier ran out — `poll`, `probe`, `claim`, …
+        tier: &'static str,
         wait_secs: u64,
     },
     CircuitOpen {
@@ -232,10 +276,11 @@ impl std::fmt::Display for AcquireError {
                 resource,
                 allowance,
                 spent,
+                tier,
                 wait_secs,
             } => write!(
                 f,
-                "GitHub {resource} background allowance spent \
+                "GitHub {resource} {tier}-tier allowance spent \
                  ({spent}/{allowance}, retry in {wait_secs}s)"
             ),
             Self::CircuitOpen { reason, retry_at } => {
@@ -978,13 +1023,19 @@ impl RateBudget {
                 .get(resource.key())
                 .copied()
                 .unwrap_or(0);
-            if spent.saturating_add(forecast) > allowance {
+            // Per-tier ceiling (#1870): every scheduled caller charges the
+            // one `tick_scheduled` counter, so a tier stops once the tick's
+            // cumulative spend reaches its share. The top of the allowance
+            // is left for the poll.
+            let ceiling = priority.tick_ceiling(allowance);
+            if spent.saturating_add(forecast) > ceiling {
                 reserved = self.claim_focused_reserve(priority, mono_now);
                 if !reserved {
                     return Err(AcquireError::TickAllowanceExhausted {
                         resource: resource.key().to_string(),
-                        allowance,
+                        allowance: ceiling,
                         spent,
+                        tier: priority.label(),
                         wait_secs: self.tick_interval.as_secs().max(1),
                     });
                 }
@@ -1788,6 +1839,95 @@ mod tests {
         assert!(matches!(err, AcquireError::LocalBudgetExhausted { .. }));
     }
 
+    /// #1870: one tick allowance is charged by every scheduled caller, so
+    /// before the per-tier ceilings the ladder below `Interactive` decided
+    /// nothing — the claim sweeper, a 90-second discovery probe and the inbox
+    /// poll raced first-come-first-served, and at fleet scale the poll lost.
+    /// Each tier now stops at its own share of the same counter, leaving the
+    /// top of the allowance for the work the user is waiting on.
+    #[test]
+    fn lower_tiers_yield_their_share_of_a_tick_before_the_poll_does() {
+        let wall = Utc::now();
+        let mono = Instant::now();
+        // No `begin_background_tick`, so every resource falls back to the
+        // bootstrap allowance — a known number to reason about.
+        let allowance = MIN_BACKGROUND_TICK_ALLOWANCE;
+        let claim_ceiling = RequestPriority::Cold.tick_ceiling(allowance);
+        let probe_ceiling = RequestPriority::Recent.tick_ceiling(allowance);
+        assert!(
+            0 < claim_ceiling && claim_ceiling < probe_ceiling && probe_ceiling < allowance,
+            "the tiers must be strictly ordered: {claim_ceiling} < {probe_ceiling} < {allowance}"
+        );
+
+        let mut budget = RateBudget::new(1000, 1000.0);
+        let spend = |budget: &mut RateBudget, class: &str, priority| {
+            budget.admit_at(ApiResource::Graphql, class, priority, 1, wall, mono)
+        };
+
+        for n in 0..claim_ceiling {
+            spend(
+                &mut budget,
+                "renew working claim label",
+                RequestPriority::Cold,
+            )
+            .unwrap_or_else(|e| panic!("claim {n} refused below its own ceiling: {e}"));
+        }
+        assert!(
+            matches!(
+                spend(
+                    &mut budget,
+                    "renew working claim label",
+                    RequestPriority::Cold
+                ),
+                Err(AcquireError::TickAllowanceExhausted { tier: "claim", .. })
+            ),
+            "the claim sweeper stops at its share"
+        );
+
+        // The probe tier keeps spending the points the sweeper may not.
+        for n in claim_ceiling..probe_ceiling {
+            spend(&mut budget, "authored-PR probe", RequestPriority::Recent)
+                .unwrap_or_else(|e| panic!("probe {n} refused below its own ceiling: {e}"));
+        }
+        assert!(
+            matches!(
+                spend(&mut budget, "authored-PR probe", RequestPriority::Recent),
+                Err(AcquireError::TickAllowanceExhausted { tier: "probe", .. })
+            ),
+            "the discovery probe stops at its share"
+        );
+
+        // …and the inbox poll still has the top of the allowance, which is
+        // the whole point: at fleet scale this is what used to be gone.
+        for n in probe_ceiling..allowance {
+            spend(&mut budget, "PR search", RequestPriority::Sessioned)
+                .unwrap_or_else(|e| panic!("poll request {n} refused: {e}"));
+        }
+        assert!(
+            matches!(
+                spend(&mut budget, "PR search", RequestPriority::Sessioned),
+                Err(AcquireError::TickAllowanceExhausted { tier: "poll", .. })
+            ),
+            "the poll spends the whole allowance and no more"
+        );
+    }
+
+    /// A tier ceiling must never floor to zero: a tiny allowance has to keep
+    /// admitting something at every tier rather than shutting the bottom ones
+    /// off entirely.
+    #[test]
+    fn every_tier_still_admits_something_from_a_one_point_allowance() {
+        for priority in [
+            RequestPriority::Focused,
+            RequestPriority::Sessioned,
+            RequestPriority::Recent,
+            RequestPriority::Cold,
+        ] {
+            assert_eq!(priority.tick_ceiling(1), 1, "{priority:?}");
+            assert_eq!(priority.tick_ceiling(0), 0, "{priority:?}");
+        }
+    }
+
     #[test]
     fn exhausted_remote_blocks_even_with_local_tokens() {
         let mut budget = RateBudget::new(100, 60.0);
@@ -1819,7 +1959,7 @@ mod tests {
             budget.admit_at(
                 ApiResource::rest("core"),
                 "notifications heartbeat",
-                RequestPriority::Recent,
+                RequestPriority::Sessioned,
                 1,
                 wall,
                 mono,
@@ -2060,13 +2200,16 @@ mod tests {
         ));
         let plan = budget.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
         assert_eq!(plan.graphql_points, 45);
+        // `Sessioned` is the poll's tier, and the plan's allowance is sized
+        // for the poll — a lower tier stops earlier at its own ceiling
+        // (`lower_tiers_yield_their_share_of_a_tick_before_the_poll_does`).
         for index in 0..plan.graphql_points {
             assert!(
                 budget
                     .admit_at(
                         ApiResource::Graphql,
                         &format!("query-{index}"),
-                        RequestPriority::Recent,
+                        RequestPriority::Sessioned,
                         1,
                         wall_now,
                         mono_now,
@@ -2078,7 +2221,7 @@ mod tests {
             budget.admit_at(
                 ApiResource::Graphql,
                 "one-too-many",
-                RequestPriority::Recent,
+                RequestPriority::Sessioned,
                 1,
                 wall_now,
                 mono_now,
@@ -2267,13 +2410,16 @@ mod tests {
             "governor starved the daemon to {} points under external contention",
             plan.graphql_points
         );
-        // And the floored allowance is genuinely spendable.
+        // And the floored allowance is genuinely spendable BY THE SWEEP —
+        // the floor exists to admit a complete sweep unit, and the sweep
+        // holds the top scheduled tier, so the per-tier ceilings (#1870)
+        // leave that guarantee intact.
         for index in 0..plan.graphql_points {
             budget
                 .admit_at(
                     ApiResource::Graphql,
                     &format!("contended-{index}"),
-                    RequestPriority::Recent,
+                    RequestPriority::Sessioned,
                     1,
                     wall_now + chrono::Duration::seconds(60),
                     mono_now + Duration::from_secs(60),
@@ -2290,6 +2436,7 @@ mod tests {
                 resource: "graphql".into(),
                 allowance: 3,
                 spent: 0,
+                tier: "probe",
                 wait_secs: 15,
             },
             AcquireError::ReserveProtected {

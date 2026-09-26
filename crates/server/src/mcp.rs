@@ -77,7 +77,9 @@ use lazybox_store::StoreMutation;
 use parking_lot::RwLock;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig as McpServerInfo,
+};
 use rmcp::service::RequestContext;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router,
@@ -3110,8 +3112,8 @@ fn json_result(payload: serde_json::Value) -> CallToolResult {
 // every dispatch; point it at the instance we already built in `new` instead.
 #[tool_handler(router = self.tool_router.clone())]
 impl ServerHandler for LazyboxMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> McpServerInfo {
+        McpServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
                 "lazybox cross-agent coordination. Discover other sessions with \

@@ -16,7 +16,8 @@ workspace's worktree.
 **Status:** stable
 **Crate(s):** `core` (`src/workspace.rs`), `server`
 **Config / flags:** —
-**Key bindings:** `Enter` open, `x` workspace menu (`x x` archive)
+**Key bindings:** `Enter` open, `x` workspace menu (`x x` archive, `x U` browse
+the archive and restore)
 
 ### What it does
 Groups a task with everything you do about it. A `Workspace` holds at most one
@@ -25,7 +26,10 @@ zero-or-more `Session`s (each an embedded terminal in a worktree).
 
 ### How to use it
 Workspaces appear in the sidebar. `Enter` opens one; spawning a shell or agent
-(`s`, `a c`/`a x`/`a u`, or `w w`) attaches a session; `x x` archives it.
+(`s`, `a c`/`a x`/`a u`, or `w w`) attaches a session; `x x` archives it. An
+archived row is in no mailbox — the row is gone and the key tombstoned — so
+`x U` opens the archive browser, where `u` restores a key and the keys its row
+absorbed (`lazybox workspace archived` / `unarchive` outside the TUI).
 
 ### How it works (brief)
 `Workspace` (`crates/core/src/workspace.rs`) carries `key`, optional
@@ -142,8 +146,9 @@ activity, cost and notes onto the PR's row and archives the scratch one.
   attaching waits for the Linear poll. The named-create guard covers Linear and
   Jira projects; only the on-demand materialize is GitHub-only.
 - An archived record (`x x` deletes the row and tombstones the key, which
-  `upsert` then skips) reports that it was archived and points at the Inactive
-  mailbox, rather than being silently resurrected or reported as invisible.
+  `upsert` then skips) reports that it was archived and names the restore —
+  `lazybox workspace unarchive <ref>`, or `x U` in the TUI — rather than being
+  silently resurrected or reported as invisible.
 - The name-match dedupe only sees tasks already in the store; a name matching
   an issue the poll has never fetched is refused rather than attached.
 

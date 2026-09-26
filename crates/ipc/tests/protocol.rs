@@ -665,6 +665,11 @@ fn all_commands() -> Vec<Command> {
             request_id: 7,
             needles: vec!["cannot borrow".into(), "deadlock".into()],
         },
+        Command::ListArchivedWorkspaces,
+        Command::UnarchiveWorkspace {
+            key: "github-o-r-42".into(),
+            client_request_id: Some("unarchive-1".into()),
+        },
         Command::Shutdown,
     ]
 }
@@ -1574,6 +1579,12 @@ fn all_events() -> Vec<Event> {
             )],
             hidden: 2,
         },
+        Event::ArchivedWorkspaces {
+            records: vec![lazybox_ipc::ArchivedWorkspaceRecord {
+                key: "github-o-r-42".into(),
+                absorbed: vec!["github-o-r-40".into()],
+            }],
+        },
     ]
 }
 
@@ -1690,6 +1701,8 @@ fn command_tag(command: &Command) -> &'static str {
         Command::GhAdmit { .. } => "GhAdmit",
         Command::GhCompleted { .. } => "GhCompleted",
         Command::SearchAgentOutput { .. } => "SearchAgentOutput",
+        Command::ListArchivedWorkspaces => "ListArchivedWorkspaces",
+        Command::UnarchiveWorkspace { .. } => "UnarchiveWorkspace",
     }
 }
 
@@ -1815,6 +1828,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::GhShimReply { .. } => "GhShimReply",
         Event::AgentOutputMatches { .. } => "AgentOutputMatches",
         Event::WorkspaceArtifacts { .. } => "WorkspaceArtifacts",
+        Event::ArchivedWorkspaces { .. } => "ArchivedWorkspaces",
     }
 }
 
@@ -1826,12 +1840,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        108,
+        110,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        115,
+        116,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

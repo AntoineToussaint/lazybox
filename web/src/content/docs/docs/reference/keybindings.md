@@ -226,6 +226,7 @@ The strength rows carry the agent whose menu the model name was read from (here,
 
 | Chord | Action |
 | --- | --- |
+| `x U` | archived |
 | `x n` | new workspace |
 | `x F` | floating workspace |
 | `x c` | coordination workspace |

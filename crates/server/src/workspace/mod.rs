@@ -1588,6 +1588,99 @@ pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
     true
 }
 
+/// The archived keys a restore surface can act on (#1824): one entry per
+/// row the user archived, carrying the keys that row absorbed.
+///
+/// An absorbed key is folded into its owner's entry rather than listed on
+/// its own, because it has no separate existence — [`unarchive_workspace_key`]
+/// takes it out with the row that wrote it, and nothing else ever removes it.
+///
+/// A row whose record cannot be parsed is still listed, with no absorbed
+/// keys: it is a tombstone the user needs to see. The unarchive of that key
+/// refuses on the same read, which is the honest outcome — a corrupt owner
+/// record still owns absorbed rows, and dropping it alone would strand them.
+pub fn archived_records(
+    config: &ServerConfig,
+) -> Result<Vec<lazybox_ipc::ArchivedWorkspaceRecord>, String> {
+    let keys = load_archived_set_strict(config)?;
+    let mut records: Vec<lazybox_ipc::ArchivedWorkspaceRecord> = keys
+        .iter()
+        .filter_map(|key| {
+            let record = read_archive_record(config, key).unwrap_or_default();
+            record
+                .absorbed_by
+                .is_none()
+                .then(|| lazybox_ipc::ArchivedWorkspaceRecord {
+                    key: key.clone(),
+                    absorbed: record.absorbed,
+                })
+        })
+        .collect();
+    records.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(records)
+}
+
+/// Reply to `Command::ListArchivedWorkspaces` — and refresh an open archive
+/// browser after an unarchive — by broadcasting the current set.
+pub fn broadcast_archived(config: &ServerConfig) {
+    match archived_records(config) {
+        Ok(records) => {
+            let _ = config
+                .bus
+                .send(lazybox_ipc::Event::ArchivedWorkspaces { records });
+        }
+        Err(e) => tracing::warn!("broadcast_archived: reading the archived set failed: {e}"),
+    }
+}
+
+/// Handle `Command::UnarchiveWorkspace`: drop the key's tombstone (and the
+/// tombstones it absorbed), then wake the poll so the record's row returns
+/// without waiting out the tick.
+///
+/// A record the providers no longer return — a PR merged long before the
+/// recently-merged window — gets no row back from the poll; removing the
+/// tombstone is what lets `workspace create --issue` materialize it, which
+/// an archived record refuses outright.
+///
+/// `key` arrives from a CLI argument or a browser row, so membership is
+/// checked before the delete: deleting an absent row succeeds at every
+/// backend, and a caller told "restored" about a key that was never archived
+/// would go looking for a row that is never coming.
+pub fn handle_unarchive(config: &ServerConfig, key: &str, client_request_id: Option<String>) {
+    let outcome = match load_archived_set_strict(config) {
+        Ok(archived) if !archived.contains(key) => Err(format!(
+            "{key} is not archived — `lazybox workspace archived` lists the keys that are"
+        )),
+        Ok(_) if unarchive_workspace_key(config, key) => Ok(()),
+        Ok(_) => Err(format!(
+            "could not restore {key}: its archive record could not be read, and dropping it \
+             alone would strand the tombstones it wrote (see the daemon log)"
+        )),
+        Err(e) => Err(format!("could not read the archived set: {e}")),
+    };
+    match outcome {
+        Ok(()) => {
+            tracing::info!(workspace_key = %key, "unarchived workspace key (tombstone removed)");
+            config.poll.wake(true);
+            if let Some(client_request_id) = client_request_id {
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::CommandCompleted { client_request_id });
+            }
+        }
+        Err(message) => {
+            tracing::warn!(workspace_key = %key, "unarchive refused: {message}");
+            if let Some(client_request_id) = client_request_id {
+                let _ = config.bus.send(lazybox_ipc::Event::CommandFailed {
+                    client_request_id,
+                    message,
+                });
+            }
+        }
+    }
+    broadcast_archived(config);
+}
+
 /// Compose the per-key kv row name for a session-tombstone key.
 fn session_tombstone_row_key(key: &str) -> String {
     format!("{}{}", lazybox_core::KV_PREFIX_SESSION_TOMBSTONE, key)
@@ -5492,6 +5585,112 @@ mod archived_set_tests {
                 .unwrap()
                 .contains("github-o-r-40"),
             "the absorbed tombstone stays recoverable rather than being stranded"
+        );
+    }
+
+    #[test]
+    fn archived_records_list_owners_with_their_absorbed_keys() {
+        // #1824: the restore surface's list. An absorbed key rides its
+        // owner's entry rather than appearing as one of its own, because
+        // nothing can restore it without the row that absorbed it.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &["github-o-r-40".to_string(), "github-o-r-41".to_string()],
+        ));
+        assert!(crate::workspace::archive_workspace_key(
+            &config,
+            "github-o-r-7"
+        ));
+
+        let records = crate::workspace::archived_records(&config).unwrap();
+        assert_eq!(
+            records,
+            vec![
+                lazybox_ipc::ArchivedWorkspaceRecord {
+                    key: "github-o-r-42".into(),
+                    absorbed: vec!["github-o-r-40".into(), "github-o-r-41".into()],
+                },
+                lazybox_ipc::ArchivedWorkspaceRecord {
+                    key: "github-o-r-7".into(),
+                    absorbed: vec![],
+                },
+            ],
+            "one entry per archived row, sorted by key, absorbed keys folded in"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_record_is_still_listed_so_the_user_can_see_it() {
+        // Hiding it would leave a tombstone nothing can name. The
+        // unarchive of that key refuses on the same read, which is the
+        // honest outcome — the owner still owns absorbed rows.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key(
+            &config,
+            "github-o-r-42"
+        ));
+        store
+            .set_kv(&archived_row_key("github-o-r-42"), r#"{"absorbed":["#)
+            .unwrap();
+
+        let records = crate::workspace::archived_records(&config).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].key, "github-o-r-42");
+        assert!(records[0].absorbed.is_empty());
+    }
+
+    #[test]
+    fn handle_unarchive_broadcasts_the_refreshed_set_and_acks() {
+        // The browser reads the refreshed list as the outcome, and a
+        // correlated caller (the CLI) gets a real verdict rather than a
+        // hopeful "requested".
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &["github-o-r-40".to_string()],
+        ));
+        let mut events = config.bus.subscribe();
+
+        crate::workspace::handle_unarchive(&config, "github-o-r-42", Some("req-1".into()));
+
+        assert!(matches!(
+            events.try_recv(),
+            Ok(lazybox_ipc::Event::CommandCompleted { client_request_id }) if client_request_id == "req-1"
+        ));
+        let Ok(lazybox_ipc::Event::ArchivedWorkspaces { records }) = events.try_recv() else {
+            panic!("the refreshed archived set must follow the ack");
+        };
+        assert!(
+            records.is_empty(),
+            "the row and the key it absorbed both left the set"
+        );
+    }
+
+    #[test]
+    fn handle_unarchive_reports_a_key_that_was_not_archived() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let mut events = config.bus.subscribe();
+
+        crate::workspace::handle_unarchive(&config, "github-o-r-42", Some("req-1".into()));
+
+        let Ok(lazybox_ipc::Event::CommandFailed {
+            client_request_id,
+            message,
+        }) = events.try_recv()
+        else {
+            panic!("an unarchive that removed nothing must fail its caller");
+        };
+        assert_eq!(client_request_id, "req-1");
+        assert!(
+            message.contains("is not archived"),
+            "a key that was never archived must not read as restored: {message}"
         );
     }
 

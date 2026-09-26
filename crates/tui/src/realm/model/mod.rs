@@ -394,6 +394,12 @@ pub enum Id {
     /// issue / routes to an agent / exports JSONL from the selected
     /// row; `d`/`c` delete/clear via the daemon.
     ErrorInbox,
+    /// Archive browser (default `x U`, #1824). Lists the tombstones `x x`
+    /// wrote — the only surface that shows them, since an archived record's
+    /// row is deleted and so appears in no mailbox — each with the keys its
+    /// row absorbed. `u` / Enter sends `Command::UnarchiveWorkspace`, whose
+    /// refreshed broadcast repaints the list.
+    ArchiveBrowser,
     /// Confirm gate for the Error Inbox's `c` (clear-all). Wiping the
     /// durable store is irreversible, so — like the other destructive
     /// confirms — a single stray key must not do it; only an explicit
@@ -603,6 +609,7 @@ impl Id {
                 | Id::Messages
                 | Id::Legend
                 | Id::ErrorInbox
+                | Id::ArchiveBrowser
                 | Id::Stats
                 | Id::Error
                 | Id::SnippetPicker
@@ -1494,6 +1501,10 @@ pub enum Msg {
     ErrorInboxDeleteRequested(String),
     /// `c` in the Error Inbox — wipe the durable error store.
     ErrorInboxClearRequested,
+    /// `u` / Enter in the archive browser (#1824) — drop the selected key's
+    /// tombstone, and those of the keys its row absorbed, so the record can
+    /// return to the inbox.
+    ArchiveRestoreRequested(String),
     /// `c` pressed in the messages window (#309) — wipe the notice
     /// history and re-render the (now empty) window.
     MessagesCleared,
@@ -8285,6 +8296,16 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::ErrorInboxDeleteRequested(dedupe_key) => {
                 self.send_cmd(IpcCommand::DeleteError { dedupe_key });
+            }
+            Msg::ArchiveRestoreRequested(key) => {
+                // No confirm: restoring is the reversal of a destructive
+                // action, and `x x` puts the row straight back. The daemon's
+                // refreshed `ArchivedWorkspaces` repaints the open browser,
+                // so the list is the outcome the user reads.
+                self.send_cmd(IpcCommand::UnarchiveWorkspace {
+                    key,
+                    client_request_id: None,
+                });
             }
             Msg::ErrorInboxFileIssue(record) => {
                 self.error_inbox_file_issue(record);

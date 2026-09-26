@@ -1399,6 +1399,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::ArchivedWorkspaces { .. }
                 | IpcEvent::Stats { .. }
                 | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }
@@ -2232,6 +2233,14 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // Archived-set snapshot (#1824) — repaint the open archive browser,
+        // which is also how a restore reports itself: the restored row is
+        // gone from the refreshed list. Dropped when the browser is closed.
+        if let IpcEvent::ArchivedWorkspaces { records } = &event {
+            self.update_archive_browser(records.clone());
+            self.redraw = true;
+            return;
+        }
         // Merge-history reply (#1432) — repaint the open modal with the
         // fetched merged PRs (or the error). A reply that lands while the
         // modal is closed, or names a different repo than the open one, is
@@ -2590,6 +2599,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentCreditExhausted { .. }
             | IpcEvent::WorkspaceCreated { .. }
             | IpcEvent::ErrorInbox { .. }
+            | IpcEvent::ArchivedWorkspaces { .. }
             | IpcEvent::Stats { .. }
             | IpcEvent::AgentSessionStarted { .. }
             | IpcEvent::SnippetKeepMine { .. }
@@ -2976,6 +2986,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::ArchivedWorkspaces { .. }
                 | IpcEvent::Stats { .. }
                 | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }

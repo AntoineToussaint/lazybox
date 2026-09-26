@@ -444,17 +444,16 @@ mod tests {
         assert!(scan_output(recoloured, &needles(&["cannot borrow"])).is_some());
     }
 
-    /// A cursor move IS a line boundary: a repainting TUI writes rows with
-    /// CSI positioning and no newline at all, so two unrelated rows must
-    /// not fuse into one line a needle spuriously spans.
+    /// A ROW move is a line boundary: a repainting TUI writes rows with CSI
+    /// positioning and no newline at all, so two unrelated rows must not
+    /// fuse into one line a needle spuriously spans. Only the row changes
+    /// count — `a_column_move_pads_the_row_instead_of_ending_it` pins the
+    /// other half, where breaking would split one rendered row in two.
     #[test]
-    fn a_cursor_move_ends_the_line_but_a_colour_does_not() {
+    fn a_row_move_ends_the_line_but_a_colour_does_not() {
         let repaint = b"\x1b[1;1Hchecking the lexer\x1b[2;1Hbuilding the parser";
         let hit = scan_output(repaint, &needles(&["lexer building"]));
-        assert!(
-            hit.is_none(),
-            "rows separated by a cursor move are distinct"
-        );
+        assert!(hit.is_none(), "rows separated by a ROW move are distinct");
 
         let hit = scan_output(repaint, &needles(&["building the parser"]))
             .expect("each row is searchable on its own");

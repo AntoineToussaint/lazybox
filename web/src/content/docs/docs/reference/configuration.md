@@ -758,12 +758,14 @@ spawn-intrinsic briefing, so they reach every agent kind (Claude, Codex,
 Cursor, a `GenericCli` you declared yourself) and a bare `a c` start as surely
 as a `w` work prompt.
 
-Two rules ship by default:
+Four rules ship by default:
 
 | Policy id | What it says |
 | --- | --- |
 | `ask-before-filing-a-record` | Never open a GitHub issue or a Linear ticket without the user's explicit go-ahead. Say what you would file and wait for a yes; once given, the filed record is the deliverable and its URL is what gets reported. |
 | `one-self-contained-pr` | Prefer one self-contained pull request, even a large one, over a stack of dependent PRs. Split only when the user asks. |
+| `check-for-existing-work` | Before starting, check that no open issue or PR already covers the work or conflicts with it, and that the fix hasn't already reached the default branch. Build on what overlaps or tell the user; never start a duplicate. |
+| `docs-current-in-pr` | Before opening or updating a PR, check the docs describing the change (READMEs, `AGENTS.md`, `docs/`, generated references) are still true and fix them in the same PR; name the docs checked in the PR body. |
 
 Each entry is keyed by policy id, and its value is one of:
 

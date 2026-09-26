@@ -76,9 +76,10 @@ in a second workspace beside one. Named workspaces are repo-less scratch only.
 Linear ticket. This is a *standing rule*, not a hardcoded string: the rules
 lazybox states in every agent's briefing are named, individually overridable
 policies (`lazybox_core::agent_policy`, `policies:` in
-`~/.lazybox/config.yaml`, `repos.<owner/name>.policies:` per repo). Two ship
-by default — ask before filing a record, and prefer one self-contained PR
-over a stack. Agent-facing text elsewhere must *defer* to them rather than
+`~/.lazybox/config.yaml`, `repos.<owner/name>.policies:` per repo). Four ship
+by default — ask before filing a record, prefer one self-contained PR over a
+stack, check for existing or conflicting work before starting, and keep the
+docs current in the PR that changes behaviour. Agent-facing text elsewhere must *defer* to them rather than
 restate them: a second, non-overridable copy of a rule disagrees with the
 first the moment anyone overrides it. An instruction whose own stated
 deliverable is the filed issue — the `carve` snippet, a Planner role spawn —

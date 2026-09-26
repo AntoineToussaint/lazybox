@@ -98,6 +98,17 @@ pub const ASK_BEFORE_FILING: &str = "ask-before-filing-a-record";
 /// by squash, can strand its parent's commits off the default branch.
 pub const ONE_SELF_CONTAINED_PR: &str = "one-self-contained-pr";
 
+/// `check-for-existing-work`: before starting, make sure no open issue or
+/// PR already covers the work or conflicts with it. The fleet re-did the
+/// same fix several times (a shipped issue left open, a sibling PR already
+/// carrying the change) because nothing asked an agent to look first.
+pub const CHECK_FOR_EXISTING_WORK: &str = "check-for-existing-work";
+
+/// `docs-current-in-pr`: a PR that changes behaviour updates the docs that
+/// describe it. Agents read those docs on every request, so a stale one
+/// misleads every later session, not just a human reader.
+pub const DOCS_CURRENT_IN_PR: &str = "docs-current-in-pr";
+
 /// The built-in rules, in the order they are rendered. Deliberately
 /// short: every rule here is paid for in context on every spawn, and a
 /// list long enough to skim past is a list that steers nothing.
@@ -118,6 +129,23 @@ fn builtin_policies() -> Vec<AgentPolicy> {
                    dependent PRs. A stack moves merge-order work onto the reviewer, and a \
                    stacked child that lands by squash can strand its parent's commits off the \
                    default branch. Split only when the user asks you to."
+                .to_string(),
+        },
+        AgentPolicy {
+            id: CHECK_FOR_EXISTING_WORK.to_string(),
+            text: "Before you start work, check that no open issue or pull request already \
+                   covers it or conflicts with it: search the repo's open PRs and issues (the \
+                   lazybox `list_issues` and `task_status` tools cost no GitHub budget) and \
+                   check whether the fix already reached the default branch. If something \
+                   overlaps, build on it or tell the user — never start a duplicate."
+                .to_string(),
+        },
+        AgentPolicy {
+            id: DOCS_CURRENT_IN_PR.to_string(),
+            text: "Before you open or update a pull request, check that the docs describing \
+                   what you changed — READMEs, `AGENTS.md` files, `docs/`, generated \
+                   references — are still true, and fix them in the same PR. Say in the PR \
+                   body which docs you checked."
                 .to_string(),
         },
     ]
@@ -247,13 +275,15 @@ mod tests {
     }
 
     #[test]
-    fn builtins_carry_both_standing_rules() {
+    fn builtins_carry_every_standing_rule() {
         let policies = AgentPolicies::builtin();
         assert_eq!(
             AgentPolicies::builtin_ids(),
             vec![
                 ASK_BEFORE_FILING.to_string(),
-                ONE_SELF_CONTAINED_PR.to_string()
+                ONE_SELF_CONTAINED_PR.to_string(),
+                CHECK_FOR_EXISTING_WORK.to_string(),
+                DOCS_CURRENT_IN_PR.to_string(),
             ]
         );
         let ask = policies.text(ASK_BEFORE_FILING).expect("the filing rule");

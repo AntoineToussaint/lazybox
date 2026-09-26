@@ -209,6 +209,34 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::MobileDeleteSession, MobileConfirm::new(question));
     }
 
+    pub(super) fn mobile_link_picked(&mut self, picks: &[ChoicePayload]) {
+        self.pop_modal();
+        if let Some(ChoicePayload::Text(url)) = picks.first() {
+            super::helpers::emit_clipboard_copy(url);
+            self.apply_mobile_rail_action(RailAction::Close);
+            self.flash_hint("Link sent to terminal clipboard");
+        }
+    }
+
+    fn copy_mobile_link(&mut self, terminal_id: lazybox_ipc::TerminalId) {
+        let Some(urls) = self.terminals.urls_for(terminal_id) else {
+            self.flash_info("That session has ended");
+            return;
+        };
+        let prompt = if urls.is_empty() {
+            "No links in this terminal view. Scroll to the link first. Enter/Esc back"
+        } else {
+            "Enter copies the full link · Esc back"
+        };
+        self.mount_modal(
+            Id::MobileLinks,
+            Choice::single(prompt, urls.into_iter().rev().collect())
+                .title("Copy link")
+                .label(|url: &String| url.clone())
+                .payload_for(|url: &String| ChoicePayload::Text(url.clone())),
+        );
+    }
+
     fn apply_mobile_rail_action(&mut self, action: RailAction) {
         match action {
             RailAction::None => (),
@@ -234,6 +262,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mobile_rail.highlight_initial(source);
             }
             RailAction::New => self.new_mobile_session(),
+            RailAction::Links(id) => self.copy_mobile_link(id),
             RailAction::Quit => self.quit = true,
             RailAction::Rename(id) | RailAction::Delete(id) => {
                 let delete = matches!(action, RailAction::Delete(_));
@@ -666,6 +695,68 @@ mod tests {
         while let Ok(cmd) = server.rx.try_recv() {
             assert!(!matches!(cmd, Command::Write { .. }));
         }
+    }
+
+    #[test]
+    fn mobile_links_empty_view_shows_a_dismissible_sheet() {
+        let (mut m, mut server, workspace) = fixture();
+        spawn(&mut m, workspace, 7);
+        m.set_focus(PaneFocus::Terminals);
+        m.dispatch_key(list_key());
+        while server.rx.try_recv().is_ok() {}
+        m.dispatch_key(key('/'));
+        assert_eq!(m.top_modal(), Some(&Id::MobileLinks));
+        m.dispatch_modal_key(KeyEvent::from(Key::Enter));
+        assert!(m.top_modal().is_none());
+        assert!(m.mobile_rail.is_open());
+        assert!(server.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mobile_links_target_the_hovered_session_without_sending_terminal_input() {
+        let (mut m, mut server, workspace) = fixture();
+        spawn(&mut m, workspace.clone(), 7);
+        spawn(&mut m, workspace, 8);
+        for (id, url) in [
+            (7, "https://first.example/path"),
+            (8, "https://second.example/path"),
+        ] {
+            m.handle_daemon_event(Event::TerminalOutput {
+                terminal_id: TerminalId(id),
+                bytes: std::sync::Arc::<[u8]>::from(format!("{url}\r\n").into_bytes()),
+                first_seq: 1,
+                seq: 1,
+                cols: 20,
+                rows: 12,
+            });
+        }
+        m.terminals.focus_terminal(TerminalId(7));
+        m.set_focus(PaneFocus::Terminals);
+        m.dispatch_key(list_key());
+        m.dispatch_key(KeyEvent::from(Key::Down));
+        while server.rx.try_recv().is_ok() {}
+        m.dispatch_key(key('/'));
+        assert_eq!(m.top_modal(), Some(&Id::MobileLinks));
+        m.dispatch_modal_key(KeyEvent::from(Key::Esc));
+        assert!(m.mobile_rail.is_open());
+        assert_eq!(m.mobile_rail.highlighted(), Some(TerminalId(8)));
+        m.dispatch_key(key('/'));
+        m.dispatch_modal_key(KeyEvent::from(Key::Enter));
+        assert!(m.top_modal().is_none());
+        assert!(!m.mobile_rail.is_open());
+        assert_eq!(m.terminals.focused_terminal_id(), Some(TerminalId(7)));
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(!matches!(
+                cmd,
+                Command::Write { .. } | Command::Resize { .. }
+            ));
+        }
+        // Outside Sessions, slash is ordinary terminal input.
+        m.dispatch_key(key('/'));
+        assert!(
+            std::iter::from_fn(|| server.rx.try_recv().ok())
+                .any(|cmd| matches!(cmd, Command::Write { bytes, .. } if bytes == b"/"))
+        );
     }
 
     #[test]

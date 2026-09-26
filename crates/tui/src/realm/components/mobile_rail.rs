@@ -39,6 +39,7 @@ pub(crate) enum RailAction {
     Close,
     Select(TerminalId),
     New,
+    Links(TerminalId),
     Prioritize {
         source: TerminalId,
         target: TerminalId,
@@ -153,6 +154,12 @@ impl MobileRail {
             }
             Key::Char('p') if self.priority.is_none() => self.priority = self.highlighted(),
             Key::Char('n') if self.priority.is_none() => return RailAction::New,
+            Key::Char('/') if self.priority.is_none() => {
+                return self
+                    .highlighted()
+                    .map(RailAction::Links)
+                    .unwrap_or(RailAction::None);
+            }
             Key::Char('r') if self.priority.is_none() => {
                 if let Some(id) = self.highlighted() {
                     return RailAction::Rename(id);
@@ -199,7 +206,7 @@ impl MobileRail {
         if self.is_prioritizing() {
             "Pick position · Esc cancel"
         } else {
-            "n new r rename x del p priority"
+            "n new r name x del p sort / URLs"
         }
     }
 
@@ -207,14 +214,18 @@ impl MobileRail {
         if self.is_prioritizing() {
             return None;
         }
-        let c = match column {
-            0..=4 => 'n',
-            6..=13 => 'r',
-            15..=19 => 'x',
-            21..=30 => 'p',
-            _ => return None,
-        };
-        Some(KeyEvent::from(Key::Char(c)))
+        // Resolve taps from the same labels we render, so shorter mobile
+        // labels or new actions cannot silently move their hit regions.
+        let mut words = self.footer().split_whitespace();
+        let mut offset = 0;
+        while let (Some(key), Some(label)) = (words.next(), words.next()) {
+            let width = key.len() + 1 + label.len();
+            if (offset..offset + width).contains(&usize::from(column)) {
+                return key.chars().next().map(|c| KeyEvent::from(Key::Char(c)));
+            }
+            offset += width + 1;
+        }
+        None
     }
 
     pub(crate) fn move_highlight(&mut self, delta: isize) {
@@ -479,6 +490,23 @@ mod tests {
     use super::*;
     use lazybox_core::SessionKey;
     use tuirealm::ratatui::{Terminal, backend::TestBackend};
+    #[test]
+    fn links_footer_is_visible_and_tappable_on_a_32_column_phone() {
+        let mut rail = MobileRail::default();
+        rail.open(&rows());
+        assert!(rail.footer().len() <= 32);
+        let start = rail.footer().find("/ URLs").unwrap();
+        for col in start..rail.footer().len() {
+            let key = rail.footer_key(col as u16).unwrap();
+            assert!(matches!(rail.key(&key), RailAction::Links(TerminalId(1))));
+        }
+        rail.key(&KeyEvent::from(Key::Char('p')));
+        assert!(matches!(
+            rail.key(&KeyEvent::from(Key::Char('/'))),
+            RailAction::None
+        ));
+    }
+
     fn rows() -> Vec<SessionRow> {
         (1..=60)
             .map(|id| SessionRow {

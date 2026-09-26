@@ -19,6 +19,10 @@ impl<T: TerminalAdapter> Model<T> {
         if top == Id::MobileNewSession {
             return self.mobile_new_session_picked(&picks);
         }
+        if top == Id::MobileLinks {
+            self.mobile_link_picked(&picks);
+            return Vec::new();
+        }
         if top == Id::MobileRunner {
             return self.mobile_runner_picked(&picks);
         }

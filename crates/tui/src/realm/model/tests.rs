@@ -9468,6 +9468,7 @@ mod stale_input_tests {
                 | Id::JumpPicker
                 | Id::PromptHistoryPicker
                 | Id::UrlPicker
+                | Id::MobileLinks
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration

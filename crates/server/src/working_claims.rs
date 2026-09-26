@@ -751,17 +751,31 @@ fn list_records(config: &ServerConfig) -> Result<Vec<WorkingClaimRecord>, String
         .collect())
 }
 
-/// The claim labels this daemon is currently renewing — the ones whose record
-/// carries our own `owner_id`. A `lazybox:w:` label upstream that is absent
-/// here is held by another box (or by a process that died without releasing
-/// it), which is what lets a status lookup say "claimed elsewhere" instead of
-/// implying a local worker (#1785).
-pub(crate) fn locally_held_labels(config: &ServerConfig) -> std::collections::HashSet<String> {
+/// The claims this daemon is currently renewing, as `(device, session)` — the
+/// ones whose record carries our own `owner_id`. A `lazybox:w:` label upstream
+/// whose holder is absent here is held by another box (or by a process that
+/// died without releasing it), which is what lets a status lookup say "claimed
+/// elsewhere" instead of implying a local worker (#1785).
+///
+/// Keyed by HOLDER, never by the label string: the label encodes the lease
+/// expiry, so a renewal that lands locally but is refused upstream — the
+/// ordinary shape under rate-budget pressure, since claim labels are the
+/// lowest-priority tier — leaves the two sides one expiry apart. Comparing
+/// whole labels then reported this box's own running agent as an unverifiable
+/// foreign claim (#1870). `claim_session` is stable across renewals, so the
+/// holder pair identifies the lease no matter which expiry is live.
+pub(crate) fn locally_held_claims(
+    config: &ServerConfig,
+) -> std::collections::HashSet<(String, String)> {
     list_records(config)
         .unwrap_or_default()
         .into_iter()
         .filter(|record| record.owner_id == config.working_claim_owner_id)
-        .map(|record| record.label)
+        .filter_map(|record| {
+            record
+                .parsed_label()
+                .map(|claim| (claim.device, claim.session))
+        })
         .collect()
 }
 
@@ -1457,6 +1471,43 @@ mod tests {
         assert!(
             events.try_recv().is_err(),
             "the second failure within the debounce window must stay quiet"
+        );
+    }
+
+    /// #1870: a renewal is stamped locally BEFORE it is pushed upstream, and
+    /// the label carries the lease expiry — so a sync the rate budget refused
+    /// (the ordinary shape under pressure: claim labels are the lowest tier)
+    /// leaves the two sides one expiry apart. Matching whole label strings
+    /// then reported this box's own running agent as a claim it could not
+    /// verify, i.e. as another box's.
+    #[tokio::test]
+    async fn a_renewal_refused_upstream_still_reads_as_locally_held() {
+        let config = crate::ServerConfig::in_memory();
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let mut record = WorkingClaimRecord::new(
+            ClaimHolder::Pty {
+                backend_key: "pty-1".into(),
+            },
+            WorkspaceKey::new("github-owner-repo-42"),
+            None,
+            config.working_claim_owner_id.clone(),
+            target(),
+            now,
+        )
+        .expect("a well-formed owner id yields a label");
+        let upstream = record.parsed_label().expect("label parses");
+        persist_record(&config, &record).expect("persist");
+
+        // The heartbeat re-stamps locally; the push that would carry it
+        // upstream is refused, so GitHub still holds the previous expiry.
+        assert!(record.prepare_heartbeat(now + ChronoDuration::minutes(46)));
+        assert_ne!(record.label, upstream.label, "the renewal moved the expiry");
+        persist_record(&config, &record).expect("persist the renewed intent");
+
+        let held = locally_held_claims(&config);
+        assert!(
+            held.contains(&(upstream.device.clone(), upstream.session.clone())),
+            "the label still live on GitHub belongs to this box: {held:?}"
         );
     }
 }

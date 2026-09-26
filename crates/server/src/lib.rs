@@ -552,6 +552,11 @@ pub struct ServerConfig {
     /// would re-broadcast an identical retryable error 4×/hour per claim.
     pub(crate) working_claim_error_reports:
         Arc<parking_lot::Mutex<HashMap<String, std::time::Instant>>>,
+    /// Latch for the live-agent population advisory: set while the fleet sits
+    /// at or above `agent.max_live_agents`, cleared when it drops back under.
+    /// See `spawn_handler::should_advise_live_agents` for why the advisory is
+    /// once-per-excursion rather than once-per-spawn.
+    pub(crate) live_agent_advisory: Arc<std::sync::atomic::AtomicBool>,
     /// Workspace keys whose deletion began in this process (single delete,
     /// merged cleanup, or project cascade). Consulted both when a workspace
     /// row is missing and immediately after `backend.spawn`, so a provision
@@ -786,6 +791,7 @@ impl ServerConfig {
             working_claim_owner_id: "00000000000000000000000000000000".into(),
             working_claim_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             working_claim_error_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            live_agent_advisory: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
             session_cost_lock: Arc::new(parking_lot::Mutex::new(())),

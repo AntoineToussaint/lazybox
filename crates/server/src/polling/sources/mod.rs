@@ -428,6 +428,31 @@ mod heartbeat_promote_tests {
         let self_throttle = ProviderError::self_throttle("github", "tick allowance spent", 20);
         assert!(!heartbeat_error_should_promote(&self_throttle));
     }
+
+    /// #1870: a warm tick whose sweep the governor deferred did no work at
+    /// all. Reporting it as an empty result set made it indistinguishable
+    /// from a successful query that matched nothing, and the poll driver's
+    /// 0-task warning then sent the user to their filters and scopes.
+    #[test]
+    fn a_warm_tick_defers_instead_of_reporting_an_empty_inbox() {
+        assert_eq!(warm_fallback(30, 30), WarmFallback::Promote);
+        assert_eq!(warm_fallback(31, 30), WarmFallback::Promote);
+        assert_eq!(warm_fallback(29, 30), WarmFallback::Defer);
+        assert_eq!(warm_fallback(0, 30), WarmFallback::Defer);
+
+        // And a deferral reports itself as lazybox's own pacing, waiting one
+        // tick — never as a fault, and never as an empty result set.
+        let deferred = deferred_sweep_error(4, 30, Duration::from_secs(60));
+        assert!(deferred.is_self_throttle(), "{deferred}");
+        assert_eq!(deferred.retry_after_secs(), Some(60));
+        assert!(!deferred.is_auth());
+        assert_eq!(deferred.source(), lazybox_gh::SOURCE);
+        let detail = format!("{deferred:?}");
+        assert!(
+            detail.contains("4 GraphQL point(s)") && detail.contains("30 needed"),
+            "the deferral must name the shortfall it is waiting on: {detail}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -967,6 +992,51 @@ fn full_sweep_stages(has_focused_targets: bool) -> Vec<FullSweepStage> {
 /// outage carries neither.
 fn heartbeat_error_should_promote(error: &lazybox_core::ProviderError) -> bool {
     !(error.is_self_throttle() || error.retry_after_secs().is_some())
+}
+
+/// What a warm (notifications-driven) tick does when the heartbeat produced no
+/// incremental data and a full sweep is the only way to make progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WarmFallback {
+    /// This tick's GraphQL allowance covers a complete sweep unit.
+    Promote,
+    /// It does not. The tick does no work, and must say so rather than
+    /// reporting an empty result set (#1870): `Ok(vec![])` is what a
+    /// successful query matching nothing looks like, and the 0-task warning
+    /// then blamed the user's filters and scopes for a budget refusal.
+    Defer,
+}
+
+fn warm_fallback(allowance: u32, required_sweep_points: u32) -> WarmFallback {
+    if allowance >= required_sweep_points {
+        WarmFallback::Promote
+    } else {
+        WarmFallback::Defer
+    }
+}
+
+/// How a [`WarmFallback::Defer`] tick reports itself.
+///
+/// A self-throttle, so `github_self_throttle_wait` in the tick driver turns it
+/// into the same honest "waiting out the budget · ~Nm" countdown a GitHub-imposed
+/// limit gets, and `broadcast_error_debounced` never escalates it to "sync
+/// failing — check your token". The retry hint is the tick interval, not the
+/// GraphQL window reset: the governor re-credits and re-plans next tick
+/// (#1203/#1218), so a deferral is a one-tick wait even when the window has an
+/// hour left on it.
+fn deferred_sweep_error(
+    allowance: u32,
+    required_sweep_points: u32,
+    tick_interval: Duration,
+) -> lazybox_core::ProviderError {
+    lazybox_core::ProviderError::self_throttle(
+        lazybox_gh::SOURCE,
+        format!(
+            "full sweep deferred: {allowance} GraphQL point(s) allowed this tick, \
+             {required_sweep_points} needed"
+        ),
+        tick_interval.as_secs().max(1),
+    )
 }
 
 pub(super) fn gh_fetch_plan(full_sweep_due: bool, poll_notifications: bool) -> GhFetchPlan {
@@ -2825,20 +2895,37 @@ impl TaskSource for GhSource {
                     GhFetchPlan::Hot => (self.fetch_hot_only().await?, FetchMode::Hot),
                     GhFetchPlan::Warm => match self.fetch_incremental().await? {
                         Some(tasks) => (tasks, FetchMode::Incremental),
-                        None => {
-                            if self.governor_plan.graphql_points >= required_sweep_points {
+                        None => match warm_fallback(
+                            self.governor_plan.graphql_points,
+                            required_sweep_points,
+                        ) {
+                            WarmFallback::Promote => {
                                 tracing::info!(
                                     "incremental returned None; promoting to full sweep"
                                 );
                                 (self.fetch_full().await?, FetchMode::Full)
-                            } else {
+                            }
+                            WarmFallback::Defer => {
+                                // A deferred sweep did no work, so reporting
+                                // `Ok(vec![])` made it indistinguishable from
+                                // a successful query that matched nothing —
+                                // and the caller's 0-task warning then blamed
+                                // the user's filters and scopes for a budget
+                                // refusal (#1870). A self-throttle says what
+                                // actually happened and lights the honest
+                                // "waiting out the budget" countdown.
                                 tracing::info!(
                                     allowance = self.governor_plan.graphql_points,
+                                    required = required_sweep_points,
                                     "incremental failed; full sweep deferred by governor"
                                 );
-                                (Vec::new(), FetchMode::Incremental)
+                                return Err(deferred_sweep_error(
+                                    self.governor_plan.graphql_points,
+                                    required_sweep_points,
+                                    self.governor_plan.tick_interval,
+                                ));
                             }
-                        }
+                        },
                     },
                 };
 

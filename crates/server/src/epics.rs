@@ -5682,7 +5682,10 @@ mod tests {
         assert!(!review_blocks_merge(&config, &key), "no row, no hold");
         config
             .store
-            .set_kv(&review_storage_key(key.as_str()), "{\"blocking\": tru")
+            .set_kv(
+                &review_storage_key(key.as_str()),
+                "{\"blocking\": [unterminated",
+            )
             .unwrap();
         assert!(review_blocks_merge(&config, &key));
     }

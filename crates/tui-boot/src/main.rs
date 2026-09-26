@@ -511,9 +511,10 @@ Remote & services:
     --issue|--pr|--ticket <R> (owner/repo#N, a GitHub URL, #N beside --repo, or a
                               Linear key. --name <name> --scratch instead for
                               repo-less scratch; --project <key> / --repo
-                              <owner/repo>, or inferred from cwd; --agent <id>
-                              spawns an agent into it; --socket <path> targets a
-                              non-default daemon)
+                              <owner/repo>, or inferred from --cwd <path>;
+                              --agent <id> spawns an agent into it; --socket
+                              <path> targets a non-default daemon. An argument
+                              this verb does not know is refused, never ignored)
   lazybox snippet export <key>
                               write a snippet out as a portable SKILL.md so the
                               workflow travels to any agent that reads the format
@@ -569,6 +570,39 @@ fn classify_top_level_fallback(first: Option<&str>) -> TopLevelFallback {
         Some("help") => TopLevelFallback::ShowHelp,
         Some(_) => TopLevelFallback::Unknown,
     }
+}
+
+/// The verbs that run a command and exit, rather than launching a UI. Kept in
+/// step with the dispatch `match` in [`main`] — every arm that does *not* take
+/// a `Preselect` belongs here.
+const NON_LAUNCH_SUBCOMMANDS: &[&str] = &[
+    "server",
+    "account",
+    "serve",
+    "slack",
+    "scan",
+    "worktree",
+    "workspace",
+    "task",
+    "log",
+    "device",
+    "auth",
+    "sandbox",
+];
+
+/// Does this argv launch a UI (so the launch flags `--fresh` / `--test` /
+/// `--demo` / `--workspace` / `--session` are its own), or run a subcommand
+/// (so they are not)?
+///
+/// Those five configure a *launch* and mean nothing to a verb, but they used
+/// to be peeled off the whole argv before dispatch — so a verb never saw them
+/// and could not refuse them. `lazybox workspace create --issue X --fresh`
+/// deleted `state.db` on its way to creating the workspace and still reported
+/// success, and `… --test` booted the TUI instead of running the verb at all.
+/// Leaving them in a subcommand's argv is what lets that verb's own
+/// unknown-argument guard reject them.
+fn argv_launches_a_ui(first: Option<&str>) -> bool {
+    !first.is_some_and(|first| NON_LAUNCH_SUBCOMMANDS.contains(&first))
 }
 
 // The disallowed-methods allow covers the `Runtime::block_on` that
@@ -636,15 +670,23 @@ async fn main() -> anyhow::Result<()> {
         return notification_click_subcommand(&args[1..]).await;
     }
 
-    let fresh = take_flag(&mut args, "--fresh");
-    let test_mode = take_flag(&mut args, "--test");
-    let demo_mode = take_flag(&mut args, "--demo");
-    let preselect_workspace = take_value(&mut args, "--workspace");
-    let preselect_session = take_value(&mut args, "--session");
-    let preselect = preselect_workspace.map(|w| lazybox_tui::realm::model::Preselect {
-        workspace_key: lazybox_core::SessionKey::from(w),
-        session_id_raw: preselect_session,
-    });
+    // Only a launching argv owns the launch flags. A subcommand keeps them in
+    // its own args so it can refuse what it does not know — see
+    // `argv_launches_a_ui`.
+    let launching = argv_launches_a_ui(args.first().map(String::as_str));
+    let fresh = launching && take_flag(&mut args, "--fresh");
+    let test_mode = launching && take_flag(&mut args, "--test");
+    let demo_mode = launching && take_flag(&mut args, "--demo");
+    let preselect = launching
+        .then(|| {
+            let workspace = take_value(&mut args, "--workspace");
+            let session = take_value(&mut args, "--session");
+            workspace.map(|w| lazybox_tui::realm::model::Preselect {
+                workspace_key: lazybox_core::SessionKey::from(w),
+                session_id_raw: session,
+            })
+        })
+        .flatten();
     if fresh {
         wipe_state_db();
         clear_persisted_setup();
@@ -834,14 +876,33 @@ fn terminal_selection_script(bundle_id: &str, terminal_tty: &str) -> Option<Stri
 /// `lazybox workspace <verb>` — the agent-facing surface over the running
 /// daemon. Lets a spawned agent (or a script) drive lazybox itself, not just
 /// the repo. Today the only verb is `create`.
+///
+/// Errors print to stdout before they are returned, for the reason
+/// [`workspace_create_subcommand`] documents: this runs after `init_tracing`,
+/// so an `anyhow` message going out on stderr lands in the log file and the
+/// caller sees an exit code with no text. A mistyped verb (`lazybox workspace
+/// craete …`) and a bare `lazybox workspace` both used to print nothing at
+/// all.
 async fn workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
+    if let Err(error) = run_workspace_subcommand(args).await {
+        // One printer for the whole verb tree — a second wrapper around
+        // `create` would print every create failure twice. Name the verb so
+        // the line reads the same for `create` as it always has.
+        match args.first().map(String::as_str) {
+            Some(verb @ "create") => println!("lazybox workspace {verb}: {error:#}"),
+            _ => println!("lazybox workspace: {error:#}"),
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn run_workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
-        Some("create") => workspace_create_subcommand(&args[1..]).await,
+        Some("create") => run_workspace_create(&args[1..]).await,
         other => {
             anyhow::bail!(
-                "unknown `lazybox workspace` verb {:?}; usage: lazybox workspace create \
-                 (--issue|--pr|--ticket <owner/repo#N|URL|KEY> | --name <name> --scratch) \
-                 [--project <key> | --repo <owner/repo>] [--agent <id>] [--cwd <path>]",
+                "unknown `lazybox workspace` verb {:?}; usage: {WORKSPACE_CREATE_USAGE}",
                 other.unwrap_or("<none>"),
             );
         }
@@ -1002,6 +1063,38 @@ fn enclosing_repo_root(cwd: &std::path::Path) -> Option<PathBuf> {
         .map(std::path::Path::to_path_buf)
 }
 
+/// The one spelling of `workspace create`'s usage. Every place that prints it
+/// reads this: the unknown-verb refusal, the unknown-argument refusal, the
+/// valueless-flag refusal, and — pinned by
+/// `help_and_usage_agree_on_the_workspace_create_flags` — the flag list in
+/// [`HELP`]. Three hand-maintained copies had already drifted (the verb
+/// refusal omitted `--socket`, which the other two carried), and a usage line
+/// that under-reports a flag is worse now that an unlisted flag is a hard
+/// error: it sends the caller into a refusal with no way out.
+const WORKSPACE_CREATE_USAGE: &str = "lazybox workspace create \
+     (--issue|--pr|--ticket <owner/repo#N|URL|KEY> | --name <name> --scratch) \
+     [--project <key> | --repo <owner/repo>] [--agent <id>] [--cwd <path>] \
+     [--socket <path>]. To pick a model tier, put a `model:<token>` label on \
+     the record (a scratch workspace has none, so it takes the agent's \
+     default) rather than passing a flag";
+
+/// One flag of `workspace create`, taken with the strict parser so a `--flag`
+/// with no value is refused rather than silently defaulted.
+fn workspace_create_value(args: &mut Vec<String>, flag: &str) -> anyhow::Result<Option<String>> {
+    match take_value_strict(args, flag) {
+        FlagValue::Absent => Ok(None),
+        FlagValue::Value(value) => Ok(Some(value)),
+        FlagValue::Dangling => Err(workspace_create_needs_a_value(flag)),
+    }
+}
+
+/// A known flag was given with nothing after it. Refusing beats defaulting:
+/// a dropped `--agent` spawns no agent while reporting success, and a dropped
+/// `--socket` silently retargets the command at the default daemon.
+fn workspace_create_needs_a_value(flag: &str) -> anyhow::Error {
+    anyhow::anyhow!("{flag} needs a value; usage: {WORKSPACE_CREATE_USAGE}")
+}
+
 /// `lazybox workspace create (--issue <ref> | --pr <ref> | --ticket <KEY> |
 /// --name <name> --scratch) [--project <key> | --repo <owner/repo>] [--agent
 /// <id>] [--cwd <path>]` — attach to a tracker record's workspace, or create a
@@ -1025,32 +1118,60 @@ fn enclosing_repo_root(cwd: &std::path::Path) -> Option<PathBuf> {
 /// worktree just needs the record. Unlike `hook-ingest`, a failure here is
 /// surfaced (non-zero exit): the caller asked for a workspace and deserves to
 /// know if the daemon wasn't reachable or the record couldn't be resolved.
-async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
-    // `init_tracing` redirects this process's stderr into the log file, so a
-    // returned `Err` would never reach the caller — the same trap `lazybox
-    // log` and `auth_cli` already work around. An agent that mistypes
-    // `--agent` must see why nothing happened, not silence.
-    if let Err(error) = run_workspace_create(args).await {
-        println!("lazybox workspace create: {error:#}");
-        return Err(error);
-    }
-    Ok(())
-}
-
+///
+/// That failure reaches the caller on *stdout*, printed by
+/// [`workspace_subcommand`]: `init_tracing` redirects this process's stderr
+/// into the log file, so a returned `Err` alone would never be seen — the
+/// same trap `lazybox log` and `auth_cli` already work around. An agent that
+/// mistypes `--agent` must see why nothing happened, not silence.
 async fn run_workspace_create(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
-    let name = take_value(&mut args, "--name");
-    let record = take_value(&mut args, "--issue")
-        .or_else(|| take_value(&mut args, "--pr"))
-        .or_else(|| take_value(&mut args, "--ticket"));
-    let project = take_value(&mut args, "--project");
-    let repo = take_value(&mut args, "--repo");
-    let agent = take_value(&mut args, "--agent");
+    let name = workspace_create_value(&mut args, "--name")?;
+    // Lazy on purpose: with `--issue` present, `--pr` is left in `args` and
+    // the unknown-argument check below reports it rather than dropping it.
+    let mut record = None;
+    for flag in ["--issue", "--pr", "--ticket"] {
+        match take_value_strict(&mut args, flag) {
+            FlagValue::Value(value) => {
+                record = Some(value);
+                break;
+            }
+            FlagValue::Dangling => return Err(workspace_create_needs_a_value(flag)),
+            FlagValue::Absent => {}
+        }
+    }
+    let project = workspace_create_value(&mut args, "--project")?;
+    let repo = workspace_create_value(&mut args, "--repo")?;
+    let agent = workspace_create_value(&mut args, "--agent")?;
     let scratch = take_flag(&mut args, "--scratch");
-    let cwd = take_value(&mut args, "--cwd").map(PathBuf::from);
-    let socket_path = take_value(&mut args, "--socket")
+    let cwd = workspace_create_value(&mut args, "--cwd")?.map(PathBuf::from);
+    let socket_path = workspace_create_value(&mut args, "--socket")?
         .map(PathBuf::from)
         .unwrap_or_else(lifecycle::socket_path);
+
+    // Every flag this verb knows has been taken by now. Anything left is a
+    // typo or a flag that does not exist here, and accepting it silently is
+    // how a spawn that ignored `--tier` looks exactly like one that honored
+    // it. The hook path stays tolerant on purpose (a build-skewed daemon may
+    // pass a flag this binary predates); a human- or agent-typed command does
+    // not get that latitude.
+    //
+    // This runs *before* the record/name checks: a misspelled `--issu X`, or
+    // a bare `owner/repo#N` with no flag at all, otherwise tripped "needs a
+    // tracker record" — an error that never mentioned the thing that was
+    // actually wrong with the command.
+    //
+    // An empty argv element carries no instruction to honor or ignore, so it
+    // is dropped rather than refused: a wrapper passing a quoted-but-unset
+    // `"$EXTRA"` must keep working.
+    args.retain(|arg| !arg.trim().is_empty());
+    if !args.is_empty() {
+        let leftovers: Vec<String> = args.iter().map(|arg| format!("{arg:?}")).collect();
+        anyhow::bail!(
+            "unknown workspace create argument(s): {}; usage: {WORKSPACE_CREATE_USAGE}",
+            leftovers.join(", "),
+        );
+    }
 
     if record.is_some() && name.is_some() {
         anyhow::bail!(
@@ -1070,22 +1191,6 @@ async fn run_workspace_create(args: &[String]) -> anyhow::Result<()> {
     }
     if let Some(agent) = agent.as_deref() {
         validate_agent_id(agent)?;
-    }
-    // Every flag this verb knows has been taken by now. Anything left is a
-    // typo or a flag that does not exist here, and accepting it silently is
-    // how a spawn that ignored `--tier` looks exactly like one that honored
-    // it. The hook path stays tolerant on purpose (a build-skewed daemon may
-    // pass a flag this binary predates); a human- or agent-typed command does
-    // not get that latitude.
-    if !args.is_empty() {
-        anyhow::bail!(
-            "unknown workspace create argument(s): {}; usage: lazybox workspace create \
-             (--issue|--pr|--ticket <owner/repo#N|URL|KEY> | --name <name> --scratch) \
-             [--project <key> | --repo <owner/repo>] [--agent <id>] [--cwd <path>] \
-             [--socket <path>]. To pick a model tier, label the task `model:<tier>` \
-             rather than passing a flag",
-            args.join(" "),
-        );
     }
     let cwd = match cwd {
         Some(path) => path,
@@ -1564,6 +1669,56 @@ async fn resolve_project_key(
             lazybox_core::ProjectKey::local(&lazybox_core::slug::slugify(&dir))
         });
     Some(key)
+}
+
+/// What [`take_value_strict`] found for one flag.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FlagValue {
+    /// The flag is not in `args`.
+    Absent,
+    /// The flag is there with a value, both now removed from `args`.
+    Value(String),
+    /// The flag is there with nothing usable after it — it ends `args`, or
+    /// the next token is another flag. Removed from `args`; the caller must
+    /// refuse, not substitute a default.
+    Dangling,
+}
+
+/// `--key value` / `--key=value` parser for a verb that refuses what it does
+/// not understand.
+///
+/// [`take_value`] returns `None` both when a flag is absent and when it is
+/// present with no value, and a caller cannot tell those apart — so
+/// `workspace create --issue X --agent` dropped `--agent` in exact silence
+/// and spawned no agent, and `--socket` last fell back to the *default*
+/// socket and talked to the wrong daemon. A trailing `--flag` also leaves
+/// nothing behind for an unknown-argument check to catch, because the flag
+/// itself was consumed. Reporting `Dangling` is what closes that.
+///
+/// The next token starting with `--` counts as no value for the same reason:
+/// `--name --scratch` otherwise parses as a workspace literally named
+/// `"--scratch"` with `--scratch` unset. No flag on this verb takes a value
+/// that begins with `--`.
+///
+/// [`take_value`] keeps its tolerant behaviour for every other caller; the
+/// hook path in particular must never harden (see `parse_hook_correlation`).
+pub(crate) fn take_value_strict(args: &mut Vec<String>, flag: &str) -> FlagValue {
+    let prefix = format!("{flag}=");
+    if let Some(pos) = args.iter().position(|a| a == flag) {
+        args.remove(pos);
+        match args.get(pos) {
+            Some(value) if !value.starts_with("--") => {
+                let value = args.remove(pos);
+                FlagValue::Value(value)
+            }
+            _ => FlagValue::Dangling,
+        }
+    } else if let Some(pos) = args.iter().position(|a| a.starts_with(&prefix)) {
+        let raw = args.remove(pos);
+        FlagValue::Value(raw[prefix.len()..].to_string())
+    } else {
+        FlagValue::Absent
+    }
 }
 
 /// `--key value` and `--key=value` parser. Removes both the flag and
@@ -3244,6 +3399,98 @@ mod argv_tests {
         let mut a = args(&["--workspace", "foo"]);
         assert!(!take_flag(&mut a, "--fresh"));
         assert_eq!(a, args(&["--workspace", "foo"]));
+    }
+
+    #[test]
+    fn take_value_strict_separates_absent_from_valueless() {
+        // The distinction `take_value` cannot express, and the whole reason
+        // this parser exists: a trailing `--agent` used to read as "no agent
+        // asked for" and spawn nothing while reporting success.
+        let mut a = args(&["--issue", "o/r#7", "--agent"]);
+        assert_eq!(
+            take_value_strict(&mut a, "--issue"),
+            FlagValue::Value("o/r#7".to_string())
+        );
+        assert_eq!(take_value_strict(&mut a, "--agent"), FlagValue::Dangling);
+        assert_eq!(take_value_strict(&mut a, "--socket"), FlagValue::Absent);
+        assert!(a.is_empty(), "a dangling flag is still consumed: {a:?}");
+    }
+
+    #[test]
+    fn take_value_strict_refuses_a_following_flag_as_a_value() {
+        // `--name --scratch` parsed as a workspace literally named
+        // "--scratch", with `--scratch` itself never set.
+        let mut a = args(&["--name", "--scratch"]);
+        assert_eq!(take_value_strict(&mut a, "--name"), FlagValue::Dangling);
+        assert_eq!(
+            a,
+            args(&["--scratch"]),
+            "the next flag survives for its own take"
+        );
+        assert!(take_flag(&mut a, "--scratch"));
+    }
+
+    #[test]
+    fn take_value_strict_still_reads_the_equals_form() {
+        // `--name=--weird` is unambiguous, so the `--` rule must not reject
+        // it: the value is spelled inside the same token.
+        let mut a = args(&["--name=--weird", "--repo=o/r"]);
+        assert_eq!(
+            take_value_strict(&mut a, "--name"),
+            FlagValue::Value("--weird".to_string())
+        );
+        assert_eq!(
+            take_value_strict(&mut a, "--repo"),
+            FlagValue::Value("o/r".to_string())
+        );
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn launch_flags_belong_to_a_launch_not_to_a_subcommand() {
+        // `--fresh` wipes state.db and `--test` boots a throwaway TUI. Peeled
+        // off a subcommand's argv they were unreachable by that verb's own
+        // refusal, so `workspace create --issue X --fresh` deleted the state
+        // DB and still went on to create the workspace.
+        assert!(argv_launches_a_ui(None), "bare `lazybox` launches");
+        assert!(argv_launches_a_ui(Some("--fresh")));
+        assert!(argv_launches_a_ui(Some("practice")));
+        assert!(argv_launches_a_ui(Some("--connect")));
+        for verb in NON_LAUNCH_SUBCOMMANDS {
+            assert!(
+                !argv_launches_a_ui(Some(verb)),
+                "`{verb}` runs and exits, so the launch flags are not its to eat"
+            );
+        }
+    }
+
+    #[test]
+    fn help_and_usage_agree_on_the_workspace_create_flags() {
+        // Three hand-kept copies of this usage had already drifted apart (the
+        // unknown-verb refusal omitted `--socket`). Now that an unlisted flag
+        // is a hard error, a usage line that under-reports one sends the
+        // caller into a refusal with no way out.
+        for flag in [
+            "--issue",
+            "--pr",
+            "--ticket",
+            "--name",
+            "--scratch",
+            "--project",
+            "--repo",
+            "--agent",
+            "--cwd",
+            "--socket",
+        ] {
+            assert!(
+                WORKSPACE_CREATE_USAGE.contains(flag),
+                "usage must name `{flag}`: {WORKSPACE_CREATE_USAGE}"
+            );
+            assert!(
+                HELP.contains(flag),
+                "`lazybox --help` must name `{flag}` too, or the refusal points nowhere"
+            );
+        }
     }
 
     #[test]

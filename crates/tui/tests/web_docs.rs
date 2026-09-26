@@ -185,6 +185,25 @@ fn website_covers_v017_public_contracts() {
         assert!(cli.contains(expected), "CLI reference missing {expected:?}");
     }
 
+    // `workspace create` refuses an argument it does not know, so a flag
+    // missing from this table is not a stale doc — it is a caller told to
+    // read a list that will get their command rejected. The page had gone
+    // four flags out of date before the refusal made that load-bearing.
+    for expected in [
+        "`--issue` / `--pr` / `--ticket <ref>`",
+        "`--scratch`",
+        "`--agent <id>`",
+        "`--cwd <path>`",
+        "`--socket <path>`",
+        "refuses an argument it does not know",
+        "model:<token>",
+    ] {
+        assert!(
+            cli.contains(expected),
+            "CLI reference `workspace create` section missing {expected:?}"
+        );
+    }
+
     let config = read("web/src/content/docs/docs/reference/configuration.md");
     for expected in [
         "scan.roots",

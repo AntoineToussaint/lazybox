@@ -37,4 +37,4 @@ which = "8"
 [dev-dependencies]
 lazybox-store = { path = "../../../crates/store" }
 tempfile = "3"
-toml = "0.8"
+toml = "1.1"

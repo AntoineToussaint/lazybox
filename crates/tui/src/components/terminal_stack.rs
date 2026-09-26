@@ -665,12 +665,14 @@ pub(crate) struct RenderedClickTarget {
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
-    /// `agent_id → label of that agent's DEFAULT model tier`
-    /// (`agents.<id>.models.default`, else the built-in default), fed by
-    /// [`Self::set_default_model_labels`]. A tab running its agent's
-    /// default tier renders no `◆` badge — the badge marks a deliberate
-    /// deviation, the same rule the sidebar row follows (#1502/#1745).
-    /// An agent with no resolvable default is absent, so its runs badge.
+    /// `agent_id → label of the strength that agent runs at` — the tier
+    /// `agents.<id>.models.default` names, resolved in that agent's own
+    /// menu and nowhere else, fed by
+    /// [`Self::set_default_model_labels`]. A tab running that strength
+    /// renders no `◆` badge — the badge marks a deliberate deviation, the
+    /// same rule the sidebar row follows (#1502/#1745). An agent whose
+    /// strength doesn't resolve is absent, so its runs badge; there is
+    /// deliberately no fall back to the built-in menu (#1797).
     default_model_labels: HashMap<String, String>,
     /// Bumped whenever the visible-set inputs change (slot
     /// membership / kinds / active session) — invalidates

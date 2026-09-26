@@ -42,6 +42,15 @@ pub(crate) struct Settings {
     active: usize,
     /// Cursor row within the active tab.
     cursor: usize,
+    /// First visible row of the active tab. Nudged at paint time so the
+    /// cursor stays inside the row viewport — without it a tab taller
+    /// than the terminal clipped its bottom rows and the cursor walked
+    /// off the screen, leaving `Enter` picking a row nobody could see
+    /// (#1797).
+    scroll: usize,
+    /// Row-viewport height from the last paint, so the divider's
+    /// position readout knows whether anything is clipped.
+    visible_rows: usize,
 }
 
 impl Settings {
@@ -54,6 +63,8 @@ impl Settings {
             tabs,
             active,
             cursor: 0,
+            scroll: 0,
+            visible_rows: usize::MAX,
         }
     }
 
@@ -81,6 +92,7 @@ impl Settings {
         if idx as usize != self.active {
             self.active = idx as usize;
             self.cursor = 0;
+            self.scroll = 0;
         }
     }
 
@@ -89,6 +101,7 @@ impl Settings {
         if self.tabs.get(n).is_some_and(|t| !t.rows.is_empty()) && n != self.active {
             self.active = n;
             self.cursor = 0;
+            self.scroll = 0;
         }
     }
 
@@ -99,6 +112,46 @@ impl Settings {
         }
         let cur = self.cursor as isize;
         self.cursor = (cur + delta).rem_euclid(len as isize) as usize;
+    }
+
+    /// Slide [`Self::scroll`] the minimum distance that puts the cursor
+    /// row inside a `height`-row viewport, then clamp it so the last
+    /// row can't be scrolled past. Returns the offset to render at.
+    fn visible_offset(&mut self, height: usize) -> usize {
+        let len = self.active_rows().len();
+        if height == 0 || len == 0 {
+            return 0;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + height {
+            self.scroll = self.cursor + 1 - height;
+        }
+        self.scroll = self.scroll.min(len.saturating_sub(height));
+        self.visible_rows = height;
+        self.scroll
+    }
+
+    /// The rule under the tab bar, carrying the cursor position when
+    /// the active tab has rows off-screen — so a clipped tab says so
+    /// instead of looking complete. It rides the divider rather than the
+    /// key hint because the hint is the first thing a narrow modal
+    /// truncates, and a readout that vanishes exactly when the list
+    /// overflows the *width* too is worse than none.
+    fn divider(&self, width: u16, theme: &crate::theme::Theme) -> Line<'static> {
+        let width = usize::from(width);
+        let readout = (self.active_rows().len() > self.visible_rows)
+            .then(|| format!(" {}/{} ", self.cursor + 1, self.active_rows().len()))
+            .filter(|r| r.len() < width);
+        let rule = width - readout.as_ref().map_or(0, |r| r.len());
+        let mut spans = vec![Span::styled(
+            "─".repeat(rule),
+            Style::default().fg(theme.chrome),
+        )];
+        if let Some(readout) = readout {
+            spans.push(Span::styled(readout, theme.hint()));
+        }
+        Line::from(spans)
     }
 
     /// The tab bar: ` 1 Providers │ 2 Agents │ … ` with the active tab
@@ -174,13 +227,45 @@ impl Component for Settings {
             return;
         }
 
-        let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);
-        lines.push(self.tab_bar(theme));
-        lines.push(Line::from(Span::styled(
-            "─".repeat(inner.width as usize),
-            Style::default().fg(theme.chrome),
-        )));
-        for (i, (label, _)) in self.active_rows().iter().enumerate() {
+        // Header (tab bar + divider) and hint stay pinned; only the rows
+        // scroll, so the tab strip can't be pushed off by a long tab.
+        //
+        // The hint is the one row that yields. Reserving all three chrome
+        // rows unconditionally meant a viewport with exactly three inner
+        // rows had nothing left for the rows themselves, and returning
+        // early there painted an empty bordered box — no tabs, no keys,
+        // no sign the modal was even interactive. The tab strip and one
+        // row carry more than the key reminder does, so at three rows the
+        // hint goes and the rest still works.
+        let show_hint = inner.height >= 4;
+        let header = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 2,
+        };
+        let rows_area = Rect {
+            x: inner.x,
+            y: inner.y + 2,
+            width: inner.width,
+            height: inner.height - if show_hint { 3 } else { 2 },
+        };
+        let total = self.active_rows().len();
+        let height = usize::from(rows_area.height);
+        let offset = self.visible_offset(height);
+        frame.render_widget(
+            Paragraph::new(vec![self.tab_bar(theme), self.divider(inner.width, theme)]),
+            header,
+        );
+
+        let mut lines: Vec<Line> = Vec::with_capacity(height);
+        for (i, (label, _)) in self
+            .active_rows()
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(height)
+        {
             let (caret, style) = if i == self.cursor {
                 ("▸ ", theme.row_focused())
             } else {
@@ -191,33 +276,28 @@ impl Component for Settings {
                 Span::styled(label.clone(), style),
             ]));
         }
-        if self.active_rows().is_empty() {
+        if total == 0 {
             lines.push(Line::from(Span::styled(
                 "nothing to configure here yet",
                 Style::default().fg(theme.text_dim),
             )));
         }
+        frame.render_widget(Paragraph::new(lines), rows_area);
 
-        // Body (everything but the bottom hint row).
-        let body = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: inner.height - 1,
-        };
-        frame.render_widget(Paragraph::new(lines), body);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "←/→ tab · ↑/↓ move · Enter pick · Esc close",
-                theme.hint(),
-            ))),
-            Rect {
-                x: inner.x,
-                y: inner.y + inner.height - 1,
-                width: inner.width,
-                height: 1,
-            },
-        );
+        if show_hint {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "←/→ tab · ↑/↓ move · Enter pick · Esc close",
+                    theme.hint(),
+                ))),
+                Rect {
+                    x: inner.x,
+                    y: inner.y + inner.height - 1,
+                    width: inner.width,
+                    height: 1,
+                },
+            );
+        }
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -415,5 +495,115 @@ mod tests {
         let mut comp = Settings::new(tabs());
         let out = render(&mut comp, 30, 5);
         assert!(out.lines().count() <= 5);
+    }
+
+    /// The shortest viewport that fits any content at all still shows the
+    /// tabs and a row. The row budget has three chrome rows to pay for
+    /// (tab bar, divider, hint) and at this height only two fit, so the
+    /// hint yields — the alternative, bailing out, painted an empty
+    /// bordered box with no tabs, no keys and no sign it was interactive.
+    ///
+    /// `tiny_terminal_does_not_panic` sits at height 5, which bails in
+    /// every version, so nothing covered this boundary.
+    #[test]
+    fn the_shortest_usable_height_keeps_the_tabs_and_a_row() {
+        let mut comp = Settings::new(tabs());
+        let out = render(&mut comp, 60, 7);
+        assert!(out.contains("1 Providers"), "tabs must survive: {out}");
+        assert!(
+            out.contains("▸ Add / remove repos · GitHub"),
+            "the cursor row must survive: {out}"
+        );
+        assert!(
+            !out.contains("Esc close"),
+            "the hint is what yields at this height: {out}"
+        );
+        // Still navigable with nothing painted off the modal.
+        comp.on(&key(Key::Char('2')));
+        let out = render(&mut comp, 60, 7);
+        assert!(out.contains("Change default agent"), "{out}");
+        assert!(out.lines().count() <= 7);
+    }
+
+    /// One row shorter there is genuinely nothing to show, and that must
+    /// stay a clean no-op rather than an underflow.
+    #[test]
+    fn one_row_below_the_usable_height_draws_only_the_frame() {
+        let mut comp = Settings::new(tabs());
+        let out = render(&mut comp, 60, 6);
+        assert!(out.contains("Settings"), "the frame still draws: {out}");
+        assert!(!out.contains("1 Providers"), "{out}");
+    }
+
+    /// A tab taller than the modal scrolls the cursor row into view.
+    /// Before, every row went into one clipped `Paragraph`: walking past
+    /// the last visible row left the cursor off-screen and `Enter`
+    /// picking a row nobody could see.
+    #[test]
+    fn cursor_row_stays_visible_when_the_tab_overflows() {
+        let rows: Vec<(String, usize)> = (0..20).map(|i| (format!("row number {i}"), i)).collect();
+        let mut comp = Settings::new(vec![SettingsTab {
+            section: SettingsSection::Agents,
+            rows,
+        }]);
+        // 12 terminal rows: border + tab bar + divider + hint leaves
+        // room for a handful of rows, not twenty.
+        let out = render(&mut comp, 60, 12);
+        assert!(out.contains("row number 0"), "{out}");
+        assert!(
+            !out.contains("row number 19"),
+            "list is taller than the pane: {out}"
+        );
+
+        for _ in 0..19 {
+            comp.on(&key(Key::Down));
+        }
+        let out = render(&mut comp, 60, 12);
+        assert!(
+            out.contains("▸ row number 19"),
+            "the cursor row must be painted: {out}"
+        );
+        assert!(
+            !out.contains("row number 0"),
+            "the top scrolled away: {out}"
+        );
+        // The tab strip is pinned, not scrolled off with the rows.
+        assert!(out.contains("Agents"), "{out}");
+        // And the footer says there is more than fits.
+        assert!(out.contains("20/20"), "{out}");
+    }
+
+    /// Walking back up scrolls the other way, and switching tabs starts
+    /// the new tab at its top rather than inheriting an offset that may
+    /// be past its end.
+    #[test]
+    fn scroll_follows_the_cursor_back_up_and_resets_across_tabs() {
+        let long: Vec<(String, usize)> = (0..20).map(|i| (format!("long {i}"), i)).collect();
+        let mut comp = Settings::new(vec![
+            SettingsTab {
+                section: SettingsSection::Agents,
+                rows: long,
+            },
+            SettingsTab {
+                section: SettingsSection::Appearance,
+                rows: vec![("short one".into(), 99)],
+            },
+        ]);
+        for _ in 0..19 {
+            comp.on(&key(Key::Down));
+        }
+        render(&mut comp, 60, 12);
+        comp.on(&key(Key::Home));
+        let out = render(&mut comp, 60, 12);
+        assert!(
+            out.contains("▸ long 0"),
+            "Home scrolls back to the top: {out}"
+        );
+
+        comp.on(&key(Key::End));
+        render(&mut comp, 60, 12);
+        comp.on(&key(Key::Right));
+        let out = render(&mut comp, 60, 12);
+        assert!(out.contains("▸ short one"), "{out}");
     }
 }

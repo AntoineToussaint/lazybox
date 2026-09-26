@@ -183,6 +183,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// legible without opening it; nothing when zero. Deliberately not `?`,
     /// which the state slot already spends on the agent asking its *operator*.
     pub inbound_requests: usize,
+    /// Markdown artifacts this workspace's agents spooled into
+    /// `.lazybox/artifacts/` (#1822). Renders a dim ` ▤N ` badge in the
+    /// passive cluster so output the agent handed over is visible without
+    /// opening the row; nothing when zero. `a A` reads them.
+    pub artifacts: usize,
     /// A declared `Blocked on:` reason exists on some task. Renders ` ⊗! `
     /// when there are no dependency blockers, else folds into the count
     /// badge (the count already says "blocked"). The reason text itself is
@@ -1236,6 +1241,7 @@ fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         cell_stack(ctx),
         cell_blocked(ctx),
         cell_inbound_request(ctx),
+        cell_artifacts(ctx),
         cell_linked(ctx),
         cell_notes(ctx),
         cell_snippet(ctx),
@@ -1393,6 +1399,23 @@ fn cell_linked(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .add_modifier(Modifier::BOLD)
     };
     Cell::from_span(Span::styled(" ⎇ local ", style))
+}
+
+/// The ` ▤N ` spooled-artifacts badge (#1822): the agent wrote `N` markdown
+/// documents into this workspace's `.lazybox/artifacts/`. Dim like the note
+/// and snippet badges — something to read, not something to act on — and a
+/// filled-page glyph rather than one of the alarm symbols, because an
+/// artifact is the agent handing over work, not reporting a problem.
+fn cell_artifacts(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if ctx.artifacts == 0 {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default().fg(ctx.theme.text_dim)
+    };
+    Cell::from_span(Span::styled(format!(" ▤{} ", ctx.artifacts), style))
 }
 
 /// The `✎` has-notes badge (issue #458). Passive info, not an urgent
@@ -1821,6 +1844,7 @@ mod tests {
             blocked_by: 0,
             blocked_on: false,
             inbound_requests: 0,
+            artifacts: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             agent_excerpt: None,
@@ -2344,6 +2368,7 @@ mod tests {
             blocked_by: 0,
             blocked_on: false,
             inbound_requests: 0,
+            artifacts: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             agent_excerpt: None,
@@ -3077,6 +3102,7 @@ mod tests {
             blocked_by: 0,
             blocked_on: false,
             inbound_requests: 0,
+            artifacts: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             agent_excerpt: None,
@@ -3679,6 +3705,24 @@ mod tests {
             !rendered.contains('?'),
             "the replies-owed badge must not reuse the state slot's `?`: {rendered}"
         );
+    }
+
+    /// A row whose agent spooled artifacts carries ` ▤N ` (#1822); one
+    /// with none carries nothing, so the badge stays absence-by-default
+    /// like every other passive decoration.
+    #[test]
+    fn cell_artifacts_counts_spooled_documents() {
+        let task = make_task("owner/repo#2", "child");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(
+            cell_artifacts(&ctx).width(),
+            0,
+            "nothing has been spooled for this workspace"
+        );
+        ctx.artifacts = 3;
+        assert_eq!(cell_artifacts(&ctx).spans[0].content.to_string(), " ▤3 ");
     }
 
     /// With neither a counted edge nor a declared reason, the badge slot
@@ -4668,6 +4712,7 @@ mod tests {
             blocked_by: 0,
             blocked_on: false,
             inbound_requests: 0,
+            artifacts: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             agent_excerpt: None,

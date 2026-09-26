@@ -205,6 +205,7 @@ pub(crate) async fn store_blocking<T: Send + 'static>(
     }
 }
 
+pub mod artifacts;
 pub mod metrics;
 pub mod polling;
 pub mod pr_trailers;
@@ -525,6 +526,11 @@ pub struct ServerConfig {
     pub device_registry: Arc<lazybox_identity::DeviceRegistry>,
     /// Cross-tick provider state, caches, and wake coordination.
     pub poll: PollState,
+    /// Markdown artifacts agents spooled into their worktrees (#1822): the
+    /// watch set the sweep reads and the attached set it broadcasts. Not
+    /// persisted — the spool files themselves are the durable copy, so a
+    /// restart re-derives this from disk.
+    pub artifacts: artifacts::ArtifactSpool,
     /// Enable GitHub fleet-claim mutations. Production configs turn this on;
     /// in-memory/test configs leave it off so a unit-test agent spawn can
     /// never reach the developer's real GitHub account.
@@ -773,6 +779,7 @@ impl ServerConfig {
             default_principal_id: lazybox_ipc::PrincipalId::local(),
             device_registry: Arc::new(lazybox_identity::DeviceRegistry::ephemeral()),
             poll: PollState::default(),
+            artifacts: artifacts::ArtifactSpool::default(),
             working_claims_enabled: false,
             working_claim_owner_id: "00000000000000000000000000000000".into(),
             working_claim_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -2319,6 +2326,18 @@ pub async fn dispatch_command(
                 let _ = tx.send(Event::AgentRequestsOpen {
                     workspace_key,
                     open,
+                });
+            }
+            // Spooled agent artifacts (#1822): seed the row badge for every
+            // workspace carrying one, so a client connecting between two
+            // spool changes sees them without waiting for the next. Kept
+            // before AutoFixPolicyConfig so that stays the end-of-replay
+            // marker.
+            for (workspace_key, found) in config.artifacts.snapshot() {
+                let _ = tx.send(Event::WorkspaceArtifacts {
+                    workspace_key,
+                    artifacts: found.artifacts,
+                    hidden: found.hidden,
                 });
             }
             // Keep the auto-fix policy as the last post-subscribe push so

@@ -264,6 +264,11 @@ const ROW_BADGES: &[MarkerDoc] = &[
         when: "Shows once at least one snippet was sent to the workspace.",
     },
     MarkerDoc {
+        label: "▤N",
+        meaning: "Count of markdown artifacts this workspace's agents wrote to `.lazybox/artifacts/`; `a A` reads them.",
+        when: "Shows once an agent has spooled at least one artifact.",
+    },
+    MarkerDoc {
         label: "⌕ …excerpt…",
         meaning: "Why this row matched an `agent:` / `said:` search: a snippet of the agent text the query hit, since the match is not in the title the `/` underline marks.",
         when: "Shows only on rows an `agent:` or `said:` search term matched.",

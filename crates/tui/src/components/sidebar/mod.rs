@@ -274,6 +274,11 @@ pub struct Sidebar {
     /// reply / capture). Drives the row's `?N` badge; a workspace with none
     /// carries no entry.
     open_requests: HashMap<SessionKey, usize>,
+    /// Markdown artifacts spooled per workspace (#1822), fed by
+    /// `Event::WorkspaceArtifacts` (seeded on connect, refreshed on every
+    /// spool change). Drives the row's `▤N` badge; a workspace with none
+    /// carries no entry.
+    artifact_counts: HashMap<SessionKey, usize>,
     /// Batched-recompute state for a daemon-event drain (#1030). While
     /// `defer_recompute` is set — the model brackets a whole drain batch
     /// with `begin_recompute_batch` / `flush_recompute` — the O(N log N)
@@ -728,6 +733,7 @@ impl Sidebar {
             repo_summaries: BTreeMap::new(),
             stacks: HashMap::new(),
             open_requests: HashMap::new(),
+            artifact_counts: HashMap::new(),
             defer_recompute: false,
             recompute_pending: false,
             #[cfg(test)]
@@ -3951,6 +3957,23 @@ impl Sidebar {
     /// Open inbound requests for one workspace; `0` when it owes none.
     pub fn open_requests(&self, key: &SessionKey) -> usize {
         self.open_requests.get(key).copied().unwrap_or(0)
+    }
+
+    /// Record how many artifacts a workspace's agents have spooled (#1822).
+    /// Zero forgets the row, like [`Self::set_open_requests`]: the badge is
+    /// absence-by-default, and a cleared spool must not keep a vanished
+    /// workspace alive in the map.
+    pub fn set_artifact_count(&mut self, key: SessionKey, count: usize) {
+        if count == 0 {
+            self.artifact_counts.remove(&key);
+        } else {
+            self.artifact_counts.insert(key, count);
+        }
+    }
+
+    /// Spooled artifacts for one workspace; `0` when it has none.
+    pub fn artifact_count(&self, key: &SessionKey) -> usize {
+        self.artifact_counts.get(key).copied().unwrap_or(0)
     }
 
     /// Drop an epic that stopped being live, re-projecting so its members

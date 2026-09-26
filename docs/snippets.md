@@ -203,6 +203,81 @@ walk there.
 Three built-in pairs ship chained: `rev` → `fixall`, `deepreview` →
 `fixall`, and `freshen` → `push`.
 
+## Hand findings to a fresh fixer
+
+A chain assumes one conversation. `]]n` sends `fixall` to the agent that
+just produced the review, and that agent remembers what it found.
+
+The moment the fixer is a *different* run — a fresh session, a cheaper
+model, another CLI, tomorrow — that memory is gone, and nothing reports
+the loss: a fixer with no findings still finishes and still says it is
+done. So the findings are persisted instead of remembered.
+
+An `action:` field marks a workflow as a step of that handoff:
+
+```yaml
+snippets:
+  myreview:
+    category: Review
+    action: deep_review
+    body: |
+      …my own review prompt…
+```
+
+The two shipped steps carry that step's **artifact contract** in their
+body — the obligation that makes the handoff durable. Declaring `action:`
+on your own snippet marks it as the same step for anything downstream; it
+does not rewrite your prompt, because a snippet delivery carries only
+what its author wrote (global response rules live in lazybox's
+spawn-time briefing, not in each snippet):
+
+- `deep_review` — with the tools available, the review is not finished
+  until it calls `submit_review` with the readable report, the scope it
+  read (`base_sha` / `head_sha`, plus `dirty_digest` on a dirty tree), and
+  one entry per finding carrying its severity, `file:line` anchors,
+  evidence and suggested remediation. **Zero findings is a complete
+  review**: the empty list is submitted, so a later fixer can tell a clean
+  tree from a review that never ran. A malformed submission is kept as a
+  *draft* that no fixer will bind, and the reply names each defect.
+- `fix_all` — with the tools available, the fixer calls `list_reviews`
+  first and obeys its `selection`: `bound` (read it with `get_review` and
+  work from its findings), `ambiguous` (ask which report), or `missing`
+  (**stop** — a deep review must run first). A bound report whose head has
+  moved still binds, but every finding is revalidated against the code as
+  it is now. The run ends with `submit_review_result`: one outcome per
+  finding — `fixed`, `already_resolved`, `blocked` or `refuted` — with the
+  evidence behind it. The original report is never modified.
+
+### Not every agent has the tools
+
+The artifact channel is the daemon's MCP server, and that reaches only
+agents lazybox can inject an MCP config into — `Agent::supports_mcp_config`,
+which Claude sets and the others do not. A snippet is delivered as text to
+whatever agent is focused, and nothing on that path knows which one it is
+(`lazybox-tui` cannot even depend on `lazybox-agents` to ask), so both
+contracts state the tool calls as a **condition the agent resolves about
+itself** and spell out the other branch.
+
+Without the tools, `deep_review` delivers the review as prose and adds a
+line saying the findings were not persisted; `fix_all` works from the
+review in the same conversation, exactly as it did before artifacts
+existed, and says in its verdict that it did. Neither stops. That matters:
+an unconditional "call `list_reviews` … `missing` — STOP" would have told
+every agent without the tools to abandon work it had previously done from
+conversation memory.
+
+Artifacts live in the daemon's store, not in the worktree, so they
+survive the session ending, the worktree being cleaned up, and a daemon
+restart. They are workspace-scoped: one workspace's findings never reach
+another's fixer.
+
+The two shipped built-ins declare these actions (`deepreview` and
+`fixall`), so the loop works with no configuration — and `]]n` still
+walks it, now without depending on the fixer having been there for the
+review. Nothing is dispatched by snippet *name* or by matching words in a
+body: rename your copy, rewrite the prose, and the `action:` you declared
+is what still decides.
+
 ## Dispatch a native skill
 
 A snippet is a *human-triggered* prompt macro; an agent **skill** (a
@@ -612,6 +687,7 @@ snippets:
     skill: <optional native skill name>
     provider: <optional workspace source scope>
     next: <optional follow-up key, or a list of them>
+    action: <optional workflow step: deep_review | fix_all>
     body: |
       <text sent to the agent>
 ```
@@ -624,6 +700,7 @@ snippets:
 | `skill`       | no       | Name of a native agent skill this snippet dispatches. When set, the delivered instruction tells the agent to invoke that `SKILL.md` skill; `body` becomes the task context. See [Dispatch a native skill](#dispatch-a-native-skill). |
 | `provider`    | no       | Workspace source this snippet is scoped to (`github`, `linear`, matching a task's provider). When set, the picker only shows it on a workspace of that source; when omitted the snippet is generic and shows everywhere. See [Provider-scoped workflows](#provider-scoped-workflows). |
 | `next`        | no       | The workflow(s) `]]n` sends next. A single key or a list; a blank, duplicate, or self-referencing entry is dropped at load. See [Chain a workflow](#chain-a-workflow). |
+| `action`      | no       | Marks this workflow as a step of the persisted review handoff — `deep_review` (produces findings) or `fix_all` (consumes them). Adds that step's artifact contract to the delivered text. Omitted for every ordinary snippet, which stays plain text injection. See [Hand findings to a fresh fixer](#hand-findings-to-a-fresh-fixer). |
 | `body`        | yes\*    | Sent to the agent. May span multiple lines. \*Optional when `skill` is set — the skill invocation is then the whole instruction. |
 
 ## Behaviour & gotchas

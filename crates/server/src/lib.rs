@@ -213,6 +213,7 @@ pub mod pty;
 pub mod read_intercept;
 pub mod registries;
 mod resource_limits;
+pub mod review_store;
 pub mod session_briefing;
 pub mod session_cost;
 pub mod session_reaper;

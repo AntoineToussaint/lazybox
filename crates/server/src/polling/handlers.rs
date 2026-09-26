@@ -263,6 +263,63 @@ impl ProviderHandle {
         }
     }
 }
+/// How long after an observed merge the external-merge recorder waits
+/// before measuring. lazybox's own merge path marks its cost reported right
+/// after the merge call returns; waiting past that means a merge lazybox
+/// performed measures zero unreported cost here and records nothing twice.
+const EXTERNAL_MERGE_SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Record the cost of a PR that merged WITHOUT lazybox writing the commit
+/// body — GitHub's native auto-merge (`enablePullRequestAutoMerge` carries
+/// no body), an agent's `gh pr merge`, the web UI. Those were the common
+/// case, so most merges carried no `Lazybox-Cost` at all.
+///
+/// Idempotent through the cost watermark: only cost not yet reported is
+/// measured, and a recorded figure is marked reported, so a merge lazybox
+/// performed itself (already marked) records nothing here.
+pub(crate) async fn record_external_merge_trailers(config: ServerConfig, key: WorkspaceKey) {
+    tokio::time::sleep(EXTERNAL_MERGE_SETTLE).await;
+    let Some(workspace) = crate::polling::upsert::load_workspace_offloaded(&config, &key).await
+    else {
+        return;
+    };
+    let trailers = crate::pr_trailers::measure(&config, &workspace, chrono::Utc::now()).await;
+    if !external_merge_has_unreported_cost(&trailers) {
+        return;
+    }
+    let provider = match build_provider_for_workspace(&config, &key).await {
+        Ok(provider) => provider,
+        Err(error) => {
+            tracing::warn!(workspace = %key, "external-merge cost: no provider ({error})");
+            return;
+        }
+    };
+    let policy = lazybox_config::Config::load()
+        .unwrap_or_default()
+        .providers
+        .github
+        .pr_trailers;
+    let outcome = provider
+        .record_merged_trailers(&workspace, &trailers, &policy)
+        .await;
+    if outcome.is_recorded() {
+        crate::pr_trailers::mark_reported(&config, &key, &trailers).await;
+        tracing::info!(workspace = %key, "recorded the cost of an external merge");
+    } else if let lazybox_core::TrailerOutcome::Dropped { reason } = outcome {
+        tracing::warn!(workspace = %key, "external-merge cost not recorded: {reason}");
+    }
+}
+
+/// Only a measured, still-unreported cost is worth a record: an unmetered
+/// PR gets no line at all (never `$0.00`), and a PR lazybox merged itself has
+/// already reported its cost.
+fn external_merge_has_unreported_cost(trailers: &lazybox_core::PrTrailers) -> bool {
+    trailers
+        .cost
+        .as_ref()
+        .and_then(|cost| cost.micros)
+        .is_some_and(|micros| micros > 0)
+}
 
 /// Build a provider handle for the workspace that owns this
 /// mutation. Routes on the workspace key's `<source>-<rest>`
@@ -7628,5 +7685,32 @@ mod sync_workspace_discovery_tests {
                 "g s on a PR workspace must upsert the repo's new open issue #{number}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod external_merge_cost_tests {
+    use super::external_merge_has_unreported_cost;
+    use lazybox_core::{CostTrailer, PrTrailers};
+
+    #[test]
+    fn only_a_measured_unreported_cost_is_recorded() {
+        assert!(!external_merge_has_unreported_cost(&PrTrailers::default()));
+        let already_reported = PrTrailers {
+            cost: Some(CostTrailer {
+                micros: Some(0),
+                tokens: None,
+            }),
+            ..PrTrailers::default()
+        };
+        assert!(!external_merge_has_unreported_cost(&already_reported));
+        let unreported = PrTrailers {
+            cost: Some(CostTrailer {
+                micros: Some(7_090_000),
+                tokens: None,
+            }),
+            ..PrTrailers::default()
+        };
+        assert!(external_merge_has_unreported_cost(&unreported));
     }
 }

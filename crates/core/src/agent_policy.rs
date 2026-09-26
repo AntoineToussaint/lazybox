@@ -133,19 +133,15 @@ fn builtin_policies() -> Vec<AgentPolicy> {
         },
         AgentPolicy {
             id: CHECK_FOR_EXISTING_WORK.to_string(),
-            text: "Before you start work, check that no open issue or pull request already \
-                   covers it or conflicts with it: search the repo's open PRs and issues (the \
-                   lazybox `list_issues` and `task_status` tools cost no GitHub budget) and \
-                   check whether the fix already reached the default branch. If something \
-                   overlaps, build on it or tell the user — never start a duplicate."
+            text: "Before starting, check no open issue or PR already covers or conflicts with \
+                   the work (`list_issues` / `task_status` are free); build on overlap or say \
+                   so, never duplicate."
                 .to_string(),
         },
         AgentPolicy {
             id: DOCS_CURRENT_IN_PR.to_string(),
-            text: "Before you open or update a pull request, check that the docs describing \
-                   what you changed — READMEs, `AGENTS.md` files, `docs/`, generated \
-                   references — are still true, and fix them in the same PR. Say in the PR \
-                   body which docs you checked."
+            text: "A PR that changes behaviour updates the docs describing it (README, \
+                   `AGENTS.md`, `docs/`) in the same PR, and names them in its body."
                 .to_string(),
         },
     ]
@@ -340,10 +336,9 @@ mod tests {
         );
         // Added rules render after the built-ins, not between them.
         let ids: Vec<&str> = policies.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![ASK_BEFORE_FILING, ONE_SELF_CONTAINED_PR, "house-rule"]
-        );
+        let mut expected: Vec<String> = AgentPolicies::builtin_ids();
+        expected.push("house-rule".to_string());
+        assert_eq!(ids, expected);
     }
 
     #[test]
@@ -382,10 +377,12 @@ mod tests {
 
     #[test]
     fn turning_every_rule_off_renders_nothing_at_all() {
-        let config = overrides(&[
-            (ASK_BEFORE_FILING, AgentPolicyOverride::Enabled(false)),
-            (ONE_SELF_CONTAINED_PR, AgentPolicyOverride::Enabled(false)),
-        ]);
+        let ids = AgentPolicies::builtin_ids();
+        let off: Vec<(&str, AgentPolicyOverride)> = ids
+            .iter()
+            .map(|id| (id.as_str(), AgentPolicyOverride::Enabled(false)))
+            .collect();
+        let config = overrides(&off);
         let policies = AgentPolicies::resolve([&config]);
         assert!(policies.is_empty());
         // No header, no stray bullet — the section disappears whole.
@@ -396,7 +393,10 @@ mod tests {
     fn render_is_prose_with_one_bullet_per_rule() {
         let rendered = AgentPolicies::builtin().render();
         assert!(rendered.starts_with("Standing rules"));
-        assert_eq!(rendered.matches("\n  - ").count(), 2);
+        assert_eq!(
+            rendered.matches("\n  - ").count(),
+            AgentPolicies::builtin_ids().len()
+        );
         assert!(!rendered.ends_with('\n'), "the caller owns the joining");
     }
 
@@ -406,12 +406,14 @@ mod tests {
         // launch, alongside the mechanics blurb that has its own cap in
         // `lazybox-agents`. Each half guards its own bytes: this one is
         // the prose lazybox ships, so it is the half a change *here*
-        // can grow. ~900 bytes is two paragraph-length rules with room
-        // for a third; a set that needs more than that has stopped
-        // being a set of standing rules and become a manual.
+        // can grow. Two paragraph-length rules plus two one-line ones
+        // (existing-work check, docs-current, added 2026-09-26 at the
+        // user's request) fit ~1100 bytes; a set that needs more than
+        // that has stopped being a set of standing rules and become a
+        // manual — shorten a rule before raising this again.
         let rendered = AgentPolicies::builtin().render();
         assert!(
-            rendered.len() <= 900,
+            rendered.len() <= 1100,
             "the built-in standing rules should stay tight: {} bytes",
             rendered.len()
         );

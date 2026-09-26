@@ -17,7 +17,12 @@ contain explicitly documented compatibility changes.
   of single fetches, working-claim upkeep paces instead of failing (live
   agents' claims no longer lapse, so the fleet stops double-spawning on
   their tasks), and the #1801 `gh` shim now actually reaches agents running
-  under tmux.
+  under tmux. On top of that, the GitHub budget is now apportioned by
+  priority: the inbox poll outranks background probes and claim upkeep
+  within every tick, a background probe that had been admitted as
+  user-initiated (bypassing every limit) is now metered, and a tick the
+  budget deferred reads as "waiting out the budget" instead of an empty
+  inbox (#1870).
 - **Safety gates fail closed.** A `config.yaml` that doesn't parse no longer
   resolves `approval: human` repos to the default policy (so a bot approval
   can't auto-merge them), and no longer drops you into first-run setup that

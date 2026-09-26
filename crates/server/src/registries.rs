@@ -1157,6 +1157,34 @@ impl TerminalRegistry {
             .min_by_key(|id| id.0)
     }
 
+    /// Every live agent terminal as `(session_key, backend_key)`, oldest
+    /// terminal first — the scan set for [`crate::agent_output_search`].
+    /// Shells are excluded: `agent:` / `said:` ask what an AGENT said, and
+    /// a user's own shell output is not that.
+    ///
+    /// A workspace with several agent terminals appears once per terminal;
+    /// the caller folds them, because the search filters workspaces, not
+    /// tabs.
+    pub async fn agent_terminal_backends(&self) -> Vec<(SessionKey, String)> {
+        let entries = self.lock_entries().await;
+        let mut targets: Vec<(TerminalId, SessionKey, String)> = entries
+            .iter()
+            .filter(|(_, entry)| !entry.finishing)
+            .filter_map(|(id, entry)| {
+                let (session_key, kind) = entry.meta.as_ref()?;
+                if !matches!(kind, TerminalKind::Agent(_)) {
+                    return None;
+                }
+                Some((*id, session_key.clone(), entry.backend_key.clone()?))
+            })
+            .collect();
+        targets.sort_unstable_by_key(|(id, _, _)| id.0);
+        targets
+            .into_iter()
+            .map(|(_, session_key, backend_key)| (session_key, backend_key))
+            .collect()
+    }
+
     pub(crate) async fn agent_terminals_for_review(
         &self,
         session_key: &SessionKey,

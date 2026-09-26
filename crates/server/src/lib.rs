@@ -165,6 +165,7 @@ mod config_sandbox {
 }
 
 mod agent_auth;
+pub mod agent_output_search;
 pub mod agent_runs;
 pub mod agent_stream;
 pub mod agent_updates;
@@ -1350,6 +1351,7 @@ impl Server {
                         lazybox_ipc::Command::QueryTaskStatus { .. } => "QueryTaskStatus",
                         lazybox_ipc::Command::GhAdmit { .. } => "GhAdmit",
                         lazybox_ipc::Command::GhCompleted { .. } => "GhCompleted",
+                        lazybox_ipc::Command::SearchAgentOutput { .. } => "SearchAgentOutput",
                         lazybox_ipc::Command::SetMetered { .. } => "SetMetered",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
                         lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
@@ -2470,6 +2472,12 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::FetchScrollback { terminal_id } => {
             spawn_handler::handle_fetch_scrollback(config, tx, terminal_id).await;
+        }
+        lazybox_ipc::Command::SearchAgentOutput {
+            request_id,
+            needles,
+        } => {
+            agent_output_search::handle_search_agent_output(config, tx, request_id, needles).await;
         }
         lazybox_ipc::Command::IngestHook {
             terminal_id,

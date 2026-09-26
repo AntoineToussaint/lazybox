@@ -1529,6 +1529,10 @@ pub(super) fn run_loop_step<T: TerminalAdapter>(
     // (#1254): a pane whose resync came back unavailable retries with
     // backoff until it converges, even if its agent never prints again.
     model.tick_terminal_resyncs();
+    // The `agent:` output scan (#1780) is paced by TIME too: the needles
+    // change with typing, and the debounce that collapses a typed word
+    // into one scan of every ring needs a tick to expire on.
+    model.tick_agent_output_search();
     timings.ticks = ticks_start.elapsed();
 
     // 3. Process tuirealm messages without blocking.

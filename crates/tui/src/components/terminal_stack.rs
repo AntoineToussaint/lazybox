@@ -3960,14 +3960,18 @@ impl TerminalStack {
     /// The searchable agent text per workspace, for the `/` search's
     /// `agent:` / `said:` qualifiers (#1774).
     ///
-    /// Stage 1 of the corpus is the prompt history: what the agent was
-    /// asked. It's small, already structured, already keyed by
-    /// workspace, and the daemon replays it for EVERY live terminal in
+    /// This is the client's half of the corpus: the prompt history, what
+    /// the agent was asked. It's small, already structured, already keyed
+    /// by workspace, and the daemon replays it for EVERY live terminal in
     /// its bulk snapshot — so "which workspace did I ask about X?"
     /// answers from data the client is already holding, with no new
-    /// storage and no scan of the megabyte-scale output rings. What the
-    /// agent *said* back lives only in those rings and needs a
-    /// daemon-side search to reach; it is not in this corpus yet.
+    /// storage and no scan of the megabyte-scale output rings.
+    ///
+    /// What the agent *said* back is never here. It lives only in those
+    /// rings, and the client's own `TerminalSlot.recent` is a 4 KiB
+    /// window kept for agent-state detection. It reaches the search as a
+    /// separate, daemon-scanned corpus (`Command::SearchAgentOutput`,
+    /// #1780) that the sidebar appends to this one.
     ///
     /// A workspace with several agent terminals contributes all of
     /// them — the search asks about the workspace, not the tab. Newest

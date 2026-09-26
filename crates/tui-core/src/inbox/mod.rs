@@ -1412,6 +1412,37 @@ fn agent_qualifier_value(term: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+/// Every needle an `agent:` / `said:` term in `query` searches for, in
+/// query order and deduplicated (#1780).
+///
+/// This is what a client hands the daemon to scan terminal output with —
+/// derived from the SAME tokenizer and normalization [`search_evaluate`]
+/// applies, so the scan can never look for a different string than the
+/// filter will then test for. A query with no agent term yields an empty
+/// vec, which is the signal that no scan is owed: the qualifier's cost
+/// stays opt-in, exactly as stage 1 (#1774) established.
+///
+/// Negated terms (`-said:panic`) are included. A negation asks whether the
+/// corpus contains the needle, so the scan has to look for it too —
+/// omitting it would leave every workspace passing a `-said:` term by
+/// default.
+pub fn agent_qualifier_needles(query: &str) -> Vec<String> {
+    let raw = normalized_query(query).to_lowercase();
+    let mut needles: Vec<String> = Vec::new();
+    for term in search_terms(&raw) {
+        let term = term
+            .strip_prefix('-')
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(term);
+        if let Some(value) = agent_qualifier_value(term)
+            && !needles.iter().any(|kept| kept == value)
+        {
+            needles.push(value.to_string());
+        }
+    }
+    needles
+}
+
 /// Drop one pair of surrounding double quotes, if present.
 fn unquote(value: &str) -> &str {
     value
@@ -3712,6 +3743,46 @@ mod tests {
 
         // Case-insensitive, both directions.
         assert!(search_evaluate("agent:PARSER", &ws, Some("The Parser broke")).matched);
+    }
+
+    /// The needles a client hands the daemon's output scan (#1780) must be
+    /// exactly what [`search_evaluate`] will then look for. Anything else
+    /// is a silent miss: the scan returns text, the filter tests for a
+    /// different string, and the row the user is hunting never appears.
+    #[test]
+    fn agent_needles_match_what_the_filter_will_look_for() {
+        assert!(agent_qualifier_needles("").is_empty());
+        assert!(
+            agent_qualifier_needles("acme login is:pr").is_empty(),
+            "a query with no agent term owes no scan — the cost stays opt-in"
+        );
+
+        // Same normalization the evaluator applies: leading `#` stripped,
+        // case folded, quoted values unquoted into ONE needle.
+        assert_eq!(
+            agent_qualifier_needles("#said:\"Cannot Borrow\" is:pr agent:E0502"),
+            vec!["cannot borrow".to_string(), "e0502".to_string()],
+        );
+
+        // A negated term still has to be scanned for: the filter asks
+        // whether the corpus CONTAINS it, so an unscanned needle would let
+        // every workspace pass `-said:panic` by default.
+        assert_eq!(agent_qualifier_needles("-said:panic"), vec!["panic"]);
+
+        // Both spellings share one corpus, so the same value asked twice is
+        // one scan.
+        assert_eq!(
+            agent_qualifier_needles("agent:parser said:parser"),
+            vec!["parser"]
+        );
+
+        // Every needle the derivation yields is one the evaluator accepts
+        // against a corpus containing it — the two halves cannot drift.
+        let mut ws = workspace_with_task("a", Some("acme/api"), 5);
+        ws.gh_issues.first_mut().expect("task").title = "Fix login flow".into();
+        let query = "said:\"cannot borrow\" agent:e0502";
+        let corpus = agent_qualifier_needles(query).join("\n");
+        assert!(search_evaluate(query, &ws, Some(&corpus)).matched);
     }
 
     /// A workspace that has never run an agent has no corpus. An

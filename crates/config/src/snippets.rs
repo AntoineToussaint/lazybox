@@ -689,10 +689,43 @@ impl Snippets {
                 ),
             ),
             (
+                "goal".to_string(),
+                entry(
+                    "Review",
+                    "What is this PR for? One or two lines",
+                    "Tell me the goal of this PR in one or two plain sentences: what \
+                     it is for and who notices when it lands. Read the diff and the PR \
+                     or issue text first so the goal is the real one, not a guess from \
+                     the branch name. Brevity is the request here, so this is not \
+                     dropping evidence: no file tour, no how, no caveats unless one \
+                     changes whether I should merge it. If the diff and the text \
+                     disagree about the goal, say that in one sentence instead. This \
+                     snippet changes nothing. The verdict names the goal.",
+                ),
+            ),
+            (
                 "clarify".to_string(),
                 entry(
                     "Review",
                     "Explain this PR in a few lines, no verbiage",
+                    "Explain this PR to me in at most five short lines — I asked for \
+                     the short version, so keeping it short is the job, not a loss of \
+                     evidence. Read the diff first; every claim comes from the real \
+                     tree. Lead with what is true now that was not before, as the user \
+                     sees it. Then, only as far as each earns a line: what was broken, \
+                     the change that fixes it, the proof (the test or number that shows \
+                     it), and any real risk. One concrete anchor per claim — a file, \
+                     symbol, or issue number — and no bulleted tour of changed files, \
+                     no restating my question, no sentence that would fit a different \
+                     PR. If I need more, I will ask for `deepclarify`. This snippet \
+                     changes nothing.",
+                ),
+            ),
+            (
+                "deepclarify".to_string(),
+                entry(
+                    "Review",
+                    "Explain this PR in depth: problem, change, proof, risk",
                     "Explain this PR to me. Your whole answer is the ending — there are \
                      no findings to report before it, so the answer itself is the \
                      explanation, not a summary of one. Read the diff and \

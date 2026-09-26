@@ -3643,6 +3643,101 @@ mod search_tests {
         );
     }
 
+    /// Stage 2 (#1780): the daemon's terminal-OUTPUT scan is a THIRD
+    /// corpus, appended to the prompt halves rather than overriding them.
+    /// A workspace has to stay matchable on what it was asked AND on what
+    /// it answered — shadowing either would make a query's result depend
+    /// on which half the daemon happened to reach.
+    #[test]
+    fn scanned_output_extends_the_corpus_without_shadowing_the_prompts() {
+        let asked = issue_ws_in_repo("o/a", "1", "Tidy the changelog");
+        let said = issue_ws_in_repo("o/a", "2", "Bump deps");
+        let asked_key = SessionKey::from(&asked.key);
+        let said_key = SessionKey::from(&said.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(asked_key.clone(), asked);
+        sb.workspaces.insert(said_key.clone(), said);
+        sb.set_agent_text(HashMap::from([(
+            asked_key.clone(),
+            "rewrite the parser".to_string(),
+        )]));
+        sb.recompute_visible();
+
+        let shown = |sb: &Sidebar| -> Vec<SessionKey> {
+            sb.visible
+                .iter()
+                .filter_map(|r| match r {
+                    VisibleRow::Workspace(k) => Some(k.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Before the scan lands, only the prompt corpus answers.
+        sb.open_search();
+        type_query(&mut sb, "agent:borrow");
+        assert!(shown(&sb).is_empty());
+
+        // The scan reaches a workspace whose PROMPTS never mentioned the
+        // term — the half that was unreachable before #1780 — and the row
+        // carries an excerpt of the output line that matched.
+        sb.set_agent_output_text(vec![
+            (
+                said_key.to_string(),
+                "error[E0502]: cannot borrow `self` as mutable".into(),
+            ),
+            (asked_key.to_string(), "nothing about that here".into()),
+        ]);
+        assert_eq!(shown(&sb), vec![said_key.clone()]);
+        let excerpt = sb.agent_excerpt(&said_key).expect("the hit carries a cue");
+        assert!(excerpt.contains("cannot borrow"), "{excerpt:?}");
+
+        // The prompt corpus still answers its own term: appending output
+        // must not have displaced it.
+        sb.search = None;
+        sb.recompute_visible();
+        sb.open_search();
+        type_query(&mut sb, "agent:parser");
+        assert_eq!(shown(&sb), vec![asked_key.clone()]);
+
+        // A reply is scoped to the query that asked for it, so a new scan
+        // REPLACES the previous one — including an empty reply, which is
+        // how "nothing matched" clears the last query's rows.
+        sb.set_agent_output_text(Vec::new());
+        sb.search = None;
+        sb.recompute_visible();
+        sb.open_search();
+        type_query(&mut sb, "agent:borrow");
+        assert!(
+            shown(&sb).is_empty(),
+            "an empty reply must clear the previous scan's rows"
+        );
+    }
+
+    /// The needles derived for the daemon scan come from the live query,
+    /// and an empty vec is the signal that no scan is owed (#1780).
+    #[test]
+    fn needles_are_derived_from_the_live_query() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = issue_ws_in_repo("o/a", "1", "Tidy the changelog");
+        sb.workspaces.insert(SessionKey::from(&ws.key), ws);
+        sb.recompute_visible();
+        assert!(
+            sb.agent_qualifier_needles().is_empty(),
+            "no search, no scan"
+        );
+
+        sb.open_search();
+        type_query(&mut sb, "login is:pr");
+        assert!(
+            sb.agent_qualifier_needles().is_empty(),
+            "a query with no agent term owes no scan"
+        );
+
+        type_query(&mut sb, " said:deadlock");
+        assert_eq!(sb.agent_qualifier_needles(), vec!["deadlock".to_string()]);
+    }
+
     /// The daemon re-publishes ONE workspace's corpus each time a prompt is
     /// persisted, so ingestion has to merge (#1774). Replacing would let a
     /// single incremental push wipe every other workspace's agent text and

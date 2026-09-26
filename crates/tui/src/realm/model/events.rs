@@ -519,6 +519,17 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::AgentSearchText { entries } => {
                 self.sidebar.ingest_durable_agent_text(entries.clone());
             }
+            // The daemon's terminal-OUTPUT scan (#1780): what the agent
+            // SAID, which lives only in its replay rings. Unlike the two
+            // corpora above this is a REPLY, scoped to the query that asked
+            // for it, so the model drops one whose request the user has
+            // typed past rather than merging it.
+            IpcEvent::AgentOutputMatches {
+                request_id,
+                entries,
+            } => {
+                self.apply_agent_output_matches(*request_id, entries.clone());
+            }
             // Durable per-action usage counts replayed on connect (#1502):
             // seed the local mastery ledger so onboarding chrome reflects
             // what the user has already learned instead of resetting.
@@ -1372,6 +1383,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::GithubDiscoveryBehind { .. }
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::AgentSearchText { .. }
+                | IpcEvent::AgentOutputMatches { .. }
                 | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::MasteryLedger { .. }
@@ -1588,6 +1600,13 @@ impl<T: TerminalAdapter> Model<T> {
         // Push to the sidebar AFTER the snapshot's WorkspaceUpserted-
         // equivalent rows are processed below, so the first render
         // already has both layers.
+        if let IpcEvent::Snapshot { .. } = &event {
+            // A Snapshot is the reconnect signal: any output scan this
+            // client had in flight died with the previous connection, so its
+            // latch is released here rather than waiting for a reply the
+            // daemon can no longer send (#1780).
+            self.release_agent_output_scan_on_reconnect();
+        }
         if let IpcEvent::Snapshot { projects, .. } = &event {
             // The snapshot is authoritative for daemon-known projects, so
             // drop any that vanished while the client was disconnected
@@ -2453,6 +2472,7 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::Snapshot { .. }
             | IpcEvent::SessionCosts { .. }
             | IpcEvent::AgentSearchText { .. }
+            | IpcEvent::AgentOutputMatches { .. }
             | IpcEvent::ViewerIdentities { .. }
             | IpcEvent::AutoFixPolicyConfig { .. }
             | IpcEvent::ShellCommandConfig { .. }
@@ -2933,6 +2953,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::AgentSearchText { .. }
+                | IpcEvent::AgentOutputMatches { .. }
                 | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::MasteryLedger { .. }

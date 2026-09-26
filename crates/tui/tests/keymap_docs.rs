@@ -21,7 +21,8 @@
 mod common;
 
 use lazybox_tui_core::action::{
-    ActionDef, ActionKind, CatalogEntry, Chord, Guard, KeyStroke, Section, leader_group_label,
+    ActionDef, ActionKind, CatalogEntry, Chord, Guard, KeyStroke, Section, TierMenu,
+    leader_group_label,
 };
 use std::path::PathBuf;
 
@@ -56,7 +57,11 @@ fn default_catalog() -> Vec<CatalogEntry> {
     let tiers = lazybox_core::AgentModels::builtin("claude")
         .expect("claude ships a built-in tier menu")
         .tiers;
-    ActionDef::catalog_with_tiers(&agents, &std::collections::BTreeMap::new(), &tiers)
+    ActionDef::catalog_with_tiers(
+        &agents,
+        &std::collections::BTreeMap::new(),
+        TierMenu::new("claude", &tiers),
+    )
 }
 
 /// Escape `|` for use inside a markdown table cell.
@@ -247,7 +252,12 @@ fn generate(frontmatter: &str) -> String {
             out.push_str(
                 "`w` opens a deterministic work menu: press `w w` for the default or \
                  already-running agent, or choose an agent / model tier below. Nothing waits \
-                 on a timeout, so the second key acts immediately.\n\n",
+                 on a timeout, so the second key acts immediately.\n\n\
+                 The strength rows carry the agent whose menu the model name was read from \
+                 (here, the default `claude`). The alias itself is agent-agnostic: on a row \
+                 already running another agent, `w` targets that agent and the which-key \
+                 popup relabels the row with *its* model — or `agent default` when its menu \
+                 defines no such tier, since nothing is then pinned.\n\n",
             );
         }
         out.push_str("| Chord | Action |\n| --- | --- |\n");

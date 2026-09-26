@@ -165,15 +165,17 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 
 `w` opens a deterministic work menu: press `w w` for the default or already-running agent, or choose an agent / model tier below. Nothing waits on a timeout, so the second key acts immediately.
 
+The strength rows carry the agent whose menu the model name was read from (here, the default `claude`). The alias itself is agent-agnostic: on a row already running another agent, `w` targets that agent and the which-key popup relabels the row with *its* model — or `agent default` when its menu defines no such tier, since nothing is then pinned.
+
 | Chord | Action |
 | --- | --- |
 | `w w` | work on this |
 | `w c` | work in claude |
 | `w x` | work in codex |
 | `w u` | work in cursor |
-| `w S` | Haiku |
-| `w M` | Sonnet |
-| `w L` | Opus |
+| `w S` | Haiku · claude |
+| `w M` | Sonnet · claude |
+| `w L` | Opus · claude |
 
 ### `a` — agent
 

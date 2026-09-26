@@ -2768,6 +2768,26 @@ pub fn agent_default_key(id: &str) -> Option<char> {
     }
 }
 
+/// A model-tier menu together with the agent whose menu it is.
+///
+/// The tier *alias* is agent-agnostic — every agent resolves the same
+/// `S` / `M` / `L` handle in its own menu — but the *label* is not.
+/// Carrying the two together is what lets the generated `w <alias>`
+/// rows say whose menu the model name came from, instead of painting
+/// one agent's model name on a chord that will run another's (#1827).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TierMenu<'a> {
+    /// Agent the menu belongs to. Empty only for the tier-less catalog.
+    pub agent: &'a str,
+    pub tiers: &'a [lazybox_core::ModelTier],
+}
+
+impl<'a> TierMenu<'a> {
+    pub fn new(agent: &'a str, tiers: &'a [lazybox_core::ModelTier]) -> Self {
+        Self { agent, tiers }
+    }
+}
+
 /// The keystroke that completes a tier chord under the `w` / `a`
 /// leader, derived from the tier's `alias`. A single uppercase letter
 /// (`"S"`) folds into a `Shift`-modified stroke (`Shift-s`) so it reads
@@ -2905,20 +2925,20 @@ impl ActionDef {
         agents: &[String],
         overrides: &std::collections::BTreeMap<String, String>,
     ) -> Vec<CatalogEntry> {
-        Self::catalog_with_tiers(agents, overrides, &[])
+        Self::catalog_with_tiers(agents, overrides, TierMenu::default())
     }
 
     /// [`ActionDef::catalog`] plus the model-tier chords: one `w S` /
-    /// `a S` row per entry in `tiers` (the default work agent's model
+    /// `a S` row per entry in `menu` (the default work agent's model
     /// menu). The tier alias is agent-agnostic at the chord level — the
     /// daemon maps it to the actual target agent's tier at spawn — so a
     /// single set of tier chords serves whichever agent `w` resolves to.
     pub fn catalog_with_tiers(
         agents: &[String],
         overrides: &std::collections::BTreeMap<String, String>,
-        tiers: &[lazybox_core::ModelTier],
+        menu: TierMenu<'_>,
     ) -> Vec<CatalogEntry> {
-        Self::catalog_full(agents, overrides, tiers, &[])
+        Self::catalog_full(agents, overrides, menu, &[])
     }
 
     /// [`ActionDef::catalog_with_tiers`] plus the remote-spawn chords:
@@ -2930,10 +2950,10 @@ impl ActionDef {
     pub fn catalog_full(
         agents: &[String],
         overrides: &std::collections::BTreeMap<String, String>,
-        tiers: &[lazybox_core::ModelTier],
+        menu: TierMenu<'_>,
         remotes: &[String],
     ) -> Vec<CatalogEntry> {
-        Self::catalog_complete(agents, overrides, tiers, remotes, &[])
+        Self::catalog_complete(agents, overrides, menu, remotes, &[])
     }
 
     /// [`ActionDef::catalog_full`] plus the per-app "open with" chords
@@ -2944,7 +2964,7 @@ impl ActionDef {
     pub fn catalog_complete(
         agents: &[String],
         overrides: &std::collections::BTreeMap<String, String>,
-        tiers: &[lazybox_core::ModelTier],
+        menu: TierMenu<'_>,
         remotes: &[String],
         open_with: &[(String, String)],
     ) -> Vec<CatalogEntry> {
@@ -3157,8 +3177,16 @@ impl ActionDef {
         // so one row per tier serves both leaders. Rows are dropped for
         // an alias that can't form a chord (multi-char) so the tier
         // still configures a model without claiming a key.
+        //
+        // The two leaders differ in what their label may promise. `a S`
+        // spawns THIS menu's agent, so the bare model name is exact.
+        // `w S` targets whatever agent the row's live conversation runs,
+        // which may resolve the alias to a different model or to none at
+        // all, so its label names the menu it was read from rather than
+        // pretending to be the run's model (#1827). Surfaces that know
+        // the contextual target — the which-key popup — override it.
         let spawn_leader = KeyStroke::new(false, false, false, ChordCode::Char('a'));
-        for tier in tiers {
+        for tier in menu.tiers {
             let Some(stroke) = tier_chord_stroke(&tier.alias) else {
                 continue;
             };
@@ -3173,7 +3201,7 @@ impl ActionDef {
                     kind: ActionKind::WorkWith,
                     param: Some(Param::Tier(tier.alias.clone())),
                     section: work.section,
-                    label: std::borrow::Cow::Owned(tier.label.clone()),
+                    label: std::borrow::Cow::Owned(format!("{} · {}", tier.label, menu.agent)),
                     describe: work.describe,
                     chords,
                     keys_display,
@@ -5026,28 +5054,36 @@ mod tests {
         use std::collections::BTreeMap;
         let agents = vec!["claude".to_string()];
         let tiers = lazybox_core::AgentModels::builtin("claude").unwrap().tiers;
-        let catalog = ActionDef::catalog_with_tiers(&agents, &BTreeMap::new(), &tiers);
+        let catalog = ActionDef::catalog_with_tiers(
+            &agents,
+            &BTreeMap::new(),
+            TierMenu::new("claude", &tiers),
+        );
 
         let w = KeyStroke::new(false, false, false, ChordCode::Char('w'));
         let a = KeyStroke::new(false, false, false, ChordCode::Char('a'));
         let shift_s = KeyStroke::new(false, true, false, ChordCode::Char('s'));
 
-        // `w S` → a WorkWith row tagged with the tier alias, labeled by
-        // the model name so the which-key popup reads "Haiku".
+        // `w S` → a WorkWith row tagged with the tier alias. The label
+        // names the menu it was read from: `w` targets the row's live
+        // agent, which may resolve `S` to another model or to none
+        // (#1827).
         let work_tier = catalog
             .iter()
             .find(|e| e.kind == ActionKind::WorkWith && e.param == Some(Param::Tier("S".into())))
             .expect("w S tier row");
         assert_eq!(work_tier.chords, vec![Chord::Seq(vec![w, shift_s])]);
-        assert_eq!(work_tier.label, "Haiku");
+        assert_eq!(work_tier.label, "Haiku · claude");
         assert_eq!(work_tier.config_key, "work_tier.S");
 
-        // `a S` → a SpawnAgent row under the agent leader.
+        // `a S` → a SpawnAgent row under the agent leader. It spawns
+        // THIS menu's agent, so the bare model name is an exact promise.
         let spawn_tier = catalog
             .iter()
             .find(|e| e.kind == ActionKind::SpawnAgent && e.param == Some(Param::Tier("S".into())))
             .expect("a S tier row");
         assert_eq!(spawn_tier.chords, vec![Chord::Seq(vec![a, shift_s])]);
+        assert_eq!(spawn_tier.label, "Haiku");
 
         // The tier chords must not collide with the agent chords that
         // share the same leaders (`w c`, `a c`). Every Seq chord in the
@@ -5445,7 +5481,8 @@ mod tests {
     fn open_with_key_generates_a_direct_workspace_row() {
         use std::collections::BTreeMap;
         let binds = vec![("Obsidian".to_string(), "O".to_string())];
-        let catalog = ActionDef::catalog_complete(&[], &BTreeMap::new(), &[], &[], &binds);
+        let catalog =
+            ActionDef::catalog_complete(&[], &BTreeMap::new(), TierMenu::default(), &[], &binds);
         let row = catalog
             .iter()
             .find(|e| e.param == Some(Param::OpenWith("Obsidian".into())))
@@ -5456,7 +5493,8 @@ mod tests {
         // A `ui.action_keys` override wins over the config `key`.
         let mut overrides = BTreeMap::new();
         overrides.insert("open_with_app.Obsidian".to_string(), "Ctrl-o".to_string());
-        let catalog = ActionDef::catalog_complete(&[], &overrides, &[], &[], &binds);
+        let catalog =
+            ActionDef::catalog_complete(&[], &overrides, TierMenu::default(), &[], &binds);
         let row = catalog
             .iter()
             .find(|e| e.param == Some(Param::OpenWith("Obsidian".into())))
@@ -5468,7 +5506,8 @@ mod tests {
     fn open_with_key_that_does_not_parse_yields_no_row() {
         use std::collections::BTreeMap;
         let binds = vec![("X".to_string(), String::new())];
-        let catalog = ActionDef::catalog_complete(&[], &BTreeMap::new(), &[], &[], &binds);
+        let catalog =
+            ActionDef::catalog_complete(&[], &BTreeMap::new(), TierMenu::default(), &[], &binds);
         assert!(
             catalog.iter().all(|e| e.kind != ActionKind::OpenWithApp),
             "an unparseable key produces no row (still reachable via `x o`)",
@@ -5514,7 +5553,11 @@ mod tests {
         let mut overrides = BTreeMap::new();
         overrides.insert("work_tier.S".to_string(), "Ctrl-1".to_string());
         overrides.insert("spawn_tier.S".to_string(), "Ctrl-2".to_string());
-        let catalog = ActionDef::catalog_with_tiers(&["claude".to_string()], &overrides, &tiers);
+        let catalog = ActionDef::catalog_with_tiers(
+            &["claude".to_string()],
+            &overrides,
+            TierMenu::new("claude", &tiers),
+        );
         let work_tier = catalog
             .iter()
             .find(|e| e.kind == ActionKind::WorkWith && e.param == Some(Param::Tier("S".into())))

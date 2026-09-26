@@ -11210,6 +11210,158 @@ mod modal_input_responsiveness_tests {
         );
     }
 
+    /// Agent menus for the #1827 label tests: the two built-in ladders,
+    /// which resolve the same aliases to different models, plus cursor —
+    /// which ships no menu at all, so every alias resolves to nothing.
+    fn tier_menus() -> std::collections::BTreeMap<String, lazybox_core::AgentModels> {
+        [
+            (
+                "claude".to_string(),
+                lazybox_core::AgentModels::builtin("claude").unwrap(),
+            ),
+            (
+                "codex".to_string(),
+                lazybox_core::AgentModels::builtin("codex").unwrap(),
+            ),
+            ("cursor".to_string(), lazybox_core::AgentModels::default()),
+        ]
+        .into()
+    }
+
+    /// Put a live agent terminal of `agent` on `key`, the way a daemon
+    /// `TerminalSpawned` would — what makes `w` target that agent
+    /// instead of spawning the default.
+    fn spawn_agent_terminal(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        key: &lazybox_core::SessionKey,
+        terminal_id: u64,
+        agent: &str,
+    ) {
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+            terminal_id: lazybox_ipc::TerminalId(terminal_id),
+            session_key: key.clone(),
+            kind: lazybox_ipc::TerminalKind::Agent(agent.into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            agent_state: None,
+        });
+    }
+
+    /// #1827: the `w S/M/L` strength chords are labelled from the
+    /// DEFAULT agent's menu but dispatched against the row's live agent,
+    /// so the painted model and the launched one diverged. The label now
+    /// resolves against the contextual target — and an agent whose menu
+    /// has no such tier says "agent default", because the alias then
+    /// passes no model flag at all.
+    #[test]
+    fn work_tier_label_resolves_against_the_target_agent() {
+        let mut m = build_model();
+        m.set_agent_models(tier_menus());
+        assert_eq!(m.sidebar.default_agent(), "claude");
+
+        // No workspace → a fresh spawn of the default agent, so the
+        // default's own menu is the honest answer.
+        assert_eq!(m.work_tier_label("M"), "Sonnet");
+
+        let key = WorkspaceKey::new("github:o/r#1");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            lazybox_core::Workspace::empty(key, "work", chrono::Utc::now()),
+        )));
+        m.sidebar.reveal_workspace_key(&session_key);
+
+        // Still no live conversation: `w` would spawn the default.
+        assert_eq!(m.work_tier_label("M"), "Sonnet");
+
+        // A live codex session takes over the target: `M` is Terra on
+        // its ladder, never claude's Sonnet.
+        spawn_agent_terminal(&mut m, &session_key, 7, "codex");
+        assert_eq!(m.work_tier_label("M"), "Terra");
+
+        // A menu-less agent resolves the alias to nothing, so the run
+        // gets no model flag — say that instead of borrowing a name.
+        let bare = WorkspaceKey::new("github:o/r#2");
+        let bare_key: lazybox_core::SessionKey = (&bare).into();
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            lazybox_core::Workspace::empty(bare, "bare", chrono::Utc::now()),
+        )));
+        m.sidebar.reveal_workspace_key(&bare_key);
+        spawn_agent_terminal(&mut m, &bare_key, 8, "cursor");
+        assert_eq!(m.work_tier_label("M"), "agent default");
+
+        // Two live conversations → the chooser picks the agent, and the
+        // two menus disagree, so the row promises neither.
+        m.sidebar.reveal_workspace_key(&session_key);
+        spawn_agent_terminal(&mut m, &session_key, 9, "claude");
+        assert_eq!(m.work_tier_label("M"), "varies by agent");
+    }
+
+    /// The which-key popup is the surface the user actually reads before
+    /// pressing the second key, so the contextual label has to reach it
+    /// — the repro in #1827 is `w` on a codex row painting "Sonnet".
+    #[test]
+    fn work_which_key_popup_names_the_target_agents_model() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        m.set_agent_models(tier_menus());
+        let key = WorkspaceKey::new("github:o/r#1");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            lazybox_core::Workspace::empty(key, "work", chrono::Utc::now()),
+        )));
+        m.sidebar.reveal_workspace_key(&session_key);
+        spawn_agent_terminal(&mut m, &session_key, 7, "codex");
+        m.set_focus(crate::realm::model::PaneFocus::Sidebar);
+
+        use tuirealm::terminal::TerminalAdapter as _;
+        let popup_text = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| -> String {
+            m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+            m.view();
+            let buffer = m.terminal.raw().backend().buffer();
+            let mut text = String::new();
+            for row in 0..buffer.area.height {
+                for col in 0..buffer.area.width {
+                    text.push_str(buffer[(col, row)].symbol());
+                }
+                text.push('\n');
+            }
+            m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+            text
+        };
+
+        let text = popup_text(&mut m);
+        assert!(
+            text.contains("Terra"),
+            "the popup names codex's own `M` tier: {text}",
+        );
+        assert!(
+            !text.contains("Sonnet"),
+            "claude's menu must not label a chord that runs codex: {text}",
+        );
+
+        // A menu-less agent pins no model, so the rows say so rather
+        // than borrowing claude's names.
+        let bare = WorkspaceKey::new("github:o/r#2");
+        let bare_key: lazybox_core::SessionKey = (&bare).into();
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            lazybox_core::Workspace::empty(bare, "bare", chrono::Utc::now()),
+        )));
+        m.sidebar.reveal_workspace_key(&bare_key);
+        spawn_agent_terminal(&mut m, &bare_key, 8, "cursor");
+        m.set_focus(crate::realm::model::PaneFocus::Sidebar);
+        let text = popup_text(&mut m);
+        assert!(
+            text.contains("agent default"),
+            "cursor resolves the strengths to nothing: {text}",
+        );
+        assert!(
+            !text.contains("Haiku") && !text.contains("Terra"),
+            "no surface may name a model the run will not use: {text}",
+        );
+    }
+
     /// `set_default_agent` updates the agent both panes resolve `w`
     /// against, live — the persist half is covered by the config
     /// round-trip test. Disk-free.
@@ -28655,7 +28807,7 @@ mod dispatch_coverage_tests {
     //! that consumes it). A new catalog row wired to neither fails the
     //! build here instead of rendering everywhere and no-oping.
     use super::super::keys::{PANE_NATIVE_KINDS, action_from_entry};
-    use lazybox_tui_core::action::ActionDef;
+    use lazybox_tui_core::action::{ActionDef, TierMenu};
 
     #[test]
     fn every_catalog_row_dispatches_or_is_allowlisted() {
@@ -28666,8 +28818,11 @@ mod dispatch_coverage_tests {
         let tiers = lazybox_core::AgentModels::builtin("claude")
             .expect("claude builtin tiers")
             .tiers;
-        let catalog =
-            ActionDef::catalog_with_tiers(&agents, &std::collections::BTreeMap::new(), &tiers);
+        let catalog = ActionDef::catalog_with_tiers(
+            &agents,
+            &std::collections::BTreeMap::new(),
+            TierMenu::new("claude", &tiers),
+        );
         for entry in &catalog {
             let dispatchable = action_from_entry(entry).is_some();
             let allowlisted = PANE_NATIVE_KINDS.iter().any(|(k, _, _)| *k == entry.kind);

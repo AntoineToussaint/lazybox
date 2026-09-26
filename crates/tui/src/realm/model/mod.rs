@@ -5043,12 +5043,16 @@ impl<T: TerminalAdapter> Model<T> {
     fn rebuild_catalog(&mut self) {
         // Tier chords track the default work agent's menu — the alias is
         // agent-agnostic at spawn, so one menu of chords serves whatever
-        // agent `w` ends up targeting.
+        // agent `w` ends up targeting. The menu carries the agent it was
+        // read from so the generated `w <alias>` rows can say so rather
+        // than painting its model names on another agent's run (#1827).
+        let default_agent = self.sidebar.default_agent();
         let tiers = self
             .agent_models
-            .get(self.sidebar.default_agent())
+            .get(default_agent)
             .map(|m| m.tiers.as_slice())
             .unwrap_or(&[]);
+        let tier_menu = lazybox_tui_core::action::TierMenu::new(default_agent, tiers);
         // Remote names gate the `r <agent>` chords — no remotes, no `r`
         // leader (the default keymap is byte-for-byte unchanged).
         let remotes: Vec<String> = self.remote_clients.keys().cloned().collect();
@@ -5063,7 +5067,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.catalog = lazybox_tui_core::action::ActionDef::catalog_complete(
             &self.agents,
             &self.action_key_overrides,
-            tiers,
+            tier_menu,
             &remotes,
             &open_with_binds,
         );
@@ -5073,6 +5077,80 @@ impl<T: TerminalAdapter> Model<T> {
     /// generated Keys screen.
     pub fn catalog(&self) -> &[lazybox_tui_core::action::CatalogEntry] {
         &self.catalog
+    }
+
+    /// What a `w <alias>` strength chord will actually launch, for the
+    /// which-key row.
+    ///
+    /// The catalog labels those chords from the DEFAULT agent's menu,
+    /// but `Action::WorkTier` dispatches against whichever agent the
+    /// row's live conversation runs, and the daemon resolves the alias
+    /// on *that* agent's menu — so the painted model and the launched
+    /// one diverge the moment the two differ (#1827). Resolve against
+    /// the real target here instead. An agent whose menu has no such
+    /// tier is launched with no model flag at all, so the row says
+    /// "agent default" rather than borrowing another menu's name.
+    pub(crate) fn work_tier_label(&self, alias: &str) -> String {
+        let mut labels: Vec<String> = self
+            .work_target_agents()
+            .iter()
+            .map(|agent| self.tier_label(agent, alias))
+            .collect();
+        labels.sort();
+        labels.dedup();
+        match labels.as_slice() {
+            [only] => only.clone(),
+            // A chooser (or a `v` fan-out) whose candidates resolve the
+            // alias differently has no single model to promise.
+            _ => "varies by agent".to_string(),
+        }
+    }
+
+    /// Every agent a `w` could land on from the current selection: the
+    /// one live conversation's agent, each candidate a chooser would
+    /// offer, or the default a fresh spawn would start. A `v`
+    /// multi-select resolves per row, so it contributes one per marked
+    /// workspace — the same resolution `dispatch_work` /
+    /// `dispatch_bulk_agent` perform.
+    fn work_target_agents(&self) -> Vec<String> {
+        use crate::components::sidebar::WorkTarget;
+        let default_agent = self.sidebar.default_agent();
+        let keys: Vec<lazybox_core::SessionKey> = if self.bulk_active() {
+            self.sidebar.selected_broadcast_keys()
+        } else {
+            self.sidebar
+                .selected_workspace_key()
+                .cloned()
+                .into_iter()
+                .collect()
+        };
+        if keys.is_empty() {
+            return vec![default_agent.to_string()];
+        }
+        keys.iter()
+            .flat_map(|key| match self.sidebar.work_target(key, default_agent) {
+                WorkTarget::Spawn(agent) => vec![agent],
+                WorkTarget::Running(target) => vec![target.agent_id],
+                WorkTarget::Choose(targets) => targets.into_iter().map(|t| t.agent_id).collect(),
+            })
+            .collect()
+    }
+
+    /// `alias` as `agent_id`'s own menu names it. An agent that defines
+    /// no such tier resolves to nothing, and the daemon then passes no
+    /// model flag at all — the agent's own ambient default.
+    ///
+    /// The config-derived menu already has the built-in one merged in
+    /// (or deliberately `replace`d), so the built-in is consulted only
+    /// for an agent the map doesn't carry at all — never as a second
+    /// chance for a tier a `replace:` menu dropped on purpose.
+    fn tier_label(&self, agent_id: &str, alias: &str) -> String {
+        self.agent_models
+            .get(agent_id)
+            .cloned()
+            .or_else(|| lazybox_core::AgentModels::builtin(agent_id))
+            .and_then(|m| m.tier(alias).map(|t| t.label.clone()))
+            .unwrap_or_else(|| "agent default".to_string())
     }
 
     /// Synthesize Project records for every scope the user is
@@ -7357,7 +7435,20 @@ impl<T: TerminalAdapter> Model<T> {
                 (
                     conts
                         .into_iter()
-                        .map(|(stroke, entry)| (stroke.display(), entry.label.to_string()))
+                        .map(|(stroke, entry)| {
+                            use lazybox_tui_core::action::{ActionKind, Param};
+                            // The `w <alias>` strength rows carry the
+                            // DEFAULT agent's model name; this popup knows
+                            // the contextual target, so it names what the
+                            // chord will really launch (#1827).
+                            let label = match (entry.kind, entry.param.as_ref()) {
+                                (ActionKind::WorkWith, Some(Param::Tier(alias))) => {
+                                    self.work_tier_label(alias)
+                                }
+                                _ => entry.label.to_string(),
+                            };
+                            (stroke.display(), label)
+                        })
                         .collect(),
                     group,
                 )

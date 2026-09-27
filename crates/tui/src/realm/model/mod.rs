@@ -6866,6 +6866,21 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::UrlPicker, modal);
     }
 
+    /// A titled picker over `(label, url)` links — the header's Checks
+    /// line. Shares the URL picker's flow: Enter opens the highlighted
+    /// link in the browser.
+    pub(crate) fn mount_link_picker(&mut self, title: &str, links: Vec<(String, String)>) {
+        use crate::realm::components::choice::Choice;
+        if links.is_empty() || matches!(self.modal_stack.last(), Some(Id::UrlPicker)) {
+            return;
+        }
+        let modal = Choice::single("Enter opens the highlighted link in your browser", links)
+            .title(title.to_string())
+            .label(|(label, _): &(String, String)| label.clone())
+            .payload_for(|(_, url): &(String, String)| ChoicePayload::Text(url.clone()));
+        self.mount_modal(Id::UrlPicker, modal);
+    }
+
     /// Hand `url` to the platform browser launcher and surface the
     /// outcome in the footer.
     fn open_external_url(&mut self, url: &str) {

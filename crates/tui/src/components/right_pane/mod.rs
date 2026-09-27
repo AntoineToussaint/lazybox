@@ -204,6 +204,13 @@ pub struct RightPane {
     /// A catalog action a header-row click asked for; the model drains it
     /// with [`Self::take_action`] and dispatches it.
     pending_action: Option<lazybox_tui_core::action::Action>,
+    /// A `(title, links)` picker a header click asked for (the Checks
+    /// line); drained by [`Self::take_links`].
+    pending_links: Option<(String, Vec<(String, String)>)>,
+    /// The known state of other tasks this workspace names as blockers,
+    /// fed by the orchestrator from the tasks it tracks. A blocker that has
+    /// since closed or merged renders struck through instead of red.
+    blocker_states: std::collections::HashMap<lazybox_core::TaskId, lazybox_core::TaskState>,
     /// Set when the user asks to read the full description (a second
     /// `d`, or a click on the `+N more lines` trailer). The orchestrator
     /// drains it after dispatching the key/click and mounts the reader
@@ -261,9 +268,9 @@ pub struct RightPane {
     pending_open_task: Option<lazybox_core::TaskId>,
 }
 
-/// One clickable blocker on the header's `Blocked on:` line: its column
-/// span and the task it names.
-type BlockerHit = (std::ops::RangeInclusive<u16>, lazybox_core::TaskId);
+/// One clickable segment of a header line: its column span and what a
+/// click on it does.
+type SpanHit = (std::ops::RangeInclusive<u16>, HeaderTarget);
 
 /// The header's click targets as offsets into the header — rows from its
 /// top, blocker columns from its left edge. [`ClickHits::place_header`]
@@ -273,7 +280,7 @@ struct HeaderHits {
     title: Option<(u16, String)>,
     issue: Option<(u16, String)>,
     reviewers: Option<u16>,
-    blockers: Option<(u16, Vec<BlockerHit>)>,
+    spans: Vec<(u16, Vec<SpanHit>)>,
     rows: Vec<(u16, HeaderTarget)>,
 }
 
@@ -286,6 +293,60 @@ enum HeaderTarget {
     Action(lazybox_tui_core::action::Action),
     /// Jump to this task's workspace, or open it (the Stack line's parent).
     Task(lazybox_core::TaskId),
+    /// Offer these `(label, url)` links in a picker — the Checks line.
+    Links {
+        title: String,
+        links: Vec<(String, String)>,
+    },
+}
+
+/// One header line built from labelled segments, recording the column
+/// span of each clickable one so a click lands on the segment under the
+/// pointer rather than the whole row.
+struct SegmentLine<'a> {
+    spans: Vec<Span<'a>>,
+    col: u16,
+    hits: Vec<SpanHit>,
+    segments: usize,
+}
+
+impl<'a> SegmentLine<'a> {
+    fn new(label: Span<'a>) -> Self {
+        let col = crate::util::visual_width(label.content.as_ref()) as u16;
+        Self {
+            spans: vec![label],
+            col,
+            hits: Vec::new(),
+            segments: 0,
+        }
+    }
+
+    /// Append a segment, preceded by `sep` unless it is the first.
+    fn push(&mut self, sep: Span<'a>, segment: Span<'a>, target: Option<HeaderTarget>) {
+        if self.segments > 0 {
+            self.col += crate::util::visual_width(sep.content.as_ref()) as u16;
+            self.spans.push(sep);
+        }
+        let width = crate::util::visual_width(segment.content.as_ref()) as u16;
+        if let Some(target) = target {
+            self.hits
+                .push((self.col..=self.col + width.saturating_sub(1), target));
+        }
+        self.col += width;
+        self.spans.push(segment);
+        self.segments += 1;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.segments == 0
+    }
+
+    fn finish(self, lines: &mut Vec<Line<'a>>, hits: &mut HeaderHits) {
+        if !self.hits.is_empty() {
+            hits.spans.push((lines.len() as u16, self.hits));
+        }
+        lines.push(Line::from(self.spans));
+    }
 }
 
 /// Click-target geometry captured during render. Three regions are
@@ -307,10 +368,11 @@ struct ClickHits {
     /// reviewer picker — the same `g r` flow (#1092). `None` unless the
     /// workspace is a PR (only PRs have reviewers).
     header_reviewers: Option<u16>,
-    /// Row of the header's `Blocked on:` line and each blocker's column
-    /// span on it. Clicking a blocker jumps to its workspace (or opens it)
-    /// — the line used to say only "1 blocker", with nothing to click.
-    header_blockers: Option<(u16, Vec<BlockerHit>)>,
+    /// Header lines with clickable segments (blockers, merge state, epic)
+    /// and each segment's column span. Clicking a blocker jumps to its
+    /// workspace (or opens it) — the line used to say only "1 blocker",
+    /// with nothing to click.
+    header_spans: Vec<(u16, Vec<SpanHit>)>,
     /// Header rows whose whole width runs a [`HeaderTarget`].
     header_rows: Vec<(u16, HeaderTarget)>,
     /// Row containing the `▶ Description` / `▼ Description` header,
@@ -338,13 +400,17 @@ impl ClickHits {
         self.header_title = hits.title.and_then(|(r, url)| Some((row(r)?, url)));
         self.header_issue = hits.issue.and_then(|(r, url)| Some((row(r)?, url)));
         self.header_reviewers = hits.reviewers.and_then(row);
-        self.header_blockers = hits.blockers.and_then(|(r, spans)| {
-            let spans = spans
-                .into_iter()
-                .map(|(cols, task)| ((area.x + cols.start())..=(area.x + cols.end()), task))
-                .collect();
-            Some((row(r)?, spans))
-        });
+        self.header_spans = hits
+            .spans
+            .into_iter()
+            .filter_map(|(r, spans)| {
+                let spans = spans
+                    .into_iter()
+                    .map(|(cols, target)| ((area.x + cols.start())..=(area.x + cols.end()), target))
+                    .collect();
+                Some((row(r)?, spans))
+            })
+            .collect();
         self.header_rows = hits
             .rows
             .into_iter()
@@ -524,6 +590,8 @@ impl RightPane {
             pending_open_url: None,
             pending_request_reviewers: false,
             pending_action: None,
+            pending_links: None,
+            blocker_states: std::collections::HashMap::new(),
             pending_open_description: false,
             body_overflows: false,
             activity_buffer: None,
@@ -1109,18 +1177,26 @@ impl RightPane {
             self.pending_open_url = Some(url.clone());
             return true;
         }
-        if let Some((r, spans)) = &self.click_hits.header_blockers
-            && *r == row
-            && let Some((_, task)) = spans.iter().find(|(cols, _)| cols.contains(&col))
-        {
-            // Jump to what is blocking this work (or open it).
-            self.pending_open_task = Some(task.clone());
-            return true;
-        }
-        if let Some((_, target)) = self.click_hits.header_rows.iter().find(|(r, _)| *r == row) {
-            match target.clone() {
+        let segment = self
+            .click_hits
+            .header_spans
+            .iter()
+            .filter(|(r, _)| *r == row)
+            .flat_map(|(_, spans)| spans.iter())
+            .find(|(cols, _)| cols.contains(&col))
+            .map(|(_, target)| target.clone());
+        let target = segment.or_else(|| {
+            self.click_hits
+                .header_rows
+                .iter()
+                .find(|(r, _)| *r == row)
+                .map(|(_, target)| target.clone())
+        });
+        if let Some(target) = target {
+            match target {
                 HeaderTarget::Action(action) => self.pending_action = Some(action),
                 HeaderTarget::Task(task) => self.pending_open_task = Some(task),
+                HeaderTarget::Links { title, links } => self.pending_links = Some((title, links)),
             }
             return true;
         }
@@ -1200,6 +1276,19 @@ impl RightPane {
     /// the `g r` flow when this returns `true`.
     pub fn take_request_reviewers(&mut self) -> bool {
         std::mem::take(&mut self.pending_request_reviewers)
+    }
+
+    /// Drain the link picker a header click asked for.
+    pub fn take_links(&mut self) -> Option<(String, Vec<(String, String)>)> {
+        self.pending_links.take()
+    }
+
+    /// Feed the known state of the tasks this workspace's blockers name.
+    pub fn set_blocker_states(
+        &mut self,
+        states: std::collections::HashMap<lazybox_core::TaskId, lazybox_core::TaskState>,
+    ) {
+        self.blocker_states = states;
     }
 
     /// Drain the catalog action a header-row click asked for.
@@ -1435,7 +1524,7 @@ impl RightPane {
         self.click_hits.header_title = None;
         self.click_hits.header_issue = None;
         self.click_hits.header_reviewers = None;
-        self.click_hits.header_blockers = None;
+        self.click_hits.header_spans.clear();
         self.click_hits.header_rows.clear();
         let theme = crate::theme::current();
         let Some(workspace) = &self.workspace else {
@@ -1623,6 +1712,62 @@ impl RightPane {
             Span::styled(branch, Style::default().fg(theme.accent)),
         ]));
 
+        // Where this work sits in an orchestration: its parent epic, the
+        // PRs it must land after, and its role. None of it showed in the
+        // right pane — epic membership read only from sidebar grouping.
+        let parent = workspace.hierarchy_parent().cloned();
+        let merge_after: Vec<lazybox_core::TaskId> =
+            workspace.hierarchy_merge_after().cloned().collect();
+        let role = workspace.effective_role();
+        if parent.is_some() || !merge_after.is_empty() || role.is_some() {
+            use lazybox_tui_core::action::Action;
+            let own_repo = task.repo.as_deref();
+            let link = Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::UNDERLINED);
+            let label = match (&parent, role) {
+                (Some(_), _) => "Epic: ",
+                (None, Some(_)) => "Role: ",
+                (None, None) => "Order: ",
+            };
+            let mut line =
+                SegmentLine::new(Span::styled(label, Style::default().fg(theme.text_dim)));
+            let sep = || Span::styled(" · ", Style::default().fg(theme.chrome));
+            if let Some(parent) = parent {
+                line.push(
+                    sep(),
+                    Span::styled(blocker_label(&parent, own_repo), link),
+                    Some(HeaderTarget::Task(parent)),
+                );
+            }
+            if let Some(role) = role {
+                line.push(
+                    sep(),
+                    Span::styled(role.display_name(), link),
+                    Some(HeaderTarget::Action(Action::SetRole)),
+                );
+            }
+            for (i, after) in merge_after.into_iter().enumerate() {
+                let (sep_span, text) = if i == 0 {
+                    (
+                        sep(),
+                        format!("merge after {}", blocker_label(&after, own_repo)),
+                    )
+                } else {
+                    (
+                        Span::styled(", ", Style::default().fg(theme.text_dim)),
+                        blocker_label(&after, own_repo),
+                    )
+                };
+                line.push(
+                    sep_span,
+                    Span::styled(text, link),
+                    Some(HeaderTarget::Task(after)),
+                );
+            }
+            line.finish(&mut lines, &mut hits);
+        }
+
         // Stacked-PR relationship (issue #969). A PR whose base is
         // another open PR's head sits mid-stack; spell out the parent it
         // rides on and its `k/N` position so the chain reads as a stack,
@@ -1676,38 +1821,42 @@ impl RightPane {
         }
         // The blocking tasks themselves, by reference, each one clickable.
         // This line used to read "1 blocker" with nothing to click and no
-        // way to find out what was blocking.
+        // way to find out what was blocking. A blocker this client knows
+        // has since closed or merged is struck through, and when none is
+        // left open the line stops being red.
         let blockers: Vec<lazybox_core::TaskId> =
             workspace.hierarchy_blocked_by().cloned().collect();
         if !blockers.is_empty() {
             let own_repo = task.repo.as_deref();
-            let row = lines.len() as u16;
-            let label = if workspace.declared_blocker().is_some() {
-                "Blocked by: "
-            } else {
-                "Blocked on: "
+            let resolved = |id: &lazybox_core::TaskId| {
+                matches!(
+                    self.blocker_states.get(id),
+                    Some(lazybox_core::TaskState::Closed | lazybox_core::TaskState::Merged)
+                )
             };
-            let mut spans = vec![Span::styled(label, Style::default().fg(theme.error))];
-            let mut col = label.chars().count() as u16;
-            let mut blocker_hits = Vec::with_capacity(blockers.len());
-            for (i, blocker) in blockers.iter().enumerate() {
-                if i > 0 {
-                    spans.push(Span::styled(", ", Style::default().fg(theme.text_dim)));
-                    col += 2;
-                }
-                let text = blocker_label(blocker, own_repo);
-                let len = text.chars().count() as u16;
-                blocker_hits.push((col..=col + len.saturating_sub(1), blocker.clone()));
-                col += len;
-                spans.push(Span::styled(
-                    text,
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::UNDERLINED),
-                ));
+            let all_resolved = blockers.iter().all(resolved);
+            let (label, label_color) = if all_resolved {
+                ("Was blocked on: ", theme.text_dim)
+            } else if workspace.declared_blocker().is_some() {
+                ("Blocked by: ", theme.error)
+            } else {
+                ("Blocked on: ", theme.error)
+            };
+            let mut line = SegmentLine::new(Span::styled(label, Style::default().fg(label_color)));
+            for blocker in &blockers {
+                let mut style = Style::default().add_modifier(Modifier::UNDERLINED);
+                style = if resolved(blocker) {
+                    style.fg(theme.text_dim).add_modifier(Modifier::CROSSED_OUT)
+                } else {
+                    style.fg(theme.accent)
+                };
+                line.push(
+                    Span::styled(", ", Style::default().fg(theme.text_dim)),
+                    Span::styled(blocker_label(blocker, own_repo), style),
+                    Some(HeaderTarget::Task(blocker.clone())),
+                );
             }
-            hits.blockers = Some((row, blocker_hits));
-            lines.push(Line::from(spans));
+            line.finish(&mut lines, &mut hits);
         }
 
         // Diffstat — a one-line at-a-glance sense of a PR's size/shape.
@@ -1737,6 +1886,224 @@ impl RightPane {
                     Style::default().fg(theme.text_dim),
                 ),
             ]));
+        }
+
+        // CI, check by check (the audit's "no drill-down anywhere"): the
+        // sidebar pill says only ✗ or ◔. Counts per outcome, the first few
+        // failing names, and a click offers every check — failing first —
+        // to open in the browser.
+        if !task.checks.is_empty() {
+            use lazybox_core::CiStatus;
+            let failing: Vec<&lazybox_core::CheckRun> = task
+                .checks
+                .iter()
+                .filter(|c| matches!(c.status, CiStatus::Failure | CiStatus::Mixed))
+                .collect();
+            let running = task
+                .checks
+                .iter()
+                .filter(|c| matches!(c.status, CiStatus::Pending | CiStatus::Running))
+                .count();
+            let passed = task
+                .checks
+                .iter()
+                .filter(|c| c.status == CiStatus::Success)
+                .count();
+            let rank = |status: CiStatus| match status {
+                CiStatus::Failure | CiStatus::Mixed => 0,
+                CiStatus::Pending | CiStatus::Running => 1,
+                CiStatus::Success => 2,
+                CiStatus::None => 3,
+            };
+            let mut ordered: Vec<&lazybox_core::CheckRun> = task.checks.iter().collect();
+            ordered.sort_by_key(|c| rank(c.status));
+            let links: Vec<(String, String)> = ordered
+                .iter()
+                .filter_map(|c| {
+                    let glyph = match rank(c.status) {
+                        0 => "✗",
+                        1 => "◔",
+                        2 => "✓",
+                        _ => "·",
+                    };
+                    Some((format!("{glyph} {}", c.name), c.url.clone()?))
+                })
+                .collect();
+            if !links.is_empty() {
+                hits.rows.push((
+                    lines.len() as u16,
+                    HeaderTarget::Links {
+                        title: "Checks".to_string(),
+                        links,
+                    },
+                ));
+            }
+            let sep = || Span::styled(" · ", Style::default().fg(theme.chrome));
+            let mut line = SegmentLine::new(Span::styled(
+                "Checks: ",
+                Style::default().fg(theme.text_dim),
+            ));
+            if !failing.is_empty() {
+                const NAMED: usize = 3;
+                let mut names: Vec<&str> = failing
+                    .iter()
+                    .take(NAMED)
+                    .map(|c| c.name.as_str())
+                    .collect();
+                let more = failing.len().saturating_sub(NAMED);
+                let extra = if more > 0 {
+                    format!(" +{more}")
+                } else {
+                    String::new()
+                };
+                names.sort_unstable();
+                line.push(
+                    sep(),
+                    Span::styled(
+                        format!("✗ {} failing ({}{extra})", failing.len(), names.join(", ")),
+                        Style::default().fg(theme.error),
+                    ),
+                    None,
+                );
+            }
+            if running > 0 {
+                line.push(
+                    sep(),
+                    Span::styled(
+                        format!("◔ {running} running"),
+                        Style::default().fg(theme.warn),
+                    ),
+                    None,
+                );
+            }
+            if passed > 0 {
+                line.push(
+                    sep(),
+                    Span::styled(
+                        format!("✓ {passed} passed"),
+                        Style::default().fg(theme.success),
+                    ),
+                    None,
+                );
+            }
+            if !line.is_empty() {
+                line.finish(&mut lines, &mut hits);
+            }
+        }
+
+        // Merge readiness, in words. Each of these was a one-glyph sidebar
+        // pill at most (behind-base had none), and the right pane showed
+        // none of them. Segments that name an action run it on click.
+        if task.is_pr()
+            && matches!(
+                task.state,
+                lazybox_core::TaskState::Open | lazybox_core::TaskState::Draft
+            )
+        {
+            use lazybox_tui_core::action::Action;
+            let sep = || Span::styled(" · ", Style::default().fg(theme.chrome));
+            let mut line =
+                SegmentLine::new(Span::styled("Merge: ", Style::default().fg(theme.text_dim)));
+            let conflict = task.mergeable.is_conflicting();
+            let policy_block = lazybox_core::policy::approval_policy_blocks(task);
+            if conflict {
+                line.push(
+                    sep(),
+                    Span::styled("conflict", Style::default().fg(theme.error)),
+                    None,
+                );
+            }
+            if task.is_behind_base {
+                line.push(
+                    sep(),
+                    Span::styled(
+                        "behind base — update",
+                        Style::default()
+                            .fg(theme.warn)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                    Some(HeaderTarget::Action(Action::UpdateBranch)),
+                );
+            }
+            if let Some(reason) = policy_block {
+                line.push(
+                    sep(),
+                    Span::styled(reason, Style::default().fg(theme.text_dim)),
+                    None,
+                );
+            }
+            if task.merge_blocked {
+                line.push(
+                    sep(),
+                    Span::styled(
+                        "blocked by branch rules",
+                        Style::default().fg(theme.text_dim),
+                    ),
+                    None,
+                );
+            }
+            if task.is_in_merge_queue {
+                line.push(
+                    sep(),
+                    Span::styled("in merge queue", Style::default().fg(theme.accent)),
+                    None,
+                );
+            }
+            if task.auto_merge_enabled {
+                line.push(
+                    sep(),
+                    Span::styled(
+                        format!(
+                            "{} GitHub auto-merge",
+                            crate::components::sidebar::pills::AUTO_GLYPH
+                        ),
+                        Style::default().fg(theme.accent),
+                    ),
+                    None,
+                );
+            }
+            let arm = if workspace.auto_merge_on_green {
+                Span::styled(
+                    format!(
+                        "{} merges on green",
+                        crate::components::sidebar::pills::ARM_GLYPH
+                    ),
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::UNDERLINED),
+                )
+            } else {
+                Span::styled(
+                    "arm on green",
+                    Style::default()
+                        .fg(theme.text_dim)
+                        .add_modifier(Modifier::UNDERLINED),
+                )
+            };
+            let ready = !conflict
+                && !task.is_behind_base
+                && !task.merge_blocked
+                && policy_block.is_none()
+                && task.state == lazybox_core::TaskState::Open
+                && task.ci == lazybox_core::CiStatus::Success;
+            if ready && !task.is_in_merge_queue {
+                line.push(
+                    sep(),
+                    Span::styled(
+                        "ready — merge",
+                        Style::default()
+                            .fg(theme.success)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                    Some(HeaderTarget::Action(Action::MergePr)),
+                );
+            }
+            line.push(
+                sep(),
+                arm,
+                Some(HeaderTarget::Action(Action::ToggleAutoMerge)),
+            );
+            line.finish(&mut lines, &mut hits);
         }
 
         // Originating issue — the Issue this PR was created from /

@@ -2706,6 +2706,9 @@ impl<T: TerminalAdapter> Model<T> {
                         if let Some(task) = self.right.take_open_task() {
                             self.open_task_reference(&task);
                         }
+                        if let Some((title, links)) = self.right.take_links() {
+                            self.mount_link_picker(&title, links);
+                        }
                         if let Some(action) = self.right.take_action() {
                             let cmds =
                                 self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Mouse);

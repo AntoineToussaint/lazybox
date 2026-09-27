@@ -18273,6 +18273,20 @@ mod leader_tile_tests {
         );
     }
 
+    /// The header's Checks line offers its checks through the same picker
+    /// as `]]u`; an empty list mounts nothing.
+    #[test]
+    fn the_link_picker_mounts_over_its_links_only_when_there_are_some() {
+        let (mut m, _server) = build_model_with_terminals(1);
+        m.mount_link_picker("Checks", Vec::new());
+        assert_ne!(m.top_modal(), Some(&Id::UrlPicker));
+        m.mount_link_picker(
+            "Checks",
+            vec![("✗ build".into(), "https://ci.example/build".into())],
+        );
+        assert_eq!(m.top_modal(), Some(&Id::UrlPicker));
+    }
+
     /// With nothing openable on screen, `]]u` opens no picker — just a
     /// footer hint (which mounts no modal).
     #[test]

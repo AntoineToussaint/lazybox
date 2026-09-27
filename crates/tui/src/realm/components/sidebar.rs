@@ -858,6 +858,11 @@ impl Sidebar {
         self.inner.focus_workspace_key(key)
     }
 
+    /// The state of `task` as this client last saw it.
+    pub fn task_state_for(&self, task: &lazybox_core::TaskId) -> Option<lazybox_core::TaskState> {
+        self.inner.task_state_for(task)
+    }
+
     /// The workspace carrying `task`, if this client knows one.
     pub fn workspace_key_for_task(
         &self,

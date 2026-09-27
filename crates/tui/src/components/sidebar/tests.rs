@@ -4167,6 +4167,28 @@ mod search_tests {
         };
         assert_eq!(sb.workspace_key_for_task(&elsewhere), None);
     }
+
+    /// The right pane strikes through a blocker that has since closed; it
+    /// learns that from whichever workspace carries the blocking task.
+    #[test]
+    fn task_state_for_reads_the_state_of_a_tracked_task() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut workspace = issue_ws("993", "Closed blocker");
+        workspace.gh_issues[0].state = lazybox_core::TaskState::Closed;
+        let task = workspace.gh_issues[0].id.clone();
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        assert_eq!(
+            sb.task_state_for(&task),
+            Some(lazybox_core::TaskState::Closed)
+        );
+        let untracked = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "x/y#1".into(),
+        };
+        assert_eq!(sb.task_state_for(&untracked), None);
+    }
 }
 
 #[cfg(test)]

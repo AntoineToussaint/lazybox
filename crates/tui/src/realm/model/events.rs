@@ -3832,6 +3832,15 @@ impl<T: TerminalAdapter> Model<T> {
             .and_then(|k| self.sidebar.stack_info(k))
             .cloned();
         self.right.set_stack(stack);
+        let blocker_states = workspace
+            .as_ref()
+            .map(|w| {
+                w.hierarchy_blocked_by()
+                    .filter_map(|id| Some((id.clone(), self.sidebar.task_state_for(id)?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.right.set_blocker_states(blocker_states);
         // On a group-header row there's no workspace to show; feed the
         // pane a repo / Space overview instead so it isn't a dead panel
         // (#1442). Cheap: built from already-tracked workspaces.

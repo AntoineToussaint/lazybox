@@ -2182,6 +2182,20 @@ impl Sidebar {
             .map(|(key, _)| key.clone())
     }
 
+    /// The state of `task` as this client last saw it, from whichever
+    /// workspace carries it. `None` when no tracked workspace does.
+    pub fn task_state_for(&self, task: &lazybox_core::TaskId) -> Option<lazybox_core::TaskState> {
+        self.workspaces.values().find_map(|workspace| {
+            workspace
+                .pr
+                .iter()
+                .chain(workspace.gh_issues.iter())
+                .chain(workspace.linear_issues.iter())
+                .find(|t| &t.id == task)
+                .map(|t| t.state)
+        })
+    }
+
     pub fn focus_workspace_key(&mut self, key: &SessionKey) -> bool {
         self.ensure_visible_fresh();
         for (i, row) in self.visible.iter().enumerate() {

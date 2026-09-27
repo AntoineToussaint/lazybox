@@ -228,6 +228,17 @@ impl Right {
         self.inner.take_action()
     }
 
+    pub fn take_links(&mut self) -> Option<(String, Vec<(String, String)>)> {
+        self.inner.take_links()
+    }
+
+    pub fn set_blocker_states(
+        &mut self,
+        states: std::collections::HashMap<lazybox_core::TaskId, lazybox_core::TaskState>,
+    ) {
+        self.inner.set_blocker_states(states);
+    }
+
     /// The focused task's raw markdown body, for the reader modal.
     pub fn task_body(&self) -> Option<String> {
         self.inner.task_body()

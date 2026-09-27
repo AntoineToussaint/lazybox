@@ -2678,15 +2678,16 @@ mod header_blocker_tests {
         let rows = render(&mut pane, 100, 24);
         let (row, hits) = pane
             .click_hits
-            .header_blockers
-            .clone()
+            .header_spans
+            .first()
+            .cloned()
             .expect("the blocker line registers click targets");
         let line = &rows[row as usize];
         assert!(line.contains("#7") && line.contains("x/y#9"), "{line}");
         assert_eq!(hits.len(), 2);
 
         let (span, target) = hits[1].clone();
-        assert_eq!(target, gh("x/y#9"));
+        assert_eq!(target, super::super::HeaderTarget::Task(gh("x/y#9")));
         assert!(pane.handle_mouse_click(*span.start(), row));
         assert_eq!(pane.take_open_task(), Some(gh("x/y#9")));
         assert_eq!(pane.take_open_task(), None, "the request is consumed");
@@ -2793,5 +2794,159 @@ mod header_height_tests {
                 "{needle} is drawn: {rows:#?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod header_status_rows_tests {
+    //! The Checks, Merge and Epic header rows, and blocker resolution:
+    //! state that was a one-glyph sidebar pill at most is spelled out in
+    //! the header, and each segment naming an action runs it on click.
+    use super::super::{PaneId, RightPane};
+    use chrono::Utc;
+    use lazybox_core::{CheckRun, CiStatus, Task, TaskId, TaskState, Workspace};
+    use lazybox_tui_core::action::Action;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn pr() -> Task {
+        super::originating_issue_header_tests::task_for_blockers(172)
+    }
+
+    fn gh(key: &str) -> TaskId {
+        TaskId {
+            source: "github".into(),
+            key: key.into(),
+        }
+    }
+
+    fn check(name: &str, status: CiStatus) -> CheckRun {
+        CheckRun {
+            name: name.into(),
+            status,
+            url: Some(format!("https://ci.example/{name}")),
+        }
+    }
+
+    fn pane_for(ws: Workspace) -> (RightPane, Vec<String>) {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let rows = render(&mut pane);
+        (pane, rows)
+    }
+
+    fn render(pane: &mut RightPane) -> Vec<String> {
+        let (w, h) = (120, 48);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    fn at(rows: &[String], needle: &str) -> (u16, u16) {
+        rows.iter()
+            .enumerate()
+            .find_map(|(y, r)| {
+                r.find(needle)
+                    .map(|byte| (r[..byte].chars().count() as u16, y as u16))
+            })
+            .unwrap_or_else(|| panic!("{needle} is drawn: {rows:#?}"))
+    }
+
+    #[test]
+    fn the_checks_line_counts_names_failures_and_offers_every_check() {
+        let mut task = pr();
+        task.checks = vec![
+            check("lint", CiStatus::Success),
+            check("build", CiStatus::Failure),
+            check("e2e", CiStatus::Running),
+        ];
+        let (mut pane, rows) = pane_for(Workspace::from_task(task, Utc::now()));
+        let (_, row) = at(&rows, "Checks:");
+        let line = &rows[row as usize];
+        for part in ["✗ 1 failing (build)", "◔ 1 running", "✓ 1 passed"] {
+            assert!(line.contains(part), "{part} in {line}");
+        }
+        assert!(pane.handle_mouse_click(2, row));
+        let (title, links) = pane.take_links().expect("a click offers the checks");
+        assert_eq!(title, "Checks");
+        let labels: Vec<&str> = links.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["✗ build", "◔ e2e", "✓ lint"], "failing first");
+        assert_eq!(links[0].1, "https://ci.example/build");
+    }
+
+    #[test]
+    fn merge_segments_run_their_own_action() {
+        let mut task = pr();
+        task.is_behind_base = true;
+        let (mut pane, rows) = pane_for(Workspace::from_task(task, Utc::now()));
+        let (col, row) = at(&rows, "behind base");
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_action(), Some(Action::UpdateBranch));
+        let (col, row) = at(&rows, "arm on green");
+        assert!(pane.handle_mouse_click(col + 1, row));
+        assert_eq!(pane.take_action(), Some(Action::ToggleAutoMerge));
+        assert!(
+            !rows[row as usize].contains("ready"),
+            "a PR behind its base is not ready"
+        );
+    }
+
+    #[test]
+    fn a_green_mergeable_pr_offers_the_merge() {
+        let mut task = pr();
+        task.ci = CiStatus::Success;
+        let mut ws = Workspace::from_task(task, Utc::now());
+        ws.auto_merge_on_green = true;
+        let (mut pane, rows) = pane_for(ws);
+        assert!(rows.iter().any(|r| r.contains("merges on green")));
+        let (col, row) = at(&rows, "ready — merge");
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_action(), Some(Action::MergePr));
+    }
+
+    #[test]
+    fn the_epic_line_links_the_parent_the_role_and_the_landing_order() {
+        let mut task = pr();
+        task.parent = Some(gh("o/r#1517"));
+        task.merge_after = vec![gh("o/r#12")];
+        let mut ws = Workspace::from_task(task, Utc::now());
+        ws.role = Some(lazybox_core::Role::Worker);
+        let (mut pane, rows) = pane_for(ws);
+        let (col, row) = at(&rows, "#1517");
+        assert!(rows[row as usize].contains("Epic:"));
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_open_task(), Some(gh("o/r#1517")));
+        let (col, row) = at(&rows, "Worker");
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_action(), Some(Action::SetRole));
+        let (col, row) = at(&rows, "merge after #12");
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_open_task(), Some(gh("o/r#12")));
+    }
+
+    #[test]
+    fn a_blocker_known_to_be_closed_stops_the_line_reading_red() {
+        let mut task = pr();
+        task.blocked_by = vec![gh("o/r#7")];
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        assert!(
+            render(&mut pane)
+                .iter()
+                .any(|r| r.contains("Blocked on: #7"))
+        );
+
+        pane.set_blocker_states([(gh("o/r#7"), TaskState::Closed)].into());
+        let rows = render(&mut pane);
+        assert!(
+            rows.iter().any(|r| r.contains("Was blocked on: #7")),
+            "{rows:#?}"
+        );
     }
 }

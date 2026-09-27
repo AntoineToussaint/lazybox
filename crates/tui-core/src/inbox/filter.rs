@@ -25,6 +25,11 @@ use super::WorkspaceKind;
 /// "big diff" for the [`Filter::BigDiff`] predicate.
 pub const BIG_DIFF_LINES: u32 = 500;
 
+/// How recent a touch keeps a workspace [`Filter::InFlight`]: long enough
+/// to span a meeting or a lunch without the working set emptying, short
+/// enough that yesterday's work has dropped out by morning.
+pub const IN_FLIGHT_WINDOW: chrono::Duration = chrono::Duration::hours(1);
+
 /// The axis a [`Filter`] lives on. Drives the OR-within / AND-across
 /// combination in [`FilterSet::accepts`] and groups the filter menu.
 #[derive(
@@ -143,6 +148,14 @@ pub enum Filter {
     /// complement of "what's blocked" — "what can I pick up" without
     /// reading every row.
     Ready,
+    /// What you are juggling right now: an agent here is working or
+    /// waiting on you (or just finished a turn you have not looked at),
+    /// or within the last [`IN_FLIGHT_WINDOW`] you marked
+    /// it read or your own PR / issue moved (a push, CI, a review, a
+    /// comment). "In flight" rather than "active" or "recent": it is the
+    /// set of things currently in the air, which is what someone running
+    /// many projects at once has to keep track of.
+    InFlight,
     // ── Role ───────────────────────────────────────────────────────
     Author,
     Reviewer,
@@ -166,7 +179,7 @@ impl Filter {
     /// Every fixed filter, in menu order (State, Role, Kind, Priority).
     /// Value-driven axes (Label, Linear state) are enumerated separately
     /// from the candidate set — see [`FilterSet`] and `Sidebar`.
-    pub const ALL: [Filter; 30] = [
+    pub const ALL: [Filter; 31] = [
         Filter::WithAgent,
         Filter::AgentWorking,
         Filter::Claimed,
@@ -186,6 +199,7 @@ impl Filter {
         Filter::Snoozed,
         Filter::Blocked,
         Filter::Ready,
+        Filter::InFlight,
         Filter::Author,
         Filter::Reviewer,
         Filter::Assignee,
@@ -219,7 +233,8 @@ impl Filter {
             | Filter::BigDiff
             | Filter::Snoozed
             | Filter::Blocked
-            | Filter::Ready => FilterAxis::State,
+            | Filter::Ready
+            | Filter::InFlight => FilterAxis::State,
             Filter::Author
             | Filter::Reviewer
             | Filter::Assignee
@@ -266,6 +281,7 @@ impl Filter {
             Filter::Snoozed => "snoozed",
             Filter::Blocked => "blocked",
             Filter::Ready => "ready",
+            Filter::InFlight => "in-flight",
             Filter::Author => "author",
             Filter::Reviewer => "reviewer",
             Filter::Assignee => "assignee",
@@ -341,6 +357,17 @@ impl Filter {
                     // agent-less. Without this, `ready` and `snoozed`
                     // overlap and a deferred ticket keeps resurfacing.
                     && !w.is_snoozed(ctx.now)
+            }
+            Filter::InFlight => {
+                let since = ctx.now - IN_FLIGHT_WINDOW;
+                crate::agent_attention::workspace_is_working(w, ctx.agents)
+                    || crate::agent_attention::workspace_is_asking(w, ctx.agents)
+                    || crate::agent_attention::workspace_is_done(w, ctx.agents)
+                    || w.last_viewed_at.is_some_and(|t| t >= since)
+                    || task.is_some_and(|t| {
+                        matches!(t.role, TaskRole::Author | TaskRole::Assignee)
+                            && t.updated_at >= since
+                    })
             }
             Filter::Author => task.is_some_and(|t| t.role == TaskRole::Author),
             Filter::Reviewer => task.is_some_and(|t| t.role == TaskRole::Reviewer),
@@ -1197,6 +1224,59 @@ mod tests {
 
         assert_eq!(Filter::Blocked.axis(), FilterAxis::State);
         assert_eq!(Filter::Blocked.label(), "blocked");
+    }
+
+    /// `in-flight` is what is in the air right now: a live agent working,
+    /// asking or just done; a workspace marked read in the last hour; or
+    /// your own task moving in the last hour. Someone else's PR moving, or
+    /// your own work from yesterday, is not.
+    #[test]
+    fn in_flight_is_what_you_touched_or_what_moved_in_the_last_hour() {
+        let no_agents = HashMap::new();
+        let check = |ws: &Workspace, agents: &HashMap<SessionKey, lazybox_ipc::AgentState>| {
+            Filter::InFlight.matches(&FilterCtx {
+                w: ws,
+                agents,
+                now: now(),
+            })
+        };
+        let an_hour_and_more = now() - IN_FLIGHT_WINDOW - chrono::Duration::minutes(1);
+        let stale = |key: &str, role: TaskRole| {
+            workspace_with(key, |t| {
+                t.role = role;
+                t.updated_at = an_hour_and_more;
+            })
+        };
+
+        let quiet = stale("a", TaskRole::Author);
+        assert!(
+            !check(&quiet, &no_agents),
+            "yesterday's own work is not in flight"
+        );
+
+        let moved = workspace_with("b", |t| t.role = TaskRole::Author);
+        assert!(check(&moved, &no_agents), "your own PR moved just now");
+        let theirs = workspace_with("c", |t| t.role = TaskRole::Observer);
+        assert!(
+            !check(&theirs, &no_agents),
+            "someone else's PR moving is not yours"
+        );
+
+        let mut viewed = stale("d", TaskRole::Observer);
+        viewed.last_viewed_at = Some(now() - chrono::Duration::minutes(10));
+        assert!(check(&viewed, &no_agents), "marked read ten minutes ago");
+
+        for state in [
+            lazybox_ipc::AgentState::Working,
+            lazybox_ipc::AgentState::InputNeeded,
+            lazybox_ipc::AgentState::Done,
+        ] {
+            let agents = HashMap::from([(SessionKey::from(&quiet.key), state)]);
+            assert!(check(&quiet, &agents), "a live agent that is {state:?}");
+        }
+
+        assert_eq!(Filter::InFlight.axis(), FilterAxis::State);
+        assert_eq!(Filter::InFlight.label(), "in-flight");
     }
 
     /// `ready` = an issue with no dependency edge, no declared blocker,

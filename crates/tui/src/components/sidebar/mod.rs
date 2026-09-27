@@ -274,6 +274,9 @@ pub struct Sidebar {
     /// reply / capture). Drives the row's `?N` badge; a workspace with none
     /// carries no entry.
     open_requests: HashMap<SessionKey, usize>,
+    /// The open inbound requests themselves — who asked what — so the
+    /// right pane can list what is behind the `⟲N` badge.
+    open_request_rows: HashMap<SessionKey, Vec<lazybox_ipc::OpenAgentRequest>>,
     /// Markdown artifacts spooled per workspace (#1822), fed by
     /// `Event::WorkspaceArtifacts` (seeded on connect, refreshed on every
     /// spool change). Drives the row's `▤N` badge; a workspace with none
@@ -761,6 +764,7 @@ impl Sidebar {
             repo_summaries: BTreeMap::new(),
             stacks: HashMap::new(),
             open_requests: HashMap::new(),
+            open_request_rows: HashMap::new(),
             artifact_counts: HashMap::new(),
             defer_recompute: false,
             recompute_pending: false,
@@ -4061,6 +4065,42 @@ impl Sidebar {
     /// Open inbound requests for one workspace; `0` when it owes none.
     pub fn open_requests(&self, key: &SessionKey) -> usize {
         self.open_requests.get(key).copied().unwrap_or(0)
+    }
+
+    /// Record who asked `key` what. An empty set forgets the row, like
+    /// [`Self::set_open_requests`].
+    pub fn set_open_request_rows(
+        &mut self,
+        key: SessionKey,
+        rows: Vec<lazybox_ipc::OpenAgentRequest>,
+    ) {
+        if rows.is_empty() {
+            self.open_request_rows.remove(&key);
+        } else {
+            self.open_request_rows.insert(key, rows);
+        }
+    }
+
+    /// The open requests against `key`, oldest first.
+    pub fn open_request_rows(&self, key: &SessionKey) -> &[lazybox_ipc::OpenAgentRequest] {
+        self.open_request_rows
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// How a workspace is named when another one refers to it: `#N title`
+    /// for a tracked task, otherwise the workspace name. `None` when this
+    /// client does not track it.
+    pub fn workspace_reference_label(&self, key: &SessionKey) -> Option<String> {
+        let workspace = self.workspaces.get(key)?;
+        Some(match workspace.primary_task() {
+            Some(task) => match task.id.number() {
+                Some(n) => format!("#{n} {}", task.title),
+                None => task.title.clone(),
+            },
+            None => workspace.name.clone(),
+        })
     }
 
     /// Record how many artifacts a workspace's agents have spooled (#1822).

@@ -232,6 +232,13 @@ impl Right {
         self.inner.take_links()
     }
 
+    pub fn set_inbound_requests(
+        &mut self,
+        requests: Vec<crate::components::right_pane::InboundRequest>,
+    ) {
+        self.inner.set_inbound_requests(requests);
+    }
+
     pub fn set_blocker_states(
         &mut self,
         states: std::collections::HashMap<lazybox_core::TaskId, lazybox_core::TaskState>,

@@ -211,6 +211,9 @@ pub struct RightPane {
     /// fed by the orchestrator from the tasks it tracks. A blocker that has
     /// since closed or merged renders struck through instead of red.
     blocker_states: std::collections::HashMap<lazybox_core::TaskId, lazybox_core::TaskState>,
+    /// Open questions other agents have asked this workspace's agent — the
+    /// `⟲N` badge's contents. Fed by the orchestrator.
+    inbound_requests: Vec<InboundRequest>,
     /// Set when the user asks to read the full description (a second
     /// `d`, or a click on the `+N more lines` trailer). The orchestrator
     /// drains it after dispatching the key/click and mounts the reader
@@ -268,6 +271,15 @@ pub struct RightPane {
     pending_open_task: Option<lazybox_core::TaskId>,
 }
 
+/// One open `ask_session` request against this workspace, as the header
+/// shows it: who asked (their workspace, and how to name it) and what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundRequest {
+    pub asker: lazybox_core::SessionKey,
+    pub asker_label: String,
+    pub question: String,
+}
+
 /// One clickable segment of a header line: its column span and what a
 /// click on it does.
 type SpanHit = (std::ops::RangeInclusive<u16>, HeaderTarget);
@@ -293,6 +305,8 @@ enum HeaderTarget {
     Action(lazybox_tui_core::action::Action),
     /// Jump to this task's workspace, or open it (the Stack line's parent).
     Task(lazybox_core::TaskId),
+    /// Move the sidebar onto this workspace — an inbound request's asker.
+    Workspace(lazybox_core::SessionKey),
     /// Offer these `(label, url)` links in a picker — the Checks line.
     Links {
         title: String,
@@ -592,6 +606,7 @@ impl RightPane {
             pending_action: None,
             pending_links: None,
             blocker_states: std::collections::HashMap::new(),
+            inbound_requests: Vec::new(),
             pending_open_description: false,
             body_overflows: false,
             activity_buffer: None,
@@ -1197,6 +1212,7 @@ impl RightPane {
                 HeaderTarget::Action(action) => self.pending_action = Some(action),
                 HeaderTarget::Task(task) => self.pending_open_task = Some(task),
                 HeaderTarget::Links { title, links } => self.pending_links = Some((title, links)),
+                HeaderTarget::Workspace(key) => self.pending_select_workspace = Some(key),
             }
             return true;
         }
@@ -1289,6 +1305,11 @@ impl RightPane {
         states: std::collections::HashMap<lazybox_core::TaskId, lazybox_core::TaskState>,
     ) {
         self.blocker_states = states;
+    }
+
+    /// Feed the open requests other agents have asked this workspace.
+    pub fn set_inbound_requests(&mut self, requests: Vec<InboundRequest>) {
+        self.inbound_requests = requests;
     }
 
     /// Drain the catalog action a header-row click asked for.
@@ -1857,6 +1878,40 @@ impl RightPane {
                 );
             }
             line.finish(&mut lines, &mut hits);
+        }
+
+        // Who is waiting on this agent, and for what — the `⟲N` badge used
+        // to be a count with no way to see behind it. One line per
+        // request, oldest first; a click jumps to the asker.
+        const INBOUND_SHOWN: usize = 3;
+        for request in self.inbound_requests.iter().take(INBOUND_SHOWN) {
+            hits.rows.push((
+                lines.len() as u16,
+                HeaderTarget::Workspace(request.asker.clone()),
+            ));
+            lines.push(Line::from(vec![
+                Span::styled("Asked by ", Style::default().fg(theme.warn)),
+                Span::styled(
+                    request.asker_label.clone(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+                Span::styled(": ", Style::default().fg(theme.text_dim)),
+                Span::styled(
+                    format!("\u{201c}{}\u{201d}", request.question.replace('\n', " ")),
+                    Style::default().fg(theme.text_dim),
+                ),
+            ]));
+        }
+        if self.inbound_requests.len() > INBOUND_SHOWN {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  +{} more open requests",
+                    self.inbound_requests.len() - INBOUND_SHOWN
+                ),
+                Style::default().fg(theme.text_dim),
+            )));
         }
 
         // Diffstat — a one-line at-a-glance sense of a PR's size/shape.

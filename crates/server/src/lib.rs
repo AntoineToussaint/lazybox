@@ -2334,10 +2334,11 @@ pub async fn dispatch_command(
             // connects mid-conversation sees them without waiting for the
             // next ask or reply. Kept before AutoFixPolicyConfig so that
             // stays the end-of-replay marker.
-            for (workspace_key, open) in crate::mcp::open_request_counts(config).await {
+            for (workspace_key, requests) in crate::mcp::open_requests_by_target(config).await {
                 let _ = tx.send(Event::AgentRequestsOpen {
                     workspace_key,
-                    open,
+                    open: requests.len(),
+                    requests,
                 });
             }
             // Spooled agent artifacts (#1822): seed the row badge for every

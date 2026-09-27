@@ -749,6 +749,25 @@ impl Sidebar {
         self.inner.open_requests(key)
     }
 
+    pub fn set_open_request_rows(
+        &mut self,
+        key: lazybox_core::SessionKey,
+        rows: Vec<lazybox_ipc::OpenAgentRequest>,
+    ) {
+        self.inner.set_open_request_rows(key, rows);
+    }
+
+    pub fn open_request_rows(
+        &self,
+        key: &lazybox_core::SessionKey,
+    ) -> &[lazybox_ipc::OpenAgentRequest] {
+        self.inner.open_request_rows(key)
+    }
+
+    pub fn workspace_reference_label(&self, key: &lazybox_core::SessionKey) -> Option<String> {
+        self.inner.workspace_reference_label(key)
+    }
+
     /// See `Sidebar::artifact_count` — spooled artifacts for one workspace.
     pub fn artifact_count(&self, key: &lazybox_core::SessionKey) -> usize {
         self.inner.artifact_count(key)

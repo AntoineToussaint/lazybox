@@ -12908,21 +12908,34 @@ mod merge_focus_follow_tests {
         let session = SessionKey::from(&ws_key);
         assert_eq!(m.sidebar.open_requests(&session), 0);
 
+        let asked = |q: &str| lazybox_ipc::OpenAgentRequest {
+            asker: lazybox_core::WorkspaceKey::new("github:o/r#9"),
+            question: q.into(),
+            asked_at: 1,
+        };
         m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
             workspace_key: ws_key.clone(),
             open: 2,
+            requests: vec![asked("status?"), asked("contract?")],
         });
         assert_eq!(m.sidebar.open_requests(&session), 2);
+        assert_eq!(
+            m.sidebar.open_request_rows(&session).len(),
+            2,
+            "who asked what is kept for the right pane"
+        );
 
         m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
             workspace_key: ws_key,
             open: 0,
+            requests: Vec::new(),
         });
         assert_eq!(
             m.sidebar.open_requests(&session),
             0,
             "an answered workspace stops badging"
         );
+        assert!(m.sidebar.open_request_rows(&session).is_empty());
     }
 
     fn rendered_description_modal(

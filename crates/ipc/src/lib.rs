@@ -564,6 +564,22 @@ pub struct MergeOrderEntry {
     pub held_by: Vec<lazybox_core::WorkspaceKey>,
 }
 
+/// One open `ask_session` request against a workspace, as a client shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct OpenAgentRequest {
+    /// The asking agent's workspace.
+    pub asker: lazybox_core::WorkspaceKey,
+    /// The question, capped at [`OPEN_REQUEST_QUESTION_MAX_CHARS`].
+    pub question: String,
+    /// Unix ms when it was asked.
+    pub asked_at: i64,
+}
+
+/// The longest question an [`OpenAgentRequest`] carries to a client, in
+/// characters. The badge's reader needs the gist, not the whole prompt.
+pub const OPEN_REQUEST_QUESTION_MAX_CHARS: usize = 200;
+
 /// Derived status of one epic member. Precedence (first match wins): Done →
 /// Failed → Asking → InProgress → Mergeable → PrOpen → Claimed → Blocked →
 /// Ready.
@@ -3966,11 +3982,15 @@ pub enum Event {
     /// (#1653). Broadcast whenever the count moves — an ask injected, a
     /// reply landed, a turn-end capture closed one — and replayed after the
     /// `Subscribe` snapshot for every workspace currently carrying one, so a
-    /// client seeds the `?N` sidebar badge on connect rather than waiting
+    /// client seeds the `⟲N` sidebar badge on connect rather than waiting
     /// for the next change. `open: 0` clears the badge. Appended last.
     AgentRequestsOpen {
         workspace_key: lazybox_core::WorkspaceKey,
         open: usize,
+        /// The open requests themselves, oldest first — who asked what, so
+        /// the badge is not a count with no way to see behind it.
+        #[serde(default)]
+        requests: Vec<OpenAgentRequest>,
     },
     /// Reply to [`Command::QueryTaskStatus`] (#1785): what the daemon can
     /// observe about work on one tracker record.

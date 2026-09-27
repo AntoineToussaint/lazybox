@@ -1071,16 +1071,17 @@ impl<T: TerminalAdapter> Model<T> {
         // Open agent-to-agent requests (#1653): the daemon owns the count
         // and pushes it here (seeded on connect, refreshed on every ask,
         // reply, and turn-end capture). The sidebar keeps it for the row's
-        // `?N` badge.
+        // `⟲N` badge, and the right pane lists who asked what.
         if let IpcEvent::AgentRequestsOpen {
             workspace_key,
             open,
+            requests,
         } = &event
         {
-            self.sidebar.set_open_requests(
-                lazybox_core::SessionKey::from(workspace_key.as_str()),
-                *open,
-            );
+            let key = lazybox_core::SessionKey::from(workspace_key.as_str());
+            self.sidebar.set_open_requests(key.clone(), *open);
+            self.sidebar.set_open_request_rows(key, requests.clone());
+            self.sync_panes();
             self.redraw = true;
         }
         // Spooled agent artifacts (#1822): the daemon owns the spool and
@@ -3841,6 +3842,27 @@ impl<T: TerminalAdapter> Model<T> {
             })
             .unwrap_or_default();
         self.right.set_blocker_states(blocker_states);
+        let inbound = session_key
+            .as_ref()
+            .map(|key| {
+                self.sidebar
+                    .open_request_rows(key)
+                    .iter()
+                    .map(|r| {
+                        let asker = lazybox_core::SessionKey::from(r.asker.as_str());
+                        crate::components::right_pane::InboundRequest {
+                            asker_label: self
+                                .sidebar
+                                .workspace_reference_label(&asker)
+                                .unwrap_or_else(|| r.asker.as_str().to_string()),
+                            asker,
+                            question: r.question.clone(),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.right.set_inbound_requests(inbound);
         // On a group-header row there's no workspace to show; feed the
         // pane a repo / Space overview instead so it isn't a dead panel
         // (#1442). Cheap: built from already-tracked workspaces.

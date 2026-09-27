@@ -1367,14 +1367,21 @@ impl LazyboxMcp {
             .collect()
     }
 
-    /// Announce how many requests are still open against `target` so the
-    /// sidebar's `?N` badge tracks the truth. Sent on every change — an ask,
-    /// a reply, a capture — and `0` clears the badge.
+    /// Announce the requests still open against `target` so the sidebar's
+    /// `⟲N` badge tracks the truth and a client can show who asked what.
+    /// Sent on every change — an ask, a reply, a capture — and an empty set
+    /// clears the badge.
     async fn announce_open_requests(&self, target: &str) {
-        let open = self.open_requests_for(target).await.len();
+        let requests: Vec<lazybox_ipc::OpenAgentRequest> = self
+            .open_requests_for(target)
+            .await
+            .iter()
+            .map(open_request_summary)
+            .collect();
         let _ = self.config.bus.send(lazybox_ipc::Event::AgentRequestsOpen {
             workspace_key: lazybox_core::WorkspaceKey::new(target),
-            open,
+            open: requests.len(),
+            requests,
         });
     }
 
@@ -3983,20 +3990,49 @@ async fn apply_captured_answers(
 /// Every workspace currently carrying an open request, with its count.
 /// Replayed after the `Subscribe` snapshot so a connecting client seeds its
 /// `?N` badges instead of waiting for the next change.
-pub async fn open_request_counts(
+pub async fn open_requests_by_target(
     config: &ServerConfig,
-) -> Vec<(lazybox_core::WorkspaceKey, usize)> {
+) -> Vec<(
+    lazybox_core::WorkspaceKey,
+    Vec<lazybox_ipc::OpenAgentRequest>,
+)> {
     let handler = LazyboxMcp::new(config.clone());
-    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for request in handler.all_requests().await {
+    let mut by_target: std::collections::BTreeMap<String, Vec<&AgentRequest>> =
+        std::collections::BTreeMap::new();
+    let requests = handler.all_requests().await;
+    for request in &requests {
         if request.status == RequestStatus::Pending {
-            *counts.entry(request.target).or_default() += 1;
+            by_target
+                .entry(request.target.clone())
+                .or_default()
+                .push(request);
         }
     }
-    counts
+    by_target
         .into_iter()
-        .map(|(target, open)| (lazybox_core::WorkspaceKey::new(target), open))
+        .map(|(target, mut open)| {
+            open.sort_by_key(|r| r.created_at);
+            (
+                lazybox_core::WorkspaceKey::new(target),
+                open.into_iter().map(open_request_summary).collect(),
+            )
+        })
         .collect()
+}
+
+/// What a client is told about one open request: who asked, the gist of
+/// the question, and when.
+fn open_request_summary(request: &AgentRequest) -> lazybox_ipc::OpenAgentRequest {
+    let question: String = request
+        .text
+        .chars()
+        .take(lazybox_ipc::OPEN_REQUEST_QUESTION_MAX_CHARS)
+        .collect();
+    lazybox_ipc::OpenAgentRequest {
+        asker: lazybox_core::WorkspaceKey::new(&request.asker),
+        question,
+        asked_at: request.created_at,
+    }
 }
 
 /// kv prefix under which every blackboard note lives.
@@ -6972,7 +7008,7 @@ mod tests {
             "past the TTL the request must stop counting as open"
         );
         assert!(
-            open_request_counts(&config).await.is_empty(),
+            open_requests_by_target(&config).await.is_empty(),
             "and stop being re-seeded as a badge on every client connect"
         );
     }
@@ -7150,20 +7186,30 @@ mod tests {
             if let lazybox_ipc::Event::AgentRequestsOpen {
                 workspace_key,
                 open,
+                requests,
             } = event
             {
-                opened = Some((workspace_key, open));
+                opened = Some((workspace_key, open, requests));
             }
         }
+        let expected = vec![lazybox_ipc::OpenAgentRequest {
+            asker: lazybox_core::WorkspaceKey::new(asker.as_str()),
+            question: "status?".into(),
+            asked_at: 1_000,
+        }];
         assert_eq!(
             opened,
-            Some((lazybox_core::WorkspaceKey::new(target.as_str()), 1)),
-            "an ask badges the target"
+            Some((
+                lazybox_core::WorkspaceKey::new(target.as_str()),
+                1,
+                expected.clone()
+            )),
+            "an ask badges the target and names who asked what"
         );
         assert_eq!(
-            open_request_counts(&config).await,
-            vec![(lazybox_core::WorkspaceKey::new(target.as_str()), 1)],
-            "and a client connecting now seeds the same count"
+            open_requests_by_target(&config).await,
+            vec![(lazybox_core::WorkspaceKey::new(target.as_str()), expected)],
+            "and a client connecting now seeds the same requests"
         );
 
         handler
@@ -7171,7 +7217,7 @@ mod tests {
             .await
             .expect("reply");
         assert!(
-            open_request_counts(&config).await.is_empty(),
+            open_requests_by_target(&config).await.is_empty(),
             "answering clears the badge"
         );
     }

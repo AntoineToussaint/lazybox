@@ -4258,6 +4258,23 @@ mod search_tests {
         };
         assert_eq!(sb.task_state_for(&untracked), None);
     }
+
+    /// Another workspace is named `#N title` when it is a tracked task.
+    #[test]
+    fn workspace_reference_label_names_a_task_by_number_and_title() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let workspace = issue_ws("994", "Token schema");
+        let key = SessionKey::from(&workspace.key);
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        let label = sb.workspace_reference_label(&key).expect("tracked");
+        assert!(label.ends_with("Token schema"), "{label}");
+        assert_eq!(
+            sb.workspace_reference_label(&SessionKey::new("github:x/y#1")),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

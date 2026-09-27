@@ -2930,6 +2930,26 @@ mod header_status_rows_tests {
     }
 
     #[test]
+    fn inbound_requests_name_who_asked_what_and_jump_to_the_asker() {
+        let asker = lazybox_core::SessionKey::new("github:o/r#9");
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr(), Utc::now())));
+        pane.set_inbound_requests(vec![super::super::InboundRequest {
+            asker: asker.clone(),
+            asker_label: "#9 token schema".into(),
+            question: "what is the\ncontract?".into(),
+        }]);
+        let rows = render(&mut pane);
+        let (col, row) = at(&rows, "Asked by #9 token schema");
+        assert!(
+            rows[row as usize].contains("\u{201c}what is the contract?\u{201d}"),
+            "{rows:#?}"
+        );
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_select_workspace(), Some(asker));
+    }
+
+    #[test]
     fn a_blocker_known_to_be_closed_stops_the_line_reading_red() {
         let mut task = pr();
         task.blocked_by = vec![gh("o/r#7")];

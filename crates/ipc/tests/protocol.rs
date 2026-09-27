@@ -1515,6 +1515,11 @@ fn all_events() -> Vec<Event> {
         Event::AgentRequestsOpen {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             open: 1,
+            requests: vec![lazybox_ipc::OpenAgentRequest {
+                asker: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+                question: "what is the token contract?".into(),
+                asked_at: 1,
+            }],
         },
         Event::TaskStatus {
             client_request_id: Some("req-1".into()),

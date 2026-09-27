@@ -357,7 +357,7 @@ fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
 /// the daemon (tmux): after a restart the surviving session's hooks
 /// must still resolve, and the backend key is the identity that
 /// survives while terminal ids are reallocated.
-fn hook_command(exe: &Path, backend_key: &str, mcp_wired: bool) -> String {
+fn hook_command(exe: &Path, backend_key: &str, mcp_wired: bool, repo: Option<&str>) -> String {
     // `--emit-session-context` opts this agent's hook into printing the
     // lazybox capability blurb on `SessionStart` (Claude adds a hook's stdout
     // to its context). Only the settings-file path — Claude — carries it;
@@ -372,11 +372,37 @@ fn hook_command(exe: &Path, backend_key: &str, mcp_wired: bool) -> String {
     // unprovisioned session the MCP server is connected would advertise six
     // tools it cannot call.
     let mcp = if mcp_wired { " --emit-mcp-context" } else { "" };
+    // `--repo` lets the SessionStart briefing state this repo's standing
+    // rules (`repos.<owner/name>.policies`). The hook is a separate process
+    // that cannot resolve the workspace, and without it a hooked Claude
+    // session — the default — only ever saw the box-wide rules. Only a
+    // well-formed `owner/name` is baked in: this string lands in a shell
+    // command.
+    let repo = repo
+        .filter(|repo| is_plain_repo_slug(repo))
+        .map(|repo| format!(" --repo \"{repo}\""))
+        .unwrap_or_default();
     guarded_hook_command(
         exe,
-        &format!(" --backend-key \"{backend_key}\" --emit-session-context{mcp}"),
+        &format!(" --backend-key \"{backend_key}\" --emit-session-context{mcp}{repo}"),
         &lazybox_core::paths::hook_log_path(),
     )
+}
+
+/// `owner/name` made only of the characters GitHub allows in owner and repo
+/// names — safe to embed in a double-quoted shell argument.
+fn is_plain_repo_slug(repo: &str) -> bool {
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let ok = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    ok(owner) && ok(name)
 }
 
 /// Hook command with no correlation flag — what the pre-spawn
@@ -20371,7 +20397,7 @@ mod tests {
         assert!(exe.is_absolute(), "current_exe must be absolute: {exe:?}");
         let quoted = format!("\"{}\"", exe.display());
 
-        let claude = hook_command(&exe, "lzb-sess-7", false);
+        let claude = hook_command(&exe, "lzb-sess-7", false, None);
         assert!(claude.contains(&quoted), "bare/relative exe in: {claude}");
 
         let codex = hook_command_keyfile(&exe, Path::new("/run/lzb/backend-key-7"));
@@ -20380,7 +20406,12 @@ mod tests {
 
     #[test]
     fn hook_command_quotes_exe_and_bakes_backend_key() {
-        let cmd = hook_command(Path::new("/opt/lazy box/lazybox"), "lzb-sess-7", false);
+        let cmd = hook_command(
+            Path::new("/opt/lazy box/lazybox"),
+            "lzb-sess-7",
+            false,
+            None,
+        );
         assert!(
             cmd.contains("\"/opt/lazy box/lazybox\" hook-ingest --backend-key \"lzb-sess-7\""),
             "exec missing or unquoted: {cmd}"
@@ -20396,7 +20427,7 @@ mod tests {
         // Claude's settings-file hook carries the marker that turns
         // `SessionStart` into the lazybox capability blurb; Codex's argv hook
         // omits it (its stdout-as-context behavior is unverified).
-        let claude = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false);
+        let claude = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false, None);
         assert!(
             claude.contains("hook-ingest --backend-key \"lzb-sess-7\" --emit-session-context"),
             "claude hook must carry the session-context marker: {claude}"
@@ -20408,18 +20439,35 @@ mod tests {
         );
     }
 
+    /// The repo rides the hook command so the SessionStart briefing states
+    /// that repo's policies; anything that isn't a plain `owner/name` is
+    /// never baked into the shell string.
+    #[test]
+    fn the_hook_command_carries_a_plain_repo_slug_only() {
+        let exe = Path::new("/opt/lazybox");
+        let with = hook_command(exe, "lzb-sess-7", false, Some("acme/api"));
+        assert!(with.contains(" --repo \"acme/api\""), "{with}");
+        for hostile in ["acme/api\"; rm -rf ~", "a/b/c", "", "acme/$(x)"] {
+            let cmd = hook_command(exe, "lzb-sess-7", false, Some(hostile));
+            assert!(
+                !cmd.contains("--repo"),
+                "{hostile:?} must not be embedded: {cmd}"
+            );
+        }
+    }
+
     #[test]
     fn hook_command_gates_the_mcp_context_marker_on_the_bus_being_wired() {
         // The MCP-context marker rides only when the spawn is provisioned to
         // the coordination bus. An unwired (e.g. ReadOnly) Claude session still
         // gets `--emit-session-context` but must NOT get `--emit-mcp-context`,
         // or its briefing would advertise tools it cannot call (#1420).
-        let wired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", true);
+        let wired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", true, None);
         assert!(
             wired.contains("--emit-session-context --emit-mcp-context"),
             "wired spawn must carry both markers: {wired}"
         );
-        let unwired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false);
+        let unwired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false, None);
         assert!(
             unwired.contains("--emit-session-context"),
             "unwired spawn still carries the base marker: {unwired}"

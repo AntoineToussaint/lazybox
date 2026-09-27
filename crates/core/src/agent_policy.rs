@@ -109,6 +109,12 @@ pub const CHECK_FOR_EXISTING_WORK: &str = "check-for-existing-work";
 /// misleads every later session, not just a human reader.
 pub const DOCS_CURRENT_IN_PR: &str = "docs-current-in-pr";
 
+/// `workspace-over-subagent`: independent work gets a workspace of its
+/// own, not a sub-agent inside the current session. A workspace is visible
+/// in the inbox, resumable, costed and lands as its own PR; a sub-agent's
+/// work is invisible until it returns and dies with the session.
+pub const WORKSPACE_OVER_SUBAGENT: &str = "workspace-over-subagent";
+
 /// The built-in rules, in the order they are rendered. Deliberately
 /// short: every rule here is paid for in context on every spawn, and a
 /// list long enough to skim past is a list that steers nothing.
@@ -142,6 +148,13 @@ fn builtin_policies() -> Vec<AgentPolicy> {
             id: DOCS_CURRENT_IN_PR.to_string(),
             text: "A PR that changes behaviour updates the docs describing it (README, \
                    `AGENTS.md`, `docs/`) in the same PR, and names them in its body."
+                .to_string(),
+        },
+        AgentPolicy {
+            id: WORKSPACE_OVER_SUBAGENT.to_string(),
+            text: "Give independent work its own workspace (`spawn_worker`, or propose the \
+                   record), not a sub-agent: it stays visible, resumable and costed. \
+                   Sub-agents are for research feeding your own task."
                 .to_string(),
         },
     ]
@@ -280,7 +293,15 @@ mod tests {
                 ONE_SELF_CONTAINED_PR.to_string(),
                 CHECK_FOR_EXISTING_WORK.to_string(),
                 DOCS_CURRENT_IN_PR.to_string(),
+                WORKSPACE_OVER_SUBAGENT.to_string(),
             ]
+        );
+        let fan_out = policies
+            .text(WORKSPACE_OVER_SUBAGENT)
+            .expect("the fan-out rule");
+        assert!(
+            fan_out.contains("own workspace") && fan_out.contains("not a sub-agent"),
+            "the fan-out rule must prefer a workspace over a sub-agent: {fan_out}"
         );
         let ask = policies.text(ASK_BEFORE_FILING).expect("the filing rule");
         assert!(
@@ -406,14 +427,15 @@ mod tests {
         // launch, alongside the mechanics blurb that has its own cap in
         // `lazybox-agents`. Each half guards its own bytes: this one is
         // the prose lazybox ships, so it is the half a change *here*
-        // can grow. Two paragraph-length rules plus two one-line ones
-        // (existing-work check, docs-current, added 2026-09-26 at the
-        // user's request) fit ~1100 bytes; a set that needs more than
+        // can grow. Two paragraph-length rules plus three one-line ones
+        // (existing-work check, docs-current, added 2026-09-26, and
+        // workspace-over-subagent, 2026-09-27, at the user's request)
+        // fit ~1300 bytes; a set that needs more than
         // that has stopped being a set of standing rules and become a
         // manual — shorten a rule before raising this again.
         let rendered = AgentPolicies::builtin().render();
         assert!(
-            rendered.len() <= 1100,
+            rendered.len() <= 1300,
             "the built-in standing rules should stay tight: {} bytes",
             rendered.len()
         );

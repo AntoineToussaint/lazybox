@@ -758,7 +758,7 @@ spawn-intrinsic briefing, so they reach every agent kind (Claude, Codex,
 Cursor, a `GenericCli` you declared yourself) and a bare `a c` start as surely
 as a `w` work prompt.
 
-Four rules ship by default:
+Five rules ship by default:
 
 | Policy id | What it says |
 | --- | --- |
@@ -766,6 +766,7 @@ Four rules ship by default:
 | `one-self-contained-pr` | Prefer one self-contained pull request, even a large one, over a stack of dependent PRs. Split only when the user asks. |
 | `check-for-existing-work` | Before starting, check that no open issue or PR already covers the work or conflicts with it, and that the fix hasn't already reached the default branch. Build on what overlaps or tell the user; never start a duplicate. |
 | `docs-current-in-pr` | Before opening or updating a PR, check the docs describing the change (READMEs, `AGENTS.md`, `docs/`, generated references) are still true and fix them in the same PR; name the docs checked in the PR body. |
+| `workspace-over-subagent` | Give independent work its own lazybox workspace — `spawn_worker` for a Coordinator, otherwise propose the record under the filing rule — rather than a sub-agent inside the session, so it stays visible in the inbox, resumable and costed. Sub-agents are for research that feeds the agent's own task. |
 
 Each entry is keyed by policy id, and its value is one of:
 

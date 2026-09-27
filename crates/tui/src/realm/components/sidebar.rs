@@ -916,6 +916,10 @@ impl Sidebar {
         self.inner.focus_next_unread_workspace()
     }
 
+    pub fn focus_next_review_pending_workspace(&mut self) -> bool {
+        self.inner.focus_next_review_pending_workspace()
+    }
+
     /// Move the cursor onto the next blocked workspace (declared reason or
     /// dependency edge), wrapping around. Backs the `E j` global key
     /// (#1521).

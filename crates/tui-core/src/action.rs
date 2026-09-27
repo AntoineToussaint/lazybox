@@ -458,6 +458,9 @@ pub enum Action {
     /// Jump the sidebar cursor to the next workspace with unread
     /// activity (`Shift-N`, #1502). Wraps around.
     JumpToUnread,
+    /// Jump the sidebar cursor to the next workspace with a review
+    /// requested or pending (`Shift-O`) — the `⟳N review` count's jump.
+    JumpToReviewPending,
     /// Jump the sidebar cursor to the next blocked workspace (`E j`,
     /// #1521): one that declares a `Blocked on:` reason or carries a
     /// dependency edge. Declared blockers sweep first, then edges. Wraps
@@ -711,6 +714,7 @@ pub enum ActionKind {
     JumpToFailingCi,
     JumpToLimited,
     JumpToUnread,
+    JumpToReviewPending,
     JumpToBlocked,
     EpicMergeOrder,
     EpicGraph,
@@ -774,6 +778,7 @@ impl ActionKind {
         Self::JumpToFailingCi,
         Self::JumpToLimited,
         Self::JumpToUnread,
+        Self::JumpToReviewPending,
         Self::JumpToBlocked,
         Self::EpicMergeOrder,
         Self::EpicGraph,
@@ -1042,6 +1047,7 @@ impl Action {
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::JumpToLimited => ActionKind::JumpToLimited,
             Action::JumpToUnread => ActionKind::JumpToUnread,
+            Action::JumpToReviewPending => ActionKind::JumpToReviewPending,
             Action::JumpToBlocked => ActionKind::JumpToBlocked,
             Action::EpicMergeOrder => ActionKind::EpicMergeOrder,
             Action::EpicGraph => ActionKind::EpicGraph,
@@ -1263,6 +1269,13 @@ impl ActionDef {
                 default_keys: "Shift-N",
                 label: "next unread",
                 describe: "Jump the cursor to the next workspace with unread activity, wrapping around (#1502). The keyboard answer to the `●N` badge — no filter mode needed.",
+                section: Section::Global,
+            },
+            ActionKind::JumpToReviewPending => &Self {
+                kind: ActionKind::JumpToReviewPending,
+                default_keys: "Shift-O",
+                label: "next review",
+                describe: "Jump the cursor to the next workspace with a reviewer requested or a review pending, wrapping around. The keyboard answer to the `⟳N review` count.",
                 section: Section::Global,
             },
             ActionKind::JumpToBlocked => &Self {
@@ -2633,6 +2646,7 @@ impl ActionKind {
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::JumpToLimited => "jump_to_limited",
             ActionKind::JumpToUnread => "jump_to_unread",
+            ActionKind::JumpToReviewPending => "jump_to_review_pending",
             ActionKind::JumpToBlocked => "jump_to_blocked",
             ActionKind::EpicMergeOrder => "epic_merge_order",
             ActionKind::EpicGraph => "epic_graph",
@@ -3744,6 +3758,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToFailingCi
         | ActionKind::JumpToLimited
         | ActionKind::JumpToUnread
+        | ActionKind::JumpToReviewPending
         | ActionKind::JumpToBlocked
         | ActionKind::EpicMergeOrder
         | ActionKind::EpicGraph

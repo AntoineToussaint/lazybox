@@ -2172,6 +2172,29 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                     return;
                 }
+                // A left-click on a focus-mode attention count jumps to the
+                // next workspace it counts (`!`, `Shift-F`, `Shift-N`); the
+                // review count selects the review-requested lens's next row.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && let Some(kind) = self
+                        .focus_count_hits
+                        .iter()
+                        .find(|(row, cols, _)| *row == m.row && cols.contains(&m.column))
+                        .map(|(_, _, kind)| *kind)
+                {
+                    use crate::realm::components::focus_header::FocusCount;
+                    use lazybox_tui_core::action::Action;
+                    let action = match kind {
+                        FocusCount::Asking => Action::JumpToAsking,
+                        FocusCount::CiFailing => Action::JumpToFailingCi,
+                        FocusCount::Unread => Action::JumpToUnread,
+                        FocusCount::Review => Action::JumpToReviewPending,
+                    };
+                    let cmds = self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Mouse);
+                    self.dispatch_cmds(cmds);
+                    self.redraw = true;
+                    return;
+                }
                 // A left-click on the footer's right zone opens what it is
                 // about: a sticky notice inspects itself, any other notice
                 // opens the message log, and the polling status opens the
@@ -3330,6 +3353,7 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,
         ActionKind::JumpToLimited => Action::JumpToLimited,
         ActionKind::JumpToUnread => Action::JumpToUnread,
+        ActionKind::JumpToReviewPending => Action::JumpToReviewPending,
         ActionKind::JumpToBlocked => Action::JumpToBlocked,
         ActionKind::EpicMergeOrder => Action::EpicMergeOrder,
         ActionKind::EpicGraph => Action::EpicGraph,

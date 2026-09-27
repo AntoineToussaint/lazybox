@@ -2330,6 +2330,34 @@ impl Sidebar {
     /// Move the cursor onto the next workspace with unread activity,
     /// starting AFTER the current row and wrapping (`Shift-N`, #1502) —
     /// the unread analog of [`Self::focus_next_asking_workspace`].
+    /// Move the cursor to the next visible workspace with a reviewer
+    /// requested or a review pending, wrapping around — the same signal as
+    /// the `⟳N review` count. Returns `false` when there is none.
+    pub fn focus_next_review_pending_workspace(&mut self) -> bool {
+        let keys_order = self.visible_workspace_keys();
+        if keys_order.is_empty() {
+            return false;
+        }
+        let start = self
+            .selected_session_key()
+            .and_then(|cur| keys_order.iter().position(|k| k == cur))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let target = (0..keys_order.len())
+            .map(|i| &keys_order[(start + i) % keys_order.len()])
+            .find(|k| {
+                self.workspaces.get(*k).is_some_and(|w| {
+                    workspace_attention_signals(w, &self.agents)
+                        .contains(&AttentionSignal::ReviewPending)
+                })
+            })
+            .cloned();
+        match target {
+            Some(key) => self.focus_workspace_key(&key),
+            None => false,
+        }
+    }
+
     pub fn focus_next_unread_workspace(&mut self) -> bool {
         let keys_order = self.visible_workspace_keys();
         if keys_order.is_empty() {

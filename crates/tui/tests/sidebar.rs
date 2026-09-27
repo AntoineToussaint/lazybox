@@ -2325,6 +2325,43 @@ fn next_unread_cycles_with_wrap_and_reports_none() {
     );
 }
 
+/// `Shift-O` / the focus strip's `⟳N review` count walk the rows with a
+/// review pending, wrapping, and report `false` when there are none.
+#[test]
+fn next_review_pending_cycles_with_wrap_and_reports_none() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let reviewed = |key: &str, secs: i64| {
+        let mut t = make_task("owner/repo", key, now - Duration::seconds(secs));
+        t.review = lazybox_core::ReviewStatus::Pending;
+        Workspace::from_task(t, now)
+    };
+    let w1 = make_workspace("owner/repo", "o/r#1", now);
+    let w2 = reviewed("o/r#2", 1);
+    let w3 = make_workspace("owner/repo", "o/r#3", now - Duration::seconds(2));
+    let w4 = reviewed("o/r#4", 3);
+    let (k2, k4) = (ws_key(&w2), ws_key(&w4));
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w1, w2, w3, w4],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(s.focus_next_review_pending_workspace());
+    assert_eq!(s.selected_session_key(), Some(&k2));
+    assert!(s.focus_next_review_pending_workspace());
+    assert_eq!(s.selected_session_key(), Some(&k4));
+    assert!(s.focus_next_review_pending_workspace(), "wraps around");
+    assert_eq!(s.selected_session_key(), Some(&k2));
+
+    let mut quiet = populated_sidebar();
+    assert!(
+        !quiet.focus_next_review_pending_workspace(),
+        "nothing to review → no move"
+    );
+}
+
 /// `Enter` on a live search query commits the filter AND asks the host
 /// to open the top match; an empty query just closes the bar (#1502).
 #[test]

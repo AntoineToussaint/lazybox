@@ -2037,6 +2037,13 @@ pub struct Model<T: TerminalAdapter> {
     footer_overflow: Option<crate::realm::components::footer::FooterOverflow>,
     /// The footer's right zone (notice pill or polling status) as last
     /// drawn, so a click on it opens what it is about.
+    /// Row, column range and kind of each attention count on the
+    /// focus-mode strip as last drawn; empty outside focus mode.
+    focus_count_hits: Vec<(
+        u16,
+        std::ops::Range<u16>,
+        crate::realm::components::focus_header::FocusCount,
+    )>,
     footer_right: Option<(
         tuirealm::ratatui::layout::Rect,
         crate::realm::components::footer::FooterRight,
@@ -3048,6 +3055,7 @@ impl<T: TerminalAdapter> Model<T> {
             last_click: None,
             footer_overflow: None,
             footer_right: None,
+            focus_count_hits: Vec::new(),
             footer_more_popup: None,
             last_render_build: std::time::Duration::ZERO,
             last_render_flush: std::time::Duration::ZERO,
@@ -7896,6 +7904,11 @@ impl<T: TerminalAdapter> Model<T> {
             };
         let mut captured_area = Rect::default();
         let mut footer_hits = crate::realm::components::footer::FooterHits::default();
+        let mut focus_count_hits: Vec<(
+            u16,
+            std::ops::Range<u16>,
+            crate::realm::components::focus_header::FocusCount,
+        )> = Vec::new();
         let footer_more_rows = self.footer_more_popup.clone();
         // The coach rail (#1460) is carved out of the pane area inside
         // the draw closure so it never occludes a pane. Resolve its
@@ -7933,13 +7946,16 @@ impl<T: TerminalAdapter> Model<T> {
             let (pane_area, coach_area) = split_coach(pane_area, coach_active);
             let right_bottom = if focus_mode {
                 let (header, body) = focus_mode_areas(pane_area);
-                crate::realm::components::focus_header::render(
+                focus_count_hits = crate::realm::components::focus_header::render(
                     f,
                     header,
                     &focus_title,
                     focus_summary,
                     &focus_hint,
-                );
+                )
+                .into_iter()
+                .map(|(cols, kind)| (header.y, cols, kind))
+                .collect();
                 if focus_panes.is_empty() {
                     // Single layout (and pane zoom): the historical
                     // fullscreen render, untouched.
@@ -8154,6 +8170,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.layout.last_area = captured_area;
         self.footer_overflow = footer_hits.overflow;
         self.footer_right = footer_hits.right;
+        self.focus_count_hits = focus_count_hits;
         // Resize commands are queued by the terminal stack's render
         // path each time a slot's rect changes. Drain + ship them so
         // libghostty's PTY learns the new size — without this,

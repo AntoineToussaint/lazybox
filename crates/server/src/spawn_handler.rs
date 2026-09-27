@@ -9060,7 +9060,80 @@ pub async fn handle_inject_prompt(
     fallback_spawn: Option<lazybox_ipc::SpawnFallback>,
     submit: bool,
 ) {
-    handle_inject_prompt_inner(config, terminal_id, prompt, fallback_spawn, submit, None).await;
+    handle_inject_prompt_inner(
+        config,
+        terminal_id,
+        prompt,
+        fallback_spawn,
+        submit,
+        None,
+        InjectGating::human(),
+        crate::delivery::ReceiptSlot::none(),
+    )
+    .await;
+}
+
+/// How long and on what an injection waits before it may paste.
+#[derive(Debug, Clone, Copy)]
+struct InjectGating {
+    gate: crate::delivery::Gate,
+    wait_limit: Duration,
+}
+
+impl InjectGating {
+    /// A human's inject: wait out a chooser only, for the standard deadline.
+    fn human() -> Self {
+        Self {
+            gate: crate::delivery::Gate::ChooserOnly,
+            wait_limit: INJECT_INPUT_DEADLINE,
+        }
+    }
+}
+
+/// [`crate::delivery::deliver`]'s entry into the inject path: the same
+/// settle-gated delivery as [`handle_inject_prompt`], reporting its outcome
+/// into `receipt` at every exit instead of only to the TUI.
+pub(crate) async fn inject_with_receipt(
+    config: &ServerConfig,
+    request: crate::delivery::DeliveryRequest,
+    receipt: crate::delivery::ReceiptSlot,
+) {
+    tracing::debug!(
+        terminal_id = ?request.terminal_id,
+        from = ?request.from,
+        gate = ?request.gate,
+        "delivery: injecting"
+    );
+    let gating = InjectGating {
+        gate: request.gate,
+        wait_limit: request.wait_limit.unwrap_or(INJECT_INPUT_DEADLINE),
+    };
+    handle_inject_prompt_inner(
+        config,
+        request.terminal_id,
+        &request.body,
+        None,
+        request.submit,
+        None,
+        gating,
+        receipt,
+    )
+    .await;
+}
+
+/// Whether an injection must keep waiting before it pastes: always behind a
+/// chooser-shaped prompt (see [`inject_must_defer`]), and — under
+/// [`crate::delivery::Gate::Idle`] — also while the agent is mid-turn.
+async fn delivery_must_wait(
+    terminals: &TerminalRegistry,
+    id: TerminalId,
+    gate: crate::delivery::Gate,
+) -> bool {
+    if inject_must_defer(terminals, id).await {
+        return true;
+    }
+    gate == crate::delivery::Gate::Idle
+        && terminals.agent_state_for(id).await == Some(lazybox_ipc::AgentState::Working)
 }
 
 fn emit_credit_recovery_stage(
@@ -9355,6 +9428,7 @@ struct SnippetDelivery {
     body: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_inject_prompt_inner(
     config: &ServerConfig,
     terminal_id: TerminalId,
@@ -9362,6 +9436,8 @@ async fn handle_inject_prompt_inner(
     fallback_spawn: Option<lazybox_ipc::SpawnFallback>,
     submit: bool,
     snippet: Option<SnippetDelivery>,
+    gating: InjectGating,
+    mut receipt: crate::delivery::ReceiptSlot,
 ) {
     // Look up — and drop the guard — before any further await so
     // a nested handle_spawn (in the fallback path) can re-acquire
@@ -9403,6 +9479,9 @@ async fn handle_inject_prompt_inner(
                     },
                 )
                 .await;
+                // The text rides the replacement spawn's initial prompt,
+                // which confirms on its own path.
+                receipt.resolve(crate::delivery::DeliveryReceipt::Delivered { confirmed: false });
                 return;
             }
             // No fallback to rewrite into a Spawn. The prompt would
@@ -9410,10 +9489,12 @@ async fn handle_inject_prompt_inner(
             // user knows to reopen the agent (invariant: user input must
             // never disappear silently — #1384).
             tracing::debug!("inject_prompt to unknown terminal {terminal_id:?}");
+            let message = "the agent terminal is no longer running — reopen it and retry";
             let _ = config.bus.send(Event::TerminalInputRejected {
                 terminal_id,
-                message: "the agent terminal is no longer running — reopen it and retry".into(),
+                message: message.into(),
             });
+            receipt.refuse(message);
             return;
         }
     };
@@ -9421,10 +9502,12 @@ async fn handle_inject_prompt_inner(
         Some((_session_key, kind)) => kind,
         None => {
             tracing::debug!("inject_prompt: no terminal_meta for {terminal_id:?} — skipping");
+            let message = "the agent terminal is no longer running — reopen it and retry";
             let _ = config.bus.send(Event::TerminalInputRejected {
                 terminal_id,
-                message: "the agent terminal is no longer running — reopen it and retry".into(),
+                message: message.into(),
             });
+            receipt.refuse(message);
             return;
         }
     };
@@ -9435,15 +9518,18 @@ async fn handle_inject_prompt_inner(
                 tracing::warn!(
                     "inject_prompt: unknown agent id `{id}` for terminal {terminal_id:?}"
                 );
+                receipt.refuse(format!("unknown agent `{id}`"));
                 return;
             }
         },
         _ => {
             tracing::debug!("inject_prompt: terminal {terminal_id:?} is not an agent — skipping");
+            let message = "the prompt could not be delivered — this terminal is not an agent";
             let _ = config.bus.send(Event::TerminalInputRejected {
                 terminal_id,
-                message: "the prompt could not be delivered — this terminal is not an agent".into(),
+                message: message.into(),
             });
+            receipt.refuse(message);
             return;
         }
     };
@@ -9462,11 +9548,13 @@ async fn handle_inject_prompt_inner(
     // waiter, and all of them pasted once the gate cleared. Reject duplicates
     // explicitly instead of growing background work and duplicating input.
     let Some(pending_injection) = PendingInjectionGuard::claim(&config.spawn, terminal_id) else {
+        let message =
+            "another delivery is already waiting for this agent to be ready — retry once it lands";
         let _ = config.bus.send(Event::TerminalInputRejected {
             terminal_id,
-            message: "a prompt injection is already waiting for this agent — answer its prompt before retrying"
-                .into(),
+            message: message.into(),
         });
+        receipt.refuse(message);
         return;
     };
 
@@ -9488,7 +9576,7 @@ async fn handle_inject_prompt_inner(
     // Subscribe BEFORE reading the current state so a transition that
     // races between the read and the wait isn't missed.
     let events = config.bus.subscribe();
-    let blocked = inject_must_defer(&config.terminal, terminal_id).await;
+    let blocked = delivery_must_wait(&config.terminal, terminal_id, gating.gate).await;
     let terminals = config.terminal.clone();
     let bus = config.bus.clone();
     let id = terminal_id;
@@ -9513,7 +9601,8 @@ async fn handle_inject_prompt_inner(
         // replaces this one's confirmation entry by design (see
         // `confirm_prompt_submission`).
         let pending_injection = pending_injection;
-        let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
+        let mut receipt = receipt;
+        let deadline = tokio::time::Instant::now() + gating.wait_limit;
         let mut events = events;
         let mut blocked = blocked;
         let mut registered_tx = Some(registered_tx);
@@ -9529,12 +9618,18 @@ async fn handle_inject_prompt_inner(
                 );
                 // The drop must be visible, not just a log line — the
                 // user pressed `w` and their prompt evaporated.
+                let message = if inject_must_defer(&terminals, id).await {
+                    "the agent stayed on a permission prompt, so the injected work \
+                     context was dropped — answer the prompt and press w again"
+                } else {
+                    "the agent stayed busy for the whole wait, so the message was not \
+                     delivered — retry once it finishes its turn"
+                };
                 let _ = bus.send(Event::TerminalInputRejected {
                     terminal_id: id,
-                    message: "the agent stayed on a permission prompt, so the injected work \
-                              context was dropped — answer the prompt and press w again"
-                        .into(),
+                    message: message.into(),
                 });
+                receipt.refuse(message);
                 return;
             }
             // Level-triggered readiness poll (#869). Ask the PTY pump to
@@ -9560,7 +9655,7 @@ async fn handle_inject_prompt_inner(
                 // above may have refreshed the cache; re-read it directly.
                 InputPoll::Tick => {}
             }
-            blocked = inject_must_defer(&terminals, id).await;
+            blocked = delivery_must_wait(&terminals, id, gating.gate).await;
         }
         let Some(interaction) =
             terminal_io::acquire_live(&config_for_confirm, id, &backend_key).await
@@ -9572,6 +9667,7 @@ async fn handle_inject_prompt_inner(
                 ?id,
                 "inject_prompt: terminal exited before interaction began"
             );
+            receipt.refuse("the agent terminal exited before the text could be delivered");
             return;
         };
         drop(pending_injection);
@@ -9609,6 +9705,9 @@ async fn handle_inject_prompt_inner(
             // WITHOUT flashing a fresh "sent snippet" toast that would stomp
             // the give-up notice sitting in the footer.
             Ok(confirmed) => {
+                receipt.resolve(crate::delivery::DeliveryReceipt::Delivered {
+                    confirmed: submit && confirmed,
+                });
                 if let Some(snippet) = snippet_for_confirm {
                     let prompt = UserPrompt {
                         text: snippet.body.clone(),
@@ -9640,6 +9739,7 @@ async fn handle_inject_prompt_inner(
             }
             Err(PromptWriteError::Initial(e)) => {
                 tracing::warn!("inject_prompt: initial write failed: {e}");
+                receipt.refuse(format!("the text could not be written ({e})"));
                 let _ = bus.send(Event::TerminalInputRejected {
                     terminal_id: id,
                     message: format!(
@@ -9649,6 +9749,9 @@ async fn handle_inject_prompt_inner(
             }
             Err(PromptWriteError::Submit(e)) => {
                 tracing::warn!("inject_prompt: submit failed: {e}");
+                receipt.refuse(format!(
+                    "the text was pasted but could not be submitted ({e})"
+                ));
                 let _ = bus.send(Event::TerminalInputRejected {
                     terminal_id: id,
                     message: format!(
@@ -9693,7 +9796,17 @@ pub async fn handle_deliver_snippet(
                 category,
                 body: body.clone(),
             });
-            handle_inject_prompt_inner(config, terminal_id, &body, None, submit, delivery).await;
+            handle_inject_prompt_inner(
+                config,
+                terminal_id,
+                &body,
+                None,
+                submit,
+                delivery,
+                InjectGating::human(),
+                crate::delivery::ReceiptSlot::none(),
+            )
+            .await;
         }
         TerminalKind::Shell => {
             let intent = if submit {
@@ -16110,6 +16223,151 @@ mod tests {
     /// A second press during that ladder must deliver, not be rejected with
     /// "already waiting … answer its prompt" — no prompt is waiting. The
     /// reservation exists to bound waiters behind a permission gate only.
+    /// A message from another agent must not land mid-turn: pasted into a
+    /// working agent it interleaves with a turn about something else, and
+    /// that turn's end was then read as the answer (the `ask_session`
+    /// capture race). Under `Gate::Idle` it waits for the turn to end, and
+    /// the receipt reports the delivery once it lands.
+    #[tokio::test]
+    async fn an_idle_gated_delivery_waits_out_a_busy_agent() {
+        use crate::delivery::{DeliveryReceipt, DeliveryRequest, Gate, Party};
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "busy-agent")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(713);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("busy-agent"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Working),
+            None,
+        )
+        .await;
+        let pending = crate::delivery::deliver(
+            &config,
+            DeliveryRequest {
+                terminal_id: id,
+                body: "sibling-question".into(),
+                submit: false,
+                gate: Gate::Idle,
+                from: Party::Agent(SessionKey::new("asker")),
+                wait_limit: Some(Duration::from_secs(5)),
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            mock.writes_for(&backend_key).await.is_empty(),
+            "nothing may be pasted while the agent is mid-turn"
+        );
+
+        config
+            .terminal
+            .record_agent_state(id, lazybox_ipc::AgentState::Done)
+            .await;
+        let _ = config.bus.send(Event::AgentState {
+            terminal_id: id,
+            session_key: SessionKey::new("busy-agent"),
+            state: lazybox_ipc::AgentState::Done,
+        });
+        assert_eq!(
+            pending.receipt_within(Duration::from_secs(3)).await,
+            Some(DeliveryReceipt::Delivered { confirmed: false }),
+        );
+        assert!(
+            mock.writes_for(&backend_key)
+                .await
+                .iter()
+                .any(|w| String::from_utf8_lossy(w).contains("sibling-question")),
+            "once the turn ended the message landed"
+        );
+    }
+
+    /// A human's `w w` keeps queueing behind a working agent: the CLI buffers
+    /// it for after the current turn, and people rely on that.
+    #[tokio::test]
+    async fn a_chooser_only_delivery_still_lands_in_a_working_agent() {
+        use crate::delivery::{DeliveryReceipt, DeliveryRequest, Gate, Party};
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "busy-agent-2")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(714);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("busy-agent-2"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Working),
+            None,
+        )
+        .await;
+        let pending = crate::delivery::deliver(
+            &config,
+            DeliveryRequest {
+                terminal_id: id,
+                body: "queued-instruction".into(),
+                submit: false,
+                gate: Gate::ChooserOnly,
+                from: Party::Human,
+                wait_limit: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            pending.receipt_within(Duration::from_secs(3)).await,
+            Some(DeliveryReceipt::Delivered { confirmed: false }),
+        );
+    }
+
+    /// A delivery the gate holds past its limit is refused with a reason the
+    /// sender can act on — never dropped silently.
+    #[tokio::test]
+    async fn an_idle_gated_delivery_past_its_limit_is_refused_with_a_reason() {
+        use crate::delivery::{DeliveryReceipt, DeliveryRequest, Gate, Party};
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "busy-agent-3")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(715);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("busy-agent-3"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Working),
+            None,
+        )
+        .await;
+        let pending = crate::delivery::deliver(
+            &config,
+            DeliveryRequest {
+                terminal_id: id,
+                body: "too-late".into(),
+                submit: true,
+                gate: Gate::Idle,
+                from: Party::Lazybox("test"),
+                wait_limit: Some(Duration::from_millis(300)),
+            },
+        )
+        .await;
+        match pending.receipt_within(Duration::from_secs(5)).await {
+            Some(DeliveryReceipt::Refused { reason }) => {
+                assert!(reason.contains("busy"), "{reason}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(mock.writes_for(&backend_key).await.is_empty());
+    }
+
     #[tokio::test]
     async fn a_submit_confirm_ladder_does_not_reject_the_next_injection() {
         let (config, mock) = ServerConfig::in_memory_with_mock();

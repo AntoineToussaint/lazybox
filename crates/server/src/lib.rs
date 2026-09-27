@@ -181,6 +181,7 @@ pub mod codex_home_migration;
 pub mod codex_quota;
 pub mod condense;
 pub mod context_tag;
+pub mod delivery;
 pub mod epics;
 pub mod error_inbox;
 pub mod event_forward;

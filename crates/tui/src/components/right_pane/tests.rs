@@ -2804,6 +2804,59 @@ mod header_height_tests {
         );
     }
 
+    /// The reserved height is `header_lines(..., width = 0).len()` while the
+    /// renderer builds at the real pane width, so the two agree only while
+    /// no line's EXISTENCE depends on width. Nothing enforced that, and the
+    /// sentinel `0` is what would make a violation invisible: a header line
+    /// that wrapped would silently clip the rows below it again — the exact
+    /// bug one shared builder was introduced to end.
+    #[test]
+    fn header_line_count_is_width_independent() {
+        let mut pr = super::originating_issue_header_tests::task_for_blockers(172);
+        // Exercise every optional row: blockers, a declared reason, a long
+        // title and a long author line that a narrow pane must truncate
+        // rather than wrap.
+        pr.blocked_by = vec![
+            TaskId {
+                source: "github".into(),
+                key: "o/r#7".into(),
+            },
+            TaskId {
+                source: "github".into(),
+                key: "other/repo#9".into(),
+            },
+        ];
+        pr.blocked_on = Some("waiting on the schema freeze".into());
+        pr.title = "a considerably longer pull request title than any narrow pane can show".into();
+        pr.author = "a-user-with-a-long-handle".into();
+        pr.role = lazybox_core::TaskRole::Reviewer;
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr.clone(), Utc::now())));
+        let workspace = pane.workspace.clone().expect("workspace");
+        let task = workspace.primary_task().expect("task");
+
+        let at = |width: u16| {
+            pane.header_lines(
+                &workspace,
+                task,
+                width,
+                pane.originating_issues(),
+                task.is_pr(),
+            )
+            .0
+            .len()
+        };
+        let measured = at(0);
+        for width in [1, 20, 40, 80, 200] {
+            assert_eq!(
+                at(width),
+                measured,
+                "header_height measures at width 0; a line count that moves with width \
+                 clips the header at width {width}",
+            );
+        }
+    }
+
     #[test]
     fn a_declared_reason_and_blocker_edges_both_fit() {
         let mut pr = super::originating_issue_header_tests::task_for_blockers(172);

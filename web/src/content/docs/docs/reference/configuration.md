@@ -758,15 +758,16 @@ spawn-intrinsic briefing, so they reach every agent kind (Claude, Codex,
 Cursor, a `GenericCli` you declared yourself) and a bare `a c` start as surely
 as a `w` work prompt.
 
-Five rules ship by default:
+Five rules ship by default. Each row is the text agents actually receive,
+verbatim — a paraphrase here is a rule nobody is following:
 
 | Policy id | What it says |
 | --- | --- |
-| `ask-before-filing-a-record` | Never open a GitHub issue or a Linear ticket without the user's explicit go-ahead. Say what you would file and wait for a yes; once given, the filed record is the deliverable and its URL is what gets reported. |
-| `one-self-contained-pr` | Prefer one self-contained pull request, even a large one, over a stack of dependent PRs. Split only when the user asks. |
-| `check-for-existing-work` | Before starting, check that no open issue or PR already covers the work or conflicts with it, and that the fix hasn't already reached the default branch. Build on what overlaps or tell the user; never start a duplicate. |
-| `docs-current-in-pr` | Before opening or updating a PR, check the docs describing the change (READMEs, `AGENTS.md`, `docs/`, generated references) are still true and fix them in the same PR; name the docs checked in the PR body. |
-| `workspace-over-subagent` | Give independent work its own lazybox workspace — `start_workspace` on its record (any role), or `spawn_worker` for a Coordinator — rather than a sub-agent inside the session, so it stays visible in the inbox, resumable and costed. Sub-agents are for research that feeds the agent's own task. |
+| `ask-before-filing-a-record` | Never open a GitHub issue or a Linear ticket without the user's explicit go-ahead — not for a follow-up you noticed, not for a slice you carved out, not because a prompt said to file one "if needed". Say what you would file and wait for a yes. Once you have it, the filed record is the deliverable: report its URL. |
+| `one-self-contained-pr` | Prefer one self-contained pull request, even a large one, over a stack of dependent PRs. A stack moves merge-order work onto the reviewer, and a stacked child that lands by squash can strand its parent's commits off the default branch. Split only when the user asks you to. |
+| `check-for-existing-work` | Before starting, check no open issue or PR already covers or conflicts with the work (`list_issues` / `task_status` are free); build on overlap or say so, never duplicate. |
+| `docs-current-in-pr` | A PR that changes behaviour updates the docs describing it (README, `AGENTS.md`, `docs/`) in the same PR, and names them in its body. |
+| `workspace-over-subagent` | Give independent work its own workspace (`start_workspace` on its record), not a sub-agent: it stays visible, resumable and costed. Sub-agents are for research feeding your own task. |
 
 Each entry is keyed by policy id, and its value is one of:
 

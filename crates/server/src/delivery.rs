@@ -181,11 +181,17 @@ impl ReceiptSlot {
         }
     }
 
-    /// The gate let the text through and it is about to be written.
-    pub(crate) fn landing(&mut self) {
-        if let Some(tx) = self.landed.take() {
-            let _ = tx.send(());
-        }
+    /// Hand the `landed` signal to whoever will know the initial write
+    /// succeeded, so the slot itself stays free for the outcome.
+    ///
+    /// The signal belongs to the write, not to winning the readiness gate:
+    /// a delivery whose write then failed used to report `Landed` — and
+    /// commit a prompt-history row — for text that never reached the
+    /// composer, while its receipt correctly refused. Dropping the returned
+    /// sender unsent is the "never landed" case, which
+    /// [`PendingDelivery::landed_within`] reads as no early outcome.
+    pub(crate) fn take_landed(&mut self) -> Option<oneshot::Sender<()>> {
+        self.landed.take()
     }
 
     pub(crate) fn resolve(&mut self, receipt: DeliveryReceipt) {
@@ -246,7 +252,7 @@ mod tests {
             receipt: rx,
             landed: landed_rx,
         };
-        slot.landing();
+        let _ = slot.take_landed().expect("the landed signal").send(());
         assert_eq!(
             pending.landed_within(Duration::from_secs(1)).await,
             Some(EarlyOutcome::Landed)

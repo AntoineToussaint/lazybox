@@ -269,6 +269,67 @@ impl ProviderHandle {
 /// performed measures zero unreported cost here and records nothing twice.
 const EXTERNAL_MERGE_SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// kv prefix under which an observed-but-unrecorded external merge waits for
+/// its cost to be measured.
+///
+/// The intent has to be DURABLE. A bare in-memory `sleep` lost the record
+/// whenever the 60s window did not survive: the same upsert that observes the
+/// merge goes on to prompt the user to remove the merged workspace (or reaps
+/// it silently under `worktree.auto_cleanup_merged`), so a user answering
+/// that prompt inside a minute — which is what someone watching their PR
+/// merge does — dropped the figure for good, with no log and no retry, and
+/// the unreported cost stayed on the watermark to be misattributed to the
+/// next PR on that workspace key. A daemon restart lost it the same way.
+pub(crate) const PENDING_MERGE_COST_PREFIX: &str = "pending-merge-cost:";
+
+/// Mark `key`'s merge as owing a cost record. Written synchronously at the
+/// merge transition so the intent exists before anything can remove the
+/// workspace or stop the daemon.
+pub(crate) fn note_merge_owes_cost(config: &ServerConfig, key: &WorkspaceKey) {
+    let kv_key = format!("{PENDING_MERGE_COST_PREFIX}{key}");
+    let observed = chrono::Utc::now().timestamp_millis().to_string();
+    if let Err(error) = config.store.set_kv(&kv_key, &observed) {
+        tracing::warn!(workspace = %key, "external-merge cost: intent not persisted ({error})");
+    }
+}
+
+/// Forget `key`'s pending cost record — it was recorded, or there is nothing
+/// left to record it against.
+fn clear_merge_cost_intent(config: &ServerConfig, key: &WorkspaceKey) {
+    let kv_key = format!("{PENDING_MERGE_COST_PREFIX}{key}");
+    if let Err(error) = config.store.delete_kv(&kv_key) {
+        tracing::warn!(workspace = %key, "external-merge cost: intent not cleared ({error})");
+    }
+}
+
+/// Re-run every external merge still owing a cost record whose settle window
+/// has passed. Level-triggered off the poll tick, so a daemon that died
+/// inside the window — or a recorder whose provider call failed — picks the
+/// work back up instead of losing it.
+pub(crate) async fn sweep_pending_merge_costs(config: &ServerConfig) {
+    let rows = match config.store.list_kv_prefix(PENDING_MERGE_COST_PREFIX) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("external-merge cost: pending sweep failed to read ({error})");
+            return;
+        }
+    };
+    let settled_before =
+        chrono::Utc::now().timestamp_millis() - EXTERNAL_MERGE_SETTLE.as_millis() as i64;
+    for (kv_key, observed) in rows {
+        let Some(key) = kv_key.strip_prefix(PENDING_MERGE_COST_PREFIX) else {
+            continue;
+        };
+        // Still inside the settle window: the recorder spawned at the merge
+        // is expected to take it, and measuring early would read a cost
+        // lazybox's own merge path is about to mark reported.
+        if observed.parse::<i64>().is_ok_and(|at| at > settled_before) {
+            continue;
+        }
+        record_pending_merge_cost(config, &WorkspaceKey::new(key)).await;
+    }
+}
+
 /// Record the cost of a PR that merged WITHOUT lazybox writing the commit
 /// body — GitHub's native auto-merge (`enablePullRequestAutoMerge` carries
 /// no body), an agent's `gh pr merge`, the web UI. Those were the common
@@ -279,17 +340,37 @@ const EXTERNAL_MERGE_SETTLE: std::time::Duration = std::time::Duration::from_sec
 /// performed itself (already marked) records nothing here.
 pub(crate) async fn record_external_merge_trailers(config: ServerConfig, key: WorkspaceKey) {
     tokio::time::sleep(EXTERNAL_MERGE_SETTLE).await;
-    let Some(workspace) = crate::polling::upsert::load_workspace_offloaded(&config, &key).await
+    record_pending_merge_cost(&config, &key).await;
+}
+
+/// One attempt at recording a merged workspace's cost. Clears the durable
+/// intent only when there is nothing left to do — recorded, nothing to
+/// record, or nothing to record it against — so a transient provider failure
+/// is retried by the next [`sweep_pending_merge_costs`].
+async fn record_pending_merge_cost(config: &ServerConfig, key: &WorkspaceKey) {
+    let Some(workspace) = crate::polling::upsert::load_workspace_offloaded(config, key).await
     else {
+        // The workspace was removed inside the settle window. Say so: the
+        // cost is genuinely unrecoverable (the row that carried the PR is
+        // gone), and a silent return made it look like nothing was owed.
+        tracing::warn!(
+            workspace = %key,
+            "external-merge cost: the workspace was removed before its cost could be recorded"
+        );
+        clear_merge_cost_intent(config, key);
         return;
     };
-    let trailers = crate::pr_trailers::measure(&config, &workspace, chrono::Utc::now()).await;
+    let trailers = crate::pr_trailers::measure(config, &workspace, chrono::Utc::now()).await;
     if !external_merge_has_unreported_cost(&trailers) {
+        clear_merge_cost_intent(config, key);
         return;
     }
-    let provider = match build_provider_for_workspace(&config, &key).await {
+    let provider = match build_provider_for_workspace(config, key).await {
         Ok(provider) => provider,
         Err(error) => {
+            // Leave the intent: a provider that cannot be built now (no
+            // credentials yet, a repo not in scope this tick) may build on
+            // the next sweep.
             tracing::warn!(workspace = %key, "external-merge cost: no provider ({error})");
             return;
         }
@@ -303,10 +384,18 @@ pub(crate) async fn record_external_merge_trailers(config: ServerConfig, key: Wo
         .record_merged_trailers(&workspace, &trailers, &policy)
         .await;
     if outcome.is_recorded() {
-        crate::pr_trailers::mark_reported(&config, &key, &trailers).await;
+        crate::pr_trailers::mark_reported(config, key, &trailers).await;
+        clear_merge_cost_intent(config, key);
         tracing::info!(workspace = %key, "recorded the cost of an external merge");
     } else if let lazybox_core::TrailerOutcome::Dropped { reason } = outcome {
+        // `Dropped` is the provider declining for a reason that will not
+        // change by itself (policy `off`, no node id) — retrying forever
+        // would spend GitHub budget on a no-op every tick.
         tracing::warn!(workspace = %key, "external-merge cost not recorded: {reason}");
+        clear_merge_cost_intent(config, key);
+    } else {
+        // `Nothing`: the policy says stay silent for this repo. Settled.
+        clear_merge_cost_intent(config, key);
     }
 }
 
@@ -7690,8 +7779,95 @@ mod sync_workspace_discovery_tests {
 
 #[cfg(test)]
 mod external_merge_cost_tests {
-    use super::external_merge_has_unreported_cost;
-    use lazybox_core::{CostTrailer, PrTrailers};
+    use super::{
+        PENDING_MERGE_COST_PREFIX, clear_merge_cost_intent, external_merge_has_unreported_cost,
+        note_merge_owes_cost, sweep_pending_merge_costs,
+    };
+    use crate::ServerConfig;
+    use lazybox_core::{CostTrailer, PrTrailers, WorkspaceKey};
+
+    /// Regression: the intent to record an external merge's cost survives
+    /// everything the in-memory 60s sleep did not.
+    ///
+    /// The same upsert that observes the merge goes on to reap or
+    /// prompt-to-remove the workspace, so a user answering that prompt
+    /// inside the minute dropped the figure permanently — no log, no retry,
+    /// and the unreported cost stayed on the watermark to be misattributed
+    /// to the next PR on that key. A daemon restart lost it identically.
+    /// The intent is a durable row now, written at the transition.
+    #[tokio::test]
+    async fn the_cost_intent_is_durable_and_survives_a_restart() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github-acme-widget-7");
+        note_merge_owes_cost(&config, &key);
+
+        // A "restart" is just a fresh read of the same store — nothing about
+        // the pending record lives in the process.
+        let pending = config
+            .store
+            .list_kv_prefix(PENDING_MERGE_COST_PREFIX)
+            .expect("read pending rows");
+        assert_eq!(
+            pending.len(),
+            1,
+            "the merge's cost intent outlives the recorder's sleep: {pending:?}"
+        );
+        assert!(pending[0].0.ends_with(key.as_str()), "{pending:?}");
+
+        clear_merge_cost_intent(&config, &key);
+        assert!(
+            config
+                .store
+                .list_kv_prefix(PENDING_MERGE_COST_PREFIX)
+                .expect("read pending rows")
+                .is_empty(),
+            "a recorded cost clears its intent"
+        );
+    }
+
+    /// A workspace removed inside the settle window is settled, not retried
+    /// forever — and the sweep says so rather than dropping it in silence.
+    #[tokio::test]
+    async fn a_removed_workspace_settles_its_intent_instead_of_looping() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github-acme-gone-9");
+        // Backdate past the settle window so the sweep acts on it now.
+        config
+            .store
+            .set_kv(&format!("{PENDING_MERGE_COST_PREFIX}{key}"), "0")
+            .expect("seed a settled pending row");
+
+        sweep_pending_merge_costs(&config).await;
+
+        assert!(
+            config
+                .store
+                .list_kv_prefix(PENDING_MERGE_COST_PREFIX)
+                .expect("read pending rows")
+                .is_empty(),
+            "a workspace that no longer exists cannot be recorded against — settle it"
+        );
+    }
+
+    /// A row still inside its settle window is left for the recorder that
+    /// the merge transition already spawned; sweeping it early would measure
+    /// a cost lazybox's own merge path is about to mark reported.
+    #[tokio::test]
+    async fn a_fresh_intent_is_left_alone_by_the_sweep() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github-acme-fresh-1");
+        note_merge_owes_cost(&config, &key);
+        sweep_pending_merge_costs(&config).await;
+        assert_eq!(
+            config
+                .store
+                .list_kv_prefix(PENDING_MERGE_COST_PREFIX)
+                .expect("read pending rows")
+                .len(),
+            1,
+            "the settle window is still open"
+        );
+    }
 
     #[test]
     fn only_a_measured_unreported_cost_is_recorded() {

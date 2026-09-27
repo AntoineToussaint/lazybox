@@ -208,9 +208,49 @@ pub struct McpRuntime {
     /// message, delivered by its `Stop` hook — waiting for the turn-end
     /// capture that the same `Stop` triggers. Consumed by that capture.
     turn_results: parking_lot::Mutex<HashMap<SessionKey, String>>,
+    /// How many turns each session has ENDED. Incremented by the same `Stop`
+    /// that records the turn result, BEFORE the `Done` state is broadcast,
+    /// so a question released by that broadcast is stamped with the count
+    /// including this turn and can never be captured by it.
+    turns_ended: parking_lot::Mutex<HashMap<SessionKey, u64>>,
     /// The workspaces each session started with `start_workspace`, so the
     /// per-session fan-out cap counts the ones still running an agent.
     started_by: parking_lot::Mutex<HashMap<SessionKey, Vec<lazybox_core::WorkspaceKey>>>,
+    /// How deep in a `start_workspace` chain each workspace sits — a
+    /// workspace an agent started carries its starter's depth plus one, and
+    /// a session nobody started is depth 0. Bounds recursion the way
+    /// [`MAX_ASK_DEPTH`] bounds nested asks: the per-caller cap alone lets
+    /// A start B, B start C, C start D … forever, because each generation is
+    /// under its own bound and a finished start frees the slot that would
+    /// have stopped it.
+    start_depth: parking_lot::Mutex<HashMap<SessionKey, u32>>,
+    /// Workspaces with a `start_workspace` spawn in flight. The
+    /// "already has a running agent" check and the spawn itself are several
+    /// awaits apart, so without this two siblings starting the same record
+    /// both saw it free and both spawned — the double-spawn the `working` /
+    /// `lazybox:w:…` claim labels exist to prevent.
+    starting: parking_lot::Mutex<std::collections::HashSet<lazybox_core::WorkspaceKey>>,
+}
+
+/// Holds a workspace's in-flight `start_workspace` claim. Released in `Drop`,
+/// so every exit — refusal, spawn failure, panic — frees it.
+pub(crate) struct StartClaim {
+    key: lazybox_core::WorkspaceKey,
+    starting: std::sync::Arc<McpRuntime>,
+}
+
+impl std::fmt::Debug for StartClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartClaim")
+            .field("key", &self.key)
+            .finish()
+    }
+}
+
+impl Drop for StartClaim {
+    fn drop(&mut self) {
+        self.starting.starting.lock().remove(&self.key);
+    }
 }
 
 impl McpRuntime {
@@ -245,6 +285,25 @@ impl McpRuntime {
         self.turn_results.lock().insert(session_key, text);
     }
 
+    /// Count one ended turn for `session_key` and return the new total.
+    /// Called on every `Stop`, result or not, so the count tracks turns
+    /// rather than turns that happened to report something.
+    pub fn end_turn(&self, session_key: &SessionKey) -> u64 {
+        let mut turns = self.turns_ended.lock();
+        let counter = turns.entry(session_key.clone()).or_insert(0);
+        *counter = counter.saturating_add(1);
+        *counter
+    }
+
+    /// How many turns `session_key` has ended.
+    pub(crate) fn turns_ended(&self, session_key: &SessionKey) -> u64 {
+        self.turns_ended
+            .lock()
+            .get(session_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Take `session_key`'s latest turn result, if one is waiting.
     fn take_turn_result(&self, session_key: &SessionKey) -> Option<String> {
         self.turn_results.lock().remove(session_key)
@@ -255,13 +314,52 @@ impl McpRuntime {
         self.turn_results.lock().remove(session_key);
     }
 
-    /// Record that `caller` started an agent in `key`.
+    /// Record that `caller` started an agent in `key`, one link deeper in
+    /// the chain than `caller` itself sits.
     fn record_started(&self, caller: &SessionKey, key: lazybox_core::WorkspaceKey) {
+        let depth = self.start_depth(caller).saturating_add(1);
+        self.start_depth
+            .lock()
+            .insert(SessionKey::from(&key), depth);
         let mut started = self.started_by.lock();
         let keys = started.entry(caller.clone()).or_default();
         if !keys.contains(&key) {
             keys.push(key);
         }
+    }
+
+    /// How deep in a `start_workspace` chain `key` sits. A session nobody
+    /// started — the user's own — is 0.
+    fn start_depth(&self, key: &SessionKey) -> u32 {
+        self.start_depth.lock().get(key).copied().unwrap_or(0)
+    }
+
+    /// Claim `key` for an in-flight start. `None` when another caller is
+    /// already spawning into it.
+    fn claim_start(
+        self: &std::sync::Arc<Self>,
+        key: &lazybox_core::WorkspaceKey,
+    ) -> Option<StartClaim> {
+        self.starting
+            .lock()
+            .insert(key.clone())
+            .then(|| StartClaim {
+                key: key.clone(),
+                starting: self.clone(),
+            })
+    }
+
+    /// Every workspace any session started, across all callers. The
+    /// per-caller ledger cannot see a fleet that grew by recursion.
+    fn all_started(&self) -> Vec<lazybox_core::WorkspaceKey> {
+        self.started_by
+            .lock()
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// The workspaces `caller` has started, oldest first.
@@ -826,6 +924,19 @@ pub(crate) struct AgentRequest {
     /// row written before this field existed stays answerable.
     #[serde(default)]
     pub(crate) awaiting_delivery: bool,
+    /// How many turns the target had ENDED when this question landed in its
+    /// input. The turn-end capture for turn N only answers questions that
+    /// landed before turn N ended, which is what makes "this turn never saw
+    /// the question" a structural fact rather than a race the capture
+    /// happens to win.
+    ///
+    /// An idle-gated question asked at a busy target is released ON the
+    /// target's `Done` transition — the same event that spawns the capture —
+    /// so the two rendezvous by design and `awaiting_delivery` alone is
+    /// decided by whichever task gets there first. Defaults to 0 so a row
+    /// written before this field existed stays answerable.
+    #[serde(default)]
+    pub(crate) delivered_after_turns: u64,
 }
 
 impl AgentRequest {
@@ -1684,6 +1795,8 @@ impl LazyboxMcp {
             status: RequestStatus::Pending,
             answers: Vec::new(),
             awaiting_delivery: true,
+            // Stamped for real when it lands (`mark_request_delivered`).
+            delivered_after_turns: 0,
         };
         // Subscribe before the row is even visible: the moment it lands, a
         // target reading it can answer, and a reply that arrives before the
@@ -1934,12 +2047,22 @@ impl LazyboxMcp {
 
     /// The question landed in the target's input: from here on the turn it
     /// starts may answer it, including by the turn-end capture.
+    ///
+    /// Stamps the target's ended-turn count as it is RIGHT NOW. An
+    /// idle-gated question is released on the target's `Done` transition,
+    /// and the `Stop` behind that transition has already counted its turn,
+    /// so the stamp includes the turn that just ended and the capture for
+    /// that turn skips it structurally.
     async fn mark_request_delivered(&self, id: &str) {
         let _write_guard = self.config.mcp.requests_write().lock().await;
         if let Some(mut request) = self.load_request(id).await
             && request.awaiting_delivery
         {
             request.awaiting_delivery = false;
+            request.delivered_after_turns = self
+                .config
+                .mcp
+                .turns_ended(&SessionKey::from(request.target.as_str()));
             let _ = self.save_request(&request).await;
         }
     }
@@ -2675,7 +2798,15 @@ impl LazyboxMcp {
         args: &StartWorkspaceArgs,
         max_started: usize,
         default_agent: &str,
-    ) -> Result<(lazybox_core::WorkspaceKey, lazybox_core::TaskId, String), McpError> {
+    ) -> Result<
+        (
+            lazybox_core::WorkspaceKey,
+            lazybox_core::TaskId,
+            String,
+            StartClaim,
+        ),
+        McpError,
+    > {
         let agent_id = args
             .agent
             .as_deref()
@@ -2709,6 +2840,23 @@ impl LazyboxMcp {
                 None,
             ));
         }
+        // Depth: the chain has to terminate. The per-caller cap below bounds
+        // one session's fan-out and nothing else — every agent this starts is
+        // itself a starter, so without a depth bound A starts B, B starts C,
+        // C starts D, indefinitely, with each generation comfortably under
+        // its own cap.
+        let depth = self.config.mcp.start_depth(caller).saturating_add(1);
+        if depth > MAX_START_DEPTH {
+            return Err(McpError::invalid_request(
+                format!(
+                    "start depth {depth} exceeds the limit of {MAX_START_DEPTH} — you are \
+                     already work that another agent handed off. Do this work here, or hand it \
+                     back to whoever started you rather than starting another agent."
+                ),
+                None,
+            ));
+        }
+
         let mut running = 0;
         for key in self.config.mcp.started_by(caller) {
             if self
@@ -2731,6 +2879,41 @@ impl LazyboxMcp {
             ));
         }
 
+        // Fleet: the per-caller cap is blind to a fleet that grew by
+        // recursion — six sessions each under their own cap is 36 agents
+        // nobody asked for. `agent.max_live_agents` is the fleet's own
+        // ceiling; it stays ADVISORY for a human's spawn ("lazybox advises,
+        // it does not forbid") but is a hard refusal for unattended agent
+        // fan-out, the same distinction `spawn_worker`'s cap already makes.
+        if let Some(fleet_cap) = lazybox_config::Config::load()
+            .unwrap_or_default()
+            .agent
+            .live_agent_cap()
+        {
+            let mut fleet = 0;
+            for key in self.config.mcp.all_started() {
+                if self
+                    .config
+                    .terminal
+                    .running_agent_terminal(&SessionKey::from(&key))
+                    .await
+                    .is_some()
+                {
+                    fleet += 1;
+                }
+            }
+            if fleet >= fleet_cap {
+                return Err(McpError::invalid_request(
+                    format!(
+                        "{fleet} agent-started workspaces are already running across the fleet \
+                         (cap {fleet_cap}, agent.max_live_agents) — wait for one to finish, or \
+                         raise the cap"
+                    ),
+                    None,
+                ));
+            }
+        }
+
         let key = crate::workspace::attach::attach_to_record(&self.config, &anchor)
             .await
             .map_err(|e| McpError::invalid_request(format!("attach to {anchor}: {e}"), None))?;
@@ -2742,6 +2925,19 @@ impl LazyboxMcp {
                 None,
             ));
         }
+        // Claim BEFORE the liveness check and hold it through the spawn:
+        // the check and `handle_spawn` are several awaits apart, so two
+        // siblings starting the same record both read it free and both
+        // spawned into it.
+        let Some(claim) = self.config.mcp.claim_start(&key) else {
+            return Err(McpError::invalid_request(
+                format!(
+                    "another agent is already starting work in {anchor} — check \
+                     `task_status` before starting another"
+                ),
+                None,
+            ));
+        };
         if let Some(terminal_id) = self
             .config
             .terminal
@@ -2757,7 +2953,7 @@ impl LazyboxMcp {
                 None,
             ));
         }
-        Ok((key, anchor, agent_id.to_string()))
+        Ok((key, anchor, agent_id.to_string(), claim))
     }
 
     /// Full `start_workspace` flow: [`Self::start_workspace_prepare`], then
@@ -2782,7 +2978,7 @@ impl LazyboxMcp {
                 None,
             ));
         }
-        let (key, anchor, agent_id) = self
+        let (key, anchor, agent_id, claim) = self
             .start_workspace_prepare(caller, &args, max_started, default_agent)
             .await?;
         self.config.mcp.record_started(caller, key.clone());
@@ -2808,13 +3004,56 @@ impl LazyboxMcp {
             },
         )
         .await;
+        // A real receipt, not a claim. `handle_spawn` returns `()`, so this
+        // used to report `handed_off: true` for a spawn that failed — no
+        // worktree, a clone failure, a misconfigured agent binary — and the
+        // caller went on believing work had started. Wait briefly for the
+        // agent terminal to appear; that is the one observable that says the
+        // spawn actually took.
+        let started_at = tokio::time::Instant::now();
+        let terminal = loop {
+            if let Some(terminal_id) = self
+                .config
+                .terminal
+                .running_agent_terminal(&SessionKey::from(&key))
+                .await
+            {
+                break Some(terminal_id);
+            }
+            if started_at.elapsed() >= START_WORKSPACE_SPAWN_WAIT {
+                break None;
+            }
+            tokio::time::sleep(START_WORKSPACE_SPAWN_POLL).await;
+        };
+        // Held until the spawn is observable, so a sibling cannot slip into
+        // the window between `handle_spawn` returning and the terminal
+        // registering.
+        drop(claim);
+        let Some(terminal_id) = terminal else {
+            tracing::warn!(
+                workspace = %key.as_str(),
+                agent = %agent_id,
+                "mcp start_workspace: no agent terminal appeared after the spawn"
+            );
+            return Err(McpError::internal_error(
+                format!(
+                    "the spawn into {} did not bring up a {agent_id} agent within {:?} — check \
+                     the workspace in lazybox (its worktree may have failed to materialise); \
+                     nothing is running there",
+                    key.as_str(),
+                    START_WORKSPACE_SPAWN_WAIT
+                ),
+                None,
+            ));
+        };
         Ok(serde_json::json!({
             "workspace_key": key.as_str(),
             "task": anchor.key,
             "agent": agent_id,
             "handed_off": true,
+            "terminal_id": terminal_id.0,
             "delivery_confirmed": false,
-            "note": "Started in the record's own workspace; the brief is recorded as yours. Not a confirmation the agent has started — verify with list_sessions / read_session, and get its answer back with ask_session.",
+            "note": "Started in the record's own workspace and its agent terminal is up; the brief is recorded as yours. Not a confirmation the agent has read the brief — verify with list_sessions / read_session, and get its answer back with ask_session.",
         }))
     }
 
@@ -2984,7 +3223,7 @@ impl LazyboxMcp {
     }
 
     #[tool(
-        description = "Hand independent work to an agent in a workspace of its own — any role may call this. Pass `task`, an EXISTING tracker record (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier); the agent runs in that record's own workspace, where its work stays visible in the inbox, resumable and costed, and the `brief` is recorded as sent by you. Prefer this to a sub-agent for work that stands on its own; keep sub-agents for research that feeds your own task. It never files a record: if the work has none, propose one to the user first. Refuses your own workspace, a record whose workspace already runs an agent (reach it with ask_session instead), and more than agent.max_epic_workers (default 6) running agents you started. Returns once handed off — verify with list_sessions / read_session."
+        description = "Hand independent work to an agent in a workspace of its own — any role may call this. Pass `task`, an EXISTING tracker record (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier); the agent runs in that record's own workspace, where its work stays visible in the inbox, resumable and costed, and the `brief` is recorded as sent by you. Prefer this to a sub-agent for work that stands on its own; keep sub-agents for research that feeds your own task. It never files a record: if the work has none, propose one to the user first. Refuses your own workspace, a record whose workspace already runs an agent (reach it with ask_session instead), more than agent.max_epic_workers (default 6) running agents you started, a chain more than 2 hand-offs deep (work handed to you is not work to hand on again), and a fleet already at agent.max_live_agents agent-started workspaces. Returns only once the new agent's terminal is actually up (or an error saying the spawn did not take, so a failed worktree never reads as work started); that is not a confirmation it has read the brief — verify with list_sessions / read_session."
     )]
     async fn start_workspace(
         &self,
@@ -3938,6 +4177,26 @@ const REQUEST_TTL_MS: i64 = 6 * 60 * 60 * 1000;
 /// indefinitely. That is deliberate — each such ask costs one turn and
 /// resolves, which is a dialogue, not the unbounded recursion this guards.
 const MAX_ASK_DEPTH: u32 = 3;
+
+/// Deepest chain of `start_workspace` hand-offs. A session the user started
+/// is depth 0 and may start work; what it starts is depth 1 and may start
+/// work; depth 2 may not start again.
+///
+/// Small on purpose, because start fan-out is MULTIPLICATIVE where nested
+/// asks are linear: with the per-caller cap at its default 6, depth 2 already
+/// admits 6 + 36 concurrent agents. The per-caller cap cannot bound a chain
+/// at all — A starts B, B starts C, B finishes, C starts D — because every
+/// generation is under its own bound and a finished start frees the slot.
+/// The default-on `workspace-over-subagent` standing rule points every agent
+/// at this tool, so the chain is the expected shape, not an abuse case.
+const MAX_START_DEPTH: u32 = 2;
+
+/// How long `start_workspace` waits for the spawned agent's terminal to
+/// register before reporting the spawn failed. The spawn is several async
+/// steps (worktree, backend session, registration), so the receipt has to
+/// wait for the one observable that proves it took.
+const START_WORKSPACE_SPAWN_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+const START_WORKSPACE_SPAWN_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// Default and maximum `ask_session` wait, in seconds. The MCP client's own
 /// call timeout is the real ceiling — a longer wait here just returns
 /// `pending` to a caller that already gave up.
@@ -4094,24 +4353,44 @@ pub fn spawn_request_watcher(config: &ServerConfig) -> tokio::task::JoinHandle<(
 /// alternative — a target that simply never calls `reply_request` — is a
 /// waiting asker that learns nothing until its timeout.
 ///
-/// Only requests created before this turn ended are captured. A `Done`
-/// racing an ask that has not yet reached the composer would otherwise
-/// answer a question the target never saw; the target is idle-`Done` when
-/// asked, so no further `Done` transition fires until the injected turn
-/// finishes, and the window is a few milliseconds wide.
+/// Only questions this turn could actually have SEEN are captured, and that
+/// is decided structurally rather than by timing.
+///
+/// An idle-gated question asked at a busy target is deliberately released on
+/// that target's `Done` transition — the very event that spawns this capture
+/// — so the delivery and the capture rendezvous by design, and
+/// `awaiting_delivery` alone would be decided by whichever task got there
+/// first. (The earlier reasoning here, "the target is idle-`Done` when asked
+/// so no further `Done` fires", only ever described a question asked at an
+/// already-idle target; it never covered the queued path.) Losing that race
+/// answers a question the target has not seen one token of with the result
+/// of the turn that ended before it was asked — exactly the bug idle-gating
+/// exists to prevent.
+///
+/// So the `Stop` counts its turn BEFORE broadcasting `Done`, delivery stamps
+/// the count it sees onto the request, and a capture for turn N answers only
+/// requests stamped below N. A question released by turn N's own `Done`
+/// carries N and is skipped no matter who wins.
 pub(crate) async fn capture_turn_end_answer(
     config: &ServerConfig,
     session_key: &SessionKey,
     now_ms: i64,
 ) {
+    let turn = config.mcp.turns_ended(session_key);
     let handler = LazyboxMcp::new(config.clone());
     let candidates: Vec<String> = handler
         .open_requests_for(session_key.as_str())
         .await
         .into_iter()
-        // Only a question that has LANDED can be answered by this turn: one
-        // still queued behind the target was never seen by it.
-        .filter(|request| request.created_at <= now_ms && !request.awaiting_delivery)
+        // Only a question that has LANDED, in a turn that has since ended,
+        // can be answered by this turn. One still queued was never seen at
+        // all; one stamped with this turn's own count landed AS the turn
+        // ended and is waiting for the next one.
+        .filter(|request| {
+            request.created_at <= now_ms
+                && !request.awaiting_delivery
+                && request.delivered_after_turns < turn
+        })
         .map(|request| request.id)
         .collect();
     if candidates.is_empty() {
@@ -4137,7 +4416,7 @@ pub(crate) async fn capture_turn_end_answer(
         }
     };
     for (request, answer) in
-        apply_captured_answers(config, &handler, candidates, &text, source, now_ms).await
+        apply_captured_answers(config, &handler, candidates, &text, source, now_ms, turn).await
     {
         tracing::info!(
             request = %request.id,
@@ -4168,6 +4447,7 @@ pub(crate) async fn capture_turn_end_answer(
 /// real in that window. Taking a stale snapshot as an argument is exactly the
 /// hazard, so the CAS lives here and is exercised directly by passing ids
 /// whose rows have since moved on.
+#[allow(clippy::too_many_arguments)]
 async fn apply_captured_answers(
     config: &ServerConfig,
     handler: &LazyboxMcp,
@@ -4175,6 +4455,7 @@ async fn apply_captured_answers(
     text: &str,
     source: AnswerSource,
     now_ms: i64,
+    turn: u64,
 ) -> Vec<(AgentRequest, RequestAnswer)> {
     let mut captured = Vec::new();
     let _write_guard = config.mcp.requests_write().lock().await;
@@ -4185,7 +4466,10 @@ async fn apply_captured_answers(
         let Some(mut request) = handler.load_request(&id).await else {
             continue;
         };
-        if request.status != RequestStatus::Pending || request.awaiting_delivery {
+        if request.status != RequestStatus::Pending
+            || request.awaiting_delivery
+            || request.delivered_after_turns >= turn
+        {
             continue;
         }
         let answer = RequestAnswer {
@@ -5089,7 +5373,7 @@ mod tests {
         seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
         let handler = LazyboxMcp::new(config.clone());
         let caller = SessionKey::from("some-agent");
-        let (key, anchor, agent) = handler
+        let (key, anchor, agent, _claim) = handler
             .start_workspace_prepare(&caller, &start_workspace_args("acme/widget#7"), 6, "claude")
             .await
             .expect("an unroled agent may start a workspace");
@@ -5143,6 +5427,180 @@ mod tests {
             .await
             .expect_err("disabled");
         assert!(err.message.contains("disabled"), "{}", err.message);
+    }
+
+    /// Regression: two siblings starting the same record must not both
+    /// spawn into it.
+    ///
+    /// The "already has a running agent" check and `handle_spawn` are
+    /// several awaits apart (`attach_to_record`, `record_started`), so both
+    /// callers read the record free and both spawned — the double-spawn the
+    /// `working` / `lazybox:w:…` claim labels exist to prevent. The claim is
+    /// taken before the check and held through the spawn.
+    #[tokio::test]
+    async fn two_callers_starting_one_record_do_not_both_spawn() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config);
+
+        // The first caller holds the claim (its guard is still alive).
+        let (_key, _anchor, _agent, claim) = handler
+            .start_workspace_prepare(
+                &SessionKey::from("first"),
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+            )
+            .await
+            .expect("the first caller claims the record");
+
+        let err = handler
+            .start_workspace_prepare(
+                &SessionKey::from("second"),
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+            )
+            .await
+            .expect_err("the second caller must be refused while the spawn is in flight");
+        assert!(
+            err.message.contains("already starting work"),
+            "the refusal names the in-flight start: {}",
+            err.message
+        );
+
+        // Releasing the claim frees the record again — a refused or failed
+        // start must never wedge it.
+        drop(claim);
+        handler
+            .start_workspace_prepare(
+                &SessionKey::from("second"),
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+            )
+            .await
+            .expect("the claim is released on drop");
+    }
+
+    /// Regression: a spawn that never brought an agent up must not report
+    /// `handed_off: true`.
+    ///
+    /// `handle_spawn` returns `()`, so the payload hardcoded success — a
+    /// failed worktree or a misconfigured agent binary read to the caller as
+    /// work started. The receipt now waits for the agent terminal, the one
+    /// observable that proves the spawn took. Here nothing can spawn (the
+    /// in-memory config has no worktree to attach), so it must error.
+    #[tokio::test(start_paused = true)]
+    async fn a_spawn_that_brings_no_agent_up_is_not_reported_as_handed_off() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config);
+        let err = handler
+            .start_workspace_payload(
+                &SessionKey::from("caller"),
+                start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+            )
+            .await
+            .expect_err("no agent terminal came up, so this is not a hand-off");
+        assert!(
+            err.message.contains("nothing is running there"),
+            "the error says the spawn did not take: {}",
+            err.message
+        );
+    }
+
+    /// Regression: a `start_workspace` chain must terminate.
+    ///
+    /// The per-caller cap bounds ONE session's fan-out and nothing else, so
+    /// A starts B, B starts C, C starts D … ran forever — each generation
+    /// comfortably under its own bound, and a finished start freeing the slot
+    /// that would otherwise have stopped it. The depth ledger makes the chain
+    /// itself the bounded thing.
+    #[tokio::test]
+    async fn a_start_chain_is_refused_once_it_runs_too_deep() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config.clone());
+
+        // Depth 0 is the user's own session: it may hand work off.
+        let root = SessionKey::from("root");
+        handler
+            .start_workspace_prepare(&root, &start_workspace_args("acme/widget#7"), 6, "claude")
+            .await
+            .expect("a session nobody started may start work");
+
+        // Walk the chain the way `record_started` stamps it.
+        let mut previous = root;
+        for generation in 1..=MAX_START_DEPTH {
+            let started = lazybox_core::WorkspaceKey::new(format!("gen-{generation}"));
+            config.mcp.record_started(&previous, started.clone());
+            previous = SessionKey::from(&started);
+        }
+        let err = handler
+            .start_workspace_prepare(
+                &previous,
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+            )
+            .await
+            .expect_err("the chain must stop");
+        assert!(
+            err.message.contains("start depth"),
+            "the refusal names the depth bound: {}",
+            err.message
+        );
+    }
+
+    /// Regression: the per-caller cap is blind to a fleet that grew by
+    /// recursion — six sessions each under their own cap is 36 agents nobody
+    /// asked for. The fleet cap refuses even a caller with an empty ledger.
+    #[tokio::test]
+    async fn the_fleet_cap_refuses_a_caller_that_is_under_its_own_cap() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let fleet_cap = lazybox_config::Config::load()
+            .unwrap_or_default()
+            .agent
+            .live_agent_cap()
+            .expect("the advisory fleet ceiling is set by default");
+
+        // Other sessions already hold the whole fleet ceiling, each running.
+        for n in 0..fleet_cap {
+            let key = lazybox_core::WorkspaceKey::new(format!("busy-{n}"));
+            config
+                .mcp
+                .record_started(&SessionKey::from(format!("starter-{n}")), key.clone());
+            config
+                .terminal
+                .register_terminal(
+                    lazybox_ipc::TerminalId(900 + n as u64),
+                    format!("backend-{n}"),
+                    SessionKey::from(&key),
+                    lazybox_ipc::TerminalKind::Agent("claude".into()),
+                )
+                .await;
+        }
+
+        let handler = LazyboxMcp::new(config);
+        // A caller with an EMPTY per-session ledger — under its own cap.
+        let err = handler
+            .start_workspace_prepare(
+                &SessionKey::from("fresh"),
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+            )
+            .await
+            .expect_err("the fleet is already full");
+        assert!(
+            err.message.contains("across the fleet"),
+            "the refusal names the fleet bound: {}",
+            err.message
+        );
     }
 
     /// The fan-out bound counts what a session started, once per workspace.
@@ -6814,6 +7272,94 @@ mod tests {
         assert_eq!(payload["source"], "reply_request");
     }
 
+    /// Regression: a question that lands AS a turn ends must not be
+    /// answered by that turn.
+    ///
+    /// An idle-gated question asked at a busy target is released on the
+    /// target's `Done` transition — the same event that spawns the capture —
+    /// so the two rendezvous by design and `awaiting_delivery` alone is
+    /// decided by whichever task wins. Losing that race answered a question
+    /// the target had not seen one token of with the result of the turn that
+    /// ended before it was asked, which is the bug idle-gating exists to
+    /// prevent. Here the delivery wins outright (the request is marked
+    /// delivered before the capture runs); only the turn stamp can exclude
+    /// it.
+    #[tokio::test(start_paused = true)]
+    async fn a_question_landing_as_the_turn_ends_is_not_answered_by_that_turn() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let terminal = lazybox_ipc::TerminalId(9501);
+        live_agent(&config, &mock, &target, terminal).await;
+        // Mid-turn, so the idle gate queues the question instead of
+        // delivering it — the path whose release races the capture.
+        config
+            .terminal
+            .record_agent_state(terminal, lazybox_ipc::AgentState::Working)
+            .await;
+
+        // The question is asked while the target is mid-turn, so it queues.
+        let result = handler
+            .ask_session_payload(
+                &asker,
+                &ask(&target, "what is the contract?", "async", None),
+                1_000,
+            )
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        assert!(
+            handler
+                .load_request(&id)
+                .await
+                .expect("the request row")
+                .awaiting_delivery,
+            "a mid-turn target queues the question rather than taking it now",
+        );
+
+        // The turn ends: the `Stop` counts it and records its result, and
+        // the SAME transition releases the queued question into the input.
+        config.mcp.end_turn(&target);
+        config
+            .mcp
+            .record_turn_result(target.clone(), "I refactored the parser.".into());
+        handler.mark_request_delivered(&id).await;
+
+        // The capture for that turn now runs — and must skip the question.
+        capture_turn_end_answer(&config, &target, 2_000).await;
+
+        let polled = handler
+            .poll_request_payload(&asker, &id, 3_000)
+            .await
+            .expect("poll");
+        assert_eq!(
+            polled["status"], "pending",
+            "the turn that ended before the question arrived must not answer it: {polled}"
+        );
+        assert!(polled["answer"].is_null(), "{polled}");
+
+        // The NEXT turn may answer it, which is the whole point.
+        config.mcp.end_turn(&target);
+        config
+            .mcp
+            .record_turn_result(target.clone(), "The contract is Foo -> Bar.".into());
+        capture_turn_end_answer(&config, &target, 4_000).await;
+        let polled = handler
+            .poll_request_payload(&asker, &id, 5_000)
+            .await
+            .expect("poll");
+        assert_eq!(polled["status"], "answered_by_capture", "{polled}");
+        assert_eq!(polled["answer"], "The contract is Foo -> Bar.");
+        assert_eq!(polled["source"], "turn_result");
+    }
+
     /// A reply that never comes leaves the request OPEN and the asker told
     /// so — the one thing it must not do is claim an answer.
     #[tokio::test(start_paused = true)]
@@ -7053,6 +7599,9 @@ mod tests {
             .expect("request id")
             .to_string();
 
+        // The turn the question was delivered into now ends, as its `Stop`
+        // hook would record it.
+        config.mcp.end_turn(&target);
         capture_turn_end_answer(&config, &target, 5_000).await;
 
         let polled = handler
@@ -7100,6 +7649,10 @@ mod tests {
             .expect("request id")
             .to_string();
 
+        // The Stop that carries the result counts its turn first, exactly as
+        // the hook path does — otherwise the capture is asked to answer for
+        // a turn that, by the count, never ended.
+        config.mcp.end_turn(&target);
         config
             .mcp
             .record_turn_result(target.clone(), "CI is green; PR #42 ready to merge.".into());
@@ -7212,6 +7765,9 @@ mod tests {
             "...scrollback noise...",
             AnswerSource::TurnEndCapture,
             3_000,
+            // A turn later than the request's stamp, so only the CAS below
+            // can exclude it — which is what this test is about.
+            1,
         )
         .await;
         assert!(

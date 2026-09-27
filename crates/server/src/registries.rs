@@ -1661,8 +1661,13 @@ impl PollState {
 pub struct SpawnCoordinator {
     /// Lets an inject task verify submit via the structured hook and retry Enter once.
     pub(crate) prompt_submit_signals: Arc<Mutex<HashMap<TerminalId, Arc<Notify>>>>,
-    /// Enforces one readiness-gated injection per terminal.
-    pub(crate) pending_prompt_injections: Arc<parking_lot::Mutex<HashSet<TerminalId>>>,
+    /// Enforces one readiness-gated injection per terminal *per lane*. The
+    /// human's `w w` and an agent's idle-gated message wait on different
+    /// things for very different lengths of time, so they reserve
+    /// separately: a single slot let a 20-minute agent wait refuse every
+    /// keypress the user made in the meantime (see `InjectLane`).
+    pub(crate) pending_prompt_injections:
+        Arc<parking_lot::Mutex<HashSet<(TerminalId, crate::spawn_handler::InjectLane)>>>,
     /// Holds keyboard→PTY writes for a terminal whose spawn-time context
     /// injection has not yet been submitted, so the injected brief is
     /// guaranteed to reach the agent before any racing user keystroke (#1444).

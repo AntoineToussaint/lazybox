@@ -2060,6 +2060,7 @@ async fn handle_spawn_inner(
                 initial_prompt.as_deref(),
                 untrusted,
                 would_skip_permissions,
+                origin,
             )
             .await
             {
@@ -2118,7 +2119,10 @@ async fn handle_spawn_inner(
             // into `handle_spawn`, and a recursive async cycle needs one
             // pointer indirection to keep the futures finitely sized.
             // (This call passes no fallback, so it can't actually recurse.)
-            Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+            Box::pin(deliver_spawn_prompt_to_live(
+                config, existing, prompt, origin,
+            ))
+            .await;
             // `confirmed: true` here: `handle_inject_prompt` runs its
             // paste+submit ladder in a detached task and returns at
             // ordering-registration, BEFORE that ladder can post a give-up
@@ -2251,7 +2255,10 @@ async fn handle_spawn_inner(
                 {
                     return None;
                 }
-                Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+                Box::pin(deliver_spawn_prompt_to_live(
+                    config, existing, prompt, origin,
+                ))
+                .await;
                 // `confirmed: true`: same detached-ladder ordering as the
                 // collapse path above — the delivery toast precedes any
                 // background give-up notice, so it can't mask one, and the
@@ -3267,6 +3274,22 @@ async fn handle_spawn_inner(
         let snippet_for_inject = initial_snippet.clone();
         let session_key_for_inject = session_key.clone();
         let inject_gate = inject_gate.take();
+        // A spawn lazybox started on its own (an `@lazybox` mention, a label,
+        // auto-fix, epic dispatch) hands the agent a prompt nobody typed:
+        // record it as lazybox's once it lands, so the agent's history and
+        // recap say where its task came from.
+        let autonomous_history = match origin {
+            lazybox_ipc::SpawnOrigin::Autonomous(trigger) if initial_snippet.is_none() => {
+                Some(UserPrompt {
+                    text: prompt.clone(),
+                    timestamp_ms: Utc::now().timestamp_millis().max(0) as u64,
+                    source: PromptSource::Lazybox {
+                        reason: trigger.notice_tag().to_string(),
+                    },
+                })
+            }
+            _ => None,
+        };
         tokio::spawn(async move {
             // Closes the input gate on every exit path of this task (#1444):
             // once injection is submitted (or fails), the keyboard writes
@@ -3311,6 +3334,9 @@ async fn handle_spawn_inner(
                     matches!(outcome, InjectOutcome::Submitted),
                 )
                 .await;
+                if let Some(entry) = autonomous_history {
+                    handle_record_user_message(&config_for_inject, id, &entry).await;
+                }
             }
         });
     }
@@ -6262,6 +6288,39 @@ async fn refuse_foreign_inject_into_bypass(
     true
 }
 
+/// Hand a spawn's prompt to the agent already running in its place. A spawn
+/// lazybox started on its own (a mention, a label, auto-fix, epic dispatch)
+/// goes through [`crate::delivery`] as lazybox, so the agent's history
+/// records where the task came from; a user's spawn keeps the plain inject,
+/// whose prompt the client records itself.
+async fn deliver_spawn_prompt_to_live(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    prompt: &str,
+    origin: lazybox_ipc::SpawnOrigin,
+) {
+    match origin {
+        lazybox_ipc::SpawnOrigin::Autonomous(trigger) => {
+            let _pending = crate::delivery::deliver(
+                config,
+                crate::delivery::DeliveryRequest {
+                    terminal_id,
+                    body: prompt.to_string(),
+                    submit: true,
+                    gate: crate::delivery::Gate::ChooserOnly,
+                    from: crate::delivery::Party::Lazybox(trigger.notice_tag()),
+                    wait_limit: None,
+                },
+            )
+            .await;
+        }
+        lazybox_ipc::SpawnOrigin::Interactive => {
+            handle_inject_prompt(config, terminal_id, prompt, None, true).await;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn collapse_onto_inflight_spawn(
     config: &ServerConfig,
     session_key: &SessionKey,
@@ -6271,6 +6330,7 @@ async fn collapse_onto_inflight_spawn(
     prompt: Option<&str>,
     untrusted: bool,
     would_skip_permissions: bool,
+    origin: lazybox_ipc::SpawnOrigin,
 ) -> bool {
     tracing::info!(
         %session_key,
@@ -6314,7 +6374,10 @@ async fn collapse_onto_inflight_spawn(
         // `handle_spawn`: `handle_inject_prompt`'s fallback arm can
         // recurse into `handle_spawn`. (No fallback passed here, so it
         // can't actually recurse.)
-        Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+        Box::pin(deliver_spawn_prompt_to_live(
+            config, existing, prompt, origin,
+        ))
+        .await;
     }
     let _ = config.bus.send(Event::TerminalFocusRequested {
         terminal_id: existing,
@@ -13105,6 +13168,63 @@ mod tests {
             "the spawn transport records the same MRU the inject records",
         );
     }
+    /// A spawn lazybox started itself (here, an `@lazybox` mention) that
+    /// lands on an agent already running delivers its prompt as lazybox's,
+    /// so the agent's history says where the task came from.
+    #[tokio::test]
+    async fn an_autonomous_spawn_onto_a_live_agent_is_recorded_as_lazybox() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:o/r#1216");
+        let backend_key = mock
+            .spawn(&[], None, &[], "autonomous-collapse")
+            .await
+            .expect("spawn backing agent");
+        register_test_agent(
+            &config.terminal,
+            TerminalId(16),
+            &backend_key,
+            session_key.clone(),
+            "claude",
+            Some(lazybox_ipc::AgentState::Idle),
+            None,
+        )
+        .await;
+
+        handle_spawn(
+            &config,
+            session_key.clone(),
+            None,
+            TerminalKind::Agent("claude".into()),
+            SpawnOptions {
+                initial_prompt: Some("triage the new @lazybox mention".into()),
+                autonomous: true,
+                origin: lazybox_ipc::SpawnOrigin::Autonomous(
+                    lazybox_ipc::AutonomousTrigger::Mention,
+                ),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let history = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let history = load_prompt_history(&config, session_key.as_str()).await;
+                if !history.is_empty() {
+                    return history;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the autonomous prompt is recorded");
+        assert_eq!(
+            history[0].source,
+            PromptSource::Lazybox {
+                reason: "@lazybox".into()
+            }
+        );
+    }
+
     /// #1148: if a Claude version ignores the deterministically seeded trust
     /// record, an autonomous terminal's exact trust chooser is revalidated
     /// from the live backend and answered once. This is the real backend-write
@@ -17377,6 +17497,7 @@ mod tests {
             None,
             false,
             true,
+            lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await;
         match rx.try_recv().expect("a retry notice is broadcast") {

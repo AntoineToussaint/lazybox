@@ -19,6 +19,9 @@ nd = "nd"  # English ordinal suffix in calendar-date parsing
 # "ratatouille". Apply to lowercase + titlecase occurrences.
 ratatui = "ratatui"
 Ratatui = "Ratatui"
+# `Magentic-One` is Microsoft's AutoGen multi-agent system — a product name
+# cited in docs/agent-coordination-v2.md, not a misspelling of "magnetic".
+Magentic = "Magentic"
 
 # Domain-specific identifiers and idioms we've settled on.
 sluggify = "sluggify"     # internal helper name; renaming is churn-only

@@ -1959,6 +1959,10 @@ mod originating_issue_header_tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
 
+    pub(super) fn task_for_blockers(number: u64) -> Task {
+        task("pull", number, vec![])
+    }
+
     fn task(kind: &str, number: u64, closes: Vec<TaskId>) -> Task {
         Task {
             author: String::new(),
@@ -2623,5 +2627,68 @@ mod natural_height_tests {
             pane_with(Some(ws_with_n_comments(10))).natural_height(),
             4 + 1 + (10 + 3)
         );
+    }
+}
+
+#[cfg(test)]
+mod header_blocker_tests {
+    use super::super::{PaneId, RightPane, blocker_label};
+    use chrono::Utc;
+    use lazybox_core::{TaskId, Workspace};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn gh(key: &str) -> TaskId {
+        TaskId {
+            source: "github".into(),
+            key: key.into(),
+        }
+    }
+
+    fn render(pane: &mut RightPane, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn a_same_repo_blocker_is_labelled_by_number_and_a_foreign_one_in_full() {
+        assert_eq!(blocker_label(&gh("o/r#7"), Some("o/r")), "#7");
+        assert_eq!(blocker_label(&gh("x/y#9"), Some("o/r")), "x/y#9");
+        let linear = TaskId {
+            source: "linear".into(),
+            key: "ENG-45".into(),
+        };
+        assert_eq!(blocker_label(&linear, Some("o/r")), "ENG-45");
+    }
+
+    #[test]
+    fn clicking_a_header_blocker_asks_to_open_that_blocker() {
+        let mut pr = super::originating_issue_header_tests::task_for_blockers(172);
+        pr.blocked_by = vec![gh("o/r#7"), gh("x/y#9")];
+        let ws = Workspace::from_task(pr, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        let rows = render(&mut pane, 100, 24);
+        let (row, hits) = pane
+            .click_hits
+            .header_blockers
+            .clone()
+            .expect("the blocker line registers click targets");
+        let line = &rows[row as usize];
+        assert!(line.contains("#7") && line.contains("x/y#9"), "{line}");
+        assert_eq!(hits.len(), 2);
+
+        let (span, target) = hits[1].clone();
+        assert_eq!(target, gh("x/y#9"));
+        assert!(pane.handle_mouse_click(*span.start(), row));
+        assert_eq!(pane.take_open_task(), Some(gh("x/y#9")));
+        assert_eq!(pane.take_open_task(), None, "the request is consumed");
     }
 }

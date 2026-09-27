@@ -8598,6 +8598,35 @@ fn modal_subscriptions() -> Vec<tuirealm::subscription::Sub<Id, UserEvent>> {
     ]
 }
 
+impl<T: TerminalAdapter> Model<T> {
+    /// Go to a task someone clicked (a blocker in the header): its own
+    /// workspace when this client has one, otherwise the task on GitHub.
+    pub(crate) fn open_task_reference(&mut self, task: &lazybox_core::TaskId) {
+        if let Some(key) = self.sidebar.workspace_key_for_task(task)
+            && self.sidebar.focus_workspace_key(&key)
+        {
+            self.sync_panes();
+            self.redraw = true;
+            return;
+        }
+        match github_task_url(task) {
+            Some(url) => self.open_external_url(&url),
+            None => self.flash_hint(format!("{} has no workspace here", task.key)),
+        }
+    }
+}
+
+/// The GitHub URL for an `owner/repo#N` task. GitHub serves an issue URL
+/// for a PR number too (it redirects), so one form covers both.
+fn github_task_url(task: &lazybox_core::TaskId) -> Option<String> {
+    if task.source != lazybox_core::GITHUB_SOURCE {
+        return None;
+    }
+    let (repo, number) = task.key.rsplit_once('#')?;
+    (repo.contains('/') && number.chars().all(|c| c.is_ascii_digit()) && !number.is_empty())
+        .then(|| format!("https://github.com/{repo}/issues/{number}"))
+}
+
 /// The short provenance tag a prompt-history row carries: `]key` for a
 /// snippet, `← sender` for a message another agent sent, `lazybox · reason`
 /// for lazybox's own automation, nothing for what the user typed.
@@ -8621,6 +8650,31 @@ fn short_session(key: &str) -> String {
     }
     let tail: String = chars[chars.len() - (MAX - 1)..].iter().collect();
     format!("…{tail}")
+}
+
+#[cfg(test)]
+mod github_task_url_tests {
+    use super::github_task_url;
+    use lazybox_core::TaskId;
+
+    fn id(source: &str, key: &str) -> TaskId {
+        TaskId {
+            source: source.into(),
+            key: key.into(),
+        }
+    }
+
+    #[test]
+    fn only_a_github_owner_repo_number_key_becomes_a_url() {
+        assert_eq!(
+            github_task_url(&id("github", "o/r#7")).as_deref(),
+            Some("https://github.com/o/r/issues/7")
+        );
+        assert_eq!(github_task_url(&id("linear", "ENG-45")), None);
+        assert_eq!(github_task_url(&id("github", "r#7")), None);
+        assert_eq!(github_task_url(&id("github", "o/r#")), None);
+        assert_eq!(github_task_url(&id("github", "o/r#7a")), None);
+    }
 }
 
 #[cfg(test)]

@@ -4148,6 +4148,25 @@ mod search_tests {
             "focus must find a row upserted while a batch is open"
         );
     }
+
+    /// A header blocker names a task, not a workspace: the lookup finds the
+    /// workspace carrying that task so a click can jump to it.
+    #[test]
+    fn workspace_key_for_task_finds_the_workspace_carrying_it() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let workspace = issue_ws("992", "Blocker");
+        let key = SessionKey::from(&workspace.key);
+        let task = workspace.gh_issues[0].id.clone();
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        assert_eq!(sb.workspace_key_for_task(&task), Some(key));
+        let elsewhere = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "x/y#1".into(),
+        };
+        assert_eq!(sb.workspace_key_for_task(&elsewhere), None);
+    }
 }
 
 #[cfg(test)]

@@ -2166,6 +2166,22 @@ impl Sidebar {
 
     /// Move the cursor onto the workspace row matching `key`. Returns
     /// true on a hit. Used by `--workspace` preselect on startup.
+    /// The workspace carrying `task` — as its PR or one of its linked
+    /// issues — if this client knows one. What a click on a blocker jumps to.
+    pub fn workspace_key_for_task(&self, task: &lazybox_core::TaskId) -> Option<SessionKey> {
+        self.workspaces
+            .iter()
+            .find(|(_, workspace)| {
+                workspace
+                    .pr
+                    .iter()
+                    .chain(workspace.gh_issues.iter())
+                    .chain(workspace.linear_issues.iter())
+                    .any(|t| &t.id == task)
+            })
+            .map(|(key, _)| key.clone())
+    }
+
     pub fn focus_workspace_key(&mut self, key: &SessionKey) -> bool {
         self.ensure_visible_fresh();
         for (i, row) in self.visible.iter().enumerate() {

@@ -858,6 +858,14 @@ impl Sidebar {
         self.inner.focus_workspace_key(key)
     }
 
+    /// The workspace carrying `task`, if this client knows one.
+    pub fn workspace_key_for_task(
+        &self,
+        task: &lazybox_core::TaskId,
+    ) -> Option<lazybox_core::SessionKey> {
+        self.inner.workspace_key_for_task(task)
+    }
+
     /// Reveal and select a workspace even when the current sidebar view
     /// hides it.
     pub fn reveal_workspace_key(&mut self, key: &lazybox_core::SessionKey) -> bool {

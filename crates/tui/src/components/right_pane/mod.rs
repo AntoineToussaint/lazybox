@@ -253,7 +253,14 @@ pub struct RightPane {
     /// which selects the workspace in the sidebar (the pane can't reach
     /// `Model` itself, mirroring the other `pending_*` handoffs).
     pending_select_workspace: Option<lazybox_core::SessionKey>,
+    /// A task the user clicked in the header (a blocker), for the
+    /// orchestrator to jump to or open.
+    pending_open_task: Option<lazybox_core::TaskId>,
 }
+
+/// One clickable blocker on the header's `Blocked on:` line: its column
+/// span and the task it names.
+type BlockerHit = (std::ops::RangeInclusive<u16>, lazybox_core::TaskId);
 
 /// Click-target geometry captured during render. Three regions are
 /// tracked: the Description section's toggle row, the Activity
@@ -274,6 +281,10 @@ struct ClickHits {
     /// reviewer picker — the same `g r` flow (#1092). `None` unless the
     /// workspace is a PR (only PRs have reviewers).
     header_reviewers: Option<u16>,
+    /// Row of the header's `Blocked on:` line and each blocker's column
+    /// span on it. Clicking a blocker jumps to its workspace (or opens it)
+    /// — the line used to say only "1 blocker", with nothing to click.
+    header_blockers: Option<(u16, Vec<BlockerHit>)>,
     /// Row containing the `▶ Description` / `▼ Description` header,
     /// or `None` when the section isn't being rendered (no body).
     body_header_row: Option<u16>,
@@ -471,6 +482,7 @@ impl RightPane {
             overview: None,
             overview_hits: Vec::new(),
             pending_select_workspace: None,
+            pending_open_task: None,
         }
     }
 
@@ -900,6 +912,11 @@ impl RightPane {
         self.pending_select_workspace.take()
     }
 
+    /// Drain a task clicked in the header (a blocker).
+    pub fn take_open_task(&mut self) -> Option<lazybox_core::TaskId> {
+        self.pending_open_task.take()
+    }
+
     pub fn set_workspace(&mut self, workspace: Option<Workspace>) {
         let same = match (&self.workspace, &workspace) {
             (Some(a), Some(b)) => a.key == b.key,
@@ -1006,7 +1023,7 @@ impl RightPane {
     ///
     /// All targets are populated during render via `click_hits`; this
     /// function does pure lookup, no re-layout.
-    pub fn handle_mouse_click(&mut self, _col: u16, row: u16) -> bool {
+    pub fn handle_mouse_click(&mut self, col: u16, row: u16) -> bool {
         tracing::debug!(
             click_row = row,
             body_header_row = ?self.click_hits.body_header_row,
@@ -1037,6 +1054,14 @@ impl RightPane {
         {
             // Open the originating issue directly (#567).
             self.pending_open_url = Some(url.clone());
+            return true;
+        }
+        if let Some((r, spans)) = &self.click_hits.header_blockers
+            && *r == row
+            && let Some((_, task)) = spans.iter().find(|(cols, _)| cols.contains(&col))
+        {
+            // Jump to what is blocking this work (or open it).
+            self.pending_open_task = Some(task.clone());
             return true;
         }
         if Some(row) == self.click_hits.header_reviewers {
@@ -1345,6 +1370,7 @@ impl RightPane {
         self.click_hits.header_title = None;
         self.click_hits.header_issue = None;
         self.click_hits.header_reviewers = None;
+        self.click_hits.header_blockers = None;
         let theme = crate::theme::current();
         let Some(workspace) = &self.workspace else {
             let line = Line::from(Span::styled(" (no session selected) ", theme.hint()));
@@ -1539,15 +1565,43 @@ impl RightPane {
                 Span::styled("Blocked on: ", Style::default().fg(theme.error)),
                 Span::styled(reason.to_string(), Style::default().fg(theme.text_dim)),
             ]));
-        } else if let count @ 1.. = workspace.hierarchy_blocked_by().count() {
-            let noun = if count == 1 { "blocker" } else { "blockers" };
-            lines.push(Line::from(vec![
-                Span::styled("Blocked on: ", Style::default().fg(theme.error)),
-                Span::styled(
-                    format!("{count} {noun}"),
-                    Style::default().fg(theme.text_dim),
-                ),
-            ]));
+        }
+        // The blocking tasks themselves, by reference, each one clickable.
+        // This line used to read "1 blocker" with nothing to click and no
+        // way to find out what was blocking.
+        let blockers: Vec<lazybox_core::TaskId> =
+            workspace.hierarchy_blocked_by().cloned().collect();
+        if !blockers.is_empty() {
+            let own_repo = task.repo.as_deref();
+            let row = area.y + lines.len() as u16;
+            let label = if workspace.declared_blocker().is_some() {
+                "Blocked by: "
+            } else {
+                "Blocked on: "
+            };
+            let mut spans = vec![Span::styled(label, Style::default().fg(theme.error))];
+            let mut col = area.x + label.chars().count() as u16;
+            let mut hits = Vec::with_capacity(blockers.len());
+            for (i, blocker) in blockers.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(", ", Style::default().fg(theme.text_dim)));
+                    col += 2;
+                }
+                let text = blocker_label(blocker, own_repo);
+                let width = text.chars().count() as u16;
+                hits.push((col..=col + width.saturating_sub(1), blocker.clone()));
+                col += width;
+                spans.push(Span::styled(
+                    text,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::UNDERLINED),
+                ));
+            }
+            if row < area.bottom() {
+                self.click_hits.header_blockers = Some((row, hits));
+            }
+            lines.push(Line::from(spans));
         }
 
         // Diffstat — a one-line at-a-glance sense of a PR's size/shape.
@@ -3000,3 +3054,13 @@ impl RightPane {
 // `crate::intent` so the `w` resolver owns the prompt text. The
 // right pane's `w` handler now calls `intent::resolve_work` and
 // just executes the returned `Intent`.
+
+/// How a blocking task reads on the header line: `#N` when it lives in the
+/// workspace's own repo, `owner/repo#N` when it doesn't, the key itself for
+/// a non-GitHub tracker (a Linear `ENG-42`).
+fn blocker_label(task: &lazybox_core::TaskId, own_repo: Option<&str>) -> String {
+    match task.key.rsplit_once('#') {
+        Some((repo, number)) if Some(repo) == own_repo => format!("#{number}"),
+        _ => task.key.clone(),
+    }
+}

@@ -2703,6 +2703,9 @@ impl<T: TerminalAdapter> Model<T> {
                         if let Some(url) = self.right.take_open_url() {
                             self.open_external_url(&url);
                         }
+                        if let Some(task) = self.right.take_open_task() {
+                            self.open_task_reference(&task);
+                        }
                         if self.right.take_request_reviewers()
                             && let Some(cmd) = self.begin_request_reviewers()
                         {

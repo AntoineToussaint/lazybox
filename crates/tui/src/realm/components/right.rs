@@ -212,6 +212,12 @@ impl Right {
         self.inner.take_open_url()
     }
 
+    /// Drain a blocker clicked in the header. The orchestrator jumps to
+    /// its workspace, or opens it when this client has none.
+    pub fn take_open_task(&mut self) -> Option<lazybox_core::TaskId> {
+        self.inner.take_open_task()
+    }
+
     /// Drain a click on the header `Reviewers:` line (#1092). The
     /// orchestrator runs the `g r` reviewer-picker flow when true.
     pub fn take_request_reviewers(&mut self) -> bool {

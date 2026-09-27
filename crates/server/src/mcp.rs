@@ -760,6 +760,13 @@ pub(crate) struct AgentRequest {
     /// what the asker may already have read.
     #[serde(default)]
     pub(crate) answers: Vec<RequestAnswer>,
+    /// The question is still queued behind a busy target and has not landed
+    /// in its input yet. The turn-end capture must not answer it: a turn
+    /// that was already running when the question was asked would
+    /// otherwise "answer" it with unrelated output. Defaults to false so a
+    /// row written before this field existed stays answerable.
+    #[serde(default)]
+    pub(crate) awaiting_delivery: bool,
 }
 
 impl AgentRequest {
@@ -1244,27 +1251,37 @@ impl LazyboxMcp {
             submit,
             "mcp notify_session: delivering prompt to a sibling agent"
         );
-        // Bound the settle-gated inject the way the gateway does: it returns
-        // once the injection is *registered*, but registration waits on the
-        // per-terminal interaction lock a concurrent write can hold. A wedged
-        // lock must not pin the tool call open forever.
-        let injected = crate::spawn_handler::handle_inject_prompt(
+        // Idle-gated like `ask_session`: a message from another agent lands
+        // between turns, never interleaved with one. The receipt says what
+        // happened; a message still queued behind a busy target is reported
+        // as queued, and lands (or is refused) when the turn ends.
+        let mut pending = crate::delivery::deliver(
             &self.config,
-            terminal_id,
-            text,
-            None,
-            submit,
-        );
-        match tokio::time::timeout(NOTIFY_TIMEOUT, injected).await {
-            Ok(()) => Ok(json_result(notify_handoff_payload(workspace, submit))),
-            Err(_) => Ok(CallToolResult::error(vec![ContentBlock::text(
-                "notify timed out acquiring the target agent terminal".to_string(),
-            )])),
+            crate::delivery::DeliveryRequest {
+                terminal_id,
+                body: text.to_string(),
+                submit,
+                gate: crate::delivery::Gate::Idle,
+                from: crate::delivery::Party::Agent(caller.clone()),
+                wait_limit: Some(ASK_DELIVERY_WAIT),
+            },
+        )
+        .await;
+        let early = pending.landed_within(DELIVERY_RECEIPT_WAIT).await;
+        {
+            // Keep the handle alive so the final outcome (confirmed, or
+            // refused after queueing) is still logged once this call returns.
+            let workspace = workspace.to_string();
+            tokio::spawn(async move {
+                let outcome = pending.receipt().await;
+                tracing::info!(to = %workspace, ?outcome, "mcp notify_session: delivery resolved");
+            });
         }
+        Ok(notify_receipt_result(workspace, submit, early))
     }
 
     #[tool(
-        description = "Actively push an instruction into another agent's session by its workspace key (from list_sessions) — a direct poke, not the pull-based blackboard. Delivers through the same settle-gated inject the TUI uses, so it never lands in a permission/chooser prompt. submit=true (default) pastes and runs it; submit=false leaves it in the target's composer for its operator to review first. Returns once the message is handed off, which is NOT a confirmation the target read or ran it — a target parked at a permission prompt drops it silently. Verify with read_session when delivery matters."
+        description = "Actively push an instruction into another agent's session by its workspace key (from list_sessions) — a direct poke, not the pull-based blackboard. It lands between the target's turns (never mid-turn, never into a permission prompt). submit=true (default) pastes and runs it; submit=false leaves it in the target's composer for its operator to review. Returns a receipt: `delivered` (it is in the target's input), `queued` (the target is busy; it lands when the current turn ends), or an error naming why it was refused."
     )]
     async fn notify_session(
         &self,
@@ -1600,6 +1617,7 @@ impl LazyboxMcp {
             depth,
             status: RequestStatus::Pending,
             answers: Vec::new(),
+            awaiting_delivery: true,
         };
         // Subscribe before the row is even visible: the moment it lands, a
         // target reading it can answer, and a reply that arrives before the
@@ -1619,21 +1637,65 @@ impl LazyboxMcp {
             "mcp ask_session: asking a sibling agent"
         );
         let envelope = request_envelope(&request.id, &self.workspace_label(caller), &question);
-        let injected = crate::spawn_handler::handle_inject_prompt(
+        // Idle-gated: the question lands only once the target is not
+        // mid-turn, so the end of an unrelated turn can never be captured
+        // as its answer.
+        let mut pending = crate::delivery::deliver(
             &self.config,
-            terminal_id,
-            &envelope,
-            None,
-            true,
-        );
-        if tokio::time::timeout_at(deadline, injected).await.is_err() {
-            // Never delivered, so the request is not open — drop it rather
-            // than leave the target badged with a question it never saw.
-            self.delete_request(&request.id).await;
-            self.config.mcp.requests().forget(&request.id);
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "ask timed out acquiring the target agent terminal".to_string(),
-            )]));
+            crate::delivery::DeliveryRequest {
+                terminal_id,
+                body: envelope,
+                submit: true,
+                gate: crate::delivery::Gate::Idle,
+                from: crate::delivery::Party::Agent(caller.clone()),
+                wait_limit: Some(ASK_DELIVERY_WAIT),
+            },
+        )
+        .await;
+        // An `async` asker returns at once, so only wait long enough to catch
+        // an immediate refusal (a dead terminal); a waiting asker gives the
+        // delivery up to its own deadline.
+        let landing_wait = if wait {
+            DELIVERY_RECEIPT_WAIT
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        } else {
+            ASYNC_ASK_LANDING_WAIT
+        };
+        match pending.landed_within(landing_wait).await {
+            Some(crate::delivery::EarlyOutcome::Landed) => {
+                self.mark_request_delivered(&request.id).await;
+            }
+            Some(crate::delivery::EarlyOutcome::Refused { reason }) => {
+                // Never delivered, so the request is not open — drop it
+                // rather than leave the target badged with a question it
+                // never saw, and tell the asker why.
+                self.delete_request(&request.id).await;
+                self.config.mcp.requests().forget(&request.id);
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "the question was not delivered: {reason}"
+                ))]));
+            }
+            None => {
+                // Queued behind a busy target: finish the bookkeeping when it
+                // lands (or is refused), without holding this call open.
+                let handler = self.clone();
+                let id = request.id.clone();
+                tokio::spawn(async move {
+                    match pending.landed_within(ASK_DELIVERY_WAIT).await {
+                        Some(crate::delivery::EarlyOutcome::Landed) => {
+                            handler.mark_request_delivered(&id).await;
+                        }
+                        Some(crate::delivery::EarlyOutcome::Refused { reason }) => {
+                            handler.abandon_undelivered_request(&id, &reason).await;
+                        }
+                        None => {
+                            handler
+                                .abandon_undelivered_request(&id, "it waited too long to land")
+                                .await;
+                        }
+                    }
+                });
+            }
         }
         self.push_status_row(
             target.as_str(),
@@ -1802,6 +1864,34 @@ impl LazyboxMcp {
             "target_state": target_state,
             "age_s": (now_ms - request.created_at).max(0) / 1_000,
         }))
+    }
+
+    /// The question landed in the target's input: from here on the turn it
+    /// starts may answer it, including by the turn-end capture.
+    async fn mark_request_delivered(&self, id: &str) {
+        let _write_guard = self.config.mcp.requests_write().lock().await;
+        if let Some(mut request) = self.load_request(id).await
+            && request.awaiting_delivery
+        {
+            request.awaiting_delivery = false;
+            let _ = self.save_request(&request).await;
+        }
+    }
+
+    /// A question that stayed queued and was then refused: close it as
+    /// abandoned (so it stops badging its target) and wake a waiting asker
+    /// with nothing, rather than leave it pending until its TTL.
+    async fn abandon_undelivered_request(&self, id: &str, reason: &str) {
+        let _write_guard = self.config.mcp.requests_write().lock().await;
+        if let Some(mut request) = self.load_request(id).await
+            && request.status == RequestStatus::Pending
+        {
+            tracing::info!(request = %id, %reason, "mcp ask_session: queued question was never delivered");
+            request.status = RequestStatus::Abandoned;
+            request.awaiting_delivery = false;
+            let _ = self.save_request(&request).await;
+        }
+        self.config.mcp.requests().forget(id);
     }
 
     async fn delete_request(&self, id: &str) {
@@ -3004,14 +3094,30 @@ fn selection_guidance(selection: &lazybox_core::ReportSelection) -> String {
 /// daemon's `/v1/events` stream, which an MCP caller does not consume. So this
 /// reports hand-off — never confirmed delivery — and points the caller at the
 /// one channel it *can* use to verify: reading the target back.
-fn notify_handoff_payload(workspace: &str, submit: bool) -> serde_json::Value {
-    serde_json::json!({
-        "handed_off": true,
-        "workspace": workspace,
-        "submit_requested": submit,
-        "delivery_confirmed": false,
-        "note": "Handed to the target's settle-gated inject; not a confirmation it was read or run. If the target was at a permission prompt the message is dropped silently. Verify with read_session when delivery matters.",
-    })
+fn notify_receipt_result(
+    workspace: &str,
+    submit: bool,
+    early: Option<crate::delivery::EarlyOutcome>,
+) -> CallToolResult {
+    match early {
+        Some(crate::delivery::EarlyOutcome::Landed) => json_result(serde_json::json!({
+            "status": "delivered",
+            "workspace": workspace,
+            "submit_requested": submit,
+            "note": "it is in the target's input, delivered between turns",
+        })),
+        None => json_result(serde_json::json!({
+            "status": "queued",
+            "workspace": workspace,
+            "submit_requested": submit,
+            "note": "the target is mid-turn; the message lands when that turn ends",
+        })),
+        Some(crate::delivery::EarlyOutcome::Refused { reason }) => {
+            CallToolResult::error(vec![ContentBlock::text(format!(
+                "the message was not delivered to {workspace}: {reason}"
+            ))])
+        }
+    }
 }
 
 /// How long `gh issue create` may take before `spawn_worker` gives up. Well
@@ -3545,6 +3651,20 @@ fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
 /// here before the inject path gets its full window — do not shorten below it.
 const NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
+/// How long a coordination tool call waits for its delivery receipt before
+/// answering "queued" — long enough for an idle target, short enough that a
+/// busy one doesn't pin the caller's turn.
+const DELIVERY_RECEIPT_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long an `async` ask waits for its question to land before returning:
+/// enough to report an immediate refusal, never a busy target's turn.
+const ASYNC_ASK_LANDING_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long an agent-originated message may wait for a busy target to finish
+/// its turn before it is refused. Covers a long turn without letting a
+/// wedged agent hold a message forever.
+const ASK_DELIVERY_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
 /// Largest accepted `notify_session` body, in bytes. A notify is a distilled
 /// instruction to a sibling agent — the same kind of content as a blackboard
 /// note — so it shares [`MAX_NOTE_BYTES`]; the cap keeps a runaway agent from
@@ -3744,7 +3864,9 @@ pub(crate) async fn capture_turn_end_answer(
         .open_requests_for(session_key.as_str())
         .await
         .into_iter()
-        .filter(|request| request.created_at <= now_ms)
+        // Only a question that has LANDED can be answered by this turn: one
+        // still queued behind the target was never seen by it.
+        .filter(|request| request.created_at <= now_ms && !request.awaiting_delivery)
         .map(|request| request.id)
         .collect();
     if candidates.is_empty() {
@@ -3809,7 +3931,7 @@ async fn apply_captured_answers(
         let Some(mut request) = handler.load_request(&id).await else {
             continue;
         };
-        if request.status != RequestStatus::Pending {
+        if request.status != RequestStatus::Pending || request.awaiting_delivery {
             continue;
         }
         let answer = RequestAnswer {
@@ -5123,25 +5245,29 @@ mod tests {
         assert!(gh_issue_create_argv(&create, None).is_ok());
     }
 
+    /// The receipt, not a guess: `delivered` only when the text landed,
+    /// `queued` while a busy target holds it, and an error with the reason
+    /// when it was refused. The old payload said "handed off, verify with
+    /// read_session" for all three.
     #[test]
-    fn notify_handoff_payload_never_claims_confirmed_delivery() {
-        // The registered-not-delivered contract: the success payload must not
-        // read as "the target got it", since a target at a permission prompt
-        // silently drops the inject and no async channel tells the MCP caller.
-        let payload = notify_handoff_payload("github:acme/widget#1", true);
-        assert_eq!(payload["handed_off"], true);
-        assert_eq!(payload["delivery_confirmed"], false);
-        assert_eq!(payload["submit_requested"], true);
-        // The prior wording ("accepted") invited exactly the misread this fix
-        // removes — it must be gone.
-        assert!(payload.get("accepted").is_none(), "{payload}");
-        assert!(
-            payload["note"]
-                .as_str()
-                .expect("note")
-                .contains("read_session"),
-            "the caller must be pointed at the one channel that can verify"
+    fn notify_reports_what_actually_happened_to_the_message() {
+        use crate::delivery::EarlyOutcome;
+        let text = |r: &CallToolResult| format!("{:?}", r.content);
+        let delivered = notify_receipt_result("w", true, Some(EarlyOutcome::Landed));
+        assert_ne!(delivered.is_error, Some(true));
+        assert!(text(&delivered).contains("delivered"));
+        let queued = notify_receipt_result("w", true, None);
+        assert_ne!(queued.is_error, Some(true));
+        assert!(text(&queued).contains("queued"));
+        let refused = notify_receipt_result(
+            "w",
+            true,
+            Some(EarlyOutcome::Refused {
+                reason: "the agent terminal exited".into(),
+            }),
         );
+        assert_eq!(refused.is_error, Some(true));
+        assert!(text(&refused).contains("terminal exited"));
     }
 
     #[test]
@@ -6576,6 +6702,51 @@ mod tests {
             handler.open_requests_for(target.as_str()).await.is_empty(),
             "the capture closes the request so the badge clears"
         );
+    }
+
+    /// **The capture race.** A question asked while the target is mid-turn
+    /// used to be pasted straight in, and the end of that unrelated turn was
+    /// then captured as its "answer". The question now waits for the turn to
+    /// end; that turn's `Done` must answer nothing, and only once the
+    /// question has landed can a turn answer it.
+    #[tokio::test]
+    async fn a_turn_already_running_when_asked_never_answers_the_question() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let terminal_id = lazybox_ipc::TerminalId(9905);
+        let backend_key = live_agent(&config, &mock, &target, terminal_id).await;
+        config
+            .terminal
+            .record_agent_state(terminal_id, lazybox_ipc::AgentState::Working)
+            .await;
+        mock.emit(&backend_key, b"refactoring the parser, unrelated work\n")
+            .await;
+
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        assert!(
+            mock.writes_for(&backend_key).await.is_empty(),
+            "the question must not be pasted into a mid-turn agent"
+        );
+
+        // The unrelated turn ends: its output is NOT an answer.
+        capture_turn_end_answer(&config, &target, 5_000).await;
+        let polled = handler
+            .poll_request_payload(&asker, &id, 6_000)
+            .await
+            .expect("poll");
+        assert_eq!(polled["status"], "pending", "{polled}");
     }
 
     /// **The lost update (review finding 2).** The capture snapshots the open

@@ -81,9 +81,42 @@ pub enum DeliveryReceipt {
 /// receipt resolves when it lands or is refused.
 pub struct PendingDelivery {
     receipt: oneshot::Receiver<DeliveryReceipt>,
+    /// Fires the moment the gate lets the text through and it is written —
+    /// before the submit-confirmation ladder, which can take ~30s. "It is in
+    /// the agent's input" is what a sender needs to know first; "the agent
+    /// started the turn" arrives later in the receipt.
+    landed: oneshot::Receiver<()>,
+}
+
+/// The first thing that happens to a delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EarlyOutcome {
+    /// The text is being written into an agent that was ready for it.
+    Landed,
+    /// It was refused before landing.
+    Refused { reason: String },
 }
 
 impl PendingDelivery {
+    /// Wait at most `limit` for the text to land or be refused. `None` means
+    /// it is still queued behind the gate; the handle stays usable.
+    pub async fn landed_within(&mut self, limit: Duration) -> Option<EarlyOutcome> {
+        let wait = async {
+            tokio::select! {
+                biased;
+                landed = &mut self.landed => landed.is_ok().then_some(EarlyOutcome::Landed),
+                receipt = &mut self.receipt => Some(match receipt {
+                    Ok(DeliveryReceipt::Refused { reason }) => EarlyOutcome::Refused { reason },
+                    Ok(DeliveryReceipt::Delivered { .. }) => EarlyOutcome::Landed,
+                    Err(_) => EarlyOutcome::Refused {
+                        reason: "the delivery ended without reporting an outcome".into(),
+                    },
+                }),
+            }
+        };
+        tokio::time::timeout(limit, wait).await.ok().flatten()
+    }
+
     /// Wait for the outcome. A dropped sender (the delivery task ended
     /// without reporting — a daemon bug, never a normal path) reads as a
     /// refusal rather than a hang.
@@ -97,9 +130,10 @@ impl PendingDelivery {
 
     /// Wait at most `limit`. `None` means the text is still queued — the
     /// gate is holding it (typically behind a busy agent) and it will land
-    /// or be refused later.
-    pub async fn receipt_within(self, limit: Duration) -> Option<DeliveryReceipt> {
-        match tokio::time::timeout(limit, self.receipt).await {
+    /// or be refused later; the handle stays usable, so the caller can hand
+    /// it to a task that finishes the bookkeeping with [`Self::receipt`].
+    pub async fn receipt_within(&mut self, limit: Duration) -> Option<DeliveryReceipt> {
+        match tokio::time::timeout(limit, &mut self.receipt).await {
             Ok(Ok(receipt)) => Some(receipt),
             Ok(Err(_)) => Some(DeliveryReceipt::Refused {
                 reason: "the delivery ended without reporting an outcome".into(),
@@ -113,25 +147,49 @@ impl PendingDelivery {
 /// [`PendingDelivery`] for its receipt.
 pub async fn deliver(config: &ServerConfig, request: DeliveryRequest) -> PendingDelivery {
     let (tx, rx) = oneshot::channel();
-    crate::spawn_handler::inject_with_receipt(config, request, ReceiptSlot::new(tx)).await;
-    PendingDelivery { receipt: rx }
+    let (landed_tx, landed_rx) = oneshot::channel();
+    crate::spawn_handler::inject_with_receipt(config, request, ReceiptSlot::new(tx, landed_tx))
+        .await;
+    PendingDelivery {
+        receipt: rx,
+        landed: landed_rx,
+    }
 }
 
-/// The one-shot a delivery reports into, consumed by the first outcome.
-pub(crate) struct ReceiptSlot(Option<oneshot::Sender<DeliveryReceipt>>);
+/// The one-shots a delivery reports into, each consumed by its first outcome.
+pub(crate) struct ReceiptSlot {
+    receipt: Option<oneshot::Sender<DeliveryReceipt>>,
+    landed: Option<oneshot::Sender<()>>,
+}
 
 impl ReceiptSlot {
-    pub(crate) fn new(tx: oneshot::Sender<DeliveryReceipt>) -> Self {
-        Self(Some(tx))
+    pub(crate) fn new(
+        receipt: oneshot::Sender<DeliveryReceipt>,
+        landed: oneshot::Sender<()>,
+    ) -> Self {
+        Self {
+            receipt: Some(receipt),
+            landed: Some(landed),
+        }
     }
 
     /// A slot nobody is listening on — the legacy fire-and-forget callers.
     pub(crate) fn none() -> Self {
-        Self(None)
+        Self {
+            receipt: None,
+            landed: None,
+        }
+    }
+
+    /// The gate let the text through and it is about to be written.
+    pub(crate) fn landing(&mut self) {
+        if let Some(tx) = self.landed.take() {
+            let _ = tx.send(());
+        }
     }
 
     pub(crate) fn resolve(&mut self, receipt: DeliveryReceipt) {
-        if let Some(tx) = self.0.take() {
+        if let Some(tx) = self.receipt.take() {
             let _ = tx.send(receipt);
         }
     }
@@ -150,10 +208,14 @@ mod tests {
     #[tokio::test]
     async fn the_first_outcome_wins_and_later_ones_are_ignored() {
         let (tx, rx) = oneshot::channel();
-        let mut slot = ReceiptSlot::new(tx);
+        let (landed_tx, landed_rx) = oneshot::channel();
+        let mut slot = ReceiptSlot::new(tx, landed_tx);
         slot.resolve(DeliveryReceipt::Delivered { confirmed: true });
         slot.refuse("too late");
-        let pending = PendingDelivery { receipt: rx };
+        let pending = PendingDelivery {
+            receipt: rx,
+            landed: landed_rx,
+        };
         assert_eq!(
             pending.receipt().await,
             DeliveryReceipt::Delivered { confirmed: true }
@@ -163,8 +225,12 @@ mod tests {
     #[tokio::test]
     async fn a_delivery_that_never_reports_reads_as_refused_not_a_hang() {
         let (tx, rx) = oneshot::channel::<DeliveryReceipt>();
+        let (_landed_tx, landed_rx) = oneshot::channel();
         drop(tx);
-        let pending = PendingDelivery { receipt: rx };
+        let pending = PendingDelivery {
+            receipt: rx,
+            landed: landed_rx,
+        };
         assert!(matches!(
             pending.receipt().await,
             DeliveryReceipt::Refused { .. }
@@ -172,12 +238,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn landing_is_reported_before_the_submit_is_confirmed() {
+        let (tx, rx) = oneshot::channel::<DeliveryReceipt>();
+        let (landed_tx, landed_rx) = oneshot::channel();
+        let mut slot = ReceiptSlot::new(tx, landed_tx);
+        let mut pending = PendingDelivery {
+            receipt: rx,
+            landed: landed_rx,
+        };
+        slot.landing();
+        assert_eq!(
+            pending.landed_within(Duration::from_secs(1)).await,
+            Some(EarlyOutcome::Landed)
+        );
+        slot.resolve(DeliveryReceipt::Delivered { confirmed: true });
+        assert_eq!(
+            pending.receipt().await,
+            DeliveryReceipt::Delivered { confirmed: true }
+        );
+    }
+
+    #[tokio::test]
     async fn an_unresolved_delivery_reads_as_still_queued() {
-        let (_tx, rx) = oneshot::channel::<DeliveryReceipt>();
-        let pending = PendingDelivery { receipt: rx };
+        let (tx, rx) = oneshot::channel::<DeliveryReceipt>();
+        let (_landed_tx, landed_rx) = oneshot::channel();
+        let mut pending = PendingDelivery {
+            receipt: rx,
+            landed: landed_rx,
+        };
         assert_eq!(
             pending.receipt_within(Duration::from_millis(20)).await,
             None
+        );
+        // Still usable after a timed-out wait: the late outcome arrives.
+        tx.send(DeliveryReceipt::Delivered { confirmed: true })
+            .unwrap();
+        assert_eq!(
+            pending.receipt().await,
+            DeliveryReceipt::Delivered { confirmed: true }
         );
     }
 }

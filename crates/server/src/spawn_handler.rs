@@ -9671,6 +9671,7 @@ async fn handle_inject_prompt_inner(
             return;
         };
         drop(pending_injection);
+        receipt.landing();
         if let Some(tx) = registered_tx.take() {
             let _ = tx.send(());
         }
@@ -16247,7 +16248,7 @@ mod tests {
             None,
         )
         .await;
-        let pending = crate::delivery::deliver(
+        let mut pending = crate::delivery::deliver(
             &config,
             DeliveryRequest {
                 terminal_id: id,
@@ -16308,7 +16309,7 @@ mod tests {
             None,
         )
         .await;
-        let pending = crate::delivery::deliver(
+        let mut pending = crate::delivery::deliver(
             &config,
             DeliveryRequest {
                 terminal_id: id,
@@ -16347,7 +16348,7 @@ mod tests {
             None,
         )
         .await;
-        let pending = crate::delivery::deliver(
+        let mut pending = crate::delivery::deliver(
             &config,
             DeliveryRequest {
                 terminal_id: id,

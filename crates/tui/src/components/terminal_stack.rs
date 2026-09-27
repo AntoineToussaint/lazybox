@@ -788,6 +788,9 @@ pub struct TerminalStack {
     /// Cleared at the start of every render so removed terminals
     /// don't leave stale hit targets.
     tab_strip_hits: Vec<(usize, std::ops::Range<u16>, u16)>,
+    /// Column range and row of each tab's spend / headroom badge. A click
+    /// opens the Stats view; the badge sat outside the tab's own range.
+    usage_badge_hits: Vec<(std::ops::Range<u16>, u16)>,
     /// Per-tile mouse targets, populated each render — one entry per
     /// visible terminal. The full tile drives click-to-focus while its
     /// body preserves the narrower hover-to-scroll target. Cleared at
@@ -1796,6 +1799,7 @@ impl TerminalStack {
             abandoned_resumes: HashSet::new(),
             swallow_repeats: false,
             tab_strip_hits: Vec::new(),
+            usage_badge_hits: Vec::new(),
             tile_hits: Vec::new(),
             last_focused: HashMap::new(),
             closing: HashSet::new(),
@@ -2563,6 +2567,14 @@ impl TerminalStack {
             .map(|(idx, _, _)| *idx)
     }
 
+    /// Did the user click a tab's spend / headroom badge? The caller opens
+    /// the Stats view.
+    pub fn usage_badge_at(&self, col: u16, row: u16) -> bool {
+        self.usage_badge_hits
+            .iter()
+            .any(|(range, hit_row)| *hit_row == row && range.contains(&col))
+    }
+
     /// Terminal whose tile the point `(col, row)` lands in, from the
     /// tile rects recorded during render. Drives hover-to-scroll: the
     /// wheel targets the pane under the cursor, not the focused one
@@ -3143,6 +3155,7 @@ impl TerminalStack {
             slot.displayed = false;
         }
         self.tab_strip_hits.clear();
+        self.usage_badge_hits.clear();
         self.tile_hits.clear();
     }
 
@@ -5004,6 +5017,7 @@ impl TerminalStack {
         // come or gone, indices shifted, area resized. We'll
         // repopulate as the tab spans go in.
         self.tab_strip_hits.clear();
+        self.usage_badge_hits.clear();
         // Cleared for the same reason as the tab hits — each render
         // re-records every visible tile's rect from scratch so the
         // wheel handler hit-tests against the current layout.
@@ -5162,6 +5176,8 @@ impl TerminalStack {
                 };
                 let badge_text = format!(" {glyph}{}", badge.text());
                 let width = badge_text.chars().count() as u16;
+                self.usage_badge_hits
+                    .push((cursor..cursor.saturating_add(width), title_area.y));
                 title_spans.push(Span::styled(badge_text, style));
                 cursor = cursor.saturating_add(width);
             }
@@ -8490,6 +8506,32 @@ mod selection_offset_tests {
         let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
         // Headroom and this session's cost paint together, not either/or.
         assert!(top.contains("◔ wk 38% left · $0.42"), "{top:?}");
+    }
+
+    /// The badge is a way into Stats: a click on it is a hit, a click on
+    /// the tab label is still the tab.
+    #[test]
+    fn a_click_on_the_usage_badge_is_its_own_target() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 60;
+        const H: u16 = 6;
+        let area = Rect::new(0, 0, W, H);
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &[]);
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().usage_badge = Some(UsageBadge {
+            headroom: None,
+            cost: Some("$0.42".into()),
+        });
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let buf = term.backend().buffer();
+        let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
+        let dollar = top.chars().position(|c| c == '$').expect("badge drawn") as u16;
+        assert!(stack.usage_badge_at(dollar, 0), "{top:?}");
+        assert_eq!(stack.tab_at(dollar, 0), None, "the badge is not the tab");
+        let tab = stack.tab_strip_hits[0].1.start;
+        assert!(!stack.usage_badge_at(tab, 0));
     }
 
     /// A cost-only badge (API-key user, no plan window) paints the dollars

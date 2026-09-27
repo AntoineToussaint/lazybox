@@ -2035,6 +2035,12 @@ pub struct Model<T: TerminalAdapter> {
     /// fits). A left-click inside it pops those hints so the count is
     /// not a dead end (#805, #1502).
     footer_overflow: Option<crate::realm::components::footer::FooterOverflow>,
+    /// The footer's right zone (notice pill or polling status) as last
+    /// drawn, so a click on it opens what it is about.
+    footer_right: Option<(
+        tuirealm::ratatui::layout::Rect,
+        crate::realm::components::footer::FooterRight,
+    )>,
     /// The `+N more` popup's rows while it is open (#1502): the hints the
     /// footer could not fit, drawn with the which-key chrome. Purely
     /// informational — the next key or click closes it and is then
@@ -3041,6 +3047,7 @@ impl<T: TerminalAdapter> Model<T> {
             leader_target: None,
             last_click: None,
             footer_overflow: None,
+            footer_right: None,
             footer_more_popup: None,
             last_render_build: std::time::Duration::ZERO,
             last_render_flush: std::time::Duration::ZERO,
@@ -7888,7 +7895,7 @@ impl<T: TerminalAdapter> Model<T> {
                 Vec::new()
             };
         let mut captured_area = Rect::default();
-        let mut footer_overflow: Option<crate::realm::components::footer::FooterOverflow> = None;
+        let mut footer_hits = crate::realm::components::footer::FooterHits::default();
         let footer_more_rows = self.footer_more_popup.clone();
         // The coach rail (#1460) is carved out of the pane area inside
         // the draw closure so it never occludes a pane. Resolve its
@@ -8058,7 +8065,7 @@ impl<T: TerminalAdapter> Model<T> {
             // returned overflow (if any) is the `… +N more` cell + the
             // hints it hides, stashed so a click on it pops exactly those
             // (#805, #1502).
-            footer_overflow = crate::realm::components::footer::render(
+            footer_hits = crate::realm::components::footer::render(
                 f,
                 footer_area,
                 Some(&focus_chip),
@@ -8145,7 +8152,8 @@ impl<T: TerminalAdapter> Model<T> {
         self.last_render_build = render_build;
         self.last_render_flush = render_flush;
         self.layout.last_area = captured_area;
-        self.footer_overflow = footer_overflow;
+        self.footer_overflow = footer_hits.overflow;
+        self.footer_right = footer_hits.right;
         // Resize commands are queued by the terminal stack's render
         // path each time a slot's rect changes. Drain + ship them so
         // libghostty's PTY learns the new size — without this,

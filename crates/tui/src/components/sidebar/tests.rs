@@ -3201,6 +3201,19 @@ mod search_tests {
         );
     }
 
+    /// The today strip is a way into Stats: a click on it is a hit, a
+    /// click on the chips beside it is not.
+    #[test]
+    fn a_click_on_the_today_strip_is_a_stats_hit() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+        let row = today_row(&mut sb, 80);
+        let dollar = row.chars().position(|c| c == '$').expect("cost drawn") as u16;
+        assert!(sb.stats_hit(dollar, 1), "{row:?}");
+        assert!(!sb.stats_hit(3, 1), "the filter chip is not the strip");
+        assert!(!sb.stats_hit(dollar, 5), "another row");
+    }
+
     /// A zero cost is noise, not information — it is dropped (#1502).
     #[test]
     fn today_strip_omits_a_zero_cost() {

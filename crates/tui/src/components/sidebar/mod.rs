@@ -527,6 +527,9 @@ pub struct Sidebar {
     /// sitting to the right of the sort chip. Click opens the global
     /// search (`open_global_search`).
     search_chip_rect: Option<Rect>,
+    /// The usage row and the today-spend strip as last drawn. A click on
+    /// either opens the Stats view; they were numbers with no way in.
+    stats_rects: Vec<Rect>,
     /// Screen rect of the bottom `/` search input bar, stashed by
     /// `render` while a search is open. A click anywhere off this bar
     /// (and off the header search chip) dismisses the search instead of
@@ -801,6 +804,7 @@ impl Sidebar {
             filter_chip_rect: None,
             sort_chip_rect: None,
             search_chip_rect: None,
+            stats_rects: Vec::new(),
             search_bar_rect: None,
             now_override: None,
             search: None,
@@ -1965,6 +1969,15 @@ impl Sidebar {
             return false;
         };
         row == rect.y && col >= rect.x && col < rect.x + rect.width
+    }
+
+    /// True when `(col, row)` falls on the usage row or the today-spend
+    /// strip — a hit opens the Stats view. Pure hit test: the model owns
+    /// the modal stack.
+    pub fn stats_hit(&self, col: u16, row: u16) -> bool {
+        self.stats_rects
+            .iter()
+            .any(|rect| row == rect.y && col >= rect.x && col < rect.x + rect.width)
     }
 
     /// Click on the sort chip cycles it — same effect as `o`.

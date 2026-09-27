@@ -24538,6 +24538,32 @@ mod click_outside_modal_dismiss_tests {
         );
     }
 
+    /// The footer's right zone opens what it is about: the polling status
+    /// opens the sync view, a routine notice opens the message log. Both
+    /// used to be dead text.
+    #[test]
+    fn footer_right_zone_click_opens_what_it_shows() {
+        use crate::realm::components::footer::FooterRight;
+        let area = Rect::new(0, 0, 120, 40);
+        let zone = Rect::new(90, 39, 30, 1);
+        for (right, modal) in [
+            (FooterRight::Polling, Id::SyncStatus),
+            (FooterRight::Notice { sticky: false }, Id::Messages),
+        ] {
+            let mut m = build_model();
+            m.handle_daemon_event(IpcEvent::Snapshot {
+                workspaces: vec![empty_ws("github:o/r#1")],
+                terminals: vec![],
+                projects: vec![],
+                recent_snippets: Vec::new(),
+                dismissed_updates: Vec::new(),
+            });
+            m.footer_right = Some((zone, right));
+            m.dispatch_mouse_in(left_down(zone.x + 3, zone.y), area);
+            assert_eq!(m.top_modal(), Some(&modal), "{right:?}");
+        }
+    }
+
     /// A click that misses the overflow cell must not pop anything —
     /// only the cell itself is the affordance (#805).
     #[test]

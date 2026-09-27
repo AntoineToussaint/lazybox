@@ -252,6 +252,24 @@ pub struct FooterOverflow {
     pub dropped: Vec<Binding>,
 }
 
+/// What the footer's right zone was showing, so a click on it can open
+/// the view behind it rather than being dead text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FooterRight {
+    /// A notice pill. `sticky` notices have their own inspect action.
+    Notice { sticky: bool },
+    /// The GitHub / Linear polling status.
+    Polling,
+}
+
+/// The footer's click targets: the `… +N more` cell (when drawn) and the
+/// right zone (when it shows anything).
+#[derive(Debug, Clone, Default)]
+pub struct FooterHits {
+    pub overflow: Option<FooterOverflow>,
+    pub right: Option<(Rect, FooterRight)>,
+}
+
 /// Pure render. The orchestrator passes in everything Footer needs:
 /// the `focus_chip` mode indicator, the focused pane's keymap, the
 /// escape-hatch `globals` tail, the low-value `evergreen` hints
@@ -269,7 +287,7 @@ pub fn render(
     evergreen: &[Binding],
     polling_status: Option<(&str, &str)>, // (spinner, label)
     notice: Option<&Notice>,
-) -> Option<FooterOverflow> {
+) -> FooterHits {
     let theme = crate::theme::current();
 
     // Background fill so the line stands out.
@@ -389,6 +407,15 @@ pub fn render(
         width: area.width.saturating_sub(right_width),
         height: 1,
     };
+    let right_hit = right_text.as_ref().map(|_| {
+        let kind = match notice {
+            Some(n) => FooterRight::Notice {
+                sticky: n.severity.is_sticky(),
+            },
+            None => FooterRight::Polling,
+        };
+        (right_rect, kind)
+    });
 
     // Left-most: the persistent focus-mode chip (#1110). Rendered
     // before the hint bar and carved off the left of `left_rect`, so
@@ -575,7 +602,10 @@ pub fn render(
         f.render_widget(Paragraph::new(line).style(bg), right_rect);
     }
 
-    overflow
+    FooterHits {
+        overflow,
+        right: right_hit,
+    }
 }
 
 /// Compact display for footer hints — `Shift-X` → `X`, `Ctrl-Q` →
@@ -653,9 +683,22 @@ mod tests {
         polling_status: Option<(&str, &str)>,
         notice: Option<&Notice>,
     ) -> (String, Option<FooterOverflow>) {
+        let (row, hits) = render_hits_at(w, keymap, globals, evergreen, polling_status, notice);
+        (row, hits.overflow)
+    }
+
+    /// Render at width `w`, returning the flat row and every click target.
+    fn render_hits_at(
+        w: u16,
+        keymap: &[Binding],
+        globals: &[Binding],
+        evergreen: &[Binding],
+        polling_status: Option<(&str, &str)>,
+        notice: Option<&Notice>,
+    ) -> (String, FooterHits) {
         let backend = TestBackend::new(w, 1);
         let mut term = Terminal::new(backend).unwrap();
-        let mut overflow = None;
+        let mut overflow = FooterHits::default();
         term.draw(|f| {
             overflow = render(
                 f,
@@ -672,6 +715,18 @@ mod tests {
         let buf = term.backend().buffer().clone();
         let row = (0..w).map(|x| buf[(x, 0)].symbol()).collect();
         (row, overflow)
+    }
+
+    /// The right zone reports what it shows and where, so a click on it
+    /// can open that view; with nothing there, there is no target.
+    #[test]
+    fn the_right_zone_reports_its_kind_and_rect() {
+        let (_, hits) = render_hits_at(80, &[], &[], &[], Some(("◐", "syncing github")), None);
+        let (rect, kind) = hits.right.expect("the polling status is a target");
+        assert_eq!(kind, FooterRight::Polling);
+        assert_eq!(rect.x + rect.width, 80, "right-aligned");
+        let (_, empty) = render_hits_at(80, &[], &[], &[], None, None);
+        assert!(empty.right.is_none());
     }
 
     fn binding(keys: &'static str, label: &'static str) -> Binding {

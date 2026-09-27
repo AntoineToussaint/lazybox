@@ -547,6 +547,10 @@ impl Terminals {
         self.inner.tab_at(col, row)
     }
 
+    pub fn usage_badge_at(&self, col: u16, row: u16) -> bool {
+        self.inner.usage_badge_at(col, row)
+    }
+
     pub fn set_active_tab(&mut self, idx: usize) {
         self.inner.set_active_tab(idx);
     }

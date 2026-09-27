@@ -455,6 +455,7 @@ impl Sidebar {
     }
 
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
+        self.stats_rects.clear();
         // Header strip (#1502 readability pass — three fixed rows, no
         // blank spacer, every attention counter on row 0 so nothing ever
         // wraps onto a stranded line):
@@ -805,6 +806,7 @@ impl Sidebar {
             let today_sep = if trailer.is_empty() { 0 } else { 2 };
             let today_room = trailer_budget.saturating_sub(trailer_used + today_sep);
             let today = self.today_spans(today_room, theme);
+            let today_w = spans_visual_width(&today) as u16;
             if !today.is_empty() {
                 if !trailer.is_empty() {
                     trailer.push(Span::raw("  "));
@@ -817,6 +819,15 @@ impl Sidebar {
                 let gap = (inner_width as usize).saturating_sub(chips_width + trailer_used);
                 spans.push(Span::raw(" ".repeat(gap)));
                 spans.extend(trailer);
+            }
+            // The today strip closes the row, right-aligned.
+            if today_w > 0 {
+                self.stats_rects.push(Rect {
+                    x: row1.x + row1.width.saturating_sub(today_w),
+                    y: row1.y,
+                    width: today_w.min(row1.width),
+                    height: 1,
+                });
             }
 
             frame.render_widget(Paragraph::new(Line::from(spans)), row1);
@@ -844,6 +855,7 @@ impl Sidebar {
         let usage_h: u16 = if usage_spans.is_empty() { 0 } else { 1 };
         if usage_h == 1 && area.height >= 3 {
             let usage_area = Rect::new(area.x + l_pad, area.y + 2, inner_width, 1);
+            self.stats_rects.push(usage_area);
             frame.render_widget(Paragraph::new(Line::from(usage_spans)), usage_area);
         }
 

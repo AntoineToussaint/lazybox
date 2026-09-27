@@ -2172,6 +2172,33 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                     return;
                 }
+                // A left-click on the footer's right zone opens what it is
+                // about: a sticky notice inspects itself, any other notice
+                // opens the message log, and the polling status opens the
+                // sync view. All three were dead text.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && let Some((_, right)) = self
+                        .footer_right
+                        .filter(|(rect, _)| rect_contains(*rect, m.column, m.row))
+                {
+                    use crate::realm::components::footer::FooterRight;
+                    use lazybox_tui_core::action::Action;
+                    let action = match right {
+                        FooterRight::Notice { sticky: true } => None,
+                        FooterRight::Notice { sticky: false } => Some(Action::OpenMessages),
+                        FooterRight::Polling => Some(Action::OpenSyncStatus),
+                    };
+                    match action {
+                        Some(action) => {
+                            let cmds =
+                                self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Mouse);
+                            self.dispatch_cmds(cmds);
+                        }
+                        None => self.inspect_notice(),
+                    }
+                    self.redraw = true;
+                    return;
+                }
                 // A left-click on the coach rail's skip / end tokens
                 // (#1460). The rail sits in its own carved band outside
                 // every pane rect, so like the footer this is the only
@@ -2226,6 +2253,18 @@ impl<T: TerminalAdapter> Model<T> {
                 // switch active tab. Checked BEFORE the
                 // "forward to inner program" path because the tab
                 // strip belongs to lazybox, not to Claude/shell.
+                // The spend / headroom badge beside a tab opens Stats.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && self.terminals.usage_badge_at(m.column, m.row)
+                {
+                    let cmds = self.dispatch_action_via(
+                        &lazybox_tui_core::action::Action::OpenStats,
+                        lazybox_ipc::ActionVia::Mouse,
+                    );
+                    self.dispatch_cmds(cmds);
+                    self.redraw = true;
+                    return;
+                }
                 if matches!(button, crossterm::event::MouseButton::Left)
                     && let Some(idx) = self.terminals.tab_at(m.column, m.row)
                 {
@@ -2536,8 +2575,18 @@ impl<T: TerminalAdapter> Model<T> {
                         if search_hit {
                             self.sidebar.open_global_search();
                         }
+                        // The usage row and today-spend strip open Stats.
+                        let stats_hit = self.sidebar.stats_hit(m.column, m.row);
+                        if stats_hit {
+                            let cmds = self.dispatch_action_via(
+                                &lazybox_tui_core::action::Action::OpenStats,
+                                lazybox_ipc::ActionVia::Mouse,
+                            );
+                            self.dispatch_cmds(cmds);
+                        }
                         let handled = filter_hit
                             || search_hit
+                            || stats_hit
                             || self.sidebar.click_to_cycle_sort(m.column, m.row)
                             || self.sidebar.click_to_select(sidebar_rect, m.row);
                         if handled {

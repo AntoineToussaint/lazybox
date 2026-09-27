@@ -1037,6 +1037,10 @@ impl Sidebar {
         self.inner.search_chip_hit(col, row)
     }
 
+    pub fn stats_hit(&self, col: u16, row: u16) -> bool {
+        self.inner.stats_hit(col, row)
+    }
+
     /// True iff the cursor sits on a repo header row. Used by the
     /// orchestrator's double-click handler to decide whether to
     /// fire `toggle_repo_at_cursor`.

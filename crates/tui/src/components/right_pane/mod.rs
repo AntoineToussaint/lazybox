@@ -262,6 +262,17 @@ pub struct RightPane {
 /// span and the task it names.
 type BlockerHit = (std::ops::RangeInclusive<u16>, lazybox_core::TaskId);
 
+/// The header's click targets as offsets into the header — rows from its
+/// top, blocker columns from its left edge. [`ClickHits::place_header`]
+/// turns them into screen positions once the header's area is known.
+#[derive(Default)]
+struct HeaderHits {
+    title: Option<(u16, String)>,
+    issue: Option<(u16, String)>,
+    reviewers: Option<u16>,
+    blockers: Option<(u16, Vec<BlockerHit>)>,
+}
+
 /// Click-target geometry captured during render. Three regions are
 /// tracked: the Description section's toggle row, the Activity
 /// section's toggle row, and each visible activity card. The
@@ -299,6 +310,25 @@ struct ClickHits {
     /// body line of the card. Empty when the section is collapsed
     /// or there's no activity.
     activity_cards: Vec<(usize, std::ops::RangeInclusive<u16>)>,
+}
+
+impl ClickHits {
+    /// Record the header's targets at their screen positions. A row the
+    /// (possibly squished) header area clips is dropped, so a clipped line
+    /// never leaves a hit region over whatever paints below it.
+    fn place_header(&mut self, hits: HeaderHits, area: Rect) {
+        let row = |offset: u16| Some(area.y + offset).filter(|r| *r < area.bottom());
+        self.header_title = hits.title.and_then(|(r, url)| Some((row(r)?, url)));
+        self.header_issue = hits.issue.and_then(|(r, url)| Some((row(r)?, url)));
+        self.header_reviewers = hits.reviewers.and_then(row);
+        self.header_blockers = hits.blockers.and_then(|(r, spans)| {
+            let spans = spans
+                .into_iter()
+                .map(|(cols, task)| ((area.x + cols.start())..=(area.x + cols.end()), task))
+                .collect();
+            Some((row(r)?, spans))
+        });
+    }
 }
 
 /// Memoized activity virtual-line buffer.
@@ -1409,7 +1439,41 @@ impl RightPane {
             return;
         };
 
+        let (lines, hits) = self.header_lines(workspace, task, area.width, origin, show_diffstat);
+        // Truncate each line to the pane width with `…` instead of
+        // relying on `Wrap`. The wrap can only break at whitespace,
+        // and the lines this header produces are mostly single
+        // identifiers — `tensorzero/nanogateway`, branch names,
+        // `@logins` — that have no break point and just clipped
+        // silently when the pane got narrow. truncate_line preserves
+        // every span's style and emits `…` at the cut.
+        let width = area.width as usize;
+        let truncated: Vec<Line> = lines
+            .into_iter()
+            .map(|l| crate::components::table::truncate_line(l, width))
+            .collect();
+        let para = Paragraph::new(truncated);
+        frame.render_widget(para, area);
+        self.click_hits.place_header(hits, area);
+    }
+
+    /// Every line the populated header draws, with the click targets on
+    /// them as row/column offsets into the header. One builder for both
+    /// the renderer and [`Self::header_height`], so the height reserved is
+    /// exactly the lines drawn: counting them separately clipped the
+    /// Assignees row off every PR, and a Stack or Linear line pushed more
+    /// off the bottom.
+    fn header_lines<'a>(
+        &'a self,
+        workspace: &'a lazybox_core::Workspace,
+        task: &'a lazybox_core::Task,
+        width: u16,
+        origin: Option<(String, String, String)>,
+        show_diffstat: bool,
+    ) -> (Vec<Line<'a>>, HeaderHits) {
+        let theme = crate::theme::current();
         let mut lines: Vec<Line> = Vec::new();
+        let mut hits = HeaderHits::default();
 
         use crate::components::icons;
         use crate::lazybox_theme::{self, StatePill};
@@ -1457,7 +1521,7 @@ impl RightPane {
             // Right-align when the row has slack; otherwise keep a single
             // space so the crumb and creator never glue together as the
             // pane narrows.
-            let gap = (area.width as usize).saturating_sub(left + right).max(1);
+            let gap = (width as usize).saturating_sub(left + right).max(1);
             crumbs.push(Span::raw(" ".repeat(gap)));
             crumbs.push(Span::styled(opened_by, Style::default().fg(theme.text_dim)));
             crumbs.push(Span::styled(handle, Style::default().fg(theme.hover)));
@@ -1486,10 +1550,7 @@ impl RightPane {
         // the row actually falls inside the (possibly squished) header
         // area — otherwise a clipped row would record a hit region over
         // whatever paints below it.
-        let title_row = area.y + lines.len() as u16;
-        if title_row < area.bottom() {
-            self.click_hits.header_title = Some((title_row, task.url.clone()));
-        }
+        hits.title = Some((lines.len() as u16, task.url.clone()));
         // The `↗` is pinned to the row's end so a long title truncates
         // ahead of the affordance instead of dropping it — the whole
         // row is the hit region, so it must stay legible as a link even
@@ -1515,7 +1576,7 @@ impl RightPane {
                 format!(" {}", icons::EXTERNAL_LINK),
                 Style::default().fg(theme.accent),
             ),
-            area.width as usize,
+            width as usize,
         ));
 
         // Branch line — confirms which worktree lazybox will spawn an
@@ -1573,24 +1634,24 @@ impl RightPane {
             workspace.hierarchy_blocked_by().cloned().collect();
         if !blockers.is_empty() {
             let own_repo = task.repo.as_deref();
-            let row = area.y + lines.len() as u16;
+            let row = lines.len() as u16;
             let label = if workspace.declared_blocker().is_some() {
                 "Blocked by: "
             } else {
                 "Blocked on: "
             };
             let mut spans = vec![Span::styled(label, Style::default().fg(theme.error))];
-            let mut col = area.x + label.chars().count() as u16;
-            let mut hits = Vec::with_capacity(blockers.len());
+            let mut col = label.chars().count() as u16;
+            let mut blocker_hits = Vec::with_capacity(blockers.len());
             for (i, blocker) in blockers.iter().enumerate() {
                 if i > 0 {
                     spans.push(Span::styled(", ", Style::default().fg(theme.text_dim)));
                     col += 2;
                 }
                 let text = blocker_label(blocker, own_repo);
-                let width = text.chars().count() as u16;
-                hits.push((col..=col + width.saturating_sub(1), blocker.clone()));
-                col += width;
+                let len = text.chars().count() as u16;
+                blocker_hits.push((col..=col + len.saturating_sub(1), blocker.clone()));
+                col += len;
                 spans.push(Span::styled(
                     text,
                     Style::default()
@@ -1598,9 +1659,7 @@ impl RightPane {
                         .add_modifier(Modifier::UNDERLINED),
                 ));
             }
-            if row < area.bottom() {
-                self.click_hits.header_blockers = Some((row, hits));
-            }
+            hits.blockers = Some((row, blocker_hits));
             lines.push(Line::from(spans));
         }
 
@@ -1637,10 +1696,7 @@ impl RightPane {
         // click target is only registered when the row is inside the
         // header area (see the title line above).
         if let Some((prefix, label, url)) = origin {
-            let issue_row = area.y + lines.len() as u16;
-            if issue_row < area.bottom() {
-                self.click_hits.header_issue = Some((issue_row, url));
-            }
+            hits.issue = Some((lines.len() as u16, url));
             lines.push(Line::from(vec![
                 Span::styled(format!("{prefix}: "), Style::default().fg(theme.text_dim)),
                 Span::styled(
@@ -1718,16 +1774,10 @@ impl RightPane {
                     spans.push(Span::styled(" (bot)", Style::default().fg(theme.text_dim)));
                 }
             }
-            let reviewers_row = area.y + lines.len() as u16;
-            if reviewers_row < area.bottom() {
-                self.click_hits.header_reviewers = Some(reviewers_row);
-            }
+            hits.reviewers = Some(lines.len() as u16);
             lines.push(Line::from(spans));
         } else if is_pr {
-            let reviewers_row = area.y + lines.len() as u16;
-            if reviewers_row < area.bottom() {
-                self.click_hits.header_reviewers = Some(reviewers_row);
-            }
+            hits.reviewers = Some(lines.len() as u16);
             lines.push(Line::from(vec![
                 Span::styled("Reviewers: ", Style::default().fg(theme.text_dim)),
                 Span::styled(
@@ -1768,20 +1818,7 @@ impl RightPane {
             ]));
         }
 
-        // Truncate each line to the pane width with `…` instead of
-        // relying on `Wrap`. The wrap can only break at whitespace,
-        // and the lines this header produces are mostly single
-        // identifiers — `tensorzero/nanogateway`, branch names,
-        // `@logins` — that have no break point and just clipped
-        // silently when the pane got narrow. truncate_line preserves
-        // every span's style and emits `…` at the cut.
-        let width = area.width as usize;
-        let truncated: Vec<Line> = lines
-            .into_iter()
-            .map(|l| crate::components::table::truncate_line(l, width))
-            .collect();
-        let para = Paragraph::new(truncated);
-        frame.render_widget(para, area);
+        (lines, hits)
     }
 
     /// Test accessor — how many times the activity buffer has been
@@ -2459,26 +2496,24 @@ impl RightPane {
         }
     }
 
-    /// Rows the header block reserves: crumbs + pill/title + branch +
-    /// reviewers (4), plus one row for an originating-issue line (#567)
-    /// and one for a PR's diffstat (#997) when present. A method — not an
-    /// inline in `render` — so the height reservation there and
+    /// Rows the header block reserves: exactly the lines
+    /// [`Self::header_lines`] builds, so no row is clipped. A method — not
+    /// an inline in `render` — so the height reservation there and
     /// `natural_height`'s measurement read the identical number and can't
     /// drift.
     fn header_height(&self) -> u16 {
-        let has_origin = self.originating_issue().is_some();
-        let show_diffstat = self
-            .workspace
-            .as_ref()
-            .and_then(|w| w.primary_task())
-            .is_some_and(|t| t.is_pr());
-        // The dependency `Blocked on:` line (#1521) is emitted when the
-        // workspace declares a blocker reason or carries counted edges;
-        // reserve its row so a short pane doesn't clip it.
-        let has_blocked = self.workspace.as_ref().is_some_and(|w| {
-            w.declared_blocker().is_some() || w.hierarchy_blocked_by().next().is_some()
-        });
-        4 + u16::from(has_origin) + u16::from(show_diffstat) + u16::from(has_blocked)
+        // The placeholder headers (no workspace, or one with no task yet)
+        // draw a single line but keep the pane's long-standing 4-row shape.
+        const PLACEHOLDER_ROWS: u16 = 4;
+        let Some(workspace) = &self.workspace else {
+            return PLACEHOLDER_ROWS;
+        };
+        let Some(task) = workspace.primary_task() else {
+            return PLACEHOLDER_ROWS;
+        };
+        let (lines, _) =
+            self.header_lines(workspace, task, 0, self.originating_issue(), task.is_pr());
+        lines.len() as u16
     }
 
     /// The rows the pane would fill given unlimited height, laid out
@@ -2537,11 +2572,8 @@ impl RightPane {
         // guarantees the activity feed always has at least its header
         // + 2 rows visible, no matter how long the PR description is.
         let body_constraint = self.task_body_constraint();
-        // Baseline header is crumbs + pill/title + branch + reviewers;
-        // an originating-issue line (#567) adds one row when present, and
-        // a PR's diffstat line (#997) adds one more. Computed once and
-        // threaded into `render_header` so the height reservation and the
-        // emitted lines can't disagree.
+        // The header's height is the line count `header_lines` builds, so
+        // the reservation and the emitted lines can't disagree.
         let origin = self.originating_issue();
         let show_diffstat = self
             .workspace
@@ -2550,7 +2582,7 @@ impl RightPane {
             .is_some_and(|t| t.is_pr());
         let header_height = self.header_height();
         let chunks = Layout::vertical([
-            Constraint::Length(header_height), // header (crumbs, pill, branch, [issue])
+            Constraint::Length(header_height), // header, every line it draws
             Constraint::Length(1),             // separator
             body_constraint,                   // 0 / 1 / Max(N) for the body
             Constraint::Min(3),                // activity — never below 3 rows

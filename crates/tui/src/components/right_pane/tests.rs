@@ -2692,3 +2692,57 @@ mod header_blocker_tests {
         assert_eq!(pane.take_open_task(), None, "the request is consumed");
     }
 }
+
+#[cfg(test)]
+mod header_height_tests {
+    //! The header reserves exactly the rows it draws. It used to count
+    //! them separately (`4 + origin + diffstat + blocked`), which clipped
+    //! the Assignees line off every PR.
+    use super::super::{PaneId, RightPane};
+    use chrono::Utc;
+    use lazybox_core::{TaskId, Workspace};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn rows(pane: &mut RightPane, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn a_pr_header_shows_its_assignees_line() {
+        let pr = super::originating_issue_header_tests::task_for_blockers(172);
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr, Utc::now())));
+        let rows = rows(&mut pane, 100, 40);
+        assert!(
+            rows.iter().any(|r| r.contains("Assignees:")),
+            "the Assignees line is drawn, not clipped: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_declared_reason_and_blocker_edges_both_fit() {
+        let mut pr = super::originating_issue_header_tests::task_for_blockers(172);
+        pr.blocked_by = vec![TaskId {
+            source: "github".into(),
+            key: "o/r#7".into(),
+        }];
+        pr.blocked_on = Some("waiting on the schema freeze".into());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr, Utc::now())));
+        let rows = rows(&mut pane, 100, 40);
+        for needle in ["schema freeze", "Blocked by: #7", "Assignees:"] {
+            assert!(
+                rows.iter().any(|r| r.contains(needle)),
+                "{needle} is drawn: {rows:#?}"
+            );
+        }
+    }
+}

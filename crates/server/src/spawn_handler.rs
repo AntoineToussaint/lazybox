@@ -9100,10 +9100,14 @@ pub async fn handle_inject_prompt(
 }
 
 /// How long and on what an injection waits before it may paste.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct InjectGating {
     gate: crate::delivery::Gate,
     wait_limit: Duration,
+    /// Record the text into the workspace's prompt history when it lands,
+    /// tagged with this source. `None` for a human's prompt, which the
+    /// client records itself.
+    record_as: Option<PromptSource>,
 }
 
 impl InjectGating {
@@ -9112,7 +9116,22 @@ impl InjectGating {
         Self {
             gate: crate::delivery::Gate::ChooserOnly,
             wait_limit: INJECT_INPUT_DEADLINE,
+            record_as: None,
         }
+    }
+}
+
+/// The history source a delivery from `from` is recorded under — `None`
+/// for the human, whose client records its own prompts.
+fn history_source_for(from: &crate::delivery::Party) -> Option<PromptSource> {
+    match from {
+        crate::delivery::Party::Human => None,
+        crate::delivery::Party::Agent(key) => Some(PromptSource::Agent {
+            from: key.as_str().to_string(),
+        }),
+        crate::delivery::Party::Lazybox(reason) => Some(PromptSource::Lazybox {
+            reason: (*reason).to_string(),
+        }),
     }
 }
 
@@ -9133,6 +9152,7 @@ pub(crate) async fn inject_with_receipt(
     let gating = InjectGating {
         gate: request.gate,
         wait_limit: request.wait_limit.unwrap_or(INJECT_INPUT_DEADLINE),
+        record_as: history_source_for(&request.from),
     };
     handle_inject_prompt_inner(
         config,
@@ -9568,6 +9588,7 @@ async fn handle_inject_prompt_inner(
         lazybox_agents::PromptIntent::Compose
     };
     let encoded_prompt = agent.encode_prompt(prompt, intent);
+    let prompt_for_history = prompt.to_string();
 
     // An InputNeeded gate may hold the waiter below for 30 seconds. Without a
     // per-terminal reservation every repeated `w` press spawned another
@@ -9698,6 +9719,17 @@ async fn handle_inject_prompt_inner(
         };
         drop(pending_injection);
         receipt.landing();
+        // Who sent it goes into the workspace's history the moment it lands,
+        // so `]]h` shows a sibling's message or lazybox's automation next to
+        // what the user typed, instead of nothing.
+        if let Some(source) = gating.record_as.clone() {
+            let prompt = UserPrompt {
+                text: prompt_for_history.clone(),
+                timestamp_ms: Utc::now().timestamp_millis().max(0) as u64,
+                source,
+            };
+            handle_record_user_message(&config_for_confirm, id, &prompt).await;
+        }
         if let Some(tx) = registered_tx.take() {
             let _ = tx.send(());
         }
@@ -16328,6 +16360,65 @@ mod tests {
                 .iter()
                 .any(|w| String::from_utf8_lossy(w).contains("sibling-question")),
             "once the turn ended the message landed"
+        );
+    }
+
+    /// A message another agent delivered used to leave no trace in the
+    /// target's `]]h` history — only what the user typed was recorded. It
+    /// is now recorded when it lands, tagged with who sent it.
+    #[tokio::test]
+    async fn a_delivery_from_another_agent_is_recorded_in_history_with_its_sender() {
+        use crate::delivery::{DeliveryRequest, EarlyOutcome, Gate, Party};
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "history-agent")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(716);
+        let target = SessionKey::new("history-agent");
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            target.clone(),
+            "claude",
+            Some(lazybox_ipc::AgentState::Done),
+            None,
+        )
+        .await;
+        let mut pending = crate::delivery::deliver(
+            &config,
+            DeliveryRequest {
+                terminal_id: id,
+                body: "rebase onto main, #1886 just landed".into(),
+                submit: false,
+                gate: Gate::Idle,
+                from: Party::Agent(SessionKey::new("coordinator")),
+                wait_limit: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            pending.landed_within(Duration::from_secs(3)).await,
+            Some(EarlyOutcome::Landed)
+        );
+        let history = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let history = load_prompt_history(&config, target.as_str()).await;
+                if !history.is_empty() {
+                    return history;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the delivery is recorded");
+        assert_eq!(history[0].text, "rebase onto main, #1886 just landed");
+        assert_eq!(
+            history[0].source,
+            PromptSource::Agent {
+                from: "coordinator".into()
+            }
         );
     }
 

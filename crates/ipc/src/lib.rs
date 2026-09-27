@@ -268,6 +268,12 @@ pub enum PromptSource {
     /// key and category so the history can name which snippet it was
     /// (`category` is empty when the snippet declares none).
     Snippet { key: String, category: String },
+    /// Delivered by another agent session through the coordination tools
+    /// (`notify_session`, `ask_session`). `from` is that session's key.
+    Agent { from: String },
+    /// Delivered by lazybox's own automation (auto-fix, resume, epic
+    /// dispatch). `reason` names which.
+    Lazybox { reason: String },
 }
 
 /// One prompt the user submitted to an agent terminal, retained in a

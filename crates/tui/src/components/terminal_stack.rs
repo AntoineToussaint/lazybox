@@ -249,6 +249,21 @@ pub const COMPOSING_CAP: usize = 8 * 1024;
 /// without being visually loud.
 const RECAP_PREFIX: &str = "you ▸ ";
 
+/// Whose message the pinned recap shows. It used to say `you ▸` for every
+/// entry; now that a sibling agent's message or lazybox's automation is
+/// recorded too, it names the sender instead of claiming the user wrote it.
+fn recap_prefix(source: &lazybox_ipc::PromptSource) -> String {
+    match source {
+        lazybox_ipc::PromptSource::Typed | lazybox_ipc::PromptSource::Snippet { .. } => {
+            RECAP_PREFIX.to_string()
+        }
+        lazybox_ipc::PromptSource::Agent { .. } | lazybox_ipc::PromptSource::Lazybox { .. } => {
+            let tag = crate::realm::model::prompt_source_tag(source).unwrap_or_default();
+            format!("{tag} ▸ ")
+        }
+    }
+}
+
 /// Client-side cap on the retained per-terminal prompt history. Keeps
 /// the optimistic (pre-reconnect) history bounded to match the daemon's
 /// own eviction; the authoritative capped list arrives on the next
@@ -5905,7 +5920,13 @@ impl TerminalStack {
     /// the user has to parse. Truncates with `…` when the message
     /// overflows the row width — same affordance the empty-state
     /// hint uses elsewhere in this pane.
-    fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str, age: &str) {
+    fn render_user_message_recap(
+        frame: &mut Frame,
+        area: Rect,
+        prefix: &str,
+        msg: &str,
+        age: &str,
+    ) {
         let theme = crate::theme::current();
         let summary = summarize_message(msg);
         // A relative age ("5m ago") on the right lets the user judge whether
@@ -5924,7 +5945,7 @@ impl TerminalStack {
         };
         let line = ratatui::text::Line::from(vec![
             Span::styled(
-                RECAP_PREFIX,
+                prefix.to_string(),
                 Style::default()
                     .fg(theme.text_dim)
                     .add_modifier(Modifier::BOLD),
@@ -6008,7 +6029,8 @@ impl TerminalStack {
                     height: 1,
                 };
                 let age = crate::realm::model::relative_age(last.timestamp_ms, now_ms());
-                Self::render_user_message_recap(frame, header_rect, &last.text, &age);
+                let prefix = recap_prefix(&last.source);
+                Self::render_user_message_recap(frame, header_rect, &prefix, &last.text, &age);
             }
             // Reserve the rightmost column of the body as a scrollbar
             // gutter. Held back unconditionally so the PTY width stays
@@ -8177,7 +8199,13 @@ mod selection_offset_tests {
         let area = Rect::new(0, 0, W, 1);
         let mut term = Terminal::new(TestBackend::new(W, 1)).unwrap();
         term.draw(|f| {
-            TerminalStack::render_user_message_recap(f, area, "review the diff", "5m ago")
+            TerminalStack::render_user_message_recap(
+                f,
+                area,
+                RECAP_PREFIX,
+                "review the diff",
+                "5m ago",
+            )
         })
         .unwrap();
         let buf = term.backend().buffer();
@@ -8199,8 +8227,10 @@ mod selection_offset_tests {
         const W: u16 = 14;
         let area = Rect::new(0, 0, W, 1);
         let mut term = Terminal::new(TestBackend::new(W, 1)).unwrap();
-        term.draw(|f| TerminalStack::render_user_message_recap(f, area, "hello there", "5m ago"))
-            .unwrap();
+        term.draw(|f| {
+            TerminalStack::render_user_message_recap(f, area, RECAP_PREFIX, "hello there", "5m ago")
+        })
+        .unwrap();
         let buf = term.backend().buffer();
         let row: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(
@@ -14926,5 +14956,29 @@ mod zoom_and_tile_header_tests {
         );
         let text: String = bg.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("limited"), "shows the limited chip: {text}");
+    }
+}
+
+#[cfg(test)]
+mod recap_prefix_tests {
+    use super::{RECAP_PREFIX, recap_prefix};
+    use lazybox_ipc::PromptSource;
+
+    /// The recap names the sender: a sibling's message must not read as
+    /// something the user typed.
+    #[test]
+    fn the_recap_names_who_sent_the_last_message() {
+        assert_eq!(recap_prefix(&PromptSource::Typed), RECAP_PREFIX);
+        let agent = recap_prefix(&PromptSource::Agent {
+            from: "coordinator".into(),
+        });
+        assert_eq!(agent, "← coordinator ▸ ");
+        assert!(!agent.starts_with("you"));
+        assert_eq!(
+            recap_prefix(&PromptSource::Lazybox {
+                reason: "auto-fix".into()
+            }),
+            "lazybox · auto-fix ▸ "
+        );
     }
 }

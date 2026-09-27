@@ -1556,7 +1556,9 @@ impl<T: TerminalAdapter> Model<T> {
         let (_, history) = self.terminals.prompt_history_for(terminal_id)?;
         history.into_iter().find_map(|prompt| match prompt.source {
             lazybox_ipc::PromptSource::Snippet { key, .. } => Some(key),
-            lazybox_ipc::PromptSource::Typed => None,
+            lazybox_ipc::PromptSource::Typed
+            | lazybox_ipc::PromptSource::Agent { .. }
+            | lazybox_ipc::PromptSource::Lazybox { .. } => None,
         })
     }
 

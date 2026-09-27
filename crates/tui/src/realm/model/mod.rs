@@ -4882,10 +4882,7 @@ impl<T: TerminalAdapter> Model<T> {
         let rows: Vec<(PromptRow, String)> = history
             .into_iter()
             .map(|prompt| {
-                let tag = match &prompt.source {
-                    lazybox_ipc::PromptSource::Snippet { key, .. } => Some(format!("]{key}")),
-                    lazybox_ipc::PromptSource::Typed => None,
-                };
+                let tag = prompt_source_tag(&prompt.source);
                 let row = PromptRow {
                     when: relative_age(prompt.timestamp_ms, now),
                     tag,
@@ -8599,4 +8596,64 @@ fn modal_subscriptions() -> Vec<tuirealm::subscription::Sub<Id, UserEvent>> {
         Sub::new(EventClause::WindowResize, SubClause::Always),
         Sub::new(EventClause::Discriminant(daemon), SubClause::Always),
     ]
+}
+
+/// The short provenance tag a prompt-history row carries: `]key` for a
+/// snippet, `← sender` for a message another agent sent, `lazybox · reason`
+/// for lazybox's own automation, nothing for what the user typed.
+pub(crate) fn prompt_source_tag(source: &lazybox_ipc::PromptSource) -> Option<String> {
+    match source {
+        lazybox_ipc::PromptSource::Snippet { key, .. } => Some(format!("]{key}")),
+        lazybox_ipc::PromptSource::Typed => None,
+        lazybox_ipc::PromptSource::Agent { from } => Some(format!("← {}", short_session(from))),
+        lazybox_ipc::PromptSource::Lazybox { reason } => Some(format!("lazybox · {reason}")),
+    }
+}
+
+/// A session key trimmed for a narrow tag: the tail, which carries the
+/// repo and number (`…lazybox-1830`), capped so the tag never crowds out
+/// the prompt text.
+fn short_session(key: &str) -> String {
+    const MAX: usize = 24;
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= MAX {
+        return key.to_string();
+    }
+    let tail: String = chars[chars.len() - (MAX - 1)..].iter().collect();
+    format!("…{tail}")
+}
+
+#[cfg(test)]
+mod prompt_source_tag_tests {
+    use super::prompt_source_tag;
+    use lazybox_ipc::PromptSource;
+
+    #[test]
+    fn every_source_names_itself_briefly() {
+        assert_eq!(prompt_source_tag(&PromptSource::Typed), None);
+        assert_eq!(
+            prompt_source_tag(&PromptSource::Snippet {
+                key: "rev".into(),
+                category: String::new()
+            })
+            .as_deref(),
+            Some("]rev")
+        );
+        let agent = prompt_source_tag(&PromptSource::Agent {
+            from: "github-AntoineToussaint-lazybox-1830".into(),
+        })
+        .expect("tag");
+        assert!(
+            agent.starts_with("← ") && agent.ends_with("lazybox-1830"),
+            "{agent}"
+        );
+        assert!(agent.chars().count() <= 26, "{agent}");
+        assert_eq!(
+            prompt_source_tag(&PromptSource::Lazybox {
+                reason: "auto-fix".into()
+            })
+            .as_deref(),
+            Some("lazybox · auto-fix")
+        );
+    }
 }

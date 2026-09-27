@@ -208,6 +208,9 @@ pub struct McpRuntime {
     /// message, delivered by its `Stop` hook — waiting for the turn-end
     /// capture that the same `Stop` triggers. Consumed by that capture.
     turn_results: parking_lot::Mutex<HashMap<SessionKey, String>>,
+    /// The workspaces each session started with `start_workspace`, so the
+    /// per-session fan-out cap counts the ones still running an agent.
+    started_by: parking_lot::Mutex<HashMap<SessionKey, Vec<lazybox_core::WorkspaceKey>>>,
 }
 
 impl McpRuntime {
@@ -250,6 +253,24 @@ impl McpRuntime {
     /// Drop an unconsumed turn result (a new turn started).
     pub fn clear_turn_result(&self, session_key: &SessionKey) {
         self.turn_results.lock().remove(session_key);
+    }
+
+    /// Record that `caller` started an agent in `key`.
+    fn record_started(&self, caller: &SessionKey, key: lazybox_core::WorkspaceKey) {
+        let mut started = self.started_by.lock();
+        let keys = started.entry(caller.clone()).or_default();
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+
+    /// The workspaces `caller` has started, oldest first.
+    fn started_by(&self, caller: &SessionKey) -> Vec<lazybox_core::WorkspaceKey> {
+        self.started_by
+            .lock()
+            .get(caller)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Record the bound endpoint URL (called once by [`start`]).
@@ -477,6 +498,22 @@ struct SpawnWorkerArgs {
     /// record it works on; pass `task` or `create_issue` instead.
     #[serde(default)]
     workspace_name: Option<String>,
+}
+
+/// A `start_workspace` request: hand independent work on an existing
+/// tracker record to an agent in that record's own workspace.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct StartWorkspaceArgs {
+    /// The tracker record the work belongs to: `owner/repo#N`, a GitHub
+    /// issue / PR URL, or a Linear identifier (`ENG-45`). It must already
+    /// exist — this tool never files one.
+    task: String,
+    /// The task handed to the new agent as its opening prompt.
+    brief: String,
+    /// Agent id to spawn (`claude`, `codex`, …). Omit to use the configured
+    /// default agent.
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 /// The issue `spawn_worker` files when the work has no ticket yet.
@@ -2626,6 +2663,161 @@ impl LazyboxMcp {
         }))
     }
 
+    /// Validate a `start_workspace` request and attach to the record's own
+    /// workspace — everything up to the spawn. The gates are
+    /// `spawn_worker`'s minus its epic and role: an existing record (never a
+    /// name, never filed here — filing is the standing rule's to allow), not
+    /// the caller's own row, no agent already running there, and a bound on
+    /// how many agents one session keeps running this way.
+    async fn start_workspace_prepare(
+        &self,
+        caller: &SessionKey,
+        args: &StartWorkspaceArgs,
+        max_started: usize,
+        default_agent: &str,
+    ) -> Result<(lazybox_core::WorkspaceKey, lazybox_core::TaskId, String), McpError> {
+        let agent_id = args
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_agent);
+        if self.config.agents.get(agent_id).is_none() {
+            return Err(McpError::invalid_request(
+                format!("unknown agent {agent_id:?} — enable it or pass a configured agent id"),
+                None,
+            ));
+        }
+        let task = args.task.trim();
+        let anchor = lazybox_core::task_ref::parse_task_ref(task, None).ok_or_else(|| {
+            McpError::invalid_request(
+                format!(
+                    "could not read {task:?} as a tracker record — pass `owner/repo#N`, a GitHub \
+                     issue/PR URL, or a Linear identifier like `ENG-45`. The record must \
+                     already exist: propose one to the user first if it does not."
+                ),
+                None,
+            )
+        })?;
+
+        // The fan-out bound: count this session's starts that still run an
+        // agent. A session handing out work unattended is the runaway the
+        // bound exists for; one whose starts have finished may start more.
+        if max_started == 0 {
+            return Err(McpError::invalid_request(
+                "starting workspaces is disabled (agent.max_epic_workers = 0)",
+                None,
+            ));
+        }
+        let mut running = 0;
+        for key in self.config.mcp.started_by(caller) {
+            if self
+                .config
+                .terminal
+                .running_agent_terminal(&SessionKey::from(&key))
+                .await
+                .is_some()
+            {
+                running += 1;
+            }
+        }
+        if running >= max_started {
+            return Err(McpError::invalid_request(
+                format!(
+                    "you already have {running} workspaces running agents you started (cap \
+                     {max_started}, agent.max_epic_workers) — wait for one to finish"
+                ),
+                None,
+            ));
+        }
+
+        let key = crate::workspace::attach::attach_to_record(&self.config, &anchor)
+            .await
+            .map_err(|e| McpError::invalid_request(format!("attach to {anchor}: {e}"), None))?;
+        if key.as_str() == caller.as_str() {
+            return Err(McpError::invalid_request(
+                format!(
+                    "{anchor} is your own workspace — do the work here, or name another record"
+                ),
+                None,
+            ));
+        }
+        if let Some(terminal_id) = self
+            .config
+            .terminal
+            .running_agent_terminal(&SessionKey::from(&key))
+            .await
+        {
+            return Err(McpError::invalid_request(
+                format!(
+                    "{anchor} already has a running agent (terminal {terminal_id:?}) — someone \
+                     is on it. Use `ask_session`/`notify_session` on `{}` to reach them.",
+                    key.as_str()
+                ),
+                None,
+            ));
+        }
+        Ok((key, anchor, agent_id.to_string()))
+    }
+
+    /// Full `start_workspace` flow: [`Self::start_workspace_prepare`], then
+    /// the spawn, with the brief recorded as the calling agent's.
+    async fn start_workspace_payload(
+        &self,
+        caller: &SessionKey,
+        args: StartWorkspaceArgs,
+        max_started: usize,
+        default_agent: &str,
+    ) -> Result<serde_json::Value, McpError> {
+        let brief = args.brief.trim().to_string();
+        if brief.is_empty() {
+            return Err(McpError::invalid_request(
+                "brief is empty — hand the new agent a task",
+                None,
+            ));
+        }
+        if brief.len() > MAX_NOTE_BYTES {
+            return Err(McpError::invalid_request(
+                format!("brief exceeds {MAX_NOTE_BYTES} bytes (hand a distilled task, not a dump)"),
+                None,
+            ));
+        }
+        let (key, anchor, agent_id) = self
+            .start_workspace_prepare(caller, &args, max_started, default_agent)
+            .await?;
+        self.config.mcp.record_started(caller, key.clone());
+        tracing::info!(
+            caller = %caller.as_str(),
+            workspace = %key.as_str(),
+            agent = %agent_id,
+            "mcp start_workspace: agent handing independent work to a workspace of its own"
+        );
+        crate::spawn_handler::handle_spawn(
+            &self.config,
+            (&key).into(),
+            None,
+            lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
+            crate::spawn_handler::SpawnOptions {
+                initial_prompt: Some(brief),
+                autonomous: true,
+                origin: lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Agent),
+                prompt_from: Some(lazybox_ipc::PromptSource::Agent {
+                    from: caller.as_str().to_string(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await;
+        Ok(serde_json::json!({
+            "workspace_key": key.as_str(),
+            "task": anchor.key,
+            "agent": agent_id,
+            "handed_off": true,
+            "delivery_confirmed": false,
+            "note": "Started in the record's own workspace; the brief is recorded as yours. Not a confirmation the agent has started — verify with list_sessions / read_session, and get its answer back with ask_session.",
+        }))
+    }
+
     /// Resolve a tracker reference and report what work is happening on it.
     async fn task_status_payload(
         &self,
@@ -2787,6 +2979,27 @@ impl LazyboxMcp {
         let default_agent = cfg.setup.default_agent.as_deref().unwrap_or("claude");
         Ok(json_result(
             self.spawn_worker_payload(&caller, args, max_workers, default_agent)
+                .await?,
+        ))
+    }
+
+    #[tool(
+        description = "Hand independent work to an agent in a workspace of its own — any role may call this. Pass `task`, an EXISTING tracker record (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier); the agent runs in that record's own workspace, where its work stays visible in the inbox, resumable and costed, and the `brief` is recorded as sent by you. Prefer this to a sub-agent for work that stands on its own; keep sub-agents for research that feeds your own task. It never files a record: if the work has none, propose one to the user first. Refuses your own workspace, a record whose workspace already runs an agent (reach it with ask_session instead), and more than agent.max_epic_workers (default 6) running agents you started. Returns once handed off — verify with list_sessions / read_session."
+    )]
+    async fn start_workspace(
+        &self,
+        Parameters(args): Parameters<StartWorkspaceArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        let max_started = cfg
+            .agent
+            .max_epic_workers
+            .unwrap_or(lazybox_config::DEFAULT_MAX_EPIC_WORKERS);
+        let default_agent = cfg.setup.default_agent.as_deref().unwrap_or("claude");
+        Ok(json_result(
+            self.start_workspace_payload(&caller, args, max_started, default_agent)
                 .await?,
         ))
     }
@@ -3288,7 +3501,10 @@ impl ServerHandler for LazyboxMcp {
                  identifier) or create_issue to file it as a sub-issue first. \
                  The worker runs in that record's own workspace, never a named \
                  one beside it; it refuses if you aren't a Coordinator or the \
-                 epic is at its worker cap. If your own workspace hits \
+                 epic is at its worker cap. Any role hands independent work \
+                 on an existing record to an agent in that record's own \
+                 workspace with start_workspace — prefer it to a sub-agent \
+                 for work that stands on its own. If your own workspace hits \
                  something a human must resolve, flag it with report_blocker and \
                  clear it with clear_blocker once unblocked."
                     .to_string(),
@@ -4855,6 +5071,90 @@ mod tests {
                 workspace_json: Some(serde_json::to_string(&ws).unwrap()),
             })
             .unwrap();
+    }
+
+    fn start_workspace_args(task: &str) -> StartWorkspaceArgs {
+        StartWorkspaceArgs {
+            task: task.to_string(),
+            brief: "implement the parser".to_string(),
+            agent: None,
+        }
+    }
+
+    /// Any role may hand independent work to a record's own workspace: no
+    /// Coordinator role, no epic, and neither is changed by the start.
+    #[tokio::test]
+    async fn start_workspace_needs_no_role_and_targets_the_record_workspace() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config.clone());
+        let caller = SessionKey::from("some-agent");
+        let (key, anchor, agent) = handler
+            .start_workspace_prepare(&caller, &start_workspace_args("acme/widget#7"), 6, "claude")
+            .await
+            .expect("an unroled agent may start a workspace");
+        assert_eq!(key.as_str(), "github-acme-widget-7");
+        assert_eq!(anchor.key, "acme/widget#7");
+        assert_eq!(agent, "claude");
+        let ws = handler.load_workspace(&key).expect("persisted");
+        assert_eq!(ws.effective_role(), None, "no role is stamped");
+        assert!(
+            crate::epics::list_all(&config)
+                .unwrap_or_default()
+                .is_empty(),
+            "no epic is touched"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_workspace_refuses_the_callers_own_row_and_a_non_record() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config);
+        let own = SessionKey::from("github-acme-widget-7");
+        let err = handler
+            .start_workspace_prepare(&own, &start_workspace_args("acme/widget#7"), 6, "claude")
+            .await
+            .expect_err("own workspace");
+        assert!(
+            err.message.contains("your own workspace"),
+            "{}",
+            err.message
+        );
+
+        let err = handler
+            .start_workspace_prepare(
+                &SessionKey::from("other"),
+                &start_workspace_args("fix the parser"),
+                6,
+                "claude",
+            )
+            .await
+            .expect_err("not a record");
+        assert!(err.message.contains("propose one"), "{}", err.message);
+
+        let err = handler
+            .start_workspace_prepare(
+                &SessionKey::from("other"),
+                &start_workspace_args("acme/widget#7"),
+                0,
+                "claude",
+            )
+            .await
+            .expect_err("disabled");
+        assert!(err.message.contains("disabled"), "{}", err.message);
+    }
+
+    /// The fan-out bound counts what a session started, once per workspace.
+    #[test]
+    fn started_workspaces_are_tracked_per_caller_without_duplicates() {
+        let runtime = McpRuntime::default();
+        let caller = SessionKey::from("a");
+        let key = lazybox_core::WorkspaceKey::new("github-acme-widget-7");
+        runtime.record_started(&caller, key.clone());
+        runtime.record_started(&caller, key.clone());
+        assert_eq!(runtime.started_by(&caller), vec![key]);
+        assert!(runtime.started_by(&SessionKey::from("b")).is_empty());
     }
 
     #[tokio::test]

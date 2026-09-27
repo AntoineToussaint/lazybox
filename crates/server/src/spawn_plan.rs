@@ -47,6 +47,11 @@ pub struct SpawnOptions {
     /// yet (both commands run as independent detached tasks with no ordering
     /// guarantee). Governs the preamble only — never the persisted role.
     pub role: Option<lazybox_core::Role>,
+    /// Who the initial prompt is from, when that is neither the user nor
+    /// one of lazybox's own triggers — another agent's `start_workspace`.
+    /// Recorded into the new agent's prompt history once it lands, so its
+    /// recap names the sender instead of claiming the user typed it.
+    pub prompt_from: Option<lazybox_ipc::PromptSource>,
 }
 
 #[derive(Debug)]

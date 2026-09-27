@@ -4260,6 +4260,9 @@ pub enum AutonomousTrigger {
     /// its `REVIEW` latch dispatching a Reviewer onto a green PR (#1525).
     /// Appended last (bincode is ordinal-sensitive).
     EpicAuto,
+    /// Another agent handed independent work to a workspace of its own
+    /// (`start_workspace`). Appended last (bincode is ordinal-sensitive).
+    Agent,
 }
 
 impl AutonomousTrigger {
@@ -4272,6 +4275,7 @@ impl AutonomousTrigger {
             Self::AutoFix => "auto-fix",
             Self::Restore => "restored",
             Self::EpicAuto => "AUTO",
+            Self::Agent => "from an agent",
         }
     }
 }

@@ -160,6 +160,34 @@ fn agent_state_key(backend_key: &str, generation: u64) -> String {
 /// keeps the old key. The durable PTY scrollback already survives respawn by
 /// keying on the stable session identity; this brings the input side into line
 /// (root cause of the history-orphaned-on-respawn bug).
+/// The history row a spawn's opening prompt is recorded as, when it is not
+/// the user's own typing: the sender another agent's `start_workspace`
+/// named, or lazybox's trigger for a spawn it started itself. A snippet
+/// prompt records through the snippet path instead; an interactive spawn
+/// records nothing here (the user typed it).
+fn spawn_prompt_history(
+    prompt: &str,
+    prompt_from: Option<PromptSource>,
+    origin: lazybox_ipc::SpawnOrigin,
+    has_snippet: bool,
+) -> Option<UserPrompt> {
+    if has_snippet {
+        return None;
+    }
+    let source = match (prompt_from, origin) {
+        (Some(source), _) => source,
+        (None, lazybox_ipc::SpawnOrigin::Autonomous(trigger)) => PromptSource::Lazybox {
+            reason: trigger.notice_tag().to_string(),
+        },
+        (None, lazybox_ipc::SpawnOrigin::Interactive) => return None,
+    };
+    Some(UserPrompt {
+        text: prompt.to_string(),
+        timestamp_ms: Utc::now().timestamp_millis().max(0) as u64,
+        source,
+    })
+}
+
 pub(crate) const WORKSPACE_MSGS_PREFIX: &str = "workspace-msgs:";
 const WORKSPACE_DRAFT_PREFIX: &str = "workspace-draft:";
 /// KV flag marking the one-time `terminal-*` → `workspace-*` re-key migration
@@ -1945,6 +1973,7 @@ async fn handle_spawn_inner(
         meter,
         untrusted,
         role: inband_role,
+        prompt_from,
     } = options;
     let access = if matches!(&kind, TerminalKind::Agent(_)) {
         access
@@ -3278,18 +3307,12 @@ async fn handle_spawn_inner(
         // auto-fix, epic dispatch) hands the agent a prompt nobody typed:
         // record it as lazybox's once it lands, so the agent's history and
         // recap say where its task came from.
-        let autonomous_history = match origin {
-            lazybox_ipc::SpawnOrigin::Autonomous(trigger) if initial_snippet.is_none() => {
-                Some(UserPrompt {
-                    text: prompt.clone(),
-                    timestamp_ms: Utc::now().timestamp_millis().max(0) as u64,
-                    source: PromptSource::Lazybox {
-                        reason: trigger.notice_tag().to_string(),
-                    },
-                })
-            }
-            _ => None,
-        };
+        let autonomous_history = spawn_prompt_history(
+            &prompt,
+            prompt_from.clone(),
+            origin,
+            initial_snippet.is_some(),
+        );
         tokio::spawn(async move {
             // Closes the input gate on every exit path of this task (#1444):
             // once injection is submitted (or fails), the keyboard writes
@@ -16502,6 +16525,46 @@ mod tests {
                 .iter()
                 .any(|w| String::from_utf8_lossy(w).contains("sibling-question")),
             "once the turn ended the message landed"
+        );
+    }
+
+    /// A spawn's opening prompt is recorded as the agent that asked for it
+    /// (`start_workspace`), as lazybox for its own triggers, and not at all
+    /// for the user's own spawn or a snippet (recorded elsewhere).
+    #[test]
+    fn a_spawn_prompt_is_recorded_as_whoever_sent_it() {
+        use lazybox_ipc::{AutonomousTrigger, SpawnOrigin};
+        let from_agent = PromptSource::Agent {
+            from: "github-o-r-1".into(),
+        };
+        let agent = spawn_prompt_history(
+            "do it",
+            Some(from_agent.clone()),
+            SpawnOrigin::Autonomous(AutonomousTrigger::Agent),
+            false,
+        )
+        .expect("an agent's brief is recorded");
+        assert_eq!(agent.source, from_agent);
+        assert_eq!(agent.text, "do it");
+
+        let fix = spawn_prompt_history(
+            "fix CI",
+            None,
+            SpawnOrigin::Autonomous(AutonomousTrigger::AutoFix),
+            false,
+        )
+        .expect("lazybox's own trigger is recorded");
+        assert_eq!(
+            fix.source,
+            PromptSource::Lazybox {
+                reason: "auto-fix".into()
+            }
+        );
+
+        assert!(spawn_prompt_history("mine", None, SpawnOrigin::Interactive, false).is_none());
+        assert!(
+            spawn_prompt_history("snip", Some(from_agent), SpawnOrigin::Interactive, true)
+                .is_none()
         );
     }
 

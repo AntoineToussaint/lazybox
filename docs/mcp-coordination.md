@@ -158,6 +158,7 @@ re-reading the dependency graph:
 | `lazybox_epic_ready(epic?)` | Just the members that are ready to start now (unblocked, unclaimed). | same snapshot, `ready` projection |
 | `lazybox_report_blocker(reason, kind?)` | Flag *this* workspace as blocked with a reason siblings can see (`kind` ∈ dependency/external/decision/credential/review/merge-order/contract/cycle/other, default decision); recorded as an operator-owned blocker and folded into derived status. | kv blocker record + recompute |
 | `lazybox_clear_blocker()` | Lift the blocker this workspace reported (no-op if none). | delete blocker record + recompute |
+| `start_workspace(task, brief, agent?)` | Any role: hand independent work on an **existing** record to an agent in that record's own workspace, instead of a sub-agent that is invisible to the inbox, unresumable and uncosted. Never files a record. Refuses the caller's own workspace, a record whose workspace already runs an agent, and more than `agent.max_epic_workers` running agents the caller started. The brief is recorded in the new agent's history as `PromptSource::Agent { from }`. | `attach_to_record` + `handle_spawn` (origin `AutonomousTrigger::Agent`); per-session starts tracked in `McpRuntime` |
 
 The tracker-record cache (#1799) adds four, so a session stops re-fetching
 what the daemon already paid for. Agents and the daemon share one GitHub

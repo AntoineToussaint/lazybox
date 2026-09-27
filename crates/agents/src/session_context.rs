@@ -156,7 +156,10 @@ blocked (a reason a sibling can see) and `clear_blocker` lifts it.\n\
   - `spawn_worker` (Coordinator only) starts a Worker **on an issue**: pass `task` \
 (`owner/repo#N`, a URL, a Linear key) or `create_issue` to file it under your epic \
 first. It runs in that record's own workspace, never a named one beside it, and \
-refuses off-role or past the epic's worker cap."
+refuses off-role or past the epic's worker cap.\n\
+  - `start_workspace` (any role) hands independent work on an existing record to an \
+agent in that record's own workspace — visible, resumable and costed, where a \
+sub-agent is none of these; the brief is recorded as yours."
 }
 
 /// The full briefing an MCP-wired agent gets: the base blurb plus the
@@ -512,6 +515,10 @@ mod tests {
         // for when asked "are we working on #N", and the one place the
         // turn-ended-is-not-task-done distinction is stated where an agent
         // will actually read it.
+        //
+        // `start_workspace` added one bullet: the tool the
+        // workspace-over-subagent standing rule points at, which does nothing
+        // for an agent that is never told it exists.
         //
         // #1822 added one more to the base half: the artifact channel an
         // agent writes a file into. It is the same shape of cost as the

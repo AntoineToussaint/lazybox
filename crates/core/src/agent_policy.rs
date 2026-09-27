@@ -152,7 +152,7 @@ fn builtin_policies() -> Vec<AgentPolicy> {
         },
         AgentPolicy {
             id: WORKSPACE_OVER_SUBAGENT.to_string(),
-            text: "Give independent work its own workspace (`spawn_worker`, or propose the \
+            text: "Give independent work its own workspace (`start_workspace` on its \
                    record), not a sub-agent: it stays visible, resumable and costed. \
                    Sub-agents are for research feeding your own task."
                 .to_string(),

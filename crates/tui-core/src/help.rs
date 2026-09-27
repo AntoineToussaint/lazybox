@@ -665,7 +665,7 @@ fallback shouldn't resurrect it)",
             "spawning glyph must be explained from the generated registry"
         );
         assert!(ctx.contains("## Row badges"));
-        assert!(ctx.contains("`⚡`"));
+        assert!(ctx.contains("`⚡\u{FE0E}`"));
         assert!(ctx.contains("`⚙\u{FE0E}`"));
     }
 

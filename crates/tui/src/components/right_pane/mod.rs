@@ -201,6 +201,9 @@ pub struct RightPane {
     /// same `g r` flow — since the pane can't reach `Model` itself
     /// (#1092).
     pending_request_reviewers: bool,
+    /// A catalog action a header-row click asked for; the model drains it
+    /// with [`Self::take_action`] and dispatches it.
+    pending_action: Option<lazybox_tui_core::action::Action>,
     /// Set when the user asks to read the full description (a second
     /// `d`, or a click on the `+N more lines` trailer). The orchestrator
     /// drains it after dispatching the key/click and mounts the reader
@@ -271,6 +274,18 @@ struct HeaderHits {
     issue: Option<(u16, String)>,
     reviewers: Option<u16>,
     blockers: Option<(u16, Vec<BlockerHit>)>,
+    rows: Vec<(u16, HeaderTarget)>,
+}
+
+/// What a click on a whole header row does. A row that names something
+/// you can act on is that action's click target — `Assignees: none — g a
+/// to change` used to print the chord and ignore the click.
+#[derive(Debug, Clone, PartialEq)]
+enum HeaderTarget {
+    /// Run this catalog action, as if its chord were pressed.
+    Action(lazybox_tui_core::action::Action),
+    /// Jump to this task's workspace, or open it (the Stack line's parent).
+    Task(lazybox_core::TaskId),
 }
 
 /// Click-target geometry captured during render. Three regions are
@@ -296,6 +311,8 @@ struct ClickHits {
     /// span on it. Clicking a blocker jumps to its workspace (or opens it)
     /// — the line used to say only "1 blocker", with nothing to click.
     header_blockers: Option<(u16, Vec<BlockerHit>)>,
+    /// Header rows whose whole width runs a [`HeaderTarget`].
+    header_rows: Vec<(u16, HeaderTarget)>,
     /// Row containing the `▶ Description` / `▼ Description` header,
     /// or `None` when the section isn't being rendered (no body).
     body_header_row: Option<u16>,
@@ -328,6 +345,11 @@ impl ClickHits {
                 .collect();
             Some((row(r)?, spans))
         });
+        self.header_rows = hits
+            .rows
+            .into_iter()
+            .filter_map(|(r, target)| Some((row(r)?, target)))
+            .collect();
     }
 }
 
@@ -501,6 +523,7 @@ impl RightPane {
             pending_selection_notice: None,
             pending_open_url: None,
             pending_request_reviewers: false,
+            pending_action: None,
             pending_open_description: false,
             body_overflows: false,
             activity_buffer: None,
@@ -1094,6 +1117,13 @@ impl RightPane {
             self.pending_open_task = Some(task.clone());
             return true;
         }
+        if let Some((_, target)) = self.click_hits.header_rows.iter().find(|(r, _)| *r == row) {
+            match target.clone() {
+                HeaderTarget::Action(action) => self.pending_action = Some(action),
+                HeaderTarget::Task(task) => self.pending_open_task = Some(task),
+            }
+            return true;
+        }
         if Some(row) == self.click_hits.header_reviewers {
             // Click the Reviewers line to open the reviewer picker —
             // same effect as pressing `g r` (#1092).
@@ -1170,6 +1200,11 @@ impl RightPane {
     /// the `g r` flow when this returns `true`.
     pub fn take_request_reviewers(&mut self) -> bool {
         std::mem::take(&mut self.pending_request_reviewers)
+    }
+
+    /// Drain the catalog action a header-row click asked for.
+    pub fn take_action(&mut self) -> Option<lazybox_tui_core::action::Action> {
+        self.pending_action.take()
     }
 
     /// Double-click on an activity card → toggle its expanded state.
@@ -1401,6 +1436,7 @@ impl RightPane {
         self.click_hits.header_issue = None;
         self.click_hits.header_reviewers = None;
         self.click_hits.header_blockers = None;
+        self.click_hits.header_rows.clear();
         let theme = crate::theme::current();
         let Some(workspace) = &self.workspace else {
             let line = Line::from(Span::styled(" (no session selected) ", theme.hint()));
@@ -1599,10 +1635,21 @@ impl RightPane {
                 // Mid-stack: name the parent, then the position after a
                 // separator.
                 Some(parent) => {
+                    if let Some(parent_id) = stack.parent.clone() {
+                        hits.rows
+                            .push((lines.len() as u16, HeaderTarget::Task(parent_id)));
+                    }
                     spans.push(Span::styled(
-                        format!("stacked on #{parent} "),
+                        "stacked on ",
                         Style::default().fg(theme.accent),
                     ));
+                    spans.push(Span::styled(
+                        format!("#{parent}"),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ));
+                    spans.push(Span::raw(" "));
                     spans.push(Span::styled(
                         format!("· {position}"),
                         Style::default().fg(theme.text_dim),
@@ -1671,6 +1718,10 @@ impl RightPane {
         if show_diffstat {
             let files = task.changed_files;
             let files_noun = if files == 1 { "file" } else { "files" };
+            hits.rows.push((
+                lines.len() as u16,
+                HeaderTarget::Action(lazybox_tui_core::action::Action::ViewDiff),
+            ));
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("+{}", task.additions),
@@ -1789,6 +1840,10 @@ impl RightPane {
                 Span::styled("— g r to request", Style::default().fg(theme.text_dim)),
             ]));
         }
+        hits.rows.push((
+            lines.len() as u16,
+            HeaderTarget::Action(lazybox_tui_core::action::Action::AddAssignees),
+        ));
         if !task.assignees.is_empty() {
             let mut spans: Vec<Span> = Vec::with_capacity(task.assignees.len() * 2 + 1);
             spans.push(Span::styled(
@@ -1816,6 +1871,29 @@ impl RightPane {
                 ),
                 Span::styled("— g a to change", Style::default().fg(theme.text_dim)),
             ]));
+        }
+        // Every label, in its GitHub colour. A row shows three chips and a
+        // `+N`; this is the only place the rest are visible without opening
+        // the label editor — which a click on this line opens (`g l`).
+        if !task.labels.is_empty() {
+            hits.rows.push((
+                lines.len() as u16,
+                HeaderTarget::Action(lazybox_tui_core::action::Action::ManageLabels),
+            ));
+            let mut spans = vec![Span::styled(
+                "Labels: ",
+                Style::default().fg(theme.text_dim),
+            )];
+            for (i, label) in task.labels.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(" · ", Style::default().fg(theme.chrome)));
+                }
+                spans.push(Span::styled(
+                    label.name.as_str(),
+                    crate::components::workspace_row::label_text_style(theme, &label.color),
+                ));
+            }
+            lines.push(Line::from(spans));
         }
 
         (lines, hits)

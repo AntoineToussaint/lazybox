@@ -4716,7 +4716,10 @@ mod broadcast_select_tests {
                         "◆ auto-merge (GitHub)",
                     ]
                 } else {
-                    ["MERGE ON GREEN · lazybox only", "⚡ on-green (lazybox)"]
+                    [
+                        "MERGE ON GREEN · lazybox only",
+                        "⚡\u{FE0E} on-green (lazybox)",
+                    ]
                 };
                 for label in labels {
                     let spans = sb.stats_row_spans(visual_width(label), theme);

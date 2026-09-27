@@ -2715,6 +2715,55 @@ mod header_height_tests {
             .collect()
     }
 
+    fn row_of(rows: &[String], needle: &str) -> u16 {
+        rows.iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} is drawn: {rows:#?}")) as u16
+    }
+
+    #[test]
+    fn header_rows_that_name_an_action_run_it_on_click() {
+        use lazybox_tui_core::action::Action;
+        let mut pr = super::originating_issue_header_tests::task_for_blockers(172);
+        pr.labels = vec![
+            lazybox_core::Label::new("bug"),
+            lazybox_core::Label::new("ux"),
+        ];
+        pr.additions = 3;
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr, Utc::now())));
+        let rows = rows(&mut pane, 100, 40);
+        assert!(rows[row_of(&rows, "Labels:") as usize].contains("bug · ux"));
+        for (needle, action) in [
+            ("Assignees:", Action::AddAssignees),
+            ("Labels:", Action::ManageLabels),
+            ("files changed", Action::ViewDiff),
+        ] {
+            assert!(pane.handle_mouse_click(20, row_of(&rows, needle)));
+            assert_eq!(pane.take_action(), Some(action), "{needle}");
+        }
+    }
+
+    #[test]
+    fn the_stack_line_links_to_the_parent_pr() {
+        let pr = super::originating_issue_header_tests::task_for_blockers(172);
+        let parent = TaskId {
+            source: "github".into(),
+            key: "o/r#171".into(),
+        };
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr, Utc::now())));
+        pane.set_stack(Some(lazybox_core::StackPosition {
+            parent: Some(parent.clone()),
+            children: vec![],
+            position: 2,
+            depth: 2,
+        }));
+        let rows = rows(&mut pane, 100, 40);
+        assert!(pane.handle_mouse_click(0, row_of(&rows, "stacked on #171")));
+        assert_eq!(pane.take_open_task(), Some(parent));
+    }
+
     #[test]
     fn a_pr_header_shows_its_assignees_line() {
         let pr = super::originating_issue_header_tests::task_for_blockers(172);

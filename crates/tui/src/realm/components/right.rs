@@ -224,6 +224,10 @@ impl Right {
         self.inner.take_request_reviewers()
     }
 
+    pub fn take_action(&mut self) -> Option<lazybox_tui_core::action::Action> {
+        self.inner.take_action()
+    }
+
     /// The focused task's raw markdown body, for the reader modal.
     pub fn task_body(&self) -> Option<String> {
         self.inner.task_body()

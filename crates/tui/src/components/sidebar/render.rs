@@ -349,7 +349,7 @@ impl Sidebar {
             } else if workspace.auto_merge_on_green {
                 Some((
                     "MERGE ON GREEN · lazybox only",
-                    "⚡ on-green (lazybox)",
+                    "⚡\u{FE0E} on-green (lazybox)",
                     theme.text_dim,
                 ))
             } else {

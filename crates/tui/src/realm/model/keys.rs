@@ -2706,6 +2706,11 @@ impl<T: TerminalAdapter> Model<T> {
                         if let Some(task) = self.right.take_open_task() {
                             self.open_task_reference(&task);
                         }
+                        if let Some(action) = self.right.take_action() {
+                            let cmds =
+                                self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Mouse);
+                            self.dispatch_cmds(cmds);
+                        }
                         if self.right.take_request_reviewers()
                             && let Some(cmd) = self.begin_request_reviewers()
                         {

@@ -2504,6 +2504,62 @@ mod search_tests {
         assert_eq!((epic.done, epic.total), (3, 9));
     }
 
+    /// The epic overview's Blocked on, Merge order and Critical path rows
+    /// each jump to their member on click — they were the rows that matter
+    /// most and the only ones with no target.
+    #[test]
+    fn epic_overview_blocker_merge_and_path_rows_are_click_targets() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("acme/api", "1", "token schema");
+        let b = issue_ws_in_repo("acme/api", "2", "consume token");
+        let (ka, kb) = (SessionKey::from(&a.key), SessionKey::from(&b.key));
+        sb.workspaces.insert(ka.clone(), a);
+        sb.workspaces.insert(kb.clone(), b);
+        let mut snap = epic_snap("auth", "Auth refactor", &[ka.as_str(), kb.as_str()]);
+        snap.members[1].blockers = vec![lazybox_ipc::Blocker {
+            kind: lazybox_ipc::BlockerKind::Decision,
+            reason: "token expiry".into(),
+            owner: lazybox_ipc::BlockerOwner::Operator,
+            since: 0,
+            holds: 0,
+        }];
+        let wk = |k: &SessionKey| lazybox_core::WorkspaceKey::new(k.as_str());
+        snap.merge_order = vec![lazybox_ipc::MergeOrderEntry {
+            key: wk(&kb),
+            held_by: vec![wk(&ka)],
+        }];
+        snap.critical_path = vec![wk(&ka), wk(&kb)];
+        sb.set_epic_snapshot(snap);
+        let epic_at = sb
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::EpicHeader(_)))
+            .expect("epic header");
+        sb.set_cursor(epic_at);
+
+        let overview = sb.header_overview().expect("overview");
+        let (lines, hits) = overview.lines(90);
+        let text = |i: usize| {
+            lines[i]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        let target_of = |needle: &str| {
+            hits.iter()
+                .find(|(i, _)| text(*i).contains(needle))
+                .map(|(_, k)| k.clone())
+        };
+        assert_eq!(target_of("token expiry"), Some(kb.clone()), "blocker row");
+        assert_eq!(
+            target_of("held behind"),
+            Some(kb.clone()),
+            "merge-order row"
+        );
+        assert_eq!(target_of("→ #2"), Some(kb), "critical-path row");
+    }
+
     /// Frame-budget regression gate (#1090, acceptance #4): the sidebar's
     /// per-frame widget build must stay cheap at scale.
     /// `prebuild_workspace_lines` rebuilds every visible row every frame

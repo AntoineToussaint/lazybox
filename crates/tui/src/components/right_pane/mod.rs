@@ -305,6 +305,8 @@ enum HeaderTarget {
     Action(lazybox_tui_core::action::Action),
     /// Jump to this task's workspace, or open it (the Stack line's parent).
     Task(lazybox_core::TaskId),
+    /// Open this URL — one of several linked issues.
+    Url(String),
     /// Move the sidebar onto this workspace — an inbound request's asker.
     Workspace(lazybox_core::SessionKey),
     /// Offer these `(label, url)` links in a picker — the Checks line.
@@ -1185,13 +1187,9 @@ impl RightPane {
             self.pending_open_url = Some(url.clone());
             return true;
         }
-        if let Some((r, url)) = &self.click_hits.header_issue
-            && *r == row
-        {
-            // Open the originating issue directly (#567).
-            self.pending_open_url = Some(url.clone());
-            return true;
-        }
+        // A segment under the pointer wins over its row's whole-row target:
+        // on the linked-issues line, `#2` opens #2 and the rest opens the
+        // first.
         let segment = self
             .click_hits
             .header_spans
@@ -1200,6 +1198,14 @@ impl RightPane {
             .flat_map(|(_, spans)| spans.iter())
             .find(|(cols, _)| cols.contains(&col))
             .map(|(_, target)| target.clone());
+        if segment.is_none()
+            && let Some((r, url)) = &self.click_hits.header_issue
+            && *r == row
+        {
+            // Open the originating issue directly (#567).
+            self.pending_open_url = Some(url.clone());
+            return true;
+        }
         let target = segment.or_else(|| {
             self.click_hits
                 .header_rows
@@ -1213,6 +1219,7 @@ impl RightPane {
                 HeaderTarget::Task(task) => self.pending_open_task = Some(task),
                 HeaderTarget::Links { title, links } => self.pending_links = Some((title, links)),
                 HeaderTarget::Workspace(key) => self.pending_select_workspace = Some(key),
+                HeaderTarget::Url(url) => self.pending_open_url = Some(url),
             }
             return true;
         }
@@ -1501,45 +1508,71 @@ impl RightPane {
     /// `ENG-123` identifier alone (it needs the workspace slug the fetched
     /// ticket carries). The row appears once the ticket is folded in.
     ///
-    /// `None` for a workspace with no tracked counterpart.
-    fn originating_issue(&self) -> Option<(String, String, String)> {
-        let ws = self.workspace.as_ref()?;
+    /// Every counterpart, not just the first — the row badge already said
+    /// `←#N+2` while the header named one. Empty when there is none.
+    fn originating_issues(&self) -> Vec<(String, String, String)> {
+        let Some(ws) = self.workspace.as_ref() else {
+            return Vec::new();
+        };
         if let Some(pr) = ws.pr.as_ref() {
-            if let Some(issue) = ws.gh_issues.iter().chain(ws.linear_issues.iter()).next() {
-                let prefix = if issue.id.source == "linear" {
-                    "Linear"
-                } else {
-                    "Issue"
-                };
-                return Some((prefix.into(), task_ref_label(issue), issue.url.clone()));
+            let mut out: Vec<(String, String, String)> = ws
+                .gh_issues
+                .iter()
+                .chain(ws.linear_issues.iter())
+                .map(|issue| {
+                    let prefix = if issue.id.source == "linear" {
+                        "Linear"
+                    } else {
+                        "Issue"
+                    };
+                    (prefix.into(), task_ref_label(issue), issue.url.clone())
+                })
+                .collect();
+            // Closing references not already folded in, by derived URL.
+            let folded: Vec<&lazybox_core::TaskId> = ws
+                .gh_issues
+                .iter()
+                .chain(ws.linear_issues.iter())
+                .map(|t| &t.id)
+                .collect();
+            for issue_id in &pr.closes_issues {
+                if folded.contains(&issue_id) {
+                    continue;
+                }
+                if let Some((repo, number)) = issue_id.key.rsplit_once('#') {
+                    out.push((
+                        "Issue".into(),
+                        format!("#{number}"),
+                        format!("https://github.com/{repo}/issues/{number}"),
+                    ));
+                }
             }
-            let issue_id = pr.closes_issues.first()?;
-            let (repo, number) = issue_id.key.rsplit_once('#')?;
-            return Some((
-                "Issue".into(),
-                format!("#{number}"),
-                format!("https://github.com/{repo}/issues/{number}"),
-            ));
+            return out;
         }
-        // Ticket / issue primary (no PR yet): surface its linked GitHub PR.
-        let primary = ws.primary_task()?;
-        let pr_id = primary
+        // Ticket / issue primary (no PR yet): surface its linked GitHub PRs.
+        let Some(primary) = ws.primary_task() else {
+            return Vec::new();
+        };
+        primary
             .linked_tasks
             .iter()
-            .find(|id| id.source == "github")?;
-        let (repo, number) = pr_id.key.rsplit_once('#')?;
-        Some((
-            "PR".into(),
-            format!("#{number}"),
-            format!("https://github.com/{repo}/pull/{number}"),
-        ))
+            .filter(|id| id.source == "github")
+            .filter_map(|id| {
+                let (repo, number) = id.key.rsplit_once('#')?;
+                Some((
+                    "PR".into(),
+                    format!("#{number}"),
+                    format!("https://github.com/{repo}/pull/{number}"),
+                ))
+            })
+            .collect()
     }
 
     fn render_header(
         &mut self,
         area: Rect,
         frame: &mut Frame,
-        origin: Option<(String, String, String)>,
+        origin: Vec<(String, String, String)>,
         show_diffstat: bool,
     ) {
         self.click_hits.header_title = None;
@@ -1614,7 +1647,7 @@ impl RightPane {
         workspace: &'a lazybox_core::Workspace,
         task: &'a lazybox_core::Task,
         width: u16,
-        origin: Option<(String, String, String)>,
+        origin: Vec<(String, String, String)>,
         show_diffstat: bool,
     ) -> (Vec<Line<'a>>, HeaderHits) {
         let theme = crate::theme::current();
@@ -2168,17 +2201,32 @@ impl RightPane {
         // from the title link above (row-granular hit-testing). The
         // click target is only registered when the row is inside the
         // header area (see the title line above).
-        if let Some((prefix, label, url)) = origin {
-            hits.issue = Some((lines.len() as u16, url));
-            lines.push(Line::from(vec![
-                Span::styled(format!("{prefix}: "), Style::default().fg(theme.text_dim)),
-                Span::styled(
-                    label,
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::UNDERLINED),
-                ),
-            ]));
+        // Every counterpart is listed, each its own link; a click anywhere
+        // else on the row opens the first.
+        if let Some((first_prefix, _, first_url)) = origin.first() {
+            let prefix = if origin.iter().all(|(p, _, _)| p == first_prefix) {
+                first_prefix.clone()
+            } else {
+                "Linked".to_string()
+            };
+            hits.issue = Some((lines.len() as u16, first_url.clone()));
+            let mut line = SegmentLine::new(Span::styled(
+                format!("{prefix}: "),
+                Style::default().fg(theme.text_dim),
+            ));
+            for (_, label, url) in origin {
+                line.push(
+                    Span::styled(" · ", Style::default().fg(theme.chrome)),
+                    Span::styled(
+                        label,
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                    Some(HeaderTarget::Url(url)),
+                );
+            }
+            line.finish(&mut lines, &mut hits);
         }
 
         // Why this ticket is in your inbox (#1015). Linear only ever
@@ -3012,7 +3060,7 @@ impl RightPane {
             return PLACEHOLDER_ROWS;
         };
         let (lines, _) =
-            self.header_lines(workspace, task, 0, self.originating_issue(), task.is_pr());
+            self.header_lines(workspace, task, 0, self.originating_issues(), task.is_pr());
         lines.len() as u16
     }
 
@@ -3074,7 +3122,7 @@ impl RightPane {
         let body_constraint = self.task_body_constraint();
         // The header's height is the line count `header_lines` builds, so
         // the reservation and the emitted lines can't disagree.
-        let origin = self.originating_issue();
+        let origin = self.originating_issues();
         let show_diffstat = self
             .workspace
             .as_ref()

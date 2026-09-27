@@ -2058,6 +2058,33 @@ mod originating_issue_header_tests {
         assert_eq!(pane.take_open_url().as_deref(), Some(url.as_str()));
     }
 
+    /// Every issue a PR closes is listed, each its own link — the row
+    /// badge said `←#167+1` while the header named only the first.
+    #[test]
+    fn every_closed_issue_is_listed_and_each_opens_its_own_url() {
+        let pr = task("pull", 172, vec![issue_id(167), issue_id(168)]);
+        let ws = Workspace::from_task(pr, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let rows = rows(&mut pane, 80, 30);
+        let (y, line) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.contains("Issue: #167 · #168"))
+            .unwrap_or_else(|| panic!("both issues listed: {rows:#?}"));
+        let col = line[..line.find("#168").unwrap()].chars().count() as u16;
+        assert!(pane.handle_mouse_click(col, y as u16));
+        assert_eq!(
+            pane.take_open_url().as_deref(),
+            Some("https://github.com/o/r/issues/168")
+        );
+        assert!(pane.handle_mouse_click(0, y as u16), "the rest of the row");
+        assert_eq!(
+            pane.take_open_url().as_deref(),
+            Some("https://github.com/o/r/issues/167")
+        );
+    }
+
     #[test]
     fn folded_issue_uses_its_real_url() {
         // Once the issue is folded into the PR workspace (`x j` /

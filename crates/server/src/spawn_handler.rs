@@ -6054,6 +6054,13 @@ pub(crate) async fn deliver_auto_fix_prompt(
     let (_, interaction) = interactions.swap_remove(position);
     drop(interactions);
     let encoded = agent.encode_prompt(&prompt, lazybox_agents::PromptIntent::Submit);
+    let history_entry = UserPrompt {
+        text: prompt.clone(),
+        timestamp_ms: Utc::now().timestamp_millis().max(0) as u64,
+        source: PromptSource::Lazybox {
+            reason: "auto-fix".to_string(),
+        },
+    };
     // Background the submit-confirm/resend tail (see `write_prompt_sequence`):
     // this runs INLINE on the serial poll loop, and after the self-confirming
     // flip was removed (issue #122) a Done agent whose Enter is swallowed would
@@ -6072,13 +6079,19 @@ pub(crate) async fn deliver_auto_fix_prompt(
     )
     .await
     {
-        Ok(_) => DoneGatedPromptOutcome::Delivered,
+        // Pasted either way: the history records that lazybox, not the user,
+        // told the agent to fix CI.
+        Ok(_) => {
+            handle_record_user_message(config, target.terminal_id, &history_entry).await;
+            DoneGatedPromptOutcome::Delivered
+        }
         Err(PromptWriteError::Submit(error)) => {
             tracing::warn!(
                 terminal_id = ?target.terminal_id,
                 %error,
                 "auto-fix: prompt was pasted but submit failed"
             );
+            handle_record_user_message(config, target.terminal_id, &history_entry).await;
             DoneGatedPromptOutcome::Delivered
         }
         Err(PromptWriteError::Initial(error)) => {
@@ -11828,6 +11841,15 @@ async fn load_prompt_history(config: &ServerConfig, session_key: &str) -> Vec<Us
     tokio::task::spawn_blocking(move || load_prompt_history_blocking(&*store, &history_key))
         .await
         .unwrap_or_default()
+}
+
+/// Test seam: a workspace's persisted prompt history.
+#[cfg(test)]
+pub(crate) async fn load_prompt_history_for_test(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+) -> Vec<UserPrompt> {
+    load_prompt_history(config, session_key.as_str()).await
 }
 
 /// Persist the in-flight composer buffer (typed but not submitted) for

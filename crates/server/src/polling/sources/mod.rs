@@ -4443,6 +4443,20 @@ mod auto_fix_dispatch_tests {
                 .is_some(),
             "a delivered Done-gated repair consumes one attempt"
         );
+        // The history names lazybox as the sender, so the agent's `]]h` and
+        // recap don't present the repair prompt as something the user typed.
+        let history =
+            crate::spawn_handler::load_prompt_history_for_test(&config, &session_key).await;
+        assert!(
+            history
+                .iter()
+                .any(|p| p.text.contains("Fix the failed CI checks.")
+                    && p.source
+                        == lazybox_ipc::PromptSource::Lazybox {
+                            reason: "auto-fix".into()
+                        }),
+            "the auto-fix prompt is recorded as lazybox's: {history:?}"
+        );
     }
 
     /// Regression (issue #122 follow-up): auto-fix dispatch runs INLINE on

@@ -150,7 +150,7 @@ pub enum Filter {
     Ready,
     /// What you are juggling right now: an agent here is working or
     /// waiting on you (or just finished a turn you have not looked at),
-    /// or within the last [`IN_FLIGHT_WINDOW`] you marked
+    /// or within the last hour (`IN_FLIGHT_WINDOW`) you marked
     /// it read or your own PR / issue moved (a push, CI, a review, a
     /// comment). "In flight" rather than "active" or "recent": it is the
     /// set of things currently in the air, which is what someone running

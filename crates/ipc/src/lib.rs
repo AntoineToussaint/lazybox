@@ -727,6 +727,12 @@ pub struct HookEvent {
     /// Notification descriptor (`notification_type` or `message`), used
     /// to distinguish a permission/elicitation prompt from an idle one.
     pub notification: Option<String>,
+    /// On `Stop`: the agent's final message for the turn, as the agent
+    /// wrote it — Claude's `last_assistant_message`, or the last assistant
+    /// text in its transcript. The turn's result, where lazybox used to
+    /// scrape the terminal's scrollback for one.
+    #[serde(default)]
+    pub turn_result: Option<String>,
 }
 
 /// The lifecycle point a [`HookEvent`] fired at. `Other` is the

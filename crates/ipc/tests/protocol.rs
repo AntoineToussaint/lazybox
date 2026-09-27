@@ -287,6 +287,7 @@ fn all_commands() -> Vec<Command> {
                 cwd: Some("/tmp/worktree".into()),
                 tool_name: Some("Bash".into()),
                 notification: Some("permission_prompt".into()),
+                turn_result: None,
             },
             backend_key: Some("tmux-key".into()),
         },

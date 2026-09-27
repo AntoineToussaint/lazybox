@@ -10117,6 +10117,22 @@ pub async fn handle_ingest_hook(
         }
     }
     terminal_io::clear_view_activity(config, terminal_id).await;
+    // The turn's result, straight from the agent: recorded before the state
+    // transition below, because the `Done` that `Stop` produces is what wakes
+    // the turn-end capture that consumes it. A new turn starting clears any
+    // result nobody consumed, so a later hookless turn end can never reuse
+    // an old turn's message.
+    match hook.kind {
+        lazybox_ipc::HookEventKind::Stop => {
+            if let Some(result) = hook.turn_result.clone() {
+                config.mcp.record_turn_result(session_key.clone(), result);
+            }
+        }
+        lazybox_ipc::HookEventKind::UserPromptSubmit => {
+            config.mcp.clear_turn_result(&session_key);
+        }
+        _ => {}
+    }
     // Proof-of-submission signal for the prompt-inject paths: a
     // `UserPromptSubmit` hook means the injected prompt actually
     // entered Claude's turn (issue #122's failure is the prompt parked
@@ -13934,6 +13950,7 @@ mod tests {
                 cwd: None,
                 tool_name: None,
                 notification: None,
+                turn_result: None,
             },
         )
         .await;
@@ -17073,6 +17090,7 @@ mod tests {
             cwd: None,
             tool_name: None,
             notification: Some(text.to_string()),
+            turn_result: None,
         };
 
         // Idle nudge → free-text elicitation.
@@ -25069,6 +25087,7 @@ mod tests {
             cwd: None,
             tool_name: None,
             notification: None,
+            turn_result: None,
         }
     }
 

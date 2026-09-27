@@ -163,6 +163,23 @@ pub async fn ingest_hook_from_stdio(args: &[String]) {
     let _ = tokio::time::timeout(INGEST_DEADLINE, ingest_hook_inner(args)).await;
 }
 
+/// The last [`TRANSCRIPT_TAIL_BYTES`] of a transcript file, as text. Only
+/// the tail: a long session's transcript runs to megabytes, and the final
+/// message is at its end.
+async fn transcript_tail(path: &std::path::Path) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    let len = file.metadata().await.ok()?.len();
+    let start = len.saturating_sub(TRANSCRIPT_TAIL_BYTES);
+    file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
+    let mut bytes = Vec::with_capacity((len - start) as usize);
+    file.read_to_end(&mut bytes).await.ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// How much of a transcript's end the `Stop` fallback reads.
+const TRANSCRIPT_TAIL_BYTES: u64 = 256 * 1024;
+
 async fn ingest_hook_inner(args: &[String]) {
     let (backend_key, terminal_id) = parse_hook_correlation(args);
     if backend_key.is_none() && terminal_id.is_none() {
@@ -173,9 +190,20 @@ async fn ingest_hook_inner(args: &[String]) {
     let Some(payload) = read_stdin_bounded().await else {
         return;
     };
-    let Some(hook) = lazybox_agents::hook::parse_claude_hook(&payload) else {
+    let Some(mut hook) = lazybox_agents::hook::parse_claude_hook(&payload) else {
         return;
     };
+    // A `Stop` without the agent's final message inline: read it from the
+    // tail of the transcript the payload names. Done here, next to the
+    // agent (a remote box's transcript is local to it, not to the daemon).
+    if hook.kind == lazybox_ipc::HookEventKind::Stop
+        && hook.turn_result.is_none()
+        && let Some(path) = lazybox_agents::hook::transcript_path(&payload)
+    {
+        hook.turn_result = transcript_tail(std::path::Path::new(&path))
+            .await
+            .and_then(|tail| lazybox_agents::hook::last_assistant_text(&tail));
+    }
     // Teach the agent what lazybox lets it do, once per session, through the
     // one channel that is spawn-intrinsic and needs no per-repo file: the
     // `SessionStart` hook's stdout, which Claude adds to the model's context.

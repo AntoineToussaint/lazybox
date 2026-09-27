@@ -204,6 +204,10 @@ pub struct McpRuntime {
     /// In-flight `ask_session` waiters (#1653), so `reply_request` wakes the
     /// asker directly instead of having it poll the store.
     requests: RequestRegistry,
+    /// Each session's most recent turn result — the agent's own final
+    /// message, delivered by its `Stop` hook — waiting for the turn-end
+    /// capture that the same `Stop` triggers. Consumed by that capture.
+    turn_results: parking_lot::Mutex<HashMap<SessionKey, String>>,
 }
 
 impl McpRuntime {
@@ -231,6 +235,21 @@ impl McpRuntime {
     /// `reply_request`.
     pub fn requests(&self) -> &RequestRegistry {
         &self.requests
+    }
+
+    /// Record `session_key`'s latest turn result (from its `Stop` hook).
+    pub fn record_turn_result(&self, session_key: SessionKey, text: String) {
+        self.turn_results.lock().insert(session_key, text);
+    }
+
+    /// Take `session_key`'s latest turn result, if one is waiting.
+    fn take_turn_result(&self, session_key: &SessionKey) -> Option<String> {
+        self.turn_results.lock().remove(session_key)
+    }
+
+    /// Drop an unconsumed turn result (a new turn started).
+    pub fn clear_turn_result(&self, session_key: &SessionKey) {
+        self.turn_results.lock().remove(session_key);
     }
 
     /// Record the bound endpoint URL (called once by [`start`]).
@@ -728,6 +747,9 @@ pub(crate) enum RequestStatus {
 pub(crate) enum AnswerSource {
     ReplyRequest,
     TurnEndCapture,
+    /// The agent's own final message for the turn, from its `Stop` hook —
+    /// what it actually said, not a scrape of its terminal.
+    TurnResult,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3872,19 +3894,27 @@ pub(crate) async fn capture_turn_end_answer(
     if candidates.is_empty() {
         return;
     }
-    // Read the scrollback BEFORE taking the mutation lock: it is a backend
-    // round trip, and holding the lock across it would serialize every
+    // The agent's own final message beats a scrape of its terminal: take it
+    // when the turn's `Stop` hook delivered one. Otherwise read the
+    // scrollback — BEFORE taking the mutation lock, since it is a backend
+    // round trip and holding the lock across it would serialize every
     // sibling's replies behind one slow snapshot.
-    let Some(text) = handler
-        .read_session_text(session_key.as_str(), Some(TURN_END_CAPTURE_LINES))
-        .await
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-    else {
-        return;
+    let (text, source) = match config.mcp.take_turn_result(session_key) {
+        Some(result) => (result, AnswerSource::TurnResult),
+        None => {
+            let Some(text) = handler
+                .read_session_text(session_key.as_str(), Some(TURN_END_CAPTURE_LINES))
+                .await
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+            else {
+                return;
+            };
+            (text, AnswerSource::TurnEndCapture)
+        }
     };
     for (request, answer) in
-        apply_captured_answers(config, &handler, candidates, &text, now_ms).await
+        apply_captured_answers(config, &handler, candidates, &text, source, now_ms).await
     {
         tracing::info!(
             request = %request.id,
@@ -3920,6 +3950,7 @@ async fn apply_captured_answers(
     handler: &LazyboxMcp,
     candidates: Vec<String>,
     text: &str,
+    source: AnswerSource,
     now_ms: i64,
 ) -> Vec<(AgentRequest, RequestAnswer)> {
     let mut captured = Vec::new();
@@ -3937,7 +3968,7 @@ async fn apply_captured_answers(
         let answer = RequestAnswer {
             text: text.to_string(),
             answered_at: now_ms,
-            source: AnswerSource::TurnEndCapture,
+            source,
         };
         request.answers.push(answer.clone());
         request.status = RequestStatus::AnsweredByCapture;
@@ -6704,6 +6735,48 @@ mod tests {
         );
     }
 
+    /// A turn that ends without `reply_request` used to be answered with the
+    /// last 60 lines of its terminal. When the agent's `Stop` hook reported
+    /// its own final message, THAT is the answer — what it said, not what
+    /// was on screen.
+    #[tokio::test]
+    async fn the_agents_own_final_message_answers_before_any_scrollback() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let terminal_id = lazybox_ipc::TerminalId(9906);
+        let backend_key = live_agent(&config, &mock, &target, terminal_id).await;
+        mock.emit(
+            &backend_key,
+            b"\x1b[2K spinner noise, box drawing, prompts\n",
+        )
+        .await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        config
+            .mcp
+            .record_turn_result(target.clone(), "CI is green; PR #42 ready to merge.".into());
+        capture_turn_end_answer(&config, &target, 5_000).await;
+
+        let polled = handler
+            .poll_request_payload(&asker, &id, 6_000)
+            .await
+            .expect("poll");
+        assert_eq!(polled["source"], "turn_result", "{polled}");
+        assert_eq!(polled["answer"], "CI is green; PR #42 ready to merge.");
+    }
+
     /// **The capture race.** A question asked while the target is mid-turn
     /// used to be pasted straight in, and the end of that unrelated turn was
     /// then captured as its "answer". The question now waits for the turn to
@@ -6796,8 +6869,15 @@ mod tests {
 
         // The capture now writes its stale snapshot. Before the CAS this
         // replaced the reply with scrollback.
-        let captured =
-            apply_captured_answers(&config, &handler, stale, "...scrollback noise...", 3_000).await;
+        let captured = apply_captured_answers(
+            &config,
+            &handler,
+            stale,
+            "...scrollback noise...",
+            AnswerSource::TurnEndCapture,
+            3_000,
+        )
+        .await;
         assert!(
             captured.is_empty(),
             "a request that was answered while we read must not be captured"

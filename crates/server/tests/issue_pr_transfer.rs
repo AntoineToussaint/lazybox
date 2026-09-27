@@ -398,6 +398,7 @@ async fn run_case(case: Case) {
                 cwd: None,
                 tool_name: None,
                 notification: None,
+                turn_result: None,
             },
         })
         .unwrap();

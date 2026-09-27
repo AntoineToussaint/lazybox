@@ -395,6 +395,7 @@ fn hook(kind: lazybox_ipc::HookEventKind) -> lazybox_ipc::HookEvent {
         cwd: None,
         tool_name: None,
         notification: None,
+        turn_result: None,
     }
 }
 
@@ -593,6 +594,7 @@ async fn hook_driven_terminal_ignores_pty_working() {
                     cwd: None,
                     tool_name: None,
                     notification: Some("Claude needs your permission to use Bash".into()),
+                    turn_result: None,
                 },
                 backend_key: Some(key.clone()),
             })
@@ -752,6 +754,7 @@ async fn stale_hooks_degrade_to_pty_detection() {
                     cwd: None,
                     tool_name: None,
                     notification: Some("Claude needs your permission to use Bash".into()),
+                    turn_result: None,
                 },
                 backend_key: Some(key.clone()),
             })
@@ -844,6 +847,7 @@ async fn stale_hooks_do_not_demote_input_needed_without_dialog_evidence() {
                     cwd: None,
                     tool_name: None,
                     notification: Some("Claude needs your permission to use Bash".into()),
+                    turn_result: None,
                 },
                 backend_key: Some(key.clone()),
             })
@@ -1549,6 +1553,7 @@ async fn hook_session_identity_is_persisted_and_used_for_restore() {
                     cwd: None,
                     tool_name: None,
                     notification: None,
+                    turn_result: None,
                 },
             })
             .unwrap();
@@ -2821,6 +2826,7 @@ async fn inject_prompt_waits_for_input_needed_to_clear() {
                     cwd: None,
                     tool_name: None,
                     notification: Some("Claude needs your permission to use Bash".into()),
+                    turn_result: None,
                 },
                 backend_key: Some(key.clone()),
             })
@@ -2878,6 +2884,7 @@ async fn inject_prompt_waits_for_input_needed_to_clear() {
                     cwd: None,
                     tool_name: None,
                     notification: None,
+                    turn_result: None,
                 },
                 backend_key: Some(key.clone()),
             })
@@ -2966,6 +2973,7 @@ async fn chooser_after_paste_suppresses_submit_resends() {
                     cwd: None,
                     tool_name: None,
                     notification: Some("Claude needs your permission to use Bash".into()),
+                    turn_result: None,
                 },
                 backend_key: Some(key.clone()),
             })
@@ -3570,6 +3578,7 @@ async fn bare_keystroke_does_not_clear_free_text_elicitation() {
                     cwd: None,
                     tool_name: None,
                     notification: Some("elicitation_dialog".into()),
+                    turn_result: None,
                 },
                 backend_key: Some(key.clone()),
             })

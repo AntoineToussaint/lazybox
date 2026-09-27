@@ -822,6 +822,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
                 cwd: None,
                 tool_name: None,
                 notification: None,
+                turn_result: None,
             },
             backend_key: None,
         },

@@ -19,6 +19,7 @@ fn hook(kind: HookEventKind, notification: Option<&str>) -> HookEvent {
         cwd: None,
         tool_name: None,
         notification: notification.map(str::to_string),
+        turn_result: None,
     }
 }
 

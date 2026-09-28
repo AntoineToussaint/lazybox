@@ -6459,6 +6459,15 @@ impl<T: TerminalAdapter> Model<T> {
     /// without ever needing a real IPC client.
     fn dispatch_cmds(&mut self, cmds: Vec<IpcCommand>) {
         for cmd in cmds {
+            // A removal takes the row out of the list now; the daemon's
+            // teardown finishes behind it (see `hide_pending_removal`).
+            if let IpcCommand::Kill { session_key, .. }
+            | IpcCommand::RemoveMergedWorkspace { session_key } = &cmd
+            {
+                self.sidebar.hide_pending_removal(session_key.clone());
+                self.sync_panes();
+                self.redraw = true;
+            }
             let workspace_create = match &cmd {
                 IpcCommand::CreateWorkspace {
                     client_request_id: Some(id),

@@ -555,7 +555,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         type ProjectRow = (lazybox_core::ProjectKey, String);
-        let modal = Choice::single("Use which repo for this Hopper item?", projects)
+        let modal = Choice::single("Use which repo for this TODO?", projects)
             .title("Choose repo")
             .label(|(_, name): &ProjectRow| name.clone())
             .payload_for(|(key, _): &ProjectRow| ChoicePayload::Project(key.clone()));

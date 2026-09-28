@@ -30,6 +30,9 @@ while IFS= read -r archive; do
   fi
   tested=$((tested + 1))
   echo "smoke-testing ${name}"
+  # Before running it: this runner has libraries a user's machine does not,
+  # so "it runs here" cannot prove the archive is self-contained (#1893).
+  "${root}/scripts/check-self-contained.sh" "${binary}" "${alias_binary}"
   version="$("${binary}" --version)"
   alias_version="$("${alias_binary}" --version)"
   echo "${version}"

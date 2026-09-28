@@ -165,6 +165,16 @@ jobs:
       - name: Test with per-test timeout enforcement
         run: cargo nextest run --workspace --profile ci
 
+      # This runner has libraries a user's machine does not (the LLVM
+      # toolchain), so a binary that runs here can still fail to start there
+      # (#1893). Checking what it links catches that on the PR that causes it,
+      # not after a release. The build reuses the test run's artifacts.
+      - name: The Linux binary needs only system libraries
+        run: |
+          binary="$(cargo build -p lazybox-tui-boot --bin lazybox --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "lazybox" and .executable != null) | .executable')"
+          scripts/check-self-contained.sh "${binary}"
+
   # `managed-k8s` is intentionally not wired into the product yet, so workspace
   # feature unification does not compile it; the provider contract and
   # in-memory control plane stay release-gated behind `--all-features`. Its own

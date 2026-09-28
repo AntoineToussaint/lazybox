@@ -6,6 +6,38 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-09-28
+
+A patch release: the Linux build starts again on a stock distro, and two
+fixes to how rows leave the sidebar.
+
+### Fixed
+
+- **Linux: `lazybox` failed to start on a stock Ubuntu** with `error while
+  loading shared libraries: libunwind.so.1` (#1893, reported and first fixed
+  in #1894). The 0.1.17 and 0.1.18 Linux binaries unwound through LLVM's
+  shared unwinder, which only machines with an LLVM toolchain have; they now
+  use `libgcc_s` like any Rust binary, and CI and the release smoke test fail
+  on any shared library a stock distro does not ship. Upgrading replaces the
+  `libunwind-NN` workaround; `libunwind8` never helped (it is an unrelated
+  library).
+- An issue's row no longer stays behind, empty and still claimed, when its
+  agent moves onto the PR it opened. It folds into the PR row, as a merged
+  "Closes #N" already did, so starting "anyway" on the issue can no longer
+  put a second agent on the same work.
+- Closing a workspace — after a merge, or `x` — removes its row at once;
+  stopping its terminals and cleaning up happen behind it. A removal that has
+  not finished after 90 seconds puts the row back with a notice.
+
+### Upgrade notes
+
+- No wire or persisted-schema change: a 0.1.19 client works with a 0.1.18
+  daemon and the other way round.
+
+### Install
+
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
+
 ## [0.1.18] - 2026-09-28
 
 ### Highlights

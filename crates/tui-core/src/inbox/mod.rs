@@ -64,6 +64,10 @@ pub struct ComputeOutcome {
 /// back a [`ComputeOutcome`].
 pub struct ComputeInputs<'a> {
     pub workspaces: &'a HashMap<SessionKey, Workspace>,
+    /// Rows the user just removed. They leave the list at once while the
+    /// daemon's teardown (terminal kills, the local-work check) finishes;
+    /// the row comes back only if the removal does not complete.
+    pub hidden: &'a HashSet<SessionKey>,
     pub mailbox: Mailbox,
     /// Composable predicate filter layered on top of the mailbox. An
     /// empty set is the no-op identity. See [`FilterSet::accepts`].
@@ -359,6 +363,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     let mailbox_rows: Vec<(&SessionKey, &Workspace)> = input
         .workspaces
         .iter()
+        .filter(|(key, _)| !input.hidden.contains(*key))
         .filter(|(_, w)| {
             mailbox_membership(w, input.mailbox, input.now, input.show_inactive_in_inbox)
                 || (snoozed_lens && w.is_snoozed(input.now))
@@ -1779,8 +1784,11 @@ mod tests {
         static NO_COLLAPSED_EPICS: BTreeSet<String> = BTreeSet::new();
         static NO_AGENT_TEXT: std::sync::LazyLock<HashMap<SessionKey, String>> =
             std::sync::LazyLock::new(HashMap::new);
+        static NO_HIDDEN: std::sync::LazyLock<HashSet<SessionKey>> =
+            std::sync::LazyLock::new(HashSet::new);
         ComputeInputs {
             workspaces,
+            hidden: &NO_HIDDEN,
             mailbox: Mailbox::Inbox,
             filters: &NO_FILTERS,
             sort_mode: SortMode::Recent,
@@ -1815,6 +1823,35 @@ mod tests {
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert!(out.visible.is_empty());
         assert!(out.summaries.is_empty());
+    }
+
+    /// A row whose removal was just requested leaves the list at once;
+    /// its neighbours stay.
+    #[test]
+    fn a_hidden_row_is_left_out_of_the_list() {
+        let mut ws = HashMap::new();
+        for key in ["gone", "kept"] {
+            let w = workspace_with_task(key, Some("owner/r"), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let gone = ws
+            .keys()
+            .find(|k| k.as_str().contains("gone"))
+            .cloned()
+            .unwrap();
+        let hidden = HashSet::from([gone]);
+        let out = compute_visible(ComputeInputs {
+            hidden: &hidden,
+            ..inputs(&ws, &sub, &col, &att, &asking, &projects)
+        });
+        let keys = visible_workspace_keys(&out);
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].contains("kept"), "{keys:?}");
     }
 
     /// One workspace under one repo: header + workspace row.

@@ -34,6 +34,11 @@ use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::widgets::{Block, Borders};
 use tuirealm::terminal::TerminalAdapter;
 
+/// How long a removed row stays hidden without the daemon confirming it
+/// before it comes back. Removals take up to ~30s when a terminal kill hits
+/// its bound; three times that is a removal that is not coming.
+const PENDING_REMOVAL_LIMIT: Duration = Duration::from_secs(90);
+
 /// True if `(col, row)` lies within `rect`'s half-open bounds.
 pub(crate) fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
@@ -1644,6 +1649,16 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // has now elapsed. Runs before the OSC drain below so a summary
         // banner it queues is emitted this same iteration (#1370).
         model.sidebar.flush_due_notifications();
+        // A removal the daemon never completed brings its row back.
+        for name in model
+            .sidebar
+            .expire_pending_removals(std::time::Instant::now(), PENDING_REMOVAL_LIMIT)
+        {
+            model.flash_error(format!(
+                "‘{name}’ is back — its removal did not finish; check the notices and retry"
+            ));
+            model.redraw = true;
+        }
 
         // Emit any OSC desktop notifications queued during this iteration's
         // drain. Routed through the render writer (not stdout directly) so

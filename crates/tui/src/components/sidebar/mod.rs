@@ -277,6 +277,11 @@ pub struct Sidebar {
     /// The open inbound requests themselves — who asked what — so the
     /// right pane can list what is behind the `⟲N` badge.
     open_request_rows: HashMap<SessionKey, Vec<lazybox_ipc::OpenAgentRequest>>,
+    /// Rows the user asked to remove, hidden from the list since the given
+    /// instant while the daemon tears them down. The daemon's
+    /// `WorkspaceRemoved` clears the entry; one that never arrives restores
+    /// the row ([`Self::expire_pending_removals`]).
+    pending_removals: HashMap<SessionKey, std::time::Instant>,
     /// Markdown artifacts spooled per workspace (#1822), fed by
     /// `Event::WorkspaceArtifacts` (seeded on connect, refreshed on every
     /// spool change). Drives the row's `▤N` badge; a workspace with none
@@ -765,6 +770,7 @@ impl Sidebar {
             stacks: HashMap::new(),
             open_requests: HashMap::new(),
             open_request_rows: HashMap::new(),
+            pending_removals: HashMap::new(),
             artifact_counts: HashMap::new(),
             defer_recompute: false,
             recompute_pending: false,
@@ -4062,6 +4068,52 @@ impl Sidebar {
         }
     }
 
+    /// Take `key` out of the list now: its removal was just requested. The
+    /// daemon's teardown (terminal kills, the local-work check) takes
+    /// seconds — up to half a minute when a kill hits its bound — and the
+    /// row used to sit there the whole time.
+    pub fn hide_pending_removal(&mut self, key: SessionKey) {
+        self.pending_removals.insert(key, std::time::Instant::now());
+        self.recompute_visible();
+    }
+
+    /// Whether `key` is hidden while its removal completes.
+    pub fn is_pending_removal(&self, key: &SessionKey) -> bool {
+        self.pending_removals.contains_key(key)
+    }
+
+    /// Bring back every hidden row whose removal has not completed within
+    /// `limit` of the request — the daemon refused it or it never finished —
+    /// and return their names so the user is told. A row must never vanish
+    /// on the strength of a request alone.
+    pub fn expire_pending_removals(
+        &mut self,
+        now: std::time::Instant,
+        limit: std::time::Duration,
+    ) -> Vec<String> {
+        let expired: Vec<SessionKey> = self
+            .pending_removals
+            .iter()
+            .filter(|(_, at)| now.duration_since(**at) >= limit)
+            .map(|(key, _)| key.clone())
+            .collect();
+        if expired.is_empty() {
+            return Vec::new();
+        }
+        let names = expired
+            .iter()
+            .map(|key| {
+                self.pending_removals.remove(key);
+                self.workspaces
+                    .get(key)
+                    .map(|w| w.name.clone())
+                    .unwrap_or_else(|| key.as_str().to_string())
+            })
+            .collect();
+        self.recompute_visible();
+        names
+    }
+
     /// Open inbound requests for one workspace; `0` when it owes none.
     pub fn open_requests(&self, key: &SessionKey) -> usize {
         self.open_requests.get(key).copied().unwrap_or(0)
@@ -4811,6 +4863,7 @@ impl Sidebar {
         let outcome = crate::components::visible_rows::compute_visible(
             crate::components::visible_rows::ComputeInputs {
                 workspaces: &self.workspaces,
+                hidden: &self.pending_removals.keys().cloned().collect(),
                 mailbox: self.mailbox,
                 filters: &self.filters,
                 sort_mode: self.sort_mode,

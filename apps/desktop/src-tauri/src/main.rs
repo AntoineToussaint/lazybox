@@ -301,6 +301,8 @@ impl InboxModel {
         let collapsed_epics = BTreeSet::new();
         let outcome = inbox::compute_visible(ComputeInputs {
             workspaces: &self.workspaces,
+            // No optimistic removal on the desktop yet.
+            hidden: &std::collections::HashSet::new(),
             mailbox: self.mailbox,
             filters: &self.filters,
             sort_mode: self.sort_mode,

@@ -996,7 +996,7 @@ impl Component for HopperEditor {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(Span::styled(" Hopper ", theme.modal_title()))
+            .title(Span::styled(" TODO ", theme.modal_title()))
             .border_style(theme.modal_border());
         let inner = block.inner(modal);
         frame.render_widget(block, modal);

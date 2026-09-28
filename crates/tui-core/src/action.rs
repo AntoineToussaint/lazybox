@@ -1197,8 +1197,8 @@ impl ActionDef {
             ActionKind::OpenHopper => &Self {
                 kind: ActionKind::OpenHopper,
                 default_keys: "Shift-H",
-                label: "hopper",
-                describe: "Open the personal Hopper editor. Active items are editable lines; Tab opens dated completion and cancellation history.",
+                label: "todo",
+                describe: "Open your TODO list — the personal cross-project juggler. Each line is a TODO you can start work on; `l` opens its checklist of nested items, each of which can link to an issue, PR or URL and checks itself off when that lands. Tab opens dated completion and cancellation history.",
                 section: Section::Global,
             },
             ActionKind::DismissNotice => &Self {
@@ -1345,14 +1345,14 @@ impl ActionDef {
                 kind: ActionKind::JumpPrevGroup,
                 default_keys: "{",
                 label: "prev group",
-                describe: "Move the cursor to the previous group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502).",
+                describe: "Move the cursor to the previous group header (Space / repo / Focused / TODO) so a long inbox can be crossed a group at a time (#1502).",
                 section: Section::Sidebar,
             },
             ActionKind::JumpNextGroup => &Self {
                 kind: ActionKind::JumpNextGroup,
                 default_keys: "}",
                 label: "next group",
-                describe: "Move the cursor to the next group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502).",
+                describe: "Move the cursor to the next group header (Space / repo / Focused / TODO) so a long inbox can be crossed a group at a time (#1502).",
                 section: Section::Sidebar,
             },
             ActionKind::ResumeRateLimited => &Self {

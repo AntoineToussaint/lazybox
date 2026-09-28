@@ -2790,7 +2790,7 @@ pub async fn dispatch_command(
                     .bus
                     .send(lazybox_ipc::Event::provider_error_permanent(
                         "hopper",
-                        format!("Hopper was not saved: {error}"),
+                        format!("the TODO list was not saved: {error}"),
                     ));
             }
         }

@@ -8452,7 +8452,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
                     self.pop_modal();
                     self.dispatch_cmds(vec![IpcCommand::SaveHopper { entries }]);
-                    self.flash_info("Hopper saved");
+                    self.flash_info("TODO saved");
                 }
             }
             Msg::HopperCompletionRequested {
@@ -8465,9 +8465,9 @@ impl<T: TerminalAdapter> Model<T> {
                         completed,
                     }]);
                     self.flash_info(if completed {
-                        "Hopper item completed"
+                        "TODO completed"
                     } else {
-                        "Hopper item reopened"
+                        "TODO reopened"
                     });
                 }
             }
@@ -8481,9 +8481,9 @@ impl<T: TerminalAdapter> Model<T> {
                         canceled,
                     }]);
                     self.flash_info(if canceled {
-                        "Hopper item canceled"
+                        "TODO canceled"
                     } else {
-                        "Hopper item reopened"
+                        "TODO reopened"
                     });
                 }
             }

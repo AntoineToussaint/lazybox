@@ -2193,7 +2193,8 @@ pub struct AgentSection {
     /// Per-model price overrides for cost attribution, keyed by **model-id
     /// prefix** (`claude-opus`, `gpt-4o`, …), longest prefix wins. Values are
     /// USD per million tokens (`input` / `output` / `cache_write` /
-    /// `cache_read`). Merged over lazybox's built-in rate card, so this is
+    /// `cache_read`, and optionally `cache_write_1h`, which otherwise
+    /// defaults to 2× `input`). Merged over lazybox's built-in rate card, so this is
     /// only needed for a brand-new model or a negotiated rate — a matching
     /// entry here always beats the built-in. See `lazybox_core::pricing`.
     #[serde(default)]

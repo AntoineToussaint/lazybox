@@ -14,6 +14,8 @@ enum Scope {
     Message,
     Usage,
     Details,
+    /// Anthropic's `usage.cache_creation` split of cache writes by lifetime.
+    CacheCreation,
     Ignore,
 }
 
@@ -26,6 +28,7 @@ impl Scope {
             (Root | Response | Message, "usage") => Some(Usage),
             (Root, "type") | (Root | Response | Message, "model") => Some(Ignore),
             (Usage, "input_tokens_details" | "prompt_tokens_details") => Some(Details),
+            (Usage, "cache_creation") => Some(CacheCreation),
             (
                 Usage,
                 "input_tokens"
@@ -34,9 +37,14 @@ impl Scope {
                 | "completion_tokens"
                 | "cache_creation_input_tokens"
                 | "cache_read_input_tokens"
-                | "cached_input_tokens",
+                | "cached_input_tokens"
+                // Fast mode bills every bucket at a premium.
+                | "speed",
             )
-            | (Details, "cached_tokens") => Some(Ignore),
+            | (Details, "cached_tokens")
+            | (CacheCreation, "ephemeral_5m_input_tokens" | "ephemeral_1h_input_tokens") => {
+                Some(Ignore)
+            }
             _ => None,
         }
     }

@@ -1368,6 +1368,13 @@ pub enum Msg {
         canceled: bool,
     },
     HopperDeleteRequested(lazybox_core::WorkspaceKey),
+    /// A TODO's checklist changed in the editor: save the whole list.
+    TodoItemsChanged {
+        workspace_key: lazybox_core::WorkspaceKey,
+        items: Vec<lazybox_core::TodoItem>,
+    },
+    /// Open what a TODO item links to.
+    TodoLinkOpened(lazybox_core::TodoLink),
     /// A picker (`Choice`, jump/snippet picker, settings palette)
     /// resolved. Each entry is the *typed value* of a picked row —
     /// never a bare positional index into a parallel "shadow Vec" —
@@ -8479,6 +8486,35 @@ impl<T: TerminalAdapter> Model<T> {
                         "Hopper item reopened"
                     });
                 }
+            }
+            Msg::TodoItemsChanged {
+                workspace_key,
+                items,
+            } => {
+                self.dispatch_cmds(vec![IpcCommand::SaveTodoItems {
+                    workspace_key,
+                    items,
+                }]);
+            }
+            Msg::TodoLinkOpened(link) => {
+                // Leave the TODO for what the item points at, the way the
+                // header's blocker links do.
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.pop_modal();
+                }
+                match link {
+                    lazybox_core::TodoLink::Task(task) => self.open_task_reference(&task),
+                    lazybox_core::TodoLink::Workspace(key) => {
+                        let key: lazybox_core::SessionKey = (&key).into();
+                        if self.sidebar.focus_workspace_key(&key) {
+                            self.sync_panes();
+                        } else {
+                            self.flash_hint("that workspace is not in the inbox");
+                        }
+                    }
+                    lazybox_core::TodoLink::Url(url) => self.open_external_url(&url),
+                }
+                self.redraw = true;
             }
             Msg::HopperDeleteRequested(workspace_key) => {
                 if matches!(self.modal_stack.last(), Some(Id::Hopper)) {

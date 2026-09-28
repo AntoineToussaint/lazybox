@@ -8660,6 +8660,7 @@ where
                     terminal_id,
                     &backend_key,
                     submit,
+                    initial_write,
                     submit_bytes,
                     output_events,
                     echo_probes,
@@ -8681,6 +8682,7 @@ where
             terminal_id,
             backend_key,
             submit,
+            initial_write,
             submit_bytes,
             output_events,
             echo_probes,
@@ -8711,11 +8713,20 @@ where
 /// recovers a swallowed soft-newline. That is why multi-select broadcasts so
 /// often pasted the prompt but never submitted it (issue #122): the recovery
 /// net was disarmed by our own flip.
+///
+/// A paste the composer never echoed may never have arrived at all: an agent
+/// that just came off a usage limit dropped the first `continue` five of six
+/// times, and resending Enter into an empty composer three times then told
+/// the user to "press Enter" on nothing. So an unconfirmed submit whose paste
+/// did not echo checks the composer, and a prompt that is not there is pasted
+/// once more before anything is reported.
+#[allow(clippy::too_many_arguments)]
 async fn settle_submit_and_confirm(
     config: &ServerConfig,
     terminal_id: TerminalId,
     backend_key: &str,
     submit: bool,
+    initial_write: Vec<u8>,
     submit_bytes: Vec<u8>,
     mut output_events: tokio::sync::broadcast::Receiver<Event>,
     echo_probes: Vec<String>,
@@ -8747,18 +8758,113 @@ async fn settle_submit_and_confirm(
     .await
     .map_err(PromptWriteError::Submit)?;
     drop(interaction);
-    let confirmed = confirm_prompt_submission(
+    let echoed = settle == PasteSettle::Echo;
+    let mut outcome = confirm_prompt_submission_outcome(
         confirm,
         config,
         backend_key,
         &submit_bytes,
         SUBMIT_CONFIRM_DEADLINE,
+        echoed,
     )
     .await;
+    if outcome == SubmitOutcome::Unconfirmed && !echoed {
+        if composer_shows_prompt(config, terminal_id, &echo_probes).await {
+            report_parked_prompt(config, terminal_id);
+        } else {
+            outcome = repaste_and_confirm(
+                config,
+                terminal_id,
+                backend_key,
+                &initial_write,
+                &submit_bytes,
+                &echo_probes,
+            )
+            .await?;
+        }
+    }
+    let confirmed = outcome == SubmitOutcome::Confirmed;
     if submit && confirmed {
         mark_done_agent_working(config, terminal_id, backend_key).await;
     }
     Ok(confirmed)
+}
+
+/// The one re-paste [`settle_submit_and_confirm`] allows: the same bytes,
+/// under the terminal's interaction lock, then the ordinary settle and
+/// confirm. A second miss is reported plainly — the prompt did not reach
+/// the agent — rather than as a parked one.
+async fn repaste_and_confirm(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+    initial_write: &[u8],
+    submit_bytes: &[u8],
+    echo_probes: &[String],
+) -> Result<SubmitOutcome, PromptWriteError> {
+    tracing::info!(
+        terminal_id = ?terminal_id,
+        "the prompt never reached the composer (no echo, not on screen) — pasting it again",
+    );
+    let Some(interaction) = terminal_io::acquire_live(config, terminal_id, backend_key).await
+    else {
+        return Ok(SubmitOutcome::Unconfirmed);
+    };
+    let mut events = config.bus.subscribe();
+    terminal_io::write_locked(
+        config,
+        terminal_id,
+        backend_key,
+        initial_write,
+        TerminalInputIntent::Compose,
+    )
+    .await
+    .map_err(PromptWriteError::Initial)?;
+    let settle = await_paste_settled(
+        &mut events,
+        terminal_id,
+        echo_probes,
+        PASTE_QUIET_WINDOW,
+        PASTE_SETTLE_CAP,
+    )
+    .await;
+    let confirm = prepare_submit_confirmation(config, terminal_id).await;
+    terminal_io::write_locked(
+        config,
+        terminal_id,
+        backend_key,
+        submit_bytes,
+        TerminalInputIntent::Submit,
+    )
+    .await
+    .map_err(PromptWriteError::Submit)?;
+    drop(interaction);
+    let outcome = confirm_prompt_submission_outcome(
+        confirm,
+        config,
+        backend_key,
+        submit_bytes,
+        SUBMIT_CONFIRM_DEADLINE,
+        settle == PasteSettle::Echo,
+    )
+    .await;
+    if outcome == SubmitOutcome::Unconfirmed && settle != PasteSettle::Echo {
+        if composer_shows_prompt(config, terminal_id, echo_probes).await {
+            report_parked_prompt(config, terminal_id);
+        } else {
+            tracing::warn!(
+                terminal_id = ?terminal_id,
+                "the prompt was pasted twice and never reached the agent's composer",
+            );
+            let _ = config.bus.send(Event::TerminalInputRejected {
+                terminal_id,
+                message: "the agent did not take the prompt (pasted twice, never appeared in \
+                          its composer) — open the terminal and check it is accepting input"
+                    .into(),
+            });
+        }
+    }
+    Ok(outcome)
 }
 
 async fn mark_done_agent_working(
@@ -8847,13 +8953,42 @@ async fn prepare_submit_confirmation(
 /// is the same hazard the spawn path's readiness gate exists to avoid
 /// (see `await_inject_window`). So a chooser observed here aborts the
 /// resend loop and fails loudly instead of typing into the dialog.
+#[cfg(test)]
 async fn confirm_prompt_submission(
-    mut confirm: SubmitConfirmation,
+    confirm: SubmitConfirmation,
     config: &ServerConfig,
     backend_key: &str,
     submit_bytes: &[u8],
     deadline: Duration,
 ) -> bool {
+    confirm_prompt_submission_outcome(confirm, config, backend_key, submit_bytes, deadline, true)
+        .await
+        == SubmitOutcome::Confirmed
+}
+
+/// How a submit confirmation ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmitOutcome {
+    Confirmed,
+    /// A permission prompt took the input; Enter was not resent.
+    BlockedOnInput,
+    /// Every Enter resend went unconfirmed.
+    Unconfirmed,
+}
+
+/// [`confirm_prompt_submission`], reporting how it ended. With
+/// `report_unconfirmed` false an unconfirmed ending is left to the caller
+/// to report — the caller that can still re-paste a prompt that never
+/// reached the composer, rather than tell the user to press Enter on an
+/// empty one.
+async fn confirm_prompt_submission_outcome(
+    mut confirm: SubmitConfirmation,
+    config: &ServerConfig,
+    backend_key: &str,
+    submit_bytes: &[u8],
+    deadline: Duration,
+    report_unconfirmed: bool,
+) -> SubmitOutcome {
     let mut resends = 0u32;
     let mut blocked_on_input = false;
     let confirmed = loop {
@@ -8930,7 +9065,7 @@ async fn confirm_prompt_submission(
         .remove_prompt_confirmation(confirm.terminal_id, &confirm.signal)
         .await;
     if confirmed {
-        return true;
+        return SubmitOutcome::Confirmed;
     }
     if blocked_on_input {
         tracing::warn!(
@@ -8946,21 +9081,48 @@ async fn confirm_prompt_submission(
                       answer the agent's prompt, then re-send the work if it didn't start"
                 .into(),
         });
-        return false;
+        return SubmitOutcome::BlockedOnInput;
     }
+    if report_unconfirmed {
+        report_parked_prompt(config, confirm.terminal_id);
+    }
+    SubmitOutcome::Unconfirmed
+}
+
+/// The loud give-up for a prompt that sits unsubmitted in the composer.
+fn report_parked_prompt(config: &ServerConfig, terminal_id: TerminalId) {
     tracing::warn!(
-        terminal_id = ?confirm.terminal_id,
+        terminal_id = ?terminal_id,
         "prompt submit never confirmed after {SUBMIT_RESEND_LIMIT} Enter resends — \
-         giving up; the prompt is likely parked in the composer",
+         giving up; the prompt is parked in the composer",
     );
-    let _ = confirm.bus.send(Event::TerminalInputRejected {
-        terminal_id: confirm.terminal_id,
+    let _ = config.bus.send(Event::TerminalInputRejected {
+        terminal_id,
         message: "the injected prompt looks parked unsubmitted in the agent's composer — \
                   open the terminal and press Enter to start it"
             .into(),
     });
-    false
 }
+
+/// Whether the agent's composer — the last few screen lines — shows the
+/// prompt the paste carried. Decides between "parked, resend Enter" and
+/// "never arrived, paste it again" once the paste settled without an echo.
+async fn composer_shows_prompt(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    echo_probes: &[String],
+) -> bool {
+    agent_output_snapshot(config, terminal_id, COMPOSER_SCAN_LINES)
+        .await
+        .is_some_and(|screen| {
+            lazybox_agents::detect::paste_echo_observed(screen.as_bytes(), echo_probes)
+        })
+}
+
+/// Screen lines read to find the composer: it sits at the bottom, above
+/// only the status footer, so a short tail keeps an older prompt further up
+/// the conversation from reading as this one.
+const COMPOSER_SCAN_LINES: usize = 8;
 
 /// Which evidence released the paste-settle gate — logged so a slow
 /// paste→Enter hop can be attributed (issue #425).
@@ -19514,6 +19676,118 @@ mod tests {
             gave_up_loudly,
             "exhausting the resends must surface a user-visible error"
         );
+    }
+
+    /// An agent coming off a usage limit dropped the first `continue` paste
+    /// outright: no echo, nothing in the composer. Resending Enter into that
+    /// empty composer and then telling the user to "press Enter" was the
+    /// whole recovery. A paste that is not on screen is now pasted again,
+    /// once, and a second miss says the agent did not take the prompt.
+    #[tokio::test(start_paused = true)]
+    async fn a_paste_that_never_reached_the_composer_is_pasted_again() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4250);
+        config.terminal.bind_backend(id, key.clone()).await;
+        let mut bus_rx = config.bus.subscribe();
+        let interaction = terminal_io::acquire_live(&config, id, &key)
+            .await
+            .expect("interaction lock");
+        let events = config.bus.subscribe();
+        let confirmed = settle_submit_and_confirm(
+            &config,
+            id,
+            &key,
+            true,
+            b"continue".to_vec(),
+            b"\r".to_vec(),
+            events,
+            vec!["continue".into()],
+            interaction,
+        )
+        .await
+        .expect("no write error");
+        assert!(!confirmed);
+        let writes = mock.writes_for(&key).await;
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|w| w.as_slice() == b"continue")
+                .count(),
+            1,
+            "the body is pasted again exactly once (the first paste is the caller's): {writes:?}"
+        );
+        let mut messages = Vec::new();
+        while let Ok(event) = bus_rx.try_recv() {
+            if let Event::TerminalInputRejected { message, .. } = event {
+                messages.push(message);
+            }
+        }
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("did not take the prompt")),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("press Enter")),
+            "never tells the user to press Enter on an empty composer: {messages:?}"
+        );
+    }
+
+    /// A prompt that IS in the composer is genuinely parked: no second
+    /// paste (that would duplicate it), and the user is told to press Enter.
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_sitting_in_the_composer_is_reported_parked_not_pasted_twice() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4251);
+        config.terminal.bind_backend(id, key.clone()).await;
+        // On screen before the settle watcher subscribes, so the settle
+        // reads no echo while the composer check does see the text.
+        mock.emit(&key, "\u{276f} continue\r\n").await;
+        let mut bus_rx = config.bus.subscribe();
+        let interaction = terminal_io::acquire_live(&config, id, &key)
+            .await
+            .expect("interaction lock");
+        let events = config.bus.subscribe();
+        let confirmed = settle_submit_and_confirm(
+            &config,
+            id,
+            &key,
+            true,
+            b"continue".to_vec(),
+            b"\r".to_vec(),
+            events,
+            vec!["continue".into()],
+            interaction,
+        )
+        .await
+        .expect("no write error");
+        assert!(!confirmed);
+        assert!(
+            !mock
+                .writes_for(&key)
+                .await
+                .iter()
+                .any(|w| w.as_slice() == b"continue"),
+            "a parked prompt is not pasted a second time"
+        );
+        let mut parked = false;
+        while let Ok(event) = bus_rx.try_recv() {
+            if let Event::TerminalInputRejected { message, .. } = event {
+                parked |= message.contains("press Enter");
+            }
+        }
+        assert!(parked, "the user is told the prompt is parked");
     }
 
     /// A snippet whose paste landed and whose Enter was sent is a delivery

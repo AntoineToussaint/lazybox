@@ -27,7 +27,28 @@
   # libc++abi carries the typeinfo + RTTI globals (e.g.
   # `typeinfo for std::bad_optional_access`). Without both, the
   # final link fails with ~30 unresolved C++ stdlib symbols.
-  run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
+  #
+  # The LLVM unwinder's STATIC archive must also be present, or the final
+  # link resolves libc++abi's `_Unwind_*` against libunwind.so.1 and ships a
+  # binary that needs a library no stock Ubuntu has (see build.rs). The LLVM
+  # major differs per runner image — 14 on ubuntu-22.04 — so derive it from
+  # whatever libc++abi-dev actually resolved to rather than pinning a number
+  # that a runner bump would silently invalidate. The final `test` fails the
+  # job loudly if the archive is still absent, instead of letting a broken
+  # artifact reach a release.
+  run: |
+    sudo apt-get update
+    sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
+    llvm_major=$(dpkg-query -W -f='${Package}\n' 'libc++abi-*-dev' 2>/dev/null \
+      | sed -n 's/^libc++abi-\([0-9][0-9]*\)-dev$/\1/p' | head -1)
+    if [ -n "$llvm_major" ]; then
+      sudo apt-get install -y "libunwind-$llvm_major-dev"
+    else
+      echo "could not determine the libc++abi LLVM major; falling back" >&2
+      sudo apt-get install -y libunwind-14-dev
+    fi
+    test -e /usr/lib/x86_64-linux-gnu/libunwind.a \
+      || { echo "libunwind.a missing — the release binary would need libunwind.so.1 at runtime" >&2; exit 1; }
 
 - name: Install C toolchain (macOS)
   if: runner.os == 'macOS'

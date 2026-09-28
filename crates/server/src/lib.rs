@@ -181,6 +181,7 @@ pub mod codex_home_migration;
 pub mod codex_quota;
 pub mod condense;
 pub mod context_tag;
+pub mod delivery;
 pub mod epics;
 pub mod error_inbox;
 pub mod event_forward;
@@ -533,6 +534,11 @@ pub struct ServerConfig {
     /// persisted — the spool files themselves are the durable copy, so a
     /// restart re-derives this from disk.
     pub artifacts: artifacts::ArtifactSpool,
+    /// The keep-awake watcher's last decision — holding or not — or `None`
+    /// before its first pass. A connecting client is primed from this, not
+    /// from re-deriving the mode over the live agents, which knows nothing
+    /// of the linger and would report "not holding" while the daemon holds.
+    pub keep_awake_active: Arc<parking_lot::Mutex<Option<bool>>>,
     /// Enable GitHub fleet-claim mutations. Production configs turn this on;
     /// in-memory/test configs leave it off so a unit-test agent spawn can
     /// never reach the developer's real GitHub account.
@@ -787,6 +793,7 @@ impl ServerConfig {
             device_registry: Arc::new(lazybox_identity::DeviceRegistry::ephemeral()),
             poll: PollState::default(),
             artifacts: artifacts::ArtifactSpool::default(),
+            keep_awake_active: Arc::default(),
             working_claims_enabled: false,
             working_claim_owner_id: "00000000000000000000000000000000".into(),
             working_claim_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -2270,11 +2277,19 @@ pub async fn dispatch_command(
                     // config. Prime `active` from the daemon's mode over the
                     // live agents, and probe the power source (blocking
                     // `pmset`) only when actually holding (#1485).
-                    let active = {
-                        let working = config.terminal.any_agent_working().await;
-                        let asking = matches!(keep_awake_mode, lazybox_config::KeepAwake::Asking)
-                            && config.terminal.any_agent_asking().await;
-                        keep_awake_mode.should_hold(working, asking)
+                    // The watcher's own decision when it has made one (it
+                    // knows the linger); the mode over the live agents only
+                    // before its first pass.
+                    let decided = *config.keep_awake_active.lock();
+                    let active = match decided {
+                        Some(active) => active,
+                        None => {
+                            let working = config.terminal.any_agent_working().await;
+                            let asking =
+                                matches!(keep_awake_mode, lazybox_config::KeepAwake::Asking)
+                                    && config.terminal.any_agent_asking().await;
+                            keep_awake_mode.should_hold(working, asking)
+                        }
                     };
                     let on_battery = active
                         && tokio::task::spawn_blocking(crate::keep_awake::on_battery)
@@ -2333,10 +2348,11 @@ pub async fn dispatch_command(
             // connects mid-conversation sees them without waiting for the
             // next ask or reply. Kept before AutoFixPolicyConfig so that
             // stays the end-of-replay marker.
-            for (workspace_key, open) in crate::mcp::open_request_counts(config).await {
+            for (workspace_key, requests) in crate::mcp::open_requests_by_target(config).await {
                 let _ = tx.send(Event::AgentRequestsOpen {
                     workspace_key,
-                    open,
+                    open: requests.len(),
+                    requests,
                 });
             }
             // Spooled agent artifacts (#1822): seed the row badge for every

@@ -160,6 +160,34 @@ fn agent_state_key(backend_key: &str, generation: u64) -> String {
 /// keeps the old key. The durable PTY scrollback already survives respawn by
 /// keying on the stable session identity; this brings the input side into line
 /// (root cause of the history-orphaned-on-respawn bug).
+/// The history row a spawn's opening prompt is recorded as, when it is not
+/// the user's own typing: the sender another agent's `start_workspace`
+/// named, or lazybox's trigger for a spawn it started itself. A snippet
+/// prompt records through the snippet path instead; an interactive spawn
+/// records nothing here (the user typed it).
+fn spawn_prompt_history(
+    prompt: &str,
+    prompt_from: Option<PromptSource>,
+    origin: lazybox_ipc::SpawnOrigin,
+    has_snippet: bool,
+) -> Option<UserPrompt> {
+    if has_snippet {
+        return None;
+    }
+    let source = match (prompt_from, origin) {
+        (Some(source), _) => source,
+        (None, lazybox_ipc::SpawnOrigin::Autonomous(trigger)) => PromptSource::Lazybox {
+            reason: trigger.notice_tag().to_string(),
+        },
+        (None, lazybox_ipc::SpawnOrigin::Interactive) => return None,
+    };
+    Some(UserPrompt {
+        text: prompt.to_string(),
+        timestamp_ms: Utc::now().timestamp_millis().max(0) as u64,
+        source,
+    })
+}
+
 pub(crate) const WORKSPACE_MSGS_PREFIX: &str = "workspace-msgs:";
 const WORKSPACE_DRAFT_PREFIX: &str = "workspace-draft:";
 /// KV flag marking the one-time `terminal-*` → `workspace-*` re-key migration
@@ -357,7 +385,7 @@ fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
 /// the daemon (tmux): after a restart the surviving session's hooks
 /// must still resolve, and the backend key is the identity that
 /// survives while terminal ids are reallocated.
-fn hook_command(exe: &Path, backend_key: &str, mcp_wired: bool) -> String {
+fn hook_command(exe: &Path, backend_key: &str, mcp_wired: bool, repo: Option<&str>) -> String {
     // `--emit-session-context` opts this agent's hook into printing the
     // lazybox capability blurb on `SessionStart` (Claude adds a hook's stdout
     // to its context). Only the settings-file path — Claude — carries it;
@@ -372,11 +400,37 @@ fn hook_command(exe: &Path, backend_key: &str, mcp_wired: bool) -> String {
     // unprovisioned session the MCP server is connected would advertise six
     // tools it cannot call.
     let mcp = if mcp_wired { " --emit-mcp-context" } else { "" };
+    // `--repo` lets the SessionStart briefing state this repo's standing
+    // rules (`repos.<owner/name>.policies`). The hook is a separate process
+    // that cannot resolve the workspace, and without it a hooked Claude
+    // session — the default — only ever saw the box-wide rules. Only a
+    // well-formed `owner/name` is baked in: this string lands in a shell
+    // command.
+    let repo = repo
+        .filter(|repo| is_plain_repo_slug(repo))
+        .map(|repo| format!(" --repo \"{repo}\""))
+        .unwrap_or_default();
     guarded_hook_command(
         exe,
-        &format!(" --backend-key \"{backend_key}\" --emit-session-context{mcp}"),
+        &format!(" --backend-key \"{backend_key}\" --emit-session-context{mcp}{repo}"),
         &lazybox_core::paths::hook_log_path(),
     )
+}
+
+/// `owner/name` made only of the characters GitHub allows in owner and repo
+/// names — safe to embed in a double-quoted shell argument.
+fn is_plain_repo_slug(repo: &str) -> bool {
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let ok = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    ok(owner) && ok(name)
 }
 
 /// Hook command with no correlation flag — what the pre-spawn
@@ -1919,6 +1973,7 @@ async fn handle_spawn_inner(
         meter,
         untrusted,
         role: inband_role,
+        prompt_from,
     } = options;
     let access = if matches!(&kind, TerminalKind::Agent(_)) {
         access
@@ -2034,6 +2089,7 @@ async fn handle_spawn_inner(
                 initial_prompt.as_deref(),
                 untrusted,
                 would_skip_permissions,
+                origin,
             )
             .await
             {
@@ -2092,7 +2148,10 @@ async fn handle_spawn_inner(
             // into `handle_spawn`, and a recursive async cycle needs one
             // pointer indirection to keep the futures finitely sized.
             // (This call passes no fallback, so it can't actually recurse.)
-            Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+            Box::pin(deliver_spawn_prompt_to_live(
+                config, existing, prompt, origin,
+            ))
+            .await;
             // `confirmed: true` here: `handle_inject_prompt` runs its
             // paste+submit ladder in a detached task and returns at
             // ordering-registration, BEFORE that ladder can post a give-up
@@ -2225,7 +2284,10 @@ async fn handle_spawn_inner(
                 {
                     return None;
                 }
-                Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+                Box::pin(deliver_spawn_prompt_to_live(
+                    config, existing, prompt, origin,
+                ))
+                .await;
                 // `confirmed: true`: same detached-ladder ordering as the
                 // collapse path above — the delivery toast precedes any
                 // background give-up notice, so it can't mask one, and the
@@ -3241,6 +3303,16 @@ async fn handle_spawn_inner(
         let snippet_for_inject = initial_snippet.clone();
         let session_key_for_inject = session_key.clone();
         let inject_gate = inject_gate.take();
+        // A spawn lazybox started on its own (an `@lazybox` mention, a label,
+        // auto-fix, epic dispatch) hands the agent a prompt nobody typed:
+        // record it as lazybox's once it lands, so the agent's history and
+        // recap say where its task came from.
+        let autonomous_history = spawn_prompt_history(
+            &prompt,
+            prompt_from.clone(),
+            origin,
+            initial_snippet.is_some(),
+        );
         tokio::spawn(async move {
             // Closes the input gate on every exit path of this task (#1444):
             // once injection is submitted (or fails), the keyboard writes
@@ -3285,6 +3357,9 @@ async fn handle_spawn_inner(
                     matches!(outcome, InjectOutcome::Submitted),
                 )
                 .await;
+                if let Some(entry) = autonomous_history {
+                    handle_record_user_message(&config_for_inject, id, &entry).await;
+                }
             }
         });
     }
@@ -3437,6 +3512,7 @@ async fn run_spawn_inject(
         true,
         interaction,
         false,
+        || async {},
     )
     .await
     {
@@ -6028,6 +6104,13 @@ pub(crate) async fn deliver_auto_fix_prompt(
     let (_, interaction) = interactions.swap_remove(position);
     drop(interactions);
     let encoded = agent.encode_prompt(&prompt, lazybox_agents::PromptIntent::Submit);
+    let history_entry = UserPrompt {
+        text: prompt.clone(),
+        timestamp_ms: Utc::now().timestamp_millis().max(0) as u64,
+        source: PromptSource::Lazybox {
+            reason: "auto-fix".to_string(),
+        },
+    };
     // Background the submit-confirm/resend tail (see `write_prompt_sequence`):
     // this runs INLINE on the serial poll loop, and after the self-confirming
     // flip was removed (issue #122) a Done agent whose Enter is swallowed would
@@ -6043,16 +6126,23 @@ pub(crate) async fn deliver_auto_fix_prompt(
         true,
         interaction,
         true,
+        || async {},
     )
     .await
     {
-        Ok(_) => DoneGatedPromptOutcome::Delivered,
+        // Pasted either way: the history records that lazybox, not the user,
+        // told the agent to fix CI.
+        Ok(_) => {
+            handle_record_user_message(config, target.terminal_id, &history_entry).await;
+            DoneGatedPromptOutcome::Delivered
+        }
         Err(PromptWriteError::Submit(error)) => {
             tracing::warn!(
                 terminal_id = ?target.terminal_id,
                 %error,
                 "auto-fix: prompt was pasted but submit failed"
             );
+            handle_record_user_message(config, target.terminal_id, &history_entry).await;
             DoneGatedPromptOutcome::Delivered
         }
         Err(PromptWriteError::Initial(error)) => {
@@ -6223,6 +6313,39 @@ async fn refuse_foreign_inject_into_bypass(
     true
 }
 
+/// Hand a spawn's prompt to the agent already running in its place. A spawn
+/// lazybox started on its own (a mention, a label, auto-fix, epic dispatch)
+/// goes through [`crate::delivery`] as lazybox, so the agent's history
+/// records where the task came from; a user's spawn keeps the plain inject,
+/// whose prompt the client records itself.
+async fn deliver_spawn_prompt_to_live(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    prompt: &str,
+    origin: lazybox_ipc::SpawnOrigin,
+) {
+    match origin {
+        lazybox_ipc::SpawnOrigin::Autonomous(trigger) => {
+            let _pending = crate::delivery::deliver(
+                config,
+                crate::delivery::DeliveryRequest {
+                    terminal_id,
+                    body: prompt.to_string(),
+                    submit: true,
+                    gate: crate::delivery::Gate::ChooserOnly,
+                    from: crate::delivery::Party::Lazybox(trigger.notice_tag()),
+                    wait_limit: None,
+                },
+            )
+            .await;
+        }
+        lazybox_ipc::SpawnOrigin::Interactive => {
+            handle_inject_prompt(config, terminal_id, prompt, None, true).await;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn collapse_onto_inflight_spawn(
     config: &ServerConfig,
     session_key: &SessionKey,
@@ -6232,6 +6355,7 @@ async fn collapse_onto_inflight_spawn(
     prompt: Option<&str>,
     untrusted: bool,
     would_skip_permissions: bool,
+    origin: lazybox_ipc::SpawnOrigin,
 ) -> bool {
     tracing::info!(
         %session_key,
@@ -6275,7 +6399,10 @@ async fn collapse_onto_inflight_spawn(
         // `handle_spawn`: `handle_inject_prompt`'s fallback arm can
         // recurse into `handle_spawn`. (No fallback passed here, so it
         // can't actually recurse.)
-        Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+        Box::pin(deliver_spawn_prompt_to_live(
+            config, existing, prompt, origin,
+        ))
+        .await;
     }
     let _ = config.bus.send(Event::TerminalFocusRequested {
         terminal_id: existing,
@@ -8387,6 +8514,12 @@ async fn hold_for_spawn_injection(config: &ServerConfig, terminal_id: TerminalId
 /// immediate; long enough that a genuine gate isn't re-scraped in a busy loop.
 const INJECT_RECLASSIFY_POLL: Duration = Duration::from_millis(250);
 
+/// Re-check interval for a delivery waiting only on the agent to finish its
+/// turn. The turn's end arrives as a bus event, so this is a backstop against
+/// a missed or lagged broadcast, not the primary wake — at 250ms it was a
+/// cached-state read four times a second for as long as the turn ran.
+const INJECT_MID_TURN_POLL: Duration = Duration::from_secs(2);
+
 /// Minimum byte-quiet a forced reclassify requires before it scrapes the
 /// screen. A reclassify poke that lands mid-paint would read a torn frame;
 /// while bytes still flow the injection releases off the transitions that flow
@@ -8464,7 +8597,8 @@ enum PromptWriteError {
 /// confirmation before Enter is sent. The lock is released before the
 /// potentially long confirmation/retry loop; retries reacquire it through the
 /// normal serialized terminal-I/O path.
-async fn write_prompt_sequence(
+#[allow(clippy::too_many_arguments)]
+async fn write_prompt_sequence<F, Fut>(
     config: &ServerConfig,
     terminal_id: TerminalId,
     backend_key: &str,
@@ -8472,7 +8606,12 @@ async fn write_prompt_sequence(
     submit: bool,
     interaction: tokio::sync::OwnedMutexGuard<()>,
     background_confirm: bool,
-) -> Result<bool, PromptWriteError> {
+    on_landed: F,
+) -> Result<bool, PromptWriteError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     let echo_probes = encoded.echo_probes().to_vec();
     let (initial_write, submit_write) = encoded.into_writes();
     // Subscribe BEFORE the first write so its repaint chunks cannot race the
@@ -8492,6 +8631,13 @@ async fn write_prompt_sequence(
     )
     .await
     .map_err(PromptWriteError::Initial)?;
+    // The text is now IN the composer. Everything below is the submit
+    // keystroke and its ~30s confirm/resend ladder, so this is the exact
+    // point "it landed" becomes true — early enough to be worth reporting
+    // separately, late enough that a failed write never claims it. Anything
+    // that must not outlive a failed write (the delivery's `landed` signal,
+    // the prompt-history row naming who sent it) hangs off here.
+    on_landed().await;
 
     if let (Some(submit_bytes), Some(output_events)) = (submit_write, output_events) {
         // The initial paste has landed, so the caller's delivery decision is
@@ -8514,6 +8660,7 @@ async fn write_prompt_sequence(
                     terminal_id,
                     &backend_key,
                     submit,
+                    initial_write,
                     submit_bytes,
                     output_events,
                     echo_probes,
@@ -8535,6 +8682,7 @@ async fn write_prompt_sequence(
             terminal_id,
             backend_key,
             submit,
+            initial_write,
             submit_bytes,
             output_events,
             echo_probes,
@@ -8565,11 +8713,20 @@ async fn write_prompt_sequence(
 /// recovers a swallowed soft-newline. That is why multi-select broadcasts so
 /// often pasted the prompt but never submitted it (issue #122): the recovery
 /// net was disarmed by our own flip.
+///
+/// A paste the composer never echoed may never have arrived at all: an agent
+/// that just came off a usage limit dropped the first `continue` five of six
+/// times, and resending Enter into an empty composer three times then told
+/// the user to "press Enter" on nothing. So an unconfirmed submit whose paste
+/// did not echo checks the composer, and a prompt that is not there is pasted
+/// once more before anything is reported.
+#[allow(clippy::too_many_arguments)]
 async fn settle_submit_and_confirm(
     config: &ServerConfig,
     terminal_id: TerminalId,
     backend_key: &str,
     submit: bool,
+    initial_write: Vec<u8>,
     submit_bytes: Vec<u8>,
     mut output_events: tokio::sync::broadcast::Receiver<Event>,
     echo_probes: Vec<String>,
@@ -8601,18 +8758,113 @@ async fn settle_submit_and_confirm(
     .await
     .map_err(PromptWriteError::Submit)?;
     drop(interaction);
-    let confirmed = confirm_prompt_submission(
+    let echoed = settle == PasteSettle::Echo;
+    let mut outcome = confirm_prompt_submission_outcome(
         confirm,
         config,
         backend_key,
         &submit_bytes,
         SUBMIT_CONFIRM_DEADLINE,
+        echoed,
     )
     .await;
+    if outcome == SubmitOutcome::Unconfirmed && !echoed {
+        if composer_shows_prompt(config, terminal_id, &echo_probes).await {
+            report_parked_prompt(config, terminal_id);
+        } else {
+            outcome = repaste_and_confirm(
+                config,
+                terminal_id,
+                backend_key,
+                &initial_write,
+                &submit_bytes,
+                &echo_probes,
+            )
+            .await?;
+        }
+    }
+    let confirmed = outcome == SubmitOutcome::Confirmed;
     if submit && confirmed {
         mark_done_agent_working(config, terminal_id, backend_key).await;
     }
     Ok(confirmed)
+}
+
+/// The one re-paste [`settle_submit_and_confirm`] allows: the same bytes,
+/// under the terminal's interaction lock, then the ordinary settle and
+/// confirm. A second miss is reported plainly — the prompt did not reach
+/// the agent — rather than as a parked one.
+async fn repaste_and_confirm(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+    initial_write: &[u8],
+    submit_bytes: &[u8],
+    echo_probes: &[String],
+) -> Result<SubmitOutcome, PromptWriteError> {
+    tracing::info!(
+        terminal_id = ?terminal_id,
+        "the prompt never reached the composer (no echo, not on screen) — pasting it again",
+    );
+    let Some(interaction) = terminal_io::acquire_live(config, terminal_id, backend_key).await
+    else {
+        return Ok(SubmitOutcome::Unconfirmed);
+    };
+    let mut events = config.bus.subscribe();
+    terminal_io::write_locked(
+        config,
+        terminal_id,
+        backend_key,
+        initial_write,
+        TerminalInputIntent::Compose,
+    )
+    .await
+    .map_err(PromptWriteError::Initial)?;
+    let settle = await_paste_settled(
+        &mut events,
+        terminal_id,
+        echo_probes,
+        PASTE_QUIET_WINDOW,
+        PASTE_SETTLE_CAP,
+    )
+    .await;
+    let confirm = prepare_submit_confirmation(config, terminal_id).await;
+    terminal_io::write_locked(
+        config,
+        terminal_id,
+        backend_key,
+        submit_bytes,
+        TerminalInputIntent::Submit,
+    )
+    .await
+    .map_err(PromptWriteError::Submit)?;
+    drop(interaction);
+    let outcome = confirm_prompt_submission_outcome(
+        confirm,
+        config,
+        backend_key,
+        submit_bytes,
+        SUBMIT_CONFIRM_DEADLINE,
+        settle == PasteSettle::Echo,
+    )
+    .await;
+    if outcome == SubmitOutcome::Unconfirmed && settle != PasteSettle::Echo {
+        if composer_shows_prompt(config, terminal_id, echo_probes).await {
+            report_parked_prompt(config, terminal_id);
+        } else {
+            tracing::warn!(
+                terminal_id = ?terminal_id,
+                "the prompt was pasted twice and never reached the agent's composer",
+            );
+            let _ = config.bus.send(Event::TerminalInputRejected {
+                terminal_id,
+                message: "the agent did not take the prompt (pasted twice, never appeared in \
+                          its composer) — open the terminal and check it is accepting input"
+                    .into(),
+            });
+        }
+    }
+    Ok(outcome)
 }
 
 async fn mark_done_agent_working(
@@ -8701,13 +8953,42 @@ async fn prepare_submit_confirmation(
 /// is the same hazard the spawn path's readiness gate exists to avoid
 /// (see `await_inject_window`). So a chooser observed here aborts the
 /// resend loop and fails loudly instead of typing into the dialog.
+#[cfg(test)]
 async fn confirm_prompt_submission(
-    mut confirm: SubmitConfirmation,
+    confirm: SubmitConfirmation,
     config: &ServerConfig,
     backend_key: &str,
     submit_bytes: &[u8],
     deadline: Duration,
 ) -> bool {
+    confirm_prompt_submission_outcome(confirm, config, backend_key, submit_bytes, deadline, true)
+        .await
+        == SubmitOutcome::Confirmed
+}
+
+/// How a submit confirmation ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmitOutcome {
+    Confirmed,
+    /// A permission prompt took the input; Enter was not resent.
+    BlockedOnInput,
+    /// Every Enter resend went unconfirmed.
+    Unconfirmed,
+}
+
+/// [`confirm_prompt_submission`], reporting how it ended. With
+/// `report_unconfirmed` false an unconfirmed ending is left to the caller
+/// to report — the caller that can still re-paste a prompt that never
+/// reached the composer, rather than tell the user to press Enter on an
+/// empty one.
+async fn confirm_prompt_submission_outcome(
+    mut confirm: SubmitConfirmation,
+    config: &ServerConfig,
+    backend_key: &str,
+    submit_bytes: &[u8],
+    deadline: Duration,
+    report_unconfirmed: bool,
+) -> SubmitOutcome {
     let mut resends = 0u32;
     let mut blocked_on_input = false;
     let confirmed = loop {
@@ -8784,7 +9065,7 @@ async fn confirm_prompt_submission(
         .remove_prompt_confirmation(confirm.terminal_id, &confirm.signal)
         .await;
     if confirmed {
-        return true;
+        return SubmitOutcome::Confirmed;
     }
     if blocked_on_input {
         tracing::warn!(
@@ -8800,21 +9081,48 @@ async fn confirm_prompt_submission(
                       answer the agent's prompt, then re-send the work if it didn't start"
                 .into(),
         });
-        return false;
+        return SubmitOutcome::BlockedOnInput;
     }
+    if report_unconfirmed {
+        report_parked_prompt(config, confirm.terminal_id);
+    }
+    SubmitOutcome::Unconfirmed
+}
+
+/// The loud give-up for a prompt that sits unsubmitted in the composer.
+fn report_parked_prompt(config: &ServerConfig, terminal_id: TerminalId) {
     tracing::warn!(
-        terminal_id = ?confirm.terminal_id,
+        terminal_id = ?terminal_id,
         "prompt submit never confirmed after {SUBMIT_RESEND_LIMIT} Enter resends — \
-         giving up; the prompt is likely parked in the composer",
+         giving up; the prompt is parked in the composer",
     );
-    let _ = confirm.bus.send(Event::TerminalInputRejected {
-        terminal_id: confirm.terminal_id,
+    let _ = config.bus.send(Event::TerminalInputRejected {
+        terminal_id,
         message: "the injected prompt looks parked unsubmitted in the agent's composer — \
                   open the terminal and press Enter to start it"
             .into(),
     });
-    false
 }
+
+/// Whether the agent's composer — the last few screen lines — shows the
+/// prompt the paste carried. Decides between "parked, resend Enter" and
+/// "never arrived, paste it again" once the paste settled without an echo.
+async fn composer_shows_prompt(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    echo_probes: &[String],
+) -> bool {
+    agent_output_snapshot(config, terminal_id, COMPOSER_SCAN_LINES)
+        .await
+        .is_some_and(|screen| {
+            lazybox_agents::detect::paste_echo_observed(screen.as_bytes(), echo_probes)
+        })
+}
+
+/// Screen lines read to find the composer: it sits at the bottom, above
+/// only the status footer, so a short tail keeps an older prompt further up
+/// the conversation from reading as this one.
+const COMPOSER_SCAN_LINES: usize = 8;
 
 /// Which evidence released the paste-settle gate — logged so a slow
 /// paste→Enter hop can be attributed (issue #425).
@@ -8961,15 +9269,28 @@ enum InputPoll {
     Tick,
 }
 
+/// Whether `state` clears the gate this delivery is waiting on. A
+/// [`crate::delivery::Gate::Idle`] delivery is still blocked by `Working`, so
+/// treating a `Working` re-broadcast as "resolved" would wake the loop — and
+/// cost it a settle sleep plus a forced PTY re-scrape — once per state event
+/// for the entire turn.
+fn state_clears_gate(state: lazybox_ipc::AgentState, gate: crate::delivery::Gate) -> bool {
+    if state == lazybox_ipc::AgentState::InputNeeded {
+        return false;
+    }
+    gate != crate::delivery::Gate::Idle || state != lazybox_ipc::AgentState::Working
+}
+
 /// One step of the level-triggered deferred-inject wait (issue #869): wait up
-/// to `step` for a resolving state transition or a terminal exit, returning
-/// [`InputPoll::Tick`] when neither arrives in time so the caller can re-read
-/// the freshly-reclassified cached state rather than block on an event that a
-/// quiescent agent never emits.
+/// to `step` for a state transition that clears `gate` or a terminal exit,
+/// returning [`InputPoll::Tick`] when neither arrives in time so the caller
+/// can re-read the freshly-reclassified cached state rather than block on an
+/// event that a quiescent agent never emits.
 async fn poll_input_resolution(
     events: &mut tokio::sync::broadcast::Receiver<Event>,
     terminal_id: TerminalId,
     terminals: &TerminalRegistry,
+    gate: crate::delivery::Gate,
     step: Duration,
 ) -> InputPoll {
     let wait = async {
@@ -8980,7 +9301,7 @@ async fn poll_input_resolution(
                     state,
                     ..
                 }) if tid == terminal_id => {
-                    if state != lazybox_ipc::AgentState::InputNeeded {
+                    if state_clears_gate(state, gate) {
                         return InputPoll::Resolved;
                     }
                 }
@@ -8989,8 +9310,13 @@ async fn poll_input_resolution(
                 }) if tid == terminal_id => return InputPoll::Exited,
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    if terminals.agent_state_for(terminal_id).await
-                        != Some(lazybox_ipc::AgentState::InputNeeded)
+                    // A terminal with no recorded state blocks nothing —
+                    // same reading as the pre-lag check, which compared
+                    // against `Some(InputNeeded)`.
+                    if terminals
+                        .agent_state_for(terminal_id)
+                        .await
+                        .is_none_or(|state| state_clears_gate(state, gate))
                     {
                         return InputPoll::Resolved;
                     }
@@ -9002,32 +9328,77 @@ async fn poll_input_resolution(
     (tokio::time::timeout(step, wait).await).unwrap_or(InputPoll::Tick)
 }
 
-/// Owns the single in-flight readiness-gated prompt injection for a terminal.
+/// Which queue a readiness-gated injection reserves. One slot per lane per
+/// terminal, not one slot per terminal.
+///
+/// The reservation exists to stop duplicate *waiters* piling up — every
+/// repeated `w` press used to spawn another waiter, and all of them pasted
+/// once the gate cleared. That argument is per-lane: a human's `w w` and an
+/// agent's idle-gated message are two different messages that both deserve
+/// to land, and they wait on different things for very different lengths of
+/// time. A human's [`crate::delivery::Gate::ChooserOnly`] wait is bounded by
+/// [`INJECT_INPUT_DEADLINE`] (120s) and only happens while a chooser is up;
+/// an agent's [`crate::delivery::Gate::Idle`] wait lasts a whole turn —
+/// `ASK_DELIVERY_WAIT` is 20 minutes. Sharing one slot meant a queued sibling
+/// message refused every `w w`, `]]s`, gateway inject and auto-fix against
+/// that agent for the rest of its turn, which is the opposite of the "user
+/// input must never disappear silently" invariant this path is built around
+/// (#1384).
+///
+/// Two lanes can paste back-to-back, which is correct: they serialize on the
+/// terminal's interaction lock, and two legitimate messages arriving is the
+/// intent, not duplication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum InjectLane {
+    /// The user, through the TUI, the desktop app, the CLI or the gateway.
+    Human,
+    /// lazybox's own automation or another agent session — anything gated on
+    /// the target being between turns.
+    Automation,
+}
+
+impl InjectLane {
+    /// The lane a delivery from `from` reserves.
+    fn for_party(from: &crate::delivery::Party) -> Self {
+        match from {
+            crate::delivery::Party::Human => Self::Human,
+            crate::delivery::Party::Agent(_) | crate::delivery::Party::Lazybox(_) => {
+                Self::Automation
+            }
+        }
+    }
+}
+
+/// Owns the single in-flight readiness-gated prompt injection for a terminal
+/// *lane* (see [`InjectLane`]).
 ///
 /// The guard is moved into the background task so every completion path —
 /// success, rejection, terminal exit, timeout, or task cancellation — releases
 /// the reservation synchronously in `Drop`.
 struct PendingInjectionGuard {
-    terminal_id: TerminalId,
-    pending: std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<TerminalId>>>,
+    slot: (TerminalId, InjectLane),
+    pending:
+        std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<(TerminalId, InjectLane)>>>,
 }
 
 impl PendingInjectionGuard {
-    fn claim(coordinator: &SpawnCoordinator, terminal_id: TerminalId) -> Option<Self> {
+    fn claim(
+        coordinator: &SpawnCoordinator,
+        terminal_id: TerminalId,
+        lane: InjectLane,
+    ) -> Option<Self> {
         let pending = coordinator.pending_prompt_injections.clone();
-        if !pending.lock().insert(terminal_id) {
+        let slot = (terminal_id, lane);
+        if !pending.lock().insert(slot) {
             return None;
         }
-        Some(Self {
-            terminal_id,
-            pending,
-        })
+        Some(Self { slot, pending })
     }
 }
 
 impl Drop for PendingInjectionGuard {
     fn drop(&mut self) {
-        self.pending.lock().remove(&self.terminal_id);
+        self.pending.lock().remove(&self.slot);
     }
 }
 
@@ -9060,7 +9431,122 @@ pub async fn handle_inject_prompt(
     fallback_spawn: Option<lazybox_ipc::SpawnFallback>,
     submit: bool,
 ) {
-    handle_inject_prompt_inner(config, terminal_id, prompt, fallback_spawn, submit, None).await;
+    handle_inject_prompt_inner(
+        config,
+        terminal_id,
+        prompt,
+        fallback_spawn,
+        submit,
+        None,
+        InjectGating::human(),
+        crate::delivery::ReceiptSlot::none(),
+    )
+    .await;
+}
+
+/// How long and on what an injection waits before it may paste.
+#[derive(Debug, Clone)]
+struct InjectGating {
+    gate: crate::delivery::Gate,
+    wait_limit: Duration,
+    /// Which reservation this injection takes. A long automation wait must
+    /// never occupy the human's slot — see [`InjectLane`].
+    lane: InjectLane,
+    /// Record the text into the workspace's prompt history when it lands,
+    /// tagged with this source. `None` for a human's prompt, which the
+    /// client records itself.
+    record_as: Option<PromptSource>,
+}
+
+impl InjectGating {
+    /// A human's inject: wait out a chooser only, for the standard deadline.
+    fn human() -> Self {
+        Self {
+            gate: crate::delivery::Gate::ChooserOnly,
+            wait_limit: INJECT_INPUT_DEADLINE,
+            lane: InjectLane::Human,
+            record_as: None,
+        }
+    }
+}
+
+/// The history source a delivery from `from` is recorded under — `None`
+/// for the human, whose client records its own prompts.
+fn history_source_for(from: &crate::delivery::Party) -> Option<PromptSource> {
+    match from {
+        crate::delivery::Party::Human => None,
+        crate::delivery::Party::Agent(key) => Some(PromptSource::Agent {
+            from: key.as_str().to_string(),
+        }),
+        crate::delivery::Party::Lazybox(reason) => Some(PromptSource::Lazybox {
+            reason: (*reason).to_string(),
+        }),
+    }
+}
+
+/// [`crate::delivery::deliver`]'s entry into the inject path: the same
+/// settle-gated delivery as [`handle_inject_prompt`], reporting its outcome
+/// into `receipt` at every exit instead of only to the TUI.
+pub(crate) async fn inject_with_receipt(
+    config: &ServerConfig,
+    request: crate::delivery::DeliveryRequest,
+    receipt: crate::delivery::ReceiptSlot,
+) {
+    tracing::debug!(
+        terminal_id = ?request.terminal_id,
+        from = ?request.from,
+        gate = ?request.gate,
+        "delivery: injecting"
+    );
+    let gating = InjectGating {
+        gate: request.gate,
+        wait_limit: request.wait_limit.unwrap_or(INJECT_INPUT_DEADLINE),
+        lane: InjectLane::for_party(&request.from),
+        record_as: history_source_for(&request.from),
+    };
+    handle_inject_prompt_inner(
+        config,
+        request.terminal_id,
+        &request.body,
+        None,
+        request.submit,
+        None,
+        gating,
+        receipt,
+    )
+    .await;
+}
+
+/// Why an injection is still waiting before it may paste. The two reasons
+/// clear through completely different mechanisms, and conflating them is what
+/// made an idle-gated delivery re-scrape the PTY four times a second for a
+/// whole turn — see [`poll_input_resolution`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryWait {
+    /// A chooser / permission / Y-N prompt owns the input. It can clear
+    /// quiescently, with no bus event, so this reason has to be polled.
+    Chooser,
+    /// The agent is mid-turn and this delivery is
+    /// [`crate::delivery::Gate::Idle`]. The turn's end always announces
+    /// itself on the bus, so this reason is woken by an event and never
+    /// needs a poke.
+    MidTurn,
+}
+
+/// Why an injection must keep waiting, if it must: always behind a
+/// chooser-shaped prompt (see [`inject_must_defer`]), and — under
+/// [`crate::delivery::Gate::Idle`] — also while the agent is mid-turn.
+async fn delivery_wait_reason(
+    terminals: &TerminalRegistry,
+    id: TerminalId,
+    gate: crate::delivery::Gate,
+) -> Option<DeliveryWait> {
+    if inject_must_defer(terminals, id).await {
+        return Some(DeliveryWait::Chooser);
+    }
+    (gate == crate::delivery::Gate::Idle
+        && terminals.agent_state_for(id).await == Some(lazybox_ipc::AgentState::Working))
+    .then_some(DeliveryWait::MidTurn)
 }
 
 fn emit_credit_recovery_stage(
@@ -9266,6 +9752,7 @@ pub async fn handle_recover_agent_credit(
             true,
             interaction,
             false,
+            || async {},
         )
         .await
         {
@@ -9355,6 +9842,7 @@ struct SnippetDelivery {
     body: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_inject_prompt_inner(
     config: &ServerConfig,
     terminal_id: TerminalId,
@@ -9362,6 +9850,8 @@ async fn handle_inject_prompt_inner(
     fallback_spawn: Option<lazybox_ipc::SpawnFallback>,
     submit: bool,
     snippet: Option<SnippetDelivery>,
+    gating: InjectGating,
+    mut receipt: crate::delivery::ReceiptSlot,
 ) {
     // Look up — and drop the guard — before any further await so
     // a nested handle_spawn (in the fallback path) can re-acquire
@@ -9403,6 +9893,9 @@ async fn handle_inject_prompt_inner(
                     },
                 )
                 .await;
+                // The text rides the replacement spawn's initial prompt,
+                // which confirms on its own path.
+                receipt.resolve(crate::delivery::DeliveryReceipt::Delivered { confirmed: false });
                 return;
             }
             // No fallback to rewrite into a Spawn. The prompt would
@@ -9410,10 +9903,12 @@ async fn handle_inject_prompt_inner(
             // user knows to reopen the agent (invariant: user input must
             // never disappear silently — #1384).
             tracing::debug!("inject_prompt to unknown terminal {terminal_id:?}");
+            let message = "the agent terminal is no longer running — reopen it and retry";
             let _ = config.bus.send(Event::TerminalInputRejected {
                 terminal_id,
-                message: "the agent terminal is no longer running — reopen it and retry".into(),
+                message: message.into(),
             });
+            receipt.refuse(message);
             return;
         }
     };
@@ -9421,10 +9916,12 @@ async fn handle_inject_prompt_inner(
         Some((_session_key, kind)) => kind,
         None => {
             tracing::debug!("inject_prompt: no terminal_meta for {terminal_id:?} — skipping");
+            let message = "the agent terminal is no longer running — reopen it and retry";
             let _ = config.bus.send(Event::TerminalInputRejected {
                 terminal_id,
-                message: "the agent terminal is no longer running — reopen it and retry".into(),
+                message: message.into(),
             });
+            receipt.refuse(message);
             return;
         }
     };
@@ -9435,15 +9932,18 @@ async fn handle_inject_prompt_inner(
                 tracing::warn!(
                     "inject_prompt: unknown agent id `{id}` for terminal {terminal_id:?}"
                 );
+                receipt.refuse(format!("unknown agent `{id}`"));
                 return;
             }
         },
         _ => {
             tracing::debug!("inject_prompt: terminal {terminal_id:?} is not an agent — skipping");
+            let message = "the prompt could not be delivered — this terminal is not an agent";
             let _ = config.bus.send(Event::TerminalInputRejected {
                 terminal_id,
-                message: "the prompt could not be delivered — this terminal is not an agent".into(),
+                message: message.into(),
             });
+            receipt.refuse(message);
             return;
         }
     };
@@ -9456,17 +9956,36 @@ async fn handle_inject_prompt_inner(
         lazybox_agents::PromptIntent::Compose
     };
     let encoded_prompt = agent.encode_prompt(prompt, intent);
+    let prompt_for_history = prompt.to_string();
 
     // An InputNeeded gate may hold the waiter below for 30 seconds. Without a
     // per-terminal reservation every repeated `w` press spawned another
     // waiter, and all of them pasted once the gate cleared. Reject duplicates
     // explicitly instead of growing background work and duplicating input.
-    let Some(pending_injection) = PendingInjectionGuard::claim(&config.spawn, terminal_id) else {
+    //
+    // Reserved per LANE (see [`InjectLane`]): a human's `w w` and an agent's
+    // idle-gated message are two messages that both deserve to land, and the
+    // automation lane can legitimately wait a whole turn. One shared slot
+    // meant a queued sibling message refused every keypress against that
+    // agent until its turn ended.
+    let Some(pending_injection) =
+        PendingInjectionGuard::claim(&config.spawn, terminal_id, gating.lane)
+    else {
+        let message = match gating.lane {
+            InjectLane::Human => {
+                "another message is already waiting for this agent to be ready — \
+                 retry once it lands"
+            }
+            InjectLane::Automation => {
+                "another agent or automation message is already queued for this agent — \
+                 retry once it lands"
+            }
+        };
         let _ = config.bus.send(Event::TerminalInputRejected {
             terminal_id,
-            message: "a prompt injection is already waiting for this agent — answer its prompt before retrying"
-                .into(),
+            message: message.into(),
         });
+        receipt.refuse(message);
         return;
     };
 
@@ -9488,7 +10007,7 @@ async fn handle_inject_prompt_inner(
     // Subscribe BEFORE reading the current state so a transition that
     // races between the read and the wait isn't missed.
     let events = config.bus.subscribe();
-    let blocked = inject_must_defer(&config.terminal, terminal_id).await;
+    let blocked = delivery_wait_reason(&config.terminal, terminal_id, gating.gate).await;
     let terminals = config.terminal.clone();
     let bus = config.bus.clone();
     let id = terminal_id;
@@ -9513,14 +10032,17 @@ async fn handle_inject_prompt_inner(
         // replaces this one's confirmation entry by design (see
         // `confirm_prompt_submission`).
         let pending_injection = pending_injection;
-        let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
+        let mut receipt = receipt;
+        let deadline = tokio::time::Instant::now() + gating.wait_limit;
         let mut events = events;
         let mut blocked = blocked;
         let mut registered_tx = Some(registered_tx);
-        if blocked && let Some(tx) = registered_tx.take() {
+        if blocked.is_some()
+            && let Some(tx) = registered_tx.take()
+        {
             let _ = tx.send(());
         }
-        while blocked {
+        while let Some(reason) = blocked {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 tracing::warn!(
@@ -9529,12 +10051,18 @@ async fn handle_inject_prompt_inner(
                 );
                 // The drop must be visible, not just a log line — the
                 // user pressed `w` and their prompt evaporated.
+                let message = if inject_must_defer(&terminals, id).await {
+                    "the agent stayed on a permission prompt, so the injected work \
+                     context was dropped — answer the prompt and press w again"
+                } else {
+                    "the agent stayed busy for the whole wait, so the message was not \
+                     delivered — retry once it finishes its turn"
+                };
                 let _ = bus.send(Event::TerminalInputRejected {
                     terminal_id: id,
-                    message: "the agent stayed on a permission prompt, so the injected work \
-                              context was dropped — answer the prompt and press w again"
-                        .into(),
+                    message: message.into(),
                 });
+                receipt.refuse(message);
                 return;
             }
             // Level-triggered readiness poll (#869). Ask the PTY pump to
@@ -9545,9 +10073,22 @@ async fn handle_inject_prompt_inner(
             // gate re-scrapes as `InputNeeded` and stays parked. Without the
             // poke the wait would block on a bus transition a resting agent
             // never emits, so the injection sat until an inbound keystroke.
-            config_for_confirm.terminal.request_reclassify(id).await;
-            let step = INJECT_RECLASSIFY_POLL.min(remaining);
-            match poll_input_resolution(&mut events, id, &terminals, step).await {
+            //
+            // Only the chooser reason needs that poke. An agent mid-turn
+            // always announces its own `Working` → `Done` transition on the
+            // bus (it is the same event that wakes the turn-end capture), so
+            // poking there bought nothing and cost a forced screen re-scrape
+            // four times a second for the whole turn — up to 20 minutes per
+            // queued message, on a box shared with a fleet.
+            let step = match reason {
+                DeliveryWait::Chooser => {
+                    config_for_confirm.terminal.request_reclassify(id).await;
+                    INJECT_RECLASSIFY_POLL
+                }
+                DeliveryWait::MidTurn => INJECT_MID_TURN_POLL,
+            }
+            .min(remaining);
+            match poll_input_resolution(&mut events, id, &terminals, gating.gate, step).await {
                 // The terminal exited; fall through to `acquire_live`, which
                 // recognizes the gone terminal and returns quietly.
                 InputPoll::Exited => break,
@@ -9560,7 +10101,7 @@ async fn handle_inject_prompt_inner(
                 // above may have refreshed the cache; re-read it directly.
                 InputPoll::Tick => {}
             }
-            blocked = inject_must_defer(&terminals, id).await;
+            blocked = delivery_wait_reason(&terminals, id, gating.gate).await;
         }
         let Some(interaction) =
             terminal_io::acquire_live(&config_for_confirm, id, &backend_key).await
@@ -9572,13 +10113,45 @@ async fn handle_inject_prompt_inner(
                 ?id,
                 "inject_prompt: terminal exited before interaction began"
             );
+            receipt.refuse("the agent terminal exited before the text could be delivered");
             return;
         };
         drop(pending_injection);
         if let Some(tx) = registered_tx.take() {
             let _ = tx.send(());
         }
-        match write_prompt_sequence(
+        // `landed` and the history row hang off the INITIAL WRITE, not off
+        // winning the gate. Firing them here — before `write_prompt_sequence`
+        // — told the sender "it is in the target's input" and committed a
+        // `]]h` / `]N` / recap entry for text a failed write never delivered,
+        // while the receipt below correctly refused: the sender then retried
+        // and wrote a second row for a message that landed once or never.
+        // `on_landed` runs the instant the paste is in the composer and
+        // before the ~30s submit ladder, which is the latency the early
+        // signal exists to skip.
+        let landed_tx = receipt.take_landed();
+        let on_landed = {
+            let config_for_history = config_for_confirm.clone();
+            let record_as = gating.record_as.clone();
+            let prompt_for_history = prompt_for_history.clone();
+            move || async move {
+                if let Some(tx) = landed_tx {
+                    let _ = tx.send(());
+                }
+                // Who sent it goes into the workspace's history the moment it
+                // lands, so `]]h` shows a sibling's message or lazybox's
+                // automation next to what the user typed, instead of nothing.
+                if let Some(source) = record_as {
+                    let prompt = UserPrompt {
+                        text: prompt_for_history,
+                        timestamp_ms: Utc::now().timestamp_millis().max(0) as u64,
+                        source,
+                    };
+                    handle_record_user_message(&config_for_history, id, &prompt).await;
+                }
+            }
+        };
+        let written = write_prompt_sequence(
             &config_for_confirm,
             id,
             &backend_key,
@@ -9586,9 +10159,10 @@ async fn handle_inject_prompt_inner(
             submit,
             interaction,
             false,
+            on_landed,
         )
-        .await
-        {
+        .await;
+        match written {
             // `Ok(_)` means the paste LANDED in the agent's composer; for a
             // submit, the initial Enter was sent. The bool is whether the
             // agent ACKNOWLEDGED that submit (`UserPromptSubmit` hook / a
@@ -9609,6 +10183,9 @@ async fn handle_inject_prompt_inner(
             // WITHOUT flashing a fresh "sent snippet" toast that would stomp
             // the give-up notice sitting in the footer.
             Ok(confirmed) => {
+                receipt.resolve(crate::delivery::DeliveryReceipt::Delivered {
+                    confirmed: submit && confirmed,
+                });
                 if let Some(snippet) = snippet_for_confirm {
                     let prompt = UserPrompt {
                         text: snippet.body.clone(),
@@ -9640,6 +10217,7 @@ async fn handle_inject_prompt_inner(
             }
             Err(PromptWriteError::Initial(e)) => {
                 tracing::warn!("inject_prompt: initial write failed: {e}");
+                receipt.refuse(format!("the text could not be written ({e})"));
                 let _ = bus.send(Event::TerminalInputRejected {
                     terminal_id: id,
                     message: format!(
@@ -9649,6 +10227,9 @@ async fn handle_inject_prompt_inner(
             }
             Err(PromptWriteError::Submit(e)) => {
                 tracing::warn!("inject_prompt: submit failed: {e}");
+                receipt.refuse(format!(
+                    "the text was pasted but could not be submitted ({e})"
+                ));
                 let _ = bus.send(Event::TerminalInputRejected {
                     terminal_id: id,
                     message: format!(
@@ -9693,7 +10274,17 @@ pub async fn handle_deliver_snippet(
                 category,
                 body: body.clone(),
             });
-            handle_inject_prompt_inner(config, terminal_id, &body, None, submit, delivery).await;
+            handle_inject_prompt_inner(
+                config,
+                terminal_id,
+                &body,
+                None,
+                submit,
+                delivery,
+                InjectGating::human(),
+                crate::delivery::ReceiptSlot::none(),
+            )
+            .await;
         }
         TerminalKind::Shell => {
             let intent = if submit {
@@ -10003,6 +10594,28 @@ pub async fn handle_ingest_hook(
         }
     }
     terminal_io::clear_view_activity(config, terminal_id).await;
+    // The turn's result, straight from the agent: recorded before the state
+    // transition below, because the `Done` that `Stop` produces is what wakes
+    // the turn-end capture that consumes it. A new turn starting clears any
+    // result nobody consumed, so a later hookless turn end can never reuse
+    // an old turn's message.
+    match hook.kind {
+        lazybox_ipc::HookEventKind::Stop => {
+            // Count the turn BEFORE the `Done` state below is broadcast. An
+            // idle-gated question is released by that broadcast and stamps
+            // the count it reads, so a question released by THIS turn's end
+            // carries this turn and the capture for it skips the question
+            // structurally, rather than depending on which task wins.
+            config.mcp.end_turn(&session_key);
+            if let Some(result) = hook.turn_result.clone() {
+                config.mcp.record_turn_result(session_key.clone(), result);
+            }
+        }
+        lazybox_ipc::HookEventKind::UserPromptSubmit => {
+            config.mcp.clear_turn_result(&session_key);
+        }
+        _ => {}
+    }
     // Proof-of-submission signal for the prompt-inject paths: a
     // `UserPromptSubmit` hook means the injected prompt actually
     // entered Claude's turn (issue #122's failure is the prompt parked
@@ -11642,6 +12255,15 @@ async fn load_prompt_history(config: &ServerConfig, session_key: &str) -> Vec<Us
         .unwrap_or_default()
 }
 
+/// Test seam: a workspace's persisted prompt history.
+#[cfg(test)]
+pub(crate) async fn load_prompt_history_for_test(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+) -> Vec<UserPrompt> {
+    load_prompt_history(config, session_key.as_str()).await
+}
+
 /// Persist the in-flight composer buffer (typed but not submitted) for
 /// an agent terminal, keyed by the STABLE workspace session_key so a
 /// half-typed prompt survives a daemon restart — including one that
@@ -12895,6 +13517,63 @@ mod tests {
             "the spawn transport records the same MRU the inject records",
         );
     }
+    /// A spawn lazybox started itself (here, an `@lazybox` mention) that
+    /// lands on an agent already running delivers its prompt as lazybox's,
+    /// so the agent's history says where the task came from.
+    #[tokio::test]
+    async fn an_autonomous_spawn_onto_a_live_agent_is_recorded_as_lazybox() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:o/r#1216");
+        let backend_key = mock
+            .spawn(&[], None, &[], "autonomous-collapse")
+            .await
+            .expect("spawn backing agent");
+        register_test_agent(
+            &config.terminal,
+            TerminalId(16),
+            &backend_key,
+            session_key.clone(),
+            "claude",
+            Some(lazybox_ipc::AgentState::Idle),
+            None,
+        )
+        .await;
+
+        handle_spawn(
+            &config,
+            session_key.clone(),
+            None,
+            TerminalKind::Agent("claude".into()),
+            SpawnOptions {
+                initial_prompt: Some("triage the new @lazybox mention".into()),
+                autonomous: true,
+                origin: lazybox_ipc::SpawnOrigin::Autonomous(
+                    lazybox_ipc::AutonomousTrigger::Mention,
+                ),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let history = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let history = load_prompt_history(&config, session_key.as_str()).await;
+                if !history.is_empty() {
+                    return history;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the autonomous prompt is recorded");
+        assert_eq!(
+            history[0].source,
+            PromptSource::Lazybox {
+                reason: "@lazybox".into()
+            }
+        );
+    }
+
     /// #1148: if a Claude version ignores the deterministically seeded trust
     /// record, an autonomous terminal's exact trust chooser is revalidated
     /// from the live backend and answered once. This is the real backend-write
@@ -13820,6 +14499,7 @@ mod tests {
                 cwd: None,
                 tool_name: None,
                 notification: None,
+                turn_result: None,
             },
         )
         .await;
@@ -15873,6 +16553,7 @@ mod tests {
                 &mut rx,
                 id,
                 &input_resolved_states(),
+                crate::delivery::Gate::ChooserOnly,
                 Duration::from_secs(1)
             )
             .await,
@@ -15898,6 +16579,7 @@ mod tests {
                 &mut rx,
                 id,
                 &input_resolved_states(),
+                crate::delivery::Gate::ChooserOnly,
                 Duration::from_millis(80)
             )
             .await,
@@ -15921,6 +16603,7 @@ mod tests {
                 &mut rx,
                 id,
                 &input_resolved_states(),
+                crate::delivery::Gate::ChooserOnly,
                 Duration::from_secs(1)
             )
             .await,
@@ -16110,6 +16793,250 @@ mod tests {
     /// A second press during that ladder must deliver, not be rejected with
     /// "already waiting … answer its prompt" — no prompt is waiting. The
     /// reservation exists to bound waiters behind a permission gate only.
+    /// A message from another agent must not land mid-turn: pasted into a
+    /// working agent it interleaves with a turn about something else, and
+    /// that turn's end was then read as the answer (the `ask_session`
+    /// capture race). Under `Gate::Idle` it waits for the turn to end, and
+    /// the receipt reports the delivery once it lands.
+    #[tokio::test]
+    async fn an_idle_gated_delivery_waits_out_a_busy_agent() {
+        use crate::delivery::{DeliveryReceipt, DeliveryRequest, Gate, Party};
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "busy-agent")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(713);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("busy-agent"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Working),
+            None,
+        )
+        .await;
+        let mut pending = crate::delivery::deliver(
+            &config,
+            DeliveryRequest {
+                terminal_id: id,
+                body: "sibling-question".into(),
+                submit: false,
+                gate: Gate::Idle,
+                from: Party::Agent(SessionKey::new("asker")),
+                wait_limit: Some(Duration::from_secs(5)),
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            mock.writes_for(&backend_key).await.is_empty(),
+            "nothing may be pasted while the agent is mid-turn"
+        );
+
+        config
+            .terminal
+            .record_agent_state(id, lazybox_ipc::AgentState::Done)
+            .await;
+        let _ = config.bus.send(Event::AgentState {
+            terminal_id: id,
+            session_key: SessionKey::new("busy-agent"),
+            state: lazybox_ipc::AgentState::Done,
+        });
+        assert_eq!(
+            pending.receipt_within(Duration::from_secs(3)).await,
+            Some(DeliveryReceipt::Delivered { confirmed: false }),
+        );
+        assert!(
+            mock.writes_for(&backend_key)
+                .await
+                .iter()
+                .any(|w| String::from_utf8_lossy(w).contains("sibling-question")),
+            "once the turn ended the message landed"
+        );
+    }
+
+    /// A spawn's opening prompt is recorded as the agent that asked for it
+    /// (`start_workspace`), as lazybox for its own triggers, and not at all
+    /// for the user's own spawn or a snippet (recorded elsewhere).
+    #[test]
+    fn a_spawn_prompt_is_recorded_as_whoever_sent_it() {
+        use lazybox_ipc::{AutonomousTrigger, SpawnOrigin};
+        let from_agent = PromptSource::Agent {
+            from: "github-o-r-1".into(),
+        };
+        let agent = spawn_prompt_history(
+            "do it",
+            Some(from_agent.clone()),
+            SpawnOrigin::Autonomous(AutonomousTrigger::Agent),
+            false,
+        )
+        .expect("an agent's brief is recorded");
+        assert_eq!(agent.source, from_agent);
+        assert_eq!(agent.text, "do it");
+
+        let fix = spawn_prompt_history(
+            "fix CI",
+            None,
+            SpawnOrigin::Autonomous(AutonomousTrigger::AutoFix),
+            false,
+        )
+        .expect("lazybox's own trigger is recorded");
+        assert_eq!(
+            fix.source,
+            PromptSource::Lazybox {
+                reason: "auto-fix".into()
+            }
+        );
+
+        assert!(spawn_prompt_history("mine", None, SpawnOrigin::Interactive, false).is_none());
+        assert!(
+            spawn_prompt_history("snip", Some(from_agent), SpawnOrigin::Interactive, true)
+                .is_none()
+        );
+    }
+
+    /// A message another agent delivered used to leave no trace in the
+    /// target's `]]h` history — only what the user typed was recorded. It
+    /// is now recorded when it lands, tagged with who sent it.
+    #[tokio::test]
+    async fn a_delivery_from_another_agent_is_recorded_in_history_with_its_sender() {
+        use crate::delivery::{DeliveryRequest, EarlyOutcome, Gate, Party};
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "history-agent")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(716);
+        let target = SessionKey::new("history-agent");
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            target.clone(),
+            "claude",
+            Some(lazybox_ipc::AgentState::Done),
+            None,
+        )
+        .await;
+        let mut pending = crate::delivery::deliver(
+            &config,
+            DeliveryRequest {
+                terminal_id: id,
+                body: "rebase onto main, #1886 just landed".into(),
+                submit: false,
+                gate: Gate::Idle,
+                from: Party::Agent(SessionKey::new("coordinator")),
+                wait_limit: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            pending.landed_within(Duration::from_secs(3)).await,
+            Some(EarlyOutcome::Landed)
+        );
+        let history = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let history = load_prompt_history(&config, target.as_str()).await;
+                if !history.is_empty() {
+                    return history;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the delivery is recorded");
+        assert_eq!(history[0].text, "rebase onto main, #1886 just landed");
+        assert_eq!(
+            history[0].source,
+            PromptSource::Agent {
+                from: "coordinator".into()
+            }
+        );
+    }
+
+    /// A human's `w w` keeps queueing behind a working agent: the CLI buffers
+    /// it for after the current turn, and people rely on that.
+    #[tokio::test]
+    async fn a_chooser_only_delivery_still_lands_in_a_working_agent() {
+        use crate::delivery::{DeliveryReceipt, DeliveryRequest, Gate, Party};
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "busy-agent-2")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(714);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("busy-agent-2"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Working),
+            None,
+        )
+        .await;
+        let mut pending = crate::delivery::deliver(
+            &config,
+            DeliveryRequest {
+                terminal_id: id,
+                body: "queued-instruction".into(),
+                submit: false,
+                gate: Gate::ChooserOnly,
+                from: Party::Human,
+                wait_limit: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            pending.receipt_within(Duration::from_secs(3)).await,
+            Some(DeliveryReceipt::Delivered { confirmed: false }),
+        );
+    }
+
+    /// A delivery the gate holds past its limit is refused with a reason the
+    /// sender can act on — never dropped silently.
+    #[tokio::test]
+    async fn an_idle_gated_delivery_past_its_limit_is_refused_with_a_reason() {
+        use crate::delivery::{DeliveryReceipt, DeliveryRequest, Gate, Party};
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "busy-agent-3")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(715);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("busy-agent-3"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Working),
+            None,
+        )
+        .await;
+        let mut pending = crate::delivery::deliver(
+            &config,
+            DeliveryRequest {
+                terminal_id: id,
+                body: "too-late".into(),
+                submit: true,
+                gate: Gate::Idle,
+                from: Party::Lazybox("test"),
+                wait_limit: Some(Duration::from_millis(300)),
+            },
+        )
+        .await;
+        match pending.receipt_within(Duration::from_secs(5)).await {
+            Some(DeliveryReceipt::Refused { reason }) => {
+                assert!(reason.contains("busy"), "{reason}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(mock.writes_for(&backend_key).await.is_empty());
+    }
+
     #[tokio::test]
     async fn a_submit_confirm_ladder_does_not_reject_the_next_injection() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
@@ -16729,6 +17656,196 @@ mod tests {
         .expect("injection reservation released after delivery");
     }
 
+    /// Regression: a sibling agent's idle-gated message must NOT occupy the
+    /// human's inject slot.
+    ///
+    /// `ask_session` / `notify_session` deliver with `Gate::Idle` and a
+    /// `wait_limit` of `ASK_DELIVERY_WAIT` (20 minutes), so while the target
+    /// is mid-turn that delivery sits in the readiness loop for the rest of
+    /// the turn. With one reservation per terminal that refused every `w w`,
+    /// `]]s`, gateway inject and auto-fix against the agent for the whole
+    /// wait — the user's text dropped, not queued, with "another delivery is
+    /// already waiting" and no way to get it in. The lanes are now separate:
+    /// the human's prompt pastes into the working agent's composer (which its
+    /// CLI queues) while the agent's message is still waiting to land
+    /// between turns.
+    #[tokio::test]
+    async fn an_agents_queued_message_does_not_block_the_humans_inject() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "busy-target")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(1890);
+        // Mid-turn: `Gate::Idle` must wait, `Gate::ChooserOnly` must not.
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("busy-target"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Working),
+            None,
+        )
+        .await;
+
+        let mut sibling = crate::delivery::deliver(
+            &config,
+            crate::delivery::DeliveryRequest {
+                terminal_id: id,
+                body: "a sibling's question".into(),
+                submit: true,
+                gate: crate::delivery::Gate::Idle,
+                from: crate::delivery::Party::Agent(SessionKey::new("asker")),
+                wait_limit: Some(Duration::from_secs(20 * 60)),
+            },
+        )
+        .await;
+        // Still queued behind the turn, holding only the automation lane.
+        assert_eq!(
+            sibling.receipt_within(Duration::from_millis(50)).await,
+            None,
+            "an idle-gated message waits out the target's turn",
+        );
+        assert_eq!(
+            config.spawn.pending_prompt_injections.lock().len(),
+            1,
+            "the automation lane is reserved",
+        );
+
+        // The human's `w w` lands anyway.
+        handle_inject_prompt(&config, id, "the user's own instruction", None, true).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let joined: Vec<u8> = mock.writes_for(&backend_key).await.concat();
+                if String::from_utf8_lossy(&joined).contains("the user's own instruction") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the human's inject must not be refused by a queued agent message");
+
+        // And the sibling's message is still queued, not stolen or dropped.
+        assert_eq!(
+            sibling.receipt_within(Duration::from_millis(50)).await,
+            None,
+            "the agent's message is still waiting for the turn to end",
+        );
+        let joined: Vec<u8> = mock.writes_for(&backend_key).await.concat();
+        assert!(
+            !String::from_utf8_lossy(&joined).contains("a sibling's question"),
+            "the idle gate still holds the agent's message back mid-turn",
+        );
+    }
+
+    /// Regression: a delivery whose WRITE failed must neither claim it
+    /// landed nor leave a prompt-history row.
+    ///
+    /// `landing()` and the history write used to fire on winning the
+    /// readiness gate, before `write_prompt_sequence` ran. An `Initial`
+    /// write error then left the receipt correctly `Refused` while `]]h`,
+    /// the row's `]N` count and the pinned recap all showed the sibling's
+    /// message as delivered — and `notify_session` had already told the
+    /// sender `status: delivered`. The sender retried and wrote a second row
+    /// for text that landed once or never.
+    #[tokio::test]
+    async fn a_failed_write_records_no_history_and_never_reports_landed() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let id = TerminalId(1892);
+        let session = SessionKey::new("write-fails");
+        // A backend key the mock never spawned: `acquire_live` admits it
+        // (the registry knows the terminal) and the write then fails
+        // `NotFound`, which is exactly `PromptWriteError::Initial`.
+        register_test_agent(
+            &config.terminal,
+            id,
+            "never-spawned",
+            session.clone(),
+            "claude",
+            Some(lazybox_ipc::AgentState::Idle),
+            None,
+        )
+        .await;
+
+        let mut pending = crate::delivery::deliver(
+            &config,
+            crate::delivery::DeliveryRequest {
+                terminal_id: id,
+                body: "a sibling's instruction".into(),
+                submit: true,
+                gate: crate::delivery::Gate::Idle,
+                from: crate::delivery::Party::Agent(SessionKey::new("asker")),
+                wait_limit: None,
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(
+                pending.receipt_within(Duration::from_secs(5)).await,
+                Some(crate::delivery::DeliveryReceipt::Refused { .. })
+            ),
+            "a failed write refuses",
+        );
+        // The early signal must not have fired: `landed_within` sees the
+        // resolved refusal, never a `Landed`.
+        assert!(
+            matches!(
+                pending.landed_within(Duration::from_millis(50)).await,
+                Some(crate::delivery::EarlyOutcome::Refused { .. }) | None
+            ),
+            "a failed write never reports Landed",
+        );
+        assert!(
+            load_prompt_history_for_test(&config, &session)
+                .await
+                .is_empty(),
+            "no history row for text that never reached the composer",
+        );
+    }
+
+    /// A second message in the SAME lane is still refused — the reservation
+    /// stops duplicate waiters piling up, which is why it exists.
+    #[tokio::test]
+    async fn a_second_message_in_the_same_lane_is_still_refused() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "busy-target-2")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(1891);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("busy-target-2"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Working),
+            None,
+        )
+        .await;
+        let request = |body: &str| crate::delivery::DeliveryRequest {
+            terminal_id: id,
+            body: body.to_string(),
+            submit: true,
+            gate: crate::delivery::Gate::Idle,
+            from: crate::delivery::Party::Agent(SessionKey::new("asker")),
+            wait_limit: Some(Duration::from_secs(20 * 60)),
+        };
+        let mut first = crate::delivery::deliver(&config, request("first")).await;
+        assert_eq!(first.receipt_within(Duration::from_millis(50)).await, None);
+        let second = crate::delivery::deliver(&config, request("second")).await;
+        assert!(
+            matches!(
+                second.receipt().await,
+                crate::delivery::DeliveryReceipt::Refused { .. }
+            ),
+            "two queued automation messages would both paste when the turn ends",
+        );
+    }
+
     /// An `InputNeeded` reading with NO recorded prompt shape is presumed
     /// chooser-like — matching `AgentObservation::from_state`, which treats a
     /// bare/legacy `InputNeeded` as a chooser — so an inject DEFERS rather
@@ -16814,6 +17931,7 @@ mod tests {
             cwd: None,
             tool_name: None,
             notification: Some(text.to_string()),
+            turn_result: None,
         };
 
         // Idle nudge → free-text elicitation.
@@ -16961,6 +18079,7 @@ mod tests {
             None,
             false,
             true,
+            lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await;
         match rx.try_recv().expect("a retry notice is broadcast") {
@@ -18559,6 +19678,118 @@ mod tests {
         );
     }
 
+    /// An agent coming off a usage limit dropped the first `continue` paste
+    /// outright: no echo, nothing in the composer. Resending Enter into that
+    /// empty composer and then telling the user to "press Enter" was the
+    /// whole recovery. A paste that is not on screen is now pasted again,
+    /// once, and a second miss says the agent did not take the prompt.
+    #[tokio::test(start_paused = true)]
+    async fn a_paste_that_never_reached_the_composer_is_pasted_again() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4250);
+        config.terminal.bind_backend(id, key.clone()).await;
+        let mut bus_rx = config.bus.subscribe();
+        let interaction = terminal_io::acquire_live(&config, id, &key)
+            .await
+            .expect("interaction lock");
+        let events = config.bus.subscribe();
+        let confirmed = settle_submit_and_confirm(
+            &config,
+            id,
+            &key,
+            true,
+            b"continue".to_vec(),
+            b"\r".to_vec(),
+            events,
+            vec!["continue".into()],
+            interaction,
+        )
+        .await
+        .expect("no write error");
+        assert!(!confirmed);
+        let writes = mock.writes_for(&key).await;
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|w| w.as_slice() == b"continue")
+                .count(),
+            1,
+            "the body is pasted again exactly once (the first paste is the caller's): {writes:?}"
+        );
+        let mut messages = Vec::new();
+        while let Ok(event) = bus_rx.try_recv() {
+            if let Event::TerminalInputRejected { message, .. } = event {
+                messages.push(message);
+            }
+        }
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("did not take the prompt")),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("press Enter")),
+            "never tells the user to press Enter on an empty composer: {messages:?}"
+        );
+    }
+
+    /// A prompt that IS in the composer is genuinely parked: no second
+    /// paste (that would duplicate it), and the user is told to press Enter.
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_sitting_in_the_composer_is_reported_parked_not_pasted_twice() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4251);
+        config.terminal.bind_backend(id, key.clone()).await;
+        // On screen before the settle watcher subscribes, so the settle
+        // reads no echo while the composer check does see the text.
+        mock.emit(&key, "\u{276f} continue\r\n").await;
+        let mut bus_rx = config.bus.subscribe();
+        let interaction = terminal_io::acquire_live(&config, id, &key)
+            .await
+            .expect("interaction lock");
+        let events = config.bus.subscribe();
+        let confirmed = settle_submit_and_confirm(
+            &config,
+            id,
+            &key,
+            true,
+            b"continue".to_vec(),
+            b"\r".to_vec(),
+            events,
+            vec!["continue".into()],
+            interaction,
+        )
+        .await
+        .expect("no write error");
+        assert!(!confirmed);
+        assert!(
+            !mock
+                .writes_for(&key)
+                .await
+                .iter()
+                .any(|w| w.as_slice() == b"continue"),
+            "a parked prompt is not pasted a second time"
+        );
+        let mut parked = false;
+        while let Ok(event) = bus_rx.try_recv() {
+            if let Event::TerminalInputRejected { message, .. } = event {
+                parked |= message.contains("press Enter");
+            }
+        }
+        assert!(parked, "the user is told the prompt is parked");
+    }
+
     /// A snippet whose paste landed and whose Enter was sent is a delivery
     /// whether or not the agent acknowledges the submit inside the confirm
     /// window. Before, an unconfirmed submit recorded nothing — no `]N`
@@ -20094,7 +21325,7 @@ mod tests {
         assert!(exe.is_absolute(), "current_exe must be absolute: {exe:?}");
         let quoted = format!("\"{}\"", exe.display());
 
-        let claude = hook_command(&exe, "lzb-sess-7", false);
+        let claude = hook_command(&exe, "lzb-sess-7", false, None);
         assert!(claude.contains(&quoted), "bare/relative exe in: {claude}");
 
         let codex = hook_command_keyfile(&exe, Path::new("/run/lzb/backend-key-7"));
@@ -20103,7 +21334,12 @@ mod tests {
 
     #[test]
     fn hook_command_quotes_exe_and_bakes_backend_key() {
-        let cmd = hook_command(Path::new("/opt/lazy box/lazybox"), "lzb-sess-7", false);
+        let cmd = hook_command(
+            Path::new("/opt/lazy box/lazybox"),
+            "lzb-sess-7",
+            false,
+            None,
+        );
         assert!(
             cmd.contains("\"/opt/lazy box/lazybox\" hook-ingest --backend-key \"lzb-sess-7\""),
             "exec missing or unquoted: {cmd}"
@@ -20119,7 +21355,7 @@ mod tests {
         // Claude's settings-file hook carries the marker that turns
         // `SessionStart` into the lazybox capability blurb; Codex's argv hook
         // omits it (its stdout-as-context behavior is unverified).
-        let claude = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false);
+        let claude = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false, None);
         assert!(
             claude.contains("hook-ingest --backend-key \"lzb-sess-7\" --emit-session-context"),
             "claude hook must carry the session-context marker: {claude}"
@@ -20131,18 +21367,35 @@ mod tests {
         );
     }
 
+    /// The repo rides the hook command so the SessionStart briefing states
+    /// that repo's policies; anything that isn't a plain `owner/name` is
+    /// never baked into the shell string.
+    #[test]
+    fn the_hook_command_carries_a_plain_repo_slug_only() {
+        let exe = Path::new("/opt/lazybox");
+        let with = hook_command(exe, "lzb-sess-7", false, Some("acme/api"));
+        assert!(with.contains(" --repo \"acme/api\""), "{with}");
+        for hostile in ["acme/api\"; rm -rf ~", "a/b/c", "", "acme/$(x)"] {
+            let cmd = hook_command(exe, "lzb-sess-7", false, Some(hostile));
+            assert!(
+                !cmd.contains("--repo"),
+                "{hostile:?} must not be embedded: {cmd}"
+            );
+        }
+    }
+
     #[test]
     fn hook_command_gates_the_mcp_context_marker_on_the_bus_being_wired() {
         // The MCP-context marker rides only when the spawn is provisioned to
         // the coordination bus. An unwired (e.g. ReadOnly) Claude session still
         // gets `--emit-session-context` but must NOT get `--emit-mcp-context`,
         // or its briefing would advertise tools it cannot call (#1420).
-        let wired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", true);
+        let wired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", true, None);
         assert!(
             wired.contains("--emit-session-context --emit-mcp-context"),
             "wired spawn must carry both markers: {wired}"
         );
-        let unwired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false);
+        let unwired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false, None);
         assert!(
             unwired.contains("--emit-session-context"),
             "unwired spawn still carries the base marker: {unwired}"
@@ -24810,6 +26063,7 @@ mod tests {
             cwd: None,
             tool_name: None,
             notification: None,
+            turn_result: None,
         }
     }
 

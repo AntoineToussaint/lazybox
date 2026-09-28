@@ -268,6 +268,12 @@ pub enum PromptSource {
     /// key and category so the history can name which snippet it was
     /// (`category` is empty when the snippet declares none).
     Snippet { key: String, category: String },
+    /// Delivered by another agent session through the coordination tools
+    /// (`notify_session`, `ask_session`). `from` is that session's key.
+    Agent { from: String },
+    /// Delivered by lazybox's own automation (auto-fix, resume, epic
+    /// dispatch). `reason` names which.
+    Lazybox { reason: String },
 }
 
 /// One prompt the user submitted to an agent terminal, retained in a
@@ -558,6 +564,22 @@ pub struct MergeOrderEntry {
     pub held_by: Vec<lazybox_core::WorkspaceKey>,
 }
 
+/// One open `ask_session` request against a workspace, as a client shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct OpenAgentRequest {
+    /// The asking agent's workspace.
+    pub asker: lazybox_core::WorkspaceKey,
+    /// The question, capped at [`OPEN_REQUEST_QUESTION_MAX_CHARS`].
+    pub question: String,
+    /// Unix ms when it was asked.
+    pub asked_at: i64,
+}
+
+/// The longest question an [`OpenAgentRequest`] carries to a client, in
+/// characters. The badge's reader needs the gist, not the whole prompt.
+pub const OPEN_REQUEST_QUESTION_MAX_CHARS: usize = 200;
+
 /// Derived status of one epic member. Precedence (first match wins): Done →
 /// Failed → Asking → InProgress → Mergeable → PrOpen → Claimed → Blocked →
 /// Ready.
@@ -727,6 +749,12 @@ pub struct HookEvent {
     /// Notification descriptor (`notification_type` or `message`), used
     /// to distinguish a permission/elicitation prompt from an idle one.
     pub notification: Option<String>,
+    /// On `Stop`: the agent's final message for the turn, as the agent
+    /// wrote it — Claude's `last_assistant_message`, or the last assistant
+    /// text in its transcript. The turn's result, where lazybox used to
+    /// scrape the terminal's scrollback for one.
+    #[serde(default)]
+    pub turn_result: Option<String>,
 }
 
 /// The lifecycle point a [`HookEvent`] fired at. `Other` is the
@@ -3954,11 +3982,15 @@ pub enum Event {
     /// (#1653). Broadcast whenever the count moves — an ask injected, a
     /// reply landed, a turn-end capture closed one — and replayed after the
     /// `Subscribe` snapshot for every workspace currently carrying one, so a
-    /// client seeds the `?N` sidebar badge on connect rather than waiting
+    /// client seeds the `⟲N` sidebar badge on connect rather than waiting
     /// for the next change. `open: 0` clears the badge. Appended last.
     AgentRequestsOpen {
         workspace_key: lazybox_core::WorkspaceKey,
         open: usize,
+        /// The open requests themselves, oldest first — who asked what, so
+        /// the badge is not a count with no way to see behind it.
+        #[serde(default)]
+        requests: Vec<OpenAgentRequest>,
     },
     /// Reply to [`Command::QueryTaskStatus`] (#1785): what the daemon can
     /// observe about work on one tracker record.
@@ -4228,6 +4260,9 @@ pub enum AutonomousTrigger {
     /// its `REVIEW` latch dispatching a Reviewer onto a green PR (#1525).
     /// Appended last (bincode is ordinal-sensitive).
     EpicAuto,
+    /// Another agent handed independent work to a workspace of its own
+    /// (`start_workspace`). Appended last (bincode is ordinal-sensitive).
+    Agent,
 }
 
 impl AutonomousTrigger {
@@ -4240,6 +4275,7 @@ impl AutonomousTrigger {
             Self::AutoFix => "auto-fix",
             Self::Restore => "restored",
             Self::EpicAuto => "AUTO",
+            Self::Agent => "from an agent",
         }
     }
 }

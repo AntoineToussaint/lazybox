@@ -215,10 +215,13 @@ the latest state per provider. (`OpenSyncStatus` in
 ### What it does
 Opens a multi-select **filter menu** over three predicate axes — state
 (with-agent, CI-failing, conflict, unread, asking, review-requested,
-auto-merge, **blocked**, **ready**), role (author / reviewer / assignee /
-mentioned), and kind (PR / issue) — each shown with a live match count.
-Filters combine AND-across-axes / OR-within-axis and render as removable chips
-in the sidebar header. `blocked` / `ready` key off the dependency edges below.
+auto-merge, **blocked**, **ready**, **in-flight**), role (author / reviewer /
+assignee / mentioned), and kind (PR / issue) — each shown with a live match
+count. Filters combine AND-across-axes / OR-within-axis and render as removable
+chips in the sidebar header. `blocked` / `ready` key off the dependency edges
+below. `in-flight` is what you are juggling right now: an agent there is
+working, waiting on you or just finished, or within the last hour you marked it
+read or your own PR / issue moved.
 
 ### How to use it
 Press `f`, toggle the predicates you want, confirm. Active filters show as
@@ -254,8 +257,9 @@ Surfaces **dependency edges** already declared upstream — no new lazybox
 concept, no epic record. Every task carries `blocked_by` (blocker task ids)
 and an optional `blocked_on` reason; GitHub tasks additionally carry a
 `parent` derived from the native sub-issue relationship. Blocked rows show a
-red `⛔` badge (`⛔N` for N edge blockers, `⛔!` for a declared `Blocked on:`
-reason), the right pane header adds a `Blocked on:` line, the filter menu gains
+red `⊗` badge (`⊗N` for N edge blockers, `⊗!` for a declared `Blocked on:`
+reason), the right pane header adds a `Blocked on:` line naming each blocker
+(click one to jump to its workspace, or open it on GitHub), the filter menu gains
 `blocked` / `ready` predicates, and `E j` jumps the cursor to the next blocked
 workspace.
 
@@ -271,7 +275,7 @@ workspace.
 - lazybox never **writes** edges upstream — this is a read-only projection.
 
 ### How to use it
-Blocked rows are visible at a glance (`⛔`). Press `f` and toggle `blocked` or
+Blocked rows are visible at a glance (`⊗`). Press `f` and toggle `blocked` or
 `ready` to narrow the inbox to just those. Press `E j` to walk the blocked
 rows: workspaces that declare a `Blocked on:` reason come first, then
 edge-blocked rows, wrapping at the end.

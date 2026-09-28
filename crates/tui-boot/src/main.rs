@@ -2144,6 +2144,11 @@ fn spawn_terminal_restore_on_signal(drain: Option<DaemonDrain>) {
         if !lazybox_config::Config::flush_pending_saves(Duration::from_secs(2)) {
             tracing::warn!("signal exit: pending config saves did not flush within the bound");
         }
+        // `exit` skips destructors, so the keep-awake inhibitor's drop-time
+        // handoff never runs: leave the bounded hold behind explicitly, or
+        // a restart hands the machine to idle sleep with agents still
+        // working in tmux.
+        lazybox_server::keep_awake::hand_off_before_exit();
         // 128 + SIGTERM(15); a conventional signal-exit status.
         std::process::exit(143);
     });

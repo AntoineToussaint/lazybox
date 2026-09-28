@@ -87,6 +87,70 @@ fn short_key(k: &WorkspaceKey) -> String {
     }
 }
 
+/// One line describing a member for the graph's detail row: its key, its
+/// status in words, and what is holding it — the graph drew only a glyph
+/// per node, so *why* a member was blocked or held was nowhere on screen.
+pub fn member_detail(member: &EpicMember) -> String {
+    let status = match &member.status {
+        EpicMemberStatus::Done => "done".to_string(),
+        EpicMemberStatus::Failed => "failed".to_string(),
+        EpicMemberStatus::Asking => "waiting on input".to_string(),
+        EpicMemberStatus::InProgress => "in progress".to_string(),
+        EpicMemberStatus::Mergeable { held_by } if !held_by.is_empty() => format!(
+            "mergeable, held behind {}",
+            held_by.iter().map(short_key).collect::<Vec<_>>().join(", ")
+        ),
+        EpicMemberStatus::Mergeable { .. } => "mergeable".to_string(),
+        EpicMemberStatus::PrOpen {
+            ci_failing,
+            changes_requested,
+        } => {
+            let mut s = "PR open".to_string();
+            if *ci_failing {
+                s.push_str(", CI failing");
+            }
+            if *changes_requested {
+                s.push_str(", changes requested");
+            }
+            s
+        }
+        EpicMemberStatus::Claimed => "claimed on another box".to_string(),
+        EpicMemberStatus::Blocked => "blocked".to_string(),
+        EpicMemberStatus::ReviewBlocked => "review found blocking issues".to_string(),
+        EpicMemberStatus::Ready => "ready to start".to_string(),
+    };
+    let mut parts = vec![short_key(&member.key), status];
+    if !member.blocked_by.is_empty() {
+        parts.push(format!(
+            "waits on {}",
+            member
+                .blocked_by
+                .iter()
+                .map(short_key)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !member.external_blockers.is_empty() {
+        parts.push(format!(
+            "external {}",
+            member
+                .external_blockers
+                .iter()
+                .map(|t| t.key.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    for blocker in &member.blockers {
+        parts.push(format!("{}: {}", blocker.kind.as_str(), blocker.reason));
+    }
+    if let Some(reason) = &member.blocked_reason {
+        parts.push(reason.clone());
+    }
+    parts.join(" · ")
+}
+
 /// The status glyph + tone for a member node.
 fn node_glyph(status: &EpicMemberStatus) -> (&'static str, Tone) {
     match status {
@@ -336,6 +400,39 @@ pub fn layout(snapshot: &EpicSnapshot, width: u16, selected: Option<usize>) -> D
 
 #[cfg(test)]
 mod tests {
+
+    /// The detail row says in words what the node's glyph only hints at:
+    /// the status, and every edge or declared reason holding the member.
+    #[test]
+    fn member_detail_names_the_status_and_what_holds_it() {
+        let mut m = member("o/r#2", 1, EpicMemberStatus::Blocked);
+        m.blocked_by = vec![WorkspaceKey::new("github:o/r#1")];
+        m.external_blockers = vec![lazybox_core::TaskId {
+            source: "github".into(),
+            key: "x/y#9".into(),
+        }];
+        m.blockers = vec![lazybox_ipc::Blocker {
+            kind: BlockerKind::Decision,
+            reason: "token expiry".into(),
+            owner: lazybox_ipc::BlockerOwner::Operator,
+            since: 0,
+            holds: 0,
+        }];
+        assert_eq!(
+            member_detail(&m),
+            "o/r#2 · blocked · waits on o/r#1 · external x/y#9 · decision: token expiry"
+        );
+        let pr = member(
+            "o/r#3",
+            0,
+            EpicMemberStatus::PrOpen {
+                ci_failing: true,
+                changes_requested: false,
+            },
+        );
+        assert_eq!(member_detail(&pr), "o/r#3 · PR open, CI failing");
+    }
+
     use super::*;
     use lazybox_ipc::{Blocker, BlockerOwner, EpicEdge, EpicMember};
 

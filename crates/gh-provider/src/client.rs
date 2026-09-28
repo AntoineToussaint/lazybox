@@ -7909,6 +7909,38 @@ impl lazybox_core::TaskProvider for GhClient {
         Some(&self.user)
     }
 
+    /// Post the PR's cost as the sticky trailer comment after a merge
+    /// lazybox did not perform. Honours the same per-visibility policy as
+    /// the commit-body path, so a public repo set to `off` stays silent.
+    async fn record_merged_trailers(
+        &self,
+        workspace: &lazybox_core::Workspace,
+        trailers: &lazybox_core::PrTrailers,
+        policy: &lazybox_core::TrailerPolicy,
+    ) -> lazybox_core::TrailerOutcome {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return lazybox_core::TrailerOutcome::Nothing;
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return lazybox_core::TrailerOutcome::Dropped {
+                reason: "the merged PR has no node id yet".to_string(),
+            };
+        };
+        let settings = match self.merge_method_for(pr.repo.as_deref(), node_id).await {
+            Ok((settings, _)) => settings,
+            Err(error) => {
+                return lazybox_core::TrailerOutcome::Dropped {
+                    reason: format!("the repo's visibility could not be read ({error})"),
+                };
+            }
+        };
+        let mode = policy.mode_for(pr.repo.as_deref(), settings.is_private);
+        match mode.apply(trailers) {
+            Some(trailers) => self.write_sticky_trailer_comment(pr, &trailers).await,
+            None => lazybox_core::TrailerOutcome::Nothing,
+        }
+    }
+
     /// Merge the workspace's PR. Requires `workspace.pr.node_id`
     /// (the GraphQL node id) — the polling cycle fills it in;
     /// hitting this on a fresh-from-cache workspace surfaces as

@@ -38,6 +38,16 @@ struct Merged {
     output: Option<u64>,
     cache_creation: Option<u64>,
     cache_read: Option<u64>,
+    /// The 1-hour part of `cache_creation` (Anthropic's
+    /// `cache_creation.ephemeral_1h_input_tokens`), billed at 2× input.
+    cache_creation_1h: Option<u64>,
+    /// `usage.speed == "fast"`: every bucket bills at the fast-mode rate.
+    fast: bool,
+    /// The input total *includes* the cached tokens — OpenAI's shape
+    /// (`prompt_tokens` with `prompt_tokens_details.cached_tokens`, the
+    /// Responses API's `input_tokens` with `input_tokens_details`, Codex's
+    /// `cached_input_tokens`). Anthropic reports the two disjointly.
+    input_includes_cached: bool,
 }
 
 impl Merged {
@@ -55,6 +65,20 @@ impl Merged {
         Self::bump(&mut self.output, other.output);
         Self::bump(&mut self.cache_creation, other.cache_creation);
         Self::bump(&mut self.cache_read, other.cache_read);
+        Self::bump(&mut self.cache_creation_1h, other.cache_creation_1h);
+        self.fast |= other.fast;
+        self.input_includes_cached |= other.input_includes_cached;
+    }
+
+    /// Input tokens that were *not* served from the cache, whichever way the
+    /// provider counted them.
+    fn uncached_input(&self) -> Option<u64> {
+        let input = self.input?;
+        Some(if self.input_includes_cached {
+            input.saturating_sub(self.cache_read.unwrap_or(0))
+        } else {
+            input
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -229,17 +253,21 @@ impl UsageAccumulator {
                 pricing::cost_micros(
                     model,
                     &TokenCounts {
-                        input: self.merged.input.unwrap_or(0),
+                        input: self.merged.uncached_input().unwrap_or(0),
                         output: self.merged.output.unwrap_or(0),
                         cache_creation: self.merged.cache_creation.unwrap_or(0),
                         cache_read: self.merged.cache_read.unwrap_or(0),
+                        cache_creation_1h: self.merged.cache_creation_1h.unwrap_or(0),
+                        fast: self.merged.fast,
                     },
                     &self.prices,
                 )
             })
         };
         Some(AgentUsage {
-            input_tokens: self.merged.input,
+            // Uncached input, so every provider's buckets add up the same
+            // way: OpenAI's total already contains the cached tokens.
+            input_tokens: self.merged.uncached_input(),
             output_tokens: self.merged.output,
             cache_creation_input_tokens: self.merged.cache_creation,
             cache_read_input_tokens: self.merged.cache_read,
@@ -363,13 +391,18 @@ fn extract(usage: &serde_json::Map<String, Value>) -> Merged {
             .and_then(|d| d.get(child))
             .and_then(Value::as_u64)
     };
+    let anthropic_cache_read = num(&["cache_read_input_tokens"]);
+    let openai_cache_read = num(&["cached_input_tokens"])
+        .or_else(|| nested("prompt_tokens_details", "cached_tokens"))
+        .or_else(|| nested("input_tokens_details", "cached_tokens"));
     Merged {
         input: num(&["input_tokens", "prompt_tokens"]),
         output: num(&["output_tokens", "completion_tokens"]),
         cache_creation: num(&["cache_creation_input_tokens"]),
-        cache_read: num(&["cache_read_input_tokens", "cached_input_tokens"])
-            .or_else(|| nested("prompt_tokens_details", "cached_tokens"))
-            .or_else(|| nested("input_tokens_details", "cached_tokens")),
+        cache_read: anthropic_cache_read.or(openai_cache_read),
+        cache_creation_1h: nested("cache_creation", "ephemeral_1h_input_tokens"),
+        fast: usage.get("speed").and_then(Value::as_str) == Some("fast"),
+        input_includes_cached: anthropic_cache_read.is_none() && openai_cache_read.is_some(),
     }
 }
 
@@ -425,7 +458,8 @@ mod tests {
             "data: [DONE]\n\n",
         );
         let u = feed(&[stream]).expect("usage");
-        assert_eq!(u.input_tokens, Some(300));
+        // `prompt_tokens` includes the 64 cached; reported uncached.
+        assert_eq!(u.input_tokens, Some(236));
         assert_eq!(u.output_tokens, Some(80));
         assert_eq!(u.cache_read_input_tokens, Some(64));
     }
@@ -438,9 +472,38 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":500,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":100}}}}\n\n",
         );
         let u = feed(&[stream]).expect("usage");
-        assert_eq!(u.input_tokens, Some(500));
+        // The Responses API's `input_tokens` includes the 100 cached.
+        assert_eq!(u.input_tokens, Some(400));
         assert_eq!(u.output_tokens, Some(25));
         assert_eq!(u.cache_read_input_tokens, Some(100));
+    }
+
+    /// OpenAI's input total contains its cached tokens. Pricing both bills
+    /// every cached token at the full input rate *and* the cached rate.
+    #[test]
+    fn openai_cached_tokens_are_billed_once() {
+        let stream = "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0,\"input_tokens_details\":{\"cached_tokens\":900000}}}}\n\n";
+        let u = feed(&[stream]).expect("usage");
+        // gpt-5: 100k fresh × $1.25 + 900k cached × $0.125 = $0.2375.
+        assert_eq!(u.cost_usd_micros, Some(237_500));
+    }
+
+    /// Anthropic's 1-hour cache writes bill at 2× input, not the 5-minute
+    /// 1.25×; the split rides a nested `cache_creation` object.
+    #[test]
+    fn anthropic_one_hour_cache_writes_bill_at_their_own_rate() {
+        let body = r#"{"model":"claude-opus-5","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":3000000,"cache_creation":{"ephemeral_5m_input_tokens":2000000,"ephemeral_1h_input_tokens":1000000}}}"#;
+        let u = feed(&[body]).expect("usage");
+        // 2M × $6.25 + 1M × $10 = $22.50.
+        assert_eq!(u.cost_usd_micros, Some(22_500_000));
+    }
+
+    /// A fast-mode response (`usage.speed: "fast"`) bills at twice the rate.
+    #[test]
+    fn a_fast_mode_response_bills_at_the_fast_rate() {
+        let body = r#"{"model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0,"speed":"fast"}}"#;
+        let u = feed(&[body]).expect("usage");
+        assert_eq!(u.cost_usd_micros, Some(8_000_000));
     }
 
     #[test]
@@ -663,6 +726,7 @@ mod tests {
                 output: 10.0,
                 cache_write: 0.0,
                 cache_read: 0.0,
+                cache_write_1h: None,
             },
         );
         let mut acc = UsageAccumulator::with_prices(Arc::new(map));

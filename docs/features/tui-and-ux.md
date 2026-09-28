@@ -253,6 +253,22 @@ The right pane: the focused workspace's merged feed of comments, reviews, status
 changes, and CI updates, with a collapsible Description section and per-card
 expand/collapse. Multi-select drives bulk mark-read and the `w w`/reply targeting.
 
+Above the feed, the header spells out the workspace's state; every line or
+segment that names something you can act on runs it on click:
+
+| Line | Click |
+|---|---|
+| title (`↗`) | opens the PR / issue |
+| `Epic: #N · Worker · merge after #M` | the epic or predecessor jumps to its workspace; the role opens `E r` |
+| `Stack: stacked on #N` | jumps to the parent PR |
+| `Blocked on: #7, x/y#9` | each blocker jumps to its workspace or opens it; resolved ones are struck through |
+| `Asked by <workspace>: "…"` | an open `ask_session` question another agent is waiting on; jumps to the asker |
+| diffstat | opens the diff (`g v`) |
+| `Checks: ✗ 1 failing (build) · ✓ 12 passed` | picks a check to open, failing first |
+| `Merge: behind base — update · arm on green · ready — merge` | each segment runs its action (`g u`, `g g`, `g m`) |
+| `Issue: #167 · #168` | each opens its own issue |
+| `Reviewers:` / `Assignees:` / `Labels:` | opens `g r` / `g a` / `g l` |
+
 ### How to use it
 Navigate with `j/k`; `g/G` jump top/bottom; `h/l` collapse/expand the focused
 card; `d` toggles the PR/issue description teaser — a second `d` on a long or
@@ -335,6 +351,9 @@ terminal for native whole-screen selection.
 
 ### How to use it
 - Click to focus panes / select rows; double-click activity cards to expand;
+  click the footer's notice (message log) or sync status (sync view), the
+  sidebar's usage / today strip or a tab's spend badge (Stats), and a
+  focus-mode count (`!`, `Shift-F`, `Shift-N`, `Shift-O`);
   right-click a sidebar row for a context menu; right-click terminal content to
   open a detected URL/file/issue reference.
 - Drag a splitter to resize; mouse wheel scrolls the focused list/terminal.

@@ -1959,6 +1959,10 @@ mod originating_issue_header_tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
 
+    pub(super) fn task_for_blockers(number: u64) -> Task {
+        task("pull", number, vec![])
+    }
+
     fn task(kind: &str, number: u64, closes: Vec<TaskId>) -> Task {
         Task {
             author: String::new(),
@@ -2052,6 +2056,33 @@ mod originating_issue_header_tests {
         assert_eq!(url, "https://github.com/o/r/issues/167");
         assert!(pane.handle_mouse_click(0, row));
         assert_eq!(pane.take_open_url().as_deref(), Some(url.as_str()));
+    }
+
+    /// Every issue a PR closes is listed, each its own link — the row
+    /// badge said `←#167+1` while the header named only the first.
+    #[test]
+    fn every_closed_issue_is_listed_and_each_opens_its_own_url() {
+        let pr = task("pull", 172, vec![issue_id(167), issue_id(168)]);
+        let ws = Workspace::from_task(pr, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let rows = rows(&mut pane, 80, 30);
+        let (y, line) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.contains("Issue: #167 · #168"))
+            .unwrap_or_else(|| panic!("both issues listed: {rows:#?}"));
+        let col = line[..line.find("#168").unwrap()].chars().count() as u16;
+        assert!(pane.handle_mouse_click(col, y as u16));
+        assert_eq!(
+            pane.take_open_url().as_deref(),
+            Some("https://github.com/o/r/issues/168")
+        );
+        assert!(pane.handle_mouse_click(0, y as u16), "the rest of the row");
+        assert_eq!(
+            pane.take_open_url().as_deref(),
+            Some("https://github.com/o/r/issues/167")
+        );
     }
 
     #[test]
@@ -2622,6 +2653,400 @@ mod natural_height_tests {
         assert_eq!(
             pane_with(Some(ws_with_n_comments(10))).natural_height(),
             4 + 1 + (10 + 3)
+        );
+    }
+}
+
+#[cfg(test)]
+mod header_blocker_tests {
+    use super::super::{PaneId, RightPane, blocker_label};
+    use chrono::Utc;
+    use lazybox_core::{TaskId, Workspace};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn gh(key: &str) -> TaskId {
+        TaskId {
+            source: "github".into(),
+            key: key.into(),
+        }
+    }
+
+    fn render(pane: &mut RightPane, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn a_same_repo_blocker_is_labelled_by_number_and_a_foreign_one_in_full() {
+        assert_eq!(blocker_label(&gh("o/r#7"), Some("o/r")), "#7");
+        assert_eq!(blocker_label(&gh("x/y#9"), Some("o/r")), "x/y#9");
+        let linear = TaskId {
+            source: "linear".into(),
+            key: "ENG-45".into(),
+        };
+        assert_eq!(blocker_label(&linear, Some("o/r")), "ENG-45");
+    }
+
+    #[test]
+    fn clicking_a_header_blocker_asks_to_open_that_blocker() {
+        let mut pr = super::originating_issue_header_tests::task_for_blockers(172);
+        pr.blocked_by = vec![gh("o/r#7"), gh("x/y#9")];
+        let ws = Workspace::from_task(pr, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        let rows = render(&mut pane, 100, 24);
+        let (row, hits) = pane
+            .click_hits
+            .header_spans
+            .first()
+            .cloned()
+            .expect("the blocker line registers click targets");
+        let line = &rows[row as usize];
+        assert!(line.contains("#7") && line.contains("x/y#9"), "{line}");
+        assert_eq!(hits.len(), 2);
+
+        let (span, target) = hits[1].clone();
+        assert_eq!(target, super::super::HeaderTarget::Task(gh("x/y#9")));
+        assert!(pane.handle_mouse_click(*span.start(), row));
+        assert_eq!(pane.take_open_task(), Some(gh("x/y#9")));
+        assert_eq!(pane.take_open_task(), None, "the request is consumed");
+    }
+}
+
+#[cfg(test)]
+mod header_height_tests {
+    //! The header reserves exactly the rows it draws. It used to count
+    //! them separately (`4 + origin + diffstat + blocked`), which clipped
+    //! the Assignees line off every PR.
+    use super::super::{PaneId, RightPane};
+    use chrono::Utc;
+    use lazybox_core::{TaskId, Workspace};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn rows(pane: &mut RightPane, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    fn row_of(rows: &[String], needle: &str) -> u16 {
+        rows.iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} is drawn: {rows:#?}")) as u16
+    }
+
+    #[test]
+    fn header_rows_that_name_an_action_run_it_on_click() {
+        use lazybox_tui_core::action::Action;
+        let mut pr = super::originating_issue_header_tests::task_for_blockers(172);
+        pr.labels = vec![
+            lazybox_core::Label::new("bug"),
+            lazybox_core::Label::new("ux"),
+        ];
+        pr.additions = 3;
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr, Utc::now())));
+        let rows = rows(&mut pane, 100, 40);
+        assert!(rows[row_of(&rows, "Labels:") as usize].contains("bug · ux"));
+        for (needle, action) in [
+            ("Assignees:", Action::AddAssignees),
+            ("Labels:", Action::ManageLabels),
+            ("files changed", Action::ViewDiff),
+        ] {
+            assert!(pane.handle_mouse_click(20, row_of(&rows, needle)));
+            assert_eq!(pane.take_action(), Some(action), "{needle}");
+        }
+    }
+
+    #[test]
+    fn the_stack_line_links_to_the_parent_pr() {
+        let pr = super::originating_issue_header_tests::task_for_blockers(172);
+        let parent = TaskId {
+            source: "github".into(),
+            key: "o/r#171".into(),
+        };
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr, Utc::now())));
+        pane.set_stack(Some(lazybox_core::StackPosition {
+            parent: Some(parent.clone()),
+            children: vec![],
+            position: 2,
+            depth: 2,
+        }));
+        let rows = rows(&mut pane, 100, 40);
+        assert!(pane.handle_mouse_click(0, row_of(&rows, "stacked on #171")));
+        assert_eq!(pane.take_open_task(), Some(parent));
+    }
+
+    #[test]
+    fn a_pr_header_shows_its_assignees_line() {
+        let pr = super::originating_issue_header_tests::task_for_blockers(172);
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr, Utc::now())));
+        let rows = rows(&mut pane, 100, 40);
+        assert!(
+            rows.iter().any(|r| r.contains("Assignees:")),
+            "the Assignees line is drawn, not clipped: {rows:#?}"
+        );
+    }
+
+    /// The reserved height is `header_lines(..., width = 0).len()` while the
+    /// renderer builds at the real pane width, so the two agree only while
+    /// no line's EXISTENCE depends on width. Nothing enforced that, and the
+    /// sentinel `0` is what would make a violation invisible: a header line
+    /// that wrapped would silently clip the rows below it again — the exact
+    /// bug one shared builder was introduced to end.
+    #[test]
+    fn header_line_count_is_width_independent() {
+        let mut pr = super::originating_issue_header_tests::task_for_blockers(172);
+        // Exercise every optional row: blockers, a declared reason, a long
+        // title and a long author line that a narrow pane must truncate
+        // rather than wrap.
+        pr.blocked_by = vec![
+            TaskId {
+                source: "github".into(),
+                key: "o/r#7".into(),
+            },
+            TaskId {
+                source: "github".into(),
+                key: "other/repo#9".into(),
+            },
+        ];
+        pr.blocked_on = Some("waiting on the schema freeze".into());
+        pr.title = "a considerably longer pull request title than any narrow pane can show".into();
+        pr.author = "a-user-with-a-long-handle".into();
+        pr.role = lazybox_core::TaskRole::Reviewer;
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr.clone(), Utc::now())));
+        let workspace = pane.workspace.clone().expect("workspace");
+        let task = workspace.primary_task().expect("task");
+
+        let at = |width: u16| {
+            pane.header_lines(
+                &workspace,
+                task,
+                width,
+                pane.originating_issues(),
+                task.is_pr(),
+            )
+            .0
+            .len()
+        };
+        let measured = at(0);
+        for width in [1, 20, 40, 80, 200] {
+            assert_eq!(
+                at(width),
+                measured,
+                "header_height measures at width 0; a line count that moves with width \
+                 clips the header at width {width}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_reason_and_blocker_edges_both_fit() {
+        let mut pr = super::originating_issue_header_tests::task_for_blockers(172);
+        pr.blocked_by = vec![TaskId {
+            source: "github".into(),
+            key: "o/r#7".into(),
+        }];
+        pr.blocked_on = Some("waiting on the schema freeze".into());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr, Utc::now())));
+        let rows = rows(&mut pane, 100, 40);
+        for needle in ["schema freeze", "Blocked by: #7", "Assignees:"] {
+            assert!(
+                rows.iter().any(|r| r.contains(needle)),
+                "{needle} is drawn: {rows:#?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod header_status_rows_tests {
+    //! The Checks, Merge and Epic header rows, and blocker resolution:
+    //! state that was a one-glyph sidebar pill at most is spelled out in
+    //! the header, and each segment naming an action runs it on click.
+    use super::super::{PaneId, RightPane};
+    use chrono::Utc;
+    use lazybox_core::{CheckRun, CiStatus, Task, TaskId, TaskState, Workspace};
+    use lazybox_tui_core::action::Action;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn pr() -> Task {
+        super::originating_issue_header_tests::task_for_blockers(172)
+    }
+
+    fn gh(key: &str) -> TaskId {
+        TaskId {
+            source: "github".into(),
+            key: key.into(),
+        }
+    }
+
+    fn check(name: &str, status: CiStatus) -> CheckRun {
+        CheckRun {
+            name: name.into(),
+            status,
+            url: Some(format!("https://ci.example/{name}")),
+        }
+    }
+
+    fn pane_for(ws: Workspace) -> (RightPane, Vec<String>) {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let rows = render(&mut pane);
+        (pane, rows)
+    }
+
+    fn render(pane: &mut RightPane) -> Vec<String> {
+        let (w, h) = (120, 48);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    fn at(rows: &[String], needle: &str) -> (u16, u16) {
+        rows.iter()
+            .enumerate()
+            .find_map(|(y, r)| {
+                r.find(needle)
+                    .map(|byte| (r[..byte].chars().count() as u16, y as u16))
+            })
+            .unwrap_or_else(|| panic!("{needle} is drawn: {rows:#?}"))
+    }
+
+    #[test]
+    fn the_checks_line_counts_names_failures_and_offers_every_check() {
+        let mut task = pr();
+        task.checks = vec![
+            check("lint", CiStatus::Success),
+            check("build", CiStatus::Failure),
+            check("e2e", CiStatus::Running),
+        ];
+        let (mut pane, rows) = pane_for(Workspace::from_task(task, Utc::now()));
+        let (_, row) = at(&rows, "Checks:");
+        let line = &rows[row as usize];
+        for part in ["✗ 1 failing (build)", "◔ 1 running", "✓ 1 passed"] {
+            assert!(line.contains(part), "{part} in {line}");
+        }
+        assert!(pane.handle_mouse_click(2, row));
+        let (title, links) = pane.take_links().expect("a click offers the checks");
+        assert_eq!(title, "Checks");
+        let labels: Vec<&str> = links.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["✗ build", "◔ e2e", "✓ lint"], "failing first");
+        assert_eq!(links[0].1, "https://ci.example/build");
+    }
+
+    #[test]
+    fn merge_segments_run_their_own_action() {
+        let mut task = pr();
+        task.is_behind_base = true;
+        let (mut pane, rows) = pane_for(Workspace::from_task(task, Utc::now()));
+        let (col, row) = at(&rows, "behind base");
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_action(), Some(Action::UpdateBranch));
+        let (col, row) = at(&rows, "arm on green");
+        assert!(pane.handle_mouse_click(col + 1, row));
+        assert_eq!(pane.take_action(), Some(Action::ToggleAutoMerge));
+        assert!(
+            !rows[row as usize].contains("ready"),
+            "a PR behind its base is not ready"
+        );
+    }
+
+    #[test]
+    fn a_green_mergeable_pr_offers_the_merge() {
+        let mut task = pr();
+        task.ci = CiStatus::Success;
+        let mut ws = Workspace::from_task(task, Utc::now());
+        ws.auto_merge_on_green = true;
+        let (mut pane, rows) = pane_for(ws);
+        assert!(rows.iter().any(|r| r.contains("merges on green")));
+        let (col, row) = at(&rows, "ready — merge");
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_action(), Some(Action::MergePr));
+    }
+
+    #[test]
+    fn the_epic_line_links_the_parent_the_role_and_the_landing_order() {
+        let mut task = pr();
+        task.parent = Some(gh("o/r#1517"));
+        task.merge_after = vec![gh("o/r#12")];
+        let mut ws = Workspace::from_task(task, Utc::now());
+        ws.role = Some(lazybox_core::Role::Worker);
+        let (mut pane, rows) = pane_for(ws);
+        let (col, row) = at(&rows, "#1517");
+        assert!(rows[row as usize].contains("Epic:"));
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_open_task(), Some(gh("o/r#1517")));
+        let (col, row) = at(&rows, "Worker");
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_action(), Some(Action::SetRole));
+        let (col, row) = at(&rows, "merge after #12");
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_open_task(), Some(gh("o/r#12")));
+    }
+
+    #[test]
+    fn inbound_requests_name_who_asked_what_and_jump_to_the_asker() {
+        let asker = lazybox_core::SessionKey::new("github:o/r#9");
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(Workspace::from_task(pr(), Utc::now())));
+        pane.set_inbound_requests(vec![super::super::InboundRequest {
+            asker: asker.clone(),
+            asker_label: "#9 token schema".into(),
+            question: "what is the\ncontract?".into(),
+        }]);
+        let rows = render(&mut pane);
+        let (col, row) = at(&rows, "Asked by #9 token schema");
+        assert!(
+            rows[row as usize].contains("\u{201c}what is the contract?\u{201d}"),
+            "{rows:#?}"
+        );
+        assert!(pane.handle_mouse_click(col, row));
+        assert_eq!(pane.take_select_workspace(), Some(asker));
+    }
+
+    #[test]
+    fn a_blocker_known_to_be_closed_stops_the_line_reading_red() {
+        let mut task = pr();
+        task.blocked_by = vec![gh("o/r#7")];
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        assert!(
+            render(&mut pane)
+                .iter()
+                .any(|r| r.contains("Blocked on: #7"))
+        );
+
+        pane.set_blocker_states([(gh("o/r#7"), TaskState::Closed)].into());
+        let rows = render(&mut pane);
+        assert!(
+            rows.iter().any(|r| r.contains("Was blocked on: #7")),
+            "{rows:#?}"
         );
     }
 }

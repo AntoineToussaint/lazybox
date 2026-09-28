@@ -274,6 +274,9 @@ pub struct Sidebar {
     /// reply / capture). Drives the row's `?N` badge; a workspace with none
     /// carries no entry.
     open_requests: HashMap<SessionKey, usize>,
+    /// The open inbound requests themselves — who asked what — so the
+    /// right pane can list what is behind the `⟲N` badge.
+    open_request_rows: HashMap<SessionKey, Vec<lazybox_ipc::OpenAgentRequest>>,
     /// Markdown artifacts spooled per workspace (#1822), fed by
     /// `Event::WorkspaceArtifacts` (seeded on connect, refreshed on every
     /// spool change). Drives the row's `▤N` badge; a workspace with none
@@ -527,6 +530,9 @@ pub struct Sidebar {
     /// sitting to the right of the sort chip. Click opens the global
     /// search (`open_global_search`).
     search_chip_rect: Option<Rect>,
+    /// The usage row and the today-spend strip as last drawn. A click on
+    /// either opens the Stats view; they were numbers with no way in.
+    stats_rects: Vec<Rect>,
     /// Screen rect of the bottom `/` search input bar, stashed by
     /// `render` while a search is open. A click anywhere off this bar
     /// (and off the header search chip) dismisses the search instead of
@@ -758,6 +764,7 @@ impl Sidebar {
             repo_summaries: BTreeMap::new(),
             stacks: HashMap::new(),
             open_requests: HashMap::new(),
+            open_request_rows: HashMap::new(),
             artifact_counts: HashMap::new(),
             defer_recompute: false,
             recompute_pending: false,
@@ -801,6 +808,7 @@ impl Sidebar {
             filter_chip_rect: None,
             sort_chip_rect: None,
             search_chip_rect: None,
+            stats_rects: Vec::new(),
             search_bar_rect: None,
             now_override: None,
             search: None,
@@ -1967,6 +1975,15 @@ impl Sidebar {
         row == rect.y && col >= rect.x && col < rect.x + rect.width
     }
 
+    /// True when `(col, row)` falls on the usage row or the today-spend
+    /// strip — a hit opens the Stats view. Pure hit test: the model owns
+    /// the modal stack.
+    pub fn stats_hit(&self, col: u16, row: u16) -> bool {
+        self.stats_rects
+            .iter()
+            .any(|rect| row == rect.y && col >= rect.x && col < rect.x + rect.width)
+    }
+
     /// Click on the sort chip cycles it — same effect as `o`.
     pub fn click_to_cycle_sort(&mut self, col: u16, row: u16) -> bool {
         let Some(rect) = self.sort_chip_rect else {
@@ -2166,6 +2183,36 @@ impl Sidebar {
 
     /// Move the cursor onto the workspace row matching `key`. Returns
     /// true on a hit. Used by `--workspace` preselect on startup.
+    /// The workspace carrying `task` — as its PR or one of its linked
+    /// issues — if this client knows one. What a click on a blocker jumps to.
+    pub fn workspace_key_for_task(&self, task: &lazybox_core::TaskId) -> Option<SessionKey> {
+        self.workspaces
+            .iter()
+            .find(|(_, workspace)| {
+                workspace
+                    .pr
+                    .iter()
+                    .chain(workspace.gh_issues.iter())
+                    .chain(workspace.linear_issues.iter())
+                    .any(|t| &t.id == task)
+            })
+            .map(|(key, _)| key.clone())
+    }
+
+    /// The state of `task` as this client last saw it, from whichever
+    /// workspace carries it. `None` when no tracked workspace does.
+    pub fn task_state_for(&self, task: &lazybox_core::TaskId) -> Option<lazybox_core::TaskState> {
+        self.workspaces.values().find_map(|workspace| {
+            workspace
+                .pr
+                .iter()
+                .chain(workspace.gh_issues.iter())
+                .chain(workspace.linear_issues.iter())
+                .find(|t| &t.id == task)
+                .map(|t| t.state)
+        })
+    }
+
     pub fn focus_workspace_key(&mut self, key: &SessionKey) -> bool {
         self.ensure_visible_fresh();
         for (i, row) in self.visible.iter().enumerate() {
@@ -2287,6 +2334,34 @@ impl Sidebar {
     /// Move the cursor onto the next workspace with unread activity,
     /// starting AFTER the current row and wrapping (`Shift-N`, #1502) —
     /// the unread analog of [`Self::focus_next_asking_workspace`].
+    /// Move the cursor to the next visible workspace with a reviewer
+    /// requested or a review pending, wrapping around — the same signal as
+    /// the `⟳N review` count. Returns `false` when there is none.
+    pub fn focus_next_review_pending_workspace(&mut self) -> bool {
+        let keys_order = self.visible_workspace_keys();
+        if keys_order.is_empty() {
+            return false;
+        }
+        let start = self
+            .selected_session_key()
+            .and_then(|cur| keys_order.iter().position(|k| k == cur))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let target = (0..keys_order.len())
+            .map(|i| &keys_order[(start + i) % keys_order.len()])
+            .find(|k| {
+                self.workspaces.get(*k).is_some_and(|w| {
+                    workspace_attention_signals(w, &self.agents)
+                        .contains(&AttentionSignal::ReviewPending)
+                })
+            })
+            .cloned();
+        match target {
+            Some(key) => self.focus_workspace_key(&key),
+            None => false,
+        }
+    }
+
     pub fn focus_next_unread_workspace(&mut self) -> bool {
         let keys_order = self.visible_workspace_keys();
         if keys_order.is_empty() {
@@ -3990,6 +4065,42 @@ impl Sidebar {
     /// Open inbound requests for one workspace; `0` when it owes none.
     pub fn open_requests(&self, key: &SessionKey) -> usize {
         self.open_requests.get(key).copied().unwrap_or(0)
+    }
+
+    /// Record who asked `key` what. An empty set forgets the row, like
+    /// [`Self::set_open_requests`].
+    pub fn set_open_request_rows(
+        &mut self,
+        key: SessionKey,
+        rows: Vec<lazybox_ipc::OpenAgentRequest>,
+    ) {
+        if rows.is_empty() {
+            self.open_request_rows.remove(&key);
+        } else {
+            self.open_request_rows.insert(key, rows);
+        }
+    }
+
+    /// The open requests against `key`, oldest first.
+    pub fn open_request_rows(&self, key: &SessionKey) -> &[lazybox_ipc::OpenAgentRequest] {
+        self.open_request_rows
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// How a workspace is named when another one refers to it: `#N title`
+    /// for a tracked task, otherwise the workspace name. `None` when this
+    /// client does not track it.
+    pub fn workspace_reference_label(&self, key: &SessionKey) -> Option<String> {
+        let workspace = self.workspaces.get(key)?;
+        Some(match workspace.primary_task() {
+            Some(task) => match task.id.number() {
+                Some(n) => format!("#{n} {}", task.title),
+                None => task.title.clone(),
+            },
+            None => workspace.name.clone(),
+        })
     }
 
     /// Record how many artifacts a workspace's agents have spooled (#1822).

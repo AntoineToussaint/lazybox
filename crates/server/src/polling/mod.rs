@@ -3517,6 +3517,11 @@ async fn run_one_tick_with_notifications(
     // the store, not poll state, and must run even when providers
     // errored (the merged state is already persisted locally).
     reprompt_unresolved_removals(config).await;
+    // Level-triggered too: any external merge still owing a cost record
+    // whose settle window has passed. Covers the in-memory recorder that
+    // never woke — a daemon restart inside the window, or a provider that
+    // could not be built at the time.
+    handlers::sweep_pending_merge_costs(config).await;
     // Keep every "track main" workspace (issue #535) fast-forwarded to
     // its base branch. Its own pass over the store, gated on the
     // per-workspace arm — decoupled from the provider round-robin so a

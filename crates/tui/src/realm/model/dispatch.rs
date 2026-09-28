@@ -2415,6 +2415,14 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_hint("nothing unread");
                 }
             }
+            Action::JumpToReviewPending => {
+                if self.sidebar.focus_next_review_pending_workspace() {
+                    self.set_focus(PaneFocus::Sidebar);
+                    self.redraw = true;
+                } else {
+                    self.flash_hint("no reviews pending");
+                }
+            }
             Action::JumpToBlocked => {
                 if self.sidebar.focus_next_blocked_workspace() {
                     self.set_focus(PaneFocus::Sidebar);

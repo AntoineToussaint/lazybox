@@ -212,10 +212,44 @@ impl Right {
         self.inner.take_open_url()
     }
 
+    /// Drain a blocker clicked in the header. The orchestrator jumps to
+    /// its workspace, or opens it when this client has none.
+    pub fn take_open_task(&mut self) -> Option<lazybox_core::TaskId> {
+        self.inner.take_open_task()
+    }
+
     /// Drain a click on the header `Reviewers:` line (#1092). The
     /// orchestrator runs the `g r` reviewer-picker flow when true.
     pub fn take_request_reviewers(&mut self) -> bool {
         self.inner.take_request_reviewers()
+    }
+
+    pub fn take_action(&mut self) -> Option<lazybox_tui_core::action::Action> {
+        self.inner.take_action()
+    }
+
+    pub fn take_links(&mut self) -> Option<(String, Vec<(String, String)>)> {
+        self.inner.take_links()
+    }
+
+    pub fn set_inbound_requests(
+        &mut self,
+        requests: Vec<crate::components::right_pane::InboundRequest>,
+    ) {
+        self.inner.set_inbound_requests(requests);
+    }
+
+    /// The open questions this workspace is carrying, as last synced.
+    #[cfg(test)]
+    pub(crate) fn inbound_requests(&self) -> &[crate::components::right_pane::InboundRequest] {
+        self.inner.inbound_requests()
+    }
+
+    pub fn set_blocker_states(
+        &mut self,
+        states: std::collections::HashMap<lazybox_core::TaskId, lazybox_core::TaskState>,
+    ) {
+        self.inner.set_blocker_states(states);
     }
 
     /// The focused task's raw markdown body, for the reader modal.

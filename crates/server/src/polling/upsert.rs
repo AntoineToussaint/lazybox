@@ -410,6 +410,21 @@ pub(super) async fn upsert_into_workspace_key(
     // reach this commit path.
     if matches!(terminal_cleanup, Some(TerminalCleanup::MergedPr(_))) {
         crate::epics::on_pr_merged(config, key);
+        // Most merges are not lazybox's own (native auto-merge, `gh pr
+        // merge`, the web UI), so their cost has no commit body to ride in.
+        // Record it out of band; a merge lazybox did is a no-op here.
+        //
+        // The intent is written FIRST and synchronously, before step 3 below
+        // can reap or prompt-to-remove this workspace: the recorder's own
+        // settle window is an in-memory sleep, and losing it (a removal
+        // inside the minute, a daemon restart) silently dropped the cost and
+        // left it on the watermark to be misattributed to the next PR here.
+        // The poll tick sweeps anything the sleep did not get to.
+        handlers::note_merge_owes_cost(config, key);
+        tokio::spawn(handlers::record_external_merge_trailers(
+            config.clone(),
+            key.clone(),
+        ));
     }
 
     // 3. TERMINAL: the PR merged or the issue closed → either reap its

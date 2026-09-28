@@ -2035,6 +2035,19 @@ pub struct Model<T: TerminalAdapter> {
     /// fits). A left-click inside it pops those hints so the count is
     /// not a dead end (#805, #1502).
     footer_overflow: Option<crate::realm::components::footer::FooterOverflow>,
+    /// The footer's right zone (notice pill or polling status) as last
+    /// drawn, so a click on it opens what it is about.
+    /// Row, column range and kind of each attention count on the
+    /// focus-mode strip as last drawn; empty outside focus mode.
+    focus_count_hits: Vec<(
+        u16,
+        std::ops::Range<u16>,
+        crate::realm::components::focus_header::FocusCount,
+    )>,
+    footer_right: Option<(
+        tuirealm::ratatui::layout::Rect,
+        crate::realm::components::footer::FooterRight,
+    )>,
     /// The `+N more` popup's rows while it is open (#1502): the hints the
     /// footer could not fit, drawn with the which-key chrome. Purely
     /// informational — the next key or click closes it and is then
@@ -3041,6 +3054,8 @@ impl<T: TerminalAdapter> Model<T> {
             leader_target: None,
             last_click: None,
             footer_overflow: None,
+            footer_right: None,
+            focus_count_hits: Vec::new(),
             footer_more_popup: None,
             last_render_build: std::time::Duration::ZERO,
             last_render_flush: std::time::Duration::ZERO,
@@ -4882,10 +4897,7 @@ impl<T: TerminalAdapter> Model<T> {
         let rows: Vec<(PromptRow, String)> = history
             .into_iter()
             .map(|prompt| {
-                let tag = match &prompt.source {
-                    lazybox_ipc::PromptSource::Snippet { key, .. } => Some(format!("]{key}")),
-                    lazybox_ipc::PromptSource::Typed => None,
-                };
+                let tag = prompt_source_tag(&prompt.source);
                 let row = PromptRow {
                     when: relative_age(prompt.timestamp_ms, now),
                     tag,
@@ -6869,6 +6881,21 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::UrlPicker, modal);
     }
 
+    /// A titled picker over `(label, url)` links — the header's Checks
+    /// line. Shares the URL picker's flow: Enter opens the highlighted
+    /// link in the browser.
+    pub(crate) fn mount_link_picker(&mut self, title: &str, links: Vec<(String, String)>) {
+        use crate::realm::components::choice::Choice;
+        if links.is_empty() || matches!(self.modal_stack.last(), Some(Id::UrlPicker)) {
+            return;
+        }
+        let modal = Choice::single("Enter opens the highlighted link in your browser", links)
+            .title(title.to_string())
+            .label(|(label, _): &(String, String)| label.clone())
+            .payload_for(|(_, url): &(String, String)| ChoicePayload::Text(url.clone()));
+        self.mount_modal(Id::UrlPicker, modal);
+    }
+
     /// Hand `url` to the platform browser launcher and surface the
     /// outcome in the footer.
     fn open_external_url(&mut self, url: &str) {
@@ -7876,7 +7903,12 @@ impl<T: TerminalAdapter> Model<T> {
                 Vec::new()
             };
         let mut captured_area = Rect::default();
-        let mut footer_overflow: Option<crate::realm::components::footer::FooterOverflow> = None;
+        let mut footer_hits = crate::realm::components::footer::FooterHits::default();
+        let mut focus_count_hits: Vec<(
+            u16,
+            std::ops::Range<u16>,
+            crate::realm::components::focus_header::FocusCount,
+        )> = Vec::new();
         let footer_more_rows = self.footer_more_popup.clone();
         // The coach rail (#1460) is carved out of the pane area inside
         // the draw closure so it never occludes a pane. Resolve its
@@ -7914,13 +7946,16 @@ impl<T: TerminalAdapter> Model<T> {
             let (pane_area, coach_area) = split_coach(pane_area, coach_active);
             let right_bottom = if focus_mode {
                 let (header, body) = focus_mode_areas(pane_area);
-                crate::realm::components::focus_header::render(
+                focus_count_hits = crate::realm::components::focus_header::render(
                     f,
                     header,
                     &focus_title,
                     focus_summary,
                     &focus_hint,
-                );
+                )
+                .into_iter()
+                .map(|(cols, kind)| (header.y, cols, kind))
+                .collect();
                 if focus_panes.is_empty() {
                     // Single layout (and pane zoom): the historical
                     // fullscreen render, untouched.
@@ -8046,7 +8081,7 @@ impl<T: TerminalAdapter> Model<T> {
             // returned overflow (if any) is the `… +N more` cell + the
             // hints it hides, stashed so a click on it pops exactly those
             // (#805, #1502).
-            footer_overflow = crate::realm::components::footer::render(
+            footer_hits = crate::realm::components::footer::render(
                 f,
                 footer_area,
                 Some(&focus_chip),
@@ -8133,7 +8168,9 @@ impl<T: TerminalAdapter> Model<T> {
         self.last_render_build = render_build;
         self.last_render_flush = render_flush;
         self.layout.last_area = captured_area;
-        self.footer_overflow = footer_overflow;
+        self.footer_overflow = footer_hits.overflow;
+        self.footer_right = footer_hits.right;
+        self.focus_count_hits = focus_count_hits;
         // Resize commands are queued by the terminal stack's render
         // path each time a slot's rect changes. Drain + ship them so
         // libghostty's PTY learns the new size — without this,
@@ -8599,4 +8636,118 @@ fn modal_subscriptions() -> Vec<tuirealm::subscription::Sub<Id, UserEvent>> {
         Sub::new(EventClause::WindowResize, SubClause::Always),
         Sub::new(EventClause::Discriminant(daemon), SubClause::Always),
     ]
+}
+
+impl<T: TerminalAdapter> Model<T> {
+    /// Go to a task someone clicked (a blocker in the header): its own
+    /// workspace when this client has one, otherwise the task on GitHub.
+    pub(crate) fn open_task_reference(&mut self, task: &lazybox_core::TaskId) {
+        if let Some(key) = self.sidebar.workspace_key_for_task(task)
+            && self.sidebar.focus_workspace_key(&key)
+        {
+            self.sync_panes();
+            self.redraw = true;
+            return;
+        }
+        match github_task_url(task) {
+            Some(url) => self.open_external_url(&url),
+            None => self.flash_hint(format!("{} has no workspace here", task.key)),
+        }
+    }
+}
+
+/// The GitHub URL for an `owner/repo#N` task. GitHub serves an issue URL
+/// for a PR number too (it redirects), so one form covers both.
+fn github_task_url(task: &lazybox_core::TaskId) -> Option<String> {
+    if task.source != lazybox_core::GITHUB_SOURCE {
+        return None;
+    }
+    let (repo, number) = task.key.rsplit_once('#')?;
+    (repo.contains('/') && number.chars().all(|c| c.is_ascii_digit()) && !number.is_empty())
+        .then(|| format!("https://github.com/{repo}/issues/{number}"))
+}
+
+/// The short provenance tag a prompt-history row carries: `]key` for a
+/// snippet, `← sender` for a message another agent sent, `lazybox · reason`
+/// for lazybox's own automation, nothing for what the user typed.
+pub(crate) fn prompt_source_tag(source: &lazybox_ipc::PromptSource) -> Option<String> {
+    match source {
+        lazybox_ipc::PromptSource::Snippet { key, .. } => Some(format!("]{key}")),
+        lazybox_ipc::PromptSource::Typed => None,
+        lazybox_ipc::PromptSource::Agent { from } => Some(format!("← {}", short_session(from))),
+        lazybox_ipc::PromptSource::Lazybox { reason } => Some(format!("lazybox · {reason}")),
+    }
+}
+
+/// A session key trimmed for a narrow tag: the tail, which carries the
+/// repo and number (`…lazybox-1830`), capped so the tag never crowds out
+/// the prompt text.
+fn short_session(key: &str) -> String {
+    const MAX: usize = 24;
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= MAX {
+        return key.to_string();
+    }
+    let tail: String = chars[chars.len() - (MAX - 1)..].iter().collect();
+    format!("…{tail}")
+}
+
+#[cfg(test)]
+mod github_task_url_tests {
+    use super::github_task_url;
+    use lazybox_core::TaskId;
+
+    fn id(source: &str, key: &str) -> TaskId {
+        TaskId {
+            source: source.into(),
+            key: key.into(),
+        }
+    }
+
+    #[test]
+    fn only_a_github_owner_repo_number_key_becomes_a_url() {
+        assert_eq!(
+            github_task_url(&id("github", "o/r#7")).as_deref(),
+            Some("https://github.com/o/r/issues/7")
+        );
+        assert_eq!(github_task_url(&id("linear", "ENG-45")), None);
+        assert_eq!(github_task_url(&id("github", "r#7")), None);
+        assert_eq!(github_task_url(&id("github", "o/r#")), None);
+        assert_eq!(github_task_url(&id("github", "o/r#7a")), None);
+    }
+}
+
+#[cfg(test)]
+mod prompt_source_tag_tests {
+    use super::prompt_source_tag;
+    use lazybox_ipc::PromptSource;
+
+    #[test]
+    fn every_source_names_itself_briefly() {
+        assert_eq!(prompt_source_tag(&PromptSource::Typed), None);
+        assert_eq!(
+            prompt_source_tag(&PromptSource::Snippet {
+                key: "rev".into(),
+                category: String::new()
+            })
+            .as_deref(),
+            Some("]rev")
+        );
+        let agent = prompt_source_tag(&PromptSource::Agent {
+            from: "github-AntoineToussaint-lazybox-1830".into(),
+        })
+        .expect("tag");
+        assert!(
+            agent.starts_with("← ") && agent.ends_with("lazybox-1830"),
+            "{agent}"
+        );
+        assert!(agent.chars().count() <= 26, "{agent}");
+        assert_eq!(
+            prompt_source_tag(&PromptSource::Lazybox {
+                reason: "auto-fix".into()
+            })
+            .as_deref(),
+            Some("lazybox · auto-fix")
+        );
+    }
 }

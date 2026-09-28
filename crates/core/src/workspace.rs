@@ -1439,8 +1439,8 @@ impl Workspace {
     /// its dependency edges. The edges are de-duplicated across tasks — a
     /// single blocking task referenced by two of this workspace's tasks (a
     /// gh issue and its PR, or two sibling sub-issues) is one blocker of the
-    /// workspace, not two, so the `⊘N` badge and the "N blockers" line count
-    /// it once.
+    /// workspace, not two, so the `⊗N` badge and the header's `Blocked on:`
+    /// links list it once.
     pub fn hierarchy_blocked_by(&self) -> impl Iterator<Item = &TaskId> {
         let mut seen = std::collections::HashSet::new();
         self.pr

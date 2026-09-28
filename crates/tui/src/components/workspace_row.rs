@@ -988,7 +988,7 @@ fn label_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
 /// char count, so without the gate a 2-byte UTF-8 char that happens
 /// to fit in 6 bytes would slice through a code point and panic.
 /// GitHub never returns that, but providers are external input.
-fn label_text_style(theme: &Theme, hex: &str) -> Style {
+pub(crate) fn label_text_style(theme: &Theme, hex: &str) -> Style {
     let cleaned = hex.trim_start_matches('#');
     if !cleaned.is_ascii() || cleaned.len() != 6 {
         return Style::default().fg(theme.text_dim);
@@ -3351,7 +3351,7 @@ mod tests {
         assert_eq!(cell_arm(&ctx).width(), 0, "unarmed row has no ARM slot");
         ctx.auto_merge_armed = true;
         let cell = cell_arm(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), " ⚡ ");
+        assert_eq!(cell.spans[0].content.as_ref(), " ⚡\u{FE0E} ");
         // The status cell stays empty — no CI/review pill here.
         assert_eq!(cell_status(&ctx).width(), 0);
     }
@@ -3805,7 +3805,7 @@ mod tests {
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.auto_merge_armed = true;
-        assert_eq!(cell_arm(&ctx).spans[0].content.as_ref(), " ⚡ ");
+        assert_eq!(cell_arm(&ctx).spans[0].content.as_ref(), " ⚡\u{FE0E} ");
         assert!(
             cell_status(&ctx)
                 .spans
@@ -4846,7 +4846,7 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(arms, " ⚡ ");
+        assert_eq!(arms, " ⚡\u{FE0E} ");
 
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx0), build_row(&ctx1), build_row(&ctx2)];
@@ -4863,7 +4863,10 @@ mod tests {
 
         // The all-badges row shows both clusters, arms right of the info;
         // the badge-less row shows none of them.
-        assert!(l0.contains(" ⎇ local  ✎  ]2  ⚙\u{FE0E}  ⚡ "), "{l0:?}");
+        assert!(
+            l0.contains(" ⎇ local  ✎  ]2  ⚙\u{FE0E}  ⚡\u{FE0E} "),
+            "{l0:?}"
+        );
         assert!(l1.contains('✎'), "{l1:?}");
         assert!(
             !l2.contains('✎') && !l2.contains('⎇') && !l2.contains('⚡'),

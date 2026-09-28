@@ -98,6 +98,23 @@ pub const ASK_BEFORE_FILING: &str = "ask-before-filing-a-record";
 /// by squash, can strand its parent's commits off the default branch.
 pub const ONE_SELF_CONTAINED_PR: &str = "one-self-contained-pr";
 
+/// `check-for-existing-work`: before starting, make sure no open issue or
+/// PR already covers the work or conflicts with it. The fleet re-did the
+/// same fix several times (a shipped issue left open, a sibling PR already
+/// carrying the change) because nothing asked an agent to look first.
+pub const CHECK_FOR_EXISTING_WORK: &str = "check-for-existing-work";
+
+/// `docs-current-in-pr`: a PR that changes behaviour updates the docs that
+/// describe it. Agents read those docs on every request, so a stale one
+/// misleads every later session, not just a human reader.
+pub const DOCS_CURRENT_IN_PR: &str = "docs-current-in-pr";
+
+/// `workspace-over-subagent`: independent work gets a workspace of its
+/// own, not a sub-agent inside the current session. A workspace is visible
+/// in the inbox, resumable, costed and lands as its own PR; a sub-agent's
+/// work is invisible until it returns and dies with the session.
+pub const WORKSPACE_OVER_SUBAGENT: &str = "workspace-over-subagent";
+
 /// The built-in rules, in the order they are rendered. Deliberately
 /// short: every rule here is paid for in context on every spawn, and a
 /// list long enough to skim past is a list that steers nothing.
@@ -118,6 +135,26 @@ fn builtin_policies() -> Vec<AgentPolicy> {
                    dependent PRs. A stack moves merge-order work onto the reviewer, and a \
                    stacked child that lands by squash can strand its parent's commits off the \
                    default branch. Split only when the user asks you to."
+                .to_string(),
+        },
+        AgentPolicy {
+            id: CHECK_FOR_EXISTING_WORK.to_string(),
+            text: "Before starting, check no open issue or PR already covers or conflicts with \
+                   the work (`list_issues` / `task_status` are free); build on overlap or say \
+                   so, never duplicate."
+                .to_string(),
+        },
+        AgentPolicy {
+            id: DOCS_CURRENT_IN_PR.to_string(),
+            text: "A PR that changes behaviour updates the docs describing it (README, \
+                   `AGENTS.md`, `docs/`) in the same PR, and names them in its body."
+                .to_string(),
+        },
+        AgentPolicy {
+            id: WORKSPACE_OVER_SUBAGENT.to_string(),
+            text: "Give independent work its own workspace (`start_workspace` on its \
+                   record), not a sub-agent: it stays visible, resumable and costed. \
+                   Sub-agents are for research feeding your own task."
                 .to_string(),
         },
     ]
@@ -247,14 +284,24 @@ mod tests {
     }
 
     #[test]
-    fn builtins_carry_both_standing_rules() {
+    fn builtins_carry_every_standing_rule() {
         let policies = AgentPolicies::builtin();
         assert_eq!(
             AgentPolicies::builtin_ids(),
             vec![
                 ASK_BEFORE_FILING.to_string(),
-                ONE_SELF_CONTAINED_PR.to_string()
+                ONE_SELF_CONTAINED_PR.to_string(),
+                CHECK_FOR_EXISTING_WORK.to_string(),
+                DOCS_CURRENT_IN_PR.to_string(),
+                WORKSPACE_OVER_SUBAGENT.to_string(),
             ]
+        );
+        let fan_out = policies
+            .text(WORKSPACE_OVER_SUBAGENT)
+            .expect("the fan-out rule");
+        assert!(
+            fan_out.contains("own workspace") && fan_out.contains("not a sub-agent"),
+            "the fan-out rule must prefer a workspace over a sub-agent: {fan_out}"
         );
         let ask = policies.text(ASK_BEFORE_FILING).expect("the filing rule");
         assert!(
@@ -310,10 +357,9 @@ mod tests {
         );
         // Added rules render after the built-ins, not between them.
         let ids: Vec<&str> = policies.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![ASK_BEFORE_FILING, ONE_SELF_CONTAINED_PR, "house-rule"]
-        );
+        let mut expected: Vec<String> = AgentPolicies::builtin_ids();
+        expected.push("house-rule".to_string());
+        assert_eq!(ids, expected);
     }
 
     #[test]
@@ -352,10 +398,12 @@ mod tests {
 
     #[test]
     fn turning_every_rule_off_renders_nothing_at_all() {
-        let config = overrides(&[
-            (ASK_BEFORE_FILING, AgentPolicyOverride::Enabled(false)),
-            (ONE_SELF_CONTAINED_PR, AgentPolicyOverride::Enabled(false)),
-        ]);
+        let ids = AgentPolicies::builtin_ids();
+        let off: Vec<(&str, AgentPolicyOverride)> = ids
+            .iter()
+            .map(|id| (id.as_str(), AgentPolicyOverride::Enabled(false)))
+            .collect();
+        let config = overrides(&off);
         let policies = AgentPolicies::resolve([&config]);
         assert!(policies.is_empty());
         // No header, no stray bullet — the section disappears whole.
@@ -366,7 +414,10 @@ mod tests {
     fn render_is_prose_with_one_bullet_per_rule() {
         let rendered = AgentPolicies::builtin().render();
         assert!(rendered.starts_with("Standing rules"));
-        assert_eq!(rendered.matches("\n  - ").count(), 2);
+        assert_eq!(
+            rendered.matches("\n  - ").count(),
+            AgentPolicies::builtin_ids().len()
+        );
         assert!(!rendered.ends_with('\n'), "the caller owns the joining");
     }
 
@@ -376,12 +427,15 @@ mod tests {
         // launch, alongside the mechanics blurb that has its own cap in
         // `lazybox-agents`. Each half guards its own bytes: this one is
         // the prose lazybox ships, so it is the half a change *here*
-        // can grow. ~900 bytes is two paragraph-length rules with room
-        // for a third; a set that needs more than that has stopped
-        // being a set of standing rules and become a manual.
+        // can grow. Two paragraph-length rules plus three one-line ones
+        // (existing-work check, docs-current, added 2026-09-26, and
+        // workspace-over-subagent, 2026-09-27, at the user's request)
+        // fit ~1300 bytes; a set that needs more than
+        // that has stopped being a set of standing rules and become a
+        // manual — shorten a rule before raising this again.
         let rendered = AgentPolicies::builtin().render();
         assert!(
-            rendered.len() <= 900,
+            rendered.len() <= 1300,
             "the built-in standing rules should stay tight: {} bytes",
             rendered.len()
         );

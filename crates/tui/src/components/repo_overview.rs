@@ -103,6 +103,8 @@ pub struct RepoRollupRow {
 /// render. Operator-owned rows are the ones a human has to clear.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpicBlockerRow {
+    /// The blocked member's workspace — a click on the row jumps there.
+    pub key: SessionKey,
     pub member: String,
     pub kind: String,
     pub reason: String,
@@ -135,9 +137,10 @@ pub struct EpicOverview {
     pub pills: Vec<&'static str>,
     pub blockers: Vec<EpicBlockerRow>,
     pub ready_queue: Vec<EpicReadyRow>,
-    pub critical_path: Vec<String>,
-    /// `(member label, predecessors still holding it)` in landing order.
-    pub merge_order: Vec<(String, Vec<String>)>,
+    /// `(member, label)` along the longest dependency chain.
+    pub critical_path: Vec<(SessionKey, String)>,
+    /// `(member, label, predecessors still holding it)` in landing order.
+    pub merge_order: Vec<(SessionKey, String, Vec<String>)>,
 }
 
 /// The full overview payload the pane renders.
@@ -359,6 +362,7 @@ pub fn build_epic_overview(
         .iter()
         .flat_map(|m| {
             m.blockers.iter().map(|b| EpicBlockerRow {
+                key: SessionKey::new(m.key.as_str()),
                 member: label_of(&m.key),
                 kind: b.kind.as_str().to_string(),
                 reason: b.reason.clone(),
@@ -424,12 +428,17 @@ pub fn build_epic_overview(
             .collect(),
         blockers,
         ready_queue,
-        critical_path: snapshot.critical_path.iter().map(&label_of).collect(),
+        critical_path: snapshot
+            .critical_path
+            .iter()
+            .map(|key| (SessionKey::new(key.as_str()), label_of(key)))
+            .collect(),
         merge_order: snapshot
             .merge_order
             .iter()
             .map(|e| {
                 (
+                    SessionKey::new(e.key.as_str()),
                     label_of(&e.key),
                     e.held_by.iter().map(&label_of).collect::<Vec<String>>(),
                 )
@@ -642,6 +651,7 @@ impl RepoOverview {
                             Style::default().fg(theme.warn),
                         ));
                     }
+                    hits.push((lines.len(), b.key.clone()));
                     lines.push(Line::from(spans));
                 }
                 lines.push(Line::from(""));
@@ -671,7 +681,7 @@ impl RepoOverview {
 
             if !epic.merge_order.is_empty() {
                 lines.push(section_header("Merge order"));
-                for (i, (label, held_by)) in epic.merge_order.iter().enumerate() {
+                for (i, (key, label, held_by)) in epic.merge_order.iter().enumerate() {
                     let mut spans = vec![
                         Span::styled(
                             format!("  {}. ", i + 1),
@@ -688,17 +698,27 @@ impl RepoOverview {
                             Style::default().fg(theme.warn),
                         ));
                     }
+                    hits.push((lines.len(), key.clone()));
                     lines.push(Line::from(spans));
                 }
                 lines.push(Line::from(""));
             }
 
+            // One member per line: a chain joined into one string clipped
+            // silently past the pane width, and no member could be clicked.
             if epic.critical_path.len() > 1 {
                 lines.push(section_header("Critical path"));
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", epic.critical_path.join("  →  ")),
-                    Style::default().fg(theme.text_dim),
-                )));
+                for (i, (key, label)) in epic.critical_path.iter().enumerate() {
+                    let lead = if i == 0 { "  " } else { "  → " };
+                    hits.push((lines.len(), key.clone()));
+                    lines.push(Line::from(vec![
+                        Span::styled(lead, Style::default().fg(theme.chrome)),
+                        Span::styled(
+                            truncate(label, title_budget(width)),
+                            Style::default().fg(theme.text_dim),
+                        ),
+                    ]));
+                }
                 lines.push(Line::from(""));
             }
         }

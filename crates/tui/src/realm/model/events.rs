@@ -1071,16 +1071,28 @@ impl<T: TerminalAdapter> Model<T> {
         // Open agent-to-agent requests (#1653): the daemon owns the count
         // and pushes it here (seeded on connect, refreshed on every ask,
         // reply, and turn-end capture). The sidebar keeps it for the row's
-        // `?N` badge.
+        // `⟲N` badge, and the right pane lists who asked what.
         if let IpcEvent::AgentRequestsOpen {
             workspace_key,
             open,
+            requests,
         } = &event
         {
-            self.sidebar.set_open_requests(
-                lazybox_core::SessionKey::from(workspace_key.as_str()),
-                *open,
-            );
+            let key = lazybox_core::SessionKey::from(workspace_key.as_str());
+            self.sidebar.set_open_requests(key.clone(), *open);
+            self.sidebar
+                .set_open_request_rows(key.clone(), requests.clone());
+            // Only the SELECTED workspace's rows are on screen, and
+            // `sync_panes` is a full rebuild (it walks every blocker and
+            // resolves each against every tracked workspace). The daemon
+            // broadcasts this event on every ask, reply and turn-end capture
+            // across the fleet, and replays one per workspace carrying an
+            // open request on connect — resyncing the panes for workspace Y
+            // because workspace X was asked something is work proportional
+            // to fleet chatter rather than to what changed.
+            if self.sidebar.selected_workspace_key() == Some(&key) {
+                self.sync_panes();
+            }
             self.redraw = true;
         }
         // Spooled agent artifacts (#1822): the daemon owns the spool and
@@ -3832,6 +3844,36 @@ impl<T: TerminalAdapter> Model<T> {
             .and_then(|k| self.sidebar.stack_info(k))
             .cloned();
         self.right.set_stack(stack);
+        let blocker_states = workspace
+            .as_ref()
+            .map(|w| {
+                w.hierarchy_blocked_by()
+                    .filter_map(|id| Some((id.clone(), self.sidebar.task_state_for(id)?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.right.set_blocker_states(blocker_states);
+        let inbound = session_key
+            .as_ref()
+            .map(|key| {
+                self.sidebar
+                    .open_request_rows(key)
+                    .iter()
+                    .map(|r| {
+                        let asker = lazybox_core::SessionKey::from(r.asker.as_str());
+                        crate::components::right_pane::InboundRequest {
+                            asker_label: self
+                                .sidebar
+                                .workspace_reference_label(&asker)
+                                .unwrap_or_else(|| r.asker.as_str().to_string()),
+                            asker,
+                            question: r.question.clone(),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.right.set_inbound_requests(inbound);
         // On a group-header row there's no workspace to show; feed the
         // pane a repo / Space overview instead so it isn't a dead panel
         // (#1442). Cheap: built from already-tracked workspaces.

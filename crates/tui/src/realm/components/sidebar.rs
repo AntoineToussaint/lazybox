@@ -749,6 +749,25 @@ impl Sidebar {
         self.inner.open_requests(key)
     }
 
+    pub fn set_open_request_rows(
+        &mut self,
+        key: lazybox_core::SessionKey,
+        rows: Vec<lazybox_ipc::OpenAgentRequest>,
+    ) {
+        self.inner.set_open_request_rows(key, rows);
+    }
+
+    pub fn open_request_rows(
+        &self,
+        key: &lazybox_core::SessionKey,
+    ) -> &[lazybox_ipc::OpenAgentRequest] {
+        self.inner.open_request_rows(key)
+    }
+
+    pub fn workspace_reference_label(&self, key: &lazybox_core::SessionKey) -> Option<String> {
+        self.inner.workspace_reference_label(key)
+    }
+
     /// See `Sidebar::artifact_count` — spooled artifacts for one workspace.
     pub fn artifact_count(&self, key: &lazybox_core::SessionKey) -> usize {
         self.inner.artifact_count(key)
@@ -858,6 +877,19 @@ impl Sidebar {
         self.inner.focus_workspace_key(key)
     }
 
+    /// The state of `task` as this client last saw it.
+    pub fn task_state_for(&self, task: &lazybox_core::TaskId) -> Option<lazybox_core::TaskState> {
+        self.inner.task_state_for(task)
+    }
+
+    /// The workspace carrying `task`, if this client knows one.
+    pub fn workspace_key_for_task(
+        &self,
+        task: &lazybox_core::TaskId,
+    ) -> Option<lazybox_core::SessionKey> {
+        self.inner.workspace_key_for_task(task)
+    }
+
     /// Reveal and select a workspace even when the current sidebar view
     /// hides it.
     pub fn reveal_workspace_key(&mut self, key: &lazybox_core::SessionKey) -> bool {
@@ -901,6 +933,10 @@ impl Sidebar {
     /// wrapping around. Backs the `Shift-N` global key (#1502).
     pub fn focus_next_unread_workspace(&mut self) -> bool {
         self.inner.focus_next_unread_workspace()
+    }
+
+    pub fn focus_next_review_pending_workspace(&mut self) -> bool {
+        self.inner.focus_next_review_pending_workspace()
     }
 
     /// Move the cursor onto the next blocked workspace (declared reason or
@@ -1022,6 +1058,10 @@ impl Sidebar {
     /// box. The orchestrator opens the global search on a hit.
     pub fn search_chip_hit(&self, col: u16, row: u16) -> bool {
         self.inner.search_chip_hit(col, row)
+    }
+
+    pub fn stats_hit(&self, col: u16, row: u16) -> bool {
+        self.inner.stats_hit(col, row)
     }
 
     /// True iff the cursor sits on a repo header row. Used by the

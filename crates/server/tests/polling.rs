@@ -6492,6 +6492,7 @@ mod live_collapse_e2e {
                         cwd: None,
                         tool_name: None,
                         notification: None,
+                        turn_result: None,
                     },
                     backend_key: Some(live.backend_key.clone()),
                 })

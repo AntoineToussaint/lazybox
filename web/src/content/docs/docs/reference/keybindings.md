@@ -48,6 +48,7 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `Shift-F` | next failing | Jump the cursor to the next PR whose CI is failing (a quick jump; the workspace picker `` ` `` reaches any workspace). |
 | `Shift-L` | next stopped agent | Jump the cursor to the next workspace whose agent has stopped and needs you — blocked on its provider usage / rate limit (#847), or stopped on an infrastructure failure such as a 502 or a refused gateway connection (#1782). |
 | `Shift-N` | next unread | Jump the cursor to the next workspace with unread activity, wrapping around (#1502). |
+| `Shift-O` | next review | Jump the cursor to the next workspace with a reviewer requested or a review pending, wrapping around. |
 | `.` | focus mode | Maximize the focused workspace's terminal to near-fullscreen behind a slim event header, hiding the sidebar and activity pane. |
 | `Shift-W` | start work | Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane. |
 | `Shift-C` | connect box | Connect to (or disconnect from) the remote box on demand. |

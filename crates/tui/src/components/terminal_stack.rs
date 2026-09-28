@@ -249,6 +249,21 @@ pub const COMPOSING_CAP: usize = 8 * 1024;
 /// without being visually loud.
 const RECAP_PREFIX: &str = "you ▸ ";
 
+/// Whose message the pinned recap shows. It used to say `you ▸` for every
+/// entry; now that a sibling agent's message or lazybox's automation is
+/// recorded too, it names the sender instead of claiming the user wrote it.
+fn recap_prefix(source: &lazybox_ipc::PromptSource) -> String {
+    match source {
+        lazybox_ipc::PromptSource::Typed | lazybox_ipc::PromptSource::Snippet { .. } => {
+            RECAP_PREFIX.to_string()
+        }
+        lazybox_ipc::PromptSource::Agent { .. } | lazybox_ipc::PromptSource::Lazybox { .. } => {
+            let tag = crate::realm::model::prompt_source_tag(source).unwrap_or_default();
+            format!("{tag} ▸ ")
+        }
+    }
+}
+
 /// Client-side cap on the retained per-terminal prompt history. Keeps
 /// the optimistic (pre-reconnect) history bounded to match the daemon's
 /// own eviction; the authoritative capped list arrives on the next
@@ -773,6 +788,9 @@ pub struct TerminalStack {
     /// Cleared at the start of every render so removed terminals
     /// don't leave stale hit targets.
     tab_strip_hits: Vec<(usize, std::ops::Range<u16>, u16)>,
+    /// Column range and row of each tab's spend / headroom badge. A click
+    /// opens the Stats view; the badge sat outside the tab's own range.
+    usage_badge_hits: Vec<(std::ops::Range<u16>, u16)>,
     /// Per-tile mouse targets, populated each render — one entry per
     /// visible terminal. The full tile drives click-to-focus while its
     /// body preserves the narrower hover-to-scroll target. Cleared at
@@ -1781,6 +1799,7 @@ impl TerminalStack {
             abandoned_resumes: HashSet::new(),
             swallow_repeats: false,
             tab_strip_hits: Vec::new(),
+            usage_badge_hits: Vec::new(),
             tile_hits: Vec::new(),
             last_focused: HashMap::new(),
             closing: HashSet::new(),
@@ -2548,6 +2567,14 @@ impl TerminalStack {
             .map(|(idx, _, _)| *idx)
     }
 
+    /// Did the user click a tab's spend / headroom badge? The caller opens
+    /// the Stats view.
+    pub fn usage_badge_at(&self, col: u16, row: u16) -> bool {
+        self.usage_badge_hits
+            .iter()
+            .any(|(range, hit_row)| *hit_row == row && range.contains(&col))
+    }
+
     /// Terminal whose tile the point `(col, row)` lands in, from the
     /// tile rects recorded during render. Drives hover-to-scroll: the
     /// wheel targets the pane under the cursor, not the focused one
@@ -3128,6 +3155,7 @@ impl TerminalStack {
             slot.displayed = false;
         }
         self.tab_strip_hits.clear();
+        self.usage_badge_hits.clear();
         self.tile_hits.clear();
     }
 
@@ -4989,6 +5017,7 @@ impl TerminalStack {
         // come or gone, indices shifted, area resized. We'll
         // repopulate as the tab spans go in.
         self.tab_strip_hits.clear();
+        self.usage_badge_hits.clear();
         // Cleared for the same reason as the tab hits — each render
         // re-records every visible tile's rect from scratch so the
         // wheel handler hit-tests against the current layout.
@@ -5147,6 +5176,8 @@ impl TerminalStack {
                 };
                 let badge_text = format!(" {glyph}{}", badge.text());
                 let width = badge_text.chars().count() as u16;
+                self.usage_badge_hits
+                    .push((cursor..cursor.saturating_add(width), title_area.y));
                 title_spans.push(Span::styled(badge_text, style));
                 cursor = cursor.saturating_add(width);
             }
@@ -5905,7 +5936,13 @@ impl TerminalStack {
     /// the user has to parse. Truncates with `…` when the message
     /// overflows the row width — same affordance the empty-state
     /// hint uses elsewhere in this pane.
-    fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str, age: &str) {
+    fn render_user_message_recap(
+        frame: &mut Frame,
+        area: Rect,
+        prefix: &str,
+        msg: &str,
+        age: &str,
+    ) {
         let theme = crate::theme::current();
         let summary = summarize_message(msg);
         // A relative age ("5m ago") on the right lets the user judge whether
@@ -5924,7 +5961,7 @@ impl TerminalStack {
         };
         let line = ratatui::text::Line::from(vec![
             Span::styled(
-                RECAP_PREFIX,
+                prefix.to_string(),
                 Style::default()
                     .fg(theme.text_dim)
                     .add_modifier(Modifier::BOLD),
@@ -6008,7 +6045,8 @@ impl TerminalStack {
                     height: 1,
                 };
                 let age = crate::realm::model::relative_age(last.timestamp_ms, now_ms());
-                Self::render_user_message_recap(frame, header_rect, &last.text, &age);
+                let prefix = recap_prefix(&last.source);
+                Self::render_user_message_recap(frame, header_rect, &prefix, &last.text, &age);
             }
             // Reserve the rightmost column of the body as a scrollbar
             // gutter. Held back unconditionally so the PTY width stays
@@ -8177,7 +8215,13 @@ mod selection_offset_tests {
         let area = Rect::new(0, 0, W, 1);
         let mut term = Terminal::new(TestBackend::new(W, 1)).unwrap();
         term.draw(|f| {
-            TerminalStack::render_user_message_recap(f, area, "review the diff", "5m ago")
+            TerminalStack::render_user_message_recap(
+                f,
+                area,
+                RECAP_PREFIX,
+                "review the diff",
+                "5m ago",
+            )
         })
         .unwrap();
         let buf = term.backend().buffer();
@@ -8199,8 +8243,10 @@ mod selection_offset_tests {
         const W: u16 = 14;
         let area = Rect::new(0, 0, W, 1);
         let mut term = Terminal::new(TestBackend::new(W, 1)).unwrap();
-        term.draw(|f| TerminalStack::render_user_message_recap(f, area, "hello there", "5m ago"))
-            .unwrap();
+        term.draw(|f| {
+            TerminalStack::render_user_message_recap(f, area, RECAP_PREFIX, "hello there", "5m ago")
+        })
+        .unwrap();
         let buf = term.backend().buffer();
         let row: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(
@@ -8460,6 +8506,32 @@ mod selection_offset_tests {
         let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
         // Headroom and this session's cost paint together, not either/or.
         assert!(top.contains("◔ wk 38% left · $0.42"), "{top:?}");
+    }
+
+    /// The badge is a way into Stats: a click on it is a hit, a click on
+    /// the tab label is still the tab.
+    #[test]
+    fn a_click_on_the_usage_badge_is_its_own_target() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 60;
+        const H: u16 = 6;
+        let area = Rect::new(0, 0, W, H);
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &[]);
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().usage_badge = Some(UsageBadge {
+            headroom: None,
+            cost: Some("$0.42".into()),
+        });
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let buf = term.backend().buffer();
+        let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
+        let dollar = top.chars().position(|c| c == '$').expect("badge drawn") as u16;
+        assert!(stack.usage_badge_at(dollar, 0), "{top:?}");
+        assert_eq!(stack.tab_at(dollar, 0), None, "the badge is not the tab");
+        let tab = stack.tab_strip_hits[0].1.start;
+        assert!(!stack.usage_badge_at(tab, 0));
     }
 
     /// A cost-only badge (API-key user, no plan window) paints the dollars
@@ -14926,5 +14998,29 @@ mod zoom_and_tile_header_tests {
         );
         let text: String = bg.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("limited"), "shows the limited chip: {text}");
+    }
+}
+
+#[cfg(test)]
+mod recap_prefix_tests {
+    use super::{RECAP_PREFIX, recap_prefix};
+    use lazybox_ipc::PromptSource;
+
+    /// The recap names the sender: a sibling's message must not read as
+    /// something the user typed.
+    #[test]
+    fn the_recap_names_who_sent_the_last_message() {
+        assert_eq!(recap_prefix(&PromptSource::Typed), RECAP_PREFIX);
+        let agent = recap_prefix(&PromptSource::Agent {
+            from: "coordinator".into(),
+        });
+        assert_eq!(agent, "← coordinator ▸ ");
+        assert!(!agent.starts_with("you"));
+        assert_eq!(
+            recap_prefix(&PromptSource::Lazybox {
+                reason: "auto-fix".into()
+            }),
+            "lazybox · auto-fix ▸ "
+        );
     }
 }

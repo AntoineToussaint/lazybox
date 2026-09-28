@@ -12908,20 +12908,97 @@ mod merge_focus_follow_tests {
         let session = SessionKey::from(&ws_key);
         assert_eq!(m.sidebar.open_requests(&session), 0);
 
+        let asked = |q: &str| lazybox_ipc::OpenAgentRequest {
+            asker: lazybox_core::WorkspaceKey::new("github:o/r#9"),
+            question: q.into(),
+            asked_at: 1,
+        };
         m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
             workspace_key: ws_key.clone(),
             open: 2,
+            requests: vec![asked("status?"), asked("contract?")],
         });
         assert_eq!(m.sidebar.open_requests(&session), 2);
+        assert_eq!(
+            m.sidebar.open_request_rows(&session).len(),
+            2,
+            "who asked what is kept for the right pane"
+        );
 
         m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
             workspace_key: ws_key,
             open: 0,
+            requests: Vec::new(),
         });
         assert_eq!(
             m.sidebar.open_requests(&session),
             0,
             "an answered workspace stops badging"
+        );
+        assert!(m.sidebar.open_request_rows(&session).is_empty());
+    }
+
+    /// The pane resync is now scoped to the SELECTED workspace — the daemon
+    /// broadcasts this event on every ask, reply and turn-end capture across
+    /// the fleet, and `sync_panes` is a full rebuild. The scoping must not
+    /// cost the selected workspace its own update, which is what this
+    /// guards: the right pane still learns who asked it what.
+    #[test]
+    fn an_open_request_for_the_selected_workspace_still_reaches_the_right_pane() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        let other = workspace("owner/repo#4", true, Duration::hours(1));
+        let other_key = other.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(other)));
+
+        let session = SessionKey::from(&ws_key);
+        assert!(
+            m.sidebar.focus_workspace_key(&session),
+            "select the workspace under test"
+        );
+        m.sync_panes();
+
+        let asked = |q: &str| lazybox_ipc::OpenAgentRequest {
+            asker: lazybox_core::WorkspaceKey::new("github:o/r#9"),
+            question: q.into(),
+            asked_at: 1,
+        };
+        m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
+            workspace_key: ws_key.clone(),
+            open: 1,
+            requests: vec![asked("what is the token contract?")],
+        });
+        assert_eq!(
+            m.right.inbound_requests().len(),
+            1,
+            "the selected workspace's inbound question reaches the pane"
+        );
+        assert!(
+            m.right.inbound_requests()[0]
+                .question
+                .contains("token contract"),
+        );
+
+        // An event about a DIFFERENT workspace records its rows without
+        // touching the selected workspace's pane.
+        m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
+            workspace_key: other_key.clone(),
+            open: 1,
+            requests: vec![asked("someone else's question")],
+        });
+        assert_eq!(
+            m.sidebar
+                .open_request_rows(&SessionKey::from(&other_key))
+                .len(),
+            1,
+            "the other workspace's rows are still recorded for its own badge"
+        );
+        assert_eq!(
+            m.right.inbound_requests().len(),
+            1,
+            "and the selected workspace's pane is untouched by it"
         );
     }
 
@@ -18271,6 +18348,20 @@ mod leader_tile_tests {
             Some(&Id::UrlPicker),
             "`]]u` mounts the URL picker for multiple URLs",
         );
+    }
+
+    /// The header's Checks line offers its checks through the same picker
+    /// as `]]u`; an empty list mounts nothing.
+    #[test]
+    fn the_link_picker_mounts_over_its_links_only_when_there_are_some() {
+        let (mut m, _server) = build_model_with_terminals(1);
+        m.mount_link_picker("Checks", Vec::new());
+        assert_ne!(m.top_modal(), Some(&Id::UrlPicker));
+        m.mount_link_picker(
+            "Checks",
+            vec![("✗ build".into(), "https://ci.example/build".into())],
+        );
+        assert_eq!(m.top_modal(), Some(&Id::UrlPicker));
     }
 
     /// With nothing openable on screen, `]]u` opens no picker — just a
@@ -24522,6 +24613,32 @@ mod click_outside_modal_dismiss_tests {
             m.footer_more_popup.is_none(),
             "clicking the cell again closes the popup"
         );
+    }
+
+    /// The footer's right zone opens what it is about: the polling status
+    /// opens the sync view, a routine notice opens the message log. Both
+    /// used to be dead text.
+    #[test]
+    fn footer_right_zone_click_opens_what_it_shows() {
+        use crate::realm::components::footer::FooterRight;
+        let area = Rect::new(0, 0, 120, 40);
+        let zone = Rect::new(90, 39, 30, 1);
+        for (right, modal) in [
+            (FooterRight::Polling, Id::SyncStatus),
+            (FooterRight::Notice { sticky: false }, Id::Messages),
+        ] {
+            let mut m = build_model();
+            m.handle_daemon_event(IpcEvent::Snapshot {
+                workspaces: vec![empty_ws("github:o/r#1")],
+                terminals: vec![],
+                projects: vec![],
+                recent_snippets: Vec::new(),
+                dismissed_updates: Vec::new(),
+            });
+            m.footer_right = Some((zone, right));
+            m.dispatch_mouse_in(left_down(zone.x + 3, zone.y), area);
+            assert_eq!(m.top_modal(), Some(&modal), "{right:?}");
+        }
     }
 
     /// A click that misses the overflow cell must not pop anything —

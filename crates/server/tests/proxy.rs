@@ -926,7 +926,8 @@ async fn assert_terminal_usage(kind: &'static str, disconnect: bool) {
         );
         assert_eq!(reports[0].0, "codex");
         assert_eq!(reports[0].1, "workspace");
-        assert_eq!(reports[0].2.input_tokens, Some(500));
+        // The Responses API's 500 includes the 100 cached: 400 uncached.
+        assert_eq!(reports[0].2.input_tokens, Some(400));
         assert_eq!(reports[0].2.output_tokens, Some(25));
         assert_eq!(reports[0].2.cache_read_input_tokens, Some(100));
     }

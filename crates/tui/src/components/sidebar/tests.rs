@@ -1536,7 +1536,7 @@ mod filter_tests {
     #[test]
     fn every_filter_has_an_axis_and_appears_in_all() {
         // ALL must list each variant exactly once; drives the menu.
-        assert_eq!(Filter::ALL.len(), 30);
+        assert_eq!(Filter::ALL.len(), 31);
         let mut seen = std::collections::BTreeSet::new();
         for f in Filter::ALL {
             assert!(seen.insert(f), "{f:?} listed twice in Filter::ALL");
@@ -2504,6 +2504,62 @@ mod search_tests {
         assert_eq!((epic.done, epic.total), (3, 9));
     }
 
+    /// The epic overview's Blocked on, Merge order and Critical path rows
+    /// each jump to their member on click — they were the rows that matter
+    /// most and the only ones with no target.
+    #[test]
+    fn epic_overview_blocker_merge_and_path_rows_are_click_targets() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("acme/api", "1", "token schema");
+        let b = issue_ws_in_repo("acme/api", "2", "consume token");
+        let (ka, kb) = (SessionKey::from(&a.key), SessionKey::from(&b.key));
+        sb.workspaces.insert(ka.clone(), a);
+        sb.workspaces.insert(kb.clone(), b);
+        let mut snap = epic_snap("auth", "Auth refactor", &[ka.as_str(), kb.as_str()]);
+        snap.members[1].blockers = vec![lazybox_ipc::Blocker {
+            kind: lazybox_ipc::BlockerKind::Decision,
+            reason: "token expiry".into(),
+            owner: lazybox_ipc::BlockerOwner::Operator,
+            since: 0,
+            holds: 0,
+        }];
+        let wk = |k: &SessionKey| lazybox_core::WorkspaceKey::new(k.as_str());
+        snap.merge_order = vec![lazybox_ipc::MergeOrderEntry {
+            key: wk(&kb),
+            held_by: vec![wk(&ka)],
+        }];
+        snap.critical_path = vec![wk(&ka), wk(&kb)];
+        sb.set_epic_snapshot(snap);
+        let epic_at = sb
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::EpicHeader(_)))
+            .expect("epic header");
+        sb.set_cursor(epic_at);
+
+        let overview = sb.header_overview().expect("overview");
+        let (lines, hits) = overview.lines(90);
+        let text = |i: usize| {
+            lines[i]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        let target_of = |needle: &str| {
+            hits.iter()
+                .find(|(i, _)| text(*i).contains(needle))
+                .map(|(_, k)| k.clone())
+        };
+        assert_eq!(target_of("token expiry"), Some(kb.clone()), "blocker row");
+        assert_eq!(
+            target_of("held behind"),
+            Some(kb.clone()),
+            "merge-order row"
+        );
+        assert_eq!(target_of("→ #2"), Some(kb), "critical-path row");
+    }
+
     /// Frame-budget regression gate (#1090, acceptance #4): the sidebar's
     /// per-frame widget build must stay cheap at scale.
     /// `prebuild_workspace_lines` rebuilds every visible row every frame
@@ -3199,6 +3255,19 @@ mod search_tests {
             3,
             "the strip no longer costs a header row"
         );
+    }
+
+    /// The today strip is a way into Stats: a click on it is a hit, a
+    /// click on the chips beside it is not.
+    #[test]
+    fn a_click_on_the_today_strip_is_a_stats_hit() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+        let row = today_row(&mut sb, 80);
+        let dollar = row.chars().position(|c| c == '$').expect("cost drawn") as u16;
+        assert!(sb.stats_hit(dollar, 1), "{row:?}");
+        assert!(!sb.stats_hit(3, 1), "the filter chip is not the strip");
+        assert!(!sb.stats_hit(dollar, 5), "another row");
     }
 
     /// A zero cost is noise, not information — it is dropped (#1502).
@@ -4148,6 +4217,64 @@ mod search_tests {
             "focus must find a row upserted while a batch is open"
         );
     }
+
+    /// A header blocker names a task, not a workspace: the lookup finds the
+    /// workspace carrying that task so a click can jump to it.
+    #[test]
+    fn workspace_key_for_task_finds_the_workspace_carrying_it() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let workspace = issue_ws("992", "Blocker");
+        let key = SessionKey::from(&workspace.key);
+        let task = workspace.gh_issues[0].id.clone();
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        assert_eq!(sb.workspace_key_for_task(&task), Some(key));
+        let elsewhere = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "x/y#1".into(),
+        };
+        assert_eq!(sb.workspace_key_for_task(&elsewhere), None);
+    }
+
+    /// The right pane strikes through a blocker that has since closed; it
+    /// learns that from whichever workspace carries the blocking task.
+    #[test]
+    fn task_state_for_reads_the_state_of_a_tracked_task() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut workspace = issue_ws("993", "Closed blocker");
+        workspace.gh_issues[0].state = lazybox_core::TaskState::Closed;
+        let task = workspace.gh_issues[0].id.clone();
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        assert_eq!(
+            sb.task_state_for(&task),
+            Some(lazybox_core::TaskState::Closed)
+        );
+        let untracked = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "x/y#1".into(),
+        };
+        assert_eq!(sb.task_state_for(&untracked), None);
+    }
+
+    /// Another workspace is named `#N title` when it is a tracked task.
+    #[test]
+    fn workspace_reference_label_names_a_task_by_number_and_title() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let workspace = issue_ws("994", "Token schema");
+        let key = SessionKey::from(&workspace.key);
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        let label = sb.workspace_reference_label(&key).expect("tracked");
+        assert!(label.ends_with("Token schema"), "{label}");
+        assert_eq!(
+            sb.workspace_reference_label(&SessionKey::new("github:x/y#1")),
+            None
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4697,7 +4824,10 @@ mod broadcast_select_tests {
                         "◆ auto-merge (GitHub)",
                     ]
                 } else {
-                    ["MERGE ON GREEN · lazybox only", "⚡ on-green (lazybox)"]
+                    [
+                        "MERGE ON GREEN · lazybox only",
+                        "⚡\u{FE0E} on-green (lazybox)",
+                    ]
                 };
                 for label in labels {
                     let spans = sb.stats_row_spans(visual_width(label), theme);

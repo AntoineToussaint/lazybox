@@ -54,6 +54,22 @@ contain explicitly documented compatibility changes.
 - Per-repo standing rules now reach the default Claude session.
 - The merge-on-green glyph rendered as a colour emoji.
 
+### Upgrade notes
+
+- Upgrade the daemon and clients together: the wire contract changed (new
+  request details on `AgentRequestsOpen`, a new autonomous trigger, a new
+  inbox filter). The persisted workspace schema did not change.
+- `keep_awake: working` / `asking` now hold for 30 minutes after the last
+  active agent instead of releasing at once; `keep_awake: always` is
+  unchanged.
+- Costs recorded before this release keep the prices they were recorded
+  with; only new usage is priced at the corrected rates. OpenAI usage now
+  reports `input_tokens` as uncached input, like Anthropic's.
+
+### Install
+
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
+
 ## [0.1.17] - 2026-09-26
 
 ### Highlights

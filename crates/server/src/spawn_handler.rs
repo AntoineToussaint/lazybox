@@ -3932,6 +3932,35 @@ async fn resolve_or_create_session(
     Ok((path, new_session_id, false))
 }
 
+/// The agent that owned a PR's branch has just moved onto the PR row. If it
+/// came from an ISSUE row, that row is the same work: fold it into the PR
+/// row, exactly as an accepted "Closes #N" merge does. Without this, a PR
+/// that only *references* its issue ("refs #N") left the issue row behind
+/// with the issue's title, no agent and a live working claim — an empty
+/// row where the user's agent had been, and a "Start anyway?" prompt that
+/// would have started a second agent beside the real one. A source row that
+/// is not an issue (a scratch workspace, another PR) is left alone.
+async fn fold_issue_row_behind_its_agent(
+    config: &ServerConfig,
+    source: &WorkspaceKey,
+    pr: &WorkspaceKey,
+) {
+    let Ok(source_ws) = load_workspace(config, source) else {
+        return;
+    };
+    let is_issue_row =
+        source_ws.pr.is_none() && source_ws.primary_task().is_some_and(|task| !task.is_pr());
+    if !is_issue_row {
+        return;
+    }
+    tracing::info!(
+        issue_workspace = %source,
+        pr_workspace = %pr,
+        "folding the issue row into the PR row its agent moved to"
+    );
+    crate::polling::handle_confirm_merge(config, source.clone(), pr.clone(), true).await;
+}
+
 async fn recover_untracked_pr_worktree_locked(
     config: &ServerConfig,
     workspace_key: &WorkspaceKey,
@@ -4022,6 +4051,7 @@ async fn recover_untracked_pr_worktree_locked(
                 worktree = %session.worktree_path.display(),
                 "transferred managed branch owner onto PR workspace"
             );
+            fold_issue_row_behind_its_agent(config, &owner.workspace_key, workspace_key).await;
             return Ok(Some((session.worktree_path, session.id)));
         }
         // Ownership changed while the two workspace locks were acquired.

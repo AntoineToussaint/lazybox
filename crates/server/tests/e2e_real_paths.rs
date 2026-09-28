@@ -1483,11 +1483,20 @@ async fn e2e_pr_spawn_transfers_its_live_managed_branch_owner() {
             "the PR spawn must focus the transferred singleton"
         );
 
-        assert!(
-            load_workspace(&config, &issue_key).sessions.is_empty(),
-            "the obsolete issue badge must no longer own the session"
-        );
+        // The issue row folds into the PR row its agent moved to, rather
+        // than staying behind as an empty badge holding the issue's claim.
+        let folded = tokio::time::timeout(Duration::from_secs(5), async {
+            while config.store.get_workspace(&issue_key).unwrap().is_some() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(folded.is_ok(), "the obsolete issue row is folded away");
         let pr_ws = load_workspace(&config, &pr_key);
+        assert!(
+            pr_ws.gh_issues.iter().any(|t| t.id.key.ends_with("#648")),
+            "the issue rides on the PR row"
+        );
         assert_eq!(pr_ws.sessions.len(), 1);
         assert_eq!(pr_ws.sessions[0].id, source_session.id);
         assert_eq!(

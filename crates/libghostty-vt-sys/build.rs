@@ -210,28 +210,25 @@ fn main() {
         // provides — libstdc++ uses `std::__cxx11::*`. Link both
         // libc++ AND libc++abi (typeinfo + RTTI live in libc++abi),
         // plus libc for sanity. CI installs `libc++-dev libc++abi-dev`.
+        //
+        // `-lc++` is not a plain library on Debian/Ubuntu: `libc++.so` is the
+        // linker script `INPUT(libc++.so.1 -lunwind -lc++abi)`, which drags
+        // LLVM's SHARED unwinder into every link, ahead of the `-lgcc_s` Rust
+        // std unwinds through. Rust's own `_Unwind_*` calls then bind to
+        // `libunwind.so.1` — a library only machines with an LLVM toolchain
+        // have — and the binary dies at startup on a stock Ubuntu (#1893).
+        // Naming gcc_s first binds them to libgcc_s, as in any Rust binary
+        // for this target; `--as-needed` then drops the unused libunwind.
+        // (Linking the unwinder statically instead does not help: the linker
+        // script still names the shared one.) glibc targets only — libgcc_s
+        // is part of every glibc toolchain, not of musl's.
+        // scripts/check-self-contained.sh fails CI and the release smoke test
+        // if a library a stock distro lacks comes back.
+        if env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|target_env| target_env == "gnu") {
+            println!("cargo:rustc-link-lib=dylib=gcc_s");
+        }
         println!("cargo:rustc-link-lib=c++");
         println!("cargo:rustc-link-lib=c++abi");
-        // libc++abi's unwinding paths call into LLVM's libunwind (`_Unwind_*`).
-        // Ubuntu resolves libc++/libc++abi above to their STATIC archives (the
-        // .so files sit under /usr/lib/llvm-NN/lib, off the default search
-        // path), but for the unwinder it also offers libunwind.so.1 — which the
-        // runner has only because `libc++abi-dev` pulls in the matching
-        // libunwind-NN (14 on ubuntu-22.04, the release runner). The link
-        // therefore succeeds in CI and ships a binary with a NEEDED entry for
-        // a library no stock Ubuntu has, so lazybox dies at startup with:
-        //   error while loading shared libraries: libunwind.so.1
-        // Nothing catches this locally: the box a release is built on always
-        // has it. Link it statically, like libc++/libc++abi, so the release
-        // archive is self-contained. `libunwind-NN-dev` symlinks libunwind.a
-        // into /usr/lib/x86_64-linux-gnu, so no extra link-search is needed.
-        // Emitted AFTER c++abi so a single-pass linker still has the pending
-        // `_Unwind_*` undefined symbols when it reaches this archive.
-        //
-        // NOTE: the similarly named `libunwind8` package is the UNRELATED
-        // nongnu library (soname libunwind.so.8) and does not satisfy this;
-        // neither does Homebrew's `libunwind` formula, which is also nongnu.
-        println!("cargo:rustc-link-lib=static=unwind");
         println!("cargo:rustc-link-lib=c");
         // The optimized archive inlines libc++'s `__throw_*` paths into a
         // `__libcpp_verbose_abort` call (the Debug build didn't), a symbol

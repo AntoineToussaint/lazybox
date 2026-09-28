@@ -6,6 +6,54 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-09-28
+
+### Highlights
+
+- **Agents talk to agents properly.** Every message into an agent now goes
+  through one delivery path that reports back — delivered, queued behind a
+  busy agent, or refused and why — and a message from another agent lands
+  between turns instead of in the middle of one. `ask_session` answers come
+  from the agent's own final message, not scraped scrollback, and a turn that
+  was already running can no longer "answer" a new question. Prompt history
+  records who sent each message: you, another agent, or lazybox.
+- **Agents can hand off and unblock each other.** `start_workspace` lets any
+  agent start independent work on an existing issue in that issue's own
+  workspace (visible, resumable, costed) instead of a hidden sub-agent, and a
+  new standing rule prefers it. `answer_session` lets an agent answer a
+  question a sibling is stuck on by pressing the keys; permission prompts
+  stay yours.
+- **The Mac stays awake while agents work.** `keep_awake` now holds for 30
+  minutes after the last active agent instead of releasing the moment none is
+  mid-turn, and a lazybox restart leaves a bounded hold behind for the agents
+  still running in tmux.
+- **Correct costs.** Opus 5.5 is priced at its own rates (it was billed as
+  Opus 5); 1-hour cache writes bill at 2× input; fast mode at 2×; OpenAI
+  cached tokens are no longer billed twice.
+- **Status you can click.** The workspace header names each blocker, check,
+  merge state, epic, role and linked issue — each a link or an action — and
+  shows which agents are waiting on this one and for what. The footer status,
+  spend badges, focus-mode counts and epic overview rows open what they
+  report.
+
+### Added
+
+- `f` → `in-flight`: what you are juggling right now.
+- `Shift-O`: jump to the next workspace with a review pending.
+- Standing rules: check for existing or conflicting work before starting,
+  keep docs current in the PR that changes behaviour, and prefer a workspace
+  to a sub-agent for independent work.
+- Cost trailers for merges lazybox did not perform itself.
+
+### Fixed
+
+- `Shift-K` after a usage limit: a `continue` the agent silently dropped is
+  pasted again, instead of Enter being resent into an empty composer and the
+  prompt reported "parked".
+- The right-pane header clipped its last lines (Assignees on every PR).
+- Per-repo standing rules now reach the default Claude session.
+- The merge-on-green glyph rendered as a colour emoji.
+
 ## [0.1.17] - 2026-09-26
 
 ### Highlights

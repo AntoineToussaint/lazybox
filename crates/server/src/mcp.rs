@@ -460,6 +460,83 @@ struct NotifySessionArgs {
     submit: bool,
 }
 
+/// An `answer_session` request: keystrokes into a sibling that is waiting
+/// on a question.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AnswerSessionArgs {
+    /// Workspace key of the waiting session (from `list_sessions`).
+    workspace: String,
+    /// Keys to press, in order: `1`–`9`, `enter`, `esc`, `up`, `down`,
+    /// `left`, `right`, `tab`, `space`, `y`, `n`. Pick option 2 of a
+    /// numbered question with `["2"]`; move and confirm with
+    /// `["down", "enter"]`.
+    #[serde(default)]
+    keys: Vec<String>,
+    /// Text typed before the keys — for a free-text answer or a "type
+    /// something" option. Follow it with `enter` in `keys` to submit.
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// How long `answer_session` lets the target redraw before reading its
+/// screen back.
+const ANSWER_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Most keys one `answer_session` call may press: enough to walk any
+/// chooser, too few to drive an agent through a session.
+const MAX_ANSWER_KEYS: usize = 16;
+/// Largest free-text answer, in bytes.
+const MAX_ANSWER_TEXT_BYTES: usize = 2000;
+
+/// The bytes one named key sends — the same encoding the TUI uses for the
+/// physical key, so the target cannot tell the two apart.
+fn answer_key_bytes(key: &str) -> Option<&'static [u8]> {
+    Some(match key.trim().to_ascii_lowercase().as_str() {
+        "1" => b"1",
+        "2" => b"2",
+        "3" => b"3",
+        "4" => b"4",
+        "5" => b"5",
+        "6" => b"6",
+        "7" => b"7",
+        "8" => b"8",
+        "9" => b"9",
+        "y" => b"y",
+        "n" => b"n",
+        "enter" | "return" => b"\r",
+        "esc" | "escape" => b"\x1b",
+        "tab" => b"\t",
+        "space" => b" ",
+        "up" => b"\x1b[A",
+        "down" => b"\x1b[B",
+        "right" => b"\x1b[C",
+        "left" => b"\x1b[D",
+        _ => return None,
+    })
+}
+
+/// Why an `answer_session` must not press anything, or `None` when it may:
+/// the target has to be waiting on input, and on a question rather than a
+/// permission prompt (see `lazybox_agents::detect::shows_claude_permission_prompt`).
+fn answer_refusal(state: Option<lazybox_ipc::AgentState>, screen: &str) -> Option<String> {
+    if state != Some(lazybox_ipc::AgentState::InputNeeded) {
+        return Some(format!(
+            "that agent is not waiting on input (state {state:?}) — to hand it work or a \
+             message use notify_session / ask_session; answer_session only answers a question \
+             it is showing"
+        ));
+    }
+    if lazybox_agents::detect::shows_claude_permission_prompt(screen) {
+        return Some(
+            "that agent is on a PERMISSION prompt (it is asking to run, edit or delete \
+             something). Those are the human's to answer — tell the user which session is \
+             waiting and what it asks; do not approve a sibling's action yourself."
+                .into(),
+        );
+    }
+    None
+}
+
 fn default_notify_submit() -> bool {
     true
 }
@@ -1448,6 +1525,124 @@ impl LazyboxMcp {
             });
         }
         Ok(notify_receipt_result(workspace, submit, early))
+    }
+
+    /// Validate and press an `answer_session`'s keys, then return the
+    /// target's screen so the caller can see whether the answer took.
+    async fn answer_session_payload(
+        &self,
+        caller: &SessionKey,
+        args: &AnswerSessionArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let target = SessionKey::from(args.workspace.as_str());
+        if &target == caller {
+            return Err(McpError::invalid_request(
+                "cannot answer your own session — pass a sibling workspace from list_sessions",
+                None,
+            ));
+        }
+        let text = args.text.as_deref().unwrap_or("");
+        if args.keys.is_empty() && text.is_empty() {
+            return Err(McpError::invalid_request(
+                "nothing to press — pass `keys` (e.g. [\"2\"] or [\"down\", \"enter\"]) and/or `text`",
+                None,
+            ));
+        }
+        if args.keys.len() > MAX_ANSWER_KEYS {
+            return Err(McpError::invalid_request(
+                format!("at most {MAX_ANSWER_KEYS} keys per answer"),
+                None,
+            ));
+        }
+        if text.len() > MAX_ANSWER_TEXT_BYTES {
+            return Err(McpError::invalid_request(
+                format!("answer text exceeds {MAX_ANSWER_TEXT_BYTES} bytes"),
+                None,
+            ));
+        }
+        let mut writes: Vec<Vec<u8>> = Vec::new();
+        if !text.is_empty() {
+            writes.push(text.as_bytes().to_vec());
+        }
+        for key in &args.keys {
+            let Some(bytes) = answer_key_bytes(key) else {
+                return Err(McpError::invalid_request(
+                    format!(
+                        "unknown key {key:?} — use 1-9, enter, esc, up, down, left, right, tab, \
+                         space, y or n"
+                    ),
+                    None,
+                ));
+            };
+            writes.push(bytes.to_vec());
+        }
+        let Some(terminal_id) = self.config.terminal.running_agent_terminal(&target).await else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "no running agent in workspace {}",
+                args.workspace
+            ))]));
+        };
+        let state = self.config.terminal.agent_state_for(terminal_id).await;
+        let screen = self
+            .read_session_text(&args.workspace, Some(40))
+            .await
+            .unwrap_or_default();
+        if let Some(reason) = answer_refusal(state, &screen) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(reason)]));
+        }
+        tracing::info!(
+            from = %caller.as_str(),
+            to = %args.workspace,
+            keys = ?args.keys,
+            text_chars = text.chars().count(),
+            "mcp answer_session: an agent answering a sibling's question"
+        );
+        // Key by key through the keyboard's own write path: a lone digit is
+        // what flips an answered chooser to Working, exactly as it does
+        // when the user presses it.
+        for bytes in writes {
+            let intent = if bytes == b"\r" {
+                lazybox_ipc::TerminalInputIntent::Submit
+            } else {
+                lazybox_ipc::TerminalInputIntent::Compose
+            };
+            if !crate::spawn_handler::handle_write_batch(
+                &self.config,
+                terminal_id,
+                &[bytes],
+                intent,
+            )
+            .await
+            {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "the keys could not be written — the agent's terminal is gone or refused input",
+                )]));
+            }
+        }
+        // Give the agent a moment to redraw, then show what it shows now.
+        tokio::time::sleep(ANSWER_SETTLE).await;
+        let after = self
+            .read_session_text(&args.workspace, Some(20))
+            .await
+            .unwrap_or_default();
+        Ok(json_result(serde_json::json!({
+            "answered": true,
+            "workspace": args.workspace,
+            "screen_after": after,
+            "note": "Check screen_after: if the question is still there, the keys did not select what you meant.",
+        })))
+    }
+
+    #[tool(
+        description = "Answer a question another agent is waiting on, by pressing keys in its session — the way the user would. Use it when a sibling is stuck on a chooser (\"1. Stack on … 2. Hold until …\"), a numbered question or a free-text prompt, and you know the answer: `keys` [\"2\"] picks option 2, [\"down\", \"enter\"] moves and confirms, `text` types a free-text answer (follow with \"enter\"). Read the session first (read_session) so you know what it asks. Refuses when the agent is not waiting on input (use notify_session / ask_session to hand it work) and when it is on a PERMISSION prompt (run / edit / delete approval) — those are the user's, so tell the user instead. Returns the target's screen after the keys so you can confirm the answer took."
+    )]
+    async fn answer_session(
+        &self,
+        Parameters(args): Parameters<AnswerSessionArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        self.answer_session_payload(&caller, &args).await
     }
 
     #[tool(
@@ -3709,7 +3904,9 @@ impl ServerHandler for LazyboxMcp {
                  distilled context to the shared blackboard with post_note and \
                  pull it — across repos, persistently — with read_notes. To \
                  actively poke another session, push an instruction into it with \
-                 notify_session. When you need an ANSWER rather than a \
+                 notify_session; when a sibling is stuck on a question you can \
+                 answer, press the keys with answer_session (never a permission \
+                 prompt — that is the user's). When you need an ANSWER rather than a \
                  handoff, ask_session sends a question (or a catalog snippet \
                  via send_snippet) to a sibling and returns its reply; if you \
                  receive a <lazybox-request>, answer it with reply_request \
@@ -7085,6 +7282,92 @@ mod tests {
             .record_agent_state(terminal_id, lazybox_ipc::AgentState::Done)
             .await;
         backend_key
+    }
+
+    /// Named keys encode exactly as the TUI encodes the physical key.
+    #[test]
+    fn answer_keys_encode_like_the_keyboard() {
+        assert_eq!(answer_key_bytes("2"), Some(&b"2"[..]));
+        assert_eq!(answer_key_bytes("Enter"), Some(&b"\r"[..]));
+        assert_eq!(answer_key_bytes("down"), Some(&b"\x1b[B"[..]));
+        assert_eq!(answer_key_bytes("esc"), Some(&b"\x1b"[..]));
+        assert_eq!(
+            answer_key_bytes("ctrl-c"),
+            None,
+            "no keys beyond the vocabulary"
+        );
+        assert_eq!(answer_key_bytes("0"), None);
+    }
+
+    /// An agent may answer a sibling's question, never its permission
+    /// prompt, and never press keys into an agent that is not waiting.
+    #[test]
+    fn answer_refusal_keeps_permission_prompts_for_the_human() {
+        use lazybox_ipc::AgentState;
+        let question = "☐ PR base\n❯ 1. Stack on #1834's branch now\n  2. Hold until #1834 merges";
+        assert_eq!(
+            answer_refusal(Some(AgentState::InputNeeded), question),
+            None
+        );
+        let permission =
+            "Bash command\n  rm -rf target\nDo you want to proceed?\n❯ 1. Yes\n  2. No";
+        let refusal = answer_refusal(Some(AgentState::InputNeeded), permission).expect("refused");
+        assert!(refusal.contains("PERMISSION"), "{refusal}");
+        let busy = answer_refusal(Some(AgentState::Working), question).expect("refused");
+        assert!(busy.contains("not waiting on input"), "{busy}");
+    }
+
+    /// End to end: the keys reach the waiting agent's terminal, one write
+    /// per key, and the caller gets the screen back.
+    #[tokio::test(start_paused = true)]
+    async fn answer_session_presses_the_keys_into_a_waiting_sibling() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let target = SessionKey::from("github:o/r#1855");
+        let terminal = lazybox_ipc::TerminalId(41);
+        let backend_key = live_agent(&config, &mock, &target, terminal).await;
+        config
+            .terminal
+            .record_agent_state(terminal, lazybox_ipc::AgentState::InputNeeded)
+            .await;
+        let handler = LazyboxMcp::new(config.clone());
+        let result = handler
+            .answer_session_payload(
+                &SessionKey::from("github:o/r#9"),
+                &AnswerSessionArgs {
+                    workspace: target.as_str().into(),
+                    keys: vec!["2".into()],
+                    text: None,
+                },
+            )
+            .await
+            .expect("answered");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let writes = mock.writes_for(&backend_key).await;
+        assert!(writes.iter().any(|w| w == b"2"), "{writes:?}");
+
+        // Its own session, an empty answer and an unknown key are refused.
+        let own = handler
+            .answer_session_payload(
+                &target,
+                &AnswerSessionArgs {
+                    workspace: target.as_str().into(),
+                    keys: vec!["1".into()],
+                    text: None,
+                },
+            )
+            .await;
+        assert!(own.is_err());
+        let unknown = handler
+            .answer_session_payload(
+                &SessionKey::from("github:o/r#9"),
+                &AnswerSessionArgs {
+                    workspace: target.as_str().into(),
+                    keys: vec!["ctrl-c".into()],
+                    text: None,
+                },
+            )
+            .await;
+        assert!(unknown.is_err());
     }
 
     #[test]

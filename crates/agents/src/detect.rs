@@ -105,6 +105,18 @@ pub const CLAUDE_STANDALONE_PROMPT_PHRASES: &[&str] = &[
     "do you want to edit its own settings",
 ];
 
+/// Whether `screen` shows one of Claude's permission / consent prompts —
+/// "do you want to allow / make this edit / delete / proceed?" and the rest
+/// of [`CLAUDE_STANDALONE_PROMPT_PHRASES`]. These gate what an agent may
+/// do, so they belong to the human: another agent answering one would
+/// approve its own sibling's action around the person the prompt asks.
+pub fn shows_claude_permission_prompt(screen: &str) -> bool {
+    let lower = screen.to_lowercase();
+    CLAUDE_STANDALONE_PROMPT_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+}
+
 /// Yes/no choice markers for the paired question + choice branch and
 /// the dialog-marker scan — the option labels a Claude approval dialog
 /// renders (`1. Yes`) plus the bare `(y/n)` family.
@@ -2619,6 +2631,7 @@ pub fn paste_echo_observed(output: &[u8], probes: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
     //! Unit coverage for the pure primitives. The agent-level tests in
     //! `tests/agents.rs` and the real-byte corpus in
     //! `tests/detect_fixtures.rs` cover composition and live wire shapes;
@@ -2626,6 +2639,19 @@ mod tests {
     //! `pub` function every detector sits on, which until now was only
     //! exercised transitively.
     use super::*;
+
+    /// Claude's consent phrases mark a permission prompt; a plain numbered
+    /// question does not.
+    #[test]
+    fn permission_prompts_are_told_apart_from_questions() {
+        assert!(shows_claude_permission_prompt(
+            "Do you want to make this edit to lib.rs?\n❯ 1. Yes"
+        ));
+        assert!(shows_claude_permission_prompt("do you want to proceed?"));
+        assert!(!shows_claude_permission_prompt(
+            "☐ PR base\n❯ 1. Stack on #1834's branch now\n  2. Hold until #1834 merges"
+        ));
+    }
 
     #[test]
     fn strip_passes_plain_text_through_unchanged() {

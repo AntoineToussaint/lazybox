@@ -325,8 +325,9 @@ pub enum CleanupPrompt {
 ///   back cleanly as not opted in — the canary is never inherited, only
 ///   chosen.
 /// - 14: `Workspace::floating` records ownership of a repo-free directory.
-/// - 15: `Workspace::todo_items` (a TODO's checklist). Omitted when empty
-///   and defaulted on read, so older records read back cleanly.
+/// - 15: `Workspace::todo_items` (a TODO's checklist). Defaulted on read,
+///   so older records read back cleanly. No `skip_serializing_if`: the
+///   workspace also travels over bincode, which cannot skip fields.
 pub const WORKSPACE_SCHEMA_VERSION: u32 = 15;
 
 /// How long a workspace counts as "recently woken" after an
@@ -410,19 +411,19 @@ pub struct TodoItem {
     /// item — from an agent, a note, another item — stays valid.
     pub id: String,
     /// The item this one nests under; `None` at the top level.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub parent: Option<String>,
     pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub done_at: Option<DateTime<Utc>>,
     /// Dropped rather than done: out of the progress count altogether.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub canceled_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub link: Option<TodoLink>,
     /// Checked off by lazybox (the linked PR merged, the issue closed)
     /// rather than by hand.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
     pub auto_checked: bool,
 }
 
@@ -627,7 +628,7 @@ pub struct Workspace {
     pub hopper: Option<HopperMeta>,
     /// The TODO's checklist, in display order (nesting via
     /// [`TodoItem::parent`]). Empty for any workspace that is not a TODO.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub todo_items: Vec<TodoItem>,
     /// When `Some`, this is a **linked (no-worktree) checkout**: the
     /// workspace points directly at an existing clone on disk (a
@@ -3021,13 +3022,10 @@ mod tests {
         );
     }
 
-    /// A checklist survives the JSON round trip, and a workspace without one
-    /// writes no `todo_items` key at all.
+    /// A checklist survives the JSON round trip.
     #[test]
-    fn todo_items_round_trip_and_stay_out_of_empty_rows() {
+    fn todo_items_round_trip() {
         let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
-        let empty = serde_json::to_string(&ws).unwrap();
-        assert!(!empty.contains("todo_items"), "{empty}");
         let mut child = todo("nested", Some(TodoLink::Url("https://x.test".into())));
         let parent = todo("top", Some(TodoLink::Workspace(WorkspaceKey::new("w"))));
         child.parent = Some(parent.id.clone());

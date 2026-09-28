@@ -215,6 +215,140 @@ mod hopper_tests {
         .expect("decode hopper workspace")
     }
 
+    fn item(
+        id: &str,
+        parent: Option<&str>,
+        link: Option<lazybox_core::TodoLink>,
+    ) -> lazybox_core::TodoItem {
+        lazybox_core::TodoItem {
+            id: id.into(),
+            parent: parent.map(Into::into),
+            text: format!("item {id}"),
+            done_at: None,
+            canceled_at: None,
+            link,
+            auto_checked: false,
+        }
+    }
+
+    fn one_todo(config: &ServerConfig, name: &str) -> WorkspaceKey {
+        save_hopper(
+            config,
+            vec![HopperEntryDraft {
+                workspace_key: None,
+                name: name.into(),
+            }],
+        )
+        .expect("create todo")
+        .remove(0)
+    }
+
+    /// A saved checklist persists in order, new items get permanent ids,
+    /// and the TODO gains no workspace per item.
+    #[tokio::test]
+    async fn save_todo_items_mints_ids_and_persists_the_tree() {
+        let config = ServerConfig::in_memory();
+        let todo = one_todo(&config, "Ship 0.1.18");
+        save_todo_items(
+            &config,
+            &todo,
+            vec![item("", None, None), item("child", None, None)],
+        )
+        .await
+        .expect("saved");
+        let saved = load(&config, &todo).todo_items;
+        assert_eq!(saved.len(), 2);
+        assert!(!saved[0].id.is_empty(), "a new item gets an id");
+        assert_eq!(saved[1].id, "child", "an existing id is kept");
+        assert_eq!(
+            config.store.list_workspaces().unwrap().len(),
+            1,
+            "items are not workspaces"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_todo_items_rejects_bad_trees_and_non_todo_rows() {
+        let config = ServerConfig::in_memory();
+        let todo = one_todo(&config, "Plan");
+        assert!(matches!(
+            save_todo_items(&config, &todo, vec![item("a", Some("ghost"), None)]).await,
+            Err(SaveTodoItemsError::UnknownParent { .. })
+        ));
+        assert!(matches!(
+            save_todo_items(
+                &config,
+                &todo,
+                vec![item("a", Some("b"), None), item("b", Some("a"), None)]
+            )
+            .await,
+            Err(SaveTodoItemsError::Cycle(_))
+        ));
+        let plain = WorkspaceKey::new("not-a-todo");
+        let ws = Workspace::empty(plain.clone(), "main", Utc::now());
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: plain.as_str().into(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+        assert_eq!(
+            save_todo_items(&config, &plain, vec![item("a", None, None)]).await,
+            Err(SaveTodoItemsError::NotTodo("not-a-todo".into()))
+        );
+    }
+
+    /// A task landing ticks off the open items linked to it in every TODO,
+    /// and nothing else.
+    #[tokio::test]
+    async fn a_landed_task_checks_off_linked_items_across_todos() {
+        let config = ServerConfig::in_memory();
+        let merged = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "o/r#1890".into(),
+        };
+        let other = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "o/r#7".into(),
+        };
+        let first = one_todo(&config, "Release");
+        let second = one_todo(&config, "Coordination");
+        save_todo_items(
+            &config,
+            &first,
+            vec![
+                item(
+                    "a",
+                    None,
+                    Some(lazybox_core::TodoLink::Task(merged.clone())),
+                ),
+                item("b", None, Some(lazybox_core::TodoLink::Task(other))),
+            ],
+        )
+        .await
+        .unwrap();
+        save_todo_items(
+            &config,
+            &second,
+            vec![item(
+                "c",
+                None,
+                Some(lazybox_core::TodoLink::Task(merged.clone())),
+            )],
+        )
+        .await
+        .unwrap();
+
+        check_todo_items_linked_to(&config, &merged).await;
+
+        let first_items = load(&config, &first).todo_items;
+        assert!(first_items[0].is_done() && first_items[0].auto_checked);
+        assert!(!first_items[1].is_done());
+        assert!(load(&config, &second).todo_items[0].is_done());
+    }
+
     #[test]
     fn save_hopper_creates_then_renames_and_reorders_stable_workspaces() {
         let config = ServerConfig::in_memory();
@@ -771,6 +905,113 @@ pub async fn set_hopper_canceled(config: &ServerConfig, key: &WorkspaceKey, canc
     }
     workspace.hopper = Some(hopper);
     commit_upsert_offloaded_reported(config, key, workspace, "set hopper cancellation").await;
+}
+
+/// Why a TODO checklist was not saved.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SaveTodoItemsError {
+    #[error("no workspace {0}")]
+    Missing(String),
+    #[error("{0} is not a TODO")]
+    NotTodo(String),
+    #[error("item {item} nests under {parent}, which is not in the list")]
+    UnknownParent { item: String, parent: String },
+    #[error("item {0} nests under itself")]
+    Cycle(String),
+}
+
+/// Replace a TODO's checklist with `items`, in their order. The client
+/// sends the whole list — one write, one `WorkspaceUpserted`, no partial
+/// state. An item with an empty id is new and gets a permanent one here;
+/// every `parent` must name an item in the list, without cycles.
+pub async fn save_todo_items(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    mut items: Vec<lazybox_core::TodoItem>,
+) -> Result<(), SaveTodoItemsError> {
+    for item in &mut items {
+        if item.id.is_empty() {
+            item.id = lazybox_core::TodoItem::new_id();
+        }
+    }
+    validate_todo_tree(&items)?;
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return Err(SaveTodoItemsError::Missing(key.as_str().into()));
+    };
+    if workspace.hopper.is_none() {
+        return Err(SaveTodoItemsError::NotTodo(key.as_str().into()));
+    }
+    workspace.todo_items = items;
+    commit_upsert_offloaded_reported(config, key, workspace, "save todo items").await;
+    Ok(())
+}
+
+/// Every parent is in the list, and following parents never loops.
+fn validate_todo_tree(items: &[lazybox_core::TodoItem]) -> Result<(), SaveTodoItemsError> {
+    let parents: std::collections::HashMap<&str, Option<&str>> = items
+        .iter()
+        .map(|i| (i.id.as_str(), i.parent.as_deref()))
+        .collect();
+    for item in items {
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = item.parent.as_deref();
+        while let Some(parent) = cursor {
+            if !seen.insert(parent) || parent == item.id {
+                return Err(SaveTodoItemsError::Cycle(item.id.clone()));
+            }
+            let Some(next) = parents.get(parent) else {
+                return Err(SaveTodoItemsError::UnknownParent {
+                    item: item.id.clone(),
+                    parent: parent.into(),
+                });
+            };
+            cursor = *next;
+        }
+    }
+    Ok(())
+}
+
+/// Tick off every open TODO item linked to `task`, which just merged (a
+/// PR) or closed (an issue). Scans the TODO rows once, then re-reads and
+/// commits each one that has something to check under its own lock, so a
+/// concurrent edit of the checklist is never overwritten with a stale copy.
+pub async fn check_todo_items_linked_to(config: &ServerConfig, task: &lazybox_core::TaskId) {
+    let store = config.store.clone();
+    let wanted = task.clone();
+    let keys = tokio::task::spawn_blocking(move || {
+        store
+            .list_workspaces()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|record| {
+                let ws = Workspace::decode_persisted(record.workspace_json.as_deref()?).ok()?;
+                let open_link = ws.todo_items.iter().any(|item| {
+                    !item.is_done()
+                        && !item.is_canceled()
+                        && matches!(&item.link, Some(lazybox_core::TodoLink::Task(id)) if *id == wanted)
+                });
+                open_link.then_some(ws.key)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    for key in keys {
+        let _ws_guard = config.lock_workspace(key.as_str()).await;
+        let Some(mut workspace) = load_workspace_offloaded(config, &key).await else {
+            continue;
+        };
+        if workspace.check_items_linked_to(task, Utc::now()) > 0 {
+            tracing::info!(
+                workspace_key = %key.as_str(),
+                task = %task.key,
+                "todo: checked off the items linked to a task that landed"
+            );
+            commit_upsert_offloaded_reported(config, &key, workspace, "auto-check todo items")
+                .await;
+        }
+    }
 }
 
 /// Record a snippet delivery against a workspace (issue #463): the

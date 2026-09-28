@@ -2444,6 +2444,14 @@ pub enum Command {
         /// for a caller that needs to know the tombstone is really gone.
         client_request_id: Option<String>,
     },
+    /// Replace a TODO's checklist with `items`, in order. The whole list
+    /// travels, so a save is one write and one `WorkspaceUpserted`. An item
+    /// with an empty id is new; the daemon mints its permanent one. Appended
+    /// last (bincode is ordinal-sensitive).
+    SaveTodoItems {
+        workspace_key: lazybox_core::WorkspaceKey,
+        items: Vec<lazybox_core::TodoItem>,
+    },
 }
 
 /// How a branch-namespace collision should be cleared (#1742). Both arms

@@ -348,6 +348,9 @@ pub(super) async fn upsert_into_workspace_key(
     } else {
         None
     };
+    // The task that just merged / closed, for the TODO auto-check below
+    // (the task itself is consumed by the commit).
+    let landed_task = terminal_cleanup.is_some().then(|| task.id.clone());
 
     // REOPEN-CANCEL (issue #552): an issue flipping closed→open cancels
     // any outstanding removal prompt — the workspace is alive again, so a
@@ -425,6 +428,11 @@ pub(super) async fn upsert_into_workspace_key(
             config.clone(),
             key.clone(),
         ));
+    }
+
+    // A TODO item linked to this task stands for it landing: check it off.
+    if let Some(task_id) = &landed_task {
+        crate::workspace::check_todo_items_linked_to(config, task_id).await;
     }
 
     // 3. TERMINAL: the PR merged or the issue closed → either reap its

@@ -6,7 +6,7 @@
 
 use crate::realm::{Msg, UserEvent};
 use chrono::{DateTime, Local, NaiveDate, Utc};
-use lazybox_core::WorkspaceKey;
+use lazybox_core::{TodoItem, TodoLink, WorkspaceKey};
 use lazybox_ipc::HopperEntryDraft;
 use std::collections::BTreeSet;
 use tuirealm::command::{Cmd, CmdResult};
@@ -25,6 +25,8 @@ pub(crate) struct HopperItem {
     pub(crate) created_at: DateTime<Utc>,
     pub(crate) completed_at: Option<DateTime<Utc>>,
     pub(crate) canceled_at: Option<DateTime<Utc>>,
+    /// The TODO's checklist, as the daemon last saved it.
+    pub(crate) items: Vec<TodoItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,7 @@ struct Row {
     key: Option<WorkspaceKey>,
     name: String,
     created_at: Option<DateTime<Utc>>,
+    items: Vec<TodoItem>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -47,6 +50,8 @@ struct HistoryItem {
     created_at: DateTime<Utc>,
     outcome_at: DateTime<Utc>,
     outcome: Outcome,
+    /// Kept so a reopened TODO comes back with its checklist.
+    items: Vec<TodoItem>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +71,29 @@ enum Mode {
     Navigate,
 }
 
+/// The checklist of one saved TODO, open inside the Active tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Checklist {
+    /// Index of the TODO in `rows`.
+    row: usize,
+    /// Selected item, in display order.
+    cursor: usize,
+    /// Text being typed for a new item or a link, if any.
+    input: Option<ChecklistInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChecklistInput {
+    kind: InputKind,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputKind {
+    NewItem,
+    Link,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryTarget {
     Day(NaiveDate),
@@ -83,6 +111,7 @@ pub struct HopperEditor {
     history_cursor: usize,
     expanded_days: BTreeSet<NaiveDate>,
     error: Option<String>,
+    checklist: Option<Checklist>,
 }
 
 impl HopperEditor {
@@ -104,12 +133,14 @@ impl HopperEditor {
                     created_at: item.created_at,
                     outcome_at,
                     outcome,
+                    items: item.items,
                 });
             } else {
                 rows.push(Row {
                     key: Some(item.key),
                     name: item.name,
                     created_at: Some(item.created_at),
+                    items: item.items,
                 });
             }
         }
@@ -125,6 +156,7 @@ impl HopperEditor {
             history_cursor: 0,
             expanded_days: BTreeSet::new(),
             error: None,
+            checklist: None,
         }
     }
 
@@ -133,6 +165,7 @@ impl HopperEditor {
             key: None,
             name: String::new(),
             created_at: None,
+            items: Vec::new(),
         }
     }
 
@@ -210,6 +243,7 @@ impl HopperEditor {
                 key: None,
                 name: suffix,
                 created_at: None,
+                items: Vec::new(),
             },
         );
         self.row += 1;
@@ -294,6 +328,7 @@ impl HopperEditor {
             created_at: row.created_at.unwrap_or(now),
             outcome_at: now,
             outcome,
+            items: row.items,
         });
         self.error = None;
         self.sync_mode();
@@ -328,6 +363,158 @@ impl HopperEditor {
                 })
                 .collect(),
         )
+    }
+
+    /// Open the checklist of the selected TODO. Only a saved TODO has one.
+    fn open_checklist(&mut self) {
+        if self.current().key.is_none() {
+            self.error = Some("Save this item before adding to its checklist".into());
+            return;
+        }
+        self.checklist = Some(Checklist {
+            row: self.row,
+            cursor: 0,
+            input: None,
+        });
+        self.error = None;
+    }
+
+    /// Save the open checklist: the whole list, as the daemon stores it.
+    fn checklist_saved(&self, row: usize) -> Option<Msg> {
+        let todo = self.rows.get(row)?;
+        Some(Msg::TodoItemsChanged {
+            workspace_key: todo.key.clone()?,
+            items: todo.items.clone(),
+        })
+    }
+
+    fn on_checklist_key(&mut self, code: Key, shift: bool) -> Option<Msg> {
+        let checklist = self.checklist.clone()?;
+        let row = checklist.row;
+        let items = &mut self.rows[row].items;
+        let cursor = checklist.cursor.min(items.len().saturating_sub(1));
+        if let Some(mut input) = checklist.input {
+            match code {
+                Key::Esc => self.set_checklist(row, cursor, None),
+                Key::Enter => {
+                    let text = input.text.trim().to_string();
+                    let changed = match input.kind {
+                        InputKind::NewItem if !text.is_empty() => {
+                            let at = insert_item_after(items, cursor, text);
+                            self.set_checklist(row, at, None);
+                            true
+                        }
+                        InputKind::NewItem => {
+                            self.set_checklist(row, cursor, None);
+                            false
+                        }
+                        InputKind::Link => {
+                            if let Some(item) = items.get_mut(cursor) {
+                                item.link = parse_link(&text);
+                            }
+                            self.set_checklist(row, cursor, None);
+                            true
+                        }
+                    };
+                    return changed.then(|| self.checklist_saved(row)).flatten();
+                }
+                Key::Backspace => {
+                    input.text.pop();
+                    self.set_checklist(row, cursor, Some(input));
+                }
+                Key::Char(ch) => {
+                    input.text.push(ch);
+                    self.set_checklist(row, cursor, Some(input));
+                }
+                _ => {}
+            }
+            return None;
+        }
+        match code {
+            Key::Esc | Key::Char('h') | Key::Left => {
+                self.checklist = None;
+                None
+            }
+            Key::Char('j') | Key::Down => {
+                let last = items.len().saturating_sub(1);
+                self.set_checklist(row, (cursor + 1).min(last), None);
+                None
+            }
+            Key::Char('k') | Key::Up => {
+                self.set_checklist(row, cursor.saturating_sub(1), None);
+                None
+            }
+            Key::Char('a') | Key::Char('o') => {
+                self.set_checklist(
+                    row,
+                    cursor,
+                    Some(ChecklistInput {
+                        kind: InputKind::NewItem,
+                        text: String::new(),
+                    }),
+                );
+                None
+            }
+            Key::Char('L') if !items.is_empty() => {
+                let text = match &items[cursor].link {
+                    Some(TodoLink::Task(id)) => id.key.clone(),
+                    Some(TodoLink::Url(url)) => url.clone(),
+                    Some(TodoLink::Workspace(key)) => key.as_str().to_string(),
+                    None => String::new(),
+                };
+                self.set_checklist(
+                    row,
+                    cursor,
+                    Some(ChecklistInput {
+                        kind: InputKind::Link,
+                        text,
+                    }),
+                );
+                None
+            }
+            Key::Enter => items
+                .get(cursor)
+                .and_then(|item| item.link.clone())
+                .map(Msg::TodoLinkOpened),
+            Key::Char(' ') if !items.is_empty() => {
+                let item = &mut items[cursor];
+                item.done_at = if item.is_done() {
+                    None
+                } else {
+                    Some(Utc::now())
+                };
+                item.canceled_at = None;
+                item.auto_checked = false;
+                self.checklist_saved(row)
+            }
+            Key::Char('c') if !items.is_empty() => {
+                let item = &mut items[cursor];
+                item.canceled_at = if item.is_canceled() {
+                    None
+                } else {
+                    Some(Utc::now())
+                };
+                item.done_at = None;
+                self.checklist_saved(row)
+            }
+            Key::Tab if !shift && !items.is_empty() => indent(items, cursor)
+                .then(|| self.checklist_saved(row))
+                .flatten(),
+            Key::BackTab | Key::Tab if !items.is_empty() => outdent(items, cursor)
+                .then(|| self.checklist_saved(row))
+                .flatten(),
+            Key::Char('x') if !items.is_empty() => {
+                remove_subtree(items, cursor);
+                let last = items.len().saturating_sub(1);
+                self.set_checklist(row, cursor.min(last), None);
+                self.checklist_saved(row)
+            }
+            _ => None,
+        }
+    }
+
+    fn set_checklist(&mut self, row: usize, cursor: usize, input: Option<ChecklistInput>) {
+        self.checklist = Some(Checklist { row, cursor, input });
     }
 
     fn history_dates(&self) -> Vec<NaiveDate> {
@@ -404,6 +591,7 @@ impl HopperEditor {
                 key: Some(item.key),
                 name: item.name,
                 created_at: Some(item.created_at),
+                items: item.items,
             },
         );
         self.history_cursor = self
@@ -453,12 +641,112 @@ impl HopperEditor {
                         Span::styled(after, style),
                     ])
                 } else {
-                    let name = crate::util::truncate_ellipsis(&row.name, text_width);
-                    Line::from(Span::styled(format!("{pointer}[ ] {name}"), style))
+                    let (done, total) = items_progress(&row.items);
+                    let progress = progress_label(done, total);
+                    let room = text_width.saturating_sub(progress.chars().count() + 2);
+                    let name = crate::util::truncate_ellipsis(&row.name, room);
+                    let mut spans = vec![Span::styled(format!("{pointer}[ ] {name}"), style)];
+                    if total > 0 {
+                        let tint = if done == total {
+                            theme.success
+                        } else {
+                            theme.accent
+                        };
+                        spans.push(Span::styled(format!("  {progress}"), style.fg(tint)));
+                    }
+                    Line::from(spans)
                 }
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), area);
+    }
+
+    fn render_checklist(
+        &self,
+        checklist: &Checklist,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &crate::theme::Theme,
+    ) {
+        let Some(todo) = self.rows.get(checklist.row) else {
+            return;
+        };
+        let (done, total) = items_progress(&todo.items);
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                todo.name.clone(),
+                Style::default().fg(theme.text_strong).bold(),
+            ),
+            Span::styled(
+                format!("  {}", progress_label(done, total)),
+                Style::default().fg(theme.accent),
+            ),
+        ])];
+        if todo.items.is_empty() && checklist.input.is_none() {
+            lines.push(Line::from(Span::styled(
+                "  No items yet — press a to add one.",
+                Style::default().fg(theme.text_dim),
+            )));
+        }
+        for (index, item) in todo.items.iter().enumerate() {
+            let selected = index == checklist.cursor && checklist.input.is_none();
+            let style = if selected {
+                theme.row_focused()
+            } else if item.is_canceled() || item.is_done() {
+                Style::default().fg(theme.text_dim)
+            } else {
+                Style::default().fg(theme.text_strong)
+            };
+            let indent = "  ".repeat(depth_of(&todo.items, index));
+            let boxed = match (item.is_done(), item.is_canceled()) {
+                (true, _) => "[x]",
+                (_, true) => "[-]",
+                _ => "[ ]",
+            };
+            let mut spans = vec![Span::styled(
+                format!(
+                    "{}{indent}{boxed} {}",
+                    if selected { "> " } else { "  " },
+                    item.text
+                ),
+                if item.is_canceled() {
+                    style.add_modifier(Modifier::CROSSED_OUT)
+                } else {
+                    style
+                },
+            )];
+            if let Some(link) = &item.link {
+                let target = match link {
+                    TodoLink::Task(id) => id.key.clone(),
+                    TodoLink::Workspace(key) => key.as_str().to_string(),
+                    TodoLink::Url(url) => url.clone(),
+                };
+                spans.push(Span::styled(
+                    format!("  → {target}"),
+                    style.fg(theme.accent).add_modifier(Modifier::UNDERLINED),
+                ));
+            }
+            if item.auto_checked {
+                spans.push(Span::styled("  auto", style.fg(theme.text_dim)));
+            }
+            lines.push(Line::from(spans));
+        }
+        if let Some(input) = &checklist.input {
+            let label = match input.kind {
+                InputKind::NewItem => "new item: ",
+                InputKind::Link => "link (owner/repo#N or URL, empty clears): ",
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {label}"), Style::default().fg(theme.text_dim)),
+                Span::styled(input.text.clone(), Style::default().fg(theme.text_strong)),
+                Span::styled("▌", Style::default().fg(theme.accent)),
+            ]));
+        }
+        let skip = lines.len().saturating_sub(area.height as usize);
+        frame.render_widget(
+            Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()),
+            area,
+        );
     }
 
     fn render_history(&self, frame: &mut Frame, area: Rect, theme: &crate::theme::Theme) {
@@ -572,6 +860,127 @@ fn cursor_window(value: &str, cursor: usize, width: usize) -> (String, String) {
     (before, after)
 }
 
+/// Nesting depth of `items[index]`: how many parents it has.
+fn depth_of(items: &[TodoItem], index: usize) -> usize {
+    let mut depth = 0;
+    let mut parent = items[index].parent.as_deref();
+    while let Some(id) = parent {
+        depth += 1;
+        if depth > items.len() {
+            break;
+        }
+        parent = items
+            .iter()
+            .find(|i| i.id == id)
+            .and_then(|i| i.parent.as_deref());
+    }
+    depth
+}
+
+/// One past the last descendant of `items[index]` — where its subtree ends
+/// in display order.
+fn subtree_end(items: &[TodoItem], index: usize) -> usize {
+    let depth = depth_of(items, index);
+    let mut end = index + 1;
+    while end < items.len() && depth_of(items, end) > depth {
+        end += 1;
+    }
+    end
+}
+
+/// Add an item after `items[cursor]` and its subtree, as its sibling (the
+/// first item of an empty list sits at the top level). Returns the new
+/// item's index. The id is minted here, so it is final from the first save.
+fn insert_item_after(items: &mut Vec<TodoItem>, cursor: usize, text: String) -> usize {
+    let (at, parent) = if items.is_empty() {
+        (0, None)
+    } else {
+        (subtree_end(items, cursor), items[cursor].parent.clone())
+    };
+    items.insert(
+        at,
+        TodoItem {
+            id: TodoItem::new_id(),
+            parent,
+            text,
+            done_at: None,
+            canceled_at: None,
+            link: None,
+            auto_checked: false,
+        },
+    );
+    at
+}
+
+/// Nest `items[cursor]` under its previous sibling. False when there is
+/// none (the first child of its parent cannot go deeper).
+fn indent(items: &mut [TodoItem], cursor: usize) -> bool {
+    let depth = depth_of(items, cursor);
+    let sibling = (0..cursor)
+        .rev()
+        .take_while(|&i| depth_of(items, i) >= depth)
+        .find(|&i| depth_of(items, i) == depth);
+    let Some(sibling) = sibling else {
+        return false;
+    };
+    items[cursor].parent = Some(items[sibling].id.clone());
+    true
+}
+
+/// Lift `items[cursor]` to its parent's level. False at the top level.
+fn outdent(items: &mut [TodoItem], cursor: usize) -> bool {
+    let Some(parent) = items[cursor].parent.clone() else {
+        return false;
+    };
+    let grandparent = items
+        .iter()
+        .find(|i| i.id == parent)
+        .and_then(|i| i.parent.clone());
+    items[cursor].parent = grandparent;
+    true
+}
+
+/// Delete `items[cursor]` and everything nested under it.
+fn remove_subtree(items: &mut Vec<TodoItem>, cursor: usize) {
+    let end = subtree_end(items, cursor);
+    items.drain(cursor..end);
+}
+
+/// What a typed link names: an issue / PR reference, or a URL. Empty text
+/// clears the link.
+fn parse_link(text: &str) -> Option<TodoLink> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(task) = lazybox_core::task_ref::parse_task_ref(text, None) {
+        return Some(TodoLink::Task(task));
+    }
+    Some(TodoLink::Url(text.to_string()))
+}
+
+/// GitHub-task-list style progress: `▰▰▱ 2/3`, at most eight cells.
+pub(crate) fn progress_label(done: usize, total: usize) -> String {
+    if total == 0 {
+        return String::new();
+    }
+    let cells = total.min(8);
+    let filled = (done * cells + total / 2) / total;
+    format!(
+        "{}{} {done}/{total}",
+        "▰".repeat(filled),
+        "▱".repeat(cells - filled)
+    )
+}
+
+/// `(done, total)` over a checklist, canceled items left out.
+fn items_progress(items: &[TodoItem]) -> (usize, usize) {
+    items
+        .iter()
+        .filter(|i| !i.is_canceled())
+        .fold((0, 0), |(d, t), i| (d + usize::from(i.is_done()), t + 1))
+}
+
 impl Component for HopperEditor {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let theme = crate::theme::current();
@@ -637,74 +1046,111 @@ impl Component for HopperEditor {
             inner.width,
             inner.height.saturating_sub(help_height + 2),
         );
-        match self.tab {
-            HopperTab::Active => self.render_active(frame, body, theme),
-            HopperTab::History => self.render_history(frame, body, theme),
+        match (self.tab, &self.checklist) {
+            (HopperTab::Active, Some(checklist)) => {
+                self.render_checklist(checklist, frame, body, theme)
+            }
+            (HopperTab::Active, None) => self.render_active(frame, body, theme),
+            (HopperTab::History, _) => self.render_history(frame, body, theme),
         }
 
-        let mut help = match self.tab {
-            HopperTab::Active => match self.mode {
-                Mode::Navigate => vec![
-                    Line::from(vec![
-                        Span::styled("d", Style::default().fg(theme.success).bold()),
-                        Span::raw(" done  "),
-                        Span::styled("c", Style::default().fg(theme.text_dim).bold()),
-                        Span::raw(" cancel  "),
-                        Span::styled("x", Style::default().fg(theme.error).bold()),
-                        Span::raw(" delete  "),
-                        Span::styled("j/k", Style::default().fg(theme.text_dim).bold()),
-                        Span::raw(" move  "),
-                        Span::styled("i", Style::default().fg(theme.success).bold()),
-                        Span::raw(" edit"),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Tab", Style::default().fg(theme.success).bold()),
-                        Span::raw(" history  "),
-                        Span::styled("Esc", Style::default().fg(theme.error).bold()),
-                        Span::raw(" close"),
-                    ]),
-                    Line::from(Span::styled(
-                        "Bare letters act on this saved item. Move to the blank row to capture a new one.",
-                        Style::default().fg(theme.text_dim),
-                    )),
-                ],
-                Mode::Capture => vec![
-                    Line::from(vec![
-                        Span::styled("Enter", Style::default().fg(theme.success).bold()),
-                        Span::raw(" next item / save  "),
-                        Span::styled("↑↓", Style::default().fg(theme.text_dim).bold()),
-                        Span::raw(" move  "),
-                        Span::styled("Esc", Style::default().fg(theme.error).bold()),
-                        Span::raw(" close"),
-                    ]),
-                    Line::from(Span::styled(
-                        "Type to edit this item. Enter on the empty row saves and closes; move onto a saved item for d/c/x.",
-                        Style::default().fg(theme.text_dim),
-                    )),
-                    Line::from(Span::styled(
-                        "One line is one persistent workspace. Paste newline-separated items to capture in bulk.",
-                        Style::default().fg(theme.text_dim),
-                    )),
-                ],
-            },
-            HopperTab::History => vec![
+        let checklist_help = self.checklist.as_ref().map(|_| {
+            vec![
                 Line::from(vec![
-                    Span::styled("↑↓", Style::default().fg(theme.text_dim).bold()),
-                    Span::raw(" day  "),
+                    Span::styled("a", Style::default().fg(theme.success).bold()),
+                    Span::raw(" add  "),
                     Span::styled("Space", Style::default().fg(theme.success).bold()),
-                    Span::raw(" expand/collapse  "),
-                    Span::styled("r", Style::default().fg(theme.success).bold()),
-                    Span::raw(" reopen item  "),
-                    Span::styled("Tab", Style::default().fg(theme.success).bold()),
-                    Span::raw(" active  "),
-                    Span::styled("Esc", Style::default().fg(theme.error).bold()),
-                    Span::raw(" close"),
+                    Span::raw(" done  "),
+                    Span::styled("c", Style::default().fg(theme.text_dim).bold()),
+                    Span::raw(" cancel  "),
+                    Span::styled("Tab/S-Tab", Style::default().fg(theme.text_dim).bold()),
+                    Span::raw(" nest  "),
+                    Span::styled("x", Style::default().fg(theme.error).bold()),
+                    Span::raw(" delete"),
+                ]),
+                Line::from(vec![
+                    Span::styled("L", Style::default().fg(theme.success).bold()),
+                    Span::raw(" link  "),
+                    Span::styled("Enter", Style::default().fg(theme.success).bold()),
+                    Span::raw(" open link  "),
+                    Span::styled("h/Esc", Style::default().fg(theme.text_dim).bold()),
+                    Span::raw(" back"),
                 ]),
                 Line::from(Span::styled(
-                    "Completed items are listed before canceled items within each day.",
+                    "An item linked to a PR or issue checks itself off when it merges or closes.",
                     Style::default().fg(theme.text_dim),
                 )),
-            ],
+            ]
+        });
+        let mut help = if let (HopperTab::Active, Some(lines)) = (self.tab, checklist_help) {
+            lines
+        } else {
+            match self.tab {
+                HopperTab::Active => match self.mode {
+                    Mode::Navigate => vec![
+                        Line::from(vec![
+                            Span::styled("d", Style::default().fg(theme.success).bold()),
+                            Span::raw(" done  "),
+                            Span::styled("c", Style::default().fg(theme.text_dim).bold()),
+                            Span::raw(" cancel  "),
+                            Span::styled("x", Style::default().fg(theme.error).bold()),
+                            Span::raw(" delete  "),
+                            Span::styled("j/k", Style::default().fg(theme.text_dim).bold()),
+                            Span::raw(" move  "),
+                            Span::styled("i", Style::default().fg(theme.success).bold()),
+                            Span::raw(" edit  "),
+                            Span::styled("l", Style::default().fg(theme.success).bold()),
+                            Span::raw(" checklist"),
+                        ]),
+                        Line::from(vec![
+                            Span::styled("Tab", Style::default().fg(theme.success).bold()),
+                            Span::raw(" history  "),
+                            Span::styled("Esc", Style::default().fg(theme.error).bold()),
+                            Span::raw(" close"),
+                        ]),
+                        Line::from(Span::styled(
+                            "Bare letters act on this saved item. Move to the blank row to capture a new one.",
+                            Style::default().fg(theme.text_dim),
+                        )),
+                    ],
+                    Mode::Capture => vec![
+                        Line::from(vec![
+                            Span::styled("Enter", Style::default().fg(theme.success).bold()),
+                            Span::raw(" next item / save  "),
+                            Span::styled("↑↓", Style::default().fg(theme.text_dim).bold()),
+                            Span::raw(" move  "),
+                            Span::styled("Esc", Style::default().fg(theme.error).bold()),
+                            Span::raw(" close"),
+                        ]),
+                        Line::from(Span::styled(
+                            "Type to edit this item. Enter on the empty row saves and closes; move onto a saved item for d/c/x.",
+                            Style::default().fg(theme.text_dim),
+                        )),
+                        Line::from(Span::styled(
+                            "One line is one persistent workspace. Paste newline-separated items to capture in bulk.",
+                            Style::default().fg(theme.text_dim),
+                        )),
+                    ],
+                },
+                HopperTab::History => vec![
+                    Line::from(vec![
+                        Span::styled("↑↓", Style::default().fg(theme.text_dim).bold()),
+                        Span::raw(" day  "),
+                        Span::styled("Space", Style::default().fg(theme.success).bold()),
+                        Span::raw(" expand/collapse  "),
+                        Span::styled("r", Style::default().fg(theme.success).bold()),
+                        Span::raw(" reopen item  "),
+                        Span::styled("Tab", Style::default().fg(theme.success).bold()),
+                        Span::raw(" active  "),
+                        Span::styled("Esc", Style::default().fg(theme.error).bold()),
+                        Span::raw(" close"),
+                    ]),
+                    Line::from(Span::styled(
+                        "Completed items are listed before canceled items within each day.",
+                        Style::default().fg(theme.text_dim),
+                    )),
+                ],
+            }
         };
         if let Some(error) = &self.error {
             help.push(Line::from(Span::styled(
@@ -741,6 +1187,13 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
             if self.tab == HopperTab::History {
                 return None;
             }
+            if let Some(Checklist {
+                input: Some(input), ..
+            }) = self.checklist.as_mut()
+            {
+                input.text.extend(text.chars().filter(|c| !c.is_control()));
+                return None;
+            }
             for ch in text.chars() {
                 if ch == '\n' {
                     self.insert_row_break();
@@ -756,6 +1209,12 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && matches!(key.code, Key::Char('c')) {
             return Some(Msg::ModalDismissed);
+        }
+        // An open checklist owns every key, Tab and Esc included (nest and
+        // back), so it is routed before the modal-level bindings.
+        if self.tab == HopperTab::Active && self.checklist.is_some() {
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+            return self.on_checklist_key(key.code, shift);
         }
         if matches!(key.code, Key::Esc) {
             // Esc leaves an in-place rename (Capture on a saved row) back
@@ -803,6 +1262,7 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
                 Key::Char('c') => return self.move_current_to_history(Outcome::Canceled),
                 Key::Char('x') => return self.delete_current_line(),
                 Key::Char('i') | Key::Enter => self.enter_capture(),
+                Key::Char('l') | Key::Right => self.open_checklist(),
                 _ => return None,
             }
             return None;
@@ -844,6 +1304,7 @@ mod tests {
             created_at: Utc::now(),
             completed_at: None,
             canceled_at: None,
+            items: Vec::new(),
         }
     }
 
@@ -878,6 +1339,123 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Open the checklist of the first (saved) row.
+    fn checklist_editor() -> HopperEditor {
+        let mut editor = HopperEditor::new(vec![item("Ship 0.1.18")]);
+        editor.on(&key(Key::Up));
+        assert_eq!(editor.mode, Mode::Navigate);
+        editor.on(&key(Key::Char('l')));
+        assert!(editor.checklist.is_some(), "l opens the checklist");
+        editor
+    }
+
+    fn type_text(editor: &mut HopperEditor, text: &str) {
+        for ch in text.chars() {
+            editor.on(&key(Key::Char(ch)));
+        }
+    }
+
+    fn saved(msg: Option<Msg>) -> Vec<TodoItem> {
+        match msg {
+            Some(Msg::TodoItemsChanged { items, .. }) => items,
+            other => panic!("expected a checklist save, got {other:?}"),
+        }
+    }
+
+    /// Adding, nesting and checking items each save the whole list, with a
+    /// permanent id minted on the first save.
+    #[test]
+    fn checklist_items_are_added_nested_and_checked_off() {
+        let mut editor = checklist_editor();
+        editor.on(&key(Key::Char('a')));
+        type_text(&mut editor, "cut the release");
+        let items = saved(editor.on(&key(Key::Enter)));
+        assert_eq!(items.len(), 1);
+        let id = items[0].id.clone();
+        assert!(!id.is_empty(), "the id is minted on the first save");
+
+        editor.on(&key(Key::Char('a')));
+        type_text(&mut editor, "run the preflight");
+        assert_eq!(saved(editor.on(&key(Key::Enter))).len(), 2);
+        let items = saved(editor.on(&key(Key::Tab)));
+        assert_eq!(items[1].parent.as_deref(), Some(id.as_str()), "Tab nests");
+        assert_eq!(items[0].id, id, "the id did not change");
+
+        let items = saved(editor.on(&key(Key::Char(' '))));
+        assert!(items[1].is_done(), "Space checks off");
+        assert_eq!(items_progress(&items), (1, 2));
+
+        let items = saved(editor.on(&key(Key::BackTab)));
+        assert_eq!(items[1].parent, None, "Shift-Tab lifts it back out");
+    }
+
+    /// A link typed as `owner/repo#N` becomes a task link, and Enter on
+    /// the item asks to open it.
+    #[test]
+    fn a_linked_item_opens_its_link() {
+        let mut editor = checklist_editor();
+        editor.on(&key(Key::Char('a')));
+        type_text(&mut editor, "merge the PR");
+        editor.on(&key(Key::Enter));
+        editor.on(&key(Key::Char('L')));
+        type_text(&mut editor, "o/r#1890");
+        let items = saved(editor.on(&key(Key::Enter)));
+        let Some(TodoLink::Task(task)) = &items[0].link else {
+            panic!("a task link: {:?}", items[0].link);
+        };
+        assert_eq!(task.key, "o/r#1890");
+        assert!(matches!(
+            editor.on(&key(Key::Enter)),
+            Some(Msg::TodoLinkOpened(TodoLink::Task(_)))
+        ));
+    }
+
+    /// `x` removes an item with everything nested under it; Esc goes back
+    /// to the TODO list rather than closing the modal.
+    #[test]
+    fn x_removes_a_subtree_and_esc_leaves_the_checklist() {
+        let mut editor = checklist_editor();
+        for text in ["parent", "child"] {
+            editor.on(&key(Key::Char('a')));
+            type_text(&mut editor, text);
+            editor.on(&key(Key::Enter));
+        }
+        editor.on(&key(Key::Tab));
+        editor.on(&key(Key::Char('k')));
+        assert!(saved(editor.on(&key(Key::Char('x')))).is_empty());
+        assert_eq!(editor.on(&key(Key::Esc)), None);
+        assert!(editor.checklist.is_none(), "Esc left the checklist");
+    }
+
+    /// Each TODO line carries its progress.
+    #[test]
+    fn a_todo_line_shows_its_progress() {
+        let mut todo = item("Ship 0.1.18");
+        let mut done = TodoItem {
+            id: "a".into(),
+            parent: None,
+            text: "a".into(),
+            done_at: None,
+            canceled_at: None,
+            link: None,
+            auto_checked: false,
+        };
+        let open = done.clone();
+        done.done_at = Some(Utc::now());
+        todo.items = vec![
+            done,
+            TodoItem {
+                id: "b".into(),
+                ..open
+            },
+        ];
+        let mut editor = HopperEditor::new(vec![todo]);
+        let screen = render(&mut editor, 90, 20);
+        assert!(screen.contains("Ship 0.1.18  ▰▱ 1/2"), "{screen}");
+        assert_eq!(progress_label(0, 0), "");
+        assert_eq!(progress_label(3, 3), "▰▰▰ 3/3");
     }
 
     #[test]

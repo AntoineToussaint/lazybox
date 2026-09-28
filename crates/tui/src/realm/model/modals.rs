@@ -525,6 +525,7 @@ impl<T: TerminalAdapter> Model<T> {
                             created_at: workspace.created_at,
                             completed_at: meta.completed_at,
                             canceled_at: meta.canceled_at,
+                            items: workspace.todo_items.clone(),
                         },
                     )
                 })

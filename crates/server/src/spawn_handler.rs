@@ -3958,7 +3958,17 @@ async fn fold_issue_row_behind_its_agent(
         pr_workspace = %pr,
         "folding the issue row into the PR row its agent moved to"
     );
-    crate::polling::handle_confirm_merge(config, source.clone(), pr.clone(), true).await;
+    // Boxed: the merge fold is a large future, and awaiting it inline would
+    // grow every spawn future by its full size — enough to overflow a 2 MiB
+    // test thread that drives a spawn (`backed_stage_terminal_is_durable_and_typeable`
+    // overflowed on Linux CI).
+    Box::pin(crate::polling::handle_confirm_merge(
+        config,
+        source.clone(),
+        pr.clone(),
+        true,
+    ))
+    .await;
 }
 
 async fn recover_untracked_pr_worktree_locked(

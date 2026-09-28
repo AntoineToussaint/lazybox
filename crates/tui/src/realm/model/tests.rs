@@ -2551,6 +2551,30 @@ mod effects_tests {
         }
     }
 
+    /// Sending a removal takes the row out of the sidebar before the daemon
+    /// answers: the teardown (terminal kills, the local-work check) runs
+    /// behind it instead of leaving the row on screen for up to 30s.
+    #[test]
+    fn a_sent_removal_hides_the_row_before_the_daemon_answers() {
+        let mut m = build_model();
+        let ws = lazybox_core::Workspace::empty(
+            WorkspaceKey::new("github:o/r#1"),
+            "main",
+            chrono::Utc::now(),
+        );
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            ws,
+        )));
+        assert_eq!(m.sidebar.visible_workspace_count(), 1);
+        m.dispatch_cmds(vec![IpcCommand::RemoveMergedWorkspace { session_key: key }]);
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            0,
+            "the row leaves at once; the daemon finishes the teardown behind it"
+        );
+    }
+
     /// Regression: a removal prompt for a workspace the client doesn't
     /// know about (never in the sidebar, or already gone) is DROPPED at
     /// the mount-time liveness gate rather than shown as an orphaned

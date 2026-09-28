@@ -97,6 +97,18 @@ impl Sidebar {
     /// Fire any coalesced desktop notifications whose debounce window
     /// has elapsed, collapsing a same-kind burst into one summary
     /// banner. Called each run-loop iteration (#1370).
+    pub fn hide_pending_removal(&mut self, key: lazybox_core::SessionKey) {
+        self.inner.hide_pending_removal(key);
+    }
+
+    pub fn expire_pending_removals(
+        &mut self,
+        now: std::time::Instant,
+        limit: std::time::Duration,
+    ) -> Vec<String> {
+        self.inner.expire_pending_removals(now, limit)
+    }
+
     pub fn flush_due_notifications(&mut self) {
         for notif in self.coalescer.flush_due(std::time::Instant::now()) {
             crate::platform::notify_user(&notif.title, &notif.body, &notif.workspace_key);

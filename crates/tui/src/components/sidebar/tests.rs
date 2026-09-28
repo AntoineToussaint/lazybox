@@ -4259,6 +4259,46 @@ mod search_tests {
         assert_eq!(sb.task_state_for(&untracked), None);
     }
 
+    /// A requested removal hides the row at once; the daemon's
+    /// `WorkspaceRemoved` makes it final, and a removal that never
+    /// completes brings the row back with its name reported.
+    #[test]
+    fn a_pending_removal_hides_then_confirms_or_comes_back() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let workspace = issue_ws("995", "Merged PR");
+        let key = SessionKey::from(&workspace.key);
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace.clone(),
+        )));
+        assert_eq!(sb.visible_workspace_count(), 1);
+
+        sb.hide_pending_removal(key.clone());
+        assert_eq!(
+            sb.visible_workspace_count(),
+            0,
+            "gone from the list at once"
+        );
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        assert_eq!(
+            sb.expire_pending_removals(later, std::time::Duration::from_secs(90)),
+            vec!["Merged PR".to_string()],
+            "an unconfirmed removal comes back, by name"
+        );
+        assert_eq!(sb.visible_workspace_count(), 1);
+
+        sb.hide_pending_removal(key.clone());
+        sb.on_event(&lazybox_ipc::Event::WorkspaceRemoved(workspace.key.clone()));
+        assert!(
+            !sb.is_pending_removal(&key),
+            "confirmed removals are cleared"
+        );
+        assert!(
+            sb.expire_pending_removals(later, std::time::Duration::from_secs(90))
+                .is_empty(),
+            "nothing to restore once the daemon confirmed"
+        );
+    }
+
     /// Another workspace is named `#N title` when it is a tracked task.
     #[test]
     fn workspace_reference_label_names_a_task_by_number_and_title() {

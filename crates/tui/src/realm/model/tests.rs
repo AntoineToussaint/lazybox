@@ -12938,6 +12938,70 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.open_request_rows(&session).is_empty());
     }
 
+    /// The pane resync is now scoped to the SELECTED workspace — the daemon
+    /// broadcasts this event on every ask, reply and turn-end capture across
+    /// the fleet, and `sync_panes` is a full rebuild. The scoping must not
+    /// cost the selected workspace its own update, which is what this
+    /// guards: the right pane still learns who asked it what.
+    #[test]
+    fn an_open_request_for_the_selected_workspace_still_reaches_the_right_pane() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        let other = workspace("owner/repo#4", true, Duration::hours(1));
+        let other_key = other.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(other)));
+
+        let session = SessionKey::from(&ws_key);
+        assert!(
+            m.sidebar.focus_workspace_key(&session),
+            "select the workspace under test"
+        );
+        m.sync_panes();
+
+        let asked = |q: &str| lazybox_ipc::OpenAgentRequest {
+            asker: lazybox_core::WorkspaceKey::new("github:o/r#9"),
+            question: q.into(),
+            asked_at: 1,
+        };
+        m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
+            workspace_key: ws_key.clone(),
+            open: 1,
+            requests: vec![asked("what is the token contract?")],
+        });
+        assert_eq!(
+            m.right.inbound_requests().len(),
+            1,
+            "the selected workspace's inbound question reaches the pane"
+        );
+        assert!(
+            m.right.inbound_requests()[0]
+                .question
+                .contains("token contract"),
+        );
+
+        // An event about a DIFFERENT workspace records its rows without
+        // touching the selected workspace's pane.
+        m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
+            workspace_key: other_key.clone(),
+            open: 1,
+            requests: vec![asked("someone else's question")],
+        });
+        assert_eq!(
+            m.sidebar
+                .open_request_rows(&SessionKey::from(&other_key))
+                .len(),
+            1,
+            "the other workspace's rows are still recorded for its own badge"
+        );
+        assert_eq!(
+            m.right.inbound_requests().len(),
+            1,
+            "and the selected workspace's pane is untouched by it"
+        );
+    }
+
     fn rendered_description_modal(
         model: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
     ) -> String {

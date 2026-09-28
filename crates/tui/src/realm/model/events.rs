@@ -1080,8 +1080,19 @@ impl<T: TerminalAdapter> Model<T> {
         {
             let key = lazybox_core::SessionKey::from(workspace_key.as_str());
             self.sidebar.set_open_requests(key.clone(), *open);
-            self.sidebar.set_open_request_rows(key, requests.clone());
-            self.sync_panes();
+            self.sidebar
+                .set_open_request_rows(key.clone(), requests.clone());
+            // Only the SELECTED workspace's rows are on screen, and
+            // `sync_panes` is a full rebuild (it walks every blocker and
+            // resolves each against every tracked workspace). The daemon
+            // broadcasts this event on every ask, reply and turn-end capture
+            // across the fleet, and replays one per workspace carrying an
+            // open request on connect — resyncing the panes for workspace Y
+            // because workspace X was asked something is work proportional
+            // to fleet chatter rather than to what changed.
+            if self.sidebar.selected_workspace_key() == Some(&key) {
+                self.sync_panes();
+            }
             self.redraw = true;
         }
         // Spooled agent artifacts (#1822): the daemon owns the spool and

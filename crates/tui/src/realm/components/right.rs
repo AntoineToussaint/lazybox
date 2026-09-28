@@ -239,6 +239,12 @@ impl Right {
         self.inner.set_inbound_requests(requests);
     }
 
+    /// The open questions this workspace is carrying, as last synced.
+    #[cfg(test)]
+    pub(crate) fn inbound_requests(&self) -> &[crate::components::right_pane::InboundRequest] {
+        self.inner.inbound_requests()
+    }
+
     pub fn set_blocker_states(
         &mut self,
         states: std::collections::HashMap<lazybox_core::TaskId, lazybox_core::TaskState>,

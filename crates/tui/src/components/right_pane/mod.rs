@@ -1315,6 +1315,12 @@ impl RightPane {
     }
 
     /// Feed the open requests other agents have asked this workspace.
+    /// The open questions this workspace is carrying, as last synced.
+    #[cfg(test)]
+    pub(crate) fn inbound_requests(&self) -> &[InboundRequest] {
+        &self.inbound_requests
+    }
+
     pub fn set_inbound_requests(&mut self, requests: Vec<InboundRequest>) {
         self.inbound_requests = requests;
     }
@@ -1646,6 +1652,13 @@ impl RightPane {
         &'a self,
         workspace: &'a lazybox_core::Workspace,
         task: &'a lazybox_core::Task,
+        // INVARIANT: `width` may change what a line CONTAINS — a
+        // right-align gap, a `…` truncation — but never how many lines
+        // there are. `header_height` measures at width 0 while the renderer
+        // draws at the real width; the moment a line's EXISTENCE depends on
+        // width those two disagree and the header clips again, which is the
+        // bug this one-builder shape exists to prevent. Enforced by
+        // `header_line_count_is_width_independent`.
         width: u16,
         origin: Vec<(String, String, String)>,
         show_diffstat: bool,
@@ -3053,6 +3066,10 @@ impl RightPane {
         // The placeholder headers (no workspace, or one with no task yet)
         // draw a single line but keep the pane's long-standing 4-row shape.
         const PLACEHOLDER_ROWS: u16 = 4;
+        // Measured at width 0: only the COUNT is wanted here, and by
+        // `header_lines`' invariant the count does not depend on width.
+        // Passing a real width would mean re-measuring on every resize for
+        // a number that cannot change.
         let Some(workspace) = &self.workspace else {
             return PLACEHOLDER_ROWS;
         };

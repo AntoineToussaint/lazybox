@@ -11097,6 +11097,15 @@ fn replace_detection_history(
 /// a daemon restart, especially when the inherited descriptor limit is low.
 const RECOVERY_ATTACH_CONCURRENCY: usize = 4;
 
+/// How long recovery will wait inline for a survivor's working claim before
+/// letting it finish detached. The uncontended path is store reads behind an
+/// uncontended per-holder lock, so it lands far inside this; the contended path
+/// is a 20s GitHub heartbeat holding that lock, which is what this exists to
+/// not wait for. Kept small because it is paid per survivor: 114 survivors all
+/// contended would be ~11s in total, against the 78.8s a single uncapped wait
+/// cost on 2026-09-29.
+const RECOVERY_CLAIM_INLINE_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// A failed attach must not spin on the async runtime or flood the synchronous
 /// log writer. The capped schedule remains self-healing while containing a
 /// persistent backend/OS outage.
@@ -11419,8 +11428,52 @@ pub async fn recover_sessions(config: &ServerConfig) {
             matches!(kind, TerminalKind::Agent(_)) && access != AgentRunAccess::ReadOnly;
         let claim_workspace = WorkspaceKey::new(session_key.as_str());
         if claiming_agent {
-            crate::working_claims::acquire_pty(config, claim_workspace, &key, claim_session_id)
-                .await;
+            // The claim's REMOTE write was never on this path — `acquire` ends
+            // in `tokio::spawn`. What is inline is its per-holder `lock_holder`
+            // plus the store reads, and that lock is held *across* the 20s
+            // GitHub heartbeat: by `acquire`'s own spawned task, and by
+            // `heartbeat_holder` in the maintenance sweep. So a survivor whose
+            // claim happens to be mid-heartbeat blocks recovery for the full
+            // `working_claims::MUTATION_TIMEOUT`, and on 2026-09-29 three of
+            // 114 survivors did — 16.00s, 20.00s and 20.09s of the 78.8s it
+            // took for the last agent to appear.
+            //
+            // The local claim row is worth keeping ordered ahead of
+            // `Event::TerminalSpawned`, because it is what `task_status` and
+            // autospawn read to answer "is anyone working on this?". So give it
+            // a short inline window — the uncontended path is store-only and
+            // finishes in well under it — and let only a contended claim finish
+            // detached rather than hold the other survivors behind it. Dropping
+            // the future can only cancel it at `lock_holder`, before anything is
+            // persisted, so the detached retry redoes the whole acquire.
+            let inline = tokio::time::timeout(
+                RECOVERY_CLAIM_INLINE_WAIT,
+                crate::working_claims::acquire_pty(
+                    config,
+                    claim_workspace.clone(),
+                    &key,
+                    claim_session_id,
+                ),
+            )
+            .await;
+            if inline.is_err() {
+                tracing::info!(
+                    backend_key = %key,
+                    workspace = %claim_workspace,
+                    "recover: working claim is contended — finishing it detached so it cannot stall the other survivors"
+                );
+                let claim_config = config.clone();
+                let claim_key = key.clone();
+                tokio::spawn(async move {
+                    crate::working_claims::acquire_pty(
+                        &claim_config,
+                        claim_workspace,
+                        &claim_key,
+                        claim_session_id,
+                    )
+                    .await;
+                });
+            }
         }
         // Carry the hydrated state on the spawn announce itself. Hydration
         // already put it in the cache, so every later PTY reading folds to

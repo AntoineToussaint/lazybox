@@ -303,6 +303,28 @@ fn merge_prompt_question(pr_label: &str, issue_label: &str, count: usize) -> Str
     )
 }
 
+/// Build a Confirm with the chrome and Enter default its mount site chose.
+///
+/// Shared by the sites that mount one of these and by
+/// [`Model::apply_removal_risks`], which rebuilds the component in place
+/// when the daemon's risk list lands: the two have to agree, and a
+/// re-mount that re-derived the default from `destructive` alone silently
+/// dropped the No guard.
+fn confirm_with_default(
+    prompt: impl Into<String>,
+    destructive: bool,
+    default_no: bool,
+) -> crate::realm::components::confirm::Confirm {
+    let modal = crate::realm::components::confirm::Confirm::new(prompt);
+    if default_no {
+        modal.default_no()
+    } else if destructive {
+        modal.destructive()
+    } else {
+        modal.default_yes()
+    }
+}
+
 /// Confirm copy for an out-of-scope workspace with live terminals.
 /// Trims the title so a verbose PR description doesn't make the modal
 /// three lines tall — 80 chars + an ellipsis fits the dynamic-height
@@ -2762,7 +2784,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// `Msg::Confirmed` / `Msg::ModalDismissed` arms.
     pub(super) fn maybe_mount_next_removal_prompt(&mut self) {
         use super::RemovalReason;
-        use crate::realm::components::confirm::Confirm;
 
         if !self.modal_stack.is_empty() {
             return;
@@ -2792,10 +2813,16 @@ impl<T: TerminalAdapter> Model<T> {
             RemovalReason::Merged => terminal_removal_copy(&prompt, "merged"),
             RemovalReason::Closed => terminal_removal_copy(&prompt, "closed"),
         };
-        // Removing a workspace deletes its worktree — always destructive.
-        // Every confirm defaults to Yes now (fast to accept), and this one
-        // wears the warning border + `⚠` title so an unsolicited
-        // merged/closed removal reads as dangerous before Enter.
+        // Removing a workspace deletes its worktree — always destructive,
+        // so the prompt always wears the warning border + `⚠` title.
+        //
+        // With nothing running it still defaults to Yes: the worktree is
+        // reconstructible and the row is already gone from the user's
+        // scope. With a live terminal it does not. Nobody asked for this
+        // prompt — a provider event raised it — and Yes kills a running
+        // agent mid-turn, which is not recoverable by re-cloning. #1899:
+        // four workspaces with live agents, two holding embargoed work,
+        // were archived in 13 seconds by one Enter per queued modal.
         //
         // Yes on any of these three is an explicit removal the daemon
         // may not refuse, so the prompt has to name what it destroys.
@@ -2804,13 +2831,15 @@ impl<T: TerminalAdapter> Model<T> {
         // all (`has_local_work: false`, always), which is exactly why
         // the answer comes from the daemon's own preflight instead of
         // from the event.
+        let guard_default_no = prompt.terminal_count > 0;
         self.arm_removal_risk_preflight_for(
             lazybox_ipc::RemovalTarget::Workspace((&prompt.workspace_key).into()),
             &copy,
             true,
+            guard_default_no,
             Id::RemoveOutOfScope,
         );
-        let modal = Confirm::new(copy).destructive();
+        let modal = confirm_with_default(copy, true, guard_default_no);
         self.set_modal_flow(ModalFlow::RemovalPrompt {
             workspace: prompt.workspace_key,
             reason: prompt.reason,
@@ -2930,7 +2959,6 @@ impl<T: TerminalAdapter> Model<T> {
         targets: Vec<super::ActionConfirmTarget>,
         override_prompt: Option<String>,
     ) {
-        use crate::realm::components::confirm::Confirm;
         use lazybox_tui_core::action::ActionDef;
         // Override wins so callers can render context-sensitive copy
         // (e.g. "Delete project X with 3 workspaces" vs. the generic
@@ -2954,13 +2982,10 @@ impl<T: TerminalAdapter> Model<T> {
         // on-main spawn) destroys nothing and stays neutral; a genuinely
         // destructive action (archive / merge / delete / close / reset)
         // wears the warning coloring so the danger shows before Enter.
-        let modal = Confirm::new(&prompt);
-        let modal = if destructive {
-            modal.destructive()
-        } else {
-            modal.default_yes()
-        };
-        self.mount_modal(Id::ActionConfirm, modal);
+        self.mount_modal(
+            Id::ActionConfirm,
+            confirm_with_default(&prompt, destructive, false),
+        );
     }
 
     /// Fire the removal-risk preflight for a delete confirm that is
@@ -2993,7 +3018,7 @@ impl<T: TerminalAdapter> Model<T> {
                 lazybox_ipc::RemovalTarget::Project(key.clone())
             }
         };
-        self.arm_removal_risk_preflight_for(target, prompt, destructive, Id::ActionConfirm);
+        self.arm_removal_risk_preflight_for(target, prompt, destructive, false, Id::ActionConfirm);
     }
 
     /// Ask the daemon what removing `target` would destroy, and
@@ -3009,6 +3034,7 @@ impl<T: TerminalAdapter> Model<T> {
         target: lazybox_ipc::RemovalTarget,
         prompt: &str,
         destructive: bool,
+        default_no: bool,
         id: Id,
     ) {
         self.send_cmd(lazybox_ipc::Command::InspectRemovalRisks {
@@ -3018,6 +3044,7 @@ impl<T: TerminalAdapter> Model<T> {
             target,
             base_prompt: prompt.to_string(),
             destructive,
+            default_no,
             id,
         });
     }
@@ -3037,7 +3064,6 @@ impl<T: TerminalAdapter> Model<T> {
         risks: &[lazybox_ipc::RemovalRiskDto],
         error: Option<&str>,
     ) {
-        use crate::realm::components::confirm::Confirm;
         let Some(pending) = self.pending_removal_risk.as_ref() else {
             return;
         };
@@ -3048,14 +3074,8 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         let prompt = format!("{}\n\n{block}", pending.base_prompt);
-        let destructive = pending.destructive;
+        let modal = confirm_with_default(prompt, pending.destructive, pending.default_no);
         let id = pending.id.clone();
-        let modal = Confirm::new(prompt);
-        let modal = if destructive {
-            modal.destructive()
-        } else {
-            modal.default_yes()
-        };
         // Remount in place. `mount_modal` replaces the component under
         // the same id and leaves `modal_flow` alone, so the action and
         // its targets — the thing Yes actually fires — are untouched.

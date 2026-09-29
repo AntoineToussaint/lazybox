@@ -970,6 +970,11 @@ pub(crate) struct PendingRemovalRisk {
     /// the re-mount reproduces the modal it replaces rather than
     /// quietly dropping the warning border.
     pub(crate) destructive: bool,
+    /// Whether that confirm put its default on No. Carried for the same
+    /// reason as `destructive`: the re-mount rebuilds the component from
+    /// scratch, so a guard it did not know about would be silently traded
+    /// for a Yes default the moment the daemon's risk list landed.
+    pub(crate) default_no: bool,
     /// Which modal the reply amends — [`Id::ActionConfirm`] for `x x`
     /// and the project delete, [`Id::RemoveOutOfScope`] for the
     /// daemon-raised removal prompts. Checked against the top of the

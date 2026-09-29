@@ -55,11 +55,20 @@ ring resync rebuilt the grid from another baseline — the capture is *refused*:
 the local grid holds every byte, it is only shallower, and the next upward
 scroll re-captures.
 
-## Confirm modals do not guard against stray keys
+## Which button a Confirm defaults to is a per-site decision
 
-`default_no()` is an alias that does nothing — Enter confirms. A Confirm is a
-deliberate-intent prompt, not protection from a typo, so anything genuinely
-destructive needs a stronger guard than a modal.
+`Confirm::new` and `destructive()` both leave `Enter` on Yes — the chord that
+raised the prompt is the intent, and `destructive()` conveys the danger with a
+warning border and `⚠` title rather than by moving the default.
+`default_no()` is the one builder that moves it, keeping that coloring: use it
+where a stray keystroke must not fire the action — an unsolicited kill of a
+running agent, a bulk wipe, an out-of-order merge. It used to be an alias for
+`destructive()`, so every call site believing itself guarded was
+Enter-to-confirm (#1899).
+
+A prompt rebuilt in place — `apply_removal_risks` remounting to append the
+daemon's risk list — has to reproduce *both* facts. Deriving the default from
+the destructive flag alone silently traded the guard back for Yes.
 
 ## Markdown is hand-rolled
 

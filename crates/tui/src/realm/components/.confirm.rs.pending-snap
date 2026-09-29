@@ -1,0 +1,7 @@
+{"run_id":"93dba266-9fe5-4f1e-9609-3775cb2e6ce7","line":375,"new":{"module_name":"lazybox_tui__realm__components__confirm__tests","snapshot_name":"highlighted_button_snapshot_default_no","metadata":{"source":"crates/tui/src/realm/components/confirm.rs","assertion_line":375,"expression":"highlight_snapshot(&mut c)"},"snapshot":"YES: [Y]es  bold=true\nNO : [N]o  bold=false"},"old":{"module_name":"lazybox_tui__realm__components__confirm__tests","metadata":{},"snapshot":"YES: [Y]es  bold=false\nNO : [N]o  bold=true"}}
+{"run_id":"1ce31d47-d186-4244-8c28-fb0d6aa7755b","line":375,"new":null,"old":null}
+{"run_id":"1ce31d47-d186-4244-8c28-fb0d6aa7755b","line":363,"new":null,"old":null}
+{"run_id":"1ce31d47-d186-4244-8c28-fb0d6aa7755b","line":350,"new":null,"old":null}
+{"run_id":"bf9c4121-e571-4c4d-b291-da6a2047c358","line":363,"new":null,"old":null}
+{"run_id":"bf9c4121-e571-4c4d-b291-da6a2047c358","line":350,"new":null,"old":null}
+{"run_id":"bf9c4121-e571-4c4d-b291-da6a2047c358","line":375,"new":null,"old":null}

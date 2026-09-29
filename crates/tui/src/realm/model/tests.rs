@@ -3130,10 +3130,10 @@ mod effects_tests {
         );
     }
 
-    /// Every confirm now defaults to Yes for speed — including the
-    /// unsolicited workspace-removal prompt — with the danger conveyed by
-    /// the modal's warning coloring (a destructive confirm) rather than by
-    /// defaulting to No.
+    /// A removal prompt with nothing running still defaults to Yes: the
+    /// worktree is reconstructible, and the danger is conveyed by the
+    /// modal's warning coloring. Contrast
+    /// [`removal_prompt_with_live_terminals_defaults_to_no`].
     #[test]
     fn removal_prompt_defaults_to_yes() {
         let mut m = build_model();
@@ -3153,6 +3153,90 @@ mod effects_tests {
         assert!(
             mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
             "the removal prompt defaults to Yes (danger shown by coloring)",
+        );
+    }
+
+    /// #1899: an unsolicited removal prompt for a workspace with a LIVE
+    /// terminal defaults to No. Yes here kills a running agent mid-turn,
+    /// and nobody asked for the prompt — a provider event raised it. In
+    /// the incident four such prompts were answered by one Enter each, two
+    /// of them over embargoed work.
+    #[test]
+    fn removal_prompt_with_live_terminals_defaults_to_no() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 1,
+                reason: super::super::RemovalReason::OutOfScope,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "a removal prompt over a live terminal defaults to No",
+        );
+    }
+
+    /// The same guard on the merged/closed removal prompts: the reason the
+    /// row is being removed does not change what Yes destroys.
+    #[test]
+    fn merged_removal_prompt_with_live_terminals_defaults_to_no() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 2,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: true,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "a merged-PR removal over live terminals defaults to No",
+        );
+    }
+
+    /// #1899: the daemon's removal-risk reply rebuilds the open confirm in
+    /// place. That re-mount must reproduce the No guard — deriving the
+    /// default from the destructive flag alone handed the prompt back with
+    /// Enter on Yes, undoing the guard a moment after it appeared.
+    #[test]
+    fn removal_risk_remount_preserves_the_no_default() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 1,
+                reason: super::super::RemovalReason::OutOfScope,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert!(!mounted_confirm_default_yes(&m, Id::RemoveOutOfScope));
+
+        let target = lazybox_ipc::RemovalTarget::Workspace(SessionKey::from("github:o/r#1"));
+        m.apply_removal_risks(
+            &target,
+            &[lazybox_ipc::RemovalRiskDto {
+                path: std::path::PathBuf::from("/tmp/worktrees/o-r-1"),
+                reasons: vec!["uncommitted changes to tracked files".into()],
+            }],
+            None,
+        );
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "the risk-block re-mount kept the No default",
         );
     }
 
@@ -3182,22 +3266,22 @@ mod effects_tests {
         );
     }
 
-    /// The clean-worktrees bulk-wipe confirm now defaults Yes for speed,
-    /// with the danger shown by the destructive warning coloring.
+    /// #1899: the clean-worktrees bulk-wipe confirm keeps a hard No floor
+    /// — one mis-hit could wipe many trees at once, so Enter cancels.
     #[test]
-    fn clean_worktrees_prompt_defaults_to_yes() {
+    fn clean_worktrees_prompt_defaults_to_no() {
         let mut m = build_model();
         m.mount_clean_worktrees_confirm();
         assert!(
-            mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
-            "clean-worktrees prompt defaults to Yes (danger shown by coloring)",
+            !mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
+            "clean-worktrees prompt defaults to No",
         );
     }
 
-    /// The inspector's delete-worktree confirm now defaults Yes, with the
-    /// danger shown by the destructive warning coloring.
+    /// #1899: the inspector's delete-worktree confirm keeps a hard No
+    /// floor — it deletes a worktree off disk, losing uncommitted work.
     #[test]
-    fn inspect_delete_prompt_defaults_to_yes() {
+    fn inspect_delete_prompt_defaults_to_no() {
         let mut m = build_model();
         m.mount_inspect_confirm(lazybox_ipc::WorktreeInspectionDto {
             path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
@@ -3212,8 +3296,8 @@ mod effects_tests {
             is_safe_to_delete: false,
         });
         assert!(
-            mounted_confirm_default_yes(&m, Id::InspectConfirm),
-            "inspector delete prompt defaults to Yes (danger shown by coloring)",
+            !mounted_confirm_default_yes(&m, Id::InspectConfirm),
+            "inspector delete prompt defaults to No",
         );
     }
 

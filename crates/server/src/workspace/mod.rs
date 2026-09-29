@@ -243,27 +243,63 @@ mod hopper_tests {
         .remove(0)
     }
 
-    /// A saved checklist persists in order, new items get permanent ids,
-    /// and the TODO gains no workspace per item.
+    /// A whole new subtree — parent and child, both new — saves in ONE call,
+    /// keeping its order and nesting, and the TODO gains no workspace per item.
+    /// Server-side minting could not express this: the child had no id to name
+    /// as its `parent` at send time.
     #[tokio::test]
-    async fn save_todo_items_mints_ids_and_persists_the_tree() {
+    async fn save_todo_items_persists_a_new_subtree_in_one_call() {
         let config = ServerConfig::in_memory();
         let todo = one_todo(&config, "Ship 0.1.18");
+        let parent = lazybox_core::TodoItem::new_id();
         save_todo_items(
             &config,
             &todo,
-            vec![item("", None, None), item("child", None, None)],
+            vec![
+                item(&parent, None, None),
+                item("child", Some(&parent), None),
+            ],
         )
         .await
         .expect("saved");
         let saved = load(&config, &todo).todo_items;
         assert_eq!(saved.len(), 2);
-        assert!(!saved[0].id.is_empty(), "a new item gets an id");
-        assert_eq!(saved[1].id, "child", "an existing id is kept");
+        assert_eq!(saved[0].id, parent, "the client's id is kept verbatim");
+        assert_eq!(
+            saved[1].parent.as_deref(),
+            Some(parent.as_str()),
+            "a new child nests under its new parent"
+        );
         assert_eq!(
             config.store.list_workspaces().unwrap().len(),
             1,
             "items are not workspaces"
+        );
+    }
+
+    /// An id-less or duplicated item is refused, and the refusal writes
+    /// nothing: the map the parent walk uses is keyed by id, so a duplicate
+    /// would persist two rows sharing one id.
+    #[tokio::test]
+    async fn save_todo_items_refuses_missing_and_duplicate_ids() {
+        let config = ServerConfig::in_memory();
+        let todo = one_todo(&config, "Plan");
+        assert_eq!(
+            save_todo_items(&config, &todo, vec![item("", None, None)]).await,
+            Err(SaveTodoItemsError::MissingId),
+        );
+        assert_eq!(
+            save_todo_items(
+                &config,
+                &todo,
+                vec![item("dup", None, None), item("dup", None, None)]
+            )
+            .await,
+            Err(SaveTodoItemsError::DuplicateId("dup".into())),
+        );
+        assert!(
+            load(&config, &todo).todo_items.is_empty(),
+            "a refused save writes nothing"
         );
     }
 
@@ -918,22 +954,27 @@ pub enum SaveTodoItemsError {
     UnknownParent { item: String, parent: String },
     #[error("item {0} nests under itself")]
     Cycle(String),
+    #[error("an item arrived with no id — clients mint ids with TodoItem::new_id")]
+    MissingId,
+    #[error("item id {0} appears twice")]
+    DuplicateId(String),
 }
 
 /// Replace a TODO's checklist with `items`, in their order. The client
 /// sends the whole list — one write, one `WorkspaceUpserted`, no partial
-/// state. An item with an empty id is new and gets a permanent one here;
-/// every `parent` must name an item in the list, without cycles.
+/// state. Every item carries an id its client minted
+/// ([`lazybox_core::TodoItem::new_id`]), unique within the list, and every
+/// `parent` must name an item in the list, without cycles.
+///
+/// Ids are the client's because the daemon cannot mint them without breaking
+/// nesting: an item whose id the daemon invents cannot be named as a `parent`
+/// by a sibling in the SAME request, since the client had no id to write
+/// there. Minting server-side made a new subtree unexpressible in one save.
 pub async fn save_todo_items(
     config: &ServerConfig,
     key: &WorkspaceKey,
-    mut items: Vec<lazybox_core::TodoItem>,
+    items: Vec<lazybox_core::TodoItem>,
 ) -> Result<(), SaveTodoItemsError> {
-    for item in &mut items {
-        if item.id.is_empty() {
-            item.id = lazybox_core::TodoItem::new_id();
-        }
-    }
     validate_todo_tree(&items)?;
     let _ws_guard = config.lock_workspace(key.as_str()).await;
     let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
@@ -949,6 +990,21 @@ pub async fn save_todo_items(
 
 /// Every parent is in the list, and following parents never loops.
 fn validate_todo_tree(items: &[lazybox_core::TodoItem]) -> Result<(), SaveTodoItemsError> {
+    // Ids first, because the `parents` map below is KEYED by id: two items
+    // sharing one collapse into a single entry, the walk still passes, and both
+    // rows persist with the same id — whereupon a `parent` naming it resolves to
+    // whichever the map kept, and every id-keyed check, edit and delete hits the
+    // wrong row. `TodoItem::id` promises it is minted once and never reused, and
+    // this is the only structural guard on a client-supplied whole-list replace.
+    let mut ids = std::collections::HashSet::with_capacity(items.len());
+    for item in items {
+        if item.id.is_empty() {
+            return Err(SaveTodoItemsError::MissingId);
+        }
+        if !ids.insert(item.id.as_str()) {
+            return Err(SaveTodoItemsError::DuplicateId(item.id.clone()));
+        }
+    }
     let parents: std::collections::HashMap<&str, Option<&str>> = items
         .iter()
         .map(|i| (i.id.as_str(), i.parent.as_deref()))

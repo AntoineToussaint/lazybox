@@ -169,8 +169,16 @@ impl PendingDelivery {
                     Step::Reported(DeliveryReceipt::or_unreported(receipt.await))
                 }
                 // No receipt left and no outcome kept: unreachable, since the
-                // receiver is only taken out together with its outcome.
-                (Some(_), None) | (None, None) => return None,
+                // receiver is only taken out together with its outcome. It
+                // degrades to the same refusal `receipt_within` gives for this
+                // state, never to `None` — `None` means "still queued", which
+                // is the branch that spawns a task to read the handle again,
+                // and sending an impossible state down the path that waits for
+                // something that can never arrive is the shape of the bug this
+                // whole change fixes.
+                (Some(_), None) | (None, None) => {
+                    return Some(EarlyOutcome::of(&DeliveryReceipt::unreported()));
+                }
             };
             match step {
                 Step::Landed => {
@@ -392,6 +400,29 @@ mod tests {
                 reason: "the composer never took the text".into()
             }),
         );
+    }
+
+    /// The two readers must agree about the state that cannot happen. `None`
+    /// from `landed_within` means "still queued", which is the branch that
+    /// spawns a task to read the handle again — so an impossible state must
+    /// never be reported as queued, whatever `receipt_within` would say.
+    #[tokio::test]
+    async fn an_impossible_state_terminates_in_both_readers() {
+        let (tx, rx) = oneshot::channel::<DeliveryReceipt>();
+        let (landed_tx, landed_rx) = oneshot::channel();
+        drop(landed_tx);
+        drop(tx);
+        let mut pending = PendingDelivery::new(rx, landed_rx);
+        // Both one-shots are closed with nothing sent: neither reader can ever
+        // learn an outcome, so both must terminate rather than say "queued".
+        assert!(matches!(
+            pending.landed_within(Duration::from_millis(20)).await,
+            Some(EarlyOutcome::Refused { .. })
+        ));
+        assert!(matches!(
+            pending.receipt_within(Duration::from_millis(20)).await,
+            Some(DeliveryReceipt::Refused { .. })
+        ));
     }
 
     /// A write that failed has a refusal waiting on the receipt. Reporting it

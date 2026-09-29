@@ -145,7 +145,7 @@ Three properties are load-bearing:
   reports the refusal, `ask_session` deletes the request and answers `the
   question was not delivered: <reason>`, so an asker is never handed a
   `request_id` for a question the target cannot have seen. This is the case
-  #1900 fixed — the refusal read as "still queued behind a busy target", and
+  #1901 fixed — the refusal read as "still queued behind a busy target", and
   the task that was supposed to finish the bookkeeping panicked instead,
   leaving five `pending` rows on 2026-09-29 that only the TTL would clear.
   Every row mutation is serialized by a process-wide lock and re-loaded

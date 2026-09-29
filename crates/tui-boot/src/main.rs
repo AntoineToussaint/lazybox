@@ -234,6 +234,42 @@ fn owned_embedded_notification_socket(
 mod tests {
     use super::*;
 
+    /// Four restarts on 2026-09-29 could not be attributed because both ways
+    /// out of the process logged nothing: a signal kill and a `q q` quit were
+    /// distinguishable only by the keep-awake handoff line they *share*. Each
+    /// arm here is one of the three things the log now has to be able to say.
+    #[test]
+    fn every_way_the_run_loop_can_end_is_recorded() {
+        // A clean quit.
+        log_run_loop_exit::<(), anyhow::Error>("embedded", &Ok(Ok(())));
+        // The loop itself failed.
+        log_run_loop_exit::<(), anyhow::Error>(
+            "embedded",
+            &Ok(Err(anyhow::anyhow!("the terminal went away"))),
+        );
+        // The blocking task carrying the loop panicked.
+        log_run_loop_exit::<(), anyhow::Error>(
+            "attach",
+            &Err(anyhow::anyhow!("realm task panicked")),
+        );
+    }
+
+    /// `ppid` separates "our launcher went away first" — a closed terminal, a
+    /// killed `make run-release` — from being signalled directly, which is the
+    /// distinction the exit line exists to record. It is read before
+    /// `std::process::exit`, because afterwards nobody can ask.
+    #[cfg(unix)]
+    #[test]
+    fn the_parent_pid_is_readable_for_the_exit_line() {
+        let parent = parent_pid().expect("unix always answers getppid");
+        assert_ne!(parent, 0, "0 is not a pid; the exit line would be a lie");
+        assert_ne!(
+            parent,
+            std::process::id(),
+            "a process is never its own parent",
+        );
+    }
+
     /// Pin the contract: the default `GithubConfig::poll_interval` is
     /// the value `resolve_poll_interval` returns when the user has no
     /// custom YAML. Previously the daemon hardcoded 60s and ignored
@@ -2129,7 +2165,21 @@ struct DaemonDrain {
 /// 5s drain — because this is a kill, not a quit.
 fn spawn_terminal_restore_on_signal(drain: Option<DaemonDrain>) {
     tokio::spawn(async move {
-        wait_for_exit_signal().await;
+        let signal = wait_for_exit_signal().await;
+        // Logged before the restore and the drains below, because those are
+        // exactly what can hang: an exit that leaves no record is an exit
+        // nobody can diagnose, and this path used to leave none at all — a
+        // kill and a `q q` quit were indistinguishable in the log, both
+        // reaching it only through the keep-awake handoff they share.
+        // `ppid == 1` means our launcher went away first (a closed terminal,
+        // a killed `make`), which is a different story from being signalled
+        // directly; it is recorded here because after `exit` nobody can ask.
+        tracing::warn!(
+            signal,
+            pid = std::process::id(),
+            ppid = parent_pid(),
+            "exit: killed by a signal — restoring the terminal, then draining"
+        );
         lazybox_tui::realm::model::restore_host_terminal();
         if let Some(mut drain) = drain {
             let _ = drain.trigger.send(true);
@@ -2154,8 +2204,43 @@ fn spawn_terminal_restore_on_signal(drain: Option<DaemonDrain>) {
     });
 }
 
+/// Record that the run loop returned, and whether it returned cleanly. Pairs
+/// with the signal path's line so the log always says *which* of the two ways
+/// out was taken — the question four restarts on 2026-09-29 could not answer.
+fn log_run_loop_exit<T, E: std::fmt::Display>(mode: &str, result: &anyhow::Result<Result<T, E>>) {
+    match result {
+        Ok(Ok(_)) => tracing::info!(mode, "exit: the run loop ended — quit requested"),
+        Ok(Err(error)) => {
+            tracing::error!(mode, %error, "exit: the run loop ended with an error")
+        }
+        Err(error) => tracing::error!(mode, %error, "exit: the run loop task panicked"),
+    }
+}
+
+/// Our parent's pid, or `None` where the platform will not say. `1` means
+/// the launcher already exited and we were re-parented to init.
+fn parent_pid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // Safe: `getppid` takes no arguments, touches no memory and cannot
+        // fail.
+        Some(unsafe { libc::getppid() } as u32)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Waits for the signal that should end the process, and names it. The name
+/// is the whole point: the three signals arrive from very different places —
+/// SIGHUP from a terminal going away, SIGINT from a Ctrl-C that reached the
+/// process group, SIGTERM from something deliberately killing us — and
+/// without it a restart is unattributable. The *sender* is not available:
+/// tokio's handler does not carry `siginfo`, so a `si_pid` would mean owning
+/// `sigaction` here and fighting tokio for the handler.
 #[cfg(unix)]
-async fn wait_for_exit_signal() {
+async fn wait_for_exit_signal() -> &'static str {
     use tokio::signal::unix::{SignalKind, signal};
     // Degrade per-signal instead of `expect` (2026-08-19 audit, L7):
     // this runs inside a spawned task, so a panicked install (fd
@@ -2187,15 +2272,16 @@ async fn wait_for_exit_signal() {
         }
     }
     tokio::select! {
-        _ = recv_or_pend(&mut term) => {},
-        _ = recv_or_pend(&mut hup) => {},
-        _ = recv_or_pend(&mut int) => {},
+        _ = recv_or_pend(&mut term) => "SIGTERM",
+        _ = recv_or_pend(&mut hup) => "SIGHUP",
+        _ = recv_or_pend(&mut int) => "SIGINT",
     }
 }
 
 #[cfg(windows)]
-async fn wait_for_exit_signal() {
+async fn wait_for_exit_signal() -> &'static str {
     let _ = tokio::signal::ctrl_c().await;
+    "CTRL_C"
 }
 
 /// Remove a flag from `args` if present. Returns `true` if it was
@@ -2419,6 +2505,7 @@ async fn run_realm_client(
     })
     .await
     .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"));
+    log_run_loop_exit("attach", &realm_result);
     // Keystroke-persisted config (star/pin/collapse/splitter) rides an
     // ordered background worker; flush it at attach-client teardown just
     // like the embedded quit path does (#1211, #1244).
@@ -2825,6 +2912,11 @@ async fn run_embedded_realm(
     })
     .await
     .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"));
+    // The counterpart to the signal path's line: reaching here means the run
+    // loop itself ended — a `q q` quit, or an error out of the loop. Without
+    // both lines, every restart in the log looked the same, because the only
+    // trace either path left was the keep-awake handoff they share.
+    log_run_loop_exit("embedded", &realm_result);
     // Tear the embedded socket service down the same way the server
     // subcommand does on SIGTERM: `SocketService::run` removes the
     // socket + pid file on its way out, so the next start doesn't

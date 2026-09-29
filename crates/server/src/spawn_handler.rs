@@ -11419,8 +11419,29 @@ pub async fn recover_sessions(config: &ServerConfig) {
             matches!(kind, TerminalKind::Agent(_)) && access != AgentRunAccess::ReadOnly;
         let claim_workspace = WorkspaceKey::new(session_key.as_str());
         if claiming_agent {
-            crate::working_claims::acquire_pty(config, claim_workspace, &key, claim_session_id)
+            // A working claim is a GitHub label write, and awaiting it here put
+            // a remote round-trip in front of `Event::TerminalSpawned` — the
+            // event that makes a recovered agent appear. On 2026-09-29 that
+            // showed 114 survivors over 78.8s (20:05:59.047 → 20:07:17.855),
+            // with 91 claim syncs timing out at `MUTATION_TIMEOUT` (20s)
+            // inside that window because the GitHub budget was spent.
+            //
+            // Nothing about the claim is a precondition for showing the agent:
+            // recovery re-asserts a claim this box already holds, the claim
+            // machinery already retries its own failures, and `release` takes
+            // the same per-holder lock as `acquire`, so a terminal killed
+            // straight after recovery still queues its release behind this.
+            let claim_config = config.clone();
+            let claim_key = key.clone();
+            tokio::spawn(async move {
+                crate::working_claims::acquire_pty(
+                    &claim_config,
+                    claim_workspace,
+                    &claim_key,
+                    claim_session_id,
+                )
                 .await;
+            });
         }
         // Carry the hydrated state on the spawn announce itself. Hydration
         // already put it in the cache, so every later PTY reading folds to

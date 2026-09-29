@@ -1268,12 +1268,26 @@ impl Workspace {
         }
     }
 
-    /// `(done, total)` over the TODO checklist, nested items included and
-    /// canceled ones left out — the `2/3` a TODO row shows.
+    /// `(done, total)` over the TODO checklist — the `2/3` a TODO row shows.
+    ///
+    /// Counts LEAF items only. An item with live children is a **heading**, and
+    /// a heading's completion is its children's: counting it as work of its own
+    /// left a finished TODO reading `3/4` forever, because nothing ticks a
+    /// heading — [`Self::check_items_linked_to`] only ticks items whose own link
+    /// landed, so the last point was reachable only by hand.
+    ///
+    /// Canceled items are out of the count entirely, and they do not keep a
+    /// parent out of it either: a heading whose every child was dropped has no
+    /// live children left, so it counts as the leaf it has become.
+    ///
+    /// Quadratic in the checklist's length, which is bounded by what a person
+    /// types into one TODO.
     pub fn todo_progress(&self) -> (usize, usize) {
-        let live = self.todo_items.iter().filter(|i| !i.is_canceled());
-        let (done, total) = live.fold((0, 0), |(d, t), i| (d + usize::from(i.is_done()), t + 1));
-        (done, total)
+        let live = || self.todo_items.iter().filter(|i| !i.is_canceled());
+        let is_heading = |id: &str| live().any(|i| i.parent.as_deref() == Some(id));
+        live()
+            .filter(|i| !is_heading(&i.id))
+            .fold((0, 0), |(d, t), i| (d + usize::from(i.is_done()), t + 1))
     }
 
     /// Check off every open item linked to `task`, stamped as done by
@@ -2982,9 +2996,10 @@ mod tests {
         }
     }
 
-    /// Progress counts nested items and leaves canceled ones out entirely.
+    /// Progress counts leaf items, skips canceled ones, and does not count a
+    /// heading as work of its own.
     #[test]
-    fn todo_progress_counts_nested_items_and_skips_canceled() {
+    fn todo_progress_counts_leaves_and_skips_canceled() {
         let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
         let parent = todo("ship 0.1.18", None);
         let mut child = todo("cut the release", None);
@@ -2993,7 +3008,39 @@ mod tests {
         let mut dropped = todo("skip this", None);
         dropped.canceled_at = Some(now());
         ws.todo_items = vec![parent, child, dropped];
-        assert_eq!(ws.todo_progress(), (1, 2));
+        assert_eq!(
+            ws.todo_progress(),
+            (1, 1),
+            "the heading is not its own unit of work"
+        );
+    }
+
+    /// The case the old counting could never reach: every child done reads as
+    /// complete, without anyone hand-ticking the heading above them.
+    #[test]
+    fn todo_progress_completes_when_every_child_is_done() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
+        let parent = todo("ship 0.1.18", None);
+        let mut children: Vec<TodoItem> = (0..3)
+            .map(|n| {
+                let mut c = todo(&format!("step {n}"), None);
+                c.parent = Some(parent.id.clone());
+                c.done_at = Some(now());
+                c
+            })
+            .collect();
+        ws.todo_items = vec![parent];
+        ws.todo_items.append(&mut children);
+        assert_eq!(ws.todo_progress(), (3, 3));
+
+        // A heading whose every child was dropped is a leaf again, so it counts
+        // and can be completed on its own.
+        let only_parent = todo("nothing under me", None);
+        let mut gone = todo("dropped", None);
+        gone.parent = Some(only_parent.id.clone());
+        gone.canceled_at = Some(now());
+        ws.todo_items = vec![only_parent, gone];
+        assert_eq!(ws.todo_progress(), (0, 1));
     }
 
     /// The linked PR merging checks its item off, once, marked as lazybox's

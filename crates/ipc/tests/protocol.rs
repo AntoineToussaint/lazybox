@@ -674,7 +674,7 @@ fn all_commands() -> Vec<Command> {
         Command::SaveTodoItems {
             workspace_key: lazybox_core::WorkspaceKey::new("morning-plan"),
             items: vec![lazybox_core::TodoItem {
-                id: String::new(),
+                id: "todo-item-1".into(),
                 parent: None,
                 text: "ship 0.1.18".into(),
                 done_at: None,

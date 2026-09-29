@@ -2222,9 +2222,7 @@ fn log_run_loop_exit<T, E: std::fmt::Display>(mode: &str, result: &anyhow::Resul
 fn parent_pid() -> Option<u32> {
     #[cfg(unix)]
     {
-        // Safe: `getppid` takes no arguments, touches no memory and cannot
-        // fail.
-        Some(unsafe { libc::getppid() } as u32)
+        Some(std::os::unix::process::parent_id())
     }
     #[cfg(not(unix))]
     {

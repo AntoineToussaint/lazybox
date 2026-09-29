@@ -141,6 +141,13 @@ Three properties are load-bearing:
   killed. Reclamation abandons those — on session teardown, and past a 6-hour
   TTL — so a `Pending` row can never become immortal, badging its workspace
   on every client connect and inflating that session's ask-depth for good.
+  A question whose *write* failed never becomes a row at all: the delivery
+  reports the refusal, `ask_session` deletes the request and answers `the
+  question was not delivered: <reason>`, so an asker is never handed a
+  `request_id` for a question the target cannot have seen. This is the case
+  #1900 fixed — the refusal read as "still queued behind a busy target", and
+  the task that was supposed to finish the bookkeeping panicked instead,
+  leaving five `pending` rows on 2026-09-29 that only the TTL would clear.
   Every row mutation is serialized by a process-wide lock and re-loaded
   inside it, so the fallback capture can never overwrite a real reply that
   landed while it was reading the target's scrollback.

@@ -32,6 +32,7 @@ mod task;
 pub mod task_record;
 pub mod task_ref;
 pub mod time;
+pub mod work;
 mod workspace;
 
 pub use agent::{AgentConfig, AgentModels, CapabilityAliases, ModelChoice, ModelTier};

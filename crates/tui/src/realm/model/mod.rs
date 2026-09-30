@@ -966,10 +966,13 @@ pub(crate) struct PendingRemovalRisk {
     /// already on screen — two replies would otherwise stack two risk
     /// blocks onto the same modal.
     pub(crate) base_prompt: String,
-    /// Whether the confirm this belongs to is destructively styled, so
-    /// the re-mount reproduces the modal it replaces rather than
-    /// quietly dropping the warning border.
-    pub(crate) destructive: bool,
+    /// The chrome and `Enter` default of the confirm this belongs to, so
+    /// the re-mount reproduces the modal it replaces rather than quietly
+    /// dropping the warning border or the No guard. Carried as one value
+    /// because the two are not independent: a guard implies the warning
+    /// chrome, and a pair of booleans could hold a combination the
+    /// component cannot build.
+    pub(crate) style: crate::realm::components::confirm::ConfirmStyle,
     /// Which modal the reply amends — [`Id::ActionConfirm`] for `x x`
     /// and the project delete, [`Id::RemoveOutOfScope`] for the
     /// daemon-raised removal prompts. Checked against the top of the
@@ -1097,6 +1100,13 @@ pub(crate) enum ModalFlow {
     RemovalPrompt {
         workspace: lazybox_core::WorkspaceKey,
         reason: RemovalReason,
+        /// Whether this prompt was mounted with the No guard because the
+        /// workspace had a live terminal. Carried rather than re-derived at
+        /// answer time so the answer matches the modal that was actually
+        /// rendered: an agent that exits while the modal is up must not
+        /// silently turn a guarded prompt back into one whose Enter writes a
+        /// permanent `CleanupPrompt::Declined`.
+        guarded: bool,
     },
     /// Active issue→PR merge confirm. The queue lives in
     /// `merge_prompt_queue`; this is only the one on screen.

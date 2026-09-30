@@ -4300,10 +4300,12 @@ impl TerminalStack {
         // ordinary typing cannot produce. A bare letter can't be: `exit`
         // ends the pane on its `x`. Nor can a same-key double-press on a
         // plain letter, the guard `q q` quit uses — English and shell
-        // words double letters (`add` fires `d d`). And a Confirm modal
-        // is no guard here either: `Confirm` defaults to Yes on Enter, and
-        // `exit⏎` supplies exactly that. A modifier is the one thing no
-        // shell reflex (`exit`, `quit`, `:q`, `clear`, `ls -l`) emits.
+        // words double letters (`add` fires `d d`). And a Confirm modal is
+        // no guard here either, whichever button it defaults to: a surface
+        // that receives arbitrary typed text is one where the typist never
+        // reads the modal, so `exit⏎` answers it either way. A modifier is
+        // the one thing no shell reflex (`exit`, `quit`, `:q`, `clear`,
+        // `ls -l`) emits.
         //
         // `Shift-X` specifically: `x` alone is out because typing produces
         // it, and `x x` is already `Archive` — two destructive actions one

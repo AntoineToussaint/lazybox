@@ -1,11 +1,14 @@
 //! `Confirm` — yes/no prompt. tuirealm port of
 //! `tui_kit::widgets::ConfirmModal`.
 //!
-//! Returns `Msg::Confirmed(true)` on Y/Enter, `Msg::Confirmed(false)`
-//! on N. Esc maps to `Msg::ModalDismissed`. Unlike the tui-kit
-//! version, the boolean lives inside `Msg` rather than being passed
-//! via a generic `Done(Box<Any>)` payload — that's the whole point of
-//! tuirealm's typed Msg approach.
+//! `y` returns `Msg::Confirmed(true)` and `n` returns
+//! `Msg::Confirmed(false)`, always. `Enter` fires whichever side is
+//! highlighted, and the mount site chooses which that is: Yes for
+//! [`Confirm::new`], [`Confirm::default_yes`] and
+//! [`Confirm::destructive`], No for [`Confirm::default_no`]. Esc maps to
+//! `Msg::ModalDismissed`. Unlike the tui-kit version, the boolean lives
+//! inside `Msg` rather than being passed via a generic `Done(Box<Any>)`
+//! payload — that's the whole point of tuirealm's typed Msg approach.
 
 use crate::realm::DOUBLE_CLICK_WINDOW;
 use crate::realm::Msg;
@@ -22,6 +25,28 @@ use tuirealm::ratatui::layout::{Position, Rect};
 use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use tuirealm::state::{State, StateValue};
+
+/// The chrome and `Enter` default a mount site chose, as one value.
+///
+/// Two independent booleans (`destructive`, `default_no`) admitted a
+/// fourth combination the component cannot represent — `default_no` implies
+/// the warning chrome — so `(destructive: false, default_no: true)` quietly
+/// produced a destructive modal the caller had not asked for. Three named
+/// states make the invalid pair unwritable, which matters most for the model's
+/// `PendingRemovalRisk`: its whole job is to rebuild a modal faithfully when the
+/// daemon's risk list lands, and it cannot do that for a state it can hold but
+/// the component cannot produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmStyle {
+    /// Neutral chrome; `Enter` fires Yes.
+    Benign,
+    /// Warning chrome; `Enter` still fires Yes, because the chord the user
+    /// pressed is itself the intent.
+    Destructive,
+    /// Warning chrome and `Enter` fires No — for a prompt a stray keystroke
+    /// must not answer.
+    Guarded,
+}
 
 /// Y/N confirmation prompt.
 pub struct Confirm {
@@ -89,6 +114,18 @@ impl Confirm {
     pub fn default_yes(mut self) -> Self {
         self.selected_yes = true;
         self
+    }
+
+    /// Build a prompt carrying `style`, for the callers that decide the
+    /// chrome and the default together and for the re-mount that has to
+    /// reproduce them.
+    pub fn styled(question: impl Into<String>, style: ConfirmStyle) -> Self {
+        let confirm = Self::new(question);
+        match style {
+            ConfirmStyle::Benign => confirm.default_yes(),
+            ConfirmStyle::Destructive => confirm.destructive(),
+            ConfirmStyle::Guarded => confirm.default_no(),
+        }
     }
 
     /// Which button `Enter` currently fires (true = Yes). Reads the
@@ -384,11 +421,20 @@ mod tests {
     #[test]
     fn default_no_keeps_the_warning_chrome() {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        let mut c = Confirm::new("Wipe every worktree?").default_no();
+        // The glyph is deliberately in the question too: the assertion pins
+        // it to the bordered title row, so a prompt that merely mentions ⚠
+        // cannot stand in for the chrome this test exists to guarantee.
+        let mut c = Confirm::new("⚠ Wipe every worktree?").default_no();
         terminal.draw(|f| c.view(f, f.area())).unwrap();
         let buf = terminal.backend().buffer().clone();
-        let has_warn_title = buf.content().iter().any(|cell| cell.symbol() == "\u{26a0}");
-        assert!(has_warn_title, "default_no keeps the ⚠ destructive title");
+        let row_has = |y: u16, sym: &str| (0..100u16).any(|x| buf[(x, y)].symbol() == sym);
+        let titled = (0..30u16)
+            .filter(|y| row_has(*y, "\u{26a0}") && row_has(*y, "\u{256d}"))
+            .count();
+        assert_eq!(
+            titled, 1,
+            "default_no keeps the ⚠ title on the modal's rounded top border",
+        );
     }
 
     /// #1899: Enter on a `default_no()` prompt cancels. This is the whole

@@ -1629,7 +1629,11 @@ showing keybinding search only",
                 // The risk preflight dies with the prompt it amends,
                 // answered either way.
                 self.pending_removal_risk = None;
-                if let Some(ModalFlow::RemovalPrompt { workspace, reason }) = self.modal_flow.take()
+                if let Some(ModalFlow::RemovalPrompt {
+                    workspace,
+                    reason,
+                    guarded,
+                }) = self.modal_flow.take()
                 {
                     let workspace_key = workspace;
                     let session_key: lazybox_core::SessionKey = (&workspace_key).into();
@@ -1648,13 +1652,30 @@ showing keybinding search only",
                         (true, super::RemovalReason::Merged | super::RemovalReason::Closed) => {
                             cmds.push(IpcCommand::RemoveMergedWorkspace { session_key });
                         }
-                        // Explicit "no" on the merged/closed prompt is a
-                        // decision the daemon must hear: it pins the
-                        // workspace in `removal_prompts.kept` so the
-                        // level-triggered re-emit stops asking. (Esc
-                        // routes through `handle_modal_dismissed`
-                        // instead and stays silent — the daemon
-                        // re-prompts after its reprompt interval.)
+                        // A guarded prompt (live terminal) defaults to No
+                        // precisely because the user may not be reading it, so
+                        // No here cannot be a *decision*: `KeepMergedWorkspace`
+                        // persists `CleanupPrompt::Declined` on the row, which
+                        // suppresses the prompt permanently, survives restarts,
+                        // and has no UI to see or undo. Answering it by reflex
+                        // would trade #1899's one-keystroke deletion for a
+                        // one-keystroke permanent retirement. Defer instead —
+                        // the silence Esc produces, so the daemon re-prompts
+                        // after its interval — and say so, because a keystroke
+                        // that decides nothing still has to explain itself.
+                        (false, super::RemovalReason::Merged | super::RemovalReason::Closed)
+                            if guarded =>
+                        {
+                            self.flash_info(format!(
+                                "keeping {} for now — lazybox will ask again",
+                                workspace_key.as_str(),
+                            ));
+                        }
+                        // Unguarded: an explicit "no" IS a decision the daemon
+                        // must hear, and it pins the workspace in
+                        // `removal_prompts.kept` so the level-triggered re-emit
+                        // stops asking. (Esc routes through
+                        // `handle_modal_dismissed` instead and stays silent.)
                         (false, super::RemovalReason::Merged | super::RemovalReason::Closed) => {
                             cmds.push(IpcCommand::KeepMergedWorkspace { session_key });
                         }
@@ -2192,7 +2213,14 @@ showing keybinding search only",
                     self.set_modal_flow(ModalFlow::ScopeRemovalConfirm {
                         outcome: Box::new(outcome),
                     });
-                    self.mount_modal(Id::ScopeRemovalConfirm, Confirm::new(prompt).destructive());
+                    // The upstream half of #1899: Yes here authorises the
+                    // rescope sweep that deletes these workspaces with their
+                    // notes, read state and stars, and then queues the
+                    // per-workspace prompts. Un-ticking a repo to tidy a filter
+                    // is not a request to delete anything, so the reflexive
+                    // answer to a prompt that exists to name that damage has to
+                    // be the one that cancels.
+                    self.mount_modal(Id::ScopeRemovalConfirm, Confirm::new(prompt).default_no());
                     return;
                 }
                 self.finish_setup(outcome);

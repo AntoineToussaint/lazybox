@@ -303,28 +303,6 @@ fn merge_prompt_question(pr_label: &str, issue_label: &str, count: usize) -> Str
     )
 }
 
-/// Build a Confirm with the chrome and Enter default its mount site chose.
-///
-/// Shared by the sites that mount one of these and by
-/// [`Model::apply_removal_risks`], which rebuilds the component in place
-/// when the daemon's risk list lands: the two have to agree, and a
-/// re-mount that re-derived the default from `destructive` alone silently
-/// dropped the No guard.
-fn confirm_with_default(
-    prompt: impl Into<String>,
-    destructive: bool,
-    default_no: bool,
-) -> crate::realm::components::confirm::Confirm {
-    let modal = crate::realm::components::confirm::Confirm::new(prompt);
-    if default_no {
-        modal.default_no()
-    } else if destructive {
-        modal.destructive()
-    } else {
-        modal.default_yes()
-    }
-}
-
 /// Confirm copy for an out-of-scope workspace with live terminals.
 /// Trims the title so a verbose PR description doesn't make the modal
 /// three lines tall — 80 chars + an ellipsis fits the dynamic-height
@@ -2784,6 +2762,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// `Msg::Confirmed` / `Msg::ModalDismissed` arms.
     pub(super) fn maybe_mount_next_removal_prompt(&mut self) {
         use super::RemovalReason;
+        use crate::realm::components::confirm::{Confirm, ConfirmStyle};
 
         if !self.modal_stack.is_empty() {
             return;
@@ -2831,18 +2810,33 @@ impl<T: TerminalAdapter> Model<T> {
         // all (`has_local_work: false`, always), which is exactly why
         // the answer comes from the daemon's own preflight instead of
         // from the event.
-        let guard_default_no = prompt.terminal_count > 0;
+        // `terminal_count` is the daemon's figure from when it emitted the
+        // event, and a queued prompt can be arbitrarily stale by the time it
+        // mounts: the queue only drains while no modal is open, and
+        // `removal_already_pending` drops the daemon's re-emit rather than
+        // refreshing the queued count. A merged PR legitimately emits 0 (no
+        // session at merge time), so an agent started on that row while the
+        // prompt waited would otherwise face a Yes default. The live client
+        // count closes that window.
+        let session_key: lazybox_core::SessionKey = (&prompt.workspace_key).into();
+        let guarded =
+            prompt.terminal_count > 0 || self.terminals.terminal_count_for(&session_key) > 0;
+        let style = if guarded {
+            ConfirmStyle::Guarded
+        } else {
+            ConfirmStyle::Destructive
+        };
         self.arm_removal_risk_preflight_for(
-            lazybox_ipc::RemovalTarget::Workspace((&prompt.workspace_key).into()),
+            lazybox_ipc::RemovalTarget::Workspace(session_key),
             &copy,
-            true,
-            guard_default_no,
+            style,
             Id::RemoveOutOfScope,
         );
-        let modal = confirm_with_default(copy, true, guard_default_no);
+        let modal = Confirm::styled(copy, style);
         self.set_modal_flow(ModalFlow::RemovalPrompt {
             workspace: prompt.workspace_key,
             reason: prompt.reason,
+            guarded,
         });
         self.mount_modal(Id::RemoveOutOfScope, modal);
     }
@@ -2959,6 +2953,7 @@ impl<T: TerminalAdapter> Model<T> {
         targets: Vec<super::ActionConfirmTarget>,
         override_prompt: Option<String>,
     ) {
+        use crate::realm::components::confirm::{Confirm, ConfirmStyle};
         use lazybox_tui_core::action::ActionDef;
         // Override wins so callers can render context-sensitive copy
         // (e.g. "Delete project X with 3 workspaces" vs. the generic
@@ -2971,21 +2966,25 @@ impl<T: TerminalAdapter> Model<T> {
                 .to_string()
         });
         let destructive = !def.confirm_is_benign_gate();
+        // A chord-initiated confirm never takes the No guard: the chord is
+        // itself the intent (#525).
+        let style = if destructive {
+            ConfirmStyle::Destructive
+        } else {
+            ConfirmStyle::Benign
+        };
         // Ask the daemon what this delete would destroy, so the one
         // confirm it costs can say so. Armed before the mount, and only
         // for a single target: a bulk archive would fan out one probe
         // per row and amend the prompt N times.
-        self.arm_removal_risk_preflight(&action, &targets, &prompt, destructive);
+        self.arm_removal_risk_preflight(&action, &targets, &prompt, style);
         self.set_modal_flow(ModalFlow::ActionConfirm { action, targets });
         // Every confirm defaults to Yes now — the chord/event is itself
         // the intent, so Enter completes it. A benign awareness gate (the
         // on-main spawn) destroys nothing and stays neutral; a genuinely
         // destructive action (archive / merge / delete / close / reset)
         // wears the warning coloring so the danger shows before Enter.
-        self.mount_modal(
-            Id::ActionConfirm,
-            confirm_with_default(&prompt, destructive, false),
-        );
+        self.mount_modal(Id::ActionConfirm, Confirm::styled(&prompt, style));
     }
 
     /// Fire the removal-risk preflight for a delete confirm that is
@@ -3000,7 +2999,7 @@ impl<T: TerminalAdapter> Model<T> {
         action: &lazybox_tui_core::action::Action,
         targets: &[super::ActionConfirmTarget],
         prompt: &str,
-        destructive: bool,
+        style: crate::realm::components::confirm::ConfirmStyle,
     ) {
         use lazybox_tui_core::action::Action;
         self.pending_removal_risk = None;
@@ -3018,7 +3017,7 @@ impl<T: TerminalAdapter> Model<T> {
                 lazybox_ipc::RemovalTarget::Project(key.clone())
             }
         };
-        self.arm_removal_risk_preflight_for(target, prompt, destructive, false, Id::ActionConfirm);
+        self.arm_removal_risk_preflight_for(target, prompt, style, Id::ActionConfirm);
     }
 
     /// Ask the daemon what removing `target` would destroy, and
@@ -3033,8 +3032,7 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         target: lazybox_ipc::RemovalTarget,
         prompt: &str,
-        destructive: bool,
-        default_no: bool,
+        style: crate::realm::components::confirm::ConfirmStyle,
         id: Id,
     ) {
         self.send_cmd(lazybox_ipc::Command::InspectRemovalRisks {
@@ -3043,8 +3041,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.pending_removal_risk = Some(super::PendingRemovalRisk {
             target,
             base_prompt: prompt.to_string(),
-            destructive,
-            default_no,
+            style,
             id,
         });
     }
@@ -3074,7 +3071,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         let prompt = format!("{}\n\n{block}", pending.base_prompt);
-        let modal = confirm_with_default(prompt, pending.destructive, pending.default_no);
+        let modal = crate::realm::components::confirm::Confirm::styled(prompt, pending.style);
         let id = pending.id.clone();
         // Remount in place. `mount_modal` replaces the component under
         // the same id and leaves `modal_flow` alone, so the action and

@@ -2515,6 +2515,7 @@ mod effects_tests {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: ws_key.clone(),
             reason: super::super::RemovalReason::OutOfScope,
         });
@@ -2537,6 +2538,7 @@ mod effects_tests {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: ws_key.clone(),
             reason: super::super::RemovalReason::Merged,
         });
@@ -2842,6 +2844,7 @@ mod effects_tests {
             Some(super::super::ModalFlow::RemovalPrompt {
                 workspace,
                 reason: super::super::RemovalReason::Merged,
+                ..
             }) => {
                 assert_eq!(workspace.as_str(), "github:o/r#2");
             }
@@ -2931,6 +2934,7 @@ mod effects_tests {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: ws_key.clone(),
             reason: super::super::RemovalReason::Merged,
         });
@@ -2952,6 +2956,7 @@ mod effects_tests {
     fn modal_dismissed_on_merged_removal_is_silent_deferral() {
         let mut m = build_model();
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: WorkspaceKey::new("github:o/r#1"),
             reason: super::super::RemovalReason::Merged,
         });
@@ -2970,6 +2975,7 @@ mod effects_tests {
     fn confirmed_no_on_remove_out_of_scope_returns_no_commands() {
         let mut m = build_model();
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: WorkspaceKey::new("github:o/r#1"),
             reason: super::super::RemovalReason::OutOfScope,
         });
@@ -3038,7 +3044,7 @@ mod effects_tests {
     /// Read the initial Enter default of the Confirm modal mounted
     /// under `id`. `Confirm::state()` exposes the highlighted button as
     /// a bool so the mount site's default is assertable end-to-end.
-    fn mounted_confirm_default_yes(
+    pub(super) fn mounted_confirm_default_yes(
         m: &Model<tuirealm::terminal::TestTerminalAdapter>,
         id: Id,
     ) -> bool {
@@ -3201,6 +3207,110 @@ mod effects_tests {
         assert!(
             !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
             "a merged-PR removal over live terminals defaults to No",
+        );
+    }
+
+    /// #1899 follow-up (r1/f1): the guard must not trust the count the daemon
+    /// snapshotted at emit time. A merged PR with no session legitimately emits
+    /// `active_terminal_count: 0`; the prompt then queues behind any open modal,
+    /// and `removal_already_pending` drops the daemon's re-emit rather than
+    /// refreshing that count. So an agent started on the row while the prompt
+    /// waited used to face a Yes default — Enter killing it and deleting the
+    /// worktree. The live client-side count is what closes that window.
+    #[test]
+    fn stale_zero_count_still_guards_when_a_terminal_is_live_now() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        let session_key = SessionKey::from("github:o/r#1");
+        // The agent the user started while the prompt sat in the queue.
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        assert_eq!(
+            m.terminals.terminal_count_for(&session_key),
+            1,
+            "fixture must have a live terminal for the guard to find"
+        );
+
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                // The daemon's stale figure.
+                terminal_count: 0,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "a live terminal guards the prompt even when the event said 0",
+        );
+    }
+
+    /// #1899 follow-up (r1/f3): No on a GUARDED merged/closed prompt must not
+    /// send `KeepMergedWorkspace`. That command persists
+    /// `CleanupPrompt::Declined` on the row, which suppresses the prompt
+    /// permanently, survives restarts, and has no UI to see or undo — so a
+    /// prompt whose default was moved to No *because the user may not be
+    /// reading it* would trade one one-keystroke irreversible outcome for
+    /// another. It defers instead, and says so.
+    #[test]
+    fn no_on_a_guarded_removal_prompt_defers_instead_of_pinning_it() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: true,
+            workspace: WorkspaceKey::new("github:o/r#1"),
+            reason: super::super::RemovalReason::Merged,
+        });
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_confirmed(false);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, lazybox_ipc::Command::KeepMergedWorkspace { .. })),
+            "a guarded No must not persist the permanent keep pin, got: {cmds:?}",
+        );
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a keystroke that decides nothing still has to explain itself");
+        assert!(
+            notice.message.contains("ask again"),
+            "the notice must say the decision was deferred, got {:?}",
+            notice.message,
+        );
+    }
+
+    /// The other half of the same guard: an UNGUARDED No is a real decision and
+    /// still tells the daemon to stop asking.
+    #[test]
+    fn no_on_an_unguarded_removal_prompt_still_pins_the_keep() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
+            workspace: WorkspaceKey::new("github:o/r#1"),
+            reason: super::super::RemovalReason::Merged,
+        });
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_confirmed(false);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, lazybox_ipc::Command::KeepMergedWorkspace { .. })),
+            "an explicit No with nothing running is a decision, got: {cmds:?}",
         );
     }
 
@@ -3375,6 +3485,7 @@ mod effects_tests {
     fn modal_dismissed_on_remove_out_of_scope_clears_slot_silently() {
         let mut m = build_model();
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: WorkspaceKey::new("github:o/r#1"),
             reason: super::super::RemovalReason::OutOfScope,
         });
@@ -3566,7 +3677,7 @@ mod effects_tests {
             dismissed_updates: Vec::new(),
         });
         assert!(m.sidebar.focus_workspace_key(&session_key));
-        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
             model_label: None,
             terminal_id: TerminalId(1),
             session_key: session_key.clone(),
@@ -12242,6 +12353,105 @@ mod merge_focus_follow_tests {
         ));
     }
 
+    /// #1899 follow-up (r1/f2): the UPSTREAM half. Yes on the safe-unsubscribe
+    /// confirm authorises the rescope sweep that deletes these workspaces with
+    /// their notes, read state and stars, and only then queues the
+    /// per-workspace prompts. Un-ticking a repo to tidy a filter is not a
+    /// request to delete anything, so the prompt that exists to name that
+    /// damage must not be answerable by a reflexive Enter.
+    #[test]
+    fn scope_removal_confirm_defaults_to_no() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        // The `task` fixture reports repo `owner/repo`, which the un-ticked
+        // scope below covers — so this workspace is the doomed one.
+        let doomed = workspace("owner/repo#1", false, Duration::hours(1));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(doomed)));
+        while server.rx.try_recv().is_ok() {}
+
+        let scopes = |list: &[&str]| -> BTreeMap<String, BTreeSet<String>> {
+            let mut out = BTreeMap::new();
+            out.insert(
+                "github".to_string(),
+                list.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>(),
+            );
+            out
+        };
+        m.setup.persisted = Some(lazybox_core::PersistedSetup {
+            enabled_providers: BTreeSet::new(),
+            enabled_agents: BTreeSet::new(),
+            provider_filters: BTreeMap::new(),
+            selected_scopes: scopes(&["github:owner/repo", "github:owner/other"]),
+        });
+        let report = crate::setup::SetupReport { tools: vec![] };
+        let outcome = crate::setup_flow::SetupOutcome {
+            report: report.clone(),
+            enabled_providers: BTreeSet::new(),
+            enabled_agents: BTreeSet::new(),
+            provider_filters: BTreeMap::new(),
+            selected_scopes: scopes(&["github:owner/other"]),
+        };
+        m.handle_runner_step(
+            crate::setup_flow::SetupRunner::new(report, BTreeSet::new()),
+            crate::setup_flow::RunnerStep::Finish(outcome),
+        );
+
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::ScopeRemovalConfirm),
+            "un-ticking a repo with workspaces must interpose the confirm",
+        );
+        assert!(
+            !super::effects_tests::mounted_confirm_default_yes(&m, Id::ScopeRemovalConfirm),
+            "Enter must not authorise the rescope sweep",
+        );
+    }
+
+    /// #1899 follow-up (r1/f8): `ClaimedSpawnConfirm` is the one
+    /// shortcut-initiated prompt whose default moved to No. Its `Id` doc calls
+    /// it a guard ("Yes bypasses this one guard"), and starting a second agent
+    /// on a claimed task is the fleet double-spawn the `working` label exists to
+    /// prevent — so No is the intended default. Pinned here because nothing
+    /// else asserted which side Enter fires.
+    #[test]
+    fn claimed_spawn_confirm_defaults_to_no() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let mut claimed = workspace("owner/repo#1899", false, Duration::hours(1));
+        claimed
+            .gh_issues
+            .first_mut()
+            .unwrap()
+            .labels
+            .push(lazybox_core::Label::new("working"));
+        let session_key = SessionKey::from(&claimed.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(claimed)));
+        while server.rx.try_recv().is_ok() {}
+
+        m.flush_dispatched_cmds(vec![lazybox_ipc::Command::Spawn {
+            session_key,
+            session_id: None,
+            client_request_id: Some("claim-default-test".into()),
+            kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
+            cwd: None,
+            initial_prompt: Some("fix it".into()),
+            initial_snippet: None,
+            on_main: false,
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
+            role: None,
+        }]);
+
+        assert_eq!(m.top_modal(), Some(&Id::ClaimedSpawnConfirm));
+        assert!(
+            !super::effects_tests::mounted_confirm_default_yes(&m, Id::ClaimedSpawnConfirm),
+            "Enter must not bypass the claim guard",
+        );
+    }
+
     #[test]
     fn claimed_workspace_allows_read_only_agent_without_confirmation() {
         let (client, mut server) = channel::pair();
@@ -17189,7 +17399,7 @@ mod daemon_event_fastpath_tests {
         let key = seed_workspace(&mut m);
         let session_key: lazybox_core::SessionKey = (&key).into();
 
-        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
             model_label: None,
             terminal_id: TerminalId(1),
             session_key: session_key.clone(),

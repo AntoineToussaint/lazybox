@@ -66,9 +66,29 @@ running agent, a bulk wipe, an out-of-order merge. It used to be an alias for
 `destructive()`, so every call site believing itself guarded was
 Enter-to-confirm (#1899).
 
-A prompt rebuilt in place — `apply_removal_risks` remounting to append the
-daemon's risk list — has to reproduce *both* facts. Deriving the default from
-the destructive flag alone silently traded the guard back for Yes.
+The three combinations are named: `ConfirmStyle::{Benign, Destructive, Guarded}`,
+built with `Confirm::styled`. Two booleans admitted a fourth that the component
+cannot represent, and `PendingRemovalRisk` — whose job is to rebuild a prompt
+faithfully when `apply_removal_risks` appends the daemon's risk list — could hold
+it. That re-mount has to reproduce chrome *and* default; deriving the default
+from the destructive flag alone silently traded the guard back for Yes.
+
+## A guard moves the default, so the default must not decide
+
+A prompt defaults to No because the user may not be reading it — so No there
+cannot commit anything. The workspace-removal prompt is guarded whenever the row
+has a live terminal, and answering a guarded one defers (the silence `Esc`
+produces, so the daemon re-prompts) instead of sending `KeepMergedWorkspace`,
+which persists `CleanupPrompt::Declined`, suppresses the prompt permanently
+across restarts, and has no UI to see or undo. Swapping a one-keystroke deletion
+for a one-keystroke permanent retirement is not a fix.
+
+The guard bit is decided at mount and carried on `ModalFlow::RemovalPrompt`, not
+re-derived when the answer lands: an agent that exits while the modal is up must
+not turn the rendered guard back into a deciding prompt. It is also ORed with the
+client's live terminal count, because the daemon's `active_terminal_count` is a
+snapshot from emit time and `removal_already_pending` drops the re-emit that
+would refresh it.
 
 ## Markdown is hand-rolled
 

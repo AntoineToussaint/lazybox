@@ -317,6 +317,21 @@ Each phase ships on its own and is useful alone.
 
 1. **TODO.** Rename Hopper → TODO; sub-TODOs, progress roll-up, links,
    auto-check; the task/plan store with immutable ids. *User-visible first.*
+
+   **Status.** The user-visible half is #1898: `TodoItem` as a field on
+   `Workspace` (schema v15), progress roll-up, and auto-check on merge. That PR
+   flags in its own body that a checklist hanging off a workspace cannot be the
+   shared plan phases 3–4 subscribe to, and records the decision that the store
+   is a follow-up which must land before phase 3 starts.
+
+   The store's **model** is now `lazybox_core::work`: `WorkId`/`PlanId` (uuid,
+   sanitizer-safe), `Party`, `Link`, `Lifecycle` with terminal states that
+   refuse further work, `Task` with provenance history, progress roll-up over
+   the tree, auto-completion by link, and `plan_members` for the
+   `anchor: None` epic projection. It is **not wired**: nothing reads or writes
+   these rows yet, and #1898's `todo_items` has not been folded into them — that
+   fold is the second migration of the same data #1898 already called out.
+   `WORK_KEY_PREFIX` / `PLAN_KEY_PREFIX` are the kv prefixes it will use.
 2. **Delivery + results.** The single delivery owner with receipts;
    `complete_task`; keep the Stop hook's content; tasks for `w w`, ask and
    auto-fix; fix the ask race and per-repo rules as part of it. Adding the

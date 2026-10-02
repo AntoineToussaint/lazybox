@@ -80,6 +80,8 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// Spinner modal. `pending(label)` builds it; the producer hand
 /// resolves via [`LoadingResult::send`].
 pub struct Loading {
+    presentation: crate::realm::presentation::Presentation,
+    mobile_scroll: u16,
     title: String,
     label: String,
     spinner_idx: usize,
@@ -93,6 +95,8 @@ impl Loading {
     pub fn pending(label: impl Into<String>) -> (Self, LoadingResult) {
         let (tx, rx) = sync_channel::<LoadingPayload>(1);
         let modal = Self {
+            presentation: crate::realm::presentation::Presentation::Desktop,
+            mobile_scroll: 0,
             title: "Loading".to_string(),
             label: label.into(),
             spinner_idx: 0,
@@ -155,6 +159,21 @@ enum TakeOutcome {
 
 impl Component for Loading {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            crate::realm::presentation::render_reader(
+                frame,
+                area,
+                &self.title,
+                &format!(
+                    "{}  {}",
+                    SPINNER_FRAMES[self.spinner_idx % SPINNER_FRAMES.len()],
+                    self.label
+                ),
+                &mut self.mobile_scroll,
+                "Esc cancel",
+            );
+            return;
+        }
         let theme = crate::theme::current();
         let modal_w = 60u16.min(area.width.saturating_sub(4));
         let modal_h = 5u16;
@@ -195,7 +214,9 @@ impl Component for Loading {
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
         None
     }
-    fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.presentation.apply_attribute(attr, value);
+    }
     fn state(&self) -> State {
         State::None
     }

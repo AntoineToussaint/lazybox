@@ -644,13 +644,29 @@ impl<T: TerminalAdapter> Model<T> {
         project_key: lazybox_core::ProjectKey,
         name: String,
     ) -> Vec<IpcCommand> {
-        let spawn_agent = Some(self.sidebar.default_agent().to_string());
+        self.create_workspace_with_runner_cmds(
+            project_key,
+            name,
+            super::SessionRunner::Agent(self.sidebar.default_agent().to_string()),
+        )
+    }
+
+    pub(super) fn create_workspace_with_runner_cmds(
+        &mut self,
+        project_key: lazybox_core::ProjectKey,
+        name: String,
+        runner: super::SessionRunner,
+    ) -> Vec<IpcCommand> {
+        let spawn_agent = match &runner {
+            super::SessionRunner::Agent(agent) => Some(agent.clone()),
+            super::SessionRunner::Shell => None,
+        };
         let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
         self.pending_workspace_creates.insert(
             client_request_id.clone(),
             super::PendingWorkspaceCreate {
                 name: name.clone(),
-                spawn_agent: spawn_agent.is_some(),
+                runner,
                 workspace_key: None,
             },
         );
@@ -707,7 +723,9 @@ impl<T: TerminalAdapter> Model<T> {
                             client_request_id.clone(),
                             super::PendingWorkspaceCreate {
                                 name: name.clone(),
-                                spawn_agent: true,
+                                runner: super::SessionRunner::Agent(
+                                    self.sidebar.default_agent().to_string(),
+                                ),
                                 workspace_key: None,
                             },
                         );
@@ -1603,6 +1621,26 @@ showing keybinding search only",
         self.pop_modal();
         let mut cmds = Vec::new();
         match top {
+            Some(Id::MobileDeleteSession) => {
+                if let Some(ModalFlow::MobileDeleteSession { terminal_id }) = self.modal_flow.take()
+                {
+                    if yes {
+                        use crate::components::terminal_stack::CloseOutcome;
+                        // The row only disappears on `TerminalExited`, so a
+                        // request whose event never came back must say so
+                        // instead of closing this prompt over an untouched
+                        // session the user will keep pressing `x` on.
+                        match self.terminals.close_terminal(terminal_id, &mut cmds) {
+                            CloseOutcome::Removed | CloseOutcome::Requested => (),
+                            CloseOutcome::Retried => self
+                                .flash_info("still closing that session — asked the daemon again"),
+                            CloseOutcome::Unknown => self.flash_info("That session has ended"),
+                        }
+                    }
+                    self.refresh_mobile_sessions();
+                    self.redraw = true;
+                }
+            }
             Some(Id::AgentAuth) => {
                 if let Some(ModalFlow::AgentAuth { terminal_id, retry }) = self.modal_flow.take() {
                     if yes {

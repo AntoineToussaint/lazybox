@@ -109,6 +109,8 @@ pub type SharedHelpConvo = Arc<Mutex<HelpConvo>>;
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub struct HelpAsk {
+    presentation: crate::realm::presentation::Presentation,
+    mobile_intro_scroll: usize,
     /// Catalog snapshot taken at mount — the search corpus.
     catalog: Vec<CatalogEntry>,
     convo: SharedHelpConvo,
@@ -143,6 +145,8 @@ impl HelpAsk {
         }
         catalog.extend(terminal_search_entries(&leader));
         Self {
+            presentation: Default::default(),
+            mobile_intro_scroll: 0,
             catalog,
             convo,
             query: String::new(),
@@ -171,10 +175,40 @@ impl HelpAsk {
         self.matches = lazybox_tui_core::help::search(&self.catalog, &self.query);
     }
 
+    /// Scroll whichever body is on screen: the intro counts down from the
+    /// top, an answer transcript counts up from the bottom.
+    fn mobile_scroll(&mut self, delta: isize) {
+        if self.convo().turns.is_empty() && self.query.is_empty() {
+            self.mobile_intro_scroll = self.mobile_intro_scroll.saturating_add_signed(delta);
+        } else {
+            self.scroll_up = self.scroll_up.saturating_add_signed(-delta);
+        }
+    }
+
     fn on_key(&mut self, key: &KeyEvent) -> Option<Msg> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
             return Some(Msg::ModalDismissed);
+        }
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            // A software keyboard offers no arrow or page keys, so the only
+            // reliably reachable bindings are the Ctrl row and the touch
+            // wheel. Ctrl-N / Ctrl-P are free here (the question input binds
+            // neither) and Ctrl-J is avoided because terminals report it as
+            // Enter (#1877 review B8).
+            let delta = match key.code {
+                Key::Up => Some(-1isize),
+                Key::Down => Some(1),
+                Key::Char('p') if ctrl => Some(-1),
+                Key::Char('n') if ctrl => Some(1),
+                Key::PageUp => Some(-8),
+                Key::PageDown => Some(8),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                self.mobile_scroll(delta);
+                return None;
+            }
         }
         // The assistant is the primary `?` surface. Pressing `?` again
         // from its empty prompt swaps to the compact all-shortcuts index;
@@ -296,12 +330,17 @@ impl HelpAsk {
                     format!("  Keys in the {pane}"),
                     Style::default().fg(theme.text_strong).bold(),
                 )));
-                const KEY_PAD: usize = 12;
+                let key_pad =
+                    if self.presentation == crate::realm::presentation::Presentation::Mobile {
+                        8
+                    } else {
+                        12
+                    };
                 for b in keys {
                     let mut k = b.keys.to_string();
                     let n = k.chars().count();
-                    if n < KEY_PAD {
-                        k.push_str(&" ".repeat(KEY_PAD - n));
+                    if n < key_pad {
+                        k.push_str(&" ".repeat(key_pad - n));
                     }
                     out.push(Line::from(vec![
                         Span::styled(format!("   {k}"), Style::default().fg(theme.accent).bold()),
@@ -326,6 +365,12 @@ impl HelpAsk {
                 "      “how do I act on a failing PR?”",
                 Style::default().fg(theme.text_dim).italic(),
             )));
+            if self.presentation == crate::realm::presentation::Presentation::Mobile {
+                return out
+                    .into_iter()
+                    .flat_map(|line| comment_render::wrap_one(line, width))
+                    .collect();
+            }
             return out;
         }
         for turn in &convo.turns {
@@ -456,7 +501,12 @@ impl Component for HelpAsk {
         let modal_h = 30u16.min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
-        let modal = Rect::new(x, y, modal_w, modal_h);
+        let mobile = self.presentation == crate::realm::presentation::Presentation::Mobile;
+        let modal = if mobile {
+            area
+        } else {
+            Rect::new(x, y, modal_w, modal_h)
+        };
 
         frame.render_widget(Clear, modal);
         let block = Block::default()
@@ -497,7 +547,14 @@ impl Component for HelpAsk {
             Span::styled("  Tab switch", Style::default().fg(theme.text_dim)),
         ]);
         let mode_rect = Rect { height: 1, ..inner };
-        frame.render_widget(Paragraph::new(mode_line), mode_rect);
+        frame.render_widget(
+            Paragraph::new(if mobile {
+                Line::from(format!("{} · Tab mode", next_question.input_label()))
+            } else {
+                mode_line
+            }),
+            mode_rect,
+        );
 
         let input_line = Line::from(vec![
             Span::styled(
@@ -560,6 +617,9 @@ impl Component for HelpAsk {
         // bottom so a streaming answer stays in view.
         let offset = if searching {
             0
+        } else if mobile && self.convo().turns.is_empty() && self.convo().notice.is_none() {
+            self.mobile_intro_scroll = self.mobile_intro_scroll.min(total.saturating_sub(visible));
+            self.mobile_intro_scroll
         } else {
             self.scroll_up = self.scroll_up.min(total.saturating_sub(visible));
             total.saturating_sub(visible + self.scroll_up)
@@ -593,13 +653,25 @@ impl Component for HelpAsk {
                 Span::raw(" shortcuts"),
             ]
         };
-        frame.render_widget(Paragraph::new(Line::from(hint)), help_rect);
+        frame.render_widget(
+            Paragraph::new(if mobile {
+                // Must fit 30 cells (a 32-column phone less the borders), so
+                // it can only name bindings that exist: Ctrl-N/Ctrl-P and the
+                // touch wheel, both of which this component now handles.
+                Line::from("Enter ask · ^N/^P/swipe · Esc")
+            } else {
+                Line::from(hint)
+            }),
+            help_rect,
+        );
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
         None
     }
-    fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.presentation.apply_attribute(attr, value);
+    }
     fn state(&self) -> State {
         State::None
     }
@@ -612,6 +684,16 @@ impl AppComponent<Msg, UserEvent> for HelpAsk {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
         match ev {
             Event::Keyboard(key) => self.on_key(key),
+            Event::Mouse(mouse)
+                if self.presentation == crate::realm::presentation::Presentation::Mobile =>
+            {
+                match mouse.kind {
+                    tuirealm::event::MouseEventKind::ScrollUp => self.mobile_scroll(-1),
+                    tuirealm::event::MouseEventKind::ScrollDown => self.mobile_scroll(1),
+                    _ => (),
+                }
+                None
+            }
             Event::Paste(text) => {
                 self.query.push_str(text);
                 self.refilter();
@@ -623,6 +705,78 @@ impl AppComponent<Msg, UserEvent> for HelpAsk {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod mobile_scroll_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn mobile_help() -> HelpAsk {
+        let mut help = HelpAsk::new(Vec::new(), Arc::new(Mutex::new(HelpConvo::default())), ']');
+        help.attr(
+            crate::realm::presentation::MOBILE_ATTRIBUTE,
+            AttrValue::Flag(true),
+        );
+        help
+    }
+
+    #[test]
+    fn a_phone_can_scroll_the_reader_without_arrow_keys_or_a_pointer() {
+        // A software keyboard has no arrow or page keys, and the footer used
+        // to advertise a swipe this component did not handle at all.
+        let mut help = mobile_help();
+        for _ in 0..3 {
+            help.on(&Event::Keyboard(KeyEvent::new(
+                Key::Char('n'),
+                KeyModifiers::CONTROL,
+            )));
+        }
+        assert_eq!(help.mobile_intro_scroll, 3);
+        help.on(&Event::Keyboard(KeyEvent::new(
+            Key::Char('p'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(help.mobile_intro_scroll, 2);
+        let wheel = |kind| {
+            Event::Mouse(tuirealm::event::MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        help.on(&wheel(tuirealm::event::MouseEventKind::ScrollDown));
+        assert_eq!(help.mobile_intro_scroll, 3);
+        help.on(&wheel(tuirealm::event::MouseEventKind::ScrollUp));
+        assert_eq!(help.mobile_intro_scroll, 2);
+        // Ctrl-N/Ctrl-P are not typed into the question.
+        assert!(help.query.is_empty());
+    }
+
+    #[test]
+    fn the_mobile_footer_only_names_bindings_that_exist_and_fits_a_32_column_phone() {
+        let footer = "Enter ask · ^N/^P/swipe · Esc";
+        assert!(
+            crate::util::visual_width(footer) <= 30,
+            "{} cells",
+            crate::util::visual_width(footer)
+        );
+        let mut help = mobile_help();
+        for binding in ["^N", "^P", "swipe", "Esc"] {
+            assert!(footer.contains(binding));
+        }
+        // Each one does something.
+        help.on(&Event::Keyboard(KeyEvent::new(
+            Key::Char('n'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(help.mobile_intro_scroll, 1);
+        assert!(matches!(
+            help.on(&Event::Keyboard(KeyEvent::from(Key::Esc))),
+            Some(Msg::ModalDismissed)
+        ));
     }
 }
 

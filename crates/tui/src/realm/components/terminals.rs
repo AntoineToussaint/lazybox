@@ -47,6 +47,12 @@ impl Terminals {
         self.inner.apply_ui_defaults(ui);
     }
 
+    pub(crate) fn terminal_summaries(
+        &self,
+    ) -> Vec<crate::components::terminal_stack::TerminalSummary> {
+        self.inner.terminal_summaries()
+    }
+
     /// Current new-terminal layout preference (tab vs split for auto
     /// spawns). Read by the `]]` leader popup to label the `]]t` row.
     pub fn terminal_new_layout(&self) -> lazybox_config::NewTerminalLayout {
@@ -339,6 +345,14 @@ impl Terminals {
 
     /// `]]x` — close the focused terminal (tile or active tab) and
     /// its PTY.
+    pub(crate) fn close_terminal(
+        &mut self,
+        id: TerminalId,
+        cmds: &mut Vec<IpcCommand>,
+    ) -> crate::components::terminal_stack::CloseOutcome {
+        self.inner.close_terminal(id, cmds)
+    }
+
     pub fn close_focused_tile(&mut self, cmds: &mut Vec<IpcCommand>) {
         self.inner.close_focused_tile(cmds);
     }
@@ -407,6 +421,11 @@ impl Terminals {
         delta: isize,
     ) -> crate::components::terminal_stack::ScrollOutcome {
         self.inner.scroll_active(delta)
+    }
+
+    /// Jump the focused terminal to live output and end its scrollback visit.
+    pub fn scroll_to_bottom(&mut self) -> crate::components::terminal_stack::ScrollOutcome {
+        self.inner.scroll_to_bottom()
     }
 
     /// Crossterm `(col, row)` → screen-absolute grid coords
@@ -481,6 +500,25 @@ impl Terminals {
     /// split-tile highlight can't bleed into a neighbouring tile (#1101).
     pub fn tile_grid_rect(&self, id: TerminalId) -> Option<tuirealm::ratatui::layout::Rect> {
         self.inner.tile_grid_rect(id)
+    }
+
+    /// Clipboard candidates in reverse source order, independent of terminal
+    /// focus, capped at [`TerminalStack::COPY_ITEM_LIMIT`]; the second value
+    /// is how many were found before the cap.
+    pub(crate) fn copy_items(
+        &mut self,
+        id: TerminalId,
+    ) -> Option<(Vec<crate::components::copy_text::CopyItem>, usize)> {
+        self.inner.copy_items(id)
+    }
+
+    /// The cap `copy_items` applies, so a caller can say what it is showing.
+    pub(crate) const COPY_ITEM_LIMIT: usize =
+        crate::components::terminal_stack::TerminalStack::COPY_ITEM_LIMIT;
+
+    /// Snapshot logical terminal lines and the current viewport cursor for copying.
+    pub fn copy_lines(&mut self, id: TerminalId) -> Option<(Vec<String>, usize)> {
+        self.inner.copy_lines(id)
     }
 
     /// Forward `visible_text` — dump a terminal's whole visible grid

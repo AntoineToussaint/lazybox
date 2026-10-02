@@ -923,6 +923,9 @@ pub(super) fn is_scroll_event(event: &crossterm::event::Event) -> bool {
 pub(super) struct StaleInputTally {
     dropped: usize,
     oldest: Duration,
+    // Keep queued suffixes of a discarded management chord from becoming
+    // terminal text (e.g. stale Ctrl-T followed by a session letter).
+    key_discarded_at: Option<std::time::Instant>,
 }
 
 impl StaleInputTally {
@@ -1867,7 +1870,18 @@ fn service_buffered_input<T: TerminalAdapter>(
         .modal_stack
         .last()
         .is_some_and(super::Id::retains_stale_keys);
-    if should_drop_stale_input(&timed.event, age, modal_retains_keys) {
+    // Mobile's live-terminal route forwards keys literally. Treat those
+    // bytes as user content, like bracketed paste, instead of dropping a
+    // half-typed prompt when a busy frame exceeds the stale-action deadline.
+    if should_drop_stale_input(&timed.event, age, modal_retains_keys)
+        && (stale_tally
+            .key_discarded_at
+            .is_some_and(|barrier| timed.read_at <= barrier)
+            || !model.mobile_retains_buffered_key(&timed.event))
+    {
+        if matches!(timed.event, crossterm::event::Event::Key(_)) {
+            stale_tally.key_discarded_at = Some(std::time::Instant::now());
+        }
         stale_tally.note(age);
         return None;
     }
@@ -2072,7 +2086,20 @@ pub(crate) enum ClipboardDelivery {
     /// anything with the escape disabled drop it, and nothing comes
     /// back either way.
     Terminal,
+    /// Past [`OSC52_TEXT_LIMIT`] — refused rather than sent.
+    TooLarge,
 }
+
+/// Largest text lazybox will put in an OSC 52 sequence.
+///
+/// base64 inflates the payload by 4/3, and emulators and multiplexers cap
+/// the escape far below a whole scrollback snapshot — tmux buffers it,
+/// xterm's historical ceiling was 8 KiB for the entire sequence — then drop
+/// an oversized one with no reply. Since the mobile copy picker can select
+/// a whole snapshot, an unbounded payload meant the UI reporting a copy that
+/// never happened. 64 KiB is past anything known to accept the escape, so
+/// beyond it the honest answer is to refuse and say so.
+pub(crate) const OSC52_TEXT_LIMIT: usize = 64 * 1024;
 
 impl ClipboardDelivery {
     /// Footer line for a copy of `what` ("3 lines", "word", "line").
@@ -2080,6 +2107,10 @@ impl ClipboardDelivery {
         match self {
             Self::Host => format!("copied {what} to clipboard"),
             Self::Terminal => format!("copied {what} — OSC 52 sent, host terminal decides"),
+            Self::TooLarge => format!(
+                "{what} is over {} KiB — too large for the terminal clipboard, select less",
+                OSC52_TEXT_LIMIT / 1024
+            ),
         }
     }
 }
@@ -2096,6 +2127,10 @@ impl ClipboardDelivery {
 pub(crate) fn emit_clipboard_copy(text: &str) -> ClipboardDelivery {
     if native_clipboard_copy(text) {
         return ClipboardDelivery::Host;
+    }
+    // A payload the host will drop must not be reported as sent.
+    if text.len() > OSC52_TEXT_LIMIT {
+        return ClipboardDelivery::TooLarge;
     }
     let encoded = base64_encode(text.as_bytes());
     let sequence = format!("\x1b]52;c;{encoded}\x1b\\");

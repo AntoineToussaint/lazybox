@@ -159,7 +159,11 @@ blocked (a reason a sibling can see) and `clear_blocker` lifts it.\n\
 first. It runs in that record's own workspace, never a named one beside it, and \
 refuses off-role or past the epic's worker cap.\n\
   - `start_workspace` (any role) hands independent work on an existing record to an \
-agent in its own workspace — visible, resumable, costed, unlike a sub-agent."
+agent in its own workspace — visible, resumable, costed, unlike a sub-agent.\n\
+  - Both take `model` — the tier the new agent runs at, named on *that agent's* menu \
+(`S`/`M`/`L`/`XL`…, a model name, or `best`/`high`/`medium`/`low`, which each agent \
+maps to its own ladder). A tier that agent lacks is refused with the valid ones \
+listed, never run at the default."
 }
 
 /// The full briefing an MCP-wired agent gets: the base blurb plus the
@@ -550,6 +554,17 @@ mod tests {
         // them. Only the byte cap moves over time: the line cap has never been
         // the binding one (it sits at 37 against 29), so raising it too would
         // loosen a guard nothing is pushing on.
+        //
+        // #1911 added one sentence to the spawn-tool bullet: the `model` tier
+        // those tools now take. It earns its bytes the same way the record
+        // bullet above does — a parameter an agent is never told about cannot
+        // be used, which is the entire bug it fixes — and it has to carry two
+        // facts that cannot be inferred: that the ladder is per-agent (`XL` is
+        // a different model on `claude` and on `codex`), and that an alias the
+        // target agent lacks is refused rather than quietly run at the
+        // default. Written as a trailing sentence on the existing bullet
+        // rather than a third one, which is why this moves the cap by ~290
+        // bytes and not the ~420 a standalone bullet cost.
         let text = lazybox_session_context_with_mcp("");
         assert!(
             text.lines().count() <= 37,
@@ -557,7 +572,7 @@ mod tests {
             text.lines().count()
         );
         assert!(
-            text.len() <= 6600,
+            text.len() <= 6950,
             "session context should stay tight: {} bytes",
             text.len()
         );

@@ -98,6 +98,13 @@ The rules that are easy to get wrong:
   order, so never let it pick the model.
 - An **untrusted** spawn — triggered by someone other than the viewer — reads
   labels only. A label is write-gated; an issue body is not.
+- A **caller**-supplied token (the MCP spawn tools' `model`, #1911) resolves
+  through [`AgentModels::alias_for_requested_token`](../core/src/agent.rs):
+  the tier spelling first, then a capability word, same precedence as a
+  task's declarations. Unlike a declaration or a `w S` chord, it is *refused*
+  when this menu names no such tier — the caller is told, with
+  `requestable_tokens()` listing the menu. The fallback those other paths
+  rely on would make "spawn at the strongest model" look like it worked.
 
 Capability tiers are about model capability. Nothing ranks, queues or
 schedules work by them; the genuinely-ranking `Priority` on `Task` is a

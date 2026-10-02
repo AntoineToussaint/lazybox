@@ -137,6 +137,20 @@ blackboard, `notify_session`, `task_status`, the epic tools, and
 around those is a design change, not a fix. Design:
 [`docs/mcp-coordination.md`](../../docs/mcp-coordination.md).
 
+**The two spawn tools are the only agent-facing way to launch an agent**, so a
+spawn knob missing from `SpawnWorkerArgs` / `StartWorkspaceArgs` is missing
+from the fleet however complete the plumbing below it is — #1911 was exactly
+that: every layer under the tool honoured a per-spawn model tier and neither
+schema named it. Both now take `model`, resolved against the *target agent's*
+own menu (`AgentModels::alias_for_requested_token`: a tier alias, label or
+model id, else a `best`/`high`/`medium`/`low` capability word) before anything
+is filed, attached or claimed, and refused with the menu listed when the agent
+has no such tier. Refuse at this boundary, never by tightening
+`spawn_plan::resolve_model_for_agent` — that fallback to the default tier is
+load-bearing for the `w S` chord (one alias, heterogeneous target agents) and
+for a restored session replaying a recorded alias whose tier config no longer
+declares.
+
 `task_status` (`task_status.rs`, #1785) answers "is anyone working on
 `owner/repo#N`?". Resolve a record by scanning `Workspace::hierarchy_task_ids()`
 — never `primary_task()`, and never by reverse-parsing a workspace key, which

@@ -468,6 +468,100 @@ mod tests {
         assert_eq!(m.alias_for_capability(CapabilityTier::High), None);
     }
 
+    /// A caller-supplied token reaches a tier by every spelling the
+    /// menu already understands, plus the capability words — so an
+    /// orchestrator that doesn't know this agent's ladder can still ask
+    /// for the strongest run (#1911).
+    #[test]
+    fn a_requested_token_resolves_by_alias_label_id_or_capability_word() {
+        let m = AgentModels::builtin("claude").unwrap();
+        assert_eq!(m.alias_for_requested_token("L"), Some("L"));
+        assert_eq!(m.alias_for_requested_token("Opus"), Some("L"));
+        assert_eq!(m.alias_for_requested_token("opus"), Some("L"));
+        assert_eq!(m.alias_for_requested_token("claude-opus-5"), Some("L"));
+        // The capability words, which name no tier of the ladder.
+        assert_eq!(m.alias_for_requested_token("best"), Some("XL"));
+        assert_eq!(m.alias_for_requested_token("BEST"), Some("XL"));
+        assert_eq!(m.alias_for_requested_token("medium"), Some("M"));
+        // Nothing by that name — the caller is told, never defaulted.
+        assert_eq!(m.alias_for_requested_token("XXL"), None);
+        assert_eq!(m.alias_for_requested_token("strongest"), None);
+    }
+
+    /// An agent whose own ladder names a rung `high` means that rung by
+    /// it — the same precedence a task's `model:<token>` declaration has
+    /// over the capability word. Codex's configured reasoning-effort
+    /// menu is exactly this shape, so the tier spelling cannot lose to
+    /// the word.
+    #[test]
+    fn a_ladder_rung_named_like_a_capability_word_wins_the_token() {
+        let m = AgentModels {
+            tiers: vec![
+                ModelTier {
+                    alias: "high".into(),
+                    label: "Astra · high".into(),
+                    short: None,
+                    args: vec!["--model".into(), "gpt-6-astra".into()],
+                },
+                ModelTier {
+                    alias: "S".into(),
+                    label: "Luna".into(),
+                    short: None,
+                    args: vec!["--model".into(), "gpt-5.6-luna".into()],
+                },
+            ],
+            capability: CapabilityAliases {
+                high: Some("S".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(m.alias_for_requested_token("high"), Some("high"));
+        // Case does not hand the token back to the capability word: the
+        // rung's own match is case-insensitive too, so `High` is still
+        // that rung and never the `S` the map points `high` at.
+        assert_eq!(m.alias_for_requested_token("High"), Some("high"));
+        // A word no rung claims does route through the map.
+        assert_eq!(m.alias_for_requested_token("low"), None);
+        let mut mapped = m.clone();
+        mapped.capability.low = Some("S".into());
+        assert_eq!(mapped.alias_for_requested_token("low"), Some("S"));
+    }
+
+    /// The refusal has to name the menu: "unknown alias" alone leaves a
+    /// caller guessing at a ladder that differs per agent.
+    #[test]
+    fn requestable_tokens_name_the_ladder_and_the_mapped_words() {
+        let tokens = AgentModels::builtin("claude").unwrap().requestable_tokens();
+        assert_eq!(
+            tokens,
+            vec![
+                "S (claude-haiku-4-5)",
+                "M (claude-sonnet-5)",
+                "L (claude-opus-5)",
+                "XL (claude-fable-5-1)",
+                "best (→ XL)",
+                "high (→ L)",
+                "medium (→ M)",
+                "low (→ S)",
+            ]
+        );
+        // A menu that maps no capability word advertises none of them,
+        // rather than offering four words that resolve to nothing.
+        let ladder_only = AgentModels {
+            tiers: AgentModels::builtin("claude").unwrap().tiers,
+            ..Default::default()
+        };
+        assert!(
+            ladder_only
+                .requestable_tokens()
+                .iter()
+                .all(|t| !t.contains('→')),
+            "{:?}",
+            ladder_only.requestable_tokens()
+        );
+    }
+
     /// #1598 refused to route *any* capability tier onto a Fable-class
     /// model, at every lookup. That also blocked the built-in menu's own
     /// deliberate `best → XL`, which #1600 exists to wire — so the guard
@@ -856,6 +950,59 @@ impl AgentModels {
         by(|t| Some(t.alias.as_str()))
             .or_else(|| by(|t| Some(t.label.as_str())))
             .or_else(|| by(ModelTier::model_id))
+    }
+
+    /// The tier alias a **caller-supplied** model token names on this
+    /// menu: a tier alias, label or pinned model id
+    /// ([`Self::tier_for_token`]), or a `best` / `high` / `medium` /
+    /// `low` capability word routed through [`Self::alias_for_capability`].
+    /// `None` when this menu has nothing by that name — which the caller
+    /// must report rather than fall back on, since "spawn at the best
+    /// model" quietly running the default looks exactly like success
+    /// (#1911).
+    ///
+    /// The tier spelling is tried first, matching the precedence
+    /// [`resolve_model_requests`](crate::resolve_model_requests) gives a
+    /// task's declarations: an agent whose own ladder defines a rung
+    /// called `high` (Codex's reasoning-effort menu does) means that
+    /// rung by it, not the capability word.
+    ///
+    /// Accepting the capability words is what makes a tier requestable
+    /// by a caller that does not know this agent's ladder — `XXL` names
+    /// different models for `claude` and `codex`, while `best` is the
+    /// one question an orchestrator can ask of either.
+    pub fn alias_for_requested_token(&self, token: &str) -> Option<&str> {
+        let token = token.trim();
+        self.tier_for_token(token)
+            .map(|tier| tier.alias.as_str())
+            .or_else(|| {
+                crate::CapabilityTier::from_token(token)
+                    .and_then(|tier| self.alias_for_capability(tier))
+            })
+    }
+
+    /// Every token [`Self::alias_for_requested_token`] accepts, in menu
+    /// order: each tier's alias (with the model it pins, so the choice
+    /// is legible without a second lookup), then the capability words
+    /// this menu actually maps.
+    ///
+    /// Written for the refusal message, which has to name the menu — a
+    /// rejection that only says "unknown" leaves the caller guessing at
+    /// a ladder that differs per agent.
+    pub fn requestable_tokens(&self) -> Vec<String> {
+        let mut tokens: Vec<String> = self
+            .tiers
+            .iter()
+            .map(|tier| match tier.model_id() {
+                Some(id) => format!("{} ({id})", tier.alias),
+                None => tier.alias.clone(),
+            })
+            .collect();
+        tokens.extend(crate::CapabilityTier::ALL.into_iter().filter_map(|tier| {
+            self.alias_for_capability(tier)
+                .map(|alias| format!("{} (→ {alias})", tier.as_str()))
+        }));
+        tokens
     }
 
     /// The tier alias one declared [`ModelRequest`](crate::ModelRequest)

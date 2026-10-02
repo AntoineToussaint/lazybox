@@ -168,6 +168,13 @@ them at session start.
 | `epic_status` / `epic_ready` | Read the live dependency snapshot or only the unblocked, unclaimed work |
 | `report_blocker` / `clear_blocker` | Publish or lift a concrete blocker that survives the current agent turn |
 | `spawn_worker` | As a Coordinator, start a Worker on an existing epic issue (or create the issue first), never in a side workspace |
+| `start_workspace` | Any role: hand independent work on an existing record to an agent in that record's own workspace |
+
+Both spawn tools take a `model` tier — an alias from the target agent's own
+ladder (`S`/`M`/`L`/`XL`…), a model name or id, or a capability word
+(`best`/`high`/`medium`/`low`) that agent maps onto its ladder. The ladders are
+per-agent, so a word is the portable way to say "the strongest run"; a tier the
+agent does not define is refused, never silently downgraded to its default.
 
 The blackboard is the primary medium: a note outlives the session that wrote
 it, and the default read scope is `global` plus the reader's own session, so a

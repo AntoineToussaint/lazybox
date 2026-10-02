@@ -166,7 +166,47 @@ re-reading the dependency graph:
 | `lazybox_epic_ready(epic?)` | Just the members that are ready to start now (unblocked, unclaimed). | same snapshot, `ready` projection |
 | `lazybox_report_blocker(reason, kind?)` | Flag *this* workspace as blocked with a reason siblings can see (`kind` ∈ dependency/external/decision/credential/review/merge-order/contract/cycle/other, default decision); recorded as an operator-owned blocker and folded into derived status. | kv blocker record + recompute |
 | `lazybox_clear_blocker()` | Lift the blocker this workspace reported (no-op if none). | delete blocker record + recompute |
-| `start_workspace(task, brief, agent?)` | Any role: hand independent work on an **existing** record to an agent in that record's own workspace, instead of a sub-agent that is invisible to the inbox, unresumable and uncosted. Never files a record. Refuses the caller's own workspace, a record whose workspace already runs an agent, more than `agent.max_epic_workers` running agents the caller started, a chain deeper than `MAX_START_DEPTH` (2) hand-offs, and a fleet already holding `agent.max_live_agents` agent-started workspaces — the per-caller cap alone bounds neither recursion nor the fleet. The brief is recorded in the new agent's history as `PromptSource::Agent { from }`. Returns only once the agent's terminal registers — a spawn that brought nothing up is an error, not a hand-off — and holds a per-workspace claim across the check-and-spawn window so two callers cannot both start the same record. | `attach_to_record` + `handle_spawn` (origin `AutonomousTrigger::Agent`); per-session starts tracked in `McpRuntime` |
+| `start_workspace(task, brief, agent?, model?)` | Any role: hand independent work on an **existing** record to an agent in that record's own workspace, instead of a sub-agent that is invisible to the inbox, unresumable and uncosted. Never files a record. Refuses the caller's own workspace, a record whose workspace already runs an agent, more than `agent.max_epic_workers` running agents the caller started, a chain deeper than `MAX_START_DEPTH` (2) hand-offs, and a fleet already holding `agent.max_live_agents` agent-started workspaces — the per-caller cap alone bounds neither recursion nor the fleet. The brief is recorded in the new agent's history as `PromptSource::Agent { from }`. Returns only once the agent's terminal registers — a spawn that brought nothing up is an error, not a hand-off — and holds a per-workspace claim across the check-and-spawn window so two callers cannot both start the same record. `model` picks the tier (see below). | `attach_to_record` + `handle_spawn` (origin `AutonomousTrigger::Agent`); per-session starts tracked in `McpRuntime` |
+
+### Picking the model tier (#1911)
+
+Both spawn tools — `spawn_worker` and `start_workspace` — take `model`, the tier
+the new agent runs at. Everything below the tool boundary already honoured a
+per-spawn tier: `SpawnOptions::model_alias` → `SpawnPlanInput::model_alias` →
+`resolve_model_for_agent`, which is also where an interactive `w S` chord
+lands. Only the two tool schemas omitted it, so an agent could choose *which*
+agent to spawn but not *how strong* — and the only levers left were a global
+`models.default` (every spawn in the fleet, and its cost) or a human pressing
+the strength key afterwards.
+
+The token is resolved on the **target agent's own** menu by
+`AgentModels::alias_for_requested_token`, which accepts, in this order:
+
+1. a tier alias, label, or the model id a tier pins (`L`, `Opus`,
+   `claude-opus-5`) — `AgentModels::tier_for_token`;
+2. a capability word (`best` / `high` / `medium` / `low`) routed through
+   `agents.<id>.models.capability` — `AgentModels::alias_for_capability`.
+
+The tier spelling is tried first, matching the precedence a task's own
+declarations get (`resolve_model_requests`): an agent whose ladder defines a
+rung called `high` means that rung by it. The words matter because the ladders
+are per-agent — `XL` is Fable on the built-in `claude` menu and a coding model
+on `codex` — so `best` is the one strength question an orchestrator can ask of
+either agent without knowing its ladder.
+
+**An alias the target agent's menu does not define is refused**, with the valid
+tokens listed (`AgentModels::requestable_tokens`), and nothing is attached,
+filed, claimed or spawned. The refusal lives at the tool boundary, not in
+`resolve_model_for_agent`: that function deliberately *falls back* to the
+agent's default tier for an unresolvable alias, because the interactive
+`w S` / `a S` chord fires one alias at whichever agent a row happens to run and
+has to degrade rather than refuse, and because a restored session replays a
+recorded alias whose tier the user may since have deleted from config. For a
+tool call the same fallback is the bug: an agent asked to "spawn at the best
+model" would get a successful hand-off that silently ran the default. So the
+resolution happens where there is a caller to read the error, and the
+**resolved** alias is what travels on — the plan one layer down needs no second
+lookup, and the tool result echoes it as `model`.
 
 The tracker-record cache (#1799) adds four, so a session stops re-fetching
 what the daemon already paid for. Agents and the daemon share one GitHub

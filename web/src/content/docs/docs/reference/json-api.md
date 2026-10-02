@@ -170,7 +170,17 @@ connection *is* the session, so no tool takes a "who am I" argument.
 | `epic_status(epic?)` | The live epic snapshot: members, derived state, done/total, blockers, and critical path |
 | `epic_ready(epic?)` | Only unblocked, unclaimed epic members that can start now |
 | `report_blocker(reason, kind?)` / `clear_blocker()` | Add or lift the caller's durable blocker and recompute epic status |
-| `spawn_worker(task? \| create_issue?, brief, agent?)` | Coordinator-only. Resolve or create an issue in the caller's epic, attach its one existing workspace, set Worker, and spawn there. Refuses duplicate live work and the `agent.max_epic_workers` cap |
+| `spawn_worker(task? \| create_issue?, brief, agent?, model?)` | Coordinator-only. Resolve or create an issue in the caller's epic, attach its one existing workspace, set Worker, and spawn there. Refuses duplicate live work and the `agent.max_epic_workers` cap |
+| `start_workspace(task, brief, agent?, model?)` | Any role. Hand independent work on an existing record to an agent in that record's own workspace. Never files a record; refuses the caller's own row, a row already running an agent, and the per-caller, depth and fleet bounds |
+
+Both spawn tools take `model`: the tier the new agent runs at, named on **that
+agent's own** menu — a tier alias (`S`/`M`/`L`/`XL`…), the model's name or the
+id a tier pins, or a capability word (`best`/`high`/`medium`/`low`) each agent
+maps onto its own ladder. The ladders differ per agent, so `XL` is not the same
+model for `claude` and `codex` and a word is the portable spelling. A tier the
+target agent's menu does not define is refused with the valid ones listed —
+never run at the default, which would make "spawn at the best model" look like
+it worked.
 
 An unanswered request does not hang the asker: when the target ends a turn
 without replying, the tail of its output is captured as the answer with

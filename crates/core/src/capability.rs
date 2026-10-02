@@ -63,6 +63,22 @@ impl CapabilityTier {
             Self::Low => "low",
         }
     }
+
+    /// The tier `token` names, case-insensitively — the inverse of
+    /// [`Self::as_str`]. `None` for anything that is not one of the four
+    /// words.
+    ///
+    /// Label and body-marker matching resolve the token by scanning the
+    /// same strongest-first tier order; this is that question asked by a
+    /// caller that holds one token and wants the tier, so the word list
+    /// stays owned here rather than re-spelled at each caller (the MCP
+    /// spawn tools' `model` argument is one).
+    pub fn from_token(token: &str) -> Option<Self> {
+        let token = token.trim();
+        Self::ORDER
+            .into_iter()
+            .find(|tier| token.eq_ignore_ascii_case(tier.as_str()))
+    }
 }
 
 /// Namespace prefix of an explicit model label (`model:opus`) and of
@@ -303,6 +319,27 @@ mod tests {
     use super::*;
     use crate::{Label, Task, TaskId, TaskRole, TaskState};
     use chrono::Utc;
+
+    /// `from_token` is the exact inverse of `as_str`, case-insensitively
+    /// and with surrounding whitespace shed — the words are declared in
+    /// one place so a caller holding a token never re-spells the list.
+    #[test]
+    fn from_token_round_trips_every_tier_and_rejects_the_rest() {
+        for tier in CapabilityTier::ALL {
+            assert_eq!(CapabilityTier::from_token(tier.as_str()), Some(tier));
+            assert_eq!(
+                CapabilityTier::from_token(&tier.as_str().to_uppercase()),
+                Some(tier)
+            );
+            assert_eq!(
+                CapabilityTier::from_token(&format!(" {} ", tier.as_str())),
+                Some(tier)
+            );
+        }
+        for token in ["", "highest", "bes", "best!", "L", "opus"] {
+            assert_eq!(CapabilityTier::from_token(token), None, "{token:?}");
+        }
+    }
 
     fn task(labels: Vec<Label>, body: Option<&str>) -> Task {
         Task {

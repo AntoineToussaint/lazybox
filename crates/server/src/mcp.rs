@@ -669,6 +669,16 @@ struct SpawnWorkerArgs {
     /// default agent.
     #[serde(default)]
     agent: Option<String>,
+    /// Model tier to run the worker at, from **that agent's own** menu —
+    /// a tier alias (`S` / `M` / `L` / `XL` …), the model's name or id, or
+    /// a capability word (`best` / `high` / `medium` / `low`) that each
+    /// agent maps to its own ladder. The ladders differ per agent, so
+    /// `XL` is not the same model on `claude` and on `codex`; a word is
+    /// the portable spelling. An alias this agent's menu does not define
+    /// is REFUSED with the valid ones listed — never quietly run at the
+    /// default. Omit to use the agent's configured default tier.
+    #[serde(default)]
+    model: Option<String>,
     /// Rejected (#1586). A worker never gets a named workspace beside the
     /// record it works on; pass `task` or `create_issue` instead.
     #[serde(default)]
@@ -689,6 +699,16 @@ struct StartWorkspaceArgs {
     /// default agent.
     #[serde(default)]
     agent: Option<String>,
+    /// Model tier to run the new agent at, from **that agent's own** menu —
+    /// a tier alias (`S` / `M` / `L` / `XL` …), the model's name or id, or
+    /// a capability word (`best` / `high` / `medium` / `low`) that each
+    /// agent maps to its own ladder. The ladders differ per agent, so
+    /// `XL` is not the same model on `claude` and on `codex`; a word is
+    /// the portable spelling. An alias this agent's menu does not define
+    /// is REFUSED with the valid ones listed — never quietly run at the
+    /// default. Omit to use the agent's configured default tier.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// The issue `spawn_worker` files when the work has no ticket yet.
@@ -721,6 +741,12 @@ struct PreparedWorker {
     /// Coordinator can see *which* row it landed on rather than inferring it.
     anchor: lazybox_core::TaskId,
     agent_id: String,
+    /// The tier alias the request's `model` token resolved to on
+    /// `agent_id`'s own menu, canonicalised here so the spawn carries the
+    /// menu's own alias rather than whatever spelling the caller used
+    /// (#1911). `None` when the caller named no tier — the spawn then
+    /// takes the agent's configured default.
+    model_alias: Option<String>,
     epic_key: String,
 }
 
@@ -2654,6 +2680,59 @@ impl LazyboxMcp {
         lazybox_core::Workspace::decode_persisted(&json).ok()
     }
 
+    /// The tier alias a spawn tool's `model` token names on `agent_id`'s own
+    /// menu, or a refusal that lists the menu.
+    ///
+    /// Refusing is the whole point. Below this boundary
+    /// [`crate::spawn_plan::resolve_model_for_agent`] falls back to the
+    /// agent's default tier for an alias it cannot resolve — deliberately,
+    /// because the interactive `w S` chord fires one alias at whichever agent
+    /// a row happens to run and must degrade rather than refuse. For a tool
+    /// call that same fallback is the bug this exists to close (#1911): an
+    /// agent told to "spawn at the best model" would be handed a successful
+    /// hand-off that silently ran the default, with the request unexpressible
+    /// and the miss invisible. So the check lives at the boundary where there
+    /// is a caller to read the error, and the resolved alias is what travels
+    /// on — canonical, so the plan one layer down needs no second lookup.
+    ///
+    /// Validated before any side effect (the issue `create_issue` would file,
+    /// the epic assignment, the claim), same as the agent id above it: a bad
+    /// tier must not leave a filed record behind.
+    fn resolve_requested_model(
+        cfg: &lazybox_config::Config,
+        agent_id: &str,
+        requested: Option<&str>,
+    ) -> Result<Option<String>, McpError> {
+        let Some(token) = requested.map(str::trim).filter(|t| !t.is_empty()) else {
+            return Ok(None);
+        };
+        let models = cfg.agent_models(agent_id);
+        match models.alias_for_requested_token(token) {
+            Some(alias) => Ok(Some(alias.to_string())),
+            None => {
+                let menu = models.requestable_tokens();
+                let menu = if menu.is_empty() {
+                    format!(
+                        "{agent_id} declares no model tiers at all, so it can only run at its \
+                         own default — omit `model`"
+                    )
+                } else {
+                    format!("{agent_id} accepts: {}", menu.join(", "))
+                };
+                Err(McpError::invalid_request(
+                    format!(
+                        "unknown model tier {token:?} for agent {agent_id:?} — {menu}. Model \
+                         ladders are per-agent, so a capability word (best / high / medium / \
+                         low) is the portable way to ask for a strength. Nothing was spawned: \
+                         running the default instead would make \"spawn at {token}\" look like \
+                         it worked."
+                    ),
+                    None,
+                ))
+            }
+        }
+    }
+
     /// Resolve + validate a `spawn_worker` request and, on success, attach to
     /// the target record's workspace, assign it to the caller's epic, and stamp
     /// its Worker role — everything up to (but not including) the agent spawn.
@@ -2668,6 +2747,7 @@ impl LazyboxMcp {
         args: &SpawnWorkerArgs,
         max_workers: usize,
         default_agent: &str,
+        cfg: &lazybox_config::Config,
     ) -> Result<PreparedWorker, McpError> {
         // Gate 1 — the caller must be a Coordinator. This is the ONE role
         // `spawn_worker` enforces (every other role behavior is advisory).
@@ -2741,6 +2821,9 @@ impl LazyboxMcp {
             ));
         }
         let agent_id = agent_id.to_string();
+        // Same reason, one field over: the tier is resolved against this
+        // agent's own menu before anything is filed or assigned.
+        let model_alias = Self::resolve_requested_model(cfg, &agent_id, args.model.as_deref())?;
 
         // Gate 4 — the target is a tracker record, never a name (#1586). A
         // named workspace beside an issue splits the branch, activity, cost
@@ -2810,6 +2893,7 @@ impl LazyboxMcp {
             key,
             anchor,
             agent_id,
+            model_alias,
             epic_key,
         })
     }
@@ -2914,6 +2998,7 @@ impl LazyboxMcp {
         args: SpawnWorkerArgs,
         max_workers: usize,
         default_agent: &str,
+        cfg: &lazybox_config::Config,
     ) -> Result<serde_json::Value, McpError> {
         let brief = args.brief.trim();
         if brief.is_empty() {
@@ -2933,9 +3018,10 @@ impl LazyboxMcp {
             key,
             anchor,
             agent_id,
+            model_alias,
             epic_key,
         } = self
-            .spawn_worker_prepare(caller, &args, max_workers, default_agent)
+            .spawn_worker_prepare(caller, &args, max_workers, default_agent, cfg)
             .await?;
 
         let session_key: SessionKey = (&key).into();
@@ -2944,6 +3030,7 @@ impl LazyboxMcp {
             worker = %key.as_str(),
             epic = %epic_key,
             agent = %agent_id,
+            model = ?model_alias,
             "mcp spawn_worker: coordinator spawning a worker into its epic"
         );
         crate::spawn_handler::handle_spawn(
@@ -2954,6 +3041,10 @@ impl LazyboxMcp {
             crate::spawn_handler::SpawnOptions {
                 initial_prompt: Some(brief),
                 autonomous: true,
+                // The tier the Coordinator asked for, already resolved against
+                // this agent's menu. Set explicitly so it wins over whatever
+                // the record's own labels declare — the caller named a model.
+                model_alias: model_alias.clone(),
                 // A Coordinator agent dispatched this worker into its
                 // epic — no human pressed anything. `SpawnOptions`
                 // defaults `origin` to `Interactive`, which would claim
@@ -2974,6 +3065,7 @@ impl LazyboxMcp {
             "task": anchor.to_string(),
             "epic": epic_key,
             "agent": agent_id,
+            "model": model_alias,
             "role": lazybox_core::Role::Worker.project_label(),
             "handed_off": true,
             "delivery_confirmed": false,
@@ -2993,11 +3085,13 @@ impl LazyboxMcp {
         args: &StartWorkspaceArgs,
         max_started: usize,
         default_agent: &str,
+        cfg: &lazybox_config::Config,
     ) -> Result<
         (
             lazybox_core::WorkspaceKey,
             lazybox_core::TaskId,
             String,
+            Option<String>,
             StartClaim,
         ),
         McpError,
@@ -3014,6 +3108,9 @@ impl LazyboxMcp {
                 None,
             ));
         }
+        // Resolved up front, next to the agent id, so a tier this agent has no
+        // name for fails before the attach and the claim rather than after.
+        let model_alias = Self::resolve_requested_model(cfg, agent_id, args.model.as_deref())?;
         let task = args.task.trim();
         let anchor = lazybox_core::task_ref::parse_task_ref(task, None).ok_or_else(|| {
             McpError::invalid_request(
@@ -3080,11 +3177,7 @@ impl LazyboxMcp {
         // ceiling; it stays ADVISORY for a human's spawn ("lazybox advises,
         // it does not forbid") but is a hard refusal for unattended agent
         // fan-out, the same distinction `spawn_worker`'s cap already makes.
-        if let Some(fleet_cap) = lazybox_config::Config::load()
-            .unwrap_or_default()
-            .agent
-            .live_agent_cap()
-        {
+        if let Some(fleet_cap) = cfg.agent.live_agent_cap() {
             let mut fleet = 0;
             for key in self.config.mcp.all_started() {
                 if self
@@ -3148,7 +3241,7 @@ impl LazyboxMcp {
                 None,
             ));
         }
-        Ok((key, anchor, agent_id.to_string(), claim))
+        Ok((key, anchor, agent_id.to_string(), model_alias, claim))
     }
 
     /// Full `start_workspace` flow: [`Self::start_workspace_prepare`], then
@@ -3159,6 +3252,7 @@ impl LazyboxMcp {
         args: StartWorkspaceArgs,
         max_started: usize,
         default_agent: &str,
+        cfg: &lazybox_config::Config,
     ) -> Result<serde_json::Value, McpError> {
         let brief = args.brief.trim().to_string();
         if brief.is_empty() {
@@ -3173,14 +3267,15 @@ impl LazyboxMcp {
                 None,
             ));
         }
-        let (key, anchor, agent_id, claim) = self
-            .start_workspace_prepare(caller, &args, max_started, default_agent)
+        let (key, anchor, agent_id, model_alias, claim) = self
+            .start_workspace_prepare(caller, &args, max_started, default_agent, cfg)
             .await?;
         self.config.mcp.record_started(caller, key.clone());
         tracing::info!(
             caller = %caller.as_str(),
             workspace = %key.as_str(),
             agent = %agent_id,
+            model = ?model_alias,
             "mcp start_workspace: agent handing independent work to a workspace of its own"
         );
         crate::spawn_handler::handle_spawn(
@@ -3191,6 +3286,10 @@ impl LazyboxMcp {
             crate::spawn_handler::SpawnOptions {
                 initial_prompt: Some(brief),
                 autonomous: true,
+                // The tier the caller asked for, already resolved against this
+                // agent's menu. Set explicitly so it wins over whatever the
+                // record's own labels declare — the caller named a model.
+                model_alias: model_alias.clone(),
                 origin: lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Agent),
                 prompt_from: Some(lazybox_ipc::PromptSource::Agent {
                     from: caller.as_str().to_string(),
@@ -3245,6 +3344,7 @@ impl LazyboxMcp {
             "workspace_key": key.as_str(),
             "task": anchor.key,
             "agent": agent_id,
+            "model": model_alias,
             "handed_off": true,
             "terminal_id": terminal_id.0,
             "delivery_confirmed": false,
@@ -3395,7 +3495,7 @@ impl LazyboxMcp {
     }
 
     #[tool(
-        description = "Coordinator-only: spawn a Worker **on an issue** into the epic you own. Pass `task` — the record the worker owns (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier) — or `create_issue` to file it as a sub-issue of your epic first. The worker runs in THAT record's own workspace: a tracked item never gets a second workspace beside it, so there is no `workspace_name`. The workspace is assigned to your epic, stamped with the Worker role, and the agent starts with `brief` as its opening prompt — automatically framed with the Worker role preamble (who you are / your epic / your resolved blockers), so `brief` is the task itself, not the role. Refuses if you are not a Coordinator, own no epic, the epic is at its worker cap (agent.max_epic_workers, default 6), or the record cannot be resolved. Returns once the worker is handed off — NOT a confirmation the agent has started; verify with list_sessions / read_session."
+        description = "Coordinator-only: spawn a Worker **on an issue** into the epic you own. Pass `task` — the record the worker owns (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier) — or `create_issue` to file it as a sub-issue of your epic first. The worker runs in THAT record's own workspace: a tracked item never gets a second workspace beside it, so there is no `workspace_name`. The workspace is assigned to your epic, stamped with the Worker role, and the agent starts with `brief` as its opening prompt — automatically framed with the Worker role preamble (who you are / your epic / your resolved blockers), so `brief` is the task itself, not the role. `model` picks the tier it runs at from THAT AGENT'S OWN menu — a tier alias (`S`/`M`/`L`/`XL`…), the model's name or id, or a capability word (`best`/`high`/`medium`/`low`) each agent maps to its own ladder; the ladders differ per agent, so `XL` means different models for `claude` and `codex` and a word is the portable spelling. A tier the agent's menu does not define is refused with the valid ones listed, never run at the default. Refuses if you are not a Coordinator, own no epic, the epic is at its worker cap (agent.max_epic_workers, default 6), or the record cannot be resolved. Returns once the worker is handed off — NOT a confirmation the agent has started; verify with list_sessions / read_session."
     )]
     async fn spawn_worker(
         &self,
@@ -3412,13 +3512,13 @@ impl LazyboxMcp {
             .unwrap_or(lazybox_config::DEFAULT_MAX_EPIC_WORKERS);
         let default_agent = cfg.setup.default_agent.as_deref().unwrap_or("claude");
         Ok(json_result(
-            self.spawn_worker_payload(&caller, args, max_workers, default_agent)
+            self.spawn_worker_payload(&caller, args, max_workers, default_agent, &cfg)
                 .await?,
         ))
     }
 
     #[tool(
-        description = "Hand independent work to an agent in a workspace of its own — any role may call this. Pass `task`, an EXISTING tracker record (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier); the agent runs in that record's own workspace, where its work stays visible in the inbox, resumable and costed, and the `brief` is recorded as sent by you. Prefer this to a sub-agent for work that stands on its own; keep sub-agents for research that feeds your own task. It never files a record: if the work has none, propose one to the user first. Refuses your own workspace, a record whose workspace already runs an agent (reach it with ask_session instead), more than agent.max_epic_workers (default 6) running agents you started, a chain more than 2 hand-offs deep (work handed to you is not work to hand on again), and a fleet already at agent.max_live_agents agent-started workspaces. Returns only once the new agent's terminal is actually up (or an error saying the spawn did not take, so a failed worktree never reads as work started); that is not a confirmation it has read the brief — verify with list_sessions / read_session."
+        description = "Hand independent work to an agent in a workspace of its own — any role may call this. Pass `task`, an EXISTING tracker record (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier); the agent runs in that record's own workspace, where its work stays visible in the inbox, resumable and costed, and the `brief` is recorded as sent by you. `model` picks the tier it runs at from THAT AGENT'S OWN menu — a tier alias (`S`/`M`/`L`/`XL`…), the model's name or id, or a capability word (`best`/`high`/`medium`/`low`) each agent maps to its own ladder; the ladders differ per agent, so `XL` means different models for `claude` and `codex` and a word is the portable spelling. A tier the agent's menu does not define is refused with the valid ones listed, never run at the default. Prefer this to a sub-agent for work that stands on its own; keep sub-agents for research that feeds your own task. It never files a record: if the work has none, propose one to the user first. Refuses your own workspace, a record whose workspace already runs an agent (reach it with ask_session instead), more than agent.max_epic_workers (default 6) running agents you started, a chain more than 2 hand-offs deep (work handed to you is not work to hand on again), and a fleet already at agent.max_live_agents agent-started workspaces. Returns only once the new agent's terminal is actually up (or an error saying the spawn did not take, so a failed worktree never reads as work started); that is not a confirmation it has read the brief — verify with list_sessions / read_session."
     )]
     async fn start_workspace(
         &self,
@@ -3433,7 +3533,7 @@ impl LazyboxMcp {
             .unwrap_or(lazybox_config::DEFAULT_MAX_EPIC_WORKERS);
         let default_agent = cfg.setup.default_agent.as_deref().unwrap_or("claude");
         Ok(json_result(
-            self.start_workspace_payload(&caller, args, max_started, default_agent)
+            self.start_workspace_payload(&caller, args, max_started, default_agent, &cfg)
                 .await?,
         ))
     }
@@ -3940,7 +4040,14 @@ impl ServerHandler for LazyboxMcp {
                  epic is at its worker cap. Any role hands independent work \
                  on an existing record to an agent in that record's own \
                  workspace with start_workspace — prefer it to a sub-agent \
-                 for work that stands on its own. If your own workspace hits \
+                 for work that stands on its own. Both spawn tools take a \
+                 `model` tier from the TARGET AGENT's own menu (an alias like \
+                 S/M/L/XL, the model's name or id, or a capability word — \
+                 best / high / medium / low — each agent maps to its own \
+                 ladder); the ladders differ per agent, so a word is the \
+                 portable spelling, and a tier that agent does not define is \
+                 refused with the valid ones listed rather than run at the \
+                 default. If your own workspace hits \
                  something a human must resolve, flag it with report_blocker and \
                  clear it with clear_blocker once unblocked."
                     .to_string(),
@@ -5500,6 +5607,14 @@ mod tests {
         crate::epics::upsert(config, record).await;
     }
 
+    /// The config the spawn gates read: tier menus, the fleet cap. Built
+    /// rather than loaded, so a test never depends on (or is steered by) the
+    /// developer's own `~/.lazybox/config.yaml` — `Config::default()` gives
+    /// each agent its built-in ladder, which is what these assertions name.
+    fn test_config() -> lazybox_config::Config {
+        lazybox_config::Config::default()
+    }
+
     /// A `spawn_worker` request targeting an existing record.
     fn spawn_worker_args(task: &str, brief: &str) -> SpawnWorkerArgs {
         SpawnWorkerArgs {
@@ -5507,6 +5622,7 @@ mod tests {
             create_issue: None,
             brief: brief.to_string(),
             agent: None,
+            model: None,
             workspace_name: None,
         }
     }
@@ -5559,6 +5675,7 @@ mod tests {
             task: task.to_string(),
             brief: "implement the parser".to_string(),
             agent: None,
+            model: None,
         }
     }
 
@@ -5570,8 +5687,14 @@ mod tests {
         seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
         let handler = LazyboxMcp::new(config.clone());
         let caller = SessionKey::from("some-agent");
-        let (key, anchor, agent, _claim) = handler
-            .start_workspace_prepare(&caller, &start_workspace_args("acme/widget#7"), 6, "claude")
+        let (key, anchor, agent, _model, _claim) = handler
+            .start_workspace_prepare(
+                &caller,
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
             .await
             .expect("an unroled agent may start a workspace");
         assert_eq!(key.as_str(), "github-acme-widget-7");
@@ -5587,6 +5710,170 @@ mod tests {
         );
     }
 
+    /// #1911: an agent could pick *which* agent to spawn but not *how
+    /// strong*, so "start a workspace on this and send the highest model on
+    /// it" was unexpressible and the spawn silently took the default tier.
+    ///
+    /// The whole chain in one test: the tool's `model` token resolves on the
+    /// target agent's own menu, and that resolved tier is what the spawn plan
+    /// the daemon builds actually carries — argv, label and alias. Asserted
+    /// through `build_spawn_plan`, not a stub, because the gap this closes was
+    /// precisely a boundary that looked wired and was not.
+    #[tokio::test]
+    async fn start_workspace_carries_an_explicit_tier_into_the_spawn_plan() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config.clone());
+        let cfg = test_config();
+
+        // Each spelling a caller might reach for: the ladder alias, the
+        // model's own name, and the capability word an orchestrator can use
+        // without knowing this agent's ladder at all.
+        for token in ["XL", "Fable", "claude-fable-5-1", "best"] {
+            let args = StartWorkspaceArgs {
+                model: Some(token.to_string()),
+                ..start_workspace_args("acme/widget#7")
+            };
+            let (_key, _anchor, agent, model_alias, _claim) = handler
+                .start_workspace_prepare(&SessionKey::from("some-agent"), &args, 6, "claude", &cfg)
+                .await
+                .unwrap_or_else(|e| panic!("{token}: {}", e.message));
+            assert_eq!(agent, "claude");
+            assert_eq!(
+                model_alias.as_deref(),
+                Some("XL"),
+                "{token} must canonicalise to the menu's own alias"
+            );
+
+            let mut input =
+                crate::spawn_plan::test_input(lazybox_ipc::TerminalKind::Agent(agent.clone()));
+            input.model_alias = model_alias;
+            // The record's own labels would otherwise pick the tier; an
+            // explicit request outranks them.
+            input.declared_model_alias = Some("S".into());
+            let plan = crate::spawn_plan::build_spawn_plan(
+                input,
+                &cfg,
+                &lazybox_agents::Registry::default_builtins(),
+            )
+            .expect("valid plan");
+
+            assert!(
+                plan.argv
+                    .windows(2)
+                    .any(|a| a == ["--model", "claude-fable-5-1"]),
+                "{token}: the plan must spawn the requested tier, not the default: {:?}",
+                plan.argv
+            );
+            assert_eq!(plan.model_alias.as_deref(), Some("XL"));
+            assert_eq!(plan.model_label.as_deref(), Some("Fable"));
+        }
+    }
+
+    /// The refusal is the feature. A silent fallback to the default tier is
+    /// what made "spawn at the best model" look like it worked when it did
+    /// not (#1911), so an alias the target agent has no name for stops the
+    /// call — with the menu listed, because the ladder differs per agent —
+    /// and nothing is attached, claimed or spawned.
+    #[tokio::test]
+    async fn start_workspace_refuses_an_unknown_tier_and_names_the_menu() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config.clone());
+        let caller = SessionKey::from("some-agent");
+        // `XXL` is a real rung in some users' own menus and in none of the
+        // built-in ones — the shape of the mistake this catches.
+        let args = StartWorkspaceArgs {
+            model: Some("XXL".into()),
+            ..start_workspace_args("acme/widget#7")
+        };
+        let err = handler
+            .start_workspace_prepare(&caller, &args, 6, "claude", &test_config())
+            .await
+            .expect_err("an unknown tier must not fall back to the default");
+
+        assert!(
+            err.message.contains("unknown model tier") && err.message.contains("\"XXL\""),
+            "the refusal names what was rejected: {}",
+            err.message
+        );
+        for valid in ["S (claude-haiku-4-5)", "L (claude-opus-5)", "best (→ XL)"] {
+            assert!(
+                err.message.contains(valid),
+                "the refusal must list {valid:?}: {}",
+                err.message
+            );
+        }
+        // Refused before any side effect: the claim is free and the row is
+        // untouched, so a retry with a valid tier works.
+        let ok = StartWorkspaceArgs {
+            model: Some("best".into()),
+            ..start_workspace_args("acme/widget#7")
+        };
+        let (_key, _anchor, _agent, model_alias, _claim) = handler
+            .start_workspace_prepare(&caller, &ok, 6, "claude", &test_config())
+            .await
+            .expect("the refusal left nothing claimed");
+        assert_eq!(model_alias.as_deref(), Some("XL"));
+    }
+
+    /// `spawn_worker` had the same gap and takes the same argument — the
+    /// Coordinator path must not be the one that still cannot say it, and its
+    /// refusal must land before `create_issue` files anything.
+    #[tokio::test]
+    async fn spawn_worker_takes_a_tier_and_refuses_an_unknown_one_before_filing() {
+        let config = ServerConfig::in_memory();
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+        seed_epic(&config, "e", &["coord"]).await;
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config.clone());
+        let caller = SessionKey::from("coord");
+
+        let prepared = handler
+            .spawn_worker_prepare(
+                &caller,
+                &SpawnWorkerArgs {
+                    model: Some("high".into()),
+                    ..spawn_worker_args("acme/widget#7", "do it")
+                },
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect("a Coordinator may pick the worker's tier");
+        assert_eq!(prepared.model_alias.as_deref(), Some("L"));
+
+        // An unknown tier refuses with the menu, and `create_issue` is never
+        // reached — the same ordering the agent-id check above it relies on.
+        let err = handler
+            .spawn_worker_prepare(
+                &caller,
+                &SpawnWorkerArgs {
+                    task: None,
+                    create_issue: Some(CreateIssueArgs {
+                        title: "would be filed".into(),
+                        body: "b".into(),
+                        repo: "acme/widget".into(),
+                        parent: None,
+                        blocked_by: Vec::new(),
+                    }),
+                    model: Some("strongest".into()),
+                    ..spawn_worker_args("acme/widget#7", "do it")
+                },
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect_err("an unknown tier must be refused");
+        assert!(
+            err.message.contains("unknown model tier") && err.message.contains("best (→ XL)"),
+            "{}",
+            err.message
+        );
+    }
+
     #[tokio::test]
     async fn start_workspace_refuses_the_callers_own_row_and_a_non_record() {
         let config = ServerConfig::in_memory();
@@ -5594,7 +5881,13 @@ mod tests {
         let handler = LazyboxMcp::new(config);
         let own = SessionKey::from("github-acme-widget-7");
         let err = handler
-            .start_workspace_prepare(&own, &start_workspace_args("acme/widget#7"), 6, "claude")
+            .start_workspace_prepare(
+                &own,
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
             .await
             .expect_err("own workspace");
         assert!(
@@ -5609,6 +5902,7 @@ mod tests {
                 &start_workspace_args("fix the parser"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("not a record");
@@ -5620,6 +5914,7 @@ mod tests {
                 &start_workspace_args("acme/widget#7"),
                 0,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("disabled");
@@ -5641,12 +5936,13 @@ mod tests {
         let handler = LazyboxMcp::new(config);
 
         // The first caller holds the claim (its guard is still alive).
-        let (_key, _anchor, _agent, claim) = handler
+        let (_key, _anchor, _agent, _model, claim) = handler
             .start_workspace_prepare(
                 &SessionKey::from("first"),
                 &start_workspace_args("acme/widget#7"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect("the first caller claims the record");
@@ -5657,6 +5953,7 @@ mod tests {
                 &start_workspace_args("acme/widget#7"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("the second caller must be refused while the spawn is in flight");
@@ -5675,6 +5972,7 @@ mod tests {
                 &start_workspace_args("acme/widget#7"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect("the claim is released on drop");
@@ -5699,6 +5997,7 @@ mod tests {
                 start_workspace_args("acme/widget#7"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("no agent terminal came up, so this is not a hand-off");
@@ -5725,7 +6024,13 @@ mod tests {
         // Depth 0 is the user's own session: it may hand work off.
         let root = SessionKey::from("root");
         handler
-            .start_workspace_prepare(&root, &start_workspace_args("acme/widget#7"), 6, "claude")
+            .start_workspace_prepare(
+                &root,
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
             .await
             .expect("a session nobody started may start work");
 
@@ -5742,6 +6047,7 @@ mod tests {
                 &start_workspace_args("acme/widget#7"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("the chain must stop");
@@ -5790,6 +6096,7 @@ mod tests {
                 &start_workspace_args("acme/widget#7"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("the fleet is already full");
@@ -5823,7 +6130,7 @@ mod tests {
         let caller = SessionKey::from("not-coord");
         let args = spawn_worker_args("acme/widget#7", "do the thing");
         let err = handler
-            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .spawn_worker_prepare(&caller, &args, 6, "claude", &test_config())
             .await
             .expect_err("a non-coordinator must be refused");
         assert!(
@@ -5843,7 +6150,7 @@ mod tests {
         let caller = SessionKey::from("coord");
         let args = spawn_worker_args("acme/widget#7", "do the thing");
         let err = handler
-            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .spawn_worker_prepare(&caller, &args, 6, "claude", &test_config())
             .await
             .expect_err("no epic must be refused");
         assert!(err.message.contains("epic"), "{}", err.message);
@@ -5861,7 +6168,7 @@ mod tests {
         let caller = SessionKey::from("coord");
         let args = spawn_worker_args("acme/widget#7", "do the thing");
         let err = handler
-            .spawn_worker_prepare(&caller, &args, 1, "claude")
+            .spawn_worker_prepare(&caller, &args, 1, "claude", &test_config())
             .await
             .expect_err("over-cap must be refused");
         assert!(
@@ -5882,7 +6189,7 @@ mod tests {
         seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
         let args = spawn_worker_args("acme/widget#7", "implement the parser");
         let prepared = handler
-            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .spawn_worker_prepare(&caller, &args, 6, "claude", &test_config())
             .await
             .expect("prepare should succeed for an in-cap coordinator");
 
@@ -5929,7 +6236,13 @@ mod tests {
             "<https://github.com/acme/widget/pull/7>",
         ] {
             let prepared = handler
-                .spawn_worker_prepare(&caller, &spawn_worker_args(reference, "do it"), 6, "claude")
+                .spawn_worker_prepare(
+                    &caller,
+                    &spawn_worker_args(reference, "do it"),
+                    6,
+                    "claude",
+                    &test_config(),
+                )
                 .await
                 .unwrap_or_else(|e| panic!("{reference} should resolve: {}", e.message));
             assert_eq!(prepared.key.as_str(), "github-acme-widget-7", "{reference}");
@@ -5951,10 +6264,11 @@ mod tests {
             create_issue: None,
             brief: "do the thing".into(),
             agent: None,
+            model: None,
             workspace_name: Some("build the parser".into()),
         };
         let err = handler
-            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .spawn_worker_prepare(&caller, &args, 6, "claude", &test_config())
             .await
             .expect_err("a named workspace must be refused");
         assert!(
@@ -5998,6 +6312,7 @@ mod tests {
                 &spawn_worker_args("acme/widget#100", "do it"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("a coordinator must not staff itself");
@@ -6047,6 +6362,7 @@ mod tests {
                 &spawn_worker_args("acme/widget#7", "do it"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("a row with a live agent must not be taken over");
@@ -6088,10 +6404,17 @@ mod tests {
             }),
             brief: "do it".into(),
             agent: None,
+            model: None,
             workspace_name: None,
         };
         let err = handler
-            .spawn_worker_prepare(&SessionKey::from("coord"), &args, 6, "claude")
+            .spawn_worker_prepare(
+                &SessionKey::from("coord"),
+                &args,
+                6,
+                "claude",
+                &test_config(),
+            )
             .await
             .expect_err("task and create_issue together is a contradiction");
         assert!(err.message.contains("not both"), "{}", err.message);
@@ -6110,10 +6433,11 @@ mod tests {
             create_issue: None,
             brief: "do the thing".into(),
             agent: None,
+            model: None,
             workspace_name: None,
         };
         let err = handler
-            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .spawn_worker_prepare(&caller, &args, 6, "claude", &test_config())
             .await
             .expect_err("neither a task nor create_issue leaves nothing to attach to");
         assert!(err.message.contains("create_issue"), "{}", err.message);
@@ -6133,6 +6457,7 @@ mod tests {
                 &spawn_worker_args("build the parser", "do the thing"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("prose is not a tracker record");

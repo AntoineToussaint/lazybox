@@ -656,41 +656,50 @@ pub(crate) fn skip_permissions_for(
     }
 }
 
+/// A minimal, io-free [`SpawnPlanInput`] for one agent/terminal kind —
+/// the fixture every in-crate test that wants a real plan builds from, so
+/// "what a spawn request looks like" has one spelling rather than a copy
+/// per test module.
+#[cfg(test)]
+pub(crate) fn test_input(kind: TerminalKind) -> SpawnPlanInput {
+    SpawnPlanInput {
+        session_key: SessionKey::from("github-acme-widget-657"),
+        standing_rules: lazybox_core::AgentPolicies::builtin().render(),
+        kind,
+        cwd: PathBuf::from("/worktrees/widget-657"),
+        agent_worktree: PathBuf::from("/worktrees/widget-657"),
+        owning_session: Some(SessionId::new()),
+        initial_prompt: Some("extract the spawn plan".into()),
+        terminal_id: TerminalId(42),
+        hook_settings: None,
+        hook_command: None,
+        coordination_context: None,
+        repo_env: Vec::new(),
+        declared_model_alias: None,
+        autonomous: false,
+        autonomous_untrusted: false,
+        landed_on_main: false,
+        model_alias: None,
+        resume: false,
+        provider_session_id: None,
+        no_permission_override: None,
+        replace_terminal_id: None,
+        prompt_history: Vec::new(),
+        composing_buffer: None,
+        access: AgentRunAccess::Default,
+        shell_command: String::new(),
+        meter: false,
+        remote: false,
+        mcp_config_path: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn input(kind: TerminalKind) -> SpawnPlanInput {
-        SpawnPlanInput {
-            session_key: SessionKey::from("github-acme-widget-657"),
-            standing_rules: lazybox_core::AgentPolicies::builtin().render(),
-            kind,
-            cwd: PathBuf::from("/worktrees/widget-657"),
-            agent_worktree: PathBuf::from("/worktrees/widget-657"),
-            owning_session: Some(SessionId::new()),
-            initial_prompt: Some("extract the spawn plan".into()),
-            terminal_id: TerminalId(42),
-            hook_settings: None,
-            hook_command: None,
-            coordination_context: None,
-            repo_env: Vec::new(),
-            declared_model_alias: None,
-            autonomous: false,
-            autonomous_untrusted: false,
-            landed_on_main: false,
-            model_alias: None,
-            resume: false,
-            provider_session_id: None,
-            no_permission_override: None,
-            replace_terminal_id: None,
-            prompt_history: Vec::new(),
-            composing_buffer: None,
-            access: AgentRunAccess::Default,
-            shell_command: String::new(),
-            meter: false,
-            remote: false,
-            mcp_config_path: None,
-        }
+        test_input(kind)
     }
 
     #[test]

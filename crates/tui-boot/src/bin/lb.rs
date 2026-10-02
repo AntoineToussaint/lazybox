@@ -9,10 +9,12 @@ use std::process::Command;
 fn lazybox_sibling(current_exe: &Path, args: &[std::ffi::OsString]) -> PathBuf {
     // An optional side-by-side mobile build keeps the normal release intact.
     // Source/release bundles without that alternate use the same main binary.
-    let mobile = args
-        .iter()
-        .take_while(|arg| *arg != "--")
-        .any(|arg| arg == "-m" || arg == "--mobile");
+    //
+    // No `--` handling: `lazybox`'s own `take_flag` scans the whole argument
+    // list, so stopping here would have picked the desktop binary and then run
+    // it in the mobile presentation anyway. The two halves have to agree about
+    // what `-m` means, and this is the half with no parser to change.
+    let mobile = args.iter().any(|arg| arg == "-m" || arg == "--mobile");
     let alternate = current_exe.with_file_name("lazybox-mobile");
     if mobile && alternate.is_file() {
         alternate
@@ -78,7 +80,9 @@ mod tests {
         for flag in ["-m", "--mobile"] {
             assert_eq!(lazybox_sibling(&lb, &args(&[flag, "--connect"])), alternate);
         }
-        assert_eq!(lazybox_sibling(&lb, &args(&["--", "-m"])), default);
+        // `--` does not hide the flag from `lazybox`'s own parser, so it must
+        // not hide it here either.
+        assert_eq!(lazybox_sibling(&lb, &args(&["--", "-m"])), alternate);
         assert_eq!(lazybox_sibling(&lb, &args(&["--version"])), default);
     }
 

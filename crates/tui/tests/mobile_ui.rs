@@ -254,34 +254,43 @@ fn grouped_mobile_setup_shows_bulk_selection_state_and_controls() {
 }
 
 #[test]
-fn all_items_control_works_through_model_on_mobile_and_desktop() {
-    for (w, h, presentation) in [
-        (32, 12, Presentation::Mobile),
-        (120, 40, Presentation::Desktop),
-    ] {
-        let mut m = model(w, h, presentation);
-        m.mount_modal(
-            Id::Setup,
-            Choice::multi("Choose tools", vec!["Claude", "Codex", "Unavailable"])
-                .label(|s| s.to_string())
-                .selectable(|s| *s != "Unavailable")
-                .selected_mask(vec![true, false, false]),
-        );
-        m.dispatch_modal_key(key('g'));
-        let out = screen(&mut m);
-        assert!(out.contains("▸ [-] All items"), "{out}");
-        assert!(out.contains("Space select all"), "{out}");
-        m.dispatch_modal_key(key(' '));
-        let out = screen(&mut m);
-        assert!(out.contains("▸ [x] All items"), "{out}");
-        assert!(out.contains("[x] Codex"), "{out}");
-        assert!(out.contains("[·] Unavailable"), "{out}");
-        m.dispatch_modal_key(key(' '));
-        let out = screen(&mut m);
-        assert!(out.contains("▸ [ ] All items"), "{out}");
-        assert!(out.contains("[ ] Claude"), "{out}");
-        assert!(out.contains("[ ] Codex"), "{out}");
-    }
+fn all_items_control_works_through_model_on_mobile_only() {
+    let tools = || {
+        Choice::multi("Choose tools", vec!["Claude", "Codex", "Unavailable"])
+            .label(|s: &&str| s.to_string())
+            .selectable(|s: &&str| *s != "Unavailable")
+            .selected_mask(vec![true, false, false])
+    };
+    let mut m = model(32, 12, Presentation::Mobile);
+    m.mount_modal(Id::Setup, tools());
+    m.dispatch_modal_key(key('g'));
+    let out = screen(&mut m);
+    assert!(out.contains("▸ [-] All items"), "{out}");
+    assert!(out.contains("Space select all"), "{out}");
+    m.dispatch_modal_key(key(' '));
+    let out = screen(&mut m);
+    assert!(out.contains("▸ [x] All items"), "{out}");
+    assert!(out.contains("[x] Codex"), "{out}");
+    assert!(out.contains("[·] Unavailable"), "{out}");
+    m.dispatch_modal_key(key(' '));
+    let out = screen(&mut m);
+    assert!(out.contains("▸ [ ] All items"), "{out}");
+    assert!(out.contains("[ ] Claude"), "{out}");
+    assert!(out.contains("[ ] Codex"), "{out}");
+
+    // Desktop keeps the pre-mobile shape: no bulk row, so `g` stays on the
+    // first item and Space toggles only it. Several desktop multi-selects
+    // confirm into a GitHub mutation (labels, assignees, reviewers).
+    let mut m = model(120, 40, Presentation::Desktop);
+    m.mount_modal(Id::Setup, tools());
+    m.dispatch_modal_key(key('g'));
+    let out = screen(&mut m);
+    assert!(!out.contains("All items"), "{out}");
+    assert!(out.contains("▸ [x] Claude"), "{out}");
+    m.dispatch_modal_key(key(' '));
+    let out = screen(&mut m);
+    assert!(out.contains("▸ [ ] Claude"), "{out}");
+    assert!(out.contains("[ ] Codex"), "{out}");
 }
 
 #[test]

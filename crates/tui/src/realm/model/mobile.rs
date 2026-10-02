@@ -226,18 +226,23 @@ impl<T: TerminalAdapter> Model<T> {
             if script {
                 self.pop_modal(); // the source copy picker
             }
-            super::helpers::emit_clipboard_copy(text);
+            // `notice` distinguishes the native clipboard from an OSC 52 the
+            // host may drop, and a payload too large to send at all. Claiming
+            // "sent to terminal clipboard" for all three reported a copy that
+            // had not happened (#1877 review B6).
+            let delivery = (self.clipboard)(text);
+            let what = if script { "text" } else { "link" };
             self.apply_mobile_rail_action(RailAction::Close);
-            self.flash_hint(if script {
-                "Text sent to terminal clipboard"
+            if delivery == super::helpers::ClipboardDelivery::TooLarge {
+                self.flash_error(delivery.notice(what));
             } else {
-                "Link sent to terminal clipboard"
-            });
+                self.flash_hint(delivery.notice(what));
+            }
         }
     }
 
     fn copy_mobile_link(&mut self, terminal_id: lazybox_ipc::TerminalId) {
-        let Some(candidates) = self.terminals.copy_items(terminal_id) else {
+        let Some((candidates, found)) = self.terminals.copy_items(terminal_id) else {
             self.flash_info("That session has ended");
             return;
         };
@@ -260,9 +265,14 @@ impl<T: TerminalAdapter> Model<T> {
             "Commands / scripts: select lines".into(),
             ChoicePayload::Terminal(terminal_id),
         ));
+        let prompt = if found > crate::realm::components::terminals::Terminals::COPY_ITEM_LIMIT {
+            format!("Newest {} of {found}: links / scripts", items.len() - 1)
+        } else {
+            "Newest first: links / scripts".to_string()
+        };
         self.mount_modal(
             Id::MobileLinks,
-            Choice::single("Newest first: links / scripts", items)
+            Choice::single(prompt, items)
                 .title("Copy")
                 .label(|item: &(String, ChoicePayload)| item.0.clone())
                 .payload_for(|item: &(String, ChoicePayload)| item.1.clone()),
@@ -282,10 +292,18 @@ impl<T: TerminalAdapter> Model<T> {
             }
             RailAction::Prioritize { source, target } => {
                 self.refresh_mobile_sessions();
-                if self.mobile_sessions.prioritize(source, target) {
-                    let order = self.mobile_sessions.saved_order();
+                if let Some(moved) = self.mobile_sessions.prioritize(source, target) {
                     lazybox_config::Config::save_with_async(move |config| {
-                        config.ui.mobile_session_order = order;
+                        // Replay the move onto the order as it is on disk.
+                        // Assigning this client's snapshot dropped the saved
+                        // priority of every tab the daemon had not streamed
+                        // in yet, and clobbered a sibling client's writes.
+                        crate::realm::components::mobile_sessions::reorder(
+                            &mut config.ui.mobile_session_order,
+                            &moved.live,
+                            &moved.source,
+                            &moved.target,
+                        );
                     });
                 } else {
                     self.flash_info("That session has ended");
@@ -334,8 +352,15 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
-    /// Progress must not take keyboard focus from an already visible terminal.
-    /// Keep the minimal profile on the session list until the spawn lands.
+    /// Substitute the mobile presentation of one worktree-progress event:
+    /// a footer notice for an ordinary step, a readable sheet for a failure.
+    ///
+    /// Called from `apply_worktree_progress`, i.e. only for events the shared
+    /// router already chose to show this client. It must never be hoisted
+    /// ahead of that decision: every client receives every `WorktreeProgress`,
+    /// so the `origin` / `spawn_requested_here` / once-per-spawn gates are
+    /// what keep somebody else's provisioning out of the one status line a
+    /// phone has.
     pub(super) fn mobile_worktree_progress(
         &mut self,
         session_key: &lazybox_core::SessionKey,
@@ -344,18 +369,26 @@ impl<T: TerminalAdapter> Model<T> {
         if self.presentation != Presentation::Mobile {
             return false;
         }
+        let label = super::modals::worktree_notice_label(session_key);
         if let lazybox_ipc::WorktreeStepStatus::Failed(message) = status {
-            use crate::realm::components::error::{Accent, ErrorModal};
-            self.mount_modal(
-                Id::Error,
-                ErrorModal::new(
-                    "New session",
-                    Accent::error("Could not start"),
-                    message.clone(),
-                ),
-            );
+            // A sheet the user is already reading or typing into owns the
+            // keyboard; report the failure in the footer rather than mounting
+            // over it.
+            if self.modal_stack.is_empty() {
+                use crate::realm::components::error::{Accent, ErrorModal};
+                self.mount_modal(
+                    Id::Error,
+                    ErrorModal::new(
+                        "New session",
+                        Accent::error("Could not start"),
+                        message.clone(),
+                    ),
+                );
+            } else {
+                self.flash_error(format!("✗ {label} could not start — {message}"));
+            }
         } else {
-            self.flash_info(format!("Starting {session_key}…"));
+            self.flash_info(format!("Starting {label}…"));
         }
         true
     }
@@ -431,10 +464,21 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if !self.mobile_rail.is_open() && self.focus == PaneFocus::Terminals {
             if key.code == Key::Char('d') && key.modifiers == KeyModifiers::CONTROL {
+                use crate::components::terminal_stack::ScrollOutcome;
                 self.terminal_selection = None;
-                let _outcome = self.terminals.scroll_to_bottom();
-                self.redraw = true;
-                return true;
+                // Ctrl-D is EOF to every shell and REPL, and a phone has no
+                // other way to send it — `cat > file`, a heredoc, python and
+                // ssh all need it. Claim the key only while the user is
+                // actually visiting scrollback; at the live bottom it belongs
+                // to the running program and falls through below as input.
+                let moved = matches!(
+                    self.terminals.scroll_to_bottom(),
+                    ScrollOutcome::Moved { .. } | ScrollOutcome::Stalled { .. }
+                );
+                if moved {
+                    self.redraw = true;
+                    return true;
+                }
             }
             let mut ct = crate::realm::keymap::realm_key_to_crossterm(key);
             ct.kind = self.key_kind;
@@ -869,16 +913,23 @@ mod tests {
         }
         assert!(offset(&m) + 50 < bottom, "touch reports must scroll far up");
         while server.rx.try_recv().is_ok() {}
-        for _ in 0..2 {
-            m.dispatch_key(KeyEvent::new(Key::Char('d'), KeyModifiers::CONTROL));
-            assert_eq!(offset(&m), bottom, "one Ctrl-D reaches the live bottom");
-            while let Ok(cmd) = server.rx.try_recv() {
-                assert!(
-                    !matches!(cmd, Command::Write { .. }),
-                    "Ctrl-D must not send EOF"
-                );
-            }
+        m.dispatch_key(KeyEvent::new(Key::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(offset(&m), bottom, "one Ctrl-D reaches the live bottom");
+        while let Ok(cmd) = server.rx.try_recv() {
+            assert!(
+                !matches!(cmd, Command::Write { .. }),
+                "Ctrl-D out of scrollback must not send EOF"
+            );
         }
+        // At the live bottom Ctrl-D belongs to the program again: it is EOF to
+        // every shell and REPL, and a phone has no other way to send it.
+        m.dispatch_key(KeyEvent::new(Key::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(offset(&m), bottom);
+        assert!(
+            std::iter::from_fn(|| server.rx.try_recv().ok())
+                .any(|cmd| matches!(cmd, Command::Write { bytes, .. } if bytes == b"\x04")),
+            "Ctrl-D at the live bottom must reach the program as EOF"
+        );
     }
 
     #[test]
@@ -1247,9 +1298,14 @@ mod tests {
         m.set_focus(PaneFocus::Terminals);
         m.dispatch_key(rail_key());
         spawn(&mut m, workspace.clone(), 1);
+        // A frame between the spawn and the key is the normal case: the run
+        // loop paints on every event. The letters must still mean what the
+        // user read when they opened Sessions.
+        m.view();
         m.dispatch_key(key('b'));
         assert_eq!(m.terminals.focused_terminal_id(), Some(TerminalId(8)));
-        m.dispatch_key(rail_key()); // a=1, b=7, c=8
+        m.dispatch_key(rail_key()); // reopened: a=1, b=7, c=8
+        m.view();
         m.terminals.close_terminal(TerminalId(7), &mut Vec::new());
         m.handle_daemon_event(Event::TerminalExited {
             terminal_id: TerminalId(7),
@@ -1481,5 +1537,158 @@ mod tests {
             m.dispatch_key(KeyEvent::new(Key::Char('q'), KeyModifiers::CONTROL));
             assert!(m.quit);
         }
+    }
+
+    #[test]
+    fn progress_for_a_spawn_this_client_did_not_request_stays_off_the_status_line() {
+        use lazybox_ipc::{AutonomousTrigger, SpawnOrigin, WorktreeStep, WorktreeStepStatus};
+        let (mut m, _server, workspace) = fixture();
+        spawn(&mut m, workspace, 7);
+        m.set_focus(PaneFocus::Terminals);
+        // Every client receives every WorktreeProgress. A human asked for this
+        // one, but not the human at this keyboard, so it must not touch the one
+        // status line a phone has.
+        let other = lazybox_core::SessionKey::new("github:someone/else#42");
+        for step in [WorktreeStep::WorktreeAdd, WorktreeStep::Setup] {
+            m.route_worktree_progress(
+                other.clone(),
+                step,
+                WorktreeStepStatus::Done,
+                SpawnOrigin::Interactive,
+            );
+        }
+        assert!(m.status.notice.is_none(), "{:?}", m.status.notice);
+        assert!(m.top_modal().is_none());
+
+        // An autonomous provision does announce itself — once per spawn, not
+        // once per step. (A trailing `Setup`/`Done` deliberately releases the
+        // marker so a LATER spawn on the same workspace announces again, so
+        // the intermediate steps are what pin the dedupe.)
+        let announce = |m: &mut Model<TestTerminalAdapter>, step| {
+            m.route_worktree_progress(
+                other.clone(),
+                step,
+                WorktreeStepStatus::Done,
+                SpawnOrigin::Autonomous(AutonomousTrigger::AutoFix),
+            );
+        };
+        announce(&mut m, WorktreeStep::Clone);
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("autonomous notice")
+            .message
+            .clone();
+        assert!(notice.starts_with("starting agent on"), "{notice}");
+        m.status.notice = None;
+        for step in [WorktreeStep::Fetch, WorktreeStep::WorktreeAdd] {
+            announce(&mut m, step);
+            assert!(
+                m.status.notice.is_none(),
+                "step {step:?} re-announced: {:?}",
+                m.status.notice
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_never_mounts_over_a_sheet_the_user_is_already_reading() {
+        let (mut m, _server, workspace) = fixture();
+        spawn(&mut m, workspace.clone(), 7);
+        m.set_focus(PaneFocus::Terminals);
+        m.dispatch_key(list_key());
+        m.dispatch_key(key('n'));
+        assert_eq!(m.top_modal(), Some(&Id::MobileNewSession));
+        m.route_worktree_progress(
+            workspace,
+            lazybox_ipc::WorktreeStep::Setup,
+            lazybox_ipc::WorktreeStepStatus::Failed("Agent is unavailable".into()),
+            lazybox_ipc::SpawnOrigin::Interactive,
+        );
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::MobileNewSession),
+            "the open sheet keeps the keyboard"
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("Agent is unavailable")),
+            "{:?}",
+            m.status.notice
+        );
+    }
+
+    #[test]
+    fn a_repeated_delete_on_an_unacknowledged_close_says_so_and_retries() {
+        let (mut m, mut server, workspace) = fixture();
+        spawn(&mut m, workspace, 7);
+        m.set_focus(PaneFocus::Terminals);
+        m.dispatch_key(list_key());
+        while server.rx.try_recv().is_ok() {}
+        m.dispatch_key(key('x'));
+        m.dispatch_modal_key(key('y'));
+        assert!(std::iter::from_fn(|| server.rx.try_recv().ok()).any(
+            |cmd| matches!(cmd, Command::Close { terminal_id, .. } if terminal_id == TerminalId(7))
+        ));
+        assert!(m.status.notice.is_none());
+        // The daemon never answers: no TerminalExited, so the row is still
+        // there. A second attempt must not be a silent no-op.
+        m.dispatch_key(key('x'));
+        m.dispatch_modal_key(key('y'));
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("still closing")),
+            "{:?}",
+            m.status.notice
+        );
+        assert!(
+            std::iter::from_fn(|| server.rx.try_recv().ok())
+                .any(|cmd| matches!(cmd, Command::Close { terminal_id, .. } if terminal_id == TerminalId(7))),
+            "the retry re-sends the close"
+        );
+    }
+
+    #[test]
+    fn copy_reports_the_transport_it_actually_used() {
+        use super::super::helpers::ClipboardDelivery;
+        for (delivery, expected) in [
+            (ClipboardDelivery::Host, "copied link to clipboard"),
+            (ClipboardDelivery::Terminal, "host terminal decides"),
+            (
+                ClipboardDelivery::TooLarge,
+                "too large for the terminal clipboard",
+            ),
+        ] {
+            let (mut m, _server, workspace) = fixture();
+            spawn(&mut m, workspace, 7);
+            m.set_focus(PaneFocus::Terminals);
+            m.clipboard = Box::new(move |_| delivery);
+            m.dispatch_key(list_key());
+            m.mobile_link_picked(&[ChoicePayload::Text("https://example.com".into())]);
+            let notice = m.status.notice.as_ref().expect("a notice").message.clone();
+            assert!(notice.contains(expected), "{delivery:?} said {notice:?}");
+        }
+    }
+
+    #[test]
+    fn mobile_long_text_sheets_are_let_through_the_wheel_gate() {
+        // The router drops a wheel notch for any modal outside this list, so a
+        // scroll handler on one that is missing from it is dead code. A phone
+        // keyboard has no arrow keys, which makes the wheel the only way to
+        // read these at all.
+        for id in [
+            Id::MobileCopyText,
+            Id::Setup,
+            Id::HelpAsk,
+            Id::DescriptionModal,
+        ] {
+            assert!(id.consumes_scroll(), "{id:?} drops the wheel");
+        }
+        assert!(!Id::MobileDeleteSession.consumes_scroll());
     }
 }

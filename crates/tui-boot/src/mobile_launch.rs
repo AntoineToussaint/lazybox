@@ -85,6 +85,10 @@ pub(crate) async fn ensure_daemon() -> anyhow::Result<PathBuf> {
         let mut child = command.spawn()?;
         loop {
             if listening(&socket).await {
+                // Detached on purpose: it is setsid'd and outlives this
+                // client. Dropping the handle instead would leave a zombie
+                // for the client's lifetime if the daemon later exits.
+                std::mem::forget(child);
                 return Ok(socket);
             }
             if let Some(status) = child.try_wait()? {

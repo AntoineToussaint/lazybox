@@ -345,8 +345,12 @@ impl Terminals {
 
     /// `]]x` — close the focused terminal (tile or active tab) and
     /// its PTY.
-    pub(crate) fn close_terminal(&mut self, id: TerminalId, cmds: &mut Vec<IpcCommand>) {
-        self.inner.close_terminal(id, cmds);
+    pub(crate) fn close_terminal(
+        &mut self,
+        id: TerminalId,
+        cmds: &mut Vec<IpcCommand>,
+    ) -> crate::components::terminal_stack::CloseOutcome {
+        self.inner.close_terminal(id, cmds)
     }
 
     pub fn close_focused_tile(&mut self, cmds: &mut Vec<IpcCommand>) {
@@ -498,13 +502,19 @@ impl Terminals {
         self.inner.tile_grid_rect(id)
     }
 
-    /// Clipboard candidates in reverse source order, independent of terminal focus.
+    /// Clipboard candidates in reverse source order, independent of terminal
+    /// focus, capped at [`TerminalStack::COPY_ITEM_LIMIT`]; the second value
+    /// is how many were found before the cap.
     pub(crate) fn copy_items(
         &mut self,
         id: TerminalId,
-    ) -> Option<Vec<crate::components::copy_text::CopyItem>> {
+    ) -> Option<(Vec<crate::components::copy_text::CopyItem>, usize)> {
         self.inner.copy_items(id)
     }
+
+    /// The cap `copy_items` applies, so a caller can say what it is showing.
+    pub(crate) const COPY_ITEM_LIMIT: usize =
+        crate::components::terminal_stack::TerminalStack::COPY_ITEM_LIMIT;
 
     /// Snapshot logical terminal lines and the current viewport cursor for copying.
     pub fn copy_lines(&mut self, id: TerminalId) -> Option<(Vec<String>, usize)> {

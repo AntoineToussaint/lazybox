@@ -86,7 +86,7 @@ in [mobile.md](mobile.md); selection uses a neutral theme background.
 | Sessions / desktop Sidebar | Scope headers and multiple panes consume width | Dedicated terminal projection; shared portal/overlay with live status rail, paging and explicit selectors |
 | Terminal tabs / split tiles | Tab strip and splits crowd the terminal | Existing single-terminal renderer; desktop layout is preserved; touch/wheel scrollback |
 | Splash / setup wizard | Large prose and controls below the fold | Mobile welcome and shared full-width sheets; normal mobile startup opens Sessions directly |
-| Choice: providers, agents, scopes, repositories, filters | Long descriptions, wide footer, many toggles | Shared phone layout, pinned controls, scrolling details, group/All items bulk selection |
+| Choice: providers, agents, scopes, repositories, filters | Long descriptions, wide footer, many toggles | Shared phone layout, pinned controls, scrolling details, group/All items bulk selection. Bulk rows are mobile-only: several desktop multi-selects confirm into a GitHub mutation (labels, assignees, reviewers), where a select-all row under `g` / `Home` / `Up` would change what those keys already did |
 | Input: rename, names, tokens, paths, URLs | Wrapping can hide the insertion point and submit hint | Shared mobile input presentation, visible insertion end and pinned controls |
 | Loading / Error / informational sheets | Long text can cover dismissal keys | Shared wrapping reader and pinned dismissal/scroll controls |
 | Delete confirmation | A stray Enter must not kill a process | Mobile explicit `y` confirmation, captured terminal ID, Enter/Escape cancel |
@@ -104,7 +104,7 @@ in [mobile.md](mobile.md); selection uses a neutral theme background.
 | IssueBrowser | List, filters, preview and mutations | Existing renderer; future list/detail workflow |
 | MergeHistory / MergeOrder | Chronology and dependencies span columns | Existing renderer; future ordered rows with details |
 | EpicGraph | Graph branches consume horizontal space | Existing renderer; future dependency list |
-| Polling / SyncStatus / WorktreeProgress | Status rows can take input focus | Mobile creation progress stays in the footer; failures use a readable error sheet |
+| Polling / SyncStatus / WorktreeProgress | Status rows can take input focus | Mobile creation progress stays in the footer; failures use a readable error sheet. The substitution happens inside `apply_worktree_progress`, *after* the shared router's origin / "who asked" / once-per-spawn gates — every client receives every progress event, so deciding earlier put other clients' provisioning on the one status line a phone has |
 | Messages / ErrorInbox / Stats | Dense tables and long logs | Existing renderer; future summary/details sheets |
 | Footer / which-key / context menus | Long legends and punctuation leaders | Mobile Sessions has its own pinned action row; hidden desktop pane actions do not receive mobile navigation |
 | Practice / coach | Additional chrome consumes keyboard-open viewport | Practice banner preserved; desktop coach rail hidden on mobile |

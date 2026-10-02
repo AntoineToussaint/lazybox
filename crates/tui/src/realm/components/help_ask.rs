@@ -175,26 +175,38 @@ impl HelpAsk {
         self.matches = lazybox_tui_core::help::search(&self.catalog, &self.query);
     }
 
+    /// Scroll whichever body is on screen: the intro counts down from the
+    /// top, an answer transcript counts up from the bottom.
+    fn mobile_scroll(&mut self, delta: isize) {
+        if self.convo().turns.is_empty() && self.query.is_empty() {
+            self.mobile_intro_scroll = self.mobile_intro_scroll.saturating_add_signed(delta);
+        } else {
+            self.scroll_up = self.scroll_up.saturating_add_signed(-delta);
+        }
+    }
+
     fn on_key(&mut self, key: &KeyEvent) -> Option<Msg> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
             return Some(Msg::ModalDismissed);
         }
         if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            // A software keyboard offers no arrow or page keys, so the only
+            // reliably reachable bindings are the Ctrl row and the touch
+            // wheel. Ctrl-N / Ctrl-P are free here (the question input binds
+            // neither) and Ctrl-J is avoided because terminals report it as
+            // Enter (#1877 review B8).
             let delta = match key.code {
                 Key::Up => Some(-1isize),
                 Key::Down => Some(1),
+                Key::Char('p') if ctrl => Some(-1),
+                Key::Char('n') if ctrl => Some(1),
                 Key::PageUp => Some(-8),
                 Key::PageDown => Some(8),
                 _ => None,
             };
             if let Some(delta) = delta {
-                if self.convo().turns.is_empty() && self.query.is_empty() {
-                    self.mobile_intro_scroll =
-                        self.mobile_intro_scroll.saturating_add_signed(delta);
-                } else {
-                    self.scroll_up = self.scroll_up.saturating_add_signed(-delta);
-                }
+                self.mobile_scroll(delta);
                 return None;
             }
         }
@@ -643,7 +655,10 @@ impl Component for HelpAsk {
         };
         frame.render_widget(
             Paragraph::new(if mobile {
-                Line::from("Enter ask · swipe · Esc back")
+                // Must fit 30 cells (a 32-column phone less the borders), so
+                // it can only name bindings that exist: Ctrl-N/Ctrl-P and the
+                // touch wheel, both of which this component now handles.
+                Line::from("Enter ask · ^N/^P/swipe · Esc")
             } else {
                 Line::from(hint)
             }),
@@ -669,6 +684,16 @@ impl AppComponent<Msg, UserEvent> for HelpAsk {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
         match ev {
             Event::Keyboard(key) => self.on_key(key),
+            Event::Mouse(mouse)
+                if self.presentation == crate::realm::presentation::Presentation::Mobile =>
+            {
+                match mouse.kind {
+                    tuirealm::event::MouseEventKind::ScrollUp => self.mobile_scroll(-1),
+                    tuirealm::event::MouseEventKind::ScrollDown => self.mobile_scroll(1),
+                    _ => (),
+                }
+                None
+            }
             Event::Paste(text) => {
                 self.query.push_str(text);
                 self.refilter();
@@ -680,6 +705,78 @@ impl AppComponent<Msg, UserEvent> for HelpAsk {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod mobile_scroll_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn mobile_help() -> HelpAsk {
+        let mut help = HelpAsk::new(Vec::new(), Arc::new(Mutex::new(HelpConvo::default())), ']');
+        help.attr(
+            crate::realm::presentation::MOBILE_ATTRIBUTE,
+            AttrValue::Flag(true),
+        );
+        help
+    }
+
+    #[test]
+    fn a_phone_can_scroll_the_reader_without_arrow_keys_or_a_pointer() {
+        // A software keyboard has no arrow or page keys, and the footer used
+        // to advertise a swipe this component did not handle at all.
+        let mut help = mobile_help();
+        for _ in 0..3 {
+            help.on(&Event::Keyboard(KeyEvent::new(
+                Key::Char('n'),
+                KeyModifiers::CONTROL,
+            )));
+        }
+        assert_eq!(help.mobile_intro_scroll, 3);
+        help.on(&Event::Keyboard(KeyEvent::new(
+            Key::Char('p'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(help.mobile_intro_scroll, 2);
+        let wheel = |kind| {
+            Event::Mouse(tuirealm::event::MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        help.on(&wheel(tuirealm::event::MouseEventKind::ScrollDown));
+        assert_eq!(help.mobile_intro_scroll, 3);
+        help.on(&wheel(tuirealm::event::MouseEventKind::ScrollUp));
+        assert_eq!(help.mobile_intro_scroll, 2);
+        // Ctrl-N/Ctrl-P are not typed into the question.
+        assert!(help.query.is_empty());
+    }
+
+    #[test]
+    fn the_mobile_footer_only_names_bindings_that_exist_and_fits_a_32_column_phone() {
+        let footer = "Enter ask · ^N/^P/swipe · Esc";
+        assert!(
+            crate::util::visual_width(footer) <= 30,
+            "{} cells",
+            crate::util::visual_width(footer)
+        );
+        let mut help = mobile_help();
+        for binding in ["^N", "^P", "swipe", "Esc"] {
+            assert!(footer.contains(binding));
+        }
+        // Each one does something.
+        help.on(&Event::Keyboard(KeyEvent::new(
+            Key::Char('n'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(help.mobile_intro_scroll, 1);
+        assert!(matches!(
+            help.on(&Event::Keyboard(KeyEvent::from(Key::Esc))),
+            Some(Msg::ModalDismissed)
+        ));
     }
 }
 

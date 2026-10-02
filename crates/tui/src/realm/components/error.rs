@@ -177,10 +177,11 @@ impl AppComponent<Msg, UserEvent> for ErrorModal {
         {
             match key.code {
                 Key::Char('j') | Key::Down => {
-                    self.mobile_scroll = self
-                        .mobile_scroll
-                        .saturating_add(1)
-                        .min(self.detail.len().min(u16::MAX as usize) as u16);
+                    // `render_reader` clamps this against the wrapped line
+                    // count every frame, which is the only bound that knows
+                    // the width; bounding it here by the detail's BYTE length
+                    // was not one.
+                    self.mobile_scroll = self.mobile_scroll.saturating_add(1);
                     return None;
                 }
                 Key::Char('k') | Key::Up => {

@@ -637,7 +637,18 @@ impl Id {
     /// channel to be ignored (#448). Today only the description reader
     /// scrolls on the wheel.
     pub(crate) fn consumes_scroll(&self) -> bool {
-        matches!(self, Id::DescriptionModal)
+        matches!(
+            self,
+            Id::DescriptionModal
+                // Mobile's long-text surfaces. A phone keyboard has no arrow
+                // keys, so the wheel/touch report is how these get read at
+                // all; each implements an `Event::Mouse` scroll arm that this
+                // gate has to let through, or that arm is dead code
+                // (#1877 review B8/B9).
+                | Id::MobileCopyText
+                | Id::Setup
+                | Id::HelpAsk
+        )
     }
 
     /// Whether a *buffered* keystroke should still be delivered to this
@@ -686,6 +697,11 @@ impl Id {
                 | Id::JumpPicker
                 | Id::PromptHistoryPicker
                 | Id::UrlPicker
+                // The mobile copy picker and its review sheet. Their one
+                // immediate effect is a clipboard write — outward, but
+                // non-destructive and undone by the next copy — and mobile
+                // forwards ordinary keys literally, so dropping a buffered
+                // key here would discard a selection already made.
                 | Id::MobileLinks
                 | Id::MobileCopyText
                 | Id::ThemePicker
@@ -8286,7 +8302,7 @@ impl<T: TerminalAdapter> Model<T> {
                 let hint = if self.mobile_rail.is_open() || mobile_focus != PaneFocus::Terminals {
                     self.mobile_rail.footer()
                 } else {
-                    "^T sessions ^G settings ^D end"
+                    "^T sessions ^G settings ^D live"
                 };
                 let text = if self.mobile_rail.is_open() || mobile_focus != PaneFocus::Terminals {
                     hint

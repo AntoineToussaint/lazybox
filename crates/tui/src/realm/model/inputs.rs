@@ -1625,7 +1625,17 @@ showing keybinding search only",
                 if let Some(ModalFlow::MobileDeleteSession { terminal_id }) = self.modal_flow.take()
                 {
                     if yes {
-                        self.terminals.close_terminal(terminal_id, &mut cmds);
+                        use crate::components::terminal_stack::CloseOutcome;
+                        // The row only disappears on `TerminalExited`, so a
+                        // request whose event never came back must say so
+                        // instead of closing this prompt over an untouched
+                        // session the user will keep pressing `x` on.
+                        match self.terminals.close_terminal(terminal_id, &mut cmds) {
+                            CloseOutcome::Removed | CloseOutcome::Requested => (),
+                            CloseOutcome::Retried => self
+                                .flash_info("still closing that session — asked the daemon again"),
+                            CloseOutcome::Unknown => self.flash_info("That session has ended"),
+                        }
                     }
                     self.refresh_mobile_sessions();
                     self.redraw = true;

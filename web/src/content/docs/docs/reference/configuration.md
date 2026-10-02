@@ -478,7 +478,7 @@ default keymap.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `collapsed_repos` | list of string | `[]` | Repo names whose sidebar group starts collapsed (written back automatically) |
-| `mobile_session_order` | list of `{session_key, terminal_id}` | `[]` | Mobile tab priority, saved by `p` in Sessions and restored across client launches. New terminals follow saved tabs; desktop ordering is unaffected. |
+| `mobile_session_order` | list of `{session_key, terminal_id}` | `[]` | Mobile tab priority, saved by `p` in Sessions and restored across client launches. Each reorder is applied to the saved list as it is on disk rather than overwriting it, so entries for terminals that have not streamed in yet — and a second client's entries — survive. New terminals follow saved tabs; desktop ordering is unaffected. |
 | `pinned_repos` | list of string | `[]` | Repo names pinned to the top of the sidebar, in pin order (`p` toggles). A list, not a set — the order you pinned in is the display order. Written back automatically. |
 | `focused_workspaces` | list of string | `[]` | Workspace keys you've starred ("focused"), in focus order — lifted into a synthetic `★ Focused` section at the top and numbered for `]]<digit>` focus jumps. Written back automatically. |
 | `spaces` | list | `[]` | User-defined Spaces — the grouping tier above repo headers (`x m` moves a source into one). Each entry names a bucket and lists its assigned source labels; the list position is the display order. Written back automatically. |

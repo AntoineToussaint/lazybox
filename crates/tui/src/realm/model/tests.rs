@@ -18442,6 +18442,40 @@ mod leader_tile_tests {
         );
     }
 
+    /// A desktop paste follows the FOCUSED tile, not the active tab index.
+    /// The two agree in Tabs and can disagree in Splits, where the old
+    /// `active_terminal_id()` target typed into whichever terminal sat at
+    /// `active_tab_idx` instead of the pane the user was looking at.
+    #[test]
+    fn desktop_split_paste_reaches_the_focused_tile_not_the_active_tab_index() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        m.terminals.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        });
+        // Leave the tab index pointing at the OTHER leaf, so the two differ.
+        m.terminals.set_active_tab(0);
+        m.set_focus(PaneFocus::Terminals);
+        assert_eq!(m.terminals.focused_terminal_id(), Some(TerminalId(2)));
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+        while server.rx.try_recv().is_ok() {}
+        m.handle_paste("hello");
+        let writes: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .filter_map(|cmd| match cmd {
+                IpcCommand::Write {
+                    terminal_id, bytes, ..
+                } => Some((terminal_id, bytes)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes, vec![(TerminalId(2), b"hello".to_vec())]);
+    }
+
     #[test]
     fn clicking_a_terminal_focus_bar_routes_input_to_that_tile() {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};

@@ -65,7 +65,9 @@ impl MobileRail {
     }
 
     /// Refresh the displayed roster, preserving the highlighted identity.
-    /// Keys resolve against this painted snapshot, never a freshly reordered list.
+    /// Keys resolve against this painted snapshot, never a freshly reordered
+    /// list — so while the overlay is open this is called only on an explicit
+    /// reorder, never from `render`.
     pub(crate) fn update(&mut self, rows: &[SessionRow]) {
         self.initialized = true;
         let selected = self.highlighted();
@@ -315,7 +317,15 @@ impl MobileRail {
         active: Option<TerminalId>,
         portal: bool,
     ) {
-        self.update(rows);
+        // The startup portal tracks the live roster; the Ctrl-T overlay does
+        // NOT. Refreshing `targets` from every frame is what broke the
+        // snapshot this struct documents: a terminal spawning while Sessions
+        // was open re-lettered the list, and the regression test only passed
+        // because it never rendered (#1877 review W1). A target that vanishes
+        // renders as "session ended" and its key is refused by the model.
+        if !self.open {
+            self.update(rows);
+        }
         let theme = crate::theme::current();
         self.panel = Rect::new(
             area.x,

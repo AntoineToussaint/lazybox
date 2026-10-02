@@ -427,7 +427,7 @@ fn snippet_body_preview(body: &str) -> String {
 /// notice: drop the `source:` prefix so a key like
 /// `github:owner/repo#7` reads as `owner/repo#7`. Keys without a prefix
 /// (local projects) pass through unchanged.
-fn worktree_notice_label(session_key: &lazybox_core::SessionKey) -> String {
+pub(super) fn worktree_notice_label(session_key: &lazybox_core::SessionKey) -> String {
     session_key
         .as_str()
         .split_once(':')
@@ -1899,7 +1899,7 @@ impl<T: TerminalAdapter> Model<T> {
                 ("Ctrl-G", "Settings"),
                 ("Ctrl-Q", "detach from Sessions"),
                 ("Swipe", "scroll chat history"),
-                ("Ctrl-D", "jump to bottom"),
+                ("Ctrl-D", "jump to live output (EOF at the bottom)"),
                 ("j/k", "move in Sessions/settings"),
                 ("n", "new session"),
                 ("r", "rename session (Ctrl-X clears)"),
@@ -4120,9 +4120,6 @@ impl<T: TerminalAdapter> Model<T> {
         status: lazybox_ipc::WorktreeStepStatus,
         origin: lazybox_ipc::SpawnOrigin,
     ) {
-        if self.mobile_worktree_progress(&session_key, &status) {
-            return;
-        }
         let trigger = match origin {
             lazybox_ipc::SpawnOrigin::Interactive => {
                 // Already tracking this session keeps a checklist this
@@ -4366,6 +4363,15 @@ impl<T: TerminalAdapter> Model<T> {
             if self.open_linear_team_repo_picker(&message, spawn) {
                 return;
             }
+        }
+        // Mobile has no room for the checklist, so it substitutes a footer
+        // notice / error sheet — but only for the events this router already
+        // decided to show. Deciding that in `route_worktree_progress` instead
+        // skipped `mine`, the autonomous once-per-spawn notice and the Esc
+        // marker, so every other client's and the daemon's provisioning
+        // overwrote the one status line a phone has (#1877 review B2).
+        if self.mobile_worktree_progress(&session_key, &status) {
+            return;
         }
         // A new spawn supersedes any stale checklist (e.g. the previous
         // one errored and the user re-pressed `w`).

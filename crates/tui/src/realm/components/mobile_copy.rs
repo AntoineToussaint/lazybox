@@ -346,6 +346,27 @@ mod tests {
         assert_eq!(copy.selected(), "printf '%s\\n' 'a b'\n\necho done");
     }
     #[test]
+    fn a_wheel_report_moves_the_line_cursor() {
+        // The only pointer a phone has. This arm was unreachable until
+        // `Id::MobileCopyText` was added to `Id::consumes_scroll`, which is
+        // where the router decides whether to forward a notch at all.
+        let mut copy = MobileCopy::new((0..10).map(|i| format!("line {i}")).collect(), 0);
+        let wheel = |kind| {
+            Event::Mouse(tuirealm::event::MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        copy.on(&wheel(MouseEventKind::ScrollDown));
+        copy.on(&wheel(MouseEventKind::ScrollDown));
+        assert_eq!(copy.cursor, 2);
+        copy.on(&wheel(MouseEventKind::ScrollUp));
+        assert_eq!(copy.cursor, 1);
+    }
+
+    #[test]
     fn narrow_copy_controls_and_wrapped_text_remain_visible() {
         use tuirealm::ratatui::{Terminal, backend::TestBackend};
         for (width, height) in [(32, 12), (39, 18), (1, 1)] {

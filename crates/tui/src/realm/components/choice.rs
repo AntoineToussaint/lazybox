@@ -315,10 +315,22 @@ impl<T: Clone + 'static + Send> Choice<T> {
             .unwrap_or("")
     }
 
+    /// Whether bulk rows (All items, section headings) are selectable here.
+    ///
+    /// Mobile only. On desktop these pickers include outward GitHub mutations
+    /// — `Apply labels`, `Assign to`, `Request review from` — where a
+    /// select-all sitting where `g` / `Home` / `Up` land turns three keys that
+    /// applied one label into three that apply every label in the repo
+    /// (#1877 review B3). Section headings stay inert there, exactly as they
+    /// were before they became rows.
+    fn bulk_rows(&self) -> bool {
+        self.presentation == crate::realm::presentation::Presentation::Mobile
+    }
+
     /// The same ordered rows drive keyboard movement and rendering.
     fn rows(&self) -> Vec<ChoiceRow> {
         let mut rows = Vec::with_capacity(self.items.len() + 1);
-        if self.mode == Mode::Multi && !self.items.is_empty() {
+        if self.mode == Mode::Multi && self.bulk_rows() && !self.items.is_empty() {
             rows.push(ChoiceRow::All);
         }
         let mut previous = "";
@@ -359,7 +371,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
     fn row_is_selectable(&self, row: ChoiceRow) -> bool {
         match row {
             ChoiceRow::Item(i) => self.is_selectable(i),
-            _ => self.mode == Mode::Multi && self.selection_counts(row).1 > 0,
+            _ => self.bulk_rows() && self.mode == Mode::Multi && self.selection_counts(row).1 > 0,
         }
     }
 
@@ -558,7 +570,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
                 Mode::Multi => "[-] ",
             };
             let cursor_caret = if is_cursor { "▸ " } else { "  " };
-            let mut style = if section && self.mode == Mode::Single {
+            let mut style = if section && !self.bulk_rows() {
                 Style::default().fg(theme.warn).bold()
             } else if !selectable {
                 Style::default().fg(theme.text_dim)
@@ -573,7 +585,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
                 style = style.bg(theme.fill);
             }
             let label = self.row_label(row);
-            let line = if section && self.mode == Mode::Single {
+            let line = if section && !self.bulk_rows() {
                 label
             } else {
                 format!("{cursor_caret}{prefix}{label}")
@@ -746,7 +758,7 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
                     "Space",
                     Style::default().fg(theme.accent).bold(),
                 ));
-                help_spans.push(Span::raw(format!(" {}  ", self.toggle_hint())));
+                help_spans.push(Span::raw(" toggle  "));
             }
             help_spans.push(Span::styled(
                 "Enter",
@@ -988,8 +1000,10 @@ mod tests {
         c.on(&Event::Keyboard(tuirealm::event::KeyEvent::from(key)))
     }
 
+    /// Bulk rows (All items / section toggles) exist on mobile only, so the
+    /// fixture that exercises them is a mobile picker.
     fn grouped() -> Choice<Item> {
-        Choice::multi(
+        let mut c = Choice::multi(
             "Pick filters",
             vec![Item("a"), Item("b"), Item("c"), Item("d")],
         )
@@ -1000,7 +1014,44 @@ mod tests {
             } else {
                 "Issues"
             }
-        })
+        });
+        c.presentation = crate::realm::presentation::Presentation::Mobile;
+        c
+    }
+
+    #[test]
+    fn desktop_multi_select_has_no_bulk_rows_so_g_and_up_still_pick_one_item() {
+        // `Apply labels` / `Assign to` / `Request review from` are desktop
+        // multi-selects whose confirmation is an outward GitHub mutation. A
+        // select-all row where `g` / `Home` / `Up` land would turn the three
+        // keys that applied one label into three that apply every label.
+        for key in [Key::Char('g'), Key::Home, Key::Up] {
+            let mut c = Choice::multi("Apply labels", vec![Item("bug"), Item("chore")])
+                .label(|i| i.0.into())
+                .payload_for(|i| ChoicePayload::Text(i.0.into()));
+            assert!(!c.rows().contains(&ChoiceRow::All));
+            press(&mut c, key);
+            assert_eq!(c.cursor, ChoiceRow::Item(0), "{key:?} left the item rows");
+            press(&mut c, Key::Char(' '));
+            assert_eq!(c.selected, vec![true, false], "{key:?} selected in bulk");
+            assert_eq!(
+                press(&mut c, Key::Enter),
+                Some(Msg::ChoicePicked(vec![ChoicePayload::Text("bug".into())]))
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_section_headings_are_inert_in_a_multi_select() {
+        // Before section labels became rows, `Up` from the first item was a
+        // clamped no-op on the sectioned `Filters` menu. Keep it that way.
+        let mut c = grouped();
+        c.presentation = crate::realm::presentation::Presentation::Desktop;
+        press(&mut c, Key::Up);
+        assert_eq!(c.cursor, ChoiceRow::Item(0));
+        press(&mut c, Key::Char(' '));
+        assert_eq!(c.selected, vec![true, false, false, false]);
+        assert!(!c.row_is_selectable(ChoiceRow::Section(0)));
     }
 
     #[test]

@@ -23,8 +23,10 @@ The startup portal and **Ctrl-T Sessions** share one renderer and these bindings
   from loaded history share one **newest-first** list. Repeated items keep their
   newest position. Blocks open a review; **Commands / scripts: select lines**
   remains the last entry. Use **j/k**
-  and **Enter** to copy the complete URL to the phone/host clipboard through
-  OSC 52. **h** shows the highlighted URL in a scrollable reader; **Escape**
+  and **Enter** to copy the complete URL to the phone/host clipboard. The
+  footer says which transport took it: the machine's own clipboard, or OSC 52
+  which the host terminal may still ignore. A selection over 64 KiB is refused
+  rather than sent, because emulators drop an oversized OSC 52 silently. **h** shows the highlighted URL in a scrollable reader; **Escape**
   returns to Sessions without copying. Enter returns to the running terminal.
   You can also tap **/ copy** in the Sessions footer. Session letters remain
   unchanged; `/` is ordinary input outside Sessions.
@@ -33,10 +35,12 @@ The startup portal and **Ctrl-T Sessions** share one renderer and these bindings
   sessions. Or use **j/k**, then **Enter**. **Escape** cancels priority mode.
   Labels skip the same reserved keys as Sessions; **[ / ]** pages destinations.
   The running terminal stays focused. Priority is saved in the current Lazybox
-  profile (`ui.mobile_session_order`) and restored on subsequent launches.
-  Existing tabs keep their order while the startup roster loads; new terminals
-  append after saved tabs. Renaming a chat does not change its position.
-  Desktop layout is unaffected. The last mobile reorder saved wins.
+  profile (`ui.mobile_session_order`) and restored on subsequent launches. Each
+  reorder is applied to the saved order as it is on disk, not written over it,
+  so reordering while the roster is still streaming in keeps the priority of
+  tabs that have not arrived yet, and a second client's tabs survive.
+  New terminals append after saved tabs. Renaming a chat does not change its
+  position. Desktop layout is unaffected.
 - **Enter**: open the highlighted session (also from the startup portal).
 - **Escape** or **Ctrl-T**: close Sessions and return to the current terminal.
   With no sessions, the portal stays ready for `n`.
@@ -52,8 +56,11 @@ The panel's status line describes the highlighted terminal, runner, and reposito
 
 The startup portal fills the screen; the Ctrl-T panel covers only the rows it
 needs. Both use the same session ordering, selectors, actions, and confirmation
-flow. Displayed labels are updated with the live roster; a key targets the last
-painted roster, so an unseen removal cannot redirect it to another terminal.
+flow. The portal tracks the live roster. The Ctrl-T overlay does not: it freezes
+its letters when it opens, so a terminal spawning or exiting while you are
+reading cannot re-letter the list under your thumb. A session that ends while
+the overlay is up shows as `session ended` and its key is refused; reopen
+Sessions to pick up new terminals.
 Canceling creation or rename returns to the same panel position. Escape from the
 runner picker returns to the area picker; creation happens only after choosing
 the final agent/Shell option. A completed creation closes the panel so the new
@@ -71,11 +78,18 @@ Escape returns to settings. Letters remain text in question and other text input
 Creation and settings sheets hide the Sessions list without losing its cursor.
 **Swipe** to scroll running chat history. Mouse wheel reports scroll vertically
 across the whole mobile viewport, including its rail, header and footer. In
-Sessions, swiping moves the highlight. Termius must forward mouse reports for
+Sessions, swiping moves the highlight. Swiping also scrolls the sheets that
+hold long text — the copy picker, settings, and Ask Lazybox — and in Ask
+Lazybox **Ctrl-N / Ctrl-P** scroll the answer without a pointer, since a
+software keyboard has no arrow keys. Termius must forward mouse reports for
 touch scrolling; native whole-screen panning does not generate Lazybox scroll
-events. **Ctrl-D** jumps all the way to the live bottom without sending input to
-the running program. Mobile does not bind Ctrl-U or Page Up/Page Down to chat
-scrolling; those keys reach the running agent or shell.
+events. **Ctrl-D** jumps all the way to the live bottom without sending input to the
+running program — but only while you are actually scrolled back. At the live
+bottom it reaches the program as EOF, because Ctrl-D is how you end `cat >
+file`, a heredoc, `python` or `ssh`, and a phone has no other way to send it.
+So one Ctrl-D returns to live output and the next one ends the program. Mobile
+does not bind Ctrl-U or Page Up/Page Down to chat scrolling either; those keys
+reach the running agent or shell.
 
 Ordinary letters, Escape and Tab reach the running program. Buffered typing in
 live mobile terminals survives slow frames rather than being discarded after
@@ -127,14 +141,23 @@ To build and install:
 
 ```sh
 . "$HOME/.cargo/env"
-CARGO_BUILD_JOBS=1 make build
+CARGO_BUILD_JOBS=1 make release
 ./scripts/install-mobile.sh
 ```
 
-The installer adds a small `lb` dispatcher and a separate mobile binary, retains
-the official `lazybox` executable for plain `lb`, and removes the previous managed
-`lb-m` / `lazybox-m` aliases. The original `lb` launcher is saved under
-`~/.local/lib/lazybox-mobile/lb.desktop-original` on the first such installation.
+The installer adds a small `lb` dispatcher and a separate mobile binary, and
+retains the official `lazybox` executable for plain `lb`.
+
+It installs a **release** build by default. The phone is the slowest device in
+the fleet, and `lb -m` is also what starts the session daemon when none is
+running — a daemon that then serves the desktop client too, which is why an
+unoptimized one is not a local choice. Set `LAZYBOX_MOBILE_PROFILE=debug` to
+opt into one deliberately.
+
+The original `lb` launcher is saved under
+`~/.local/lib/lazybox-mobile/lb.desktop-original` on the first such
+installation; `./scripts/install-mobile.sh --uninstall` puts it back and
+removes `lb -m`.
 
 The installer honors `CARGO_TARGET_DIR`. Set `LAZYBOX_BUILD_DIR` to use a specific
 directory containing the built `lazybox` and `lb` executables.
@@ -143,10 +166,15 @@ directory containing the built `lazybox` and `lb` executables.
 
 Termius's native drag selection copies the rendered screen, which includes
 Lazybox's rail and scrollbar. For a clean link, use **Ctrl-T → / → j/k → Enter**.
-The mobile picker reads the selected terminal's loaded history, with the most
-recent links and script/text blocks at the top. It joins soft-wrapped
+The mobile picker reads the recent end of the selected terminal's loaded
+history — a bounded window, not the whole retained scrollback, which can be
+50,000 lines and took a third of a second of frozen UI to walk. The most
+recent links and script/text blocks are at the top, and the list is capped;
+its header says `Newest N of M` when there was more. It joins soft-wrapped
 logical lines, including their portions above/below the viewport, and honors
-explicit OSC 8 hyperlink destinations even when their displayed label differs.
+explicit OSC 8 hyperlink destinations even when their displayed label differs
+(a destination it cannot offer, such as `file://`, leaves the visible label
+to be scanned instead).
 It does not scroll, resize, or type into the terminal while copying. If a very
 long link begins outside the history currently loaded by the client, thumb-scroll
 up to load that history first, then open the picker. Ctrl-D returns to the bottom.
@@ -157,7 +185,9 @@ not supplied enough information to reconstruct the original URL reliably.
 Clipboard delivery requires OSC 52 support/permission in the outer terminal;
 Termius iOS added this in 7.5.0 (and OSC 8 hyperlinks in 7.6.1), according to its
 [release notes](https://apps.apple.com/us/app/termius-modern-ssh-client/id549039908).
-Lazybox reports that it sent the link; the terminal controls clipboard access.
+Lazybox reports which transport took the text — the machine's own clipboard, or
+an OSC 52 whose fate the terminal controls — and refuses a selection over
+64 KiB rather than emitting an escape the host will drop without a word.
 
 
 ### Copying recommended commands and scripts
@@ -170,7 +200,8 @@ lets you adjust the line range.
 
 For text not recognized as a block, select **Commands / scripts: select lines** (the last
 entry, reachable with **G** in the picker). This freezes a plain-text snapshot
-of the highlighted terminal's loaded history, starting at its current viewport.
+of the same bounded window of the highlighted terminal's history, starting at
+its current viewport.
 
 - **j/k** or arrows: move between logical lines; tapping a line also selects it.
 - **v** or Space: mark/unmark a range's first line. Move to its last line with

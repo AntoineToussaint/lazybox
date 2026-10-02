@@ -12,5 +12,5 @@ expression: out
 │   Ctrl-Q   detach from       │
 │Sessions                      │
 │   Swipe    scroll chat       │
-│Enter ask · swipe · Esc back  │
+│Enter ask · ^N/^P/swipe · Esc │
 ╰──────────────────────────────╯

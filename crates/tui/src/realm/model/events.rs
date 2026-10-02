@@ -1272,6 +1272,13 @@ impl<T: TerminalAdapter> Model<T> {
             }
             IpcEvent::CommandCompleted { client_request_id } => {
                 if let Some(pending) = self.pending_workspace_creates.remove(client_request_id) {
+                    // One message on purpose. This used to pick between
+                    // "ready" and "created" on `spawn_agent: bool`, where
+                    // false meant "nothing was started". Under `SessionRunner`
+                    // every create starts something — an agent or a shell — so
+                    // the "created" case no longer exists rather than having
+                    // been folded away; `CommandFailed` still names which
+                    // runner it was that failed.
                     self.flash_info(format!("workspace {} ready", pending.name));
                 }
             }

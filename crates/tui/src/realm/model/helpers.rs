@@ -2086,7 +2086,20 @@ pub(crate) enum ClipboardDelivery {
     /// anything with the escape disabled drop it, and nothing comes
     /// back either way.
     Terminal,
+    /// Past [`OSC52_TEXT_LIMIT`] — refused rather than sent.
+    TooLarge,
 }
+
+/// Largest text lazybox will put in an OSC 52 sequence.
+///
+/// base64 inflates the payload by 4/3, and emulators and multiplexers cap
+/// the escape far below a whole scrollback snapshot — tmux buffers it,
+/// xterm's historical ceiling was 8 KiB for the entire sequence — then drop
+/// an oversized one with no reply. Since the mobile copy picker can select
+/// a whole snapshot, an unbounded payload meant the UI reporting a copy that
+/// never happened. 64 KiB is past anything known to accept the escape, so
+/// beyond it the honest answer is to refuse and say so.
+pub(crate) const OSC52_TEXT_LIMIT: usize = 64 * 1024;
 
 impl ClipboardDelivery {
     /// Footer line for a copy of `what` ("3 lines", "word", "line").
@@ -2094,6 +2107,10 @@ impl ClipboardDelivery {
         match self {
             Self::Host => format!("copied {what} to clipboard"),
             Self::Terminal => format!("copied {what} — OSC 52 sent, host terminal decides"),
+            Self::TooLarge => format!(
+                "{what} is over {} KiB — too large for the terminal clipboard, select less",
+                OSC52_TEXT_LIMIT / 1024
+            ),
         }
     }
 }
@@ -2110,6 +2127,10 @@ impl ClipboardDelivery {
 pub(crate) fn emit_clipboard_copy(text: &str) -> ClipboardDelivery {
     if native_clipboard_copy(text) {
         return ClipboardDelivery::Host;
+    }
+    // A payload the host will drop must not be reported as sent.
+    if text.len() > OSC52_TEXT_LIMIT {
+        return ClipboardDelivery::TooLarge;
     }
     let encoded = base64_encode(text.as_bytes());
     let sequence = format!("\x1b]52;c;{encoded}\x1b\\");

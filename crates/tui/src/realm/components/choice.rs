@@ -43,6 +43,7 @@ type SectionFn<T> = Box<dyn Fn(&T) -> &'static str + Send>;
 type SelectableFn<T> = Box<dyn Fn(&T) -> bool + Send>;
 type HighlightFn<T> = Box<dyn Fn(&T) + Send>;
 type PayloadFn<T> = Box<dyn Fn(&T) -> ChoicePayload + Send>;
+type SearchFn<T> = Box<dyn Fn(&T, &str) -> bool + Send>;
 
 /// Single- or multi-select picker.
 pub struct Choice<T: Clone + 'static + Send> {
@@ -99,6 +100,21 @@ pub struct Choice<T: Clone + 'static + Send> {
     /// click hit-testing reads it to resolve a clicked row back to its
     /// item.
     line_items: Vec<Option<usize>>,
+    /// Opt-in filter-as-you-type matcher: `(item, query) -> keep`. Set
+    /// via [`Choice::with_search`]; `None` leaves the picker exactly as
+    /// it was, with bare chars still bound to `g` / `G` / `r`.
+    search_for: Option<SearchFn<T>>,
+    /// What the user has typed so far. Only ever non-empty when
+    /// `search_for` is set.
+    query: String,
+    /// Item indices passing `search_for` for the current `query`, in
+    /// `items` order. Always populated (every index when there is no
+    /// search); rows outside it are not rendered and the cursor cannot
+    /// land on them. `selected` stays keyed to item indices, so a row
+    /// ticked and then typed out of view is still picked on Enter —
+    /// narrowing the view must not silently drop filters the user
+    /// already had on.
+    visible: Vec<usize>,
 }
 
 impl<T: Clone + 'static + Send> Choice<T> {
@@ -127,6 +143,9 @@ impl<T: Clone + 'static + Send> Choice<T> {
             body_area: Rect::default(),
             help_area: Rect::default(),
             line_items: Vec::new(),
+            search_for: None,
+            query: String::new(),
+            visible: (0..len).collect(),
         }
     }
 
@@ -155,6 +174,9 @@ impl<T: Clone + 'static + Send> Choice<T> {
             body_area: Rect::default(),
             help_area: Rect::default(),
             line_items: Vec::new(),
+            search_for: None,
+            query: String::new(),
+            visible: (0..len).collect(),
         }
     }
 
@@ -280,6 +302,66 @@ impl<T: Clone + 'static + Send> Choice<T> {
         }
     }
 
+    /// Enable filter-as-you-type over the rows: printable keys append
+    /// to a query, Backspace trims it, and only rows for which
+    /// `f(item, &query)` holds are rendered or reachable. Opt-in,
+    /// because a picker without it keeps `g` / `G` / `r` bound as
+    /// commands — a list long enough to need searching is the one that
+    /// wants this (the `f` filter menu is 30+ rows across seven axes,
+    /// and a filter whose label has moved is otherwise unreachable
+    /// except by eye, #1914).
+    ///
+    /// The matcher takes the row's own `T` so the knowledge of what a
+    /// row can be called stays with the data (`FilterEntry::matches_search`
+    /// and its alias table) instead of being re-derived from the
+    /// rendered label here.
+    pub fn with_search<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&T, &str) -> bool + Send + 'static,
+    {
+        self.search_for = Some(Box::new(f));
+        self.refilter();
+        self
+    }
+
+    /// Is this row admitted by the current query? Always true when no
+    /// search is configured.
+    fn is_visible(&self, idx: usize) -> bool {
+        self.visible.contains(&idx)
+    }
+
+    /// Can the cursor rest on, and Enter act on, this row? Visible
+    /// *and* selectable — kept apart from [`Self::is_selectable`],
+    /// which stays the caller's own predicate and still decides how a
+    /// rendered row is dimmed and prefixed.
+    fn is_pickable(&self, idx: usize) -> bool {
+        self.is_visible(idx) && self.is_selectable(idx)
+    }
+
+    /// Recompute [`Self::visible`] for the current query and pull the
+    /// cursor onto a row that still exists. Scroll is reset because the
+    /// line layout it offsets into has changed underneath it.
+    fn refilter(&mut self) {
+        self.visible = match self.search_for.as_ref() {
+            None => (0..self.items.len()).collect(),
+            Some(f) => (0..self.items.len())
+                .filter(|&i| f(&self.items[i], &self.query))
+                .collect(),
+        };
+        self.scroll = 0;
+        if !self.is_pickable(self.cursor) {
+            // Prefer the first pickable row; with none (an empty
+            // result, or every match non-selectable) park on the first
+            // visible row so the cursor index stays meaningful —
+            // `confirm_picks` refuses to act on it either way.
+            if let Some(&idx) = self.visible.iter().find(|&&i| self.is_selectable(i)) {
+                self.cursor = idx;
+            } else if let Some(&idx) = self.visible.first() {
+                self.cursor = idx;
+            }
+        }
+    }
+
     fn is_selectable(&self, idx: usize) -> bool {
         match self.items.get(idx) {
             None => false,
@@ -295,24 +377,26 @@ impl<T: Clone + 'static + Send> Choice<T> {
         let cur = self.cursor as isize;
         let target = (cur + delta).clamp(0, last) as usize;
         self.cursor = target;
-        // After the move, if we landed on a non-selectable row,
-        // hop in the same direction until we hit a selectable one
-        // (or run off the edge — in which case fall back to the
-        // first selectable row anywhere). Stops j/k from getting
-        // stuck on inert section/header rows when those exist.
-        if !self.is_selectable(self.cursor) {
+        // After the move, if we landed on a row the cursor can't rest
+        // on — the caller's `selectable` said no, or a typed query has
+        // hidden it — hop in the same direction until we hit one that
+        // works (or run off the edge, in which case fall back to the
+        // first pickable row anywhere). Stops j/k from getting stuck on
+        // inert section/header rows when those exist, and from landing
+        // between two surviving search matches.
+        if !self.is_pickable(self.cursor) {
             let dir: isize = if delta >= 0 { 1 } else { -1 };
             let mut i = self.cursor as isize;
             while i + dir >= 0 && i + dir <= last {
                 i += dir;
-                if self.is_selectable(i as usize) {
+                if self.is_pickable(i as usize) {
                     self.cursor = i as usize;
                     return;
                 }
             }
-            // No selectable in that direction — fall back to first
-            // selectable anywhere.
-            if let Some(idx) = (0..=last as usize).find(|i| self.is_selectable(*i)) {
+            // No pickable row in that direction — fall back to the
+            // first pickable one anywhere.
+            if let Some(idx) = (0..=last as usize).find(|i| self.is_pickable(*i)) {
                 self.cursor = idx;
             }
         }
@@ -323,7 +407,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
         if self.items.is_empty() {
             return;
         }
-        if let Some(idx) = (0..self.items.len()).find(|i| self.is_selectable(*i)) {
+        if let Some(idx) = (0..self.items.len()).find(|i| self.is_pickable(*i)) {
             self.cursor = idx;
         }
     }
@@ -333,7 +417,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
         if self.items.is_empty() {
             return;
         }
-        if let Some(idx) = (0..self.items.len()).rev().find(|i| self.is_selectable(*i)) {
+        if let Some(idx) = (0..self.items.len()).rev().find(|i| self.is_pickable(*i)) {
             self.cursor = idx;
         }
     }
@@ -360,7 +444,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
                 if self.items.is_empty() {
                     return ConfirmResult::Cancel;
                 }
-                if !self.is_selectable(self.cursor) {
+                if !self.is_pickable(self.cursor) {
                     return ConfirmResult::Stay;
                 }
                 vec![self.cursor]
@@ -408,6 +492,22 @@ impl<T: Clone + 'static + Send> Choice<T> {
             lines.push(Line::from(Span::styled(segment.to_string(), prompt_style)));
             line_items.push(None);
         }
+        // Echo the typed query so searching is visible — without this
+        // the list just narrows and the user can't tell why, or what to
+        // Backspace. Only drawn once something has been typed; the hint
+        // that typing works at all lives in the help footer.
+        if self.search_for.is_some() && !self.query.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("search: ", Style::default().fg(theme.text_dim)),
+                Span::styled(
+                    self.query.clone(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            line_items.push(None);
+        }
         lines.push(Line::raw(""));
         line_items.push(None);
 
@@ -416,6 +516,13 @@ impl<T: Clone + 'static + Send> Choice<T> {
         // each group.
         let mut last_section: Option<&'static str> = None;
         for (i, item) in self.items.iter().enumerate() {
+            // A row the query excluded is not drawn at all — and
+            // neither is its section header, which the `last_section`
+            // bookkeeping below handles for free because it only
+            // advances on a row that is actually printed.
+            if !self.is_visible(i) {
+                continue;
+            }
             if let Some(sec_fn) = self.section_for.as_ref() {
                 let section = sec_fn(item);
                 if !section.is_empty() && Some(section) != last_section {
@@ -480,6 +587,15 @@ impl<T: Clone + 'static + Send> Choice<T> {
             lines.push(Line::from(Span::styled(truncated, style)));
             line_items.push(Some(i));
         }
+        // A query that matches nothing would otherwise render as an
+        // empty box with no explanation of what happened.
+        if self.search_for.is_some() && self.visible.is_empty() && !self.items.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  no filter matches \"{}\"", self.query),
+                Style::default().fg(theme.text_dim),
+            )));
+            line_items.push(None);
+        }
         // Empty hint
         if self.show_empty_hint {
             lines.push(Line::raw(""));
@@ -536,7 +652,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
             };
         }
         let idx = self.item_at_click(m.column, m.row)?;
-        if !self.is_selectable(idx) {
+        if !self.is_pickable(idx) {
             return None;
         }
         let prev_cursor = self.cursor;
@@ -626,6 +742,13 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
                 Style::default().fg(theme.success).bold(),
             ));
             help_spans.push(Span::raw(" confirm  "));
+            if self.search_for.is_some() {
+                help_spans.push(Span::styled(
+                    "type",
+                    Style::default().fg(theme.accent).bold(),
+                ));
+                help_spans.push(Span::raw(" search  "));
+            }
             if self.can_refresh {
                 help_spans.push(Span::styled("r", Style::default().fg(theme.warn).bold()));
                 help_spans.push(Span::raw(" refresh  "));
@@ -749,18 +872,34 @@ impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
                 self.show_empty_hint = false;
                 None
             }
-            Key::Home | Key::Char('g') => {
+            Key::Home => {
                 self.cursor_to_first();
                 self.show_empty_hint = false;
                 None
             }
-            Key::End | Key::Char('G') => {
+            Key::End => {
                 self.cursor_to_last();
                 self.show_empty_hint = false;
                 None
             }
+            // `g` / `G` stay Home / End only while nothing is being
+            // typed into: with a search configured they are ordinary
+            // letters, or no query containing one could ever be entered.
+            Key::Char('g') if self.search_for.is_none() => {
+                self.cursor_to_first();
+                self.show_empty_hint = false;
+                None
+            }
+            Key::Char('G') if self.search_for.is_none() => {
+                self.cursor_to_last();
+                self.show_empty_hint = false;
+                None
+            }
+            // Space keeps toggling even under search — the labels it
+            // searches have no spaces in them, and losing the toggle
+            // key would cost more than a query that can contain one.
             Key::Char(' ') if self.mode == Mode::Multi => {
-                if !self.items.is_empty() && self.is_selectable(self.cursor) {
+                if !self.items.is_empty() && self.is_pickable(self.cursor) {
                     self.selected[self.cursor] = !self.selected[self.cursor];
                 }
                 self.show_empty_hint = false;
@@ -768,6 +907,22 @@ impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
             }
             Key::Char('r') if self.can_refresh => Some(Msg::ChoiceRefresh),
             Key::Backspace if self.can_back => Some(Msg::ChoiceBack),
+            // Filter-as-you-type, when `with_search` armed it. Trims the
+            // query on Backspace (the picker that uses Backspace for
+            // `ChoiceBack` is matched above and never sets a search), and
+            // takes any printable key that no arm above claimed.
+            Key::Backspace if self.search_for.is_some() => {
+                self.query.pop();
+                self.refilter();
+                self.show_empty_hint = false;
+                None
+            }
+            Key::Char(c) if self.search_for.is_some() && !ctrl && !c.is_control() => {
+                self.query.push(c);
+                self.refilter();
+                self.show_empty_hint = false;
+                None
+            }
             Key::Enter => match self.confirm_picks() {
                 ConfirmResult::Stay => None,
                 ConfirmResult::Cancel => Some(Msg::ModalDismissed),
@@ -785,6 +940,7 @@ impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tuirealm::event::{Event, Key, KeyEvent};
 
     /// Tiny payload — exercising `Choice` only needs cloneable items
     /// with stable equality for assertions.
@@ -1054,5 +1210,150 @@ mod tests {
         let col = c.body_area.x + 1;
         assert_eq!(c.on(&left_click(col, c.body_area.y)), None);
         assert_eq!(c.selected, vec![false, false]);
+    }
+
+    // ── filter-as-you-type (`with_search`, #1914) ──────────────────
+
+    /// Printable keys build a query and the list narrows to the rows
+    /// that match it — the behaviour the `f` menu needs before an alias
+    /// table can be reached by typing at all.
+    #[test]
+    fn typing_narrows_to_matching_rows_and_moves_the_cursor_onto_one() {
+        let items = vec![Item("unread"), Item("needs-recovery"), Item("asking")];
+        let mut c = Choice::multi("p", items)
+            .label(|i: &Item| i.0.to_string())
+            .with_search(|i: &Item, q: &str| i.0.contains(q));
+        assert_eq!(c.visible, vec![0, 1, 2], "no query hides nothing");
+
+        for ch in "recov".chars() {
+            c.on(&Event::Keyboard(KeyEvent::from(Key::Char(ch))));
+        }
+        assert_eq!(c.query, "recov");
+        assert_eq!(c.visible, vec![1], "only needs-recovery survives");
+        assert_eq!(c.cursor, 1, "the cursor follows onto the surviving row");
+
+        // Backspace widens again rather than leaving the picker.
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Backspace)));
+        assert_eq!(c.query, "reco");
+        assert_eq!(c.visible, vec![1]);
+    }
+
+    /// A row ticked before the query hid it is still applied on Enter.
+    /// Narrowing the view is a way to find a row, not a way to silently
+    /// drop filters the user already had on.
+    #[test]
+    fn a_ticked_row_typed_out_of_view_is_still_picked() {
+        let items = vec![Item("unread"), Item("needs-recovery")];
+        let mut c = Choice::multi("p", items)
+            .label(|i: &Item| i.0.to_string())
+            .payload_for(|i: &Item| ChoicePayload::Text(i.0.to_string()))
+            .with_search(|i: &Item, q: &str| i.0.contains(q));
+        // Tick `unread` (row 0), then type a query only the other row matches.
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Char(' '))));
+        assert_eq!(c.selected, vec![true, false]);
+        for ch in "recov".chars() {
+            c.on(&Event::Keyboard(KeyEvent::from(Key::Char(ch))));
+        }
+        assert_eq!(c.visible, vec![1]);
+        // Tick the surviving row too, then confirm.
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Char(' '))));
+        match c.on(&Event::Keyboard(KeyEvent::from(Key::Enter))) {
+            Some(Msg::ChoicePicked(picks)) => assert_eq!(
+                picks,
+                vec![
+                    ChoicePayload::Text("unread".to_string()),
+                    ChoicePayload::Text("needs-recovery".to_string()),
+                ],
+            ),
+            other => panic!("expected both picks, got {other:?}"),
+        }
+    }
+
+    /// The cursor cannot rest on a hidden row, so j/k walk only the
+    /// surviving matches and a single-select cannot commit one.
+    #[test]
+    fn navigation_skips_rows_the_query_hid() {
+        let items = vec![Item("aa"), Item("bb"), Item("ab")];
+        let mut c = Choice::single("p", items)
+            .label(|i: &Item| i.0.to_string())
+            .payload_for(|i: &Item| ChoicePayload::Text(i.0.to_string()))
+            .with_search(|i: &Item, q: &str| i.0.contains(q));
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Char('a'))));
+        assert_eq!(c.visible, vec![0, 2], "bb is out");
+        assert_eq!(c.cursor, 0);
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Down)));
+        assert_eq!(c.cursor, 2, "Down hops over the hidden row");
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Down)));
+        assert_eq!(c.cursor, 2, "and clamps at the last visible row");
+        assert_eq!(
+            c.on(&Event::Keyboard(KeyEvent::from(Key::Enter))),
+            Some(Msg::ChoicePicked(vec![ChoicePayload::Text(
+                "ab".to_string()
+            )])),
+        );
+    }
+
+    /// `g` / `G` are Home / End only on a picker without a search; with
+    /// one they are letters, or no query containing them could be typed.
+    #[test]
+    fn g_is_home_without_a_search_and_a_query_character_with_one() {
+        let items = vec![Item("alpha"), Item("beta"), Item("gamma")];
+        let mut plain = Choice::single("p", items.clone()).label(|i: &Item| i.0.to_string());
+        plain.cursor = 2;
+        plain.on(&Event::Keyboard(KeyEvent::from(Key::Char('g'))));
+        assert_eq!(plain.cursor, 0, "`g` still jumps to the top here");
+
+        let mut searched = Choice::single("p", items)
+            .label(|i: &Item| i.0.to_string())
+            .with_search(|i: &Item, q: &str| i.0.contains(q));
+        searched.cursor = 2;
+        searched.on(&Event::Keyboard(KeyEvent::from(Key::Char('g'))));
+        assert_eq!(searched.query, "g");
+        assert_eq!(searched.visible, vec![2], "only gamma contains a `g`");
+    }
+
+    /// A query matching nothing says so, instead of rendering an empty
+    /// box; and the typed query is echoed so Backspace has a target.
+    #[test]
+    fn a_query_is_echoed_and_an_empty_result_explains_itself() {
+        let items = vec![Item("unread"), Item("asking")];
+        let mut c = Choice::multi("p", items)
+            .label(|i: &Item| i.0.to_string())
+            .with_search(|i: &Item, q: &str| i.0.contains(q));
+        for ch in "zzz".chars() {
+            c.on(&Event::Keyboard(KeyEvent::from(Key::Char(ch))));
+        }
+        assert!(c.visible.is_empty());
+        let (lines, _, _) = c.build_lines(60);
+        let text: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("search: zzz"), "query echoed, got:\n{text}");
+        assert!(
+            text.contains("no filter matches \"zzz\""),
+            "empty result explained, got:\n{text}",
+        );
+        assert!(!text.contains("unread"), "no rows survive, got:\n{text}");
+    }
+
+    /// Esc still dismisses while typing — a query must not capture the
+    /// key that closes the modal.
+    #[test]
+    fn esc_dismisses_even_mid_query() {
+        let mut c = Choice::multi("p", vec![Item("unread")])
+            .label(|i: &Item| i.0.to_string())
+            .with_search(|i: &Item, q: &str| i.0.contains(q));
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Char('u'))));
+        assert_eq!(
+            c.on(&Event::Keyboard(KeyEvent::from(Key::Esc))),
+            Some(Msg::ModalDismissed),
+        );
     }
 }

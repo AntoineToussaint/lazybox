@@ -27,6 +27,13 @@ state that lives here is state the daemon cannot recover after a reconnect.
   delegate render and key dispatch to their inherent methods. Put logic in the
   domain struct, where it can be tested without a realm.
 - **Modals** are `AppComponent`s mounted on `Model::modal_stack`.
+- **Two picker shapes, and only two.** `Choice<T>` (`realm/components/choice.rs`)
+  is the single- or multi-select with axis sections and typed payloads; opt in to
+  filter-as-you-type with `.with_search(|item, query| …)`, which hands the
+  matching to the item's own type rather than re-deriving it from the rendered
+  label. `FilterableList` (`realm/components/filterable.rs`) owns the
+  single-column filter-first pickers (jump, prompt history, snippets). A long
+  list needs one of these — not a third copy of the key protocol.
 - **Setup wizard** (`src/setup_flow.rs`) is a realm-native `SetupRunner` state
   machine driving Choice / Loading / Error modals.
 - Migration notes for the tuirealm port: `src/realm/MIGRATION.md`.

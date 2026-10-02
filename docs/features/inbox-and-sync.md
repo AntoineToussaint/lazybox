@@ -214,18 +214,30 @@ the latest state per provider. (`OpenSyncStatus` in
 
 ### What it does
 Opens a multi-select **filter menu** over three predicate axes — state
-(with-agent, CI-failing, conflict, unread, asking, review-requested,
-auto-merge, **blocked**, **ready**, **in-flight**), role (author / reviewer /
-assignee / mentioned), and kind (PR / issue) — each shown with a live match
-count. Filters combine AND-across-axes / OR-within-axis and render as removable
-chips in the sidebar header. `blocked` / `ready` key off the dependency edges
-below. `in-flight` is what you are juggling right now: an agent there is
-working, waiting on you or just finished, or within the last hour you marked it
-read or your own PR / issue moved.
+(with-agent, CI-failing, conflict, unread, asking, **needs-recovery**,
+review-requested, auto-merge, **blocked**, **ready**, **in-flight**), role
+(author / reviewer / assignee / mentioned), and kind (PR / issue) — each shown
+with a live match count. Filters combine AND-across-axes / OR-within-axis and
+render as removable chips in the sidebar header. `blocked` / `ready` key off the
+dependency edges below. `in-flight` is what you are juggling right now: an agent
+there is working, waiting on you or just finished, or within the last hour you
+marked it read or your own PR / issue moved. `needs-recovery` is every stopped
+agent shape the two recovery actions restart — rate-limited (`⧗`), parked (`☾`)
+and stalled (`↯`).
 
 ### How to use it
 Press `f`, toggle the predicates you want, confirm. Active filters show as
 header chips (removable). Filters compose with `/` search.
+
+**Typing narrows the menu.** The list is 30+ rows across seven axes, so printable
+keys filter it as you type (Backspace trims, Esc still cancels) — matching each
+row's label *and* its search aliases, so a predicate whose label has since moved
+is still reachable by the word you reach for: `rate-limited` finds
+`needs-recovery`, `in-review` finds `in-progress`, `conflicting` finds
+`conflict`. A row you ticked before typing is still applied on Enter. The alias
+table is `Filter::search_aliases` (`crates/tui-core/src/inbox/filter.rs`), and a
+renamed label records its old name there — the rename itself is usually right;
+losing the old word is what costs the capability its discoverability (#1914).
 
 ### How it works (brief)
 `OpenFilterMenu` (`crates/tui-core/src/action.rs`) mounts the multi-select;
@@ -235,6 +247,7 @@ fetch filters).
 
 ### Test checklist
 - [ ] `f` opens the menu with per-predicate match counts.
+- [ ] Typing `rate-limited` in the menu narrows it to the `needs-recovery` row.
 - [ ] Toggling `reviewer` hides PRs you only author.
 - [ ] Predicates across axes combine with AND; within an axis with OR.
 - [ ] Active filters render as removable header chips.

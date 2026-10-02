@@ -160,6 +160,31 @@ only an explicit "not logged in" as a refusal, so a status command that cannot
 answer (an old build, a wrapper script) never strands a conversation you did in
 fact sign back into.
 
+#### A dead login is not a usage limit
+
+The two look alike — both leave an agent stopped mid-work — but only one of them
+can be fixed by typing `continue`. A rate-limited agent acts on the keystroke and
+reports back; a logged-out one can do nothing until it is signed in again. So
+`Shift-K` (resume stopped agents) **holds back** any pane whose login has died,
+offers it sign-in instead, and counts only the agents it actually resumed in its
+notice. `a R` (restart stopped agents) takes those panes too, because a restart
+is what picks up a credential a running process will never re-read.
+
+This matters most on the path that produces both at once: you hit a usage limit,
+log out, and log back in on a different subscription. The agents are now *logged
+out*, while their limit reading is sticky — so they sit in the resume target set
+holding a credential that died underneath them.
+
+Detection of that state reads Claude's signed-out banner as a rendered cell —
+a logged-out state opening a line, a login directive (`/login`, `claude auth
+login`) after it — rather than as whole literal sentences. Before #1847 it was
+six literals that each required a period (`not logged in. run /login`) where
+Claude ships `Not logged in · Please run /login`, so every one of them missed a
+real logout by the width of a separator and the agent was reported as having
+finished its turn. The state marker is accepted only at a line start and never
+inside a fenced block, which is what keeps an agent *quoting* the banner — a
+routine event in this repository — from tripping it.
+
 #### Migrating off the per-workspace Codex homes
 
 Builds between #1376 and #1656 gave each workspace its own Codex home under

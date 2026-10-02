@@ -292,6 +292,28 @@ const CLAUDE_CELL_GLYPHS: &[char] = &['⏺', '⎿'];
 /// failed doesn't match.
 const CLAUDE_BACKGROUND_FAILURE_MARKERS: (&str, &str) = ("backgroundcommand", "failedwithexitcode");
 
+/// The signed-out half of Claude's "you are logged out" cell, compacted
+/// ([`compact_lower`]). Paired with [`CLAUDE_LOGIN_DIRECTIVES`] by
+/// [`claude_signed_out_cell`], which is the whole of the state half — the
+/// separator and the imperative's wording are deliberately NOT encoded
+/// here, because that is what #1847 was.
+const CLAUDE_SIGNED_OUT_MARKERS: &[&str] = &["notloggedin", "notauthenticated"];
+
+/// The login-directive half: the thing Claude tells you to run. Both the
+/// slash command and the CLI subcommand ship, and nothing else resolves a
+/// dead credential, so this list is closed rather than a guess at the next
+/// phrasing.
+///
+/// Every entry must contain `login` or `auth`, and that is not incidental:
+/// outside the spawn-time startup window the daemon runs a cheap
+/// `auth_prefilter` (`crates/server/src/spawn_handler.rs`) over the same
+/// window first, and a window matching none of `auth` / `log in` / `login`
+/// never reaches this detector at all. The real banner clears that gate on
+/// `/login` alone — it carries no `auth`, and `logged in` does not contain
+/// `log in` — so a directive added here without one of those tokens would
+/// be detected in tests and silently dead in a running session.
+const CLAUDE_LOGIN_DIRECTIVES: &[&str] = &["/login", "claudeauthlogin"];
+
 /// Every line of `compact` that sits OUTSIDE a markdown fence, as
 /// `(byte offset, line)`. Fence delimiters are consumed, not yielded.
 ///
@@ -374,6 +396,41 @@ fn stall_marker_pos(compact: &str) -> Option<usize> {
         }
     }
     latest
+}
+
+/// Whether `compact` holds a machine-rendered cell saying the account is
+/// signed out — the third cell scanner, sharing [`unfenced_lines`] and
+/// [`CLAUDE_CELL_GLYPHS`] with [`stall_marker_pos`] for the same reason.
+///
+/// Two stable halves must share one line: a logged-out state
+/// ([`CLAUDE_SIGNED_OUT_MARKERS`]) *opening* the cell, and a login
+/// directive ([`CLAUDE_LOGIN_DIRECTIVES`]) anywhere after it. Whatever sits
+/// between them — a period, a middle dot, an em dash, `Please` — is never
+/// read, which is the point: #1847 was six literals that each hardcoded
+/// `". run"`, and Claude ships `Not logged in · Please run /login`. Every
+/// one of the six missed a live logout for the width of a separator, and
+/// the agent was classified `Done` — a thirteen-minute turn and a
+/// thirteen-minute turn that died on a dead credential rendered
+/// identically.
+///
+/// Line-anchoring is what makes dropping the punctuation safe, and it is
+/// load-bearing rather than tidy. This repository's own prose is the
+/// adversary: agents here routinely print, quote and diff these exact
+/// strings — this very doc comment does — so the state marker is accepted
+/// only at a line start (after a cell glyph or nothing) and never
+/// mid-sentence, and a banner pasted inside a fenced block is skipped
+/// outright. That is what rejects a README walkthrough reading "if you are
+/// not authenticated, run claude auth login", which a bare proximity rule
+/// would fire on: there the state sits mid-sentence, where no rendered
+/// cell ever puts it.
+fn claude_signed_out_cell(compact: &str) -> bool {
+    unfenced_lines(compact).any(|(_, line)| {
+        let cell = line.trim_start_matches(CLAUDE_CELL_GLYPHS);
+        CLAUDE_SIGNED_OUT_MARKERS
+            .iter()
+            .any(|marker| cell.starts_with(marker))
+            && contains_any(cell, CLAUDE_LOGIN_DIRECTIVES)
+    })
 }
 
 /// The rest of a result cell starting at `from`: every following line up to
@@ -649,14 +706,17 @@ pub fn codex_auth_failure(recent_output: &[u8]) -> Option<AuthFailure> {
 }
 
 pub fn claude_auth_failure(recent_output: &[u8]) -> Option<AuthFailure> {
-    let text = strip_ansi_lossy(recent_output).to_ascii_lowercase();
-    let tail = recent_tail(&text, 8 * 1024);
-    let login_required = tail.contains("not authenticated. run `claude auth login`")
-        || tail.contains("not authenticated. run claude auth login")
-        || tail.contains("not authenticated. run /login")
-        || tail.contains("not logged in. run `claude auth login`")
-        || tail.contains("not logged in. run claude auth login")
-        || tail.contains("not logged in. run /login");
+    let stripped = strip_ansi_lossy(recent_output);
+    let recent = recent_tail(&stripped, 8 * 1024);
+    let text = recent.to_ascii_lowercase();
+    let tail = text.as_str();
+    // The signed-out banner is read as a rendered cell, not as a literal:
+    // see [`claude_signed_out_cell`] for why the separator between its two
+    // halves is deliberately unmatched (#1847). The other two branches keep
+    // their literal tables — each is pinned by a fixture of real provider
+    // output, and widening a shape with no evidence behind it is how the
+    // six dead literals got here.
+    let login_required = claude_signed_out_cell(&compact_lower(recent));
     let oauth_expired = (tail.contains("oauth") || tail.contains("authentication"))
         && (tail.contains("expired") || tail.contains("invalid"))
         && (tail.contains("please log in again")

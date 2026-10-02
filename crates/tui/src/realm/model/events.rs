@@ -2379,7 +2379,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // exactly the way a rate-limited one is: the process read its
                 // credential at startup and never re-reads it, so only a
                 // stop-respawn-continue frees it.
-                self.auth_failed_terminals.insert(*terminal_id);
+                self.auth_failed_terminals.insert(
+                    *terminal_id,
+                    super::AuthFailedPane {
+                        display_name: display_name.clone(),
+                        other_session_count: *other_session_count,
+                    },
+                );
                 self.queue_agent_auth_prompt(super::AgentAuthPrompt {
                     terminal_id: *terminal_id,
                     display_name: display_name.clone(),

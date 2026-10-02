@@ -280,7 +280,7 @@ mod agent_auth_recovery_tests {
                 model_label: None,
                 authenticating: false,
             });
-            assert!(!model.auth_failed_terminals.contains(&TerminalId(id)));
+            assert!(!model.auth_failed_terminals.contains_key(&TerminalId(id)));
         }
         assert!(model.auth_prompt_queue.is_empty());
         assert!(model.top_modal().is_none());
@@ -5418,6 +5418,143 @@ snippets:
                 && notice.message.contains("1 parked"),
             "the notice reports both resumes and names the single parked agent: {}",
             notice.message
+        );
+    }
+
+    /// `Shift-K` must not type `continue` into an agent whose login has died
+    /// (#1847). A limited agent and a signed-out one are not the same kind of
+    /// stuck: the first can act on the keystroke and report back, the second
+    /// can do nothing until `/login` happens — so the prompt lands in a dead
+    /// pane and the notice claims a recovery that did not occur.
+    ///
+    /// The healthy limited sibling still resumes in the same press: holding
+    /// back the signed-out pane must not cost the user the bulk action.
+    #[test]
+    fn resume_rate_limited_holds_back_a_signed_out_agent() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        m.ui_defaults.usage_limit_alerts = false;
+        // Both agents are limit-blocked, and that reading is sticky — which
+        // is precisely how the user's path produces this state: they hit the
+        // limit, then logged out and back in on another subscription, so the
+        // credential died underneath a pane still reading `LimitReached`.
+        for (i, key) in keys.iter().enumerate().take(2) {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: key.clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state: AgentState::LimitReached,
+            });
+        }
+        m.handle_daemon_event(IpcEvent::AgentAuthRequired {
+            terminal_id: TerminalId(2),
+            agent_id: "claude".into(),
+            display_name: "Claude Code".into(),
+            reason: "Claude Code authentication is no longer valid.".into(),
+            other_session_count: 0,
+        });
+        // The user dismissed the prompt that arrived with the failure; the
+        // standing record outlives it, which is what lets `Shift-K` re-offer.
+        assert_eq!(m.top_modal(), Some(&Id::AgentAuth));
+        assert!(m.handle_modal_dismissed().is_empty());
+
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        let injected: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt { terminal_id, .. } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            injected,
+            vec![1],
+            "only the agent that can act on `continue` is injected; the \
+             signed-out one is held back: {cmds:?}",
+        );
+        let notice = m.status.notice.as_ref().expect("a notice is shown");
+        assert!(
+            notice.message.contains("resuming 1 stopped agent")
+                && notice.message.contains("1 signed-out agent held back"),
+            "the count names only what was resumed, and says the other was \
+             held back: {}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("resuming 2"),
+            "the notice must never claim to have resumed an agent it did not: {}",
+            notice.message
+        );
+        // Held back is not dropped: the pane is re-offered the sign-in that
+        // is its actual remedy, through the same flow the daemon drives.
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::AgentAuth),
+            "the signed-out pane is routed to re-authentication",
+        );
+        assert!(matches!(
+            m.handle_confirmed(true).as_slice(),
+            [IpcCommand::ReauthenticateAgent {
+                terminal_id: TerminalId(2),
+            }],
+        ));
+    }
+
+    /// The whole target set is signed out — the user's reported case with one
+    /// subscription's worth of agents. There is no resume to report, so the
+    /// notice must say that plainly instead of "resuming N", which is how
+    /// #1847 read as a successful recovery that recovered nothing.
+    #[test]
+    fn resume_rate_limited_with_only_signed_out_agents_resumes_nothing() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        m.ui_defaults.usage_limit_alerts = false;
+        for (i, state) in [AgentState::LimitReached, AgentState::AwaitingReset]
+            .into_iter()
+            .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+            m.handle_daemon_event(IpcEvent::AgentAuthRequired {
+                terminal_id: TerminalId(i as u64 + 1),
+                agent_id: "claude".into(),
+                display_name: "Claude Code".into(),
+                reason: "Claude Code authentication is no longer valid.".into(),
+                other_session_count: 1,
+            });
+        }
+        while m.top_modal().is_some() {
+            assert!(m.handle_modal_dismissed().is_empty());
+        }
+
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "nothing is injected when every target is logged out: {cmds:?}",
+        );
+        let notice = m.status.notice.as_ref().expect("a notice is shown");
+        assert!(
+            notice.message.contains("not resuming 2 signed-out agents"),
+            "the notice says what actually happened: {}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("resuming 2 stopped"),
+            "it must not read as a successful bulk resume: {}",
+            notice.message
+        );
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::AgentAuth),
+            "sign-in is re-offered rather than the press doing nothing",
         );
     }
 

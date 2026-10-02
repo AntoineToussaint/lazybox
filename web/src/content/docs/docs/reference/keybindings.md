@@ -52,7 +52,7 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `.` | focus mode | Maximize the focused workspace's terminal to near-fullscreen behind a slim event header, hiding the sidebar and activity pane. |
 | `Shift-W` | start work | Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane. |
 | `Shift-C` | connect box | Connect to (or disconnect from) the remote box on demand. |
-| `Shift-K` | resume stopped agents | Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike. |
+| `Shift-K` | resume stopped agents | Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike — except an agent whose login has died, which is held back and offered sign-in instead, because 'continue' cannot move a logged-out agent and the notice would otherwise claim a recovery that did not happen. |
 | `Ctrl-k` | recover credit | Select the provider's Wait for credit option for the focused blocked agent, wait for its composer, and submit the configured continuation prompt. |
 | `Shift-P` | activity pane | Cycle the activity pane: full feed → one-line summary (new-activity / failing-CI counts) → hidden → full. |
 | `F8 \| Alt-s \| Ctrl-Alt-s` | text selection | Toggle lazybox's mouse capture so the host terminal regains native text selection (trackpad-select + Cmd-C in agent scrollback). |

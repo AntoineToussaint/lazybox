@@ -270,6 +270,21 @@ impl<T: TerminalAdapter> Model<T> {
     /// never touches that selection). Every limited/parked workspace has a
     /// live agent (the states only come from agent detection), so none fall
     /// through to the spawn / skip cases.
+    ///
+    /// A pane whose login has died is held back and sent to sign-in instead
+    /// (#1847). This is the one exception to the "the key does the thing;
+    /// the agent reports" policy below, and it is not a softening of it:
+    /// that policy is sound because a *parked* agent can act on `continue`
+    /// and report what happened. A logged-out one cannot act on anything —
+    /// the keystroke lands in a pane that will answer `/login` and nothing
+    /// else — so there is no report to wait for, and the delivery would
+    /// only produce a notice claiming a recovery that did not occur.
+    ///
+    /// This is exactly the user's reported path: hit a limit, log out, log
+    /// back in on another subscription, and the limited agents are now
+    /// *logged out* while their `LimitReached` / `AwaitingReset` reading is
+    /// sticky — so they are still in the target set, holding a credential
+    /// their process read at startup and will never re-read.
     pub(super) fn resume_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
         // Every limited agent: the alerting `LimitReached` ones AND the
         // parked `AwaitingReset` ones (Claude's auto-continue wait). The
@@ -280,11 +295,40 @@ impl<T: TerminalAdapter> Model<T> {
         // and submit `continue`. If the account is still limited, Claude
         // parks again and says so; if credentials changed or the window
         // reset, it works. The key does the thing; the agent reports.
-        let terminals = self.sidebar.recoverable_terminals();
-        // Named in the notice so the count on screen matches the ☾ badges.
-        let parked = self.sidebar.awaiting_reset_terminals().len();
-        if terminals.is_empty() {
+        let recoverable = self.sidebar.recoverable_terminals();
+        if recoverable.is_empty() {
             self.flash_hint("no stopped agents to resume");
+            return Vec::new();
+        }
+        // Split before delivering anything: a signed-out pane is stuck on a
+        // dead credential, and `continue` typed into it is not a weaker fix
+        // than sign-in, it is no fix at all.
+        let (signed_out, terminals): (Vec<_>, Vec<_>) = recoverable
+            .iter()
+            .copied()
+            .partition(|id| self.auth_failed_terminals.contains_key(id));
+        // Counted over what actually gets the keystroke, not over every ☾
+        // badge on screen: the notice says these parked agents "got
+        // `continue` too", and a parked agent held back for sign-in did not.
+        let awaiting_reset = self.sidebar.awaiting_reset_terminals();
+        let parked = terminals
+            .iter()
+            .filter(|id| awaiting_reset.contains(id))
+            .count();
+        if terminals.is_empty() {
+            // Everything in the target set is logged out, so there is no
+            // resume to report at all — only the sign-in that is the actual
+            // remedy. Saying "resuming 0" here, or saying nothing, is how
+            // #1847 looked like a successful recovery.
+            let blocked = signed_out.len();
+            let plural = if blocked == 1 { "" } else { "s" };
+            self.route_signed_out_to_reauthentication(&signed_out);
+            self.flash_info(format!(
+                "not resuming {blocked} signed-out agent{plural} — a logged-out agent \
+                 can't act on `continue`; sign in again to recover {}",
+                if blocked == 1 { "it" } else { "them" }
+            ));
+            self.redraw = true;
             return Vec::new();
         }
         let mut cmds = Vec::new();
@@ -302,8 +346,23 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let resumed = terminals.len();
         let plural = if resumed == 1 { "" } else { "s" };
+        // Signed-out panes are reported as held back, never folded into the
+        // resumed count — the count is the whole value of this notice.
+        let held_back = if signed_out.is_empty() {
+            String::new()
+        } else {
+            let blocked = signed_out.len();
+            let blocked_plural = if blocked == 1 { "" } else { "s" };
+            self.route_signed_out_to_reauthentication(&signed_out);
+            format!(
+                "; {blocked} signed-out agent{blocked_plural} held back for sign-in, \
+                 which `continue` can't substitute for"
+            )
+        };
         if parked == 0 {
-            self.flash_info(format!("resuming {resumed} stopped agent{plural}"));
+            self.flash_info(format!(
+                "resuming {resumed} stopped agent{plural}{held_back}"
+            ));
         } else {
             // The restart key is remappable (`ui.action_keys.restart_rate_limited`);
             // resolve the effective chord so the notice never names a key the
@@ -315,11 +374,46 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info(format!(
                 "resuming {resumed} stopped agent{plural} ({parked} parked on the \
                  auto-continue wait got `continue` too; {restart_keys} restarts them with \
-                 fresh credentials if they park again)"
+                 fresh credentials if they park again){held_back}"
             ));
         }
         self.redraw = true;
         cmds
+    }
+
+    /// Send each signed-out pane back to the re-authentication flow the
+    /// daemon already owns (#1847).
+    ///
+    /// Deliberately the *existing* route rather than a new one:
+    /// `AgentAuthRequired` mounts this same prompt when the failure is first
+    /// detected, and the user may have dismissed it — so `Shift-K` re-offers
+    /// it instead of inventing a second way to sign in. `Enter` there runs
+    /// `ReauthenticateAgent`, which is login-only (lazybox never runs the
+    /// provider's `logout`, #1376) and resumes the conversation afterwards;
+    /// the daemon's post-sign-in sweep then picks up the peers riding the
+    /// same machine-wide login, which is why this does not fan a command out
+    /// per terminal itself.
+    ///
+    /// [`Self::queue_agent_auth_prompt`] dedupes per terminal and mounts one
+    /// at a time, so repeated presses cannot stack modals, and a pane whose
+    /// prompt is already up is left alone.
+    fn route_signed_out_to_reauthentication(&mut self, signed_out: &[lazybox_ipc::TerminalId]) {
+        let prompts: Vec<_> = signed_out
+            .iter()
+            .filter_map(|terminal_id| {
+                let pane = self.auth_failed_terminals.get(terminal_id)?;
+                Some(super::AgentAuthPrompt {
+                    terminal_id: *terminal_id,
+                    display_name: pane.display_name.clone(),
+                    other_session_count: pane.other_session_count,
+                    retry: false,
+                    error: None,
+                })
+            })
+            .collect();
+        for prompt in prompts {
+            self.queue_agent_auth_prompt(prompt);
+        }
     }
 
     /// `a R` — restart every limited agent so it picks up fresh credentials
@@ -348,7 +442,7 @@ impl<T: TerminalAdapter> Model<T> {
         let mut terminals = self.sidebar.recoverable_terminals();
         let extra: Vec<_> = self
             .auth_failed_terminals
-            .iter()
+            .keys()
             .copied()
             .filter(|id| live.contains(id) && !terminals.contains(id))
             .collect();
@@ -462,7 +556,7 @@ impl<T: TerminalAdapter> Model<T> {
         // A live auth-failed pane is stuck exactly the way a rate-limited one
         // is (#1719) whatever its screen reading says, and `a R` already
         // restarts it — so it resolves as blocked before the state match.
-        let signed_out = self.auth_failed_terminals.contains(&terminal_id);
+        let signed_out = self.auth_failed_terminals.contains_key(&terminal_id);
         let continue_work = match state {
             _ if signed_out => true,
             // `Stalled` joins the blocked pair: the turn is already lost to

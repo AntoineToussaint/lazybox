@@ -273,6 +273,11 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     }
 
     /// Scroll the terminal viewport.
+    ///
+    /// [`ScrollViewport::Row`] is the absolute verb and shares its row
+    /// space with [`Scrollbar::offset`], so an offset read back from
+    /// [`Terminal::scrollbar`] can be written here to put the viewport
+    /// exactly where it was.
     pub fn scroll_viewport(&mut self, scroll: ScrollViewport) {
         unsafe { ffi::ghostty_terminal_scroll_viewport(self.inner.as_raw(), scroll.into()) }
     }
@@ -594,6 +599,23 @@ pub enum ScrollViewport {
     Bottom,
     /// Scroll by a delta amount (up is negative).
     Delta(isize),
+    /// Scroll to an absolute row offset from the top of the scrollable
+    /// area. Row 0 is the top of the scrollback and the requested row
+    /// becomes the first visible row of the viewport.
+    ///
+    /// This is the **only absolute** verb, and it is the one that makes a
+    /// viewport position writable rather than merely readable: the row
+    /// space is the same one [`Scrollbar::offset`] reports, so an offset
+    /// read from [`Terminal::scrollbar`] round-trips back through here
+    /// unchanged. Without it a caller that wants to put the viewport
+    /// somewhere specific has to re-derive the move as a [`Self::Delta`]
+    /// from wherever the viewport happens to be, which is only correct
+    /// while nothing has moved underneath it.
+    ///
+    /// The value is clamped by libghostty so the viewport never scrolls
+    /// past the top of the active area; a terminal with no scrollback
+    /// (the alternate screen is active) always stays on the active area.
+    Row(usize),
 }
 impl From<ScrollViewport> for ffi::TerminalScrollViewport {
     fn from(value: ScrollViewport) -> Self {
@@ -611,6 +633,14 @@ impl From<ScrollViewport> for ffi::TerminalScrollViewport {
                 value: {
                     let mut v = ffi::TerminalScrollViewportValue::default();
                     v.delta = delta;
+                    v
+                },
+            },
+            ScrollViewport::Row(row) => Self {
+                tag: ffi::TerminalScrollViewportTag::ROW,
+                value: {
+                    let mut v = ffi::TerminalScrollViewportValue::default();
+                    v.row = row;
                     v
                 },
             },
@@ -1164,5 +1194,28 @@ handlers! {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ABI tag and union field each scroll verb maps to, pinned so a
+    /// reordering upstream cannot silently retarget a scroll. Behaviour
+    /// against a real terminal lives in
+    /// `tests/scroll_viewport_row.rs`; this is the conversion alone.
+    #[test]
+    fn every_scroll_verb_maps_to_its_abi_tag() {
+        let top: ffi::TerminalScrollViewport = ScrollViewport::Top.into();
+        assert_eq!(top.tag, ffi::TerminalScrollViewportTag::TOP);
+        let bottom: ffi::TerminalScrollViewport = ScrollViewport::Bottom.into();
+        assert_eq!(bottom.tag, ffi::TerminalScrollViewportTag::BOTTOM);
+        let delta: ffi::TerminalScrollViewport = ScrollViewport::Delta(-7).into();
+        assert_eq!(delta.tag, ffi::TerminalScrollViewportTag::DELTA);
+        assert_eq!(unsafe { delta.value.delta }, -7);
+        let row: ffi::TerminalScrollViewport = ScrollViewport::Row(42).into();
+        assert_eq!(row.tag, ffi::TerminalScrollViewportTag::ROW);
+        assert_eq!(unsafe { row.value.row }, 42);
     }
 }

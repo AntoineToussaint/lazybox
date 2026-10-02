@@ -43,6 +43,44 @@ laid out at one size reparsed at another duplicate lines in scrollback. Three
 separate client-side fixes recurred before the size authority moved to the
 daemon; do not reintroduce a local guess.
 
+## The viewport pin has one owner across writes, not just across scrolls
+
+`TerminalVt::scroll` is the single owner of viewport *movement* (#42/#371) and
+it stays that way: nothing outside it calls libghostty's `scroll_viewport`, and
+`tests/terminal_scroll.rs::scroll_viewport_has_a_single_owner` brace-matches its
+body and fails the build on an escapee. A new verb added *inside* the owner is
+fine; a call anywhere else is not.
+
+That owner was only ever half the problem. `scroll` moves the pin; `feed`
+mutates the content the pin points into; before #1909 neither said anything
+about the other, so a parked viewport had no owner across writes. The pairing
+is now explicit:
+
+- `TerminalVt::anchor` holds the pin's *meaning* — `Bottom`, or parked N rows
+  above the live bottom. Rows-above-bottom, not an absolute row, because a
+  rebuild changes how deep the history above the tail is and an absolute row
+  would then name different content.
+- `feed` **re-derives** the anchor after every write. It does not re-impose it:
+  libghostty keeps a real content pin across appends, so three new lines under
+  a viewport parked 7 rows up correctly leave the user on the same rows, now 10
+  above the bottom. Forcing 7 back would drag them down the buffer per chunk.
+- `TerminalSlot::rebuild_grid` is the one place a grid is replaced wholesale,
+  and its `GridPin` argument makes each site state what happens to the pin:
+  `Keep` re-asserts the anchor (the capture adoption, which only deepens
+  history above the tail), `LiveBottom` returns to the tail on purpose (the
+  ring resync, whose replay may be shallower than what it replaces). A rebuild
+  that fails leaves both the grid and the pin alone.
+- `restore_anchor` places the pin **absolutely**, via `ScrollRequest::ToRow`
+  over `libghostty_vt::ScrollViewport::Row`. That ABI verb shares its row space
+  with `Scrollbar.offset`, so a position read off the VT is written back
+  unchanged. The previous delta restore worked only because a fresh grid starts
+  at the bottom — every restore was a guess re-derived from a distance.
+
+Asserting the *distance* is not asserting the pin: the pre-#1909 test checked
+that the distance survived a rebuild, and it did, while the content at that
+distance moved. A viewport assertion compares the rendered rows
+(`viewport_rows`), not `grid_text` and not a scrollbar arithmetic.
+
 ## A capture never replaces output it predates
 
 `apply_scrollback` swaps the whole grid for the daemon's tmux capture, and
@@ -54,6 +92,17 @@ that retained stream can no longer be spliced on — it outran its cap, or a
 ring resync rebuilt the grid from another baseline — the capture is *refused*:
 the local grid holds every byte, it is only shallower, and the next upward
 scroll re-captures.
+
+A delivered batch is a **run** of chunks: the client coalesces adjacent output
+(`realm/model/helpers.rs::coalesce_adjacent_output`) and keeps only the run's
+`first_seq..=seq`, so the byte offset where any one chunk inside it ends is
+gone. A batch is therefore wholly covered by the capture, wholly uncovered, or
+straddling its watermark and **unsplittable** — and re-feeding a straddling
+batch whole re-draws the rows the capture already holds. That was #1909: the
+same block twice, the second copy continuing on the capture's unterminated last
+row (hence "truncated at the same word"), and the parked viewport dragged down
+by the duplicated row count because the anchor is measured from a tail that just
+grew. A straddling batch refuses the capture, like a hole does.
 
 ## Which button a Confirm defaults to is a per-site decision
 

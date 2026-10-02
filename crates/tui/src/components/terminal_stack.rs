@@ -560,7 +560,7 @@ pub enum ScrollOutcome {
 /// A viewport scroll request — the entire vocabulary the scroll owner
 /// (`TerminalVt::scroll`) accepts. Every scroll surface (wheel,
 /// `Shift-PgUp/PgDn`, `Shift-Home/End`, the per-tile hover scroll)
-/// speaks only these three verbs; nothing outside `TerminalVt::scroll`
+/// speaks only these verbs; nothing outside `TerminalVt::scroll`
 /// calls libghostty's `scroll_viewport` directly. That single choke
 /// point is what makes a silent no-op impossible (the #42/#371 promise):
 /// a request either moves the viewport or comes back with a typed
@@ -574,10 +574,61 @@ pub enum ScrollRequest {
     Top,
     /// Jump the viewport to the live bottom.
     Bottom,
+    /// Put the viewport on an **absolute** scrollback row — the row
+    /// space `scrollbar().offset` reports, so a position read back from
+    /// the VT can be written to it unchanged.
+    ///
+    /// Not a user-facing gesture: no key or wheel produces it. It exists
+    /// for `TerminalVt::restore_anchor`, which has to re-place the pin on
+    /// a grid that was just rebuilt underneath it. Every other verb is
+    /// relative, and a relative restore is only correct while the thing it
+    /// is relative to has not moved — which, across a rebuild, is exactly
+    /// what did move (#1909).
+    ToRow(u64),
+}
+
+/// Where a terminal's viewport is pinned, expressed in the one unit that
+/// still means something after the grid is rebuilt underneath it: rows
+/// between the bottom of the viewport and the live bottom.
+///
+/// This is the pin's *owner-side* representation, and it is deliberately
+/// not an absolute row. An absolute row names a position in one
+/// particular grid; a rebuild (a ring resync, a deep-scrollback capture
+/// adoption) produces a different grid whose history above the live
+/// content has a different depth, so the same integer names different
+/// content. Distance from the live bottom survives that, because a
+/// rebuild only ever changes the history *above* the live tail — an
+/// invariant [`TerminalSlot::rebuild_grid`] is responsible for holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewportAnchor {
+    /// Following the live tail: new output scrolls the view.
+    Bottom,
+    /// Parked `rows_above_bottom` rows above the live bottom. The user
+    /// is reading history and new output must not move what they see.
+    Parked { rows_above_bottom: u64 },
+}
+
+/// What a wholesale grid rebuild does to the viewport pin. Passed to
+/// [`TerminalSlot::rebuild_grid`] so each rebuild site *states* its
+/// policy instead of inheriting whatever a fresh parser happens to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridPin {
+    /// Re-assert the anchor the old grid carried: the user was reading
+    /// history and the rebuild only deepened what is above them.
+    Keep,
+    /// Return to the live tail on purpose, because the rebuild cannot
+    /// promise the old anchor still names anything.
+    LiveBottom,
 }
 
 /// Classify the observed state transition after a request that passed
 /// the empty-scrollback and boundary preflight checks.
+///
+/// An unchanged offset is [`ScrollOutcome::Stalled`] for every verb: the
+/// preflight has already filtered out the requests that legitimately
+/// cannot move (empty scrollback, already at the requested boundary,
+/// [`ScrollRequest::ToRow`] onto the row the viewport is already on), so
+/// a request that reaches here and does not move is a broken VT scroll.
 fn classify_scroll_transition(
     request: ScrollRequest,
     before: vt::terminal::Scrollbar,
@@ -597,6 +648,18 @@ fn classify_scroll_transition(
             total: after.total,
             len: after.len,
         }
+    }
+}
+
+/// The anchor a scrollbar reading describes: following the live tail, or
+/// parked that many rows above it. One definition, used by every site
+/// that records or re-derives the pin.
+fn anchor_of(bar: vt::terminal::Scrollbar) -> ViewportAnchor {
+    let rows_above_bottom = bar.total.saturating_sub(bar.offset.saturating_add(bar.len));
+    if rows_above_bottom == 0 {
+        ViewportAnchor::Bottom
+    } else {
+        ViewportAnchor::Parked { rows_above_bottom }
     }
 }
 
@@ -1289,11 +1352,21 @@ const SCROLLBACK_CATCHUP_CAP: usize = 4 * 1024 * 1024;
 /// suffix it does not cover.
 #[derive(Default)]
 struct ScrollbackCatchup {
-    /// `(end_seq, cols, rows, bytes)` per `TerminalOutput` batch, in
-    /// delivery order. The size travels with the bytes: a batch is
-    /// re-fed at the PTY size it was produced for, never the grid's
+    /// `(first_seq, end_seq, cols, rows, bytes)` per `TerminalOutput`
+    /// batch, in delivery order. The size travels with the bytes: a batch
+    /// is re-fed at the PTY size it was produced for, never the grid's
     /// current one (#1547).
-    batches: Vec<(u64, u16, u16, Vec<u8>)>,
+    ///
+    /// `first_seq` is what makes the capture's watermark answerable. A
+    /// delivered batch is a *run* of chunks the client coalesced
+    /// (`coalesce_adjacent_output`), and coalescing keeps only the run's
+    /// seq range — the byte offset where any one chunk inside it ends is
+    /// gone. So a batch is either wholly covered by the capture, wholly
+    /// uncovered, or **straddling it and unsplittable**; without
+    /// `first_seq` the third case is indistinguishable from the second
+    /// and gets re-fed whole, re-drawing rows the capture already holds
+    /// (#1909).
+    batches: Vec<(u64, u64, u16, u16, Vec<u8>)>,
     bytes: usize,
     /// Set once what survives here is no longer a faithful continuation
     /// of the capture in flight — [`SCROLLBACK_CATCHUP_CAP`] was hit and
@@ -1305,7 +1378,7 @@ struct ScrollbackCatchup {
 }
 
 impl ScrollbackCatchup {
-    fn record(&mut self, seq: u64, cols: u16, rows: u16, bytes: &[u8]) {
+    fn record(&mut self, first_seq: u64, seq: u64, cols: u16, rows: u16, bytes: &[u8]) {
         if self.unusable {
             return;
         }
@@ -1314,13 +1387,27 @@ impl ScrollbackCatchup {
             return;
         }
         self.bytes += bytes.len();
-        self.batches.push((seq, cols, rows, bytes.to_vec()));
+        self.batches
+            .push((first_seq, seq, cols, rows, bytes.to_vec()));
     }
 
     fn invalidate(&mut self) {
         self.unusable = true;
         self.batches.clear();
         self.bytes = 0;
+    }
+
+    /// Whether any retained batch spans `watermark` — i.e. the capture
+    /// already drew some of that batch's chunks and not others.
+    ///
+    /// Such a batch cannot be split (see [`Self::batches`]), so there is
+    /// no lossless way to splice it onto the capture: re-feeding it whole
+    /// duplicates the covered prefix on screen, and dropping it loses
+    /// every chunk after the watermark. The capture is refused instead.
+    fn straddles(&self, watermark: u64) -> bool {
+        self.batches
+            .iter()
+            .any(|(first_seq, end_seq, _, _, _)| *first_seq <= watermark && *end_seq > watermark)
     }
 }
 
@@ -1446,6 +1533,67 @@ impl TerminalSlot {
                 self.vt.feed(&bytes[start..end]);
             }
         }
+    }
+
+    /// Replace this slot's grid wholesale, stating in one place what
+    /// happens to the viewport pin.
+    ///
+    /// Two paths rebuild a grid — the ring replay in
+    /// [`TerminalStack::resync_terminal`] and the deep-scrollback capture
+    /// adoption in [`TerminalStack::apply_scrollback`] — and a rebuild is
+    /// the one content mutation [`TerminalVt::feed`] cannot cover: the
+    /// parser that held the pin is gone, and the fresh one starts at the
+    /// live bottom. Both come through here so neither can drop the user's
+    /// place by omission, which is how #1909 kept coming back.
+    ///
+    /// `pin` is the policy, and it is an argument rather than a default
+    /// because the two sites genuinely differ:
+    ///
+    /// - [`GridPin::Keep`] for the capture adoption. It is sound only
+    ///   because that rebuild grows history *above* the live tail and
+    ///   leaves the tail itself alone — the invariant the anchor's unit
+    ///   (rows above the bottom) is measured against. A rebuild that
+    ///   changes the tail breaks the anchor's meaning, which is why a
+    ///   capture whose racing output cannot be re-fed without
+    ///   re-drawing rows is refused rather than adopted.
+    /// - [`GridPin::LiveBottom`] for the ring resync. That replay is a
+    ///   bounded tail of dropped output and may hold *less* history than
+    ///   the grid it replaces, so no row in it reliably means "where the
+    ///   user was". Returning to the tail is a decision, not an accident
+    ///   (`docs/terminal-scrolling.md`).
+    /// `rebuild` returns whether it actually replaced the grid. `false`
+    /// leaves the pin and the cached frame untouched: a rebuild that
+    /// could not happen (a libghostty allocation failure) must degrade to
+    /// the last coherent grid *including* the viewport the user was on,
+    /// not snap them somewhere on the way out.
+    fn rebuild_grid(&mut self, pin: GridPin, rebuild: impl FnOnce(&mut Self) -> bool) -> bool {
+        let carried = self.vt.anchor;
+        if !rebuild(self) {
+            return false;
+        }
+        // The rebuild's own feeds re-derived the anchor against the fresh
+        // grid, where it means nothing yet — restore the policy's value
+        // and then put the pin on it.
+        self.vt.anchor = match pin {
+            GridPin::Keep => carried,
+            GridPin::LiveBottom => ViewportAnchor::Bottom,
+        };
+        let outcome = self.vt.restore_anchor();
+        if matches!(
+            outcome,
+            ScrollOutcome::Stalled { .. } | ScrollOutcome::StateUnavailable
+        ) {
+            tracing::error!(
+                ?pin,
+                ?outcome,
+                anchor = ?self.vt.anchor,
+                "viewport anchor could not be re-asserted after a grid rebuild"
+            );
+        }
+        // A fresh parser restarts its revision counter — a stale cached
+        // frame keyed to the old counter must never blit.
+        self.last_frame_rev = None;
+        true
     }
 
     /// The daemon stamped its PTY as `cols` × `rows`: size the grid to
@@ -1626,6 +1774,23 @@ struct TerminalVt {
     /// paint, the grid literally cannot differ — skipping the full
     /// per-cell FFI walk is sound (2026-08-19 audit, U1).
     content_rev: u64,
+    /// Where the user has parked this terminal's viewport — the pin's
+    /// meaning, owned here rather than re-derived at each call site.
+    ///
+    /// libghostty owns the pin *mechanically* (there is still no
+    /// lazybox-side offset field; `scrollbar()` is read on demand) and it
+    /// holds a real content pin across appends, compensating when the
+    /// ring evicts the oldest rows. What it cannot do is survive its own
+    /// replacement: a rebuild throws the grid away and the fresh parser
+    /// starts at the live bottom. This field is what carries the user's
+    /// place across that boundary, and it is the contract [`Self::feed`]
+    /// and [`Self::scroll`] state about each other — `scroll` moves the
+    /// pin and records where it put it, `feed` mutates the content under
+    /// the pin and re-derives the anchor so it keeps naming the same
+    /// place. Before #1909 neither said anything about the other: the
+    /// choke point made *scrolling* total and observable and left the
+    /// pin's meaning across *writes* owned by nobody.
+    anchor: ViewportAnchor,
     /// Deterministic fault injection for the resync retry contract.
     #[cfg(test)]
     fail_next_reset: bool,
@@ -1654,15 +1819,75 @@ impl TerminalVt {
             shadow: None,
             last_visible_cursor: None,
             content_rev: 0,
+            anchor: ViewportAnchor::Bottom,
             #[cfg(test)]
             fail_next_reset: false,
             _not_send: std::marker::PhantomData,
         }))
     }
 
+    /// Write `bytes` into the parser, then re-derive the viewport
+    /// anchor.
+    ///
+    /// A write is the other mutation of the viewport's meaning: it moves
+    /// the content the pin points into. libghostty keeps the pin on the
+    /// same *content* across an append (verified on #1909: park
+    /// mid-scrollback, feed, and the visible rows are byte-identical), so
+    /// the anchor is **re-derived, never re-imposed** — a parked viewport
+    /// that was 5 rows above the bottom is 8 rows above it after 3 lines
+    /// arrive, and that is correct, not drift. Forcing the old number
+    /// back would be the bug: it would drag the user down the buffer on
+    /// every chunk.
+    ///
+    /// What this buys is that [`Self::anchor`] is always current, so the
+    /// rebuild paths have a trustworthy value to re-assert instead of
+    /// taking a one-shot reading at the moment they happen to run.
     fn feed(&mut self, bytes: &[u8]) {
         self.content_rev = self.content_rev.wrapping_add(1);
         self.terminal.vt_write(bytes);
+        self.observe_anchor();
+    }
+
+    /// Re-derive [`Self::anchor`] from the live scrollbar. Called after
+    /// every mutation that can move the viewport or the content under it.
+    /// A terminal whose viewport sits at (or past) the live bottom is
+    /// following the tail; anything else is parked.
+    ///
+    /// A scrollbar read that fails leaves the previous anchor in place:
+    /// a transient FFI error must not silently convert "parked" into
+    /// "following the tail" and snap the user to the bottom on the next
+    /// rebuild.
+    fn observe_anchor(&mut self) {
+        let Ok(bar) = self.terminal.scrollbar() else {
+            return;
+        };
+        self.anchor = anchor_of(bar);
+    }
+
+    /// Put the viewport back where [`Self::anchor`] says the user was,
+    /// after the grid underneath it was replaced.
+    ///
+    /// Goes through the scroll owner like every other viewport movement,
+    /// using the absolute [`ScrollRequest::ToRow`] verb: the target is
+    /// computed from the *new* grid's own extent, so it does not depend
+    /// on where the fresh parser happened to leave the pin. The previous
+    /// shape — a `By(-distance)` delta that was only correct because a
+    /// fresh grid starts at the bottom — is what made every restore a
+    /// guess (#1909, VERIFIED 1: the client could read an absolute
+    /// position and not write one).
+    fn restore_anchor(&mut self) -> ScrollOutcome {
+        let rows_above_bottom = match self.anchor {
+            ViewportAnchor::Bottom => return self.scroll(ScrollRequest::Bottom),
+            ViewportAnchor::Parked { rows_above_bottom } => rows_above_bottom,
+        };
+        let Ok(bar) = self.terminal.scrollbar() else {
+            tracing::error!("terminal scroll state unavailable restoring the viewport anchor");
+            return ScrollOutcome::StateUnavailable;
+        };
+        let max_offset = bar.total.saturating_sub(bar.len);
+        self.scroll(ScrollRequest::ToRow(
+            max_offset.saturating_sub(rows_above_bottom),
+        ))
     }
 
     /// THE one and only mutation of this terminal's viewport pin. Every
@@ -1676,6 +1901,13 @@ impl TerminalVt {
     /// silently no-op.
     /// That single choke point is the #42/#371 encapsulation: one owner
     /// of scroll state, and it cannot fail quietly.
+    ///
+    /// It is also where [`Self::anchor`] is *set*: a move here is the
+    /// user choosing a place to read, and every content mutation after it
+    /// only re-derives the anchor to keep naming that same place
+    /// ([`Self::feed`]). That pairing is the half #371 left open — the
+    /// owner made scrolling total and observable, and said nothing about
+    /// what a write does to the pin it had just moved (#1909).
     fn scroll(&mut self, request: ScrollRequest) -> ScrollOutcome {
         if matches!(request, ScrollRequest::By(0)) {
             return ScrollOutcome::Noop;
@@ -1690,6 +1922,16 @@ impl TerminalVt {
         }
 
         let max_offset = before.total.saturating_sub(before.len);
+        // An absolute request is clamped to the grid it is being applied
+        // to before anything else looks at it, so the preflight below and
+        // the outcome classification both reason about the row the
+        // viewport will actually land on rather than the one asked for.
+        // libghostty clamps too; doing it here as well is what keeps a
+        // clamped request from being reported as `Stalled`.
+        let request = match request {
+            ScrollRequest::ToRow(row) => ScrollRequest::ToRow(row.min(max_offset)),
+            other => other,
+        };
         let boundary = match request {
             ScrollRequest::By(delta) if delta < 0 && before.offset == 0 => {
                 Some(ScrollBoundary::Top)
@@ -1709,6 +1951,12 @@ impl TerminalVt {
                 len: before.len,
             };
         }
+        // The viewport is already on the requested row: nothing to do,
+        // and reporting it as `Stalled` would make a correct restore look
+        // like a broken VT scroll.
+        if matches!(request, ScrollRequest::ToRow(row) if row == before.offset) {
+            return ScrollOutcome::Noop;
+        }
 
         self.content_rev = self.content_rev.wrapping_add(1);
         match request {
@@ -1721,11 +1969,22 @@ impl TerminalVt {
             ScrollRequest::Bottom => self
                 .terminal
                 .scroll_viewport(vt::terminal::ScrollViewport::Bottom),
+            // The absolute verb (#1909): the row space is `scrollbar()`'s
+            // own, so the pin lands exactly where it was read from.
+            ScrollRequest::ToRow(row) => {
+                self.terminal
+                    .scroll_viewport(vt::terminal::ScrollViewport::Row(
+                        usize::try_from(row).unwrap_or(usize::MAX),
+                    ))
+            }
         }
         let Ok(after) = self.terminal.scrollbar() else {
             tracing::error!(?request, "terminal scroll state unavailable after request");
             return ScrollOutcome::StateUnavailable;
         };
+        // The user moved the pin deliberately: this is where the anchor
+        // is set, and every later write only re-derives it.
+        self.anchor = anchor_of(after);
         let outcome = classify_scroll_transition(request, before, after);
         if let ScrollOutcome::Stalled {
             offset, total, len, ..
@@ -3596,7 +3855,7 @@ impl TerminalStack {
         // `apply_scrollback` puts back whatever the capture's watermark
         // says it missed.
         if let Some(catchup) = slot.scrollback_catchup.as_mut() {
-            catchup.record(seq, cols, rows, bytes);
+            catchup.record(first_seq, seq, cols, rows, bytes);
         }
         slot.last_seq = seq;
     }
@@ -3658,7 +3917,18 @@ impl TerminalStack {
         if !slot.sync.is_desynced() && seq == slot.last_seq {
             return;
         }
-        if !slot.vt.reset() {
+        // One rebuild owner (`rebuild_grid`), so the pin policy is stated
+        // rather than inherited: a ring replay is a bounded tail of
+        // dropped output and may be shallower than the grid it replaces,
+        // so the viewport deliberately returns to the live bottom.
+        let adopted = slot.rebuild_grid(GridPin::LiveBottom, |slot| {
+            if !slot.vt.reset() {
+                return false;
+            }
+            slot.feed_sized(replay, sizes);
+            true
+        });
+        if !adopted {
             // The replay was authoritative, but the local parser could
             // not adopt it. Keep the last coherent grid and immediately
             // request another replay; leaving the old request latch set
@@ -3675,10 +3945,6 @@ impl TerminalStack {
             self.pending_resync_requests.push(id);
             return;
         }
-        slot.feed_sized(replay, sizes);
-        // The reset parser restarted its revision counter — a stale
-        // cached frame keyed to the old counter must never blit.
-        slot.last_frame_rev = None;
         // Drop any half-buffered clipboard sequence — the stream is being
         // rebuilt from the ring and we don't re-forward OSC 52 here.
         slot.osc52_carry.clear();
@@ -3763,6 +4029,25 @@ impl TerminalStack {
             );
             return;
         }
+        // #1909, the duplicate-block cause. A delivered batch is a run of
+        // coalesced chunks and the client kept only its seq range, so a
+        // batch spanning the capture's watermark cannot be cut at it.
+        // Re-feeding it whole re-draws the rows the capture already holds
+        // — the same lines twice, the second cut at the same word, which
+        // is the reported symptom — and it lengthens the grid below the
+        // user's parked anchor, dragging their view down by exactly the
+        // duplicated row count. Refuse the capture, as for a hole: the
+        // local grid holds every byte and is only shallower, and the next
+        // upward scroll re-captures.
+        if catchup.as_ref().is_some_and(|c| c.straddles(seq)) {
+            tracing::debug!(
+                terminal_id = ?id,
+                seq,
+                "deep-scrollback capture refused — a delivered batch straddles its watermark \
+                 and cannot be split at it"
+            );
+            return;
+        }
         let t = &slot.vt.terminal;
         // Pre-flight the rebuild in a scratch parser at the same width
         // and adopt it when it is DEEPER than the current grid, or when
@@ -3802,26 +4087,11 @@ impl TerminalStack {
             .iter()
             .filter_map(|m| t.mode(*m).ok().map(|on| (m.value(), on)))
             .collect();
-        let dist_from_bottom = t
-            .scrollbar()
-            .ok()
-            .map(|b| b.total.saturating_sub(b.offset + b.len))
-            .unwrap_or(0);
-        // Adopt the scratch parser we already built and fed instead of
-        // resetting `slot.vt` and re-parsing the capture a second time — a
-        // deep capture is multiple megabytes and the pre-flight already did
-        // the full parse. Dropping the old parser here is the same grid
-        // replacement `reset()` performed, minus the wasted second pass.
-        slot.vt = scratch;
-        // The fresh parser restarts its revision counter — a stale
-        // cached frame keyed to the old counter must never blit.
-        slot.last_frame_rev = None;
         let mut modes = Vec::with_capacity(preserved.len() * 8);
         for (value, on) in preserved {
             let flag = if on { 'h' } else { 'l' };
             modes.extend_from_slice(format!("\x1b[?{value}{flag}").as_bytes());
         }
-        slot.vt.feed(&modes);
         // Everything the capture missed, in delivery order and each run
         // at the PTY size it was produced for. A batch straddling the
         // watermark is re-fed whole: re-painting cells the capture
@@ -3830,15 +4100,33 @@ impl TerminalStack {
         // These bytes were OSC 52-forwarded on first delivery, so they
         // go straight into the parser — `forward_osc52` must not see
         // them twice.
-        let uncovered: Vec<&(u64, u16, u16, Vec<u8>)> = catchup
+        let uncovered: Vec<&(u64, u64, u16, u16, Vec<u8>)> = catchup
             .iter()
             .flat_map(|c| c.batches.iter())
-            .filter(|(end_seq, _, _, _)| *end_seq > seq)
+            .filter(|(_, end_seq, _, _, _)| *end_seq > seq)
             .collect();
-        for (_, cols, rows, bytes) in &uncovered {
-            slot.adopt_pty_size(*cols, *rows);
-            slot.vt.feed(bytes);
-        }
+        // One owner for the pin across the replacement (`rebuild_grid`):
+        // the user is mid-scroll — that is what triggered this fetch — and
+        // the rebuild only deepens the history above them, so their anchor
+        // is re-asserted on the new grid rather than re-derived from a
+        // distance measured a moment earlier. The straddle refusal above
+        // is what keeps `GridPin::Keep` honest: nothing is appended below
+        // the tail the anchor is measured from.
+        slot.rebuild_grid(GridPin::Keep, |slot| {
+            // Adopt the scratch parser we already built and fed instead of
+            // resetting `slot.vt` and re-parsing the capture a second time
+            // — a deep capture is multiple megabytes and the pre-flight
+            // already did the full parse. Dropping the old parser here is
+            // the same grid replacement `reset()` performed, minus the
+            // wasted second pass.
+            slot.vt = scratch;
+            slot.vt.feed(&modes);
+            for (_, _, cols, rows, bytes) in &uncovered {
+                slot.adopt_pty_size(*cols, *rows);
+                slot.vt.feed(bytes);
+            }
+            true
+        });
         if !uncovered.is_empty() {
             tracing::debug!(
                 terminal_id = ?id,
@@ -3847,14 +4135,6 @@ impl TerminalStack {
                 batches = uncovered.len(),
                 "re-fed live output the deep-scrollback capture predates"
             );
-        }
-        if dist_from_bottom > 0 {
-            // Through the single scroll owner; the restore is
-            // best-effort (a capture shallower than the old offset
-            // simply lands at the top).
-            let _ = slot.vt.scroll(ScrollRequest::By(
-                -(dist_from_bottom.min(isize::MAX as u64) as isize),
-            ));
         }
         // Same bookkeeping as `resync_terminal`: the capture replaces
         // everything, including any bytes buffered while hidden, and
@@ -3866,7 +4146,7 @@ impl TerminalStack {
         slot.recent.clear();
         let tail_start = replay.len().saturating_sub(RECENT_OUTPUT_CAP);
         slot.recent.extend_from_slice(&replay[tail_start..]);
-        for (_, _, _, bytes) in &uncovered {
+        for (_, _, _, _, bytes) in &uncovered {
             slot.recent.extend_from_slice(bytes);
         }
         if slot.recent.len() > RECENT_OUTPUT_CAP {
@@ -7221,6 +7501,187 @@ mod scroll_outcome_tests {
 }
 
 #[cfg(test)]
+mod viewport_anchor_tests {
+    use super::*;
+
+    /// A terminal with `lines` rows of history above a 10-row screen.
+    fn vt(lines: usize) -> Box<TerminalVt> {
+        let mut vt = TerminalVt::new().expect("vt");
+        vt.ensure_size(80, 10);
+        let mut payload = String::new();
+        for i in 0..lines {
+            payload.push_str(&format!("line {i}\r\n"));
+        }
+        payload.push_str("tail");
+        vt.feed(payload.as_bytes());
+        vt
+    }
+
+    /// A fresh terminal, and one whose viewport sits at the live bottom,
+    /// are both "following the tail" — there is no parked state to carry.
+    #[test]
+    fn a_terminal_at_the_bottom_is_anchored_to_the_bottom() {
+        let vt = vt(200);
+        assert_eq!(vt.anchor, ViewportAnchor::Bottom);
+    }
+
+    /// Scrolling is where the anchor is SET: the user chose this place.
+    #[test]
+    fn scrolling_up_records_the_parked_distance() {
+        let mut vt = vt(200);
+        assert!(matches!(
+            vt.scroll(ScrollRequest::By(-7)),
+            ScrollOutcome::Moved { .. }
+        ));
+        assert_eq!(
+            vt.anchor,
+            ViewportAnchor::Parked {
+                rows_above_bottom: 7
+            }
+        );
+    }
+
+    /// And scrolling back to the bottom clears it, so the next rebuild
+    /// follows the tail instead of restoring a stale park.
+    #[test]
+    fn scrolling_back_to_the_bottom_clears_the_park() {
+        let mut vt = vt(200);
+        let _ = vt.scroll(ScrollRequest::By(-7));
+        let _ = vt.scroll(ScrollRequest::Bottom);
+        assert_eq!(vt.anchor, ViewportAnchor::Bottom);
+    }
+
+    /// The contract `feed` owes `scroll`: a write moves the content under
+    /// the pin, so the anchor is RE-DERIVED to keep naming the same place.
+    /// Three lines arriving under a viewport parked 7 rows up leaves the
+    /// user on the same rows, now 10 rows above the bottom — and the
+    /// anchor says so. Re-imposing the old 7 would drag them down.
+    #[test]
+    fn a_write_re_derives_the_anchor_instead_of_re_imposing_it() {
+        let mut vt = vt(200);
+        let _ = vt.scroll(ScrollRequest::By(-7));
+        let offset_before = vt.terminal.scrollbar().expect("bar").offset;
+
+        vt.feed(b"new 1\r\nnew 2\r\nnew 3\r\n");
+
+        assert_eq!(
+            vt.anchor,
+            ViewportAnchor::Parked {
+                rows_above_bottom: 10
+            },
+            "three new rows at the bottom put the user three rows further from it"
+        );
+        assert_eq!(
+            vt.terminal.scrollbar().expect("bar").offset,
+            offset_before,
+            "and libghostty kept the pin on the same content"
+        );
+    }
+
+    /// Output arriving at the live bottom keeps the viewport following it.
+    #[test]
+    fn a_write_at_the_bottom_keeps_following_the_tail() {
+        let mut vt = vt(200);
+        vt.feed(b"new\r\n");
+        assert_eq!(vt.anchor, ViewportAnchor::Bottom);
+    }
+
+    /// The absolute restore: after the grid is replaced the anchor is put
+    /// back exactly, through the scroll owner's `ToRow` verb — not
+    /// re-derived as a delta from wherever the fresh parser landed.
+    #[test]
+    fn restore_anchor_puts_the_pin_back_absolutely() {
+        let mut shallow = vt(200);
+        let _ = shallow.scroll(ScrollRequest::By(-7));
+        let parked = shallow.anchor;
+
+        // Simulate the grid being replaced: a fresh parser at the live
+        // bottom, carrying the old anchor.
+        let mut rebuilt = vt(400);
+        assert_eq!(rebuilt.anchor, ViewportAnchor::Bottom);
+        rebuilt.anchor = parked;
+        assert!(matches!(
+            rebuilt.restore_anchor(),
+            ScrollOutcome::Moved { .. }
+        ));
+
+        let bar = rebuilt.terminal.scrollbar().expect("bar");
+        assert_eq!(
+            bar.total.saturating_sub(bar.offset + bar.len),
+            7,
+            "the pin lands 7 rows above the new grid's bottom: {bar:?}"
+        );
+        assert_eq!(rebuilt.anchor, parked, "and the anchor still says so");
+    }
+
+    /// Restoring a park deeper than the rebuilt grid can hold clamps to
+    /// the top rather than reporting a bogus move or scrolling off the
+    /// end — a capture shallower than the local grid degrades gracefully.
+    #[test]
+    fn restore_anchor_clamps_a_park_deeper_than_the_grid() {
+        let mut vt = vt(30);
+        vt.anchor = ViewportAnchor::Parked {
+            rows_above_bottom: 10_000,
+        };
+        let _ = vt.restore_anchor();
+        assert_eq!(
+            vt.terminal.scrollbar().expect("bar").offset,
+            0,
+            "clamped to the top of what the grid actually holds"
+        );
+    }
+
+    /// Restoring `Bottom` returns to the live tail.
+    #[test]
+    fn restore_anchor_follows_the_tail_when_not_parked() {
+        let mut vt = vt(200);
+        let _ = vt.scroll(ScrollRequest::By(-7));
+        vt.anchor = ViewportAnchor::Bottom;
+        let _ = vt.restore_anchor();
+        let bar = vt.terminal.scrollbar().expect("bar");
+        assert_eq!(bar.offset + bar.len, bar.total, "back on the live tail");
+    }
+
+    /// `ToRow` onto the row the viewport already occupies is a `Noop`, not
+    /// a `Stalled` — a correct restore must not look like a broken VT.
+    #[test]
+    fn to_row_onto_the_current_row_is_a_noop() {
+        let mut vt = vt(200);
+        let _ = vt.scroll(ScrollRequest::By(-7));
+        let offset = vt.terminal.scrollbar().expect("bar").offset;
+        assert_eq!(vt.scroll(ScrollRequest::ToRow(offset)), ScrollOutcome::Noop);
+    }
+
+    /// A `ToRow` past the live bottom is clamped before classification,
+    /// so it reports the bottom boundary rather than a phantom move.
+    #[test]
+    fn to_row_past_the_bottom_lands_on_the_bottom() {
+        let mut vt = vt(200);
+        let _ = vt.scroll(ScrollRequest::By(-7));
+        assert!(matches!(
+            vt.scroll(ScrollRequest::ToRow(u64::MAX)),
+            ScrollOutcome::Moved { .. }
+        ));
+        let bar = vt.terminal.scrollbar().expect("bar");
+        assert_eq!(bar.offset + bar.len, bar.total);
+        assert_eq!(vt.anchor, ViewportAnchor::Bottom);
+    }
+
+    /// Without scrollback there is nowhere to restore to, and the owner
+    /// says so rather than pretending.
+    #[test]
+    fn to_row_without_scrollback_reports_no_scrollback() {
+        let mut vt = TerminalVt::new().expect("vt");
+        vt.ensure_size(80, 10);
+        vt.feed(b"one line");
+        assert_eq!(
+            vt.scroll(ScrollRequest::ToRow(3)),
+            ScrollOutcome::NoScrollback
+        );
+    }
+}
+
+#[cfg(test)]
 mod find_url_at_byte_tests {
     use super::find_url_at_byte;
 
@@ -9682,6 +10143,109 @@ mod resync_tests {
         );
     }
 
+    /// `rebuild_grid(GridPin::LiveBottom)`: a ring resync is drop
+    /// recovery. The replay is a bounded tail that may hold *less*
+    /// history than the grid it replaces, so no row in it reliably means
+    /// "where the user was" — the viewport deliberately returns to the
+    /// live bottom (`docs/terminal-scrolling.md`). Asserted so the policy
+    /// is a decision the code states rather than whatever a fresh parser
+    /// happens to do.
+    #[test]
+    fn a_ring_resync_deliberately_returns_the_viewport_to_the_bottom() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = shell_stack(id, &sk);
+        let mut history = String::new();
+        for i in 0..200 {
+            history.push_str(&format!("line {i}\r\n"));
+        }
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: history.into_bytes().into(),
+            first_seq: 1,
+            seq: 1,
+            cols: 0,
+            rows: 0,
+        });
+        let _ = stack.scroll_active(-20);
+        assert!(matches!(
+            stack.terminals[&id].vt.anchor,
+            ViewportAnchor::Parked { .. }
+        ));
+
+        let mut replay = String::new();
+        for i in 0..200 {
+            replay.push_str(&format!("line {i}\r\n"));
+        }
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: replay.into_bytes(),
+            seq: 4,
+            sizes: Vec::new(),
+        });
+
+        let slot = &stack.terminals[&id];
+        assert_eq!(slot.vt.anchor, ViewportAnchor::Bottom);
+        let bar = slot.vt.terminal.scrollbar().expect("bar");
+        assert_eq!(
+            bar.offset + bar.len,
+            bar.total,
+            "the viewport is on the live tail: {bar:?}"
+        );
+    }
+
+    /// A rebuild that could not happen must not move the pin either: the
+    /// grid degrades to the last coherent one *including* the viewport
+    /// the user was reading, instead of snapping them to the bottom on
+    /// the way out.
+    #[test]
+    fn a_failed_rebuild_leaves_the_parked_viewport_alone() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = shell_stack(id, &sk);
+        let mut history = String::new();
+        for i in 0..200 {
+            history.push_str(&format!("line {i}\r\n"));
+        }
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: history.into_bytes().into(),
+            first_seq: 1,
+            seq: 1,
+            cols: 0,
+            rows: 0,
+        });
+        let _ = stack.scroll_active(-20);
+        let parked = stack.terminals[&id].vt.anchor;
+        let offset = stack.terminals[&id]
+            .vt
+            .terminal
+            .scrollbar()
+            .expect("bar")
+            .offset;
+        stack
+            .terminals
+            .get_mut(&id)
+            .expect("slot")
+            .vt
+            .fail_next_reset = true;
+
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: b"authoritative".to_vec(),
+            seq: 4,
+            sizes: Vec::new(),
+        });
+
+        let slot = &stack.terminals[&id];
+        assert_eq!(slot.vt.anchor, parked, "the pin survives a failed rebuild");
+        assert_eq!(
+            slot.vt.terminal.scrollbar().expect("bar").offset,
+            offset,
+            "and so does the viewport itself"
+        );
+    }
+
     #[test]
     fn local_vt_reset_failure_releases_latch_and_retries_immediately() {
         let sk = SessionKey::new("s");
@@ -9805,6 +10369,45 @@ mod deep_scrollback_tests {
         }
         payload.push_str("live bottom");
         payload.into_bytes()
+    }
+
+    /// The rows the widget would actually paint — the *viewport*, read
+    /// through the same render state `GhosttyTerminal` walks.
+    ///
+    /// Distinct from [`grid_text`] on purpose. `grid_text` answers "what
+    /// does the terminal retain", which is the right question for history
+    /// adoption and the wrong one for a parked viewport: a rebuild can
+    /// retain every byte and still move the user somewhere else. #1909's
+    /// symptom was invisible to every existing assertion because the
+    /// closest one (`apply_scrollback_keeps_viewport_distance_from_bottom`)
+    /// checks the distance *number*, which was preserved while the content
+    /// at that distance changed.
+    fn viewport_rows(stack: &mut TerminalStack, id: TerminalId) -> Vec<String> {
+        let slot = stack.terminals.get_mut(&id).expect("slot");
+        let snapshot = slot
+            .vt
+            .render_state
+            .update(&slot.vt.terminal)
+            .expect("render snapshot");
+        let mut row_iter = slot.vt.row_iter.update(&snapshot).expect("row iterator");
+        let mut rows = Vec::new();
+        while let Some(row) = row_iter.next() {
+            let mut line = String::new();
+            if let Ok(mut cells) = slot.vt.cell_iter.update(row) {
+                while let Some(cell) = cells.next() {
+                    let graphemes = cell.graphemes().unwrap_or_default();
+                    if graphemes.is_empty() {
+                        line.push(' ');
+                    } else {
+                        for g in graphemes {
+                            line.push(g);
+                        }
+                    }
+                }
+            }
+            rows.push(line.trim_end().to_string());
+        }
+        rows
     }
 
     fn scrollbar(stack: &TerminalStack, id: TerminalId) -> vt::terminal::Scrollbar {
@@ -10355,6 +10958,193 @@ mod deep_scrollback_tests {
             after.total - after.offset - after.len,
             5,
             "viewport must stay anchored to the bottom: {after:?}"
+        );
+    }
+
+    /// #1909, the reported symptom. The user is parked in scrollback,
+    /// the agent keeps talking, and the block they are reading appears
+    /// **twice** — the second copy cut at the same word — while their
+    /// view slides down by the duplicated row count.
+    ///
+    /// The mechanism, end to end: scrolling up arms a deep-scrollback
+    /// fetch (#393); output that lands while the capture is in flight is
+    /// retained so adopting the capture cannot erase it (#1798); the
+    /// client coalesces adjacent output chunks into one event and keeps
+    /// only the run's seq range (`coalesce_adjacent_output`). So when the
+    /// capture's watermark falls *inside* a delivered run, the batch is
+    /// unsplittable — and re-feeding it whole re-draws the chunks the
+    /// capture already contains.
+    ///
+    /// Both halves of the symptom are asserted, because fixing the
+    /// duplicate without the pin (or the reverse) would leave a passing
+    /// test and a broken screen:
+    ///   - no duplicated block anywhere in the retained grid, and
+    ///   - the rows the user was looking at are byte-identical.
+    #[test]
+    fn a_batch_straddling_the_capture_watermark_never_duplicates_the_parked_view() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        let mut local = String::new();
+        for i in 0..80 {
+            local.push_str(&format!("agent line {i}\r\n"));
+        }
+        feed(&mut stack, id, local.as_bytes(), 1, 4);
+
+        // The user scrolls up to read. This arms the fetch.
+        let _ = stack.scroll_active(-20);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id), "fetch armed");
+        let parked = viewport_rows(&mut stack, id);
+        assert!(
+            parked.iter().any(|r| r == "agent line 29"),
+            "precondition: parked mid-history, not at the tail: {parked:?}"
+        );
+
+        // ONE coalesced event covering chunks 5..=8, exactly as the
+        // drain delivers a burst from a chatty agent.
+        feed(
+            &mut stack,
+            id,
+            b"COALESCED A\r\nCOALESCED B\r\nCOALESCED C\r\nCOALESCED D\r\n",
+            5,
+            8,
+        );
+        let after_live = viewport_rows(&mut stack, id);
+        assert_eq!(
+            after_live, parked,
+            "output arriving under a parked viewport must not move it"
+        );
+
+        // The capture was taken after chunk 6 landed, so it already holds
+        // COALESCED A and B. Its watermark (6) falls inside the 5..=8 run.
+        let mut capture = String::new();
+        for i in 0..80 {
+            capture.push_str(&format!("agent line {i}\r\n"));
+        }
+        capture.push_str("COALESCED A\r\nCOALESCED B");
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: capture.into_bytes(),
+            seq: 6,
+        });
+
+        let text = grid_text(&stack, id);
+        for line in ["COALESCED A", "COALESCED B"] {
+            assert_eq!(
+                text.matches(line).count(),
+                1,
+                "{line:?} must appear once; a second copy is the #1909 \
+                 duplicate block:\n{text}"
+            );
+        }
+        for line in ["COALESCED C", "COALESCED D"] {
+            assert!(
+                text.contains(line),
+                "{line:?} landed after the watermark and must not be lost"
+            );
+        }
+        assert_eq!(
+            viewport_rows(&mut stack, id),
+            parked,
+            "the rows the user was reading must be exactly what they were"
+        );
+    }
+
+    /// The refusal the test above depends on, stated on its own: a
+    /// straddling batch cannot be cut at the watermark, so the capture is
+    /// declined and the local grid — every byte, just shallower — stands.
+    /// The next upward scroll re-captures (`scrollback_stale` is still
+    /// set), so declining costs depth for one visit, never content.
+    #[test]
+    fn a_capture_is_refused_when_a_batch_straddles_its_watermark() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"start\r\n", 1, 1);
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id));
+        feed(&mut stack, id, b"straddling run\r\n", 2, 5);
+        let before = scrollbar(&stack, id);
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep_history(400),
+            seq: 3,
+        });
+
+        let after = scrollbar(&stack, id);
+        assert_eq!(
+            after.total, before.total,
+            "the capture was refused, so the grid is untouched: {after:?}"
+        );
+        assert!(
+            stack.terminals[&id].scrollback_stale,
+            "the next scroll re-captures"
+        );
+    }
+
+    /// A batch wholly after the watermark still splices on, so the
+    /// refusal above cannot be read as "give up on racing output". This
+    /// is the #1798 guarantee, kept.
+    #[test]
+    fn a_capture_is_still_adopted_when_no_batch_straddles() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"start\r\n", 1, 4);
+
+        visit_with_racing_output(&mut stack, id, &[(b"racing\r\n", 5)], deep_history(200), 4);
+
+        let text = grid_text(&stack, id);
+        assert!(text.contains("history line 0"), "capture adopted");
+        assert!(text.contains("racing"), "racing output re-fed");
+        assert_eq!(text.matches("racing").count(), 1, "and only once:\n{text}");
+    }
+
+    /// The pin is re-asserted *on content*, not on a number. A capture of
+    /// the same pane holds the same tail and more history above it, and
+    /// the user must still be looking at the rows they were looking at —
+    /// the assertion the pre-#1909 distance check could not make, since it
+    /// compared the distance and never the content at it.
+    #[test]
+    fn a_deeper_capture_leaves_the_parked_rows_identical() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        // The client parsed only the recent tail of the session …
+        let mut local = String::new();
+        for i in 240..300 {
+            local.push_str(&format!("history line {i}\r\n"));
+        }
+        local.push_str("live bottom");
+        feed(&mut stack, id, local.as_bytes(), 1, 1);
+        let _ = stack.scroll_active(-5);
+        let parked = viewport_rows(&mut stack, id);
+        assert!(
+            !parked.iter().any(|r| r == "live bottom"),
+            "precondition: parked above the live bottom, not on it: {parked:?}"
+        );
+
+        // … while tmux retained the whole thing. Same tail, deeper above:
+        // the shape `GridPin::Keep` is sound for.
+        let mut capture = String::new();
+        for i in 0..300 {
+            capture.push_str(&format!("history line {i}\r\n"));
+        }
+        capture.push_str("live bottom");
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: capture.into_bytes(),
+            seq: 2,
+        });
+
+        let bar = scrollbar(&stack, id);
+        assert!(bar.total > 290, "the deeper history was adopted: {bar:?}");
+        assert_eq!(
+            viewport_rows(&mut stack, id),
+            parked,
+            "deepening the history above the user must not move the user"
         );
     }
 

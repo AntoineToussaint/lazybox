@@ -1359,7 +1359,7 @@ impl ActionDef {
                 kind: ActionKind::ResumeRateLimited,
                 default_keys: "Shift-K",
                 label: "resume stopped agents",
-                describe: "Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike. An agent whose account is still limited simply parks again and says so. If you switched Claude account / API key, `a R` (restart stopped agents) also swaps in the fresh credentials: a running process never re-reads them.",
+                describe: "Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike — except an agent whose login has died, which is held back and offered sign-in instead, because 'continue' cannot move a logged-out agent and the notice would otherwise claim a recovery that did not happen. An agent whose account is still limited simply parks again and says so. If you switched Claude account / API key, `a R` (restart stopped agents) also swaps in the fresh credentials: a running process never re-reads them.",
                 section: Section::Global,
             },
             ActionKind::RestartRateLimited => &Self {

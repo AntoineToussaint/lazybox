@@ -1301,6 +1301,20 @@ pub(crate) enum EditorFormStage {
     AwaitCommand { id: String, display: Option<String> },
 }
 
+/// What a signed-out pane remembers about its own failure, so an action
+/// taken long after the daemon reported it can still route the user back to
+/// sign-in with the provider named (#1847).
+#[derive(Debug, Clone)]
+pub(crate) struct AuthFailedPane {
+    pub display_name: String,
+    /// Other running sessions of this agent at the moment the failure was
+    /// detected. Carried for the prompt's copy only — it describes the
+    /// present, and the prompt is careful to promise a policy rather than a
+    /// headcount, because an interactive login takes minutes and the fleet
+    /// moves underneath it.
+    pub other_session_count: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AgentAuthPrompt {
     pub terminal_id: lazybox_ipc::TerminalId,
@@ -2262,7 +2276,15 @@ pub struct Model<T: TerminalAdapter> {
     /// the same conversation, continue — is exactly what that action already
     /// does for a rate-limited agent. Without this set the one action that
     /// unsticks them can't see them.
-    auth_failed_terminals: std::collections::HashSet<lazybox_ipc::TerminalId>,
+    ///
+    /// Keyed to what the re-auth prompt needs rather than a bare set
+    /// (#1847): `Shift-K` must *re-offer* sign-in for a pane it refuses to
+    /// inject `continue` into, and a modal that can't name the provider is
+    /// not an offer. The queue itself is drained the moment its modal
+    /// mounts, and the user may well have dismissed that modal minutes ago
+    /// — so the details have to live with the standing record, not with the
+    /// prompt that already went by.
+    auth_failed_terminals: std::collections::HashMap<lazybox_ipc::TerminalId, AuthFailedPane>,
     /// Terminals with a `]]R` restart already sent and not yet answered by
     /// the daemon's replacement pane.
     ///
@@ -3095,7 +3117,7 @@ impl<T: TerminalAdapter> Model<T> {
             modal_flow: None,
             pending_hopper_action: None,
             auth_prompt_queue: std::collections::VecDeque::new(),
-            auth_failed_terminals: std::collections::HashSet::new(),
+            auth_failed_terminals: std::collections::HashMap::new(),
             restart_in_flight: std::collections::HashSet::new(),
             conversion: None,
             last_reply_body: None,

@@ -25,7 +25,8 @@ pub use attention::{
     workspace_attention_signals, workspace_needs_attention,
 };
 pub use filter::{
-    Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet, task_involves,
+    Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet, search_key,
+    task_involves,
 };
 pub use model::{
     Mailbox, RepoSummary, SearchState, SortMode, TicketTreeMeta, VisibleRow, WorkspaceKind,

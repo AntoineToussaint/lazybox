@@ -2392,6 +2392,65 @@ mod effects_tests {
         assert_eq!(active, vec![Filter::Author, Filter::Pr]);
     }
 
+    /// End-to-end on the real `f` menu (#1914): the reported bug was
+    /// that `rate-limited` appeared nowhere on screen, so the user
+    /// concluded the filter did not exist. Type the old name into the
+    /// mounted menu and the `needs-recovery` row — and only it — must
+    /// be what is left rendered.
+    #[test]
+    fn typing_the_old_rate_limited_name_narrows_the_f_menu_to_needs_recovery() {
+        use lazybox_tui_core::action::Action;
+        use tuirealm::ratatui::layout::Rect;
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let mut m = build_model();
+        m.dispatch_action(&Action::OpenFilterMenu);
+        assert_eq!(m.modal_stack.last(), Some(&Id::FilterMenu));
+
+        let rendered = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| -> String {
+            let mut term = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+            term.draw(|frame| m.app.view(&Id::FilterMenu, frame, Rect::new(0, 0, 100, 30)))
+                .expect("render filter menu");
+            let buffer = term.backend().buffer();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|col| buffer[(col, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let before = rendered(&mut m);
+        assert!(
+            before.contains("needs-recovery") && before.contains("unread"),
+            "the unfiltered menu lists every predicate, got:\n{before}",
+        );
+
+        for ch in "rate-limited".chars() {
+            m.app
+                .get_component_mut(&Id::FilterMenu)
+                .expect("filter menu mounted")
+                .on(&tuirealm::event::Event::Keyboard(
+                    tuirealm::event::KeyEvent::from(tuirealm::event::Key::Char(ch)),
+                ));
+        }
+        let after = rendered(&mut m);
+        assert!(
+            after.contains("needs-recovery"),
+            "typing the pre-rename name must leave the entry on screen, got:\n{after}",
+        );
+        assert!(
+            !after.contains("unread"),
+            "every other predicate is filtered out, got:\n{after}",
+        );
+        assert!(
+            after.contains("rate-limited"),
+            "the typed query is echoed, got:\n{after}",
+        );
+    }
+
     /// An empty pick clears every active filter.
     #[test]
     fn filter_menu_empty_pick_clears_filters() {

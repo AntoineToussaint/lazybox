@@ -77,6 +77,19 @@ pub fn task_involves(task: &lazybox_core::Task, login: &str) -> bool {
         || task.assignees.iter().any(|a| a.eq_ignore_ascii_case(login))
 }
 
+/// Normalized matching form for a filter name: lowercased with every
+/// non-alphanumeric character dropped. Applied to both sides of the
+/// `f` menu's typeahead so punctuation never decides whether a filter
+/// is findable — `rate-limited`, `rate limited`, `RateLimited` and
+/// `ratelimited` are one key, and a query typed without the hyphen
+/// still lands on `needs-recovery`.
+pub fn search_key(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 /// One toggleable predicate over a workspace. Variants are grouped by
 /// their [`FilterAxis`]; [`Filter::ALL`] lists them in menu order.
 #[derive(
@@ -114,6 +127,12 @@ pub enum Filter {
     /// parked or alerting, or a turn that died on an infrastructure
     /// failure (`Stalled`, #1782). Named for the limit it originally
     /// covered; the label reads `needs-recovery` because it is now both.
+    ///
+    /// The label was `rate-limited` before that widening, and the old
+    /// word is kept findable by [`Filter::search_aliases`] — renaming
+    /// a label cost a reported capability its discoverability once
+    /// (#1914), so the alias, not the rename, is where the bridge
+    /// lives.
     RateLimited,
     /// A reviewer is requested, or a review is pending / changes-requested.
     ReviewRequested,
@@ -294,6 +313,131 @@ impl Filter {
             Filter::PriorityMedium => "medium",
             Filter::PriorityLow => "low",
         }
+    }
+
+    /// Extra words that must find this filter when typing in the `f`
+    /// menu, beyond [`Filter::label`]. Matching is substring over the
+    /// normalized form (see [`search_key`]), so a label already covers
+    /// every prefix and infix of itself — an alias earns its place only
+    /// by carrying a word the label does *not* contain.
+    ///
+    /// The rule each entry below is held to: the alias appears in this
+    /// variant's own doc comment, in the identifiers its predicate
+    /// reads, or in the words the UI prints for the states it covers.
+    /// That keeps the list a record of vocabulary the product already
+    /// uses rather than a thesaurus, and it is why a renamed label
+    /// stops costing discoverability: the old term stays here.
+    pub fn search_aliases(self) -> &'static [&'static str] {
+        match self {
+            // "recorded session … not a currently-live PTY" — someone
+            // reaching for the session rather than the agent.
+            Filter::WithAgent => &["session"],
+            // The variant's own name, and the sidebar runner spinner
+            // this predicate shares its source with.
+            Filter::AgentWorking => &["agent-working", "running"],
+            // Deliberately no `working` alias: that is
+            // `AgentWorking`'s canonical label, even though GitHub's
+            // claim label is literally `working` / `lazybox:w:…`.
+            // Aliasing it would make one query mean two filters.
+            Filter::Claimed => &[],
+            // The predicate is `Failure | Mixed`; the label names only
+            // the first.
+            Filter::CiFailing => &["ci-failure", "ci-mixed", "ci-red"],
+            // The predicate is `Pending | Running` — "queued" is the
+            // word the doc comment uses for `Pending`.
+            Filter::CiRunning => &["ci-pending", "ci-queued"],
+            // `t.mergeable.is_conflicting()`: the code's own word is
+            // the participle, which is not a substring of `conflict`.
+            Filter::Conflict => &["conflicting", "merge-conflict"],
+            Filter::Unread => &[],
+            // `AgentState::InputNeeded`, printed as `! needs input`.
+            Filter::Asking => &["input-needed", "needs-input"],
+            // RENAMED. This was `rate-limited` until the predicate grew
+            // past rate-limiting (see the variant's doc comment); the
+            // old term is listed first and is the reason this whole
+            // alias mechanism exists (#1914). The rest are the three
+            // `AgentState`s `workspace_needs_recovery` matches and the
+            // words the UI prints for them — `⧗ limited`,
+            // `☾ waiting`, `↯ stalled` — plus "stopped", which is how
+            // both recovery actions label themselves ("resume / restart
+            // stopped agents").
+            Filter::RateLimited => &[
+                "rate-limited",
+                "limit-reached",
+                "awaiting-reset",
+                "parked",
+                "stalled",
+                "stopped",
+            ],
+            // The predicate also admits `ChangesRequested`.
+            Filter::ReviewRequested => &["changes-requested"],
+            // The policy modal and the row pill call this state
+            // "armed" (`● armed · ○ off`, the `ARM` pill).
+            Filter::AutoMerge => &["armed"],
+            Filter::Draft => &[],
+            // The predicate is `InProgress | InReview`; the label names
+            // only the first, so `in-review` found nothing.
+            Filter::InProgress => &["in-review"],
+            Filter::NeedsReply => &[],
+            // `g u` is labelled "update branch" — the action a user
+            // wants when they go looking for this filter.
+            Filter::BehindBase => &["update-branch"],
+            Filter::BigDiff => &[],
+            // `Filter::Ready`'s doc comment: "a snoozed issue was
+            // deliberately deferred".
+            Filter::Snoozed => &["deferred"],
+            // The doc comment's own vocabulary for the edges this
+            // reads: `blocked_by`, `Blocked by:` / `Depends on:`.
+            Filter::Blocked => &["blocked-by", "depends-on", "dependency"],
+            // The doc comment: "The direct complement of 'what's
+            // blocked' — 'what can I pick up'".
+            Filter::Ready => &["unblocked", "pick-up"],
+            // The doc comment names the two words it was chosen over:
+            // "'In flight' rather than 'active' or 'recent'".
+            Filter::InFlight => &["active", "recent"],
+            Filter::Author
+            | Filter::Reviewer
+            | Filter::Assignee
+            | Filter::Mentioned
+            | Filter::Observer
+            | Filter::Pr
+            | Filter::Issue
+            | Filter::PriorityUrgent
+            | Filter::PriorityHigh
+            | Filter::PriorityMedium
+            | Filter::PriorityLow => &[],
+        }
+    }
+
+    /// Does a typed `query` find this filter? Substring over the label
+    /// and every [`Filter::search_aliases`] entry, both normalized by
+    /// [`search_key`] — so `rate-limited`, `ratelimited`, `Rate Limited`
+    /// and a bare `limit` all reach `needs-recovery`. An empty query
+    /// matches everything (typing nothing hides nothing).
+    pub fn matches_search(self, query: &str) -> bool {
+        let q = search_key(query);
+        if q.is_empty() {
+            return true;
+        }
+        std::iter::once(self.label())
+            .chain(self.search_aliases().iter().copied())
+            .any(|key| search_key(key).contains(&q))
+    }
+
+    /// Exact (normalized) name lookup: the label or one of the
+    /// aliases, whole. Used by [`FilterEntry::from_token`], which must
+    /// not resolve a partial word to a filter the way the typeahead
+    /// does.
+    fn by_exact_name(token: &str) -> Option<Filter> {
+        let t = search_key(token);
+        if t.is_empty() {
+            return None;
+        }
+        Filter::ALL.into_iter().find(|f| {
+            std::iter::once(f.label())
+                .chain(f.search_aliases().iter().copied())
+                .any(|key| search_key(key) == t)
+        })
     }
 
     /// Does `ctx`'s workspace satisfy this predicate?
@@ -483,6 +627,23 @@ impl FilterEntry {
         }
     }
 
+    /// Does a typed `query` find this row in the `f` menu? Predicates
+    /// match their label *or* any of [`Filter::search_aliases`] (so the
+    /// pre-rename `rate-limited` reaches `needs-recovery`); the
+    /// value-driven axes match their own text, which is the only name
+    /// they have. An empty query matches every row.
+    pub fn matches_search(&self, query: &str) -> bool {
+        match self {
+            FilterEntry::Predicate(f) => f.matches_search(query),
+            FilterEntry::Label(name)
+            | FilterEntry::LinearState(name)
+            | FilterEntry::Person(name) => {
+                let q = search_key(query);
+                q.is_empty() || search_key(name).contains(&q)
+            }
+        }
+    }
+
     /// Stable string token for persisting this entry in the config's
     /// `ui.last_lens` (which must stay free of UI-crate types).
     /// Predicates use their label verbatim; value axes carry a prefix
@@ -514,9 +675,16 @@ impl FilterEntry {
             // second row.
             return Some(FilterEntry::Person(login.to_ascii_lowercase()));
         }
+        // Exact label first, then the alias table — so a hand-edited
+        // `rate-limited` (or a `PR` typed in lower case) resolves to the
+        // predicate it names instead of reading as a filter that is
+        // gone. The lens is re-persisted through `to_token`, which always
+        // writes the canonical label, exactly as the `person:Alice`
+        // normalization above collapses onto the discovered login.
         Filter::ALL
             .into_iter()
             .find(|f| f.label() == token)
+            .or_else(|| Filter::by_exact_name(token))
             .map(FilterEntry::Predicate)
     }
 }
@@ -1489,5 +1657,178 @@ mod tests {
             set.chips(),
             vec!["ci-failing".to_string(), "issue".to_string()]
         );
+    }
+
+    /// The reported defect (#1914): the capability shipped, but its
+    /// label had moved off the word the user reached for, so the `f`
+    /// menu's typeahead found nothing. Every spelling of the old name
+    /// must reach the entry — and reach ONLY it, or "found" would mean
+    /// "somewhere in a list of candidates".
+    #[test]
+    fn the_old_rate_limited_name_finds_the_needs_recovery_entry() {
+        let entry = FilterEntry::Predicate(Filter::RateLimited);
+        for query in [
+            "rate-limited",
+            "ratelimited",
+            "rate limited",
+            "Rate-Limited",
+            "RATELIMITED",
+            "limit",
+            "rate",
+        ] {
+            assert!(
+                entry.matches_search(query),
+                "typing {query:?} must reach the needs-recovery entry",
+            );
+            let hits: Vec<&'static str> = Filter::ALL
+                .into_iter()
+                .filter(|f| f.matches_search(query))
+                .map(|f| f.label())
+                .collect();
+            assert_eq!(
+                hits,
+                vec!["needs-recovery"],
+                "{query:?} must reach needs-recovery and nothing else",
+            );
+        }
+    }
+
+    /// The other words the predicate's own doc comment and the two
+    /// recovery actions use for the states it matches — each the word a
+    /// user who saw that state printed on screen would type.
+    #[test]
+    fn the_recovery_states_vocabulary_finds_the_entry() {
+        for query in ["parked", "stalled", "stopped", "awaiting-reset", "recovery"] {
+            assert!(
+                Filter::RateLimited.matches_search(query),
+                "{query:?} must reach needs-recovery",
+            );
+        }
+    }
+
+    /// Each drifted label found by the #1914 audit, reaching its filter
+    /// by the word the predicate itself covers but the label omits.
+    #[test]
+    fn audited_aliases_reach_their_filter() {
+        for (query, want) in [
+            ("in-review", Filter::InProgress),
+            ("conflicting", Filter::Conflict),
+            ("input-needed", Filter::Asking),
+            ("changes-requested", Filter::ReviewRequested),
+            ("ci-mixed", Filter::CiFailing),
+            ("ci-queued", Filter::CiRunning),
+            ("armed", Filter::AutoMerge),
+            ("update-branch", Filter::BehindBase),
+            ("depends-on", Filter::Blocked),
+            ("unblocked", Filter::Ready),
+            ("active", Filter::InFlight),
+            ("recent", Filter::InFlight),
+            ("agent-working", Filter::AgentWorking),
+        ] {
+            let hits: Vec<Filter> = Filter::ALL
+                .into_iter()
+                .filter(|f| f.matches_search(query))
+                .collect();
+            assert!(
+                hits.contains(&want),
+                "{query:?} must reach {want:?}, reached {hits:?}",
+            );
+        }
+    }
+
+    /// An alias must never collide with another filter's canonical
+    /// label: a query that lands on two filters makes the typeahead
+    /// ambiguous and `from_token` arbitrary. This is the guard that
+    /// keeps the next alias honest — `working` is deliberately absent
+    /// from `Claimed` for exactly this reason.
+    #[test]
+    fn no_alias_shadows_another_filters_label() {
+        for f in Filter::ALL {
+            for alias in f.search_aliases() {
+                let key = search_key(alias);
+                assert!(!key.is_empty(), "{f:?} has an empty alias");
+                if let Some(other) = Filter::ALL
+                    .into_iter()
+                    .find(|o| *o != f && search_key(o.label()) == key)
+                {
+                    panic!("{f:?}'s alias {alias:?} is {other:?}'s own label");
+                }
+                assert!(
+                    !f.search_aliases()
+                        .iter()
+                        .any(|a| *a != *alias && search_key(a) == key),
+                    "{f:?} lists {alias:?} twice",
+                );
+            }
+        }
+    }
+
+    /// Normalization drops punctuation, so two labels that differ only
+    /// by a hyphen would become one search key — and `by_exact_name`
+    /// would resolve a token to whichever came first in `ALL`.
+    #[test]
+    fn labels_stay_distinct_after_normalization() {
+        let mut keys: Vec<String> = Filter::ALL
+            .into_iter()
+            .map(|f| search_key(f.label()))
+            .collect();
+        let before = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(before, keys.len(), "two filter labels normalize alike");
+    }
+
+    /// An empty query hides nothing — opening the menu and typing
+    /// nothing must still show every row.
+    #[test]
+    fn an_empty_query_matches_every_entry() {
+        for f in Filter::ALL {
+            assert!(f.matches_search(""));
+            assert!(f.matches_search("   "));
+        }
+        assert!(FilterEntry::Label("bug".into()).matches_search(""));
+    }
+
+    /// The value-driven axes have only their own text to match, and it
+    /// is normalized the same way (a Person row renders as `@login`).
+    #[test]
+    fn value_axis_entries_match_their_own_text() {
+        assert!(FilterEntry::Label("needs triage".into()).matches_search("needstriage"));
+        assert!(FilterEntry::Person("Alice".into()).matches_search("alice"));
+        assert!(!FilterEntry::LinearState("Backlog".into()).matches_search("done"));
+    }
+
+    /// A persisted or hand-edited lens token spelled with the old name
+    /// resolves to the predicate instead of reading as a filter that is
+    /// gone — and is rewritten canonically on the next save, the same
+    /// normalization the `person:Alice` token already gets.
+    #[test]
+    fn from_token_accepts_an_alias_and_renormalizes_it() {
+        let entry = FilterEntry::from_token("rate-limited").expect("alias resolves");
+        assert_eq!(entry, FilterEntry::Predicate(Filter::RateLimited));
+        assert_eq!(entry.to_token(), "needs-recovery");
+        // Lower-cased `PR` resolves too, by the same normalization.
+        assert_eq!(
+            FilterEntry::from_token("pr"),
+            Some(FilterEntry::Predicate(Filter::Pr)),
+        );
+        // A partial word is NOT a token: exact names only here, or a
+        // stale config would silently acquire a filter nobody chose.
+        assert_eq!(FilterEntry::from_token("limit"), None);
+        assert_eq!(FilterEntry::from_token("banana"), None);
+        assert_eq!(FilterEntry::from_token(""), None);
+    }
+
+    /// Every canonical label still round-trips, aliases notwithstanding.
+    #[test]
+    fn every_label_round_trips_through_a_token() {
+        for f in Filter::ALL {
+            let entry = FilterEntry::Predicate(f);
+            assert_eq!(
+                FilterEntry::from_token(&entry.to_token()),
+                Some(entry.clone()),
+                "{f:?} must round-trip",
+            );
+        }
     }
 }

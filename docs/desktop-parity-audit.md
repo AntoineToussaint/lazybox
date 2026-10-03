@@ -177,7 +177,7 @@ against the desktop's two command channels. "DC" = a `DesktopCommand`
 | Reply | DC `PostReply` |
 | Refresh | DC `Refresh` |
 | OpenInBrowser | url `open_url` (`main.ts:2394`) |
-| OpenFilterMenu | TI `set_filters` (`main.ts:918`) |
+| OpenFilterMenu | TI `set_filters` (`main.ts:918`) — no typeahead; `FilterMenuItem` carries `label` but not `Filter::search_aliases`, so the desktop cannot yet find a filter by its pre-rename name (#1914) |
 | OpenSearch | TI `set_search` (`main.ts:940`) |
 | CycleSort | TI `set_sort_mode` |
 | CycleMailbox | TI `set_mailbox` |

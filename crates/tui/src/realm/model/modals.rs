@@ -940,7 +940,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// multi-select `Choice` over every filter, grouped by axis
     /// (State / Role / Kind), each row carrying its match count and
     /// pre-checked when already active. Space toggles, Enter replaces
-    /// the sidebar's active set (an empty submit clears all filters).
+    /// the sidebar's active set (an empty submit clears all filters),
+    /// and typing narrows the list by label or alias — a row ticked
+    /// before it was typed out of view is still applied.
     pub(crate) fn mount_filter_menu(&mut self) {
         use crate::components::sidebar::FilterEntry;
         use crate::realm::components::choice::Choice;
@@ -968,6 +970,12 @@ impl<T: TerminalAdapter> Model<T> {
         // resolve to the wrong predicate (#512).
         .payload_for(|e: &FilterEntry| ChoicePayload::Filter(e.clone()))
         .with_selected_by(move |e: &FilterEntry| active.contains_entry(e))
+        // Typing narrows the menu, matching each row's label *and* its
+        // alias list — so the pre-rename `rate-limited` still reaches
+        // `needs-recovery` (#1914). The matching lives on `FilterEntry`
+        // rather than here so it reads the predicate's own vocabulary
+        // instead of the formatted `label (count)` string above.
+        .with_search(|e: &FilterEntry, q: &str| e.matches_search(q))
         .allow_empty(true);
         self.mount_modal(Id::FilterMenu, modal);
     }

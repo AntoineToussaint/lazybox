@@ -105,14 +105,48 @@ contract. They organize work; implementation stays on the tracker record.
 (merge-on-green) both wire merge and trailers. A change made in one of them
 half-lands; put it in the provider, or change both.
 
+**But lazybox usually does not perform the merge.** Since GitHub-native
+auto-merge shipped (#1596 via #1607), GitHub writes the merge commit; `gh pr
+merge` and the web UI never let lazybox write it. So the *common* path for
+cost is the out-of-band recorder — `handlers::record_external_merge_trailers`,
+gated in `polling/upsert.rs` on the `TerminalCleanup::MergedPr` transition,
+with a durable `pending-merge-cost:` intent and a poll-tick sweep behind it.
+A merged PR with no stored workspace returns before that gate, so there is
+nothing to record against. Test the external path explicitly: covering only
+lazybox's own merge covers the rare case, which is how #1917 shipped inert.
+
 Cost trailers (`pr_trailers.rs`, format contract in
 `lazybox_core::pr_trailers`) are permanent and public, which is why
-`providers.github.pr_trailers` gates them. Three invariants the code exists to
-hold: `commitBody` *replaces* GitHub's default squash log, so the default is
-read back and appended to — a body that cannot be resolved merges with **no**
-trailer rather than a truncated log; an unmetered PR gets no `Lazybox-Cost`
-line at all, never `$0.00`; and cost is billed per PR, not per workspace (the
-`meter-cost-mark:` watermark is stamped at merge).
+`providers.github.pr_trailers` gates them.
+
+**Measuring is not publishing, and public repos default to `off`.** A commit
+trailer cannot be deleted without rewriting history, so per-PR spend on a repo
+the world can clone is opt-in per repo (`repos: { owner/name: full }`);
+`private` defaults to `full`. A workspace therefore measures a real cost and
+correctly publishes nothing — which is a *decision*, and it must be said out
+loud. #1917 was 25 merges of exactly this with no log, no event and no UI
+anywhere, indistinguishable from a broken feature.
+
+Four invariants the code exists to hold:
+
+- `commitBody` *replaces* GitHub's default squash log, so the default is read
+  back and appended to — a body that cannot be resolved merges with **no**
+  trailer rather than a truncated log.
+- An unmetered PR gets no `Lazybox-Cost` line at all, never `$0.00`:
+  "free" and "not metered" must stay distinguishable.
+- Cost is billed per PR, not per workspace — the `meter-cost-mark:` watermark
+  is stamped at merge, and the issue→PR fold carries the issue-phase total
+  onto the PR key (`client_kv::move_session_cost`, which *deletes* its source
+  row, so a surviving source row proves the fold never ran).
+- **Only a settled record may stamp the watermark.** The watermark claims
+  "this figure has been dealt with", so `TrailerOutcome` decides, not the
+  merge: `InCommit`/`InComment` landed and close the slice; `Nothing` is a
+  deliberate policy withholding and closes it too (leaving it would roll this
+  PR's spend onto the next one); `Dropped` was measured, permitted and
+  **lost**, so it stays owed; and a reconciled merge wrote nothing lazybox
+  passed. Both merge sites stamped before testing the outcome and silently
+  retired real money — the guard lives in `pr_trailers::mark_merge_reported`
+  so one place covers both.
 
 ## GitHub-native auto-merge is gated on coverage
 

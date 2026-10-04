@@ -12787,6 +12787,123 @@ mod tests {
         assert_eq!(sent_variable(&sent[1], "commitBody"), None);
     }
 
+    /// A merged PR workspace whose visibility is already cached, as a repo
+    /// lazybox has merged in before would leave it.
+    fn merged_pr_workspace(node_id: &str) -> lazybox_core::Workspace {
+        let mut pr = task_without_node_id(TaskKind::Pr);
+        pr.node_id = Some(node_id.to_string());
+        pr.state = TaskState::Merged;
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("github-o-r-1"),
+            "topic",
+            chrono::Utc::now(),
+        );
+        ws.pr = Some(pr);
+        ws
+    }
+
+    /// THE path that actually carries cost in production, and the one that
+    /// had no test: a merge lazybox did **not** perform.
+    ///
+    /// Since GitHub-native auto-merge shipped (#1596 via #1607), GitHub
+    /// writes the merge commit — and `gh pr merge` and the web UI never let
+    /// lazybox write it. So `record_merged_trailers` is the common path, not
+    /// the fallback. The existing coverage
+    /// (`auto_merge_writes_the_cost_trailer_and_closes_the_slice`) drives
+    /// lazybox's own merge, now the rare case, which is exactly why #1917
+    /// went unnoticed across 25 merges.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_external_merge_records_its_cost_out_of_band() {
+        // No comment on the PR yet, then the create succeeds.
+        let empty = "[]";
+        let created = comment_json(42, "test-user", "created").to_string();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri = spawn_recording_response_server(
+            vec![empty, Box::leak(created.into_boxed_str())],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+        // Visibility is cached, so the policy decision costs no round trip.
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".to_string(), squash_settings());
+
+        // A public repo explicitly opted in — the only way a public repo
+        // publishes, since `public` defaults to `off`.
+        let mut policy = lazybox_core::TrailerPolicy::default();
+        policy
+            .repos
+            .insert("o/r".to_string(), lazybox_core::TrailerMode::Full);
+
+        let outcome = lazybox_core::TaskProvider::record_merged_trailers(
+            &client,
+            &merged_pr_workspace("PR_1"),
+            &cost_trailers(15_236_648),
+            &policy,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            lazybox_core::TrailerOutcome::InComment,
+            "a merge GitHub performed still has to land its cost somewhere",
+        );
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2, "list, then create: {sent:?}");
+        assert!(
+            sent[1].starts_with("POST /repos/o/r/issues/1/comments"),
+            "the cost is posted onto the merged PR: {:?}",
+            sent[1].lines().next(),
+        );
+        assert!(
+            sent[1].contains("Lazybox-Cost: $15.24"),
+            "the measured figure reaches GitHub: {:?}",
+            sent[1].lines().last(),
+        );
+        assert!(
+            sent[1].contains("lazybox:pr-trailers"),
+            "the sticky marker keeps a re-merge from stacking a second comment",
+        );
+    }
+
+    /// The #1917 root cause, pinned: a public repo with no opt-in publishes
+    /// **nothing**, and that is a decision rather than a loss.
+    ///
+    /// It must come back as `Nothing` — which settles the cost slice — and
+    /// never as `Dropped`, which means "measured, permitted, lost" and keeps
+    /// the figure owed. It must also spend no GitHub request at all.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_public_repo_withholds_cost_without_spending_a_request() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri = spawn_recording_response_server(vec!["[]"], requests.clone()).await;
+        let client = make_client(&base_uri);
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".to_string(), squash_settings());
+
+        let outcome = lazybox_core::TaskProvider::record_merged_trailers(
+            &client,
+            &merged_pr_workspace("PR_1"),
+            &cost_trailers(15_236_648),
+            // Stock policy: `private: full`, `public: off`, no overrides.
+            &lazybox_core::TrailerPolicy::default(),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            lazybox_core::TrailerOutcome::Nothing,
+            "withheld by policy is a decision, not a lost record",
+        );
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "a withheld trailer must not spend a GitHub request",
+        );
+    }
+
     /// One issue comment as GitHub's REST API returns it.
     fn comment_json(id: u64, login: &str, body: &str) -> serde_json::Value {
         let user = |login: &str| {

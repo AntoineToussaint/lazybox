@@ -1,9 +1,18 @@
 //! The producer behind [`lazybox_core::PrTrailers`] (#1592).
 //!
-//! lazybox performs the merge itself, so it owns the moment the commit body
-//! is written — and it is the only participant that knows what the PR took.
-//! This module reads that back off the durable state the daemon already
-//! keeps and hands it to the merge path.
+//! lazybox is the only participant that knows what a PR took, so it reads
+//! that back off the durable state the daemon already keeps. It is **not**
+//! usually the participant that writes the merge commit: since GitHub-native
+//! auto-merge shipped (#1596 via #1607), and counting `gh pr merge` and the
+//! web UI, a merge lazybox performs itself is the exception. The common path
+//! is the out-of-band recorder, `polling::handlers::record_external_merge_trailers`.
+//!
+//! Measuring is not publishing. Whether a measured figure may be written at
+//! all is [`lazybox_core::TrailerPolicy`]'s call, per repository visibility,
+//! and **public repositories default to [`off`](lazybox_core::TrailerMode::Off)**
+//! — a commit trailer cannot be deleted without rewriting history, so per-PR
+//! spend on a repo the world can clone is opt-in. A workspace can therefore
+//! measure a real cost and correctly publish nothing (#1917).
 //!
 //! Only measured fields are filled. Everything else stays `None` and renders
 //! nothing: a `Lazybox-Cost: $0.00` would read as "this was free" rather than
@@ -68,17 +77,58 @@ pub async fn measure(
     }
 }
 
-/// A reconciled terminal state confirms the merge, not trailer delivery.
-/// Preserve the pending cost watermark when the write was never confirmed.
+/// Close this merge's cost slice — but only when the record actually
+/// settled. The watermark is the claim "this figure has been dealt with";
+/// stamping it for a figure that reached nothing retires real money in
+/// silence, which is the #1917 defect.
+///
+/// Three ways a merge can land without the record settling, and each must
+/// leave the watermark alone:
+///
+/// * **Reconciled** — the merge was observed as already done elsewhere, so
+///   its commit body is fixed and carries nothing lazybox passed.
+/// * **[`Dropped`](lazybox_core::TrailerOutcome::Dropped)** — measured,
+///   permitted by policy, and *lost* (the default commit body could not be
+///   resolved, the comment write failed). The figure is still owed.
+/// * A queued merge, which never reaches here: GitHub builds its own commit.
+///
+/// [`Nothing`](lazybox_core::TrailerOutcome::Nothing) *does* settle the
+/// slice. With a measured cost it means the repository's policy withheld
+/// publication deliberately, and leaving the figure unreported would roll it
+/// forward onto whatever PR lands next on this key — so the slice closes and
+/// the write-off is logged rather than silent.
 pub(crate) async fn mark_merge_reported(
     config: &ServerConfig,
     key: &WorkspaceKey,
     trailers: &PrTrailers,
     progress: &lazybox_core::MergeProgress,
+    outcome: &lazybox_core::TrailerOutcome,
 ) {
-    if !progress.was_reconciled() {
-        mark_reported(config, key, trailers).await;
+    if progress.was_reconciled() {
+        return;
     }
+    if let lazybox_core::TrailerOutcome::Dropped { reason } = outcome {
+        tracing::warn!(
+            workspace = %key,
+            "the cost record was lost ({reason}) — leaving it unreported for the next merge",
+        );
+        return;
+    }
+    if matches!(outcome, lazybox_core::TrailerOutcome::Nothing)
+        && let Some(micros) = trailers.cost.as_ref().and_then(|c| c.micros)
+        && micros > 0
+    {
+        // The one case that made #1917 invisible: 25 merges measured a real
+        // cost, published nothing because this repo is public and public
+        // defaults to `off`, and said so nowhere at all.
+        tracing::info!(
+            workspace = %key,
+            "cost withheld by `providers.github.pr_trailers` policy — \
+             ${:.2} measured, nothing published, slice closed",
+            micros as f64 / 1_000_000.0,
+        );
+    }
+    mark_reported(config, key, trailers).await;
 }
 
 /// Close this workspace's cost slice by exactly the figure `trailers`
@@ -366,7 +416,14 @@ mod tests {
         let trailers = measure(&config, &ws, at(600)).await;
         let progress = lazybox_core::MergeProgress::default();
         progress.mark_reconciled();
-        mark_merge_reported(&config, &ws.key, &trailers, &progress).await;
+        mark_merge_reported(
+            &config,
+            &ws.key,
+            &trailers,
+            &progress,
+            &lazybox_core::TrailerOutcome::Nothing,
+        )
+        .await;
         assert_eq!(
             client_kv::unreported_session_cost(&*store, ws.key.as_str()),
             900_000,
@@ -374,7 +431,14 @@ mod tests {
         );
 
         // A normal confirmed merge still closes exactly its measured slice.
-        mark_merge_reported(&config, &ws.key, &trailers, &Default::default()).await;
+        mark_merge_reported(
+            &config,
+            &ws.key,
+            &trailers,
+            &Default::default(),
+            &lazybox_core::TrailerOutcome::InCommit,
+        )
+        .await;
         assert_eq!(
             client_kv::unreported_session_cost(&*store, ws.key.as_str()),
             0
@@ -426,6 +490,133 @@ mod tests {
             client_kv::unreported_session_cost(&*store, ws.key.as_str()),
             900_000,
             "nothing was reported, so nothing is marked reported",
+        );
+    }
+
+    /// A trailer that was measured, permitted by policy, and then **lost**
+    /// must leave the watermark exactly where it was — the figure is still
+    /// owed.
+    ///
+    /// #1917: both merge sites stamped the watermark *before* testing the
+    /// outcome, so a `Dropped` record retired real money with nothing
+    /// written anywhere. PR #1900's $10.82 went exactly this way: measured,
+    /// marked reported, present in no commit body and no comment.
+    #[tokio::test]
+    async fn a_lost_trailer_leaves_the_watermark_alone() {
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store
+            .set_kv("meter-cost:github:o/r#42", "10821436")
+            .unwrap();
+        let config = config_with(store.clone());
+        let ws = workspace();
+        let trailers = measure(&config, &ws, at(600)).await;
+
+        mark_merge_reported(
+            &config,
+            &ws.key,
+            &trailers,
+            &Default::default(),
+            &lazybox_core::TrailerOutcome::Dropped {
+                reason: "the default commit body could not be resolved".to_string(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            client_kv::unreported_session_cost(&*store, ws.key.as_str()),
+            10_821_436,
+            "a record that reached nothing is still owed to the next merge",
+        );
+
+        // The same figure, actually landed, does close the slice.
+        mark_merge_reported(
+            &config,
+            &ws.key,
+            &trailers,
+            &Default::default(),
+            &lazybox_core::TrailerOutcome::InCommit,
+        )
+        .await;
+        assert_eq!(
+            client_kv::unreported_session_cost(&*store, ws.key.as_str()),
+            0,
+            "a landed record closes exactly its measured slice",
+        );
+    }
+
+    /// `Nothing` carrying a measured cost is the *policy* write-off — a
+    /// public repo defaults to `off`, so the figure may not be published.
+    /// That closes the slice deliberately: leaving it unreported would roll
+    /// this PR's spend onto whichever PR lands next on the key, overstating
+    /// it. Distinct from `Dropped`, which is a loss, not a decision.
+    #[tokio::test]
+    async fn a_policy_withheld_cost_closes_its_slice_deliberately() {
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.set_kv("meter-cost:github:o/r#42", "1500000").unwrap();
+        let config = config_with(store.clone());
+        let ws = workspace();
+        let trailers = measure(&config, &ws, at(600)).await;
+
+        mark_merge_reported(
+            &config,
+            &ws.key,
+            &trailers,
+            &Default::default(),
+            &lazybox_core::TrailerOutcome::Nothing,
+        )
+        .await;
+
+        assert_eq!(
+            client_kv::unreported_session_cost(&*store, ws.key.as_str()),
+            0,
+            "a withheld figure is settled, not carried onto the next PR",
+        );
+    }
+
+    /// The issue→PR fold rekeys the workspace, and the cost has to travel
+    /// with it — keyed to the *rekey*, not to one key.
+    ///
+    /// #1917 found $77.25 stranded on three issue keys whose PRs had already
+    /// merged (`…-1909` $15.24, `…-1911` $42.69, `…-1899` $19.32). A
+    /// recorder resolving the merged PR's key must find the whole line of
+    /// work there, and the old key must be left with nothing — otherwise the
+    /// same spend is reportable twice.
+    #[tokio::test]
+    async fn cost_survives_the_issue_to_pr_rekey() {
+        const ISSUE: &str = "github:o/r#41";
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        // The issue phase: an agent works the issue row and spends $15.24.
+        store
+            .set_kv(&format!("meter-cost:{ISSUE}"), "15236648")
+            .unwrap();
+        // The PR row has already priced a little of its own work.
+        store.set_kv("meter-cost:github:o/r#42", "1000000").unwrap();
+
+        assert!(
+            client_kv::move_session_cost(&*store, ISSUE, KEY),
+            "the fold moves the issue's total onto the PR",
+        );
+
+        let config = config_with(store.clone());
+        let ws = workspace();
+        let trailers = measure(&config, &ws, at(600)).await;
+        assert_eq!(
+            trailers.cost.as_ref().and_then(|c| c.micros),
+            Some(16_236_648),
+            "the PR's figure covers the whole line of work, issue phase included",
+        );
+        assert_eq!(
+            client_kv::unreported_session_cost(&*store, ISSUE),
+            0,
+            "the issue key keeps nothing — a stale resolution cannot report it again",
+        );
+
+        // And the slice closes on the key the work now lives under.
+        mark_reported(&config, &ws.key, &trailers).await;
+        assert_eq!(
+            client_kv::unreported_session_cost(&*store, KEY),
+            0,
+            "the rekeyed slice closes in full",
         );
     }
 

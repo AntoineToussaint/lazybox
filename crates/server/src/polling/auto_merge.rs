@@ -800,6 +800,7 @@ pub async fn run_attempt<B: MergeBackend>(
                 key,
                 &trailers,
                 &merge_options.progress,
+                &outcome,
             )
             .await;
             // Nobody is watching this flow, so a lost cost record has to
@@ -2467,6 +2468,23 @@ mod tests {
             }
         }
 
+        /// A backend whose merge LANDS but whose cost record is lost on the
+        /// way — GitHub merged, the trailer did not survive (#1917).
+        fn dropping_the_record(fresh: Task, head: &str) -> Self {
+            Self {
+                fetch: Ok(Some((fresh, Some(head.into())))),
+                merge_result: Ok(lazybox_core::MergeOutcome::Merged(
+                    lazybox_core::TrailerOutcome::Dropped {
+                        reason: "the default commit body could not be resolved".to_string(),
+                    },
+                )),
+                merges: parking_lot::Mutex::new(Vec::new()),
+                trailers: parking_lot::Mutex::new(Vec::new()),
+                paused_until: None,
+                fetches: parking_lot::Mutex::new(0),
+            }
+        }
+
         /// A backend whose merge is answered by GitHub taking the PR into
         /// the repository's merge queue (#1669) — accepted, but not merged.
         fn queueing(fresh: Task, head: &str) -> Self {
@@ -2646,6 +2664,36 @@ mod tests {
             crate::client_kv::unreported_session_cost(&*store, ws.key.as_str()),
             0,
             "the merged slice is marked reported, so the next PR starts at zero",
+        );
+    }
+
+    /// #1917: a merge that LANDS while losing its cost record must not
+    /// close the slice. This site stamped the watermark before it looked at
+    /// the outcome, so a `Dropped` record retired real money and then
+    /// announced the loss — in that order.
+    ///
+    /// The guard lives in `pr_trailers::mark_merge_reported`, but it is
+    /// asserted here because the risk is the *call site*: there are two of
+    /// them, and one that forgets to pass the outcome would silently keep
+    /// the old behaviour.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_lost_cost_record_does_not_close_the_slice() {
+        let ws = armed_ws("o/r#1");
+        let store = Arc::new(MemoryStore::new());
+        seed(&store, &ws);
+        store
+            .set_kv(&format!("meter-cost:{}", ws.key.as_str()), "13893891")
+            .expect("seed the metered cost");
+        let config = ServerConfig::with_store(store.clone());
+        let backend = FakeBackend::dropping_the_record(green_task("o/r#1"), "abc123");
+
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
+
+        assert_eq!(
+            crate::client_kv::unreported_session_cost(&*store, ws.key.as_str()),
+            13_893_891,
+            "the merge landed but the record did not — the cost is still owed, \
+             and must survive for the next merge on this workspace",
         );
     }
 

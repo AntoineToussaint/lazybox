@@ -389,12 +389,29 @@ async fn record_pending_merge_cost(config: &ServerConfig, key: &WorkspaceKey) {
         tracing::info!(workspace = %key, "recorded the cost of an external merge");
     } else if let lazybox_core::TrailerOutcome::Dropped { reason } = outcome {
         // `Dropped` is the provider declining for a reason that will not
-        // change by itself (policy `off`, no node id) — retrying forever
-        // would spend GitHub budget on a no-op every tick.
+        // change by itself — no node id on the merged PR, an unaddressable
+        // PR key — so retrying forever would spend GitHub budget on a no-op
+        // every tick. (Policy `off` is NOT this case: it returns `Nothing`.)
+        // The figure stays unreported, so it rides to the next merge on this
+        // key rather than being written off.
         tracing::warn!(workspace = %key, "external-merge cost not recorded: {reason}");
         clear_merge_cost_intent(config, key);
     } else {
-        // `Nothing`: the policy says stay silent for this repo. Settled.
+        // `Nothing`: this repo's policy withheld publication. Settled — but
+        // say so. Silence here is what made #1917 undiagnosable: a public
+        // repo defaults to `off`, so 25 merges measured a real cost,
+        // published nothing, and reported that decision nowhere. The figure
+        // is still marked reported, because leaving it would roll it onto
+        // whatever PR lands next on this key.
+        if let Some(micros) = trailers.cost.as_ref().and_then(|cost| cost.micros) {
+            tracing::info!(
+                workspace = %key,
+                "external-merge cost withheld by `providers.github.pr_trailers` \
+                 policy — ${:.2} measured, nothing published",
+                micros as f64 / 1_000_000.0,
+            );
+        }
+        crate::pr_trailers::mark_reported(config, key, &trailers).await;
         clear_merge_cost_intent(config, key);
     }
 }
@@ -1139,17 +1156,24 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
         return;
     }
     tracing::info!("merged PR for workspace {workspace_key}");
+    // The outcome, not the merge, decides whether the cost slice may close:
+    // a `Dropped` record was measured, permitted by policy, and lost, so it
+    // stays owed to the next merge rather than being retired in silence
+    // (#1917). Read by reference — the `Err` and `Queued` shapes already
+    // returned above, so this is the merged case.
+    let outcome = match &merge_result {
+        Ok(lazybox_core::MergeOutcome::Merged(outcome)) => outcome.clone(),
+        _ => lazybox_core::TrailerOutcome::Nothing,
+    };
     crate::pr_trailers::mark_merge_reported(
         config,
         &workspace_key,
         &trailers,
         &merge_options.progress,
+        &outcome,
     )
     .await;
-    if let Ok(lazybox_core::MergeOutcome::Merged(lazybox_core::TrailerOutcome::Dropped {
-        reason,
-    })) = merge_result
-    {
+    if let lazybox_core::TrailerOutcome::Dropped { reason } = &outcome {
         let _ = config.bus.send(Event::provider_error_retryable(
             "merge",
             format!("merged, but the cost record was not written: {reason}"),

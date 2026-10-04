@@ -325,7 +325,10 @@ pub enum CleanupPrompt {
 ///   back cleanly as not opted in — the canary is never inherited, only
 ///   chosen.
 /// - 14: `Workspace::floating` records ownership of a repo-free directory.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 14;
+/// - 15: `Workspace::todo_items` (a TODO's checklist). Defaulted on read,
+///   so older records read back cleanly. No `skip_serializing_if`: the
+///   workspace also travels over bincode, which cannot skip fields.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 15;
 
 /// How long a workspace counts as "recently woken" after an
 /// event-conditional snooze fires (#scale): within this window the row
@@ -395,6 +398,59 @@ pub struct HopperMeta {
     /// active Hopper while preserving its workspace and history.
     #[serde(default)]
     pub canceled_at: Option<DateTime<Utc>>,
+}
+
+/// One checklist item under a TODO (a Hopper workspace). Items are cheap —
+/// they are not workspaces — and nest through `parent`. An item can link to
+/// the work it stands for, and a linked item checks itself off when that
+/// work lands (see [`Workspace::check_items_linked_to`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct TodoItem {
+    /// Minted once ([`TodoItem::new_id`]) and never reused, so a link to an
+    /// item — from an agent, a note, another item — stays valid.
+    pub id: String,
+    /// The item this one nests under; `None` at the top level.
+    #[serde(default)]
+    pub parent: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub done_at: Option<DateTime<Utc>>,
+    /// Dropped rather than done: out of the progress count altogether.
+    #[serde(default)]
+    pub canceled_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub link: Option<TodoLink>,
+    /// Checked off by lazybox (the linked PR merged, the issue closed)
+    /// rather than by hand.
+    #[serde(default)]
+    pub auto_checked: bool,
+}
+
+impl TodoItem {
+    /// A fresh, never-reused item id.
+    pub fn new_id() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.done_at.is_some()
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.canceled_at.is_some()
+    }
+}
+
+/// What a TODO item points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum TodoLink {
+    /// An issue, PR or ticket; checks the item off when it merges / closes.
+    Task(TaskId),
+    /// A workspace, by key.
+    Workspace(WorkspaceKey),
+    Url(String),
 }
 
 /// The orchestration **role** a workspace plays inside a cross-repo epic
@@ -570,6 +626,10 @@ pub struct Workspace {
     /// project workspaces are local too, but do not belong in the Hopper.
     #[serde(default)]
     pub hopper: Option<HopperMeta>,
+    /// The TODO's checklist, in display order (nesting via
+    /// [`TodoItem::parent`]). Empty for any workspace that is not a TODO.
+    #[serde(default)]
+    pub todo_items: Vec<TodoItem>,
     /// When `Some`, this is a **linked (no-worktree) checkout**: the
     /// workspace points directly at an existing clone on disk (a
     /// canonical `~/development/<owner>/<repo>` folder imported via the
@@ -757,6 +817,7 @@ impl Workspace {
             local: false,
             floating: None,
             hopper: None,
+            todo_items: Vec::new(),
             linked_checkout: None,
             branch,
             sessions: Vec::new(),
@@ -1207,6 +1268,45 @@ impl Workspace {
         }
     }
 
+    /// `(done, total)` over the TODO checklist — the `2/3` a TODO row shows.
+    ///
+    /// Counts LEAF items only. An item with live children is a **heading**, and
+    /// a heading's completion is its children's: counting it as work of its own
+    /// left a finished TODO reading `3/4` forever, because nothing ticks a
+    /// heading — [`Self::check_items_linked_to`] only ticks items whose own link
+    /// landed, so the last point was reachable only by hand.
+    ///
+    /// Canceled items are out of the count entirely, and they do not keep a
+    /// parent out of it either: a heading whose every child was dropped has no
+    /// live children left, so it counts as the leaf it has become.
+    ///
+    /// Quadratic in the checklist's length, which is bounded by what a person
+    /// types into one TODO.
+    pub fn todo_progress(&self) -> (usize, usize) {
+        let live = || self.todo_items.iter().filter(|i| !i.is_canceled());
+        let is_heading = |id: &str| live().any(|i| i.parent.as_deref() == Some(id));
+        live()
+            .filter(|i| !is_heading(&i.id))
+            .fold((0, 0), |(d, t), i| (d + usize::from(i.is_done()), t + 1))
+    }
+
+    /// Check off every open item linked to `task`, stamped as done by
+    /// lazybox at `now`. Called when that task's PR merges or its issue
+    /// closes. Returns how many items changed, so the caller persists only
+    /// on a real change.
+    pub fn check_items_linked_to(&mut self, task: &TaskId, now: DateTime<Utc>) -> usize {
+        let mut changed = 0;
+        for item in &mut self.todo_items {
+            let linked = matches!(&item.link, Some(TodoLink::Task(id)) if id == task);
+            if linked && !item.is_done() && !item.is_canceled() {
+                item.done_at = Some(now);
+                item.auto_checked = true;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// Fold every **user-owned** field of `other` into this workspace,
     /// each by an explicit merge rule. The single source of truth for
     /// what survives when a session moves between workspaces — the
@@ -1250,6 +1350,8 @@ impl Workspace {
             local: _,
             floating: _,
             hopper: _,
+            // A TODO's checklist is part of the TODO row itself.
+            todo_items: _,
             linked_checkout: _,
             name: _,
             branch: _,
@@ -2586,6 +2688,110 @@ mod tests {
             contracts: vec![],
             blocked_on: None,
         }
+    }
+
+    fn todo(text: &str, link: Option<TodoLink>) -> TodoItem {
+        TodoItem {
+            id: TodoItem::new_id(),
+            parent: None,
+            text: text.into(),
+            done_at: None,
+            canceled_at: None,
+            link,
+            auto_checked: false,
+        }
+    }
+
+    fn gh(key: &str) -> TaskId {
+        TaskId {
+            source: "github".into(),
+            key: key.into(),
+        }
+    }
+
+    /// Progress counts leaf items, skips canceled ones, and does not count a
+    /// heading as work of its own.
+    #[test]
+    fn todo_progress_counts_leaves_and_skips_canceled() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
+        let parent = todo("ship 0.1.18", None);
+        let mut child = todo("cut the release", None);
+        child.parent = Some(parent.id.clone());
+        child.done_at = Some(now());
+        let mut dropped = todo("skip this", None);
+        dropped.canceled_at = Some(now());
+        ws.todo_items = vec![parent, child, dropped];
+        assert_eq!(
+            ws.todo_progress(),
+            (1, 1),
+            "the heading is not its own unit of work"
+        );
+    }
+
+    /// The case the old counting could never reach: every child done reads as
+    /// complete, without anyone hand-ticking the heading above them.
+    #[test]
+    fn todo_progress_completes_when_every_child_is_done() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
+        let parent = todo("ship 0.1.18", None);
+        let mut children: Vec<TodoItem> = (0..3)
+            .map(|n| {
+                let mut c = todo(&format!("step {n}"), None);
+                c.parent = Some(parent.id.clone());
+                c.done_at = Some(now());
+                c
+            })
+            .collect();
+        ws.todo_items = vec![parent];
+        ws.todo_items.append(&mut children);
+        assert_eq!(ws.todo_progress(), (3, 3));
+
+        // A heading whose every child was dropped is a leaf again, so it counts
+        // and can be completed on its own.
+        let only_parent = todo("nothing under me", None);
+        let mut gone = todo("dropped", None);
+        gone.parent = Some(only_parent.id.clone());
+        gone.canceled_at = Some(now());
+        ws.todo_items = vec![only_parent, gone];
+        assert_eq!(ws.todo_progress(), (0, 1));
+    }
+
+    /// The linked PR merging checks its item off, once, marked as lazybox's
+    /// doing; items linked elsewhere, or canceled, are untouched.
+    #[test]
+    fn a_merged_pr_checks_off_the_items_linked_to_it() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
+        let mut canceled = todo("old attempt", Some(TodoLink::Task(gh("o/r#1890"))));
+        canceled.canceled_at = Some(now());
+        ws.todo_items = vec![
+            todo("merge the PR", Some(TodoLink::Task(gh("o/r#1890")))),
+            todo("other work", Some(TodoLink::Task(gh("o/r#7")))),
+            canceled,
+        ];
+        assert_eq!(ws.check_items_linked_to(&gh("o/r#1890"), now()), 1);
+        assert!(ws.todo_items[0].is_done() && ws.todo_items[0].auto_checked);
+        assert!(!ws.todo_items[1].is_done());
+        assert!(
+            !ws.todo_items[2].is_done(),
+            "a canceled item stays canceled"
+        );
+        assert_eq!(
+            ws.check_items_linked_to(&gh("o/r#1890"), now()),
+            0,
+            "a second merge event changes nothing"
+        );
+    }
+
+    /// A checklist survives the JSON round trip.
+    #[test]
+    fn todo_items_round_trip() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
+        let mut child = todo("nested", Some(TodoLink::Url("https://x.test".into())));
+        let parent = todo("top", Some(TodoLink::Workspace(WorkspaceKey::new("w"))));
+        child.parent = Some(parent.id.clone());
+        ws.todo_items = vec![parent, child];
+        let back: Workspace = serde_json::from_str(&serde_json::to_string(&ws).unwrap()).unwrap();
+        assert_eq!(back.todo_items, ws.todo_items);
     }
 
     #[test]

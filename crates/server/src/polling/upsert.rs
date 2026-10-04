@@ -242,6 +242,16 @@ pub(super) async fn upsert_with_context(
 /// then persist + broadcast. Split out from `upsert` so the
 /// "route to PR workspace" path can reuse the same write/broadcast
 /// behaviour without duplicating it.
+/// Has this task's work landed? A PR lands by merging; one closed unmerged was
+/// abandoned and lands nothing. An issue lands by closing.
+fn task_landed(task: &Task) -> bool {
+    if task.is_pr() {
+        task.state == lazybox_core::TaskState::Merged
+    } else {
+        task.state == lazybox_core::TaskState::Closed
+    }
+}
+
 pub(super) async fn upsert_into_workspace_key(
     config: &ServerConfig,
     key: &WorkspaceKey,
@@ -268,6 +278,24 @@ pub(super) async fn upsert_into_workspace_key(
     // fetch succeeded, so the row's data is merely deferred one tick, never
     // lost — just without burning the batch's wall-clock on a lock we won't get
     // this instant anyway.
+    // A task observed in a terminal state stands for work that landed, so every
+    // TODO item linked to it is checked off. Driven by the OBSERVED state, not by
+    // the `terminal_cleanup` transition below, and run before the early returns
+    // that follow — because a checklist must still tick when:
+    //   - lazybox holds no workspace for the task, where the merged-PR branch
+    //     below returns `Unchanged` outright. Routine, not exotic: the
+    //     merged-workspace cleanup deletes that row as its default behaviour.
+    //   - this box never saw the open->terminal edge (off, or the poller
+    //     throttled past the window), so `merged_transition_pr_number` declines
+    //     and nothing else would ever look again.
+    // `Workspace::check_items_linked_to` is idempotent and writes nothing when
+    // no linked item is open, so re-observing a landed task costs the candidate
+    // scan and no writes. The poller fetches only CHANGED tasks, so that scan
+    // lands on the transition plus the occasional full sweep, not every tick.
+    if task_landed(&task) {
+        crate::workspace::check_todo_items_linked_to(config, &task.id).await;
+    }
+
     let Some(ws_guards) =
         lock_workspace_with_closing_issues_or_skip(config, key, Some(&task)).await
     else {

@@ -671,6 +671,21 @@ fn all_commands() -> Vec<Command> {
             key: "github-o-r-42".into(),
             client_request_id: Some("unarchive-1".into()),
         },
+        Command::SaveTodoItems {
+            workspace_key: lazybox_core::WorkspaceKey::new("morning-plan"),
+            items: vec![lazybox_core::TodoItem {
+                id: "todo-item-1".into(),
+                parent: None,
+                text: "ship 0.1.18".into(),
+                done_at: None,
+                canceled_at: None,
+                link: Some(lazybox_core::TodoLink::Task(lazybox_core::TaskId {
+                    source: "github".into(),
+                    key: "o/r#1890".into(),
+                })),
+                auto_checked: false,
+            }],
+        },
         Command::Shutdown,
     ]
 }
@@ -1709,6 +1724,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SearchAgentOutput { .. } => "SearchAgentOutput",
         Command::ListArchivedWorkspaces => "ListArchivedWorkspaces",
         Command::UnarchiveWorkspace { .. } => "UnarchiveWorkspace",
+        Command::SaveTodoItems { .. } => "SaveTodoItems",
     }
 }
 
@@ -1846,7 +1862,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        110,
+        111,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

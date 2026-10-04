@@ -1375,6 +1375,7 @@ impl Server {
                         lazybox_ipc::Command::SearchAgentOutput { .. } => "SearchAgentOutput",
                         lazybox_ipc::Command::ListArchivedWorkspaces => "ListArchivedWorkspaces",
                         lazybox_ipc::Command::UnarchiveWorkspace { .. } => "UnarchiveWorkspace",
+                        lazybox_ipc::Command::SaveTodoItems { .. } => "SaveTodoItems",
                         lazybox_ipc::Command::SetMetered { .. } => "SetMetered",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
                         lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
@@ -2789,7 +2790,7 @@ pub async fn dispatch_command(
                     .bus
                     .send(lazybox_ipc::Event::provider_error_permanent(
                         "hopper",
-                        format!("Hopper was not saved: {error}"),
+                        format!("the TODO list was not saved: {error}"),
                     ));
             }
         }
@@ -2810,6 +2811,20 @@ pub async fn dispatch_command(
             canceled,
         } => {
             workspace::set_hopper_canceled(config, &workspace_key, canceled).await;
+        }
+        lazybox_ipc::Command::SaveTodoItems {
+            workspace_key,
+            items,
+        } => {
+            if let Err(error) = workspace::save_todo_items(config, &workspace_key, items).await {
+                tracing::error!(error = %error, "save todo items failed");
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::provider_error_permanent(
+                        "todo",
+                        format!("the TODO checklist was not saved: {error}"),
+                    ));
+            }
         }
         lazybox_ipc::Command::Snooze {
             session_key,

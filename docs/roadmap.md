@@ -7,7 +7,7 @@ agent reading a stale roadmap starts the wrong work.
 
 Status: `now` · `next` · `later` · `done`.
 
-## 1. Ship what is built — `now`
+## 1. Ship what is built — `done` (0.1.18)
 
 PR #1890 is a month of fixes that no one is running: the delivery owner and
 real turn results, clickable header/footer/overview, the `in-flight` filter,
@@ -19,7 +19,7 @@ and the lost-paste recovery.
   checks are the user's to attest).
 - Done when: 0.1.18 is released and installed.
 
-## 2. TODO, phase 1 — `next`
+## 2. TODO, phase 1 — `now`
 
 The Hopper becomes **TODO** — the user's own cross-project juggler and the
 plan agents read (design §"Plan = the TODO tree").

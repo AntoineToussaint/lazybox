@@ -35,18 +35,22 @@ worktrees, terminals, agents, notes, and history.
 
 - The user begins the day by quickly capturing a newline-separated personal list.
 - Capture must not require choosing a repository or creating a directory.
-- Personal items appear as a dedicated Hopper section near the top of the sidebar,
+- Personal items appear as a dedicated TODO section near the top of the sidebar,
   immediately below Focused, and participate in ordinary workspace navigation.
 - Starting an agent or shell for a repo-less item triggers repository assignment at
   that moment; creating the item itself remains uninterrupted.
-- Hopper state is initially local to the active Lazybox daemon and persists in the
+- TODO state is initially local to the active Lazybox daemon and persists in the
   existing SQLite state database across restarts.
 
 ## Capabilities and Constraints
 
-- A hopper item is a personal kind of Workspace, not a parallel to-do record that
-  must later be converted into one.
-- A fresh hopper workspace may have zero sessions and no on-disk directory.
+- A TODO is a personal kind of Workspace, not a parallel to-do record that
+  must later be converted into one. (The code still calls it the Hopper.)
+- A TODO carries a checklist of lightweight items — not workspaces — that nest,
+  show GitHub-style progress (`▰▰▱ 2/3`), and can link to an issue, PR, workspace
+  or URL. An item linked to a PR or issue checks itself off when it merges or
+  closes.
+- A fresh TODO workspace may have zero sessions and no on-disk directory.
 - Repository assignment is optional at capture time and required before creating a
   repo-backed worktree, agent session, or shell session.
 - Completing an item archives it while preserving its workspace, terminals, and
@@ -78,5 +82,5 @@ worktrees, terminals, agents, notes, and history.
 
 ## Accessibility & Inclusion
 
-The hopper must preserve Lazybox's keyboard-first operation, visible focus, existing
+The TODO list must preserve Lazybox's keyboard-first operation, visible focus, existing
 key-remapping model, and non-mouse path for every action.

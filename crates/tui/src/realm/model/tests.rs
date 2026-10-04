@@ -35077,6 +35077,52 @@ mod diff_review_source_tests {
         );
     }
 
+    /// The case the second source exists for, from the entry point that
+    /// hits it most: an inbox PR row nobody has checked out. The
+    /// diffstat line — `+N −M · N files changed` — is a click target
+    /// for `ViewDiff` (`components/right_pane/mod.rs`), and resolving
+    /// the target from a session worktree or a linked checkout alone
+    /// finds neither on that row, so the click flashed *"this workspace
+    /// has no worktree to review"* on precisely the PR whose diff
+    /// GitHub was already serving.
+    #[test]
+    fn view_diff_reads_the_pull_request_with_no_session_and_no_checkout() {
+        let (client, mut server) = channel::pair();
+        let mut model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model init");
+        let workspace = Workspace::from_task(pr_task(), Utc::now());
+        let workspace_key = workspace.key.clone();
+        assert!(
+            workspace.sessions.is_empty() && workspace.linked_checkout.is_none(),
+            "the fixture must carry NEITHER local source or it proves nothing",
+        );
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        while server.rx.try_recv().is_ok() {}
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [IpcCommand::InspectWorkspaceDiff {
+                    workspace_key: key,
+                    target: WorkspaceDiffTarget::PullRequest,
+                }] if key == &workspace_key
+            ),
+            "a PR row with no checkout must still read the PR diff, got {commands:?}"
+        );
+        // And the footer says which document is being read, rather
+        // than the refusal this row used to get.
+        let notice = model
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert_eq!(notice, "reading the PR diff…", "footer said {notice:?}");
+    }
+
     /// Without a PR there is nothing to read but the checkout — which
     /// is also the only diff that exists before a branch is pushed.
     #[test]

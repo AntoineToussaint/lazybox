@@ -2054,6 +2054,26 @@ pub enum TileDirection {
     Down,
 }
 
+/// Which way a split divides its rect. Named for the arrangement of
+/// the *children*, not of the divider line between them: a
+/// `Horizontal` split puts them side by side and so draws a vertical
+/// `│`. Returned by [`TileTree::axis_at`] so a caller resizing a
+/// divider knows whether the pointer's column or its row is the
+/// meaningful coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileAxis {
+    Horizontal,
+    Vertical,
+}
+
+/// Floor and ceiling for a split's `ratio`. A divider dragged to the
+/// very edge would leave a zero-width tile that still owns a PTY and
+/// still takes keystrokes — invisible but live, which is the one state
+/// a tiling layout must not reach. 10% keeps the smaller tile legible
+/// enough to aim at and drag back.
+pub const TILE_RATIO_MIN: u8 = 10;
+pub const TILE_RATIO_MAX: u8 = 90;
+
 impl TileTree {
     /// Every leaf's terminal id, in pre-order. Stable ordering — the
     /// renderer relies on this for the focused-tile highlight.
@@ -2270,6 +2290,119 @@ impl TileTree {
             return Some(self.descend_to_leaf(&mut new_path));
         }
         None
+    }
+
+    /// The axis of the split at `path`, or `None` when the path names a
+    /// leaf or does not exist. `Horizontal` is an `HSplit` — children
+    /// side by side, so the divider between them is a *vertical* line.
+    pub fn axis_at(&self, path: &[u8]) -> Option<TileAxis> {
+        match self.subtree_at(path)? {
+            TileTree::Leaf { .. } => None,
+            TileTree::HSplit { .. } => Some(TileAxis::Horizontal),
+            TileTree::VSplit { .. } => Some(TileAxis::Vertical),
+        }
+    }
+
+    /// The first child's share of the split at `path`. `None` for a
+    /// leaf or a path that does not exist.
+    pub fn ratio_at(&self, path: &[u8]) -> Option<u8> {
+        match self.subtree_at(path)? {
+            TileTree::Leaf { .. } => None,
+            TileTree::HSplit { ratio, .. } | TileTree::VSplit { ratio, .. } => Some(*ratio),
+        }
+    }
+
+    /// Move the divider of the split at `path`: set the first child's
+    /// share to `ratio`, clamped into [`TILE_RATIO_MIN`]..=[`TILE_RATIO_MAX`]
+    /// so neither tile can be driven to an unusable sliver. Returns
+    /// `true` when the stored ratio actually changed, so a caller can
+    /// decide whether to redraw and persist — a drag delivers many
+    /// pointer positions that land on the same percentage.
+    ///
+    /// Clamping here rather than at the call sites is deliberate: the
+    /// pointer, the keyboard nudge and a restored `SessionLayout` all
+    /// reach the same invariant through this one door.
+    pub fn set_ratio_at(&mut self, path: &[u8], ratio: u8) -> bool {
+        let clamped = ratio.clamp(TILE_RATIO_MIN, TILE_RATIO_MAX);
+        match self.subtree_at_mut(path) {
+            Some(TileTree::HSplit { ratio: r, .. }) | Some(TileTree::VSplit { ratio: r, .. }) => {
+                if *r == clamped {
+                    return false;
+                }
+                *r = clamped;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Move the divider nearest to the leaf at `leaf_path` by `step`
+    /// percentage points in the direction `dir`. Returns the path of
+    /// the split it moved, so the caller can skip its redraw and its
+    /// persist when nothing happened; `None` when no divider lies on
+    /// that axis above the leaf, or the ratio is already clamped.
+    ///
+    /// **The divider moves the way the arrow points** — not "the
+    /// current tile grows". Those two readings agree for a tile in the
+    /// first child and disagree for one in the second, and a divider
+    /// is a single line: pushing it right always widens whatever is
+    /// left of it. So the sign is a function of `dir` alone, which is
+    /// what makes the gesture invertible (Left then Right returns you
+    /// to where you were) and what makes it mean the same thing as
+    /// dragging that divider with the mouse. The keyboard and the
+    /// pointer must not disagree about which way is which.
+    ///
+    /// *Which* divider is the same walk [`neighbor`](Self::neighbor)
+    /// does — the nearest ancestor split on `dir`'s axis — so the
+    /// divider a resize moves is the one between this tile and the tile
+    /// the matching bare arrow would move focus to.
+    pub fn resize_toward(
+        &mut self,
+        leaf_path: &[u8],
+        dir: TileDirection,
+        step: i16,
+    ) -> Option<Vec<u8>> {
+        let want_horizontal = matches!(dir, TileDirection::Left | TileDirection::Right);
+        let signed = match dir {
+            // `ratio` is the FIRST child's share, and the first child is
+            // the left / top one.
+            TileDirection::Right | TileDirection::Down => step,
+            TileDirection::Left | TileDirection::Up => -step,
+        };
+        for i in (0..leaf_path.len()).rev() {
+            let prefix = &leaf_path[..i];
+            let node = self.subtree_at(prefix)?;
+            if matches!(node, TileTree::HSplit { .. }) != want_horizontal {
+                continue;
+            }
+            let current = self.ratio_at(prefix)? as i16;
+            let next = (current + signed).clamp(TILE_RATIO_MIN as i16, TILE_RATIO_MAX as i16) as u8;
+            let owner = prefix.to_vec();
+            return self.set_ratio_at(&owner, next).then_some(owner);
+        }
+        None
+    }
+
+    fn subtree_at_mut(&mut self, path: &[u8]) -> Option<&mut TileTree> {
+        let mut node = self;
+        for &step in path {
+            node = match node {
+                TileTree::HSplit { left, right, .. }
+                | TileTree::VSplit {
+                    top: left,
+                    bottom: right,
+                    ..
+                } => {
+                    if step == 0 {
+                        left.as_mut()
+                    } else {
+                        right.as_mut()
+                    }
+                }
+                TileTree::Leaf { .. } => return None,
+            };
+        }
+        Some(node)
     }
 
     fn subtree_at(&self, path: &[u8]) -> Option<&TileTree> {
@@ -2520,6 +2653,160 @@ mod tile_tree_tests {
         let path1 = t.path_to(1).unwrap();
         let n = t.neighbor(&path1, TileDirection::Right);
         assert_eq!(n, Some(vec![1, 0]));
+    }
+
+    // ── Divider ratios (#1920) ───────────────────────────────────────
+    //
+    // Until #1920 `ratio` was written once as a hardcoded 50 by the
+    // split that created it and read only by the renderer, so every
+    // divider in a tiled session was immovable. These pin the one door
+    // through which it now changes.
+
+    #[test]
+    fn axis_names_the_children_not_the_divider() {
+        let t = hsplit(leaf(1), vsplit(leaf(2), leaf(3)));
+        // Side-by-side children, so the divider drawn between them is
+        // the vertical `│` — the axis names the arrangement.
+        assert_eq!(t.axis_at(&[]), Some(TileAxis::Horizontal));
+        assert_eq!(t.axis_at(&[1]), Some(TileAxis::Vertical));
+        // A leaf has no divider to resize, including one reached
+        // through a longer path.
+        assert_eq!(t.axis_at(&[0]), None);
+        assert_eq!(t.axis_at(&[1, 0]), None);
+        assert_eq!(t.axis_at(&[0, 0]), None, "descending past a leaf");
+    }
+
+    #[test]
+    fn set_ratio_reports_whether_it_changed() {
+        let mut t = hsplit(leaf(1), leaf(2));
+        assert_eq!(t.ratio_at(&[]), Some(50));
+        assert!(t.set_ratio_at(&[], 70));
+        assert_eq!(t.ratio_at(&[]), Some(70));
+        // A drag delivers many pointer positions that land on the same
+        // percentage; the caller must be able to skip the redraw and
+        // the persist for those.
+        assert!(!t.set_ratio_at(&[], 70));
+        assert!(!t.set_ratio_at(&[0], 70), "a leaf has no ratio to set");
+    }
+
+    /// A tile driven to zero width would still own a PTY and still take
+    /// keystrokes while being invisible. Both ends clamp.
+    #[test]
+    fn set_ratio_clamps_both_ends_away_from_an_invisible_tile() {
+        let mut t = hsplit(leaf(1), leaf(2));
+        assert!(t.set_ratio_at(&[], 0));
+        assert_eq!(t.ratio_at(&[]), Some(TILE_RATIO_MIN));
+        assert!(t.set_ratio_at(&[], 100));
+        assert_eq!(t.ratio_at(&[]), Some(TILE_RATIO_MAX));
+    }
+
+    /// The divider moves the way the arrow points, from EITHER tile —
+    /// the reading that makes the gesture invertible and makes it agree
+    /// with dragging the same divider by mouse. The tempting
+    /// alternative ("the current tile grows") disagrees for a tile in
+    /// the second child and would make Shift-Right mean two different
+    /// things depending on which side the user had clicked into.
+    #[test]
+    fn resize_toward_moves_the_divider_the_way_the_arrow_points() {
+        // H(1, 2) — the agent on the left, its `lazybox log` on the right.
+        let mut t = hsplit(leaf(1), leaf(2));
+        let agent = t.path_to(1).unwrap();
+        let log = t.path_to(2).unwrap();
+
+        assert_eq!(
+            t.resize_toward(&agent, TileDirection::Right, 5),
+            Some(vec![])
+        );
+        assert_eq!(t.ratio_at(&[]), Some(55), "divider right, agent wider");
+
+        // Pressed from the OTHER tile, the same arrow moves the same
+        // divider the same way.
+        assert_eq!(t.resize_toward(&log, TileDirection::Right, 5), Some(vec![]));
+        assert_eq!(t.ratio_at(&[]), Some(60));
+
+        // And it inverts, from either side.
+        assert_eq!(t.resize_toward(&log, TileDirection::Left, 5), Some(vec![]));
+        assert_eq!(
+            t.resize_toward(&agent, TileDirection::Left, 5),
+            Some(vec![])
+        );
+        assert_eq!(t.ratio_at(&[]), Some(50), "back where it started");
+    }
+
+    /// The divider a "wider" keystroke means is the one between this
+    /// tile and the tile the matching arrow would MOVE to — so the walk
+    /// skips ancestors on the wrong axis, exactly like `neighbor`.
+    #[test]
+    fn resize_toward_skips_ancestors_on_the_wrong_axis() {
+        // H(1, V(2, 3)): tile 2 sits in a vertical split nested inside a
+        // horizontal one. A Left/Right resize from 2 must move the OUTER
+        // horizontal divider, not the vertical one it sits directly in.
+        let mut t = hsplit(leaf(1), vsplit(leaf(2), leaf(3)));
+        let two = t.path_to(2).unwrap();
+        assert_eq!(two, vec![1, 0]);
+
+        assert_eq!(
+            t.resize_toward(&two, TileDirection::Left, 10),
+            Some(vec![]),
+            "Left from the nested tile moves the outer vertical divider",
+        );
+        assert_eq!(t.ratio_at(&[]), Some(40), "the outer divider went left");
+        assert_eq!(t.ratio_at(&[1]), Some(50), "the inner split is untouched");
+
+        assert_eq!(
+            t.resize_toward(&two, TileDirection::Down, 10),
+            Some(vec![1]),
+            "Down from the nested tile moves the inner horizontal divider",
+        );
+        assert_eq!(t.ratio_at(&[1]), Some(60));
+        assert_eq!(t.ratio_at(&[]), Some(40), "the outer split is untouched");
+    }
+
+    #[test]
+    fn resize_toward_reports_nothing_when_no_divider_lies_that_way() {
+        // A lone leaf has no ancestor at all.
+        let mut only = leaf(1);
+        assert_eq!(only.resize_toward(&[], TileDirection::Left, 5), None);
+
+        // H(1, 2) has no horizontal divider, so Up/Down move nothing.
+        let mut t = hsplit(leaf(1), leaf(2));
+        let left = t.path_to(1).unwrap();
+        assert_eq!(t.resize_toward(&left, TileDirection::Up, 5), None);
+        assert_eq!(t.resize_toward(&left, TileDirection::Down, 5), None);
+        assert_eq!(t.ratio_at(&[]), Some(50), "nothing moved");
+    }
+
+    /// At the clamp the keystroke reports "nothing moved" rather than
+    /// claiming a resize the tree refused — the caller shows no notice
+    /// and skips the persist.
+    #[test]
+    fn resize_toward_at_the_clamp_reports_no_change() {
+        let mut t = hsplit(leaf(1), leaf(2));
+        let left = t.path_to(1).unwrap();
+        assert!(t.set_ratio_at(&[], TILE_RATIO_MAX));
+        assert_eq!(t.resize_toward(&left, TileDirection::Right, 5), None);
+        assert_eq!(t.ratio_at(&[]), Some(TILE_RATIO_MAX));
+    }
+
+    /// A resized tree is the persisted one: `SessionLayout` round-trips
+    /// through serde, which is how a divider position survives a
+    /// restart (`Command::SetSessionLayout`). No new config knob is
+    /// involved — the ratio IS the stored percentage.
+    #[test]
+    fn a_moved_divider_survives_the_layout_round_trip() {
+        let mut tree = hsplit(leaf(1), leaf(2));
+        assert!(tree.set_ratio_at(&[], 72));
+        let layout = SessionLayout::Splits {
+            tree,
+            focused: vec![1],
+        };
+        let json = serde_json::to_string(&layout).expect("layout serializes");
+        let back: SessionLayout = serde_json::from_str(&json).expect("layout deserializes");
+        let SessionLayout::Splits { tree, focused } = back else {
+            panic!("expected Splits, got {back:?}");
+        };
+        assert_eq!(tree.ratio_at(&[]), Some(72));
+        assert_eq!(focused, vec![1]);
     }
 }
 

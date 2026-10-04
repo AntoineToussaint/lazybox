@@ -323,6 +323,51 @@ impl Terminals {
         self.inner.split_tile(direction, cmds);
     }
 
+    /// `]]Shift-<arrow>` — move the divider nearest the focused tile
+    /// one `step` in `dir`. Returns the axis label of the divider that
+    /// moved, or `None` when none lies that way (#1920).
+    pub fn resize_focused_divider(
+        &mut self,
+        dir: lazybox_core::TileDirection,
+        step: i16,
+        cmds: &mut Vec<IpcCommand>,
+    ) -> Option<&'static str> {
+        self.inner.resize_focused_divider(dir, step, cmds)
+    }
+
+    /// The tile divider under `(col, row)`, as the last frame drew it.
+    pub fn hit_test_tile_divider(&self, col: u16, row: u16) -> Option<Vec<u8>> {
+        self.inner.hit_test_tile_divider(col, row)
+    }
+
+    /// Mark a tile divider as grabbed, so it paints accented.
+    pub fn begin_divider_drag(&mut self, path: Vec<u8>) {
+        self.inner.begin_divider_drag(path);
+    }
+
+    /// Release a grabbed tile divider. `true` when one was held.
+    pub fn end_divider_drag(&mut self) -> bool {
+        self.inner.end_divider_drag()
+    }
+
+    /// Move a grabbed tile divider to follow the pointer. `true` when
+    /// the ratio changed.
+    pub fn drag_tile_divider(&mut self, path: &[u8], col: u16, row: u16) -> bool {
+        self.inner.drag_tile_divider(path, col, row)
+    }
+
+    /// Push a `Command::SetSessionLayout` for the active session, so a
+    /// divider the user moved survives a restart.
+    pub fn persist_session_layout(&mut self, cmds: &mut Vec<IpcCommand>) {
+        self.inner.persist_session_layout(cmds);
+    }
+
+    /// A refusal the pane needs said out loud — a keystroke dropped
+    /// for a reason the user cannot see (a read-only log window).
+    pub fn take_input_refusal(&mut self) -> Option<String> {
+        self.inner.take_input_refusal()
+    }
+
     /// `]]<arrow>` — move tile focus (or cycle tabs in Tabs mode).
     pub fn move_tile_focus(
         &mut self,
@@ -352,6 +397,15 @@ impl Terminals {
 
     /// Whether the active session renders as a tile tree (vs Tabs).
     /// Drives the layout-tailored rows of the `]]` leader popup.
+    /// The ratio of the split at `path`, for tests that assert a divider
+    /// actually moved. `None` for a leaf, a missing path, or Tabs mode.
+    pub fn split_ratio_at(&self, path: &[u8]) -> Option<u8> {
+        match self.inner.layout() {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.ratio_at(path),
+            lazybox_core::SessionLayout::Tabs { .. } => None,
+        }
+    }
+
     pub fn layout_is_splits(&self) -> bool {
         matches!(
             self.inner.layout(),

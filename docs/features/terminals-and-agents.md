@@ -814,6 +814,8 @@ leaving, splitting, scrolling, and copying.
 - `Tab` cycles focus only before you've typed in the current visit; after the first keystroke it routes to the PTY (autocomplete).
 - `Ctrl-c` is forwarded as SIGINT.
 - `]]` then `|`/`\` (split vertical), `-` (split horizontal), arrows (move tile focus / cycle tabs), `x` (close the focused terminal). `Ctrl-w` is not a lazybox prefix — it reaches the inner program (readline word-erase).
+- `]]Shift-arrow` moves the divider between the focused tile and its neighbour that way, by `ui.split_step_percent` — the keyboard half of dragging that divider with the mouse. The divider follows the arrow from either tile, and the position is saved with that workspace's layout. A bare `Shift-arrow` inside a terminal stays the shell's.
+- A **log window takes no typed input.** A `lazybox log` runner is `tail -F`, which never reads stdin, so lazybox refuses keystrokes there rather than writing to a reader that does not exist; typing leaves a footer notice saying so. Scrollback, wheel scrolling, drag-select and copy are unaffected.
 - By default a second terminal in a workspace opens side-by-side (a split tile). Set `ui.terminal_new_layout: tabs` to have ordinary `s`/agent spawns stack behind the tab strip instead — the existing tile keeps its full size. Explicit `]]|` / `]]-` splits are unaffected.
 - `]]t` toggles that default live (split ⇄ tabs), persisting it to `ui.terminal_new_layout` so it survives restart; the `]]` popup's `t` row shows the current setting. The change affects the *next* spawn, not terminals already open.
 - Mouse wheel always scrolls lazybox's local history (3 rows/notch), including

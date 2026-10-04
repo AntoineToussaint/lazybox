@@ -192,13 +192,61 @@ declares.
 the row. The report keeps tracker lifecycle, working-claim, session
 (`SessionRunState`) and agent turn (`AgentState`) as separate facts because
 none implies another: a finished turn is not a finished task, an unexpired
-`lazybox:w:` claim is not a running process, and a live terminal that has not
+claim is not a running process, and a live terminal that has not
 reported a state is `unknown`, not idle. It is read-only — it must never reach
 for `workspace::attach::attach_to_record`, which materializes a workspace from
 the provider — and `Err` is reserved for status that could not be *established*,
 so a failed lookup can never read as "no worker". The same derivation backs
 `lazybox task status <ref>` over `Command::QueryTaskStatus`, which is the
 documented fallback for a session that gets no MCP tools.
+
+## Working claims: a label for presence, a comment for identity
+
+`working_claims.rs` owns "an agent is working on this". It is two upstream
+facts (#1922) and a durable local record that keeps them converged:
+
+- the one stable `working` label — **presence**, read free from the poll
+  payload by `Task::has_working_claim()`;
+- one sticky comment per record — **identity**: holder, agent, model, started,
+  last heartbeat, expiry, edited in place every 15 minutes.
+
+The local `WorkingClaimRecord` (a `terminal-working-claim:<holder>` kv row) is
+keyed by HOLDER, never by the upstream text, and remembers the comment id. That
+id is what makes a steady-state heartbeat **one** request: the in-place comment
+edit. Whether to spend a second on the label is answered by
+`stable_label_attached`, which reads the persisted row — so a label that never
+moved costs nothing, and one a human stripped is re-attached. The predecessor
+minted a `lazybox:w:<device>:<session>:<expiry>` label per claim and spent two
+requests renaming it to its new expiry every heartbeat.
+
+Three consequences worth knowing before you touch this:
+
+**Presence is now binary, so a lapsed claim is not free to spot.** The expiry
+used to be readable from the label name on any tick. It now lives in the
+comment, so `retire_lapsed_stable_claims` (on the 15-minute maintenance tick,
+one `Cold` comment read per record whose label no local lease accounts for) is
+what retires one. Until it runs, a lapsed claim still reads as claimed — the
+conservative direction, which over-blocks a spawn rather than letting the fleet
+double-spawn. A label with **no** comment of ours behind it is left strictly
+alone: `working` is an ordinary word that a human or another tool may own, and
+`task_status` reports it as unbacked rather than resolving it into a holder.
+
+**The label is shared, so a release has to look before it detaches.** Two
+boxes meant two labels before, so "release mine, leave the racing machine's
+alone" was true by construction. `release_working_claim` now reads the standing
+comment first and hands back `SupersededBy` when it names a different live
+lease, touching nothing.
+
+**The migration order is load-bearing.** A record carrying a pre-#1922
+`legacy_label` (read through serde's old `label` field name) attaches the
+stable label *first*, then retires the per-claim one. The other order leaves
+the record momentarily unclaimed, which is exactly the double-spawn window the
+claim exists to close.
+
+`ClaimRelease::WorkspaceLockHeld` is unchanged and still required from workspace
+removal — `project_synced_claim` takes the workspace's non-reentrant lock, and
+the phantom-workspace hang after #1533/#1534 was a release parking on the lock
+its own caller held.
 
 ## Two GitHub clients: who authors, who polls
 

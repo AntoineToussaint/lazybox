@@ -369,10 +369,21 @@ over the row, and every matching workspace is reported rather than an arbitrary
 first one.
 
 The report keeps apart facts that are easy to conflate. A finished agent turn is
-**not** task completion; an unexpired `lazybox:w:` claim is **not** proof of a
+**not** task completion; an unexpired working claim is **not** proof of a
 running process (it has a one-hour TTL a crashed worker stops renewing); a
 retained session worktree is **not** an agent turn. Where the evidence is
 missing or contradictory the verdict is `unknown` rather than a guess.
+
+Resolving a claim's *holder* is the one part of this report that may reach
+GitHub. Presence is the `working` label, which the daemon already has; the
+holder, agent, model and expiry live in lazybox's own claim comment. So a
+record carrying that label — and no lease this box is itself renewing — costs
+one comment read, on the lowest-priority tier. A `working` label with no
+lazybox-authored comment behind it is reported as exactly that (no holder, no
+expiry) rather than resolved into one: the label may be a human's own workflow
+label, its comment may have been deleted, or the read may simply have been
+refused, and guessing between those is how a caller either double-spawns or
+blocks forever.
 
 Exit codes: `0` when status was established (including "nobody is working on
 it", which is a real answer), `2` for a reference that cannot be resolved, `1`

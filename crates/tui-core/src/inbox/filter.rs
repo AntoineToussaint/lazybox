@@ -1140,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn claimed_filter_matches_qualified_ownership() {
+    fn claimed_filter_matches_the_stable_label_and_legacy_qualified_ownership() {
         let agents = HashMap::new();
         let mut claimed = workspace("claimed", TaskRole::Author, CiStatus::None, TaskKind::Issue);
         let label = lazybox_core::qualified_working_claim_label(
@@ -1163,6 +1163,22 @@ mod tests {
         }));
         assert!(!Filter::Claimed.matches(&FilterCtx {
             w: &unclaimed,
+            agents: &agents,
+            now: now(),
+        }));
+
+        // The current shape (#1922): one stable `working` label, with the
+        // holder and the lease in lazybox's claim comment. The filter reads
+        // presence off the label, which is the half that rides free in the
+        // poll payload — so the lens works with no GitHub request at all.
+        let mut stable = workspace("stable", TaskRole::Author, CiStatus::None, TaskKind::Issue);
+        stable
+            .primary_task_mut()
+            .unwrap()
+            .labels
+            .push(lazybox_core::Label::new(lazybox_core::WORKING_LABEL_NAME));
+        assert!(Filter::Claimed.matches(&FilterCtx {
+            w: &stable,
             agents: &agents,
             now: now(),
         }));

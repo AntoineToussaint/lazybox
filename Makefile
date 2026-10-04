@@ -180,6 +180,14 @@ rebase-main: ## Rebase the current branch onto origin/main, auto-regenerating th
 test: ## Run all tests (cargo-nextest enforces a 10s per-test deadline).
 	@PATH="$(PINNED_PATH)" cargo nextest run --workspace
 
+bench: ## Wall-clock numbers for the terminal/UI hot paths (#1919). Run on a QUIET box — state the load average alongside any figure you quote.
+	@uptime
+	@PATH="$(PINNED_PATH)" cargo bench -p lazybox-tui --bench terminal_feed --bench client_hot_paths
+
+bench-cpu: ## Per-call CPU time of the hot-path VT calls. Load-robust (CLOCK_THREAD_CPUTIME_ID), so usable on a busy shared box — unlike `make bench`.
+	@uptime
+	@PATH="$(PINNED_PATH)" cargo bench -p lazybox-tui --bench vt_call_cost
+
 test-ignored: ## Run #[ignore]'d real-backend integration tests on demand.
 	@PATH="$(PINNED_PATH)" cargo nextest run --workspace --run-ignored only
 

@@ -60,10 +60,20 @@ is now explicit:
   above the live bottom. Rows-above-bottom, not an absolute row, because a
   rebuild changes how deep the history above the tail is and an absolute row
   would then name different content.
-- `feed` **re-derives** the anchor after every write. It does not re-impose it:
-  libghostty keeps a real content pin across appends, so three new lines under
-  a viewport parked 7 rows up correctly leave the user on the same rows, now 10
-  above the bottom. Forcing 7 back would drag them down the buffer per chunk.
+- `feed` **re-derives** the anchor after a write **while parked**. It does not
+  re-impose it: libghostty keeps a real content pin across appends, so three
+  new lines under a viewport parked 7 rows up correctly leave the user on the
+  same rows, now 10 above the bottom. Forcing 7 back would drag them down the
+  buffer per chunk.
+- A write while **following the tail** re-derives nothing, and costs no FFI
+  read at all (#1918). Appending cannot un-park a viewport already at the live
+  bottom, so the cached `Bottom` is already what a read would return — and the
+  read is `scrollbar()`, expensive by its own contract, on the hottest path in
+  the client. Entering the parked state goes through `scroll`, which reads
+  anyway, so no transition is missed. The equivalence is held by
+  `following_a_tail_is_equivalent_to_re_deriving` against escape-heavy traffic
+  (region scrolls, an alt-screen round trip, a hard reset) rather than left as
+  an argument; see the hot-path budgets below.
 - `TerminalSlot::rebuild_grid` is the one place a grid is replaced wholesale,
   and its `GridPin` argument makes each site state what happens to the pin:
   `Keep` re-asserts the anchor (the capture adoption, which only deepens
@@ -80,6 +90,77 @@ Asserting the *distance* is not asserting the pin: the pre-#1909 test checked
 that the distance survived a rebuild, and it did, while the content at that
 distance moved. A viewport assertion compares the rendered rows
 (`viewport_rows`), not `grid_text` and not a scrollbar arithmetic.
+
+## The hot paths have budgets, and the budgets are counted
+
+Four paths in this crate run often enough that what they are *allowed to
+do per call* is part of their contract. The gate is
+`tests/terminal_hot_paths.rs`; the wall-clock numbers are `make bench`.
+
+| Path | Budget per call | Counted by |
+| --- | --- | --- |
+| `TerminalVt::feed` — every output chunk of every terminal | **0** scrollbar derivations while following the tail; **1** while parked | `a_following_tail_feed_reads_no_scrollbar`, `a_parked_feed_still_re_derives_once_per_write` |
+| `TerminalVt::scroll` — a user action | a **constant** (2: `before` and `after`), never a function of depth or distance | `a_scroll_reads_a_constant_number_of_scrollbars` |
+| `TerminalStack::render` — per visible tile per frame | **1** scrollbar derivation; **≤ rows + 1** row fetches on a painted frame and **0** on a repaint of an unmutated grid | `a_painted_frame_reads_one_scrollbar_per_tile`, `a_frame_walks_each_viewport_row_at_most_once`, `an_unchanged_frame_walks_no_rows` |
+| `TerminalStack::handle_key` — every keystroke | exactly **1** `Command::Write`, **0** VT work, bounded bookkeeping | `one_keystroke_is_one_write_and_no_vt_work`, `typing_a_word_is_one_write_per_key` |
+
+**`libghostty_vt::Terminal::scrollbar()` is expensive by contract and
+cheap in this build — respect the contract anyway.** Its doc says
+"arbitrary pins are expensive … not too frequently". Measured
+(`make bench-cpu`), it is **~5 ns of CPU at any viewport depth** — the
+same parked 9000 rows up a 9860-row grid as at the live bottom. So #1910
+putting it on `feed` cost ~0.5% of a `vt_write` (~960 ns) and was *not*
+what the user felt in #1918; the box was at load average 75.
+
+Which is why the budget is still zero on the following-tail path. The
+number above describes today's libghostty, not the API's promise: the
+warning is the implementation's licence to become expensive, and a hot
+path built on "it happens to be 5 ns" breaks silently the day it isn't.
+Keep the call off per-chunk paths on contract grounds, and do not add
+caching or complexity to shave it — that trade was measured and refused
+once already (see `TerminalStack::render`'s comment on not caching the
+reading across frames).
+
+**Gate on work counted, not on time.** A wall-clock threshold cannot be
+the gate here. The suite already has a loaded profile (`make test-loaded`)
+because fixed timeouts flake on a shared box, and the regression above was
+reported at load average 75. A time budget is then either too loose to
+catch anything or tight enough to fail PRs that changed nothing. A count
+is exact on every machine. Timing numbers are for humans, in the PR body.
+
+**Every budget assertion carries a positive control.** The dangerous
+failure of a counting gate is not a wrong number, it is a counter that
+stopped observing — then every "this does no work" assertion passes green
+while the regression ships. `vt_budget::Counts::assert_live` is how each
+test proves the instrument is alive before trusting its zero. That is also
+why the counters in `lazybox_tui_term::vt_budget` are compiled in
+unconditionally rather than behind a cargo feature: a feature left off
+makes the whole gate vacuous. They are per-scrollbar-read and per-**row**
+(never per cell) for exactly that affordability.
+
+**The counting shim cannot be bypassed.** `TerminalVt::scrollbar` is the
+one place this crate reaches the binding, and
+`scrollbar_reads_have_a_single_counted_owner` brace-matches its body and
+fails the build on a raw `.terminal.scrollbar(` anywhere else in `src/` —
+the same mechanical backstop `scroll_viewport` has carried since #371. A
+new read goes through the owner, or the budget stops seeing it.
+
+**The every-row walk in `ghostty_widget.rs` is justified, not a defect.**
+libghostty's dirty flags are unsound as a redraw-skip signal against a
+viewport-indexed cache (#239, and the module docs there explain it), so
+the widget walks every cell of every row. What bounds it is the
+content-revision gate in `TerminalStack::render`: `(content_rev, rect)`
+logs the VT's *inputs*, so an unchanged grid blits a cached frame and
+walks nothing. Do not "optimize" the walk by consulting the flags; do keep
+the revision gate sound, and invalidate `last_frame_rev` **and**
+`last_frame_bar` wherever the parser is replaced — a fresh parser restarts
+the counter.
+
+**Nothing on the tick path may read the config.** `Config::load()` is a
+file read plus a YAML parse; every TUI caller is an action or a modal
+mount. `the_tick_phase_does_not_load_the_config` discovers the `tick_*`
+family from `run_loop_step` itself and audits each body, so a tick added
+later is covered without anyone remembering to.
 
 ## A capture never replaces output it predates
 

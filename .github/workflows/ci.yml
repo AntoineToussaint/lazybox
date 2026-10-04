@@ -433,10 +433,8 @@ jobs:
           cargo doc --no-deps -p lazybox-sandbox --all-features
 
   benches:
-    # The workspace's bench targets — three in `tui` (`terminal_feed` and
-    # `client_hot_paths` on criterion, `vt_call_cost` a plain `main` measuring
-    # CPU time) and one in `server` — type-check under the clippy
-    # `--all-targets` gate on every PR; only this full build proves they
+    # The workspace's two criterion benches (tui, server) type-check under the
+    # clippy `--all-targets` gate on every PR; only this full build proves they
     # still LINK. That link is a second whole-workspace compile (~4m52s) for a
     # check that has never caught anything clippy didn't, so it runs in the
     # merge queue against the candidate tree — like `msrv` and macOS — rather

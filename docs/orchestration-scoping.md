@@ -304,7 +304,7 @@ storage — `post_note` / `read_notes` with tags, which exist.
 ### 4j. Labels: the visible projection
 
 lazybox already treats GitHub labels as live coordination state (`working`,
-`lazybox:w:*`, `lazybox:<agent>`), which is what makes the fleet legible to
+`lazybox:<agent>`), which is what makes the fleet legible to
 anyone looking at GitHub rather than at lazybox. The epic gets the same
 treatment, so the plan is visible from GitHub, from a Linear/Jira mirror, or
 from any other tool:

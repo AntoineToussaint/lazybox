@@ -6,6 +6,32 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **"An agent is working on this" is now one stable `working` label plus one
+  sticky comment**, instead of a `lazybox:w:<device>:<session>:<expiry>` label
+  minted per claim (#1922). The old shape grew a repository's label namespace
+  by one unreadable name per task, forever, and a human reading the thread saw
+  nothing. Now the label carries presence — free in the poll payload, so
+  "is this claimed?" still costs no GitHub request on any tick — and a comment
+  marked `<!-- lazybox:claim -->` carries the holder, agent, model, start time
+  and expiry, **edited in place** on every heartbeat, so a four-hour claim
+  leaves one comment rather than sixteen. A steady-state heartbeat now costs
+  one GitHub request instead of two.
+
+  The comment counts as a claim only when lazybox itself authored it: anyone
+  can paste the marker, but only a repository writer can attach the label, so
+  the author check is what gives the comment half the same trust the label
+  half has. A `working` label with no lazybox-authored comment behind it is
+  reported by `lazybox task status` as exactly that — no holder, no expiry —
+  and is never detached, since `working` may be a label a human or another
+  tool owns.
+
+  Claims held by a box on an older build keep being honoured, and each holder
+  retires its own per-claim label on its next heartbeat — after attaching the
+  stable one, so nothing reads as free in between. `role:<…>` labels are
+  unchanged.
+
 ## [0.1.19] - 2026-09-28
 
 A patch release: the Linux build starts again on a stock distro, and two

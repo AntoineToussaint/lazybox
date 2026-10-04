@@ -1418,12 +1418,21 @@ fn request_profile(
         // vs 60-min claim TTL leaves ample slack for transient refusals.
         // `Cold` carries the lowest per-tick ceiling (#1870), so the sweeper
         // yields to the poll on the REST `core` bucket the same way.
-        "list issue working labels"
-        | "list issue working labels next page"
-        | "renew working claim label"
-        | "create working claim label"
+        "create working claim label"
         | "add working claim label"
-        | "delete working claim label" => (ApiResource::rest("core"), RequestPriority::Cold),
+        | "delete working claim label"
+        // The claim COMMENT (#1922), on the same 15-minute heartbeat and so on
+        // the same tier. These must be spelled out: `post issue comment` and
+        // `update issue comment` are classified `Interactive` below (they
+        // carry a user's own comment), and a heartbeat admitted on that tier
+        // would bypass the reserve and the per-tick allowance exactly as the
+        // claim label writes did before #1218.
+        | "list issue claim comments"
+        | "list issue claim comments last page"
+        | "get working claim comment"
+        | "post working claim comment"
+        | "update working claim comment"
+        | "remove working claim label" => (ApiResource::rest("core"), RequestPriority::Cold),
         operation
             if operation.starts_with("list ")
                 || operation == "post issue comment"
@@ -1902,6 +1911,19 @@ impl GhClient {
             inner,
             ..stub
         })
+    }
+
+    /// Test-only: the login [`Self::stub_with_base_uri_for_tests`]
+    /// authenticates as.
+    ///
+    /// Exported because the sticky-comment reader accepts a comment only from
+    /// the authenticated login — the trust property the whole claim rests on
+    /// (#1600) — so a server-side test seeding a canned claim comment has to
+    /// author it as exactly this user, and a literal copied into that test
+    /// would silently stop matching the day the stub's login changed.
+    #[doc(hidden)]
+    pub fn stub_login_for_tests() -> &'static str {
+        "test-user"
     }
 
     /// Test-only: a stub client whose cached budget already contains a
@@ -6090,45 +6112,117 @@ impl GhClient {
             trailers.render()
         );
         let dropped = |reason: String| lazybox_core::TrailerOutcome::Dropped { reason };
-        match self.find_trailer_comment(owner, name, number).await {
-            Ok(Some(comment_id)) => match self
-                .update_issue_comment(owner, name, comment_id, &body)
-                .await
-            {
-                Ok(()) => lazybox_core::TrailerOutcome::InComment,
-                Err(error) => dropped(format!("updating the cost comment failed ({error})")),
-            },
-            Ok(None) => match self
-                .post_issue_comment(&format!("{owner}/{name}"), number, &body)
-                .await
-            {
-                Ok(()) => lazybox_core::TrailerOutcome::InComment,
-                Err(error) => dropped(format!("posting the cost comment failed ({error})")),
-            },
-            // Posting blind here would stack a duplicate on every merge, which
-            // is the precise thing the sticky marker exists to prevent.
-            Err(error) => dropped(format!(
+        match self
+            .write_sticky_comment(&TRAILER_STICKY, owner, name, number, &body, None)
+            .await
+        {
+            Ok(_) => lazybox_core::TrailerOutcome::InComment,
+            Err(StickyWriteError::Locate(error)) => dropped(format!(
                 "the existing cost comment could not be located ({error})"
             )),
+            Err(StickyWriteError::Update(error)) => {
+                dropped(format!("updating the cost comment failed ({error})"))
+            }
+            Err(StickyWriteError::Post(error)) => {
+                dropped(format!("posting the cost comment failed ({error})"))
+            }
         }
     }
 
-    /// The id of this PR's existing lazybox trailer comment, if any. Matched
-    /// on BOTH the marker and our own authorship, so a marker pasted by
-    /// someone else can't redirect the edit onto their comment.
+    /// Converge one sticky comment: find lazybox's own comment bearing
+    /// `sticky`'s marker and edit it in place, or post it when there is none.
+    /// Returns the comment's id so a caller that heartbeats can remember it
+    /// and skip the search next time.
+    ///
+    /// `known` short-circuits the search with an id a previous call returned.
+    /// A `known` id that no longer resolves (the comment was deleted) falls
+    /// back to the search rather than failing, so a tidied thread self-heals
+    /// into exactly one comment again instead of none.
+    ///
+    /// One implementation for both markers on purpose (#1922): a second
+    /// find-and-edit would be a second place for the authorship check to be
+    /// forgotten, and that check is the whole reason a comment can be trusted
+    /// at all.
+    async fn write_sticky_comment(
+        &self,
+        sticky: &StickyComment,
+        owner: &str,
+        name: &str,
+        number: u64,
+        body: &str,
+        known: Option<octocrab::models::CommentId>,
+    ) -> Result<octocrab::models::CommentId, StickyWriteError> {
+        if let Some(id) = known {
+            match self
+                .update_issue_comment(sticky, owner, name, id, body)
+                .await
+            {
+                Ok(()) => return Ok(id),
+                // 404: the remembered comment is gone. 403/410 likewise mean
+                // this id is not ours to edit any more. Fall through to the
+                // search so the next heartbeat converges rather than failing
+                // forever on a stale id.
+                Err(error) if matches!(gh_error_status(&error), Some(403 | 404 | 410)) => {}
+                Err(error) => return Err(StickyWriteError::Update(error)),
+            }
+        }
+        let found = self
+            .find_sticky_comment(sticky, owner, name, number)
+            .await
+            // Posting blind here would stack a duplicate on every write, which
+            // is the precise thing the sticky marker exists to prevent.
+            .map_err(StickyWriteError::Locate)?;
+        match found {
+            Some(id) => {
+                self.update_issue_comment(sticky, owner, name, id, body)
+                    .await
+                    .map_err(StickyWriteError::Update)?;
+                Ok(id)
+            }
+            None => self
+                .post_sticky_comment(sticky, owner, name, number, body)
+                .await
+                .map_err(StickyWriteError::Post),
+        }
+    }
+
+    /// The id of this record's existing lazybox comment bearing `sticky`'s
+    /// marker, if any. Matched on BOTH the marker and our own authorship, so a
+    /// marker pasted by someone else can't redirect the edit onto their
+    /// comment — and, for a claim, can't fabricate a claim at all. Only
+    /// repository writers can attach a label; *anyone* can write a comment, so
+    /// this check is what gives the comment half of a claim the same trust
+    /// the label half has (#1600, #1922).
     ///
     /// GitHub returns issue comments oldest-first with no way to reverse the
-    /// order, and ours is written at merge time — so on a PR with more than
-    /// one page of comments it lives on the LAST page, and searching page one
-    /// would never find it. Follow the `last` link and search backwards from
-    /// the newest comment.
-    async fn find_trailer_comment(
+    /// order, and ours is written mid-thread (at merge, or when an agent
+    /// starts) — so on a record with more than one page of comments it lives
+    /// on the LAST page, and searching page one would never find it. Follow
+    /// the `last` link and search backwards from the newest comment.
+    async fn find_sticky_comment(
         &self,
+        sticky: &StickyComment,
         owner: &str,
         name: &str,
         number: u64,
     ) -> Result<Option<octocrab::models::CommentId>, GhError> {
-        self.acquire_or_block("list issue comments")?;
+        Ok(self
+            .find_sticky_comment_body(sticky, owner, name, number)
+            .await?
+            .map(|(id, _)| id))
+    }
+
+    /// As [`find_sticky_comment`](Self::find_sticky_comment), but also returns
+    /// the body — for a reader that wants to parse what lazybox said rather
+    /// than overwrite it.
+    async fn find_sticky_comment_body(
+        &self,
+        sticky: &StickyComment,
+        owner: &str,
+        name: &str,
+        number: u64,
+    ) -> Result<Option<(octocrab::models::CommentId, String)>, GhError> {
+        self.acquire_or_block(sticky.list_op)?;
         let _permit = self.request_permit().await?;
         let first = self
             .inner
@@ -6140,7 +6234,7 @@ impl GhClient {
             .map_err(GhError::Api)?;
         let newest = match first.last.clone() {
             Some(last) => {
-                self.acquire_or_block("list issue comments last page")?;
+                self.acquire_or_block(sticky.list_next_op)?;
                 let _permit = self.request_permit().await?;
                 self.inner
                     .get_page::<octocrab::models::issues::Comment>(&Some(last))
@@ -6158,19 +6252,20 @@ impl GhClient {
                 c.user.login == self.user
                     && c.body
                         .as_deref()
-                        .is_some_and(|b| b.starts_with(TRAILER_COMMENT_MARKER))
+                        .is_some_and(|b| b.starts_with(sticky.marker))
             })
-            .map(|c| c.id))
+            .and_then(|c| c.body.map(|body| (c.id, body))))
     }
 
     async fn update_issue_comment(
         &self,
+        sticky: &StickyComment,
         owner: &str,
         name: &str,
         comment_id: octocrab::models::CommentId,
         body: &str,
     ) -> Result<(), GhError> {
-        self.acquire_or_block("update issue comment")?;
+        self.acquire_or_block(sticky.update_op)?;
         let _permit = self.request_permit().await?;
         let _mutation_guard = self.mutation_gate.lock().await;
         self.inner
@@ -6179,6 +6274,32 @@ impl GhClient {
             .await
             .map_err(GhError::Api)?;
         Ok(())
+    }
+
+    /// Post a sticky comment under `sticky`'s own budget classification.
+    /// Separate from [`post_issue_comment`](Self::post_issue_comment), whose
+    /// operation label is `Interactive` because it carries a user's own
+    /// comment: a heartbeat must never be admitted on that tier, or N agents
+    /// renewing claims bypass the reserve and the per-tick allowance the way
+    /// the label writes did before #1218.
+    async fn post_sticky_comment(
+        &self,
+        sticky: &StickyComment,
+        owner: &str,
+        name: &str,
+        number: u64,
+        body: &str,
+    ) -> Result<octocrab::models::CommentId, GhError> {
+        self.acquire_or_block(sticky.post_op)?;
+        let _permit = self.request_permit().await?;
+        let _mutation_guard = self.mutation_gate.lock().await;
+        let comment = self
+            .inner
+            .issues(owner, name)
+            .create_comment(number, body)
+            .await
+            .map_err(GhError::Api)?;
+        Ok(comment.id)
     }
 
     /// Post a top-level comment on an issue or PR. PRs ARE issues in
@@ -6643,144 +6764,263 @@ impl GhClient {
         Ok(())
     }
 
-    /// Converge one owner/session-qualified claim on an issue or PR. Applying
-    /// a heartbeat creates or renames only that identity's repository label,
-    /// attaches the desired expiry, and removes superseded expiries for the
-    /// same identity. Clearing removes every attached expiry for that identity.
-    pub async fn sync_working_claim_target(
+    /// Converge a claim on an issue or PR: the stable
+    /// [`lazybox_core::WORKING_LABEL_NAME`] label for presence, and one sticky
+    /// comment carrying the lease (#1922).
+    ///
+    /// `attach_label` is the caller's free answer to "is the label already
+    /// there?", read from the poll payload it already holds — passing `false`
+    /// when it is present would spend one REST call per heartbeat to re-add a
+    /// label that never moved, and passing `true` when a human has stripped it
+    /// is what makes the claim self-heal.
+    ///
+    /// `known_comment` short-circuits the comment search with the id a
+    /// previous call returned, so a steady-state heartbeat is ONE request: the
+    /// in-place comment edit. The predecessor spent two (list the issue's
+    /// labels, then rename the per-claim label to its new expiry) and minted a
+    /// label per claim on the repository while doing it.
+    ///
+    /// Returns the comment's id, for the caller to remember.
+    pub async fn apply_working_claim(
         &self,
         task_id: &lazybox_core::TaskId,
         repo: &str,
-        desired_label: Option<&str>,
-        device: &str,
-        session: &str,
-    ) -> Result<(), GhError> {
+        note: &lazybox_core::WorkingClaimNote,
+        known_comment: Option<u64>,
+        attach_label: bool,
+    ) -> Result<u64, GhError> {
         let (owner, name, number) = working_claim_target(task_id, repo)?;
+        if attach_label {
+            self.attach_stable_working_label(owner, name, number)
+                .await?;
+        }
+        let id = self
+            .write_sticky_comment(
+                &CLAIM_STICKY,
+                owner,
+                name,
+                number,
+                &note.render(),
+                known_comment.map(octocrab::models::CommentId),
+            )
+            .await
+            .map_err(claim_comment_error)?;
+        Ok(*id)
+    }
+
+    /// Attach the stable `working` label, defining it in the repository first
+    /// if it is not there yet.
+    ///
+    /// The predecessor created the label definition unconditionally before
+    /// attaching it, because a per-claim name never existed yet. A fixed name
+    /// exists after the repository's first claim, so the create is done only
+    /// as a *recovery*: the attach is attempted, and a repository that does
+    /// not define the label yet pays one create and one retry, once, instead
+    /// of every claim paying a create it does not need.
+    ///
+    /// Written as a fallback rather than a precondition on purpose. GitHub's
+    /// add-labels endpoint is widely believed to create a missing label on the
+    /// fly, and this code does not depend on whether that is true: if it is,
+    /// the first attach simply succeeds and the fallback never runs.
+    async fn attach_stable_working_label(
+        &self,
+        owner: &str,
+        name: &str,
+        number: u64,
+    ) -> Result<(), GhError> {
         let handler = self.inner.issues(owner, name);
-        let _permit = self.acquire_rest("list issue working labels").await?;
-        let mut page = handler
-            .list_labels_for_issue(number)
-            .per_page(100)
-            .send()
+        let label = lazybox_core::WORKING_LABEL_NAME.to_string();
+        {
+            let _permit = self.acquire_rest("add working claim label").await?;
+            match handler
+                .add_labels(number, std::slice::from_ref(&label))
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(error) if matches!(octocrab_error_status(&error), Some(404 | 422)) => {}
+                Err(error) => return Err(GhError::Api(error)),
+            }
+        }
+        {
+            let _permit = self.acquire_rest("create working claim label").await?;
+            match handler
+                .create_label(
+                    &label,
+                    "fbca04",
+                    "Claimed by a lazybox agent; see lazybox's claim comment for the holder.",
+                )
+                .await
+            {
+                Ok(_) => {}
+                // Already defined — then the add above failed for another
+                // reason and the retry below will surface it.
+                Err(error) if octocrab_error_status(&error) == Some(422) => {}
+                Err(error) => return Err(GhError::Api(error)),
+            }
+        }
+        let _permit = self.acquire_rest("add working claim label").await?;
+        handler
+            .add_labels(number, std::slice::from_ref(&label))
             .await
             .map_err(GhError::Api)?;
-        let mut attached = Vec::new();
-        loop {
-            attached.extend(page.items.iter().map(|label| label.name.clone()));
-            if page.next.is_none() {
-                break;
-            }
-            let _permit = self
-                .acquire_rest("list issue working labels next page")
-                .await?;
-            page = match self
-                .inner
-                .get_page::<octocrab::models::Label>(&page.next)
-                .await
-                .map_err(GhError::Api)?
-            {
-                Some(next) => next,
-                None => break,
-            };
-        }
-
-        let owned = attached
-            .into_iter()
-            .filter(|name| {
-                lazybox_core::QualifiedWorkingClaim::parse(name)
-                    .is_some_and(|claim| claim.device == device && claim.session == session)
-            })
-            .collect::<Vec<_>>();
-
-        if let Some(desired) = desired_label {
-            let parsed = lazybox_core::QualifiedWorkingClaim::parse(desired).ok_or_else(|| {
-                GhError::Graphql("working claim: desired label is malformed".into())
-            })?;
-            if parsed.device != device || parsed.session != session {
-                return Err(GhError::Graphql(
-                    "working claim: desired label does not match its owner".into(),
-                ));
-            }
-            // The one expiry renamed in place this heartbeat, if any. A rename
-            // keeps the label attached (it is the same label under a new
-            // name), so it needs neither the add below nor a delete of its
-            // old name — both were one wasted REST call per heartbeat, the
-            // delete a guaranteed 404.
-            let mut renamed: Option<&String> = None;
-            if !owned.iter().any(|name| name == desired) {
-                let mut available = false;
-                if let Some(previous) = owned.first() {
-                    let _permit = self.acquire_rest("renew working claim label").await?;
-                    match handler
-                        .update_label(
-                            previous,
-                            desired,
-                            "fbca04",
-                            "Claimed by a lazybox agent; expires without a heartbeat.",
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            available = true;
-                            renamed = Some(previous);
-                        }
-                        Err(error) if matches!(octocrab_error_status(&error), Some(404 | 422)) => {}
-                        Err(error) => return Err(GhError::Api(error)),
-                    }
-                }
-                if !available {
-                    let _permit = self.acquire_rest("create working claim label").await?;
-                    match handler
-                        .create_label(
-                            desired,
-                            "fbca04",
-                            "Claimed by a lazybox agent; expires without a heartbeat.",
-                        )
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(error) if octocrab_error_status(&error) == Some(422) => {}
-                        Err(error) => return Err(GhError::Api(error)),
-                    }
-                }
-                if renamed.is_none() {
-                    let _permit = self.acquire_rest("add working claim label").await?;
-                    handler
-                        .add_labels(number, &[desired.to_string()])
-                        .await
-                        .map_err(GhError::Api)?;
-                }
-            }
-            // Superseded expiries are deleted at the repository level: a
-            // qualified label names exactly one claim lease, so once it is
-            // stale its *definition* is garbage too — detaching alone would
-            // leak one dead label into the repo's label picker per heartbeat
-            // (the rename path above already carried the definition forward).
-            for previous in owned
-                .iter()
-                .filter(|name| name.as_str() != desired && Some(*name) != renamed)
-            {
-                let _permit = self.acquire_rest("delete working claim label").await?;
-                if let Err(error) = handler.delete_label(previous).await
-                    && octocrab_error_status(&error) != Some(404)
-                {
-                    return Err(GhError::Api(error));
-                }
-            }
-        } else {
-            // Release deletes the repository-level definition (which also
-            // detaches it from the issue) so a finished claim leaves nothing
-            // behind in the repo's label picker.
-            for label in &owned {
-                let _permit = self.acquire_rest("delete working claim label").await?;
-                if let Err(error) = handler.delete_label(label).await
-                    && octocrab_error_status(&error) != Some(404)
-                {
-                    return Err(GhError::Api(error));
-                }
-            }
-        }
         Ok(())
+    }
+
+    /// Let a claim go: record the release in the sticky comment and detach the
+    /// stable label.
+    ///
+    /// Reads the comment first, and that read is load-bearing. With a per-claim
+    /// label, "release mine, leave the racing machine's alone" was true by
+    /// construction — two boxes meant two labels. One stable label is shared,
+    /// so a blind detach here would silently cancel a second box's live claim
+    /// (the property `clearing_one_machine_claim_never_removes_the_racing_machine`
+    /// pinned). Instead: if the comment names a *different* live lease, that
+    /// box claimed after us and owns the label now — leave both alone and say
+    /// so.
+    pub async fn release_working_claim(
+        &self,
+        task_id: &lazybox_core::TaskId,
+        repo: &str,
+        note: &lazybox_core::WorkingClaimNote,
+        known_comment: Option<u64>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<WorkingClaimRelease, GhError> {
+        let (owner, name, number) = working_claim_target(task_id, repo)?;
+        let found = match known_comment {
+            Some(id) => self
+                .read_sticky_comment_by_id(&CLAIM_STICKY, owner, name, id)
+                .await?
+                .map(|body| (id, body)),
+            None => self
+                .find_sticky_comment_body(&CLAIM_STICKY, owner, name, number)
+                .await?
+                .map(|(id, body)| (*id, body)),
+        };
+        let standing = found
+            .as_ref()
+            .and_then(|(_, body)| lazybox_core::WorkingClaimNote::parse(body));
+        if let Some(standing) = &standing
+            && !standing.same_owner(note)
+            && standing.is_active_at(now)
+        {
+            return Ok(WorkingClaimRelease::SupersededBy {
+                device: standing.device.clone(),
+                session: standing.session.clone(),
+            });
+        }
+        // Record the release only in a comment that already exists. Posting a
+        // fresh "lazybox has finished working on this" where lazybox never
+        // announced starting — a claim whose first sync never landed, or one
+        // whose comment somebody deleted — would be noise about work the
+        // thread has no record of.
+        if let Some((id, _)) = &found {
+            let mut released = note.clone();
+            released.released_at = Some(now);
+            // Keep what the standing note knew about the lease that the local
+            // record may have lost across a restart (the original start time).
+            if let Some(standing) = &standing
+                && standing.same_owner(note)
+            {
+                released.started_at = standing.started_at;
+            }
+            self.write_sticky_comment(
+                &CLAIM_STICKY,
+                owner,
+                name,
+                number,
+                &released.render(),
+                Some(octocrab::models::CommentId(*id)),
+            )
+            .await
+            .map_err(claim_comment_error)?;
+        }
+        self.remove_working_label_target(task_id, repo).await?;
+        Ok(WorkingClaimRelease::Released)
+    }
+
+    /// The claim lazybox itself wrote on this record, if any.
+    ///
+    /// **A decision-point read, never a per-tick one** (#1922). Presence comes
+    /// free from the `working` label in the poll payload; this is for the
+    /// caller that is about to act on a claim it cannot account for locally —
+    /// a spawn onto a claimed task, a status lookup, the stale-label sweep —
+    /// and wants to know who holds it and until when.
+    ///
+    /// `None` means no comment of ours backs the label. That is not "no
+    /// claim": it is a label with nothing behind it, which the caller must
+    /// report as unbacked rather than quietly treat as free or as held.
+    /// Authorship is checked by the sticky reader this calls, so a forged
+    /// comment bearing the marker from any other login is invisible here —
+    /// the comment half of a claim gets the same write-access trust the label
+    /// half has (#1600).
+    pub async fn read_working_claim_note(
+        &self,
+        task_id: &lazybox_core::TaskId,
+        repo: &str,
+    ) -> Result<Option<lazybox_core::WorkingClaimNote>, GhError> {
+        let (owner, name, number) = working_claim_target(task_id, repo)?;
+        Ok(self
+            .find_sticky_comment_body(&CLAIM_STICKY, owner, name, number)
+            .await?
+            .and_then(|(_, body)| lazybox_core::WorkingClaimNote::parse(&body)))
+    }
+
+    /// Detach the stable claim label. Detach, never delete: unlike a
+    /// per-claim label, `working` is one fixed name shared by every claim this
+    /// repository will ever see, so deleting its definition would churn the
+    /// repo's label picker and take the label off every other claimed task in
+    /// the repo at once.
+    pub async fn remove_working_label_target(
+        &self,
+        task_id: &lazybox_core::TaskId,
+        repo: &str,
+    ) -> Result<(), GhError> {
+        let (owner, name, number) = working_claim_target(task_id, repo)?;
+        let _permit = self.acquire_rest("remove working claim label").await?;
+        match self
+            .inner
+            .issues(owner, name)
+            .remove_label(number, lazybox_core::WORKING_LABEL_NAME)
+            .await
+        {
+            Ok(_) => Ok(()),
+            // Already gone is already success — a human tidying the label is
+            // the common case, not an error.
+            Err(error) if matches!(octocrab_error_status(&error), Some(404)) => Ok(()),
+            Err(error) => Err(GhError::Api(error)),
+        }
+    }
+
+    /// Fetch one comment by id and return its body when it is ours and bears
+    /// `sticky`'s marker. One request, no pagination — the cheap read for a
+    /// caller that remembered the id.
+    async fn read_sticky_comment_by_id(
+        &self,
+        sticky: &StickyComment,
+        owner: &str,
+        name: &str,
+        comment_id: u64,
+    ) -> Result<Option<String>, GhError> {
+        self.acquire_or_block(sticky.get_op)?;
+        let _permit = self.request_permit().await?;
+        let comment = match self
+            .inner
+            .issues(owner, name)
+            .get_comment(octocrab::models::CommentId(comment_id))
+            .await
+        {
+            Ok(comment) => comment,
+            Err(error) if matches!(octocrab_error_status(&error), Some(403 | 404 | 410)) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(GhError::Api(error)),
+        };
+        if comment.user.login != self.user {
+            return Ok(None);
+        }
+        Ok(comment
+            .body
+            .filter(|body| body.trim_start().starts_with(sticky.marker)))
     }
 
     /// Converge the single derived-status label (#1517 §4j) on a task's issue
@@ -8623,6 +8863,119 @@ pub(crate) fn should_query_issues(
 /// the handle that makes the comment sticky rather than one-per-merge.
 const TRAILER_COMMENT_MARKER: &str = "<!-- lazybox:pr-trailers -->";
 
+/// One kind of sticky comment: the marker that identifies lazybox's own
+/// comment of this kind, plus the operation labels its REST calls are budgeted
+/// under.
+///
+/// The labels are part of the descriptor rather than hardcoded in the writer
+/// because the two kinds belong on different budget tiers, and
+/// [`request_profile`] keys on the label. Getting that wrong is not cosmetic:
+/// an operation name it does not recognise falls through to `Interactive`,
+/// which bypasses the reserve, the per-tick allowance and the local bucket
+/// alike (#1870).
+struct StickyComment {
+    /// Must open the comment body. Anchored, not searched — see
+    /// [`lazybox_core::WorkingClaimNote::parse`].
+    marker: &'static str,
+    list_op: &'static str,
+    list_next_op: &'static str,
+    /// Reading the one comment back by its remembered id — a different
+    /// request from the list, and one a reader of the logs should be able to
+    /// tell apart from it.
+    get_op: &'static str,
+    post_op: &'static str,
+    update_op: &'static str,
+}
+
+/// The PR cost/provenance trailer comment, written once per merge. Its reads
+/// and writes stay on the `Interactive` tier they have always been on: a merge
+/// is a one-off the user is waiting on, not a recurring heartbeat.
+const TRAILER_STICKY: StickyComment = StickyComment {
+    marker: TRAILER_COMMENT_MARKER,
+    list_op: "list issue comments",
+    list_next_op: "list issue comments last page",
+    get_op: "get issue comment",
+    post_op: "post issue comment",
+    update_op: "update issue comment",
+};
+
+/// The working-claim comment (#1922) — the identity half of a claim, edited in
+/// place on every 15-minute heartbeat. `Cold`, like the claim label writes it
+/// replaces: under budget pressure a refused heartbeat simply retries next
+/// cycle, and the 15-minute heartbeat against a 60-minute TTL leaves ample
+/// slack for that.
+const CLAIM_STICKY: StickyComment = StickyComment {
+    marker: lazybox_core::WORKING_CLAIM_COMMENT_MARKER,
+    list_op: "list issue claim comments",
+    list_next_op: "list issue claim comments last page",
+    get_op: "get working claim comment",
+    post_op: "post working claim comment",
+    update_op: "update working claim comment",
+};
+
+/// What happened when a holder let its claim go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkingClaimRelease {
+    /// The comment records the release and the stable label is detached.
+    Released,
+    /// A different live lease holds the record now, so nothing was touched.
+    /// Its own holder will release it; stripping the shared label here would
+    /// cancel a claim that is still being renewed.
+    SupersededBy { device: String, session: String },
+}
+
+/// Why a sticky-comment write did not land. Split by *stage* because the
+/// caller's recovery differs: a failure to locate must never be followed by a
+/// blind post (that is how duplicates stack), while a failed update or post is
+/// simply retried next cycle.
+enum StickyWriteError {
+    Locate(GhError),
+    Update(GhError),
+    Post(GhError),
+}
+
+impl StickyWriteError {
+    fn into_inner(self) -> GhError {
+        match self {
+            Self::Locate(error) | Self::Update(error) | Self::Post(error) => error,
+        }
+    }
+}
+
+/// Report which stage of the claim-comment write failed, then hand back the
+/// original [`GhError`].
+///
+/// The stage is the diagnostic ("could not locate" and "could not post" call
+/// for different fixes), but it must not become the returned error: the caller
+/// classifies a claim failure as retryable or permanent from the error itself,
+/// and flattening a rate-limit into a formatted string is how a throttle comes
+/// to read as a bug.
+fn claim_comment_error(error: StickyWriteError) -> GhError {
+    tracing::warn!("working claim comment: {error}");
+    error.into_inner()
+}
+
+impl std::fmt::Display for StickyWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Locate(error) => write!(f, "the existing comment could not be located ({error})"),
+            Self::Update(error) => write!(f, "updating the comment failed ({error})"),
+            Self::Post(error) => write!(f, "posting the comment failed ({error})"),
+        }
+    }
+}
+
+/// The HTTP status behind a [`GhError`], when it came from an API call at all.
+/// A budget refusal or a local gate has no status — which is why this returns
+/// `None` rather than a stand-in, so "GitHub said 404" is never confused with
+/// "we never asked".
+fn gh_error_status(error: &GhError) -> Option<u16> {
+    match error {
+        GhError::Api(error) => octocrab_error_status(error),
+        _ => None,
+    }
+}
+
 const ALREADY_MERGED_MARKERS: &[&str] = &["already merged", "merged state"];
 
 /// GitHub's rejections that mean "auto-merge is already on" — the
@@ -10046,13 +10399,24 @@ mod tests {
     #[test]
     fn working_claim_ops_are_scheduled_rest_core() {
         use crate::rate_budget::{ApiResource, RequestPriority};
+        // Every operation label the claim paths issue. Enumerated, because
+        // `request_profile`'s fallback arm is `Interactive`: a name it does
+        // not recognise is admitted past the reserve, the per-tick allowance
+        // and the local bucket alike, silently. The claim COMMENT names
+        // (#1922) matter most here — `post issue comment` and `update issue
+        // comment`, which they deliberately do NOT reuse, are `Interactive`
+        // one arm further down, so a typo would land a 15-minute heartbeat on
+        // the tier that re-creates the #1218 storm.
         for op in [
-            "list issue working labels",
-            "list issue working labels next page",
-            "renew working claim label",
             "create working claim label",
             "add working claim label",
             "delete working claim label",
+            "remove working claim label",
+            "list issue claim comments",
+            "list issue claim comments last page",
+            "get working claim comment",
+            "post working claim comment",
+            "update working claim comment",
         ] {
             let (resource, priority) = request_profile(op);
             assert_eq!(
@@ -10070,6 +10434,15 @@ mod tests {
                 priority,
                 RequestPriority::Interactive,
                 "{op} must not bypass the budget gates"
+            );
+        }
+        // The other half of the same property: a user's own comment stays
+        // Interactive, so the two must not be collapsed onto one label.
+        for op in ["post issue comment", "update issue comment"] {
+            assert_eq!(
+                request_profile(op).1,
+                RequestPriority::Interactive,
+                "{op} carries a user's own comment and must stay interactive"
             );
         }
     }
@@ -10807,6 +11180,45 @@ mod tests {
                          Content-Type: {content_type}\r\n\
                          {extra_headers}Content-Length: {}\r\n\
                          Connection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// As [`spawn_sequenced_response_server`], but each response carries its
+    /// own status line and every request is recorded — for a path whose
+    /// behaviour depends on the status (a remembered comment id that 404s).
+    async fn spawn_sequenced_http_response_server_recording(
+        responses: Vec<(&'static str, &'static str)>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut served = 0usize;
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(connection) => connection,
+                    Err(_) => continue,
+                };
+                let (status, body) = responses[served.min(responses.len() - 1)];
+                served += 1;
+                let requests = requests.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let read = sock.read(&mut buf).await.unwrap_or(0);
+                    requests
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf[..read]).into_owned());
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len(),
                     );
                     let _ = sock.write_all(response.as_bytes()).await;
@@ -13432,142 +13844,492 @@ mod tests {
             .expect("label mutation success must return Ok");
     }
 
+    /// `2026-09-09T00:00:00Z` — the fixture clock the comment JSON uses.
+    fn claim_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-09-09T00:00:00Z")
+            .expect("fixture clock")
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn claim_note() -> lazybox_core::WorkingClaimNote {
+        let mut note = lazybox_core::WorkingClaimNote::new(
+            "0123456789abcdef0123",
+            "1234567890",
+            claim_now(),
+            claim_now() + chrono::Duration::seconds(lazybox_core::WORKING_CLAIM_TTL_SECS),
+        );
+        note.agent = Some("claude".into());
+        note.model = Some("Opus 5".into());
+        note.workspace = Some("github-o-r-2".into());
+        note
+    }
+
+    fn label_json(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": 9,
+            "node_id": "LA_9",
+            "url": "https://api.github.test/repos/o/r/labels/working",
+            "name": name,
+            "description": "Claimed by a lazybox agent",
+            "color": "fbca04",
+            "default": false,
+        })
+    }
+
+    fn leak(value: String) -> &'static str {
+        Box::leak(value.into_boxed_str())
+    }
+
+    /// A fresh claim is the one stable `working` label plus one comment. No
+    /// per-claim label is minted: the repository's label namespace used to
+    /// grow by one name per task, forever (#1922).
     #[tokio::test(flavor = "current_thread")]
-    async fn working_claim_creates_missing_qualified_label_then_applies_it() {
-        const LABEL: &str = "lazybox:w:0123456789abcdef0123:1234567890:00000001";
-        const CREATED: &str = r#"{
-            "id": 1,
-            "node_id": "LA_1",
-            "url": "https://api.github.test/repos/o/r/labels/lazybox",
-            "name": "lazybox:w:0123456789abcdef0123:1234567890:ffffffff",
-            "description": "Claimed by a lazybox agent",
-            "color": "fbca04",
-            "default": false
-        }"#;
-        const APPLIED: &str = r#"[{
-            "id": 1,
-            "node_id": "LA_1",
-            "url": "https://api.github.test/repos/o/r/labels/lazybox",
-            "name": "lazybox:w:0123456789abcdef0123:1234567890:ffffffff",
-            "description": "Claimed by a lazybox agent",
-            "color": "fbca04",
-            "default": false
-        }]"#;
-        let base_uri = spawn_sequenced_response_server(vec!["[]", CREATED, APPLIED]).await;
+    async fn a_fresh_claim_attaches_the_stable_label_and_posts_one_comment() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let labels = serde_json::json!([label_json("working")]).to_string();
+        let posted = comment_json(77, "test-user", "posted").to_string();
+        let base_uri = spawn_recording_response_server(
+            vec![leak(labels), "[]", leak(posted)],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+        let task = task_without_node_id(TaskKind::Issue);
+
+        let comment_id = client
+            .apply_working_claim(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                &claim_note(),
+                None,
+                true,
+            )
+            .await
+            .expect("a fresh claim applies");
+        assert_eq!(comment_id, 77, "the caller must be handed the id to reuse");
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 3, "add the label, search, post: {sent:#?}");
+        assert!(
+            sent[0].starts_with("POST /repos/o/r/issues/2/labels"),
+            "{}",
+            sent[0]
+        );
+        assert!(
+            sent[0].contains("\"working\"") && !sent[0].contains("lazybox:w:"),
+            "exactly one stable label name, never a minted one: {}",
+            sent[0]
+        );
+        assert!(
+            sent[2].starts_with("POST /repos/o/r/issues/2/comments"),
+            "{}",
+            sent[2]
+        );
+        assert!(
+            sent[2].contains("lazybox:claim"),
+            "the comment must carry the marker it will be found by: {}",
+            sent[2]
+        );
+    }
+
+    /// A repository that has never seen a lazybox claim does not define the
+    /// `working` label yet. The attach must recover by defining it, so the
+    /// first claim in a repo lands rather than erroring — and it must do that
+    /// *without* making every later claim pay for a create it does not need.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_first_claim_in_a_repo_defines_the_label_then_attaches_it() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let created = leak(serde_json::json!(label_json("working")).to_string());
+        let attached = leak(serde_json::json!([label_json("working")]).to_string());
+        let posted = leak(comment_json(77, "test-user", "posted").to_string());
+        let base_uri = spawn_sequenced_http_response_server_recording(
+            vec![
+                // The attach, against a repo with no such label.
+                ("404 Not Found", r#"{"message":"Label does not exist"}"#),
+                ("201 Created", created),
+                ("200 OK", attached),
+                ("200 OK", "[]"),
+                ("201 Created", posted),
+            ],
+            requests.clone(),
+        )
+        .await;
         let client = make_client(&base_uri);
         let task = task_without_node_id(TaskKind::Issue);
 
         client
-            .sync_working_claim_target(
+            .apply_working_claim(
                 &task.id,
                 task.repo.as_deref().unwrap(),
-                Some(LABEL),
-                "0123456789abcdef0123",
-                "1234567890",
+                &claim_note(),
+                None,
+                true,
             )
             .await
-            .expect("a fresh repository must create and apply the coordination label");
+            .expect("the first claim in a repo must land");
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(
+            sent.len(),
+            5,
+            "attach, define, attach, search, post: {sent:#?}"
+        );
+        assert!(
+            sent[1].starts_with("POST /repos/o/r/labels"),
+            "the definition is created at the repo level: {}",
+            sent[1]
+        );
+        assert!(
+            sent[2].starts_with("POST /repos/o/r/issues/2/labels"),
+            "then the attach is retried: {}",
+            sent[2]
+        );
     }
 
+    /// The call-count guard. A steady-state heartbeat is **one** request: the
+    /// in-place comment edit. The predecessor spent two — list the issue's
+    /// labels, then rename the per-claim label to its new expiry — on a path
+    /// that fires per agent every 15 minutes against a shared 5,000/hour
+    /// budget. Counted, never reasoned about.
     #[tokio::test(flavor = "current_thread")]
-    async fn working_claim_clear_is_idempotent_when_repo_has_no_label() {
-        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    async fn a_claim_heartbeat_is_one_request_that_edits_the_comment_in_place() {
+        /// What `sync_working_claim_target` cost per heartbeat before #1922.
+        const PREVIOUS_PER_HEARTBEAT_REQUESTS: usize = 2;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let updated = comment_json(77, "test-user", "updated").to_string();
+        let base_uri = spawn_recording_response_server(vec![leak(updated)], requests.clone()).await;
+        let client = make_client(&base_uri);
+        let task = task_without_node_id(TaskKind::Issue);
+
+        client
+            .apply_working_claim(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                &claim_note(),
+                Some(77),
+                // The label is already attached, which the caller knows from
+                // the poll payload it already holds — so re-adding it costs
+                // nothing here.
+                false,
+            )
+            .await
+            .expect("a heartbeat renews the claim");
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 1, "one edit and nothing else: {sent:#?}");
+        assert!(
+            sent.len() <= PREVIOUS_PER_HEARTBEAT_REQUESTS,
+            "a heartbeat must not cost more GitHub calls than the labels-only claim did"
+        );
+        assert!(
+            sent[0].starts_with("POST /repos/o/r/issues/comments/77"),
+            "the remembered comment is edited directly, with no search: {}",
+            sent[0]
+        );
+        assert!(
+            sent[0].contains("Lazybox-Claim-Heartbeat"),
+            "the edit must carry the renewed lease: {}",
+            sent[0]
+        );
+    }
+
+    /// Four heartbeats, one comment. A heartbeat posted as a *new* comment
+    /// would be four an hour per task — the reason a straight swap from
+    /// labels to comments was wrong, and what the sticky marker prevents.
+    #[tokio::test(flavor = "current_thread")]
+    async fn four_heartbeats_leave_exactly_one_comment() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let existing = serde_json::json!([comment_json(
+            77,
+            "test-user",
+            &format!("{}\nstale", lazybox_core::WORKING_CLAIM_COMMENT_MARKER)
+        )])
+        .to_string();
+        let updated = comment_json(77, "test-user", "updated").to_string();
+        // Search once, then edit forever.
         let base_uri =
-            spawn_counting_response_server("200 OK", "application/json", "", "[]", hits.clone())
+            spawn_recording_response_server(vec![leak(existing), leak(updated)], requests.clone())
                 .await;
         let client = make_client(&base_uri);
         let task = task_without_node_id(TaskKind::Issue);
 
-        client
-            .sync_working_claim_target(
-                &task.id,
-                task.repo.as_deref().unwrap(),
-                None,
-                "0123456789abcdef0123",
-                "1234567890",
-            )
-            .await
-            .expect("clearing a missing claim is already success");
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let mut known = None;
+        for beat in 0..4 {
+            let mut note = claim_note();
+            note.heartbeat_at = claim_now() + chrono::Duration::minutes(15 * beat);
+            known = Some(
+                client
+                    .apply_working_claim(
+                        &task.id,
+                        task.repo.as_deref().unwrap(),
+                        &note,
+                        known,
+                        false,
+                    )
+                    .await
+                    .expect("every heartbeat lands"),
+            );
+        }
+
+        let sent = requests.lock().unwrap();
+        let creates = sent
+            .iter()
+            .filter(|r| r.starts_with("POST /repos/o/r/issues/2/comments"))
+            .count();
+        assert_eq!(creates, 0, "the existing comment is edited, never replaced");
+        let edits = sent
+            .iter()
+            .filter(|r| r.starts_with("POST /repos/o/r/issues/comments/77"))
+            .count();
+        assert_eq!(edits, 4, "four heartbeats, four in-place edits: {sent:#?}");
     }
 
+    /// A remembered id that no longer resolves must not wedge the claim: the
+    /// write falls back to the search, so a thread somebody tidied converges
+    /// on exactly one comment again instead of none.
     #[tokio::test(flavor = "current_thread")]
-    async fn clearing_one_machine_claim_never_removes_the_racing_machine() {
-        const ATTACHED: &str = r#"[
-          {"id":1,"node_id":"LA_1","url":"https://api.github.test/repos/o/r/labels/one","name":"lazybox:w:0123456789abcdef0123:1234567890:ffffffff","description":null,"color":"fbca04","default":false},
-          {"id":2,"node_id":"LA_2","url":"https://api.github.test/repos/o/r/labels/two","name":"lazybox:w:fedcba9876543210fedc:aaaaaaaaaa:ffffffff","description":null,"color":"fbca04","default":false},
-          {"id":3,"node_id":"LA_3","url":"https://api.github.test/repos/o/r/labels/working","name":"working","description":null,"color":"fbca04","default":false}
-        ]"#;
+    async fn a_deleted_claim_comment_is_reposted_rather_than_failing_forever() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let base_uri =
-            spawn_recording_response_server(vec![ATTACHED, "[]"], requests.clone()).await;
+        let posted = comment_json(99, "test-user", "posted").to_string();
+        let base_uri = spawn_sequenced_http_response_server_recording(
+            vec![
+                ("404 Not Found", r#"{"message":"Not Found"}"#),
+                ("200 OK", "[]"),
+                ("201 Created", leak(posted)),
+            ],
+            requests.clone(),
+        )
+        .await;
         let client = make_client(&base_uri);
         let task = task_without_node_id(TaskKind::Issue);
 
-        client
-            .sync_working_claim_target(
+        let id = client
+            .apply_working_claim(
                 &task.id,
                 task.repo.as_deref().unwrap(),
-                None,
-                "0123456789abcdef0123",
-                "1234567890",
+                &claim_note(),
+                Some(77),
+                false,
             )
             .await
-            .expect("one owner can release while the racing owner remains");
-
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2, "one list plus one owner-specific delete");
-        assert!(requests[1].contains("1234567890"), "{}", requests[1]);
-        assert!(!requests[1].contains("aaaaaaaaaa"), "{}", requests[1]);
-        // Release must delete the repository-level *definition*, not merely
-        // detach the label from the issue — a detach-only release leaks one
-        // dead label into the repo's label picker per agent spawn.
-        assert!(requests[1].starts_with("DELETE "), "{}", requests[1]);
-        assert!(!requests[1].contains("/issues/"), "{}", requests[1]);
+            .expect("a vanished comment is reposted");
+        assert_eq!(id, 99, "the caller must remember the NEW id");
+        assert_eq!(requests.lock().unwrap().len(), 3);
     }
 
-    /// A heartbeat renews an attached claim by renaming it in place. The
-    /// renamed label stays attached, so the renewal is exactly one list and
-    /// one rename: re-adding it, and deleting its old (now nonexistent)
-    /// name, were two wasted REST calls per agent per heartbeat — the delete
-    /// a guaranteed 404 — at a time the claim loop was starving.
+    /// The #1600 property, for the comment half of a claim. Only repository
+    /// writers can attach a label; *anyone* can post a comment, marker and
+    /// all. A note from any other login must be invisible — otherwise a
+    /// drive-by comment fabricates a claim, or cancels a real one.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_claim_renewal_is_one_rename_with_no_add_or_delete() {
-        const OLD: &str = "lazybox:w:0123456789abcdef0123:1234567890:00000001";
-        const NEW: &str = "lazybox:w:0123456789abcdef0123:1234567890:00000002";
-        let attached = format!(
-            r#"[{{"id":1,"node_id":"LA_1","url":"https://api.github.test/repos/o/r/labels/one","name":"{OLD}","description":null,"color":"fbca04","default":false}}]"#
-        );
-        let renamed = format!(
-            r#"{{"id":1,"node_id":"LA_1","url":"https://api.github.test/repos/o/r/labels/one","name":"{NEW}","description":null,"color":"fbca04","default":false}}"#
-        );
-        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let bodies: Vec<&'static str> = vec![
-            Box::leak(attached.into_boxed_str()),
-            Box::leak(renamed.into_boxed_str()),
-        ];
-        let base_uri = spawn_recording_response_server(bodies, requests.clone()).await;
+    async fn a_forged_claim_comment_from_another_author_is_not_a_claim() {
+        let forged = serde_json::json!([comment_json(88, "someone-else", &claim_note().render())])
+            .to_string();
+        let base_uri = spawn_sequenced_response_server(vec![leak(forged)]).await;
         let client = make_client(&base_uri);
         let task = task_without_node_id(TaskKind::Issue);
 
-        client
-            .sync_working_claim_target(
-                &task.id,
-                task.repo.as_deref().unwrap(),
-                Some(NEW),
-                "0123456789abcdef0123",
-                "1234567890",
-            )
+        let note = client
+            .read_working_claim_note(&task.id, task.repo.as_deref().unwrap())
             .await
-            .expect("renewing an attached claim succeeds");
-
-        let requests = requests.lock().unwrap();
+            .expect("the read itself succeeds");
         assert_eq!(
-            requests.len(),
-            2,
-            "one list plus one rename, nothing else: {requests:#?}"
+            note, None,
+            "a well-formed claim from a foreign author must read as NO claim"
         );
-        assert!(requests[1].starts_with("PATCH "), "{}", requests[1]);
+
+        // Control: the identical body from the authenticated login IS a claim,
+        // so the test is proving the author check and not a parse failure.
+        let ours =
+            serde_json::json!([comment_json(88, "test-user", &claim_note().render())]).to_string();
+        let base_uri = spawn_sequenced_response_server(vec![leak(ours)]).await;
+        let client = make_client(&base_uri);
+        let note = client
+            .read_working_claim_note(&task.id, task.repo.as_deref().unwrap())
+            .await
+            .expect("the read succeeds")
+            .expect("our own claim comment is a claim");
+        assert_eq!(note.device, "0123456789abcdef0123");
+        assert_eq!(note.agent.as_deref(), Some("claude"));
+        assert_eq!(note.model.as_deref(), Some("Opus 5"));
+    }
+
+    /// Release records the end of the work in the comment and takes the label
+    /// off the issue. It **detaches** rather than deleting the definition:
+    /// `working` is one fixed name shared by every claim in the repository, so
+    /// deleting it would unclaim every other claimed task at once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn releasing_a_claim_detaches_the_shared_label_and_records_it() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let standing = comment_json(77, "test-user", &claim_note().render()).to_string();
+        let updated = comment_json(77, "test-user", "updated").to_string();
+        let base_uri = spawn_recording_response_server(
+            vec![leak(standing), leak(updated), "[]"],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+        let task = task_without_node_id(TaskKind::Issue);
+
+        let outcome = client
+            .release_working_claim(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                &claim_note(),
+                Some(77),
+                claim_now() + chrono::Duration::minutes(30),
+            )
+            .await
+            .expect("releasing our own claim succeeds");
+        assert_eq!(outcome, WorkingClaimRelease::Released);
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 3, "read, record, detach: {sent:#?}");
+        assert!(
+            sent[0].starts_with("GET /repos/o/r/issues/comments/77"),
+            "the standing comment is read by id, not searched for: {}",
+            sent[0]
+        );
+        assert!(
+            sent[1].contains("Lazybox-Claim-Released"),
+            "the release must be recorded in the comment: {}",
+            sent[1]
+        );
+        assert!(
+            sent[2].starts_with("DELETE /repos/o/r/issues/2/labels/working"),
+            "the label is detached from the ISSUE, never deleted from the repo: {}",
+            sent[2]
+        );
+    }
+
+    /// With a per-claim label, "release mine, leave the racing machine's
+    /// alone" was true by construction — two boxes meant two labels. One
+    /// shared label makes it a thing the code has to get right: a blind
+    /// detach here would cancel a claim another box is still renewing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn releasing_never_detaches_a_label_a_racing_box_still_holds() {
+        let mut racing = claim_note();
+        racing.device = "fedcba9876543210fedc".into();
+        racing.session = "aaaaaaaaaa".into();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let standing = comment_json(77, "test-user", &racing.render()).to_string();
+        let base_uri =
+            spawn_recording_response_server(vec![leak(standing)], requests.clone()).await;
+        let client = make_client(&base_uri);
+        let task = task_without_node_id(TaskKind::Issue);
+
+        let outcome = client
+            .release_working_claim(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                &claim_note(),
+                Some(77),
+                claim_now() + chrono::Duration::minutes(30),
+            )
+            .await
+            .expect("a superseded release is not an error");
+        assert_eq!(
+            outcome,
+            WorkingClaimRelease::SupersededBy {
+                device: "fedcba9876543210fedc".into(),
+                session: "aaaaaaaaaa".into(),
+            }
+        );
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(
+            sent.len(),
+            1,
+            "one read and then hands off: the other box's claim is untouched: {sent:#?}"
+        );
+    }
+
+    /// Nothing to edit means nothing to say: a release must still detach the
+    /// label, but must not post a fresh "finished working on this" on a thread
+    /// where lazybox never announced starting.
+    #[tokio::test(flavor = "current_thread")]
+    async fn releasing_with_no_standing_comment_detaches_without_posting() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri = spawn_recording_response_server(vec!["[]", "[]"], requests.clone()).await;
+        let client = make_client(&base_uri);
+        let task = task_without_node_id(TaskKind::Issue);
+
+        let outcome = client
+            .release_working_claim(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                &claim_note(),
+                // No remembered id: the claim never got as far as a comment.
+                None,
+                claim_now() + chrono::Duration::minutes(30),
+            )
+            .await
+            .expect("a never-announced claim still releases");
+        assert_eq!(outcome, WorkingClaimRelease::Released);
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2, "search then detach: {sent:#?}");
+        assert!(
+            sent[1].starts_with("DELETE /repos/o/r/issues/2/labels/working"),
+            "{}",
+            sent[1]
+        );
+        assert!(
+            !sent.iter().any(|r| r.contains("Lazybox-Claim-Released")),
+            "no comment is posted: {sent:#?}"
+        );
+    }
+
+    /// A lease that lapsed is nobody's live claim, so the release proceeds —
+    /// otherwise a crashed box's standing comment would pin the shared label
+    /// in place forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn releasing_proceeds_when_the_standing_claim_has_lapsed() {
+        let mut lapsed = claim_note();
+        lapsed.device = "fedcba9876543210fedc".into();
+        lapsed.session = "aaaaaaaaaa".into();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let standing = comment_json(77, "test-user", &lapsed.render()).to_string();
+        let updated = comment_json(77, "test-user", "updated").to_string();
+        let base_uri = spawn_recording_response_server(
+            vec![leak(standing), leak(updated), "[]"],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+        let task = task_without_node_id(TaskKind::Issue);
+
+        let outcome = client
+            .release_working_claim(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                &claim_note(),
+                Some(77),
+                lapsed.expires_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .expect("a lapsed standing claim does not block a release");
+        assert_eq!(outcome, WorkingClaimRelease::Released);
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    /// Detaching a label that is already gone is already success — a human
+    /// tidying it is the common case, not an error to report.
+    #[tokio::test(flavor = "current_thread")]
+    async fn detaching_an_absent_stable_label_is_success() {
+        let base_uri = spawn_sequenced_http_response_server(vec![(
+            "404 Not Found",
+            "application/json",
+            "",
+            r#"{"message":"Label does not exist"}"#,
+        )])
+        .await;
+        let client = make_client(&base_uri);
+        let task = task_without_node_id(TaskKind::Issue);
+        client
+            .remove_working_label_target(&task.id, task.repo.as_deref().unwrap())
+            .await
+            .expect("an absent label is already detached");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -13577,12 +14339,12 @@ mod tests {
         task.id.source = "linear".to_string();
 
         let error = client
-            .sync_working_claim_target(
+            .apply_working_claim(
                 &task.id,
                 task.repo.as_deref().unwrap(),
+                &claim_note(),
                 None,
-                "0123456789abcdef0123",
-                "1234567890",
+                true,
             )
             .await
             .unwrap_err()
@@ -13598,12 +14360,12 @@ mod tests {
         task.repo = Some("other/repository".to_string());
 
         let error = client
-            .sync_working_claim_target(
+            .apply_working_claim(
                 &task.id,
                 task.repo.as_deref().unwrap(),
+                &claim_note(),
                 None,
-                "0123456789abcdef0123",
-                "1234567890",
+                true,
             )
             .await
             .unwrap_err()

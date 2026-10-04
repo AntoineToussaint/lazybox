@@ -33,6 +33,7 @@ pub mod task_record;
 pub mod task_ref;
 pub mod time;
 pub mod work;
+mod working_claim;
 mod workspace;
 
 pub use agent::{AgentConfig, AgentModels, CapabilityAliases, ModelChoice, ModelTier};
@@ -95,6 +96,7 @@ pub use task_record::{
     RECORD_LIST_BODY_PREVIEW_BYTES, RecordComment, RecordKind, TASK_FILE_RELATIVE_PATH, TaskRecord,
     WORKSPACE_RECORD_FILE_SCHEMA, WorkspaceRecordFile, sub_issue_ids,
 };
+pub use working_claim::{WORKING_CLAIM_COMMENT_MARKER, WorkingClaimNote};
 pub use workspace::{
     CleanupPrompt, FloatingWorkspaceKind, HopperMeta, MAX_ACTIVITY_ITEMS, ROLE_LABEL_PREFIX, Role,
     SENT_SNIPPETS_MAX, Session as WorkspaceSession, SessionId, SessionKind, SessionLayout,

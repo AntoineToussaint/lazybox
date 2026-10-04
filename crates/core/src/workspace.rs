@@ -37,13 +37,26 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// GitHub-native fleet coordination label applied while a lazybox agent owns
-/// a task. Kept in core so providers, daemon, and clients cannot drift onto
-/// different spellings.
+/// The GitHub-native fleet coordination label applied while a lazybox agent
+/// owns a task — the one stable name a claim ever uses (#1922). Kept in core
+/// so providers, daemon, and clients cannot drift onto different spellings.
+///
+/// This label is **presence only**: it rides free in the poll payload, so
+/// "is this claimed?" costs no GitHub call on any tick. Who holds it, with
+/// which agent and model, and when the lease lapses live in the sticky claim
+/// comment ([`WorkingClaimNote`](crate::WorkingClaimNote)), fetched only at a
+/// decision point.
 pub const WORKING_LABEL_NAME: &str = "working";
 
-/// Prefix for owner-qualified GitHub fleet claims. The remainder encodes a
-/// stable box fingerprint, a claim-session fingerprint, and an expiry.
+/// Prefix for the superseded owner-qualified GitHub fleet claims, whose label
+/// *name* encoded the whole lease: a truncated box fingerprint, a
+/// claim-session fingerprint, and an expiry.
+///
+/// **Legacy, read-only.** lazybox no longer mints these — one label per claim
+/// grew the repository's label namespace forever and told a human nothing
+/// (#1922). They are still parsed so a claim held by a box on an older build
+/// keeps being honoured, and a holder on this build removes its own as soon
+/// as it has attached [`WORKING_LABEL_NAME`] in its place.
 pub const WORKING_CLAIM_LABEL_PREFIX: &str = "lazybox:w:";
 
 /// Prefix for the upstream orchestration-role projection label (#1523). The
@@ -1478,8 +1491,8 @@ impl Workspace {
             .find_map(|task| task.blocked_on.as_deref())
     }
 
-    /// Whether the headline task has an active qualified claim or a
-    /// conservatively preserved legacy [`WORKING_LABEL_NAME`] claim.
+    /// Whether the headline task carries the stable [`WORKING_LABEL_NAME`]
+    /// claim or an active legacy qualified claim.
     pub fn is_claimed(&self) -> bool {
         self.primary_task().is_some_and(Task::has_working_claim)
     }

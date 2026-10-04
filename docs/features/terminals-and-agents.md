@@ -581,7 +581,7 @@ What it exists to keep apart — the facts the manual hunt conflated:
 | Fact | Read from | What it does *not* mean |
 |---|---|---|
 | tracker lifecycle | the cached provider `Task` (stamped with its poll time) | — |
-| working-claim | the `lazybox:w:` label's own expiry, plus whether *this* box holds it | an active claim is **not** a running process |
+| working-claim | the claim comment's own expiry (the `working` label is presence only), plus whether *this* box holds it | an active claim is **not** a running process |
 | session | the persisted `SessionRunState` | a retained worktree is **not** an agent turn |
 | agent turn | the live `AgentState` of a running PTY | a turn ending is **not** task completion |
 | review / CI | the PR's own check + review state | — |

@@ -19,6 +19,8 @@ function diff(overrides: Partial<WorkspaceDiffDto> = {}): WorkspaceDiffDto {
     stat: overrides.stat ?? [],
     files: overrides.files ?? [],
     truncated: overrides.truncated ?? false,
+    head_sha: overrides.head_sha ?? null,
+    divergence: overrides.divergence ?? null,
   };
 }
 

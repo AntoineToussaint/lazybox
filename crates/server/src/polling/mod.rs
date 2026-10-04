@@ -45,8 +45,9 @@ pub use handlers::{
     handle_fetch_pr_details, handle_fetch_repo_labels, handle_fetch_repo_merge_history,
     handle_fetch_requestable_reviewers, handle_inspect_workspace_diff, handle_inspect_worktrees,
     handle_mark_ready, handle_merge_pr, handle_request_reviewers, handle_scan_checkouts,
-    handle_set_assignees, handle_set_labels, handle_sync_workspace, handle_update_branch,
-    post_reply, prefetch_top_pr_details, remove_merged_workspace,
+    handle_set_assignees, handle_set_labels, handle_submit_pull_request_review,
+    handle_sync_workspace, handle_update_branch, post_reply, prefetch_top_pr_details,
+    remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 pub(crate) use sources::dispatch_action;

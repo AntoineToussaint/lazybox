@@ -422,6 +422,8 @@ mod tests {
                 }],
             }],
             truncated: false,
+            head_sha: None,
+            divergence: None,
         }
     }
 
@@ -467,6 +469,8 @@ mod tests {
             stat: vec![],
             files: vec![],
             truncated: false,
+            head_sha: None,
+            divergence: None,
         };
         let ctx = pr_context(&task, &[], PrDiff::Available(&empty));
         assert!(ctx.contains("no uncommitted changes"));

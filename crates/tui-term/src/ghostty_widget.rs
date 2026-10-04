@@ -159,6 +159,12 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
             Ok(r) => r,
             Err(_) => return,
         };
+        // A frame that reaches here walks the grid. The caller's
+        // content-revision cache (`TerminalStack::render`) blits instead
+        // and never constructs this widget, so the counted frames are
+        // exactly the un-cached ones — which is what the budget in
+        // `crates/tui/AGENTS.md` is stated against (#1919).
+        crate::vt_budget::record_frame();
 
         // Per-cell buffers re-used across the loop — avoid 12_000
         // per-frame allocations of the same shape.
@@ -167,6 +173,15 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
 
         let mut y = 0u16;
         while let Some(row) = row_iter.next() {
+            // Counted where the row is FETCHED, not where it is walked,
+            // because the fetch is the FFI call. A `while let` has to
+            // fetch in order to test, so a grid taller than the rect
+            // records exactly one overshoot read before the guard below
+            // breaks — hence the budget is stated as `rows + 1`, and the
+            // `+ 1` is a constant, not a term that scales. Per-row and
+            // not per-cell on purpose: ~50 increments a frame is below
+            // the noise floor, ~12k would not be (see `vt_budget`).
+            crate::vt_budget::record_row_read();
             if y >= area.height {
                 break;
             }

@@ -1826,26 +1826,66 @@ impl TerminalVt {
         }))
     }
 
-    /// Write `bytes` into the parser, then re-derive the viewport
-    /// anchor.
+    /// Write `bytes` into the parser, re-deriving the viewport anchor
+    /// while the viewport is PARKED and not otherwise.
     ///
     /// A write is the other mutation of the viewport's meaning: it moves
     /// the content the pin points into. libghostty keeps the pin on the
     /// same *content* across an append (verified on #1909: park
     /// mid-scrollback, feed, and the visible rows are byte-identical), so
-    /// the anchor is **re-derived, never re-imposed** — a parked viewport
-    /// that was 5 rows above the bottom is 8 rows above it after 3 lines
-    /// arrive, and that is correct, not drift. Forcing the old number
-    /// back would be the bug: it would drag the user down the buffer on
-    /// every chunk.
+    /// while parked the anchor is **re-derived, never re-imposed** — a
+    /// viewport that was 5 rows above the bottom is 8 rows above it after
+    /// 3 lines arrive, and that is correct, not drift. Forcing the old
+    /// number back would be the bug: it would drag the user down the
+    /// buffer on every chunk. That is the case [`Self::anchor`] exists
+    /// for, and it is what gives the rebuild paths a trustworthy value to
+    /// re-assert instead of a one-shot reading taken whenever they happen
+    /// to run.
     ///
-    /// What this buys is that [`Self::anchor`] is always current, so the
-    /// rebuild paths have a trustworthy value to re-assert instead of
-    /// taking a one-shot reading at the moment they happen to run.
+    /// **Following the tail, the read is skipped entirely** (#1918).
+    /// Appending cannot un-park a viewport already at the live bottom: it
+    /// stays at the bottom, so the cached `Bottom` is already what a read
+    /// would return. `following_a_tail_is_equivalent_to_re_deriving` in
+    /// `tests/terminal_hot_paths.rs` holds that equivalence against
+    /// escape-heavy traffic (scroll regions, an alt-screen round trip, a
+    /// hard reset) rather than leaving it as an argument, and entering the
+    /// parked state goes through [`Self::scroll`], which reads anyway — so
+    /// no transition is missed by not reading here.
+    ///
+    /// The reason is the contract, not a measured cost, and the
+    /// distinction matters for whoever edits this next.
+    /// `vt::Terminal::scrollbar`'s own doc says "arbitrary pins are
+    /// expensive … not too frequently", and this is the hottest path in
+    /// the client — every output chunk of every terminal — which is why
+    /// #1910 doing it per write was wrong. But measured
+    /// (`make bench-cpu`) the call is **~5 ns of CPU at any viewport
+    /// depth**, against ~960 ns for the `vt_write` beside it, so it was
+    /// never what made typing feel slow: that box was at load average 75.
+    /// The warning is the implementation's licence to become expensive,
+    /// and a per-chunk path built on "it happens to be 5 ns today" breaks
+    /// silently the day it is not. Keep it off this path for that reason,
+    /// and do not spend complexity shaving the remaining calls.
     fn feed(&mut self, bytes: &[u8]) {
         self.content_rev = self.content_rev.wrapping_add(1);
         self.terminal.vt_write(bytes);
-        self.observe_anchor();
+        if matches!(self.anchor, ViewportAnchor::Parked { .. }) {
+            self.observe_anchor();
+        }
+    }
+
+    /// The ONE place this crate reads libghostty's scrollbar.
+    ///
+    /// Routing every read through here is what makes the derivation
+    /// countable, and so what makes the hot-path budgets in
+    /// `crates/tui/AGENTS.md` assertable instead of aspirational
+    /// (#1919). `tests/terminal_hot_paths.rs::
+    /// scrollbar_reads_have_a_single_counted_owner` brace-matches this
+    /// body and fails the build on a raw `.terminal.scrollbar()` anywhere
+    /// else in the crate's sources — the same mechanical backstop
+    /// `scroll_viewport` has had since #371.
+    fn scrollbar(&self) -> vt::error::Result<vt::terminal::Scrollbar> {
+        lazybox_tui_term::vt_budget::record_scrollbar();
+        self.terminal.scrollbar()
     }
 
     /// Re-derive [`Self::anchor`] from the live scrollbar. Called after
@@ -1858,7 +1898,7 @@ impl TerminalVt {
     /// "following the tail" and snap the user to the bottom on the next
     /// rebuild.
     fn observe_anchor(&mut self) {
-        let Ok(bar) = self.terminal.scrollbar() else {
+        let Ok(bar) = self.scrollbar() else {
             return;
         };
         self.anchor = anchor_of(bar);
@@ -1880,7 +1920,7 @@ impl TerminalVt {
             ViewportAnchor::Bottom => return self.scroll(ScrollRequest::Bottom),
             ViewportAnchor::Parked { rows_above_bottom } => rows_above_bottom,
         };
-        let Ok(bar) = self.terminal.scrollbar() else {
+        let Ok(bar) = self.scrollbar() else {
             tracing::error!("terminal scroll state unavailable restoring the viewport anchor");
             return ScrollOutcome::StateUnavailable;
         };
@@ -1912,7 +1952,7 @@ impl TerminalVt {
         if matches!(request, ScrollRequest::By(0)) {
             return ScrollOutcome::Noop;
         }
-        let Ok(before) = self.terminal.scrollbar() else {
+        let Ok(before) = self.scrollbar() else {
             tracing::error!(?request, "terminal scroll state unavailable before request");
             return ScrollOutcome::StateUnavailable;
         };
@@ -1978,7 +2018,7 @@ impl TerminalVt {
                     ))
             }
         }
-        let Ok(after) = self.terminal.scrollbar() else {
+        let Ok(after) = self.scrollbar() else {
             tracing::error!(?request, "terminal scroll state unavailable after request");
             return ScrollOutcome::StateUnavailable;
         };
@@ -2772,7 +2812,7 @@ impl TerminalStack {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get(&id)?;
         let screen = slot.vt.terminal.active_screen().ok();
-        let bar = slot.vt.terminal.scrollbar().ok()?;
+        let bar = slot.vt.scrollbar().ok()?;
         Some(format!(
             "screen={:?} total={} offset={} len={}",
             screen, bar.total, bar.offset, bar.len,
@@ -2938,7 +2978,6 @@ impl TerminalStack {
                 .terminals
                 .get(&id)?
                 .vt
-                .terminal
                 .scrollbar()
                 .ok()
                 .map(|b| b.offset),
@@ -4067,18 +4106,13 @@ impl TerminalStack {
         // the very junk this fetch exists to replace makes the local grid
         // *deeper* than tmux's clean history — and the clean capture was
         // rejected every time, one repeated block per scroll.
-        let current_total = t.scrollbar().ok().map(|b| b.total).unwrap_or(0);
+        let current_total = slot.vt.scrollbar().ok().map(|b| b.total).unwrap_or(0);
         let Some(mut scratch) = TerminalVt::new() else {
             return;
         };
         scratch.ensure_size(slot.vt.cols, slot.vt.rows);
         scratch.feed(replay);
-        let rebuilt_total = scratch
-            .terminal
-            .scrollbar()
-            .ok()
-            .map(|b| b.total)
-            .unwrap_or(0);
+        let rebuilt_total = scratch.scrollbar().ok().map(|b| b.total).unwrap_or(0);
         let capture_has_history = rebuilt_total > u64::from(slot.vt.rows);
         if rebuilt_total <= current_total && !(capture_has_history && slot.scrollback_stale) {
             return;
@@ -6370,11 +6404,24 @@ impl TerminalStack {
                 slot.vt.ensure_size(grid.width, grid.height);
             }
             slot.flush_pending();
-            // Record the viewport offset of the frame we're painting AFTER
-            // the flush — the widget below renders from this same post-flush
-            // state, so this is the offset the selection mapping must reuse
-            // (see `TerminalHit::offset`).
-            let frame_offset = slot.vt.terminal.scrollbar().ok().map(|b| b.offset);
+            // ONE scrollbar derivation per tile per frame (#1919). The
+            // frame needs the reading twice — the viewport offset recorded
+            // on the tile hit, which the selection mapping must read back
+            // (see `TerminalHit::offset`), and the gutter's extent below —
+            // and read it twice until this was hoisted. Read AFTER the
+            // flush: the widget below renders from this same post-flush
+            // state, so this is the offset the mapping must reuse.
+            //
+            // Deliberately NOT cached across frames on the
+            // `(content_rev, rect)` key the frame blit uses. That would
+            // make it zero on an unchanged frame, and the measurement says
+            // the call costs ~5 ns at any viewport depth (`make bench-cpu`)
+            // — so caching would buy ~10 ns a frame in exchange for a new
+            // staleness obligation on every future parser-replacement
+            // site, where a missed invalidation hands the selection
+            // mapping an offset from a grid that no longer exists.
+            let bar = slot.vt.scrollbar().ok();
+            let frame_offset = bar.map(|b| b.offset);
             if let Some(hit) = self.tile_hits.last_mut() {
                 hit.offset = frame_offset;
             }
@@ -6436,7 +6483,7 @@ impl TerminalStack {
                 slot.last_frame_rev = Some(rev_key);
             }
             if let Some(gutter) = gutter
-                && let Ok(bar) = slot.vt.terminal.scrollbar()
+                && let Some(bar) = bar
             {
                 crate::components::scrollbar::render_vertical(
                     frame,

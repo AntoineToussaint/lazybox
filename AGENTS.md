@@ -86,8 +86,10 @@ first the moment anyone overrides it. An instruction whose own stated
 deliverable is the filed issue — the `carve` snippet, a Planner role spawn —
 is itself the go-ahead.
 
-**Some GitHub labels are live coordination state**, not metadata: `working` /
-`lazybox:w:…` (a running agent owns this task), `no-auto-fix` /
+**Some GitHub labels are live coordination state**, not metadata: `working`
+(a running agent owns this task — one stable label, with the holder, agent,
+model and expiry in lazybox's own sticky claim comment beside it; `lazybox:w:…`
+is the same thing from a box on an older build), `no-auto-fix` /
 `do-not-lazybox` (auto-fix opt-out), and `role:<…>` (orchestration role).
 Stripping one makes the fleet double-spawn or unrole a session.
 

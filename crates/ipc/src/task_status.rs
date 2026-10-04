@@ -11,7 +11,7 @@
 //! | Fact | Source of truth |
 //! |---|---|
 //! | tracker lifecycle | the provider poll's cached [`lazybox_core::Task`] |
-//! | assignment / claim | the `lazybox:w:` label's own expiry |
+//! | assignment / claim | the claim comment's own expiry (`working` label = presence) |
 //! | session lifecycle | the persisted [`lazybox_core::WorkspaceSession`] |
 //! | agent turn | the live [`crate::AgentState`] of a running PTY |
 //! | review / CI | the PR's own check + review state |
@@ -129,7 +129,12 @@ pub struct TrackerFacts {
     pub closed_at: Option<DateTime<Utc>>,
 }
 
-/// Working-claims (`lazybox:w:<device>:<session>:<expiry>`) on a record.
+/// Working-claims on a record.
+///
+/// A claim is the stable `working` label (presence) plus one lazybox-authored
+/// sticky comment carrying the lease (#1922); a claim held by a box on an
+/// older build is a `lazybox:w:<device>:<session>:<expiry>` label instead, and
+/// both are reported here the same way.
 ///
 /// A claim is an assertion with an expiry, never proof that a process is alive:
 /// the fleet renews it on a heartbeat, so a crashed worker leaves one standing
@@ -142,28 +147,52 @@ pub struct ClaimFacts {
     /// Claims whose expiry has passed — evidence of a worker that stopped
     /// renewing, not of one still working.
     pub expired: Vec<ClaimHolder>,
-    /// The bare `working` label, which carries no holder or expiry.
-    pub unqualified: bool,
+    /// The `working` label is attached, but no lazybox-authored claim comment
+    /// backs it — so it names no holder and no expiry.
+    ///
+    /// Three things look like this and the report cannot tell them apart: a
+    /// human's or another tool's own `working` workflow label, a claim whose
+    /// comment a tidy-up deleted, and a claim whose comment this daemon could
+    /// not read (offline, or refused under budget pressure). All three are
+    /// reported as unbacked rather than resolved into a holder, because
+    /// guessing either way is how a caller either double-spawns or blocks
+    /// forever.
+    pub unbacked_label: bool,
 }
 
 impl ClaimFacts {
     pub fn is_empty(&self) -> bool {
-        self.active.is_empty() && self.expired.is_empty() && !self.unqualified
+        self.active.is_empty() && self.expired.is_empty() && !self.unbacked_label
     }
 }
 
-/// One `lazybox:w:` claim.
+/// One claim lease.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct ClaimHolder {
-    /// Opaque device id from the label — enough to tell "this box" from
-    /// "another box" without naming anyone.
+    /// Opaque device id — enough to tell "this box" from "another box"
+    /// without naming anyone.
     pub device: String,
     pub session: String,
     pub expires_at: DateTime<Utc>,
     /// Whether a live agent on *this* daemon accounts for the claim. `false`
     /// on an active claim means the holder is remote or unverifiable from here.
     pub verified_locally: bool,
+    /// Agent id the holder named in its claim comment, when it named one.
+    /// Always `None` for a legacy label claim, whose name had no room for it.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Model label the holder named in its claim comment.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// When the holder first took this lease — the claim comment's own record,
+    /// so "started 4 hours ago" is answerable rather than inferred from the
+    /// expiry.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// The holder's workspace, for a reader chasing the work to its box.
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 /// A blocker the worker declared on its own workspace.
@@ -483,12 +512,13 @@ pub fn derive_verdict(workspaces: &[WorkspaceStatus], archived: bool) -> Verdict
     }
     if workspaces
         .iter()
-        .any(|workspace| workspace.claim.unqualified)
+        .any(|workspace| workspace.claim.unbacked_label)
     {
         return Verdict {
             state: WorkState::Unknown,
-            reason: "a bare `working` label carries no holder or expiry, and no live agent \
-                     accounts for it"
+            reason: "the `working` label is attached but no lazybox-authored claim comment \
+                     backs it, so it names no holder or expiry, and no live agent accounts \
+                     for it"
                 .to_string(),
             evidence,
         };
@@ -601,6 +631,10 @@ mod tests {
             session: "0123456789".into(),
             expires_at,
             verified_locally,
+            agent: None,
+            model: None,
+            started_at: None,
+            workspace: None,
         }
     }
 
@@ -775,7 +809,7 @@ mod tests {
     #[test]
     fn a_bare_working_label_alone_is_unknown() {
         let mut ws = workspace("w");
-        ws.claim.unqualified = true;
+        ws.claim.unbacked_label = true;
         let verdict = derive_verdict(&[ws], false);
         assert_eq!(verdict.state, WorkState::Unknown);
     }

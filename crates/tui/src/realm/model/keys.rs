@@ -962,27 +962,10 @@ impl<T: TerminalAdapter> Model<T> {
                     .workspace_by_key(session_key)
                     .filter(|workspace| workspace.is_claimed())
                     .map(|workspace| {
-                        let Some(task) = workspace.primary_task() else {
-                            return (
-                                session_key.to_string(),
-                                (session_key.to_string(), vec!["unknown owner".into()]),
-                            );
-                        };
-                        let mut owners = task
-                            .active_qualified_working_claims(chrono::Utc::now())
-                            .into_iter()
-                            .map(|claim| {
-                                format!(
-                                    "device {}/session {}",
-                                    &claim.device[..8],
-                                    &claim.session[..6]
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        if task.has_label(lazybox_core::WORKING_LABEL_NAME) {
-                            owners.push("legacy claim (unknown owner)".into());
-                        }
-                        (session_key.to_string(), (task.title.clone(), owners))
+                        (
+                            session_key.to_string(),
+                            claim_owners(workspace, session_key),
+                        )
                     }),
                 IpcCommand::StartAgentRun {
                     session_key,
@@ -993,27 +976,10 @@ impl<T: TerminalAdapter> Model<T> {
                     .workspace_by_key(session_key)
                     .filter(|workspace| workspace.is_claimed())
                     .map(|workspace| {
-                        let Some(task) = workspace.primary_task() else {
-                            return (
-                                session_key.to_string(),
-                                (session_key.to_string(), vec!["unknown owner".into()]),
-                            );
-                        };
-                        let mut owners = task
-                            .active_qualified_working_claims(chrono::Utc::now())
-                            .into_iter()
-                            .map(|claim| {
-                                format!(
-                                    "device {}/session {}",
-                                    &claim.device[..8],
-                                    &claim.session[..6]
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        if task.has_label(lazybox_core::WORKING_LABEL_NAME) {
-                            owners.push("legacy claim (unknown owner)".into());
-                        }
-                        (session_key.to_string(), (task.title.clone(), owners))
+                        (
+                            session_key.to_string(),
+                            claim_owners(workspace, session_key),
+                        )
                     }),
                 _ => None,
             })
@@ -3670,4 +3636,45 @@ mod popup_nav_tests {
         assert_eq!(single_menu_char("←→"), None);
         assert_eq!(single_menu_char(""), None);
     }
+}
+
+/// The claim owners to name in the "already claimed, start anyway?" prompt,
+/// with the workspace's title.
+///
+/// The client reads claims from the poll payload alone, which is the point:
+/// presence is a label and costs nothing (#1922). A stable `working` label
+/// therefore names no holder here — the holder lives in the claim comment,
+/// which only a decision point on the daemon side fetches — so the prompt says
+/// that plainly and points at the command that will answer it, rather than
+/// inventing an owner or implying there isn't one. A claim from a box on an
+/// older build still carries its holder in the label name, so it is still
+/// named.
+fn claim_owners(
+    workspace: &lazybox_core::Workspace,
+    session_key: &lazybox_core::SessionKey,
+) -> (String, Vec<String>) {
+    let Some(task) = workspace.primary_task() else {
+        return (session_key.to_string(), vec!["unknown owner".into()]);
+    };
+    let mut owners = task
+        .active_qualified_working_claims(chrono::Utc::now())
+        .into_iter()
+        .map(|claim| {
+            format!(
+                "device {}/session {}",
+                &claim.device[..8],
+                &claim.session[..6]
+            )
+        })
+        .collect::<Vec<_>>();
+    if task.has_stable_working_claim() {
+        owners.push(format!(
+            "a lazybox agent (`lazybox task status {}` names it)",
+            task.id.key
+        ));
+    }
+    if owners.is_empty() {
+        owners.push("unknown owner".into());
+    }
+    (task.title.clone(), owners)
 }

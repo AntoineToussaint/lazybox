@@ -53,9 +53,10 @@ Do not discard evidence to fit a line cap; stop when the handoff is complete.\n\
 \n\
 Load-bearing GitHub labels — never strip these, they are live coordination state, \
 not junk:\n\
-  - `working` and `lazybox:w:…` mark a task as owned by a running agent \
-(heartbeat-renewed, 1-hour TTL). Removing one lets the fleet double-spawn on a task \
-it now thinks is free.\n\
+  - `working` marks a task as owned by a running agent (heartbeat-renewed, \
+1-hour TTL), with the holder in lazybox's own sticky claim comment beside it. \
+Removing either half lets the fleet double-spawn; `lazybox:w:…` is the same \
+claim from an older build.\n\
   - `no-auto-fix` / `do-not-lazybox` opt a PR out of lazybox's auto-fix only (not \
 auto-merge, not `@lazybox`). Add one to stop lazybox auto-fixing a PR; remove it to \
 let it resume.\n\
@@ -565,6 +566,18 @@ mod tests {
         // default. Written as a trailing sentence on the existing bullet
         // rather than a third one, which is why this moves the cap by ~290
         // bytes and not the ~420 a standalone bullet cost.
+        //
+        // #1922 split the claim into two halves — the stable `working` label
+        // and lazybox's own sticky claim comment — so the bullet has one more
+        // load-bearing fact than it did: an agent that strips EITHER half
+        // double-spawns, and the old text only ever named a label. That is
+        // the one sentence that cannot be dropped, and it costs ~66 bytes
+        // over the label-only wording even after cutting the holder/agent/
+        // model enumeration (detail an agent never acts on) and the
+        // older-build aside down to a clause. The cap moves by 100 rather
+        // than being fitted to the 6962 that measures, keeping the reword
+        // headroom every raise above was sized to leave. The line cap stays
+        // 37: the bullet is still ONE rendered line, so nothing moved there.
         let text = lazybox_session_context_with_mcp("");
         assert!(
             text.lines().count() <= 37,
@@ -572,7 +585,7 @@ mod tests {
             text.lines().count()
         );
         assert!(
-            text.len() <= 6950,
+            text.len() <= 7050,
             "session context should stay tight: {} bytes",
             text.len()
         );

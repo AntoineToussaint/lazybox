@@ -228,7 +228,7 @@ pub struct McpRuntime {
     /// "already has a running agent" check and the spawn itself are several
     /// awaits apart, so without this two siblings starting the same record
     /// both saw it free and both spawned — the double-spawn the `working` /
-    /// `lazybox:w:…` claim labels exist to prevent.
+    /// `working` claim exists to prevent.
     starting: parking_lot::Mutex<std::collections::HashSet<lazybox_core::WorkspaceKey>>,
 }
 
@@ -5927,7 +5927,7 @@ mod tests {
     /// The "already has a running agent" check and `handle_spawn` are
     /// several awaits apart (`attach_to_record`, `record_started`), so both
     /// callers read the record free and both spawned — the double-spawn the
-    /// `working` / `lazybox:w:…` claim labels exist to prevent. The claim is
+    /// `working` claim exists to prevent. The claim is
     /// taken before the check and held through the spawn.
     #[tokio::test]
     async fn two_callers_starting_one_record_do_not_both_spawn() {

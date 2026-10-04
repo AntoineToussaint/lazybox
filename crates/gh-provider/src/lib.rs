@@ -16,7 +16,8 @@ pub use app_auth::{
 };
 pub use client::{
     BackgroundSweepForecast, BranchMergeGate, GateShortfall, GhClient, GhError, HotFetch,
-    RepoSweepOutcome, RepoSweepSpec, SelectedFetchOutcome, credential_fingerprint,
+    RepoSweepOutcome, RepoSweepSpec, SelectedFetchOutcome, WorkingClaimRelease,
+    credential_fingerprint,
 };
 pub use graphql::{
     CiFailureRecheck, PrDetails, RoleQualifier, repo_sweep_issue_query, repo_sweep_pr_query,

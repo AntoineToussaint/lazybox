@@ -6506,7 +6506,8 @@ mod tests {
         // Sidebar-rendering fields stay in the inbox query but
         // shrunk so 100 PRs/page × N fields doesn't compound.
         // Labels are control plane, not decoration: the working claim
-        // (`working` + `lazybox:w:…`), `role:*`, the auto-fix opt-outs
+        // (`working`, and `lazybox:w:…` from an older build), `role:*`,
+        // the auto-fix opt-outs
         // and the `model:<tier>` selector all ride them, and a task
         // whose labels are truncated loses that state silently. The cap
         // was sized when the sidebar's first label was all that

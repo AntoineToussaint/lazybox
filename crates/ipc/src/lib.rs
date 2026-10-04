@@ -2444,6 +2444,17 @@ pub enum Command {
         /// for a caller that needs to know the tombstone is really gone.
         client_request_id: Option<String>,
     },
+    /// Replace a TODO's checklist with `items`, in order. The whole list
+    /// travels, so a save is one write and one `WorkspaceUpserted`. Every item
+    /// carries an id the CLIENT minted (`TodoItem::new_id`), unique within the
+    /// list — the daemon refuses an empty or duplicated one. Client-minted
+    /// because an id the daemon invents cannot be named as a `parent` by a
+    /// sibling in the same request, which made a new subtree unexpressible in
+    /// one save. Appended last (bincode is ordinal-sensitive).
+    SaveTodoItems {
+        workspace_key: lazybox_core::WorkspaceKey,
+        items: Vec<lazybox_core::TodoItem>,
+    },
 }
 
 /// How a branch-namespace collision should be cleared (#1742). Both arms

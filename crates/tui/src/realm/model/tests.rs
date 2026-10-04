@@ -14328,6 +14328,54 @@ mod merge_focus_follow_tests {
         assert!(m.pending_hopper_action.is_none());
     }
 
+    /// A checklist edit in the TODO editor reaches the daemon as one
+    /// `SaveTodoItems` carrying the whole list, and the editor stays open.
+    #[test]
+    fn a_checklist_edit_is_saved_to_the_daemon() {
+        use lazybox_core::HopperMeta;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(lazybox_ipc::EVENT_CHANNEL_CAPACITY);
+        let client = lazybox_ipc::Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        let mut todo = Workspace::empty(WorkspaceKey::new("ship"), "main", Utc::now());
+        todo.name = "Ship".into();
+        todo.hopper = Some(HopperMeta {
+            position: 0,
+            completed_at: None,
+            canceled_at: None,
+        });
+        let key = todo.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(todo)));
+        m.mount_hopper();
+        while cmd_rx.try_recv().is_ok() {}
+
+        let item = lazybox_core::TodoItem {
+            id: "a".into(),
+            parent: None,
+            text: "cut the release".into(),
+            done_at: None,
+            canceled_at: None,
+            link: None,
+            auto_checked: false,
+        };
+        m.update(Msg::TodoItemsChanged {
+            workspace_key: key.clone(),
+            items: vec![item.clone()],
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::Hopper));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(IpcCommand::SaveTodoItems { workspace_key, items })
+                if workspace_key == key && items == vec![item]
+        ));
+    }
+
     #[test]
     fn hopper_lifecycle_actions_keep_the_modal_open_for_batching() {
         use lazybox_core::HopperMeta;

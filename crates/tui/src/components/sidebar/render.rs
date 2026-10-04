@@ -989,7 +989,7 @@ impl Sidebar {
                             row_bg.unwrap_or_default().fg(theme.text_dim),
                         ),
                         Span::styled(
-                            "Hopper",
+                            "TODO",
                             row_bg
                                 .unwrap_or_default()
                                 .fg(theme.accent)

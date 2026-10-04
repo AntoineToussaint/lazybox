@@ -40,7 +40,7 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `Shift-M` | messages | Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. |
 | `Shift-E` | errors | Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. |
 | `Shift-U` | usage stats | Open the usage-stats view — a day/week breakdown of what you've done, built from the daemon's persisted event history: agent sessions, prompts, PRs merged, agent turns, tokens, and cost. |
-| `Shift-H` | hopper | Open the personal Hopper editor. |
+| `Shift-H` | todo | Open your TODO list — the personal cross-project juggler. |
 | `Esc` | dismiss | Clear the current footer notice, whatever its severity — retryable, info, permanent, or auth. |
 | `Enter` | detail | Open the current footer error in a full-text detail modal. |
 | `` ` `` | jump to workspace | Open a fuzzy picker over every workspace (across repos) and jump to the one you pick. |
@@ -83,8 +83,8 @@ Manage the sidebar list itself — only while the sidebar has focus.
 
 | Key | Action | What it does |
 | --- | --- | --- |
-| `{` | prev group | Move the cursor to the previous group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502). |
-| `}` | next group | Move the cursor to the next group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502). |
+| `{` | prev group | Move the cursor to the previous group header (Space / repo / Focused / TODO) so a long inbox can be crossed a group at a time (#1502). |
+| `}` | next group | Move the cursor to the next group header (Space / repo / Focused / TODO) so a long inbox can be crossed a group at a time (#1502). |
 | `f` | filter | Open the filter menu — toggle state (with-agent, CI-failing, conflict, unread, asking, …), role, and kind predicates. |
 | `o` | order | Cycle the sort order (recency → by-role → by-role with section headers). |
 | `Shift-S` | switch mailbox | Cycle the mailbox view (Inbox → Inactive → Snoozed). |
@@ -147,7 +147,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | `]]←↓↑→` | Move tile focus; Left/Right cycles tabs in Tabs mode |
 | `]]Shift-←↓↑→` | Move the divider between the focused tile and its neighbour that way, by `ui.split_step_percent` — the keyboard half of dragging that divider with the mouse |
 | `]]x` | Close the focused terminal (tile or active tab) |
-| `]]H` | Open the personal Hopper editor |
+| `]]H` | Open your TODO list |
 | `]]z` | Toggle tmux-style zoom of the focused tile (maximize / restore); Splits grid only |
 | `]]t` | Switch this session's terminals between tabs and side-by-side tiles, and set how the next one opens (persists `ui.terminal_new_layout`) |
 

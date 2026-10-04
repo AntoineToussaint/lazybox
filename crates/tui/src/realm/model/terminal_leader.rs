@@ -226,8 +226,8 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
     FixedCommandSpec {
         key: 'H',
         command: LeaderCmd::OpenHopper,
-        menu_label: "hopper",
-        reference: "Open the personal Hopper editor",
+        menu_label: "todo",
+        reference: "Open your TODO list",
         sidebar: false,
     },
     FixedCommandSpec {

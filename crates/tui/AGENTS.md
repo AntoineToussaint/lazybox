@@ -192,6 +192,77 @@ row (hence "truncated at the same word"), and the parked viewport dragged down
 by the duplicated row count because the anchor is measured from a tail that just
 grew. A straddling batch refuses the capture, like a hole does.
 
+## A tile divider is a ratio in the session, not a percentage in config
+
+Runners in the stack are tabs *by default* (`SessionLayout::Tabs`), but
+`SessionLayout::Splits { tree, focused }` over an N-way
+`lazybox_core::TileTree` is equally real and is what `lazybox log` actually
+produces: `auto_split_on_spawn` defaults to `Split`, so an agent that runs
+`cargo test 2>&1 | lazybox log` gets its log window as a *tile* beside it.
+
+Each split node carries its own `ratio`, and that ratio **is** the persisted
+divider position — there is no `ui.`-level percentage for it, unlike
+`sidebar_pct` / `right_top_pct`. It travels with the rest of the layout
+through `Command::SetSessionLayout`, which is why each workspace remembers
+its own divider rather than sharing one global number. Reaching for a config
+knob here would add a second, coarser source of truth for something the tree
+already stores.
+
+Three rules hold that together:
+
+- **One door onto the ratio.** `TileTree::set_ratio_at` clamps to
+  `TILE_RATIO_MIN..=TILE_RATIO_MAX`, and the pointer, the keyboard nudge and
+  a restored layout all go through it. A divider dragged to the edge would
+  otherwise leave a zero-width tile that still owns a PTY and still takes
+  keystrokes — invisible but live.
+- **The divider moves the way the arrow points.** `resize_toward` takes its
+  sign from the direction alone, never from which child the focused tile sits
+  in. The tempting alternative ("the current tile grows") disagrees for a
+  tile in the second child, which would make `]]Shift-Right` mean two
+  different things depending on which side the user had clicked into, and
+  would stop it matching the mouse drag. Keyboard and pointer must not
+  disagree about which way is which.
+- **Hit-testing reads the frame, not a recomputation.** `render_tile_tree`
+  records each divider it paints (`divider_hits`: path, line, container,
+  axis) and the hit-test and drag read that back, the same way `TerminalHit`
+  records its rects. The grab zone is ±1 cell — the 3-cell zone the pane
+  splitters use — because a 1-cell line is not a target a pointer hits
+  reliably, and one that needs a pixel-perfect aim reads as not draggable.
+
+A drag persists **once**, on mouse-up. One `Command::SetSessionLayout` per
+pointer motion would put the daemon's workspace writer on the mouse.
+
+## A log window takes no typed input
+
+A `LogTail` runner is `tail -F <path>` (`crates/server/src/spawn_plan.rs`) —
+a process that never reads its stdin. `TerminalStack::handle_key` therefore
+refuses to produce PTY-bound bytes for one at all, rather than filtering for
+printables: there is no keystroke `tail -F` has a use for, so a byte that got
+through would be one with no reader. Before #1920 every keystroke in a log
+window became a `Command::Write`, and `Enter` additionally shipped
+`TerminalInputIntent::Submit` — which `lazybox_ipc` documents as
+"authoritative evidence that a turn may start" and which arms
+`submission_in_flight` on that runner's activity entry.
+
+The guard is on the **runner kind, not the pane**: the agent in the same
+tiled session still types and still records. Muting the pane would pass every
+"no write" assertion and break the feature.
+
+What a log window can still do is unaffected *by construction*, not by a
+carve-out — none of it reaches the refusal. Scrollback keys resolve at the
+top of `handle_key`, the wheel and text selection are mouse paths in the
+Model, and search is a `Section::Sidebar` action. Keep it that way: a guard
+moved earlier in `handle_key` would silently take the scrollback with it,
+which is what `a_log_window_still_scrolls` exists to catch.
+
+Refusing in silence would be its own bug — "I typed and nothing happened" —
+so a *typing* attempt (a printable or `Enter`, modulo SHIFT) leaves a notice
+on `input_refusal` for the Model to flash. An arrow or a stray `Ctrl-C` is
+refused quietly; a footer line per keystroke is noise. The daemon already
+refuses the **snippet** path into one of these and calls it "a read-only log
+terminal" (`spawn_handler.rs`); this is the same knowledge on the typing
+path, at the boundary where the runner kind is known.
+
 ## Which button a Confirm defaults to is a per-site decision
 
 `Confirm::new` and `destructive()` both leave `Enter` on Yes — the chord that

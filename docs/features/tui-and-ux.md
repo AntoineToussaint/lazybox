@@ -18,7 +18,7 @@ press Enter to ask a workflow question.
 **Status:** stable
 **Crate(s):** `tui` (`src/pane.rs`, `realm/model/`)
 **Config / flags:** `ui.split_step_percent` (resize step)
-**Key bindings:** `Tab` cycle, `Shift-arrows` resize splitters
+**Key bindings:** `Tab` cycle, `Shift-arrows` resize splitters, `]]Shift-arrows` resize a tile divider
 
 ### What it does
 Three regions: **Sidebar** (workspace list), **Activity** (right pane, the
@@ -29,6 +29,17 @@ focused workspace's feed), and **Terminals** (the embedded terminal stack).
 `Tab` moves Sidebar → Activity → Terminals → Sidebar. Click any pane to focus
 it. `Shift-arrows` resize the splitters; drag a splitter with the mouse for
 continuous resize.
+
+There is a third draggable divider *inside* the terminal stack, between two
+tiles of a split session — an agent and its `lazybox log` window, say. Drag it
+the same way, or press `]]Shift-arrow` to move it by `ui.split_step_percent`.
+The divider moves the way the arrow points, from either tile. `Shift-arrows`
+without the leader are deliberately inert inside a terminal so the shell can
+bind them, which is why this one lives behind `]]`.
+
+Unlike the two pane splitters, a tile divider's position is **per workspace**:
+it is a ratio in that session's tile tree, saved with the layout, not a number
+in `ui:`.
 
 ### How it works (brief)
 The `Pane` trait (`crates/tui/src/pane.rs`) is a focusable region owning a
@@ -42,6 +53,8 @@ reads the focused pane's keymap.
 - [ ] Clicking a pane focuses it.
 - [ ] `Shift-Left/Right` resize the sidebar–right splitter; `Shift-Up/Down` the activity–terminal splitter.
 - [ ] Dragging a splitter resizes continuously.
+- [ ] In a split session, dragging the divider between two tiles resizes them; the grabbed divider is accented while held, and the position survives a restart of that workspace.
+- [ ] `]]Shift-arrow` moves the same divider; in Tabs mode (or on a lone terminal) it flashes "no divider that way" instead of doing nothing.
 - [ ] The hint bar shows the focused pane's bindings.
 
 ### Known sharp edges

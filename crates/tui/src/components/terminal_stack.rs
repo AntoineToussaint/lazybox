@@ -731,6 +731,25 @@ struct TerminalHit {
     offset: Option<u64>,
 }
 
+/// One tile divider as the last frame drew it (#1920). Recorded so a
+/// click can be resolved back to the split it belongs to without the
+/// hit-test re-walking the tree and re-deriving the same arithmetic —
+/// the drag must act on the geometry the user actually aimed at, which
+/// is the frame on screen, not a recomputation that may already
+/// disagree. Same reason `TerminalHit` records its rects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TileDividerHit {
+    /// Path to the split node, which is what [`lazybox_core::TileTree`]
+    /// addresses a ratio by.
+    path: Vec<u8>,
+    /// The 1-cell line the renderer painted.
+    line: Rect,
+    /// The split's whole rect — the denominator a pointer position is
+    /// turned into a percentage against.
+    container: Rect,
+    axis: lazybox_core::TileAxis,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RenderedClickTarget {
     pub(crate) terminal_id: TerminalId,
@@ -859,6 +878,24 @@ pub struct TerminalStack {
     /// body preserves the narrower hover-to-scroll target. Cleared at
     /// the start of every render so a closed tile leaves no stale target.
     tile_hits: Vec<TerminalHit>,
+    /// Every tile divider the last frame painted, in render order
+    /// (#1920). Cleared and repopulated per frame alongside
+    /// `tile_hits`.
+    divider_hits: Vec<TileDividerHit>,
+    /// A refusal the pane needs the Model to say out loud — set when a
+    /// keystroke was dropped for a reason the user cannot see (#1920).
+    /// Drained by [`Self::take_input_refusal`]; the pane has no footer
+    /// of its own and only ever gets a `cmds` vec, so a notice has to
+    /// ride out through the Model the same way `take_open_description`
+    /// does.
+    input_refusal: Option<String>,
+    /// The divider currently being dragged, highlighted so the user can
+    /// see which line they grabbed. `None` outside a drag. This is the
+    /// only hover-style cue in the pane: an idle hover would need a
+    /// `MouseEventKind::Moved` arm, which the Model does not have, and
+    /// a redraw per pointer motion — see the PR for why that is not
+    /// "cheap" while the client hot paths are being budgeted.
+    dragging_divider: Option<Vec<u8>>,
     /// Last-focused terminal per session. Recorded when we leave a
     /// session so returning restores the pane the user was last on
     /// instead of snapping back to the first. Keyed by terminal id
@@ -2100,6 +2137,9 @@ impl TerminalStack {
             tab_strip_hits: Vec::new(),
             usage_badge_hits: Vec::new(),
             tile_hits: Vec::new(),
+            divider_hits: Vec::new(),
+            input_refusal: None,
+            dragging_divider: None,
             last_focused: HashMap::new(),
             closing: HashSet::new(),
             dead_on_arrival: DEFAULT_DEAD_ON_ARRIVAL,
@@ -2853,6 +2893,133 @@ impl TerminalStack {
         outcome
     }
 
+    /// Color for the divider at `path`: the accent while it is being
+    /// dragged, the pane's own chrome otherwise. The one affordance
+    /// that says "this line is the thing you have hold of".
+    fn divider_color(&self, path: &[u8], chrome: Color) -> Color {
+        match &self.dragging_divider {
+            Some(active) if active.as_slice() == path => crate::theme::current().accent,
+            _ => chrome,
+        }
+    }
+
+    /// Resolve `(col, row)` to the tile divider under it, if any
+    /// (#1920). Returns the path of the split that divider belongs to,
+    /// which is how [`lazybox_core::TileTree`] addresses its ratio.
+    ///
+    /// Tolerance is ±1 cell, giving the same 3-cell grab zone the
+    /// sidebar and activity splitters use (`hit_test_splitter` in
+    /// `realm/layout.rs`) — a 1-cell line is not something a pointer
+    /// lands on reliably, and a divider that needs a pixel-perfect aim
+    /// reads as not draggable at all.
+    ///
+    /// Later dividers win on an overlap: nested splits are pushed after
+    /// their parents, so where a child's divider ends within a cell of
+    /// its parent's the user gets the inner one, which is the smaller
+    /// and harder target.
+    pub fn hit_test_tile_divider(&self, col: u16, row: u16) -> Option<Vec<u8>> {
+        self.divider_hits
+            .iter()
+            .rev()
+            .find(|hit| {
+                let line = hit.line;
+                match hit.axis {
+                    lazybox_core::TileAxis::Horizontal => {
+                        col + 1 >= line.x
+                            && col <= line.x + 1
+                            && row >= line.y
+                            && row < line.y + line.height
+                    }
+                    lazybox_core::TileAxis::Vertical => {
+                        row + 1 >= line.y
+                            && row <= line.y + 1
+                            && col >= line.x
+                            && col < line.x + line.width
+                    }
+                }
+            })
+            .map(|hit| hit.path.clone())
+    }
+
+    /// Mark `path` as the divider under an active drag so the next
+    /// frame paints it accented. Idempotent.
+    pub fn begin_divider_drag(&mut self, path: Vec<u8>) {
+        self.dragging_divider = Some(path);
+    }
+
+    /// End a divider drag. Returns `true` when one was in progress, so
+    /// the caller knows to redraw the un-accented line and to persist
+    /// the layout ONCE — a drag delivers a position per pointer motion,
+    /// and a `Command::SetSessionLayout` per motion would put the
+    /// daemon's workspace writer on the mouse.
+    pub fn end_divider_drag(&mut self) -> bool {
+        self.dragging_divider.take().is_some()
+    }
+
+    /// Move the divider at `path` to follow the pointer. Returns `true`
+    /// when the stored ratio actually changed.
+    ///
+    /// The percentage is taken against the rect the frame drew that
+    /// split into, so a drag inside a nested split is relative to its
+    /// own container and not to the whole pane. Deliberately does NOT
+    /// persist: see [`Self::end_divider_drag`].
+    pub fn drag_tile_divider(&mut self, path: &[u8], col: u16, row: u16) -> bool {
+        let Some(hit) = self
+            .divider_hits
+            .iter()
+            .find(|hit| hit.path == path)
+            .cloned()
+        else {
+            return false;
+        };
+        let lazybox_core::SessionLayout::Splits { tree, .. } = &mut self.layout else {
+            return false;
+        };
+        let (span, rel) = match hit.axis {
+            lazybox_core::TileAxis::Horizontal => (
+                hit.container.width,
+                col.saturating_sub(hit.container.x) as u32,
+            ),
+            lazybox_core::TileAxis::Vertical => (
+                hit.container.height,
+                row.saturating_sub(hit.container.y) as u32,
+            ),
+        };
+        if span == 0 {
+            return false;
+        }
+        let pct = (rel * 100 / span as u32).min(100) as u8;
+        tree.set_ratio_at(path, pct)
+    }
+
+    /// Move the divider nearest the focused tile one step in `dir` —
+    /// the keyboard half of the same gesture (`]]Shift-<arrow>`).
+    /// Returns the label of the divider moved so the caller can say
+    /// what happened, or `None` when no divider lies that way or the
+    /// ratio is already clamped.
+    ///
+    /// `step` is `ui.split_step_percent`, the same knob the sidebar and
+    /// activity splitters nudge by, so one tap means the same amount of
+    /// movement everywhere in the UI.
+    pub fn resize_focused_divider(
+        &mut self,
+        dir: lazybox_core::TileDirection,
+        step: i16,
+        cmds: &mut Vec<Command>,
+    ) -> Option<&'static str> {
+        let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout else {
+            return None;
+        };
+        let focused = focused.clone();
+        let moved = tree.resize_toward(&focused, dir, step)?;
+        let axis = tree.axis_at(&moved)?;
+        self.persist_layout(cmds);
+        Some(match axis {
+            lazybox_core::TileAxis::Horizontal => "columns",
+            lazybox_core::TileAxis::Vertical => "rows",
+        })
+    }
+
     /// Did the user click on a terminal-tab label? Returns the tab
     /// index when `(col, row)` lands inside one of the click
     /// targets cached during render. Called by the orchestrator's
@@ -3455,6 +3622,7 @@ impl TerminalStack {
         self.tab_strip_hits.clear();
         self.usage_badge_hits.clear();
         self.tile_hits.clear();
+        self.divider_hits.clear();
     }
 
     /// Render one specific terminal into `area` — the focus-mode pane
@@ -4704,6 +4872,44 @@ impl TerminalStack {
             return PaneOutcome::Pass;
         }
 
+        // A log window takes no typed input (#1920).
+        //
+        // A `LogTail` runner is `tail -F <path>` (`spawn_plan.rs`): it
+        // never reads its stdin, so every byte routed here went to a
+        // process that cannot use it — and `Enter` additionally shipped
+        // `TerminalInputIntent::Submit`, which `lazybox_ipc` documents
+        // as "authoritative evidence that a turn may start" and which
+        // arms `submission_in_flight` on this runner's activity entry.
+        // The daemon already refuses the SNIPPET path into one of these
+        // and calls it "a read-only log terminal"
+        // (`spawn_handler.rs`); this is the same knowledge applied to
+        // the typing path, at the boundary where the runner kind is
+        // known.
+        //
+        // Refusing EVERY byte rather than filtering for printables is
+        // the narrow choice here, not the broad one: there is no
+        // keystroke `tail -F` has a use for, so a byte that still got
+        // through would be one with no reader. What the user can still
+        // do is unaffected by construction, because none of it reaches
+        // this point — scrollback keys returned at the top of this
+        // function, the wheel and text selection are mouse paths in the
+        // Model, and search is a sidebar action.
+        //
+        // Only a *typing* attempt earns a notice. Someone who pressed
+        // `k` or `Enter` is owed an answer for why nothing happened; an
+        // arrow or a stray `Ctrl-C` is not worth a footer line.
+        if self
+            .terminals
+            .get(&id)
+            .is_some_and(|slot| matches!(slot.kind, TerminalKind::LogTail { .. }))
+        {
+            if Self::is_typing_attempt(&key) {
+                self.input_refusal =
+                    Some("read-only log window — it takes no typed input".to_string());
+            }
+            return PaneOutcome::Consumed;
+        }
+
         let Some(bytes) = key_to_bytes(&key) else {
             return PaneOutcome::Consumed;
         };
@@ -4775,6 +4981,29 @@ impl TerminalStack {
     /// `cmds` vec (and later the same ordered command channel), so the
     /// PTY receives the identical byte stream; splitting mid-UTF-8 or
     /// mid-escape is fine for a byte-oriented PTY.
+    /// Whether this keystroke reads as an attempt to type something —
+    /// a printable character or a submit. CONTROL / ALT / SUPER /
+    /// HYPER / META all belong to an inner program's vocabulary rather
+    /// than to prose, so a chord carrying one is not a typing attempt;
+    /// SHIFT is subtracted instead of listed because a capital letter
+    /// is still typing, and subtracting keeps the test closed if
+    /// crossterm ever adds a modifier bit (the same reasoning the
+    /// exited-pane keys use).
+    fn is_typing_attempt(key: &KeyEvent) -> bool {
+        if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+            return false;
+        }
+        matches!(key.code, KeyCode::Char(_) | KeyCode::Enter)
+    }
+
+    /// Take the pending input refusal, if the last keystroke produced
+    /// one. The Model drains this after dispatching a key and flashes
+    /// it, so "I typed into the log window and nothing happened" has an
+    /// answer on screen instead of being a silent swallow.
+    pub fn take_input_refusal(&mut self) -> Option<String> {
+        self.input_refusal.take()
+    }
+
     fn push_write(
         cmds: &mut Vec<Command>,
         terminal_id: TerminalId,
@@ -5338,6 +5567,7 @@ impl TerminalStack {
         // re-records every visible tile's rect from scratch so the
         // wheel handler hit-tests against the current layout.
         self.tile_hits.clear();
+        self.divider_hits.clear();
         // Title row: a mode label plus an icon+label per active terminal
         // (e.g. `Terminals    claude   _ shell`). Active is bold-accent;
         // inactive is dim grey. Two-tab common case looks like a tab
@@ -6224,6 +6454,14 @@ impl TerminalStack {
         Some(now)
     }
 
+    /// Public door onto the private `persist_layout`, for the Model's
+    /// end-of-drag save (#1920). A tile divider's position is part of
+    /// the session layout, so it travels the same way `]]t` and a
+    /// split do.
+    pub fn persist_session_layout(&mut self, cmds: &mut Vec<Command>) {
+        self.persist_layout(cmds);
+    }
+
     /// Push a `Command::SetSessionLayout` for the currently-active
     /// session if we know which one we're on. The daemon writes the
     /// new layout to the workspace record + rebroadcasts.
@@ -6930,10 +7168,17 @@ impl TerminalStack {
                         width: 1,
                         height: rect.height,
                     };
+                    let color = self.divider_color(current_path, chrome);
                     let lines: Vec<Line> = (0..rect.height)
-                        .map(|_| Line::from(Span::styled("│", Style::default().fg(chrome))))
+                        .map(|_| Line::from(Span::styled("│", Style::default().fg(color))))
                         .collect();
                     frame.render_widget(Paragraph::new(lines), div);
+                    self.divider_hits.push(TileDividerHit {
+                        path: current_path.to_vec(),
+                        line: div,
+                        container: rect,
+                        axis: lazybox_core::TileAxis::Horizontal,
+                    });
                 }
             }
             lazybox_core::TileTree::VSplit { top, bottom, ratio } => {
@@ -6983,13 +7228,20 @@ impl TerminalStack {
                         width: rect.width,
                         height: 1,
                     };
+                    let color = self.divider_color(current_path, chrome);
                     frame.render_widget(
                         Paragraph::new(Line::from(Span::styled(
                             "─".repeat(div.width as usize),
-                            Style::default().fg(chrome),
+                            Style::default().fg(color),
                         ))),
                         div,
                     );
+                    self.divider_hits.push(TileDividerHit {
+                        path: current_path.to_vec(),
+                        line: div,
+                        container: rect,
+                        axis: lazybox_core::TileAxis::Vertical,
+                    });
                 }
             }
         }
@@ -15860,6 +16112,503 @@ mod recap_prefix_tests {
                 reason: "auto-fix".into()
             }),
             "lazybox · auto-fix ▸ "
+        );
+    }
+}
+
+// ── #1920: a log window is read-only, and tile dividers move ─────────
+
+/// Two halves of #1920, sharing one fixture.
+///
+/// **Typed input into a `LogTail` slot.** A log runner is `tail -F`
+/// (`spawn_plan.rs`), a process that never reads its stdin — and before
+/// this, `handle_key` classified intent by the key alone and
+/// `push_write` forwarded regardless of runner kind, so every keystroke
+/// in a log window became a `Command::Write` to a reader that did not
+/// exist, with `Enter` additionally shipping
+/// `TerminalInputIntent::Submit` — documented in `lazybox_ipc` as
+/// "authoritative evidence that a turn may start".
+///
+/// **Divider ratios.** A tiled session draws a divider between its
+/// tiles and, before this, nothing could move it: `ratio` was written
+/// once as a hardcoded 50 and read only by the renderer.
+#[cfg(test)]
+mod log_window_and_divider_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn slot(kind: TerminalKind) -> TerminalSlot {
+        TerminalStack::make_slot(
+            SessionKey::new("session"),
+            kind,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        )
+    }
+
+    /// An agent with its `lazybox log` window beside it — the shape the
+    /// issue is about, and the shape `lazybox log` actually produces
+    /// (`auto_split_on_spawn` defaults to `Split`, so the log lands as a
+    /// tile rather than a tab).
+    fn agent_and_log() -> TerminalStack {
+        let sk = SessionKey::new("session");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.insert_slot_for_test(TerminalId(1), slot(TerminalKind::Agent("claude".into())));
+        stack.insert_slot_for_test(
+            TerminalId(2),
+            slot(TerminalKind::LogTail {
+                path: "/w/target/test.log".into(),
+            }),
+        );
+        stack.set_active_session(Some(sk));
+        stack.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        });
+        stack
+    }
+
+    fn writes(cmds: &[Command]) -> Vec<&Command> {
+        cmds.iter()
+            .filter(|c| matches!(c, Command::Write { .. }))
+            .collect()
+    }
+
+    /// Render once at a known size so the divider geometry the
+    /// hit-tests read is the geometry a frame actually painted.
+    fn render(stack: &mut TerminalStack, w: u16, h: u16) -> Rect {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("test backend");
+        let area = Rect::new(0, 0, w, h);
+        term.draw(|frame| {
+            stack.begin_focus_frame();
+            stack.render(area, frame, true);
+        })
+        .expect("render");
+        area
+    }
+
+    // ── Part 2: the log window takes no typed input ──────────────────
+
+    /// THE regression test. Revert the `LogTail` arm in `handle_key` and
+    /// the two `Write` assertions fail: `k` produces
+    /// `Write{intent:Compose}` and `Enter` produces
+    /// `Write{intent:Submit}`.
+    #[test]
+    fn typing_into_a_log_window_writes_nothing_and_records_nothing() {
+        let mut stack = agent_and_log();
+        assert!(stack.focus_terminal(TerminalId(2)), "focus the log window");
+
+        let mut cmds = Vec::new();
+        for key in [
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            stack.handle_key(key, &mut cmds);
+        }
+
+        assert!(
+            writes(&cmds).is_empty(),
+            "no byte may reach a `tail -F` that cannot read it: {cmds:#?}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::RecordUserMessage { .. })),
+            "nothing typed here is a user prompt: {cmds:#?}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::RecordComposingBuffer { .. })),
+            "and nothing here is a draft: {cmds:#?}",
+        );
+    }
+
+    /// `Submit` is the consequence with the longest reach — the daemon
+    /// treats it as turn-start evidence and arms `submission_in_flight`
+    /// — so it gets its own assertion rather than riding on "no writes".
+    #[test]
+    fn enter_in_a_log_window_emits_no_submit_intent() {
+        let mut stack = agent_and_log();
+        assert!(stack.focus_terminal(TerminalId(2)));
+        let mut cmds = Vec::new();
+        stack.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut cmds);
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                Command::Write {
+                    intent: TerminalInputIntent::Submit,
+                    ..
+                }
+            )),
+            "a log window must not claim a turn started: {cmds:#?}",
+        );
+    }
+
+    /// "Refuse text", not "swallow all keys": scrolling keeps working.
+    /// Scroll is resolved above the guard in `handle_key`, so this pins
+    /// the ordering — a guard placed earlier would silently take the
+    /// scrollback with it.
+    #[test]
+    fn a_log_window_still_scrolls() {
+        let mut stack = agent_and_log();
+        assert!(stack.focus_terminal(TerminalId(2)));
+        // Enough history to have somewhere to scroll to.
+        let payload: String = (0..200).map(|i| format!("line {i}\r\n")).collect();
+        stack
+            .terminals
+            .get_mut(&TerminalId(2))
+            .expect("the log slot")
+            .vt
+            .feed(payload.as_bytes());
+
+        let mut cmds = Vec::new();
+        let up = KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT);
+        assert_eq!(stack.handle_key(up, &mut cmds), PaneOutcome::Consumed);
+        let parked = stack
+            .terminals
+            .get(&TerminalId(2))
+            .expect("the log slot")
+            .vt
+            .anchor;
+        assert!(
+            !matches!(parked, ViewportAnchor::Bottom),
+            "Shift-PageUp must still park the viewport, got {parked:?}",
+        );
+        assert!(
+            writes(&cmds).is_empty(),
+            "and scrolling is still not a write: {cmds:#?}",
+        );
+
+        assert_eq!(
+            stack.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT), &mut cmds),
+            PaneOutcome::Consumed,
+        );
+        assert!(matches!(
+            stack
+                .terminals
+                .get(&TerminalId(2))
+                .expect("the log slot")
+                .vt
+                .anchor,
+            ViewportAnchor::Bottom,
+        ));
+    }
+
+    /// The guard is scoped to the runner kind, not to the pane: the
+    /// agent in the very same tiled session still takes input, and
+    /// still records it. Without this, "fixing" #1920 by muting the
+    /// pane would pass every assertion above.
+    #[test]
+    fn the_agent_beside_it_still_takes_typed_input() {
+        let mut stack = agent_and_log();
+        assert!(stack.focus_terminal(TerminalId(1)), "focus the agent");
+        let mut cmds = Vec::new();
+        stack.handle_key(
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+        stack.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut cmds);
+        assert_eq!(writes(&cmds).len(), 2, "both keystrokes reach the agent");
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::Write {
+                    intent: TerminalInputIntent::Submit,
+                    ..
+                }
+            )),
+            "and Enter still starts a turn: {cmds:#?}",
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::RecordUserMessage { .. })),
+            "and still lands in prompt history: {cmds:#?}",
+        );
+    }
+
+    /// Only a typing attempt earns a footer line. An arrow or a
+    /// `Ctrl-C` is refused in silence — a notice on every keystroke
+    /// would be its own noise.
+    #[test]
+    fn only_a_typing_attempt_is_reported_to_the_user() {
+        let mut stack = agent_and_log();
+        assert!(stack.focus_terminal(TerminalId(2)));
+        let mut cmds = Vec::new();
+
+        for (key, expected) in [
+            (KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), true),
+            (KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT), true),
+            (KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), true),
+            (KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), false),
+            (
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                false,
+            ),
+            (KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), false),
+        ] {
+            stack.handle_key(key, &mut cmds);
+            assert_eq!(
+                stack.take_input_refusal().is_some(),
+                expected,
+                "{key:?} should {} be reported",
+                if expected { "" } else { "not" },
+            );
+        }
+    }
+
+    // ── Part 1: the divider between them moves ───────────────────────
+
+    /// The divider is drawn at the ratio boundary and a click within a
+    /// cell of it resolves to the split that owns the ratio — the same
+    /// 3-cell grab zone the pane splitters use, because a 1-cell line
+    /// is not a target a pointer hits reliably.
+    #[test]
+    fn a_click_near_the_divider_resolves_to_its_split() {
+        let mut stack = agent_and_log();
+        render(&mut stack, 80, 24);
+        // 50% of 80 columns, offset by the pane's own border.
+        let seam = stack
+            .divider_hits
+            .first()
+            .expect("the agent/log divider was painted")
+            .line
+            .x;
+
+        for col in [seam - 1, seam, seam + 1] {
+            assert_eq!(
+                stack.hit_test_tile_divider(col, 12),
+                Some(vec![]),
+                "column {col} is within the grab zone of a seam at {seam}",
+            );
+        }
+        assert_eq!(
+            stack.hit_test_tile_divider(seam + 6, 12),
+            None,
+            "well clear of the seam is not a grab",
+        );
+    }
+
+    /// Dragging moves the stored ratio, and the percentage is taken
+    /// against the split's own rect.
+    #[test]
+    fn dragging_the_divider_moves_the_stored_ratio() {
+        let mut stack = agent_and_log();
+        render(&mut stack, 80, 24);
+        let container = stack
+            .divider_hits
+            .first()
+            .expect("a painted divider")
+            .container;
+
+        // Drop the pointer at three quarters across the split's rect.
+        let target = container.x + container.width * 3 / 4;
+        assert!(stack.drag_tile_divider(&[], target, 12));
+        let ratio = match &stack.layout {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.ratio_at(&[]),
+            other => panic!("expected Splits, got {other:?}"),
+        };
+        // Within a point of three quarters: a percentage derived from a
+        // whole number of cells cannot land exactly, and pinning the
+        // quantised value would make this a test of the arithmetic
+        // rather than of the ratio following the pointer.
+        let ratio = ratio.expect("the split has a ratio");
+        assert!(
+            ratio.abs_diff(75) <= 1,
+            "the ratio should follow the pointer to ~75%, got {ratio}",
+        );
+
+        // The same position again is not a change — a drag delivers one
+        // of these per pointer motion.
+        assert!(!stack.drag_tile_divider(&[], target, 12));
+    }
+
+    /// A drag past the edge cannot produce an invisible-but-live tile.
+    #[test]
+    fn dragging_past_the_edge_clamps() {
+        let mut stack = agent_and_log();
+        render(&mut stack, 80, 24);
+        let container = stack
+            .divider_hits
+            .first()
+            .expect("a painted divider")
+            .container;
+
+        assert!(stack.drag_tile_divider(&[], container.x, 12));
+        let ratio = match &stack.layout {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.ratio_at(&[]),
+            other => panic!("expected Splits, got {other:?}"),
+        };
+        assert_eq!(ratio, Some(lazybox_core::TILE_RATIO_MIN));
+    }
+
+    /// The keyboard half. `]]Shift-<arrow>` moves the same divider, and
+    /// persists it the same way a `]]t` or a split does — so the
+    /// position survives a restart with no new config knob.
+    #[test]
+    fn the_keyboard_moves_the_same_divider_and_persists_it() {
+        let mut stack = agent_and_log();
+        let mut cmds = Vec::new();
+
+        assert_eq!(
+            stack.resize_focused_divider(lazybox_core::TileDirection::Right, 5, &mut cmds),
+            Some("columns"),
+        );
+        let ratio = match &stack.layout {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.ratio_at(&[]),
+            other => panic!("expected Splits, got {other:?}"),
+        };
+        assert_eq!(ratio, Some(55));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::SetSessionLayout { .. })),
+            "the moved divider is persisted: {cmds:#?}",
+        );
+    }
+
+    /// In Tabs mode there is no divider, so the keystroke reports
+    /// nothing and the caller can say so instead of doing nothing
+    /// visible.
+    #[test]
+    fn the_keyboard_reports_nothing_in_tabs_mode() {
+        let mut stack = agent_and_log();
+        stack.set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        let mut cmds = Vec::new();
+        assert_eq!(
+            stack.resize_focused_divider(lazybox_core::TileDirection::Right, 5, &mut cmds),
+            None,
+        );
+        assert!(cmds.is_empty(), "and nothing is persisted: {cmds:#?}");
+    }
+
+    /// The grabbed divider paints accented, which is the whole of the
+    /// drag cue — there is no idle hover state (see the PR body).
+    #[test]
+    fn the_grabbed_divider_is_painted_accented() {
+        let mut stack = agent_and_log();
+        render(&mut stack, 80, 24);
+        let chrome = Color::Rgb(1, 2, 3);
+        assert_eq!(stack.divider_color(&[], chrome), chrome);
+
+        stack.begin_divider_drag(Vec::new());
+        assert_eq!(
+            stack.divider_color(&[], chrome),
+            crate::theme::current().accent,
+        );
+        // A *different* divider is unaffected.
+        assert_eq!(stack.divider_color(&[1], chrome), chrome);
+
+        assert!(stack.end_divider_drag());
+        assert_eq!(stack.divider_color(&[], chrome), chrome);
+        assert!(
+            !stack.end_divider_drag(),
+            "releasing twice is not a release"
+        );
+    }
+
+    /// Nothing is grabbable where no divider is painted (#1920).
+    ///
+    /// A zoomed tile renders through `render_tile_leaf`, and Tabs mode
+    /// through `render_one_terminal` — neither walks the tree, so
+    /// neither records a divider. That makes the hit-test correct here
+    /// *only* because `divider_hits` is cleared at the start of every
+    /// frame: without that clear, the last split frame's geometry would
+    /// still be live and a click in the middle of a zoomed terminal
+    /// would start a phantom drag on an invisible line.
+    #[test]
+    fn a_zoomed_tile_and_tabs_mode_expose_no_divider_to_grab() {
+        let mut stack = agent_and_log();
+        render(&mut stack, 80, 24);
+        let seam = stack
+            .divider_hits
+            .first()
+            .expect("the split frame painted a divider")
+            .line
+            .x;
+        assert!(stack.hit_test_tile_divider(seam, 12).is_some());
+
+        // Zoom: the grid is hidden, so its divider is gone with it.
+        assert_eq!(stack.toggle_zoom(), Some(true), "zoom the focused tile");
+        render(&mut stack, 80, 24);
+        assert!(
+            stack.divider_hits.is_empty(),
+            "a zoomed tile paints no divider: {:?}",
+            stack.divider_hits,
+        );
+        assert_eq!(
+            stack.hit_test_tile_divider(seam, 12),
+            None,
+            "and last frame's seam must not still be grabbable",
+        );
+
+        // Restoring the grid brings it back.
+        assert_eq!(stack.toggle_zoom(), Some(false));
+        render(&mut stack, 80, 24);
+        assert!(stack.hit_test_tile_divider(seam, 12).is_some());
+
+        // Tabs mode: one terminal fills the pane, no divider either.
+        stack.set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut stack, 80, 24);
+        assert!(
+            stack.divider_hits.is_empty(),
+            "Tabs mode paints no divider: {:?}",
+            stack.divider_hits,
+        );
+        assert_eq!(stack.hit_test_tile_divider(seam, 12), None);
+    }
+
+    /// A nested split records its own divider against its own
+    /// container, so a drag inside it is relative to that rect and not
+    /// to the whole pane.
+    #[test]
+    fn a_nested_split_records_its_own_divider() {
+        let mut stack = agent_and_log();
+        stack.insert_slot_for_test(TerminalId(3), slot(TerminalKind::Shell));
+        stack.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::VSplit {
+                    top: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                    bottom: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 3 }),
+                    ratio: 50,
+                }),
+                ratio: 50,
+            },
+            focused: vec![0],
+        });
+        render(&mut stack, 100, 30);
+
+        let paths: Vec<Vec<u8>> = stack
+            .divider_hits
+            .iter()
+            .map(|hit| hit.path.clone())
+            .collect();
+        assert!(paths.contains(&vec![]), "the outer divider: {paths:?}");
+        assert!(paths.contains(&vec![1]), "the inner divider: {paths:?}");
+
+        let inner = stack
+            .divider_hits
+            .iter()
+            .find(|hit| hit.path == vec![1])
+            .expect("the inner divider");
+        assert_eq!(inner.axis, lazybox_core::TileAxis::Vertical);
+        assert!(
+            inner.container.width < 100,
+            "the inner split's container is its own half, not the pane: {:?}",
+            inner.container,
         );
     }
 }

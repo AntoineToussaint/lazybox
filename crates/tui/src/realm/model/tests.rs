@@ -18780,6 +18780,67 @@ mod leader_tile_tests {
         );
     }
 
+    /// `]]Shift-→` moves the DIVIDER, where the bare `]]→` moved tile
+    /// focus (#1920). Driven through `dispatch_key` rather than against
+    /// `TerminalStack` directly, because "the key does nothing" is
+    /// usually resolution or availability and not dispatch — the stack
+    /// method being right proves nothing about the chord reaching it.
+    #[test]
+    fn terminal_leader_shift_arrows_move_the_divider_not_the_focus() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals.set_layout(two_leaf_split());
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+
+        m.dispatch_key(RealmKey::new(Key::Right, RealmMods::SHIFT));
+        assert!(
+            !m.terminal_leader_pending(),
+            "the shifted arrow fired a command and consumed the leader",
+        );
+        assert_eq!(
+            m.terminal_leader_highlight(),
+            None,
+            "shifted arrows don't navigate the popup either",
+        );
+        assert_eq!(
+            m.terminals.focused_terminal_id(),
+            Some(TerminalId(1)),
+            "resizing must NOT move tile focus — that is the bare arrow",
+        );
+        let ratio = m.terminals.split_ratio_at(&[]);
+        assert!(
+            ratio.is_some_and(|r| r > 50),
+            "the divider moved right, got {ratio:?}",
+        );
+
+        // And it reaches the daemon, so the position survives a restart.
+        let mut sent_layout = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(cmd, IpcCommand::SetSessionLayout { .. }) {
+                sent_layout = true;
+            }
+        }
+        assert!(sent_layout, "a moved divider is persisted");
+    }
+
+    /// In Tabs mode there is no divider, so the chord says so rather
+    /// than doing nothing visible.
+    #[test]
+    fn terminal_leader_shift_arrows_explain_themselves_in_tabs_mode() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+
+        m.dispatch_key(RealmKey::new(Key::Right, RealmMods::SHIFT));
+        let notice = m.status.notice.as_ref().map(|n| n.message.clone());
+        assert!(
+            notice.as_deref().is_some_and(|n| n.contains("no divider")),
+            "the user is told why nothing moved, got {notice:?}",
+        );
+    }
+
     /// In a split layout the popup carries a `←↓↑→ move tile` aggregate
     /// row that has no single `Enter`-fireable key; `j`/`k` step past it
     /// so the highlight only ever lands on a dispatchable row (#343).

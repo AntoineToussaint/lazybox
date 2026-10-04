@@ -28,12 +28,33 @@ pub(crate) const SPLIT_MAX: u16 = 80;
 pub(crate) const SPLIT_STEP: i16 = 3;
 
 /// Which splitter the user is currently dragging.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Deliberately `Clone` and not `Copy`: a tile divider is addressed by
+/// its path through the session's [`lazybox_core::TileTree`], which is
+/// a `Vec<u8>`. Inlining that into a fixed-size array to preserve
+/// `Copy` would cap the tree depth a divider can be dragged at — a
+/// silent ceiling on a tree that has no other depth limit — and the
+/// clone happens once per pointer motion, against a path of one byte
+/// per split level.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DragTarget {
     /// The vertical line between sidebar and the right column.
     SidebarRight,
     /// The horizontal line between activity and terminal stack.
     ActivityTerminals,
+    /// A divider *inside* the terminal stack, between two tiles of a
+    /// `SessionLayout::Splits` tree (#1920) — the one between an agent
+    /// and its `lazybox log` window. Carries the path to the split
+    /// node whose `ratio` the drag moves.
+    ///
+    /// Unlike the other two, the geometry and the percentage for this
+    /// one live on the terminal stack, not on `LayoutCtx`: the ratio is
+    /// a field of the session's tile tree, which is persisted
+    /// per-session through `Command::SetSessionLayout` rather than in
+    /// `ui:` config. `LayoutCtx` therefore tracks only *that* a tile
+    /// divider is being dragged, and [`Self::update_drag`] routes it
+    /// back to the pane that owns it.
+    TileDivider(Vec<u8>),
 }
 
 /// Splitter percentages + last-viewport snapshot + active drag, in
@@ -156,7 +177,7 @@ impl LayoutCtx {
     /// Translate a drag's `(col, row)` into a new percentage for the
     /// active splitter and apply it. Returns `true` if the percentage
     /// actually changed so the caller can redraw.
-    pub fn update_drag(&mut self, target: DragTarget, col: u16, row: u16) -> bool {
+    pub fn update_drag(&mut self, target: &DragTarget, col: u16, row: u16) -> bool {
         match target {
             DragTarget::SidebarRight => {
                 if self.last_area.width == 0 {
@@ -172,6 +193,9 @@ impl LayoutCtx {
                 }
                 false
             }
+            // Owned by `TerminalStack` — see the variant's doc comment.
+            // The Model routes it there before reaching this far.
+            DragTarget::TileDivider(_) => false,
             DragTarget::ActivityTerminals => {
                 // Grabbing the splitter is a deliberate height choice —
                 // mark it on the first movement so the content-fit shrink
@@ -697,7 +721,7 @@ mod tests {
     fn update_drag_moves_sidebar_to_drop_column() {
         let mut c = ctx();
         // Drop at column 25 out of 100 → ~25% sidebar.
-        let changed = c.update_drag(DragTarget::SidebarRight, 25, 10);
+        let changed = c.update_drag(&DragTarget::SidebarRight, 25, 10);
         assert!(changed);
         assert_eq!(c.sidebar_pct, 25);
     }
@@ -706,7 +730,7 @@ mod tests {
     fn update_drag_clamps_to_split_max() {
         let mut c = ctx();
         // Way past the right edge — clamps to SPLIT_MAX.
-        let changed = c.update_drag(DragTarget::SidebarRight, 95, 10);
+        let changed = c.update_drag(&DragTarget::SidebarRight, 95, 10);
         assert!(changed);
         assert_eq!(c.sidebar_pct, SPLIT_MAX);
     }
@@ -717,9 +741,9 @@ mod tests {
         let start = c.sidebar_pct;
         // Drop at the column already corresponding to the current pct.
         let target_col = (start as u32 * c.last_area.width as u32 / 100) as u16;
-        let _ = c.update_drag(DragTarget::SidebarRight, target_col, 10);
+        let _ = c.update_drag(&DragTarget::SidebarRight, target_col, 10);
         // Second drag at the same column → no change → false.
-        let changed = c.update_drag(DragTarget::SidebarRight, target_col, 10);
+        let changed = c.update_drag(&DragTarget::SidebarRight, target_col, 10);
         assert!(!changed);
     }
 
@@ -949,7 +973,7 @@ mod tests {
     fn dragging_the_horizontal_splitter_marks_the_activity_row_user_set() {
         let mut c = ctx();
         assert!(!c.activity_user_resized);
-        c.update_drag(DragTarget::ActivityTerminals, 60, 30);
+        c.update_drag(&DragTarget::ActivityTerminals, 60, 30);
         assert!(
             c.activity_user_resized,
             "a splitter drag opts the row out of content-fit"

@@ -505,6 +505,95 @@ fn typing_a_word_is_one_write_per_key() {
     );
 }
 
+/// A keystroke into a read-only log window is **zero** writes (#1920).
+///
+/// The budget beside it says one keystroke is one `Command::Write`. For a
+/// `LogTail` runner the right number is none: it is `tail -F`, which never
+/// reads its stdin, so a write there goes to a reader that does not exist
+/// — and `Enter` additionally shipped `TerminalInputIntent::Submit`, which
+/// `lazybox_ipc` documents as authoritative turn-start evidence.
+///
+/// This lives in the budget file rather than beside the behavioural tests
+/// in `terminal_stack.rs` because it is the same claim as its neighbour,
+/// with a different number: "how many writes does this keystroke produce"
+/// is exactly what this gate counts, and a per-kind exemption that the
+/// gate does not know about is one a future change to the write path can
+/// quietly take back.
+///
+/// Its positive control is in the same test: the agent in the SAME
+/// session, the same keystroke, still produces its one write. A zero that
+/// is only ever read next to another zero proves nothing, and muting the
+/// pane rather than the runner would satisfy the zero alone.
+#[test]
+fn a_keystroke_into_a_log_window_is_zero_writes_and_no_vt_work() {
+    let (mut stack, _, _) = agent_with_scrollback();
+    // A `lazybox log` window alongside the agent — what
+    // `cargo test 2>&1 | lazybox log` opens.
+    stack.on_event(&Event::TerminalSpawned {
+        terminal_id: TerminalId(2),
+        session_key: "s".into(),
+        kind: TerminalKind::LogTail {
+            path: "/w/target/test.log".into(),
+        },
+        no_permission: false,
+        on_main: false,
+        model_label: None,
+        agent_state: None,
+    });
+    render(&mut stack);
+
+    let count_writes = |cmds: &[Command]| {
+        cmds.iter()
+            .filter(|c| matches!(c, Command::Write { .. }))
+            .count()
+    };
+
+    // The log window: nothing goes out, and no VT work is done either.
+    assert!(stack.focus_terminal(TerminalId(2)), "focus the log window");
+    let watch = vt_budget::watch();
+    let mut refused: Vec<Command> = Vec::new();
+    for key in [
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    ] {
+        stack.handle_key(key, &mut refused);
+    }
+    let refused_counts = watch.counts();
+    assert_eq!(
+        count_writes(&refused),
+        0,
+        "a log window takes no typed input: {refused:?}",
+    );
+    assert!(
+        refused.is_empty(),
+        "and a refusal emits no command at all: {refused:?}",
+    );
+    assert_eq!(
+        refused_counts,
+        vt_budget::Counts::default(),
+        "refusing input is not VT work either: {refused_counts:?}",
+    );
+
+    // The positive control, in the same session: the agent still writes.
+    assert!(stack.focus_terminal(TerminalId(1)), "focus the agent");
+    let mut typed: Vec<Command> = Vec::new();
+    stack.handle_key(
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+        &mut typed,
+    );
+    assert_eq!(
+        count_writes(&typed),
+        1,
+        "the guard is on the runner kind, not the pane: {typed:?}",
+    );
+
+    // And the instrument itself is alive — a painted frame must count.
+    let watch = vt_budget::watch();
+    output(&mut stack, 9, W, H, b"fresh output\r\n");
+    render(&mut stack);
+    watch.counts().assert_live();
+}
+
 // ── Source-level backstops ───────────────────────────────────────────
 
 /// The files named by a `#[cfg(test)] mod <name>;` declaration — test

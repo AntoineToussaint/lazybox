@@ -798,17 +798,27 @@ fn the_tick_phase_does_not_load_the_config() {
 
     let mut paths = Vec::new();
     collect_rust_sources(&src_root, &mut paths);
+    // Read and strip each file ONCE, up front. The first cut did it inside
+    // the per-tick loop, re-parsing a 16k-line `terminal_stack.rs` fourteen
+    // times over, and timed out against nextest's 10s deadline on a loaded
+    // box — a flake of exactly the kind this gate exists to avoid being.
+    let sources: Vec<(&std::path::Path, String)> = paths
+        .iter()
+        .map(|path| {
+            let text = production_only(&std::fs::read_to_string(path).expect("read Rust source"));
+            (path.as_path(), text)
+        })
+        .collect();
+
     for tick in &ticks {
         let signature = format!("fn {tick}(");
         let mut found = false;
-        for path in &paths {
-            let candidate =
-                production_only(&std::fs::read_to_string(path).expect("read Rust source"));
+        for (path, candidate) in &sources {
             if !candidate.contains(&signature) {
                 continue;
             }
             found = true;
-            let body = body_of(&candidate, &signature);
+            let body = body_of(candidate, &signature);
             assert!(
                 !body.contains("Config::load"),
                 "`{tick}` runs on every loop iteration and reads the config \

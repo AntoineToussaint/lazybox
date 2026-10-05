@@ -1006,10 +1006,18 @@ impl<T: TerminalAdapter> Model<T> {
                 )
             };
             self.set_modal_flow(super::ModalFlow::ClaimedSpawnConfirm { commands: planned });
-            self.mount_modal(
-                super::Id::ClaimedSpawnConfirm,
-                crate::realm::components::confirm::Confirm::new(prompt).default_no(),
+            // The spawn chord is behind this prompt, so it sits on the
+            // `destructive_shortcut` axis (#1921). It destroys nothing at
+            // all — a second agent on a claimed task is a coordination
+            // warning, undone by stopping it — so a No default here was the
+            // clearest case of #1900's overreach: the user pressed the key
+            // and the prompt exists only to name who else is on the row.
+            let modal = crate::realm::components::confirm::Confirm::from_source(
+                prompt,
+                crate::realm::components::confirm::ConfirmSource::Shortcut,
+                self.ui_defaults.confirm_default,
             );
+            self.mount_modal(super::Id::ClaimedSpawnConfirm, modal);
             return;
         }
         self.note_spawn_feedback(&cmds);

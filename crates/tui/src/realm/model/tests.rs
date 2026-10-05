@@ -3409,32 +3409,6 @@ mod effects_tests {
         );
     }
 
-    /// Issue #525: a user who sets `event: yes` opts the unsolicited
-    /// removal prompt into a Yes default.
-    #[test]
-    fn removal_prompt_respects_yes_event_override() {
-        use lazybox_config::ConfirmDefault;
-
-        let mut m = build_model();
-        super::seed_ws(&mut m, "github:o/r#1");
-        super::seed_ws(&mut m, "github:o/r#2");
-        m.ui_defaults.confirm_default.event = ConfirmDefault::Yes;
-        m.removal_prompt_queue
-            .push_back(super::super::RemovalPrompt {
-                workspace_key: WorkspaceKey::new("github:o/r#1"),
-                label: "o/r#1".into(),
-                title: None,
-                terminal_count: 0,
-                reason: super::super::RemovalReason::Merged,
-                has_local_work: false,
-            });
-        m.maybe_mount_next_removal_prompt();
-        assert!(
-            mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
-            "event: yes flips the removal prompt to Yes",
-        );
-    }
-
     /// #1899: the clean-worktrees bulk-wipe confirm keeps a hard No floor
     /// — one mis-hit could wipe many trees at once, so Enter cancels.
     #[test]
@@ -3492,9 +3466,11 @@ mod effects_tests {
         );
     }
 
-    /// Every destructive confirm now defaults to Yes for speed — the old
-    /// `destructive_shortcut: no` opt-out no longer flips it to No; the
-    /// danger is conveyed by the modal's warning coloring instead.
+    /// A destructive confirm reached by a chord defaults to Yes for speed,
+    /// and the danger is conveyed by the modal's warning coloring. #1921: it
+    /// is the *shipped* `destructive_shortcut: yes` that says so, not a
+    /// hardcoded choice — `no_shortcut_flips_every_chord_prompt` pins the
+    /// other side of the same knob.
     #[test]
     fn destructive_action_confirm_defaults_yes() {
         use lazybox_tui_core::action::Action;
@@ -3517,6 +3493,9 @@ mod effects_tests {
     /// not a destructive action — it always defaults Yes, even when a
     /// cautious user has forced `destructive_shortcut: no` for the
     /// genuinely destructive prompts.
+    ///
+    /// #1921 is what gives this test teeth: until the knob was wired, the
+    /// override it sets changed nothing and the assertion held for free.
     #[test]
     fn on_main_spawn_confirm_stays_yes_despite_no_shortcut_override() {
         use lazybox_config::ConfirmDefault;
@@ -12555,12 +12534,19 @@ mod merge_focus_follow_tests {
     /// per-workspace prompts. Un-ticking a repo to tidy a filter is not a
     /// request to delete anything, so the prompt that exists to name that
     /// damage must not be answerable by a reflexive Enter.
+    ///
+    /// #1921: a documented `default_no()` floor, not the
+    /// `destructive_shortcut` axis — the chord behind this prompt is the
+    /// wizard's Finish, and the deletion is a consequence of it. The knob is
+    /// set to `yes` here on purpose, so the test cannot go vacuous if the
+    /// shipped default ever moves.
     #[test]
     fn scope_removal_confirm_defaults_to_no() {
         use std::collections::{BTreeMap, BTreeSet};
 
         let (client, mut server) = channel::pair();
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.ui_defaults.confirm_default.destructive_shortcut = lazybox_config::ConfirmDefault::Yes;
         // The `task` fixture reports repo `owner/repo`, which the un-ticked
         // scope below covers — so this workspace is the doomed one.
         let doomed = workspace("owner/repo#1", false, Duration::hours(1));
@@ -12601,20 +12587,18 @@ mod merge_focus_follow_tests {
         );
         assert!(
             !super::effects_tests::mounted_confirm_default_yes(&m, Id::ScopeRemovalConfirm),
-            "Enter must not authorise the rescope sweep",
+            "Enter must not authorise the rescope sweep, whatever the knob says",
         );
     }
 
-    /// #1899 follow-up (r1/f8): `ClaimedSpawnConfirm` is the one
-    /// shortcut-initiated prompt whose default moved to No. Its `Id` doc calls
-    /// it a guard ("Yes bypasses this one guard"), and starting a second agent
-    /// on a claimed task is the fleet double-spawn the `working` label exists to
-    /// prevent — so No is the intended default. Pinned here because nothing
-    /// else asserted which side Enter fires.
-    #[test]
-    fn claimed_spawn_confirm_defaults_to_no() {
+    /// Press the spawn chord at a workspace whose task carries the `working`
+    /// claim label, and return the model with the resulting prompt up.
+    fn spawn_onto_a_claimed_workspace(
+        shortcut_default: lazybox_config::ConfirmDefault,
+    ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
         let (client, mut server) = channel::pair();
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.ui_defaults.confirm_default.destructive_shortcut = shortcut_default;
         let mut claimed = workspace("owner/repo#1899", false, Duration::hours(1));
         claimed
             .gh_issues
@@ -12640,11 +12624,34 @@ mod merge_focus_follow_tests {
             force_new: false,
             role: None,
         }]);
-
         assert_eq!(m.top_modal(), Some(&Id::ClaimedSpawnConfirm));
+        m
+    }
+
+    /// #1921: `ClaimedSpawnConfirm` is on the `destructive_shortcut` axis, so
+    /// it defaults to Yes. #1900 moved it to No as part of making
+    /// `default_no()` honest, and its own PR body conceded that cut against
+    /// chord-is-the-intent: the user pressed the spawn key, and this prompt
+    /// destroys nothing — a second agent on a claimed row is a coordination
+    /// warning, undone by stopping it. The claim is still *named* before the
+    /// spawn; it just is not a No default.
+    #[test]
+    fn claimed_spawn_confirm_defaults_to_yes_on_a_chord() {
+        let m = spawn_onto_a_claimed_workspace(lazybox_config::ConfirmDefault::Yes);
+        assert!(
+            super::effects_tests::mounted_confirm_default_yes(&m, Id::ClaimedSpawnConfirm),
+            "the spawn chord is the intent — Enter starts the agent",
+        );
+    }
+
+    /// And the knob flips it, which is the point of routing it to an axis
+    /// rather than deciding at the mount site.
+    #[test]
+    fn claimed_spawn_confirm_follows_a_no_shortcut_override() {
+        let m = spawn_onto_a_claimed_workspace(lazybox_config::ConfirmDefault::No);
         assert!(
             !super::effects_tests::mounted_confirm_default_yes(&m, Id::ClaimedSpawnConfirm),
-            "Enter must not bypass the claim guard",
+            "destructive_shortcut: no moves it to No",
         );
     }
 
@@ -35041,5 +35048,567 @@ mod agent_output_search_tests {
             vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
         );
         assert_eq!(m.sidebar.visible_workspace_count(), 0);
+    }
+}
+
+/// Issue #1921: every destructive confirm's `Enter` side comes from
+/// `ui.confirm_default`, on the axis the prompt was raised from — and
+/// nowhere else. One test per prompt under the shipped config, one per
+/// axis showing the config field flips it, and one per documented floor
+/// showing it does not.
+///
+/// #1900 moved eight prompts to a No default while fixing one of them,
+/// because the policy lived at eight mount sites and the config key that
+/// should have decided it was read by nobody. These tests pin the axis, so
+/// the next policy change stays a config line.
+#[cfg(test)]
+mod confirm_default_axis_tests {
+    use super::super::{ActionConfirmTarget, Id, Model};
+    use lazybox_config::ConfirmDefault;
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::channel;
+    use lazybox_tui_core::action::Action;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// Which side the *rendered* modal highlights — true when `[Y]es` is
+    /// the bold one.
+    ///
+    /// `state()` alone is not enough here: a mount that no-ops over an
+    /// already-open modal leaves the previous component in place, and
+    /// reading its state would report the default this prompt never got.
+    /// The drawn frame is what the user answers, so it is what the
+    /// assertions check.
+    fn rendered_default_yes(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        id: Id,
+    ) -> bool {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        use tuirealm::ratatui::layout::Rect;
+        use tuirealm::ratatui::style::Modifier;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| m.app.view(&id, frame, Rect::new(0, 0, 100, 40)))
+            .expect("render the confirm");
+        let buf = terminal.backend().buffer().clone();
+        let find = |label: &str| -> Option<(u16, u16)> {
+            let chars: Vec<String> = label.chars().map(|c| c.to_string()).collect();
+            let span = chars.len() as u16;
+            (0..buf.area.height).find_map(|y| {
+                (0..buf.area.width.saturating_sub(span))
+                    .find(|&x| {
+                        chars
+                            .iter()
+                            .enumerate()
+                            .all(|(i, c)| buf[(x + i as u16, y)].symbol() == c.as_str())
+                    })
+                    .map(|x| (x, y))
+            })
+        };
+        let yes = find("[Y]es").expect("the rendered confirm shows [Y]es");
+        let no = find("[N]o").expect("the rendered confirm shows [N]o");
+        let yes_bold = buf[yes].modifier.contains(Modifier::BOLD);
+        let no_bold = buf[no].modifier.contains(Modifier::BOLD);
+        assert_ne!(
+            yes_bold, no_bold,
+            "exactly one button carries the Enter highlight",
+        );
+        yes_bold
+    }
+
+    /// Assert the prompt mounted under `id` defaults to Yes (`yes`) or No,
+    /// from the component's own state *and* from the frame it draws.
+    fn assert_default(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        id: Id,
+        yes: bool,
+        what: &str,
+    ) {
+        assert_eq!(
+            m.top_modal(),
+            Some(&id),
+            "{what}: the prompt must be the modal on top",
+        );
+        assert_eq!(
+            super::effects_tests::mounted_confirm_default_yes(m, id.clone()),
+            yes,
+            "{what}: component state",
+        );
+        assert_eq!(rendered_default_yes(m, id), yes, "{what}: rendered frame",);
+    }
+
+    // ---------------------------------------------------------------
+    // The shortcut axis: a chord raised it, so Enter completes it.
+    // ---------------------------------------------------------------
+
+    /// `x x` archive and every other destructive catalog action. This is
+    /// the family the dead `destructive_shortcut` key was written for.
+    #[test]
+    fn archive_confirm_defaults_to_yes_on_a_chord() {
+        let mut m = build_model();
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(SessionKey::from(
+                "github:o/r#1",
+            ))],
+            None,
+        );
+        assert_default(&mut m, Id::ActionConfirm, true, "x x archive");
+    }
+
+    /// `c` inside the Error Inbox. The chord *is* "clear", and what Yes
+    /// loses is a log the next failure re-records.
+    #[test]
+    fn error_inbox_clear_defaults_to_yes_on_a_chord() {
+        let mut m = build_model();
+        m.mount_error_inbox_clear_confirm();
+        assert_default(
+            &mut m,
+            Id::ErrorInboxClearConfirm,
+            true,
+            "error-inbox clear-all",
+        );
+    }
+
+    /// `g m` on a PR GitHub holds behind its predecessors. The refusal
+    /// lands async, but the merge the user pressed for is what it answers.
+    #[test]
+    fn merge_held_override_defaults_to_yes_on_a_chord() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.mount_merge_held_confirm(&WorkspaceKey::new("github:o/r#1"), "o/r#1", "o/r#2");
+        assert_default(
+            &mut m,
+            Id::MergeHeldConfirm,
+            true,
+            "held-merge override (fresh mount)",
+        );
+    }
+
+    /// The second mount path: a bulk `g m` produces one refusal per held
+    /// PR, and a later one folds into the prompt already open rather than
+    /// being dropped. That fold rebuilds the component, so it has to
+    /// resolve the axis too — #1900 had both paths on `default_no()`.
+    #[test]
+    fn merge_held_fold_path_defaults_to_yes_on_a_chord() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
+        m.mount_merge_held_confirm(&WorkspaceKey::new("github:o/r#1"), "o/r#1", "o/r#3");
+        // Second refusal, same prompt still on top: folds in.
+        m.mount_merge_held_confirm(&WorkspaceKey::new("github:o/r#2"), "o/r#2", "o/r#3");
+        match m.modal_flow.as_ref() {
+            Some(super::super::ModalFlow::MergeHeldConfirm { held }) => assert_eq!(
+                held.len(),
+                2,
+                "the second refusal folded into the open prompt",
+            ),
+            other => panic!("expected a MergeHeldConfirm flow, got {other:?}"),
+        }
+        assert_default(
+            &mut m,
+            Id::MergeHeldConfirm,
+            true,
+            "held-merge override (fold path)",
+        );
+    }
+
+    /// The help assistant's apply gate when it would overwrite a snippet
+    /// that already exists. The user asked for the snippet and is looking
+    /// at a preview of exactly what gets written.
+    #[test]
+    fn snippet_overwrite_defaults_to_yes_on_a_chord() {
+        let mut m = build_model();
+        m.snippets = lazybox_config::Snippets::builtin();
+        let key = m
+            .snippets
+            .all()
+            .next()
+            .map(|(k, _)| k.to_string())
+            .expect("the builtin snippet catalog is not empty");
+        m.modal_stack.push(Id::HelpAsk);
+        m.propose_help_action(lazybox_tui_core::help::HelpActionIntent::AddSnippet {
+            key: key.clone(),
+            category: String::new(),
+            description: "replace it".into(),
+            body: "a new body".into(),
+        });
+        assert_default(
+            &mut m,
+            Id::HelpActionConfirm,
+            true,
+            &format!("snippet overwrite of `{key}`"),
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // `destructive_shortcut: no` flips that axis — all of it, at once.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn no_shortcut_flips_every_chord_prompt() {
+        // Archive.
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(SessionKey::from(
+                "github:o/r#1",
+            ))],
+            None,
+        );
+        assert_default(&mut m, Id::ActionConfirm, false, "x x archive under no");
+
+        // Error-inbox clear-all.
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
+        m.mount_error_inbox_clear_confirm();
+        assert_default(
+            &mut m,
+            Id::ErrorInboxClearConfirm,
+            false,
+            "error-inbox clear-all under no",
+        );
+
+        // Held-merge override, both mount paths.
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
+        m.mount_merge_held_confirm(&WorkspaceKey::new("github:o/r#1"), "o/r#1", "o/r#3");
+        assert_default(
+            &mut m,
+            Id::MergeHeldConfirm,
+            false,
+            "held-merge override under no (fresh mount)",
+        );
+        m.mount_merge_held_confirm(&WorkspaceKey::new("github:o/r#2"), "o/r#2", "o/r#3");
+        assert_default(
+            &mut m,
+            Id::MergeHeldConfirm,
+            false,
+            "held-merge override under no (fold path)",
+        );
+
+        // Snippet overwrite.
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
+        m.snippets = lazybox_config::Snippets::builtin();
+        let key = m
+            .snippets
+            .all()
+            .next()
+            .map(|(k, _)| k.to_string())
+            .expect("the builtin snippet catalog is not empty");
+        m.modal_stack.push(Id::HelpAsk);
+        m.propose_help_action(lazybox_tui_core::help::HelpActionIntent::AddSnippet {
+            key,
+            category: String::new(),
+            description: "replace it".into(),
+            body: "a new body".into(),
+        });
+        assert_default(
+            &mut m,
+            Id::HelpActionConfirm,
+            false,
+            "snippet overwrite under no",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // The event axis: nobody pressed anything, so Enter must not kill.
+    // ---------------------------------------------------------------
+
+    /// The one pushed prompt, and the whole reason #1899 was filed: a
+    /// removal prompt over a workspace whose agent is still running.
+    /// Shipped `event: no`, so Enter cancels.
+    #[test]
+    fn pushed_removal_over_a_live_agent_defaults_to_no() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 1,
+                reason: super::super::RemovalReason::OutOfScope,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_default(
+            &mut m,
+            Id::RemoveOutOfScope,
+            false,
+            "pushed removal over a live agent",
+        );
+    }
+
+    /// `event: yes` flips it — the knob is the whole point, and a user who
+    /// wants the pre-#1900 speed back sets this instead of patching
+    /// `maybe_mount_next_removal_prompt`.
+    #[test]
+    fn yes_event_flips_the_pushed_removal_prompt() {
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.event = ConfirmDefault::Yes;
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 1,
+                reason: super::super::RemovalReason::OutOfScope,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_default(
+            &mut m,
+            Id::RemoveOutOfScope,
+            true,
+            "pushed removal under event: yes",
+        );
+    }
+
+    /// `event: yes` also lifts the "a guarded No must not decide" rule it
+    /// implies. The guard exists because the user may not be reading a
+    /// prompt that defaults to No; once they have asked for a Yes default
+    /// here, their No is a deliberate answer and may pin the keep.
+    #[test]
+    fn yes_event_makes_the_pushed_prompts_no_a_decision() {
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.event = ConfirmDefault::Yes;
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 1,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        match m.modal_flow.as_ref() {
+            Some(super::super::ModalFlow::RemovalPrompt { guarded, .. }) => assert!(
+                !guarded,
+                "event: yes puts the default on Yes, so the prompt is not guarded",
+            ),
+            other => panic!("expected a RemovalPrompt flow, got {other:?}"),
+        }
+        let cmds = m.handle_confirmed(false);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, lazybox_ipc::Command::KeepMergedWorkspace { .. })),
+            "No under event: yes is a decision that pins the keep, got: {cmds:?}",
+        );
+    }
+
+    /// The pushed prompt's re-mount: `apply_removal_risks` rebuilds the
+    /// open modal in place to append what the daemon found, and must
+    /// reproduce the resolved default rather than re-derive it (#1900's
+    /// fix, kept). Asserted on the drawn frame, since a re-mount that
+    /// silently failed would leave the old component's state behind.
+    #[test]
+    fn the_risk_remount_reproduces_the_resolved_default() {
+        for (event, want_yes, label) in [
+            (ConfirmDefault::No, false, "event: no"),
+            (ConfirmDefault::Yes, true, "event: yes"),
+        ] {
+            let mut m = build_model();
+            m.ui_defaults.confirm_default.event = event;
+            super::seed_ws(&mut m, "github:o/r#1");
+            m.removal_prompt_queue
+                .push_back(super::super::RemovalPrompt {
+                    workspace_key: WorkspaceKey::new("github:o/r#1"),
+                    label: "o/r#1".into(),
+                    title: None,
+                    terminal_count: 1,
+                    reason: super::super::RemovalReason::OutOfScope,
+                    has_local_work: false,
+                });
+            m.maybe_mount_next_removal_prompt();
+            assert_default(&mut m, Id::RemoveOutOfScope, want_yes, label);
+
+            m.apply_removal_risks(
+                &lazybox_ipc::RemovalTarget::Workspace(SessionKey::from("github:o/r#1")),
+                &[lazybox_ipc::RemovalRiskDto {
+                    path: std::path::PathBuf::from("/tmp/worktrees/o-r-1"),
+                    reasons: vec!["uncommitted changes to tracked files".into()],
+                }],
+                None,
+            );
+            assert_default(
+                &mut m,
+                Id::RemoveOutOfScope,
+                want_yes,
+                &format!("{label}, after the risk-block re-mount"),
+            );
+        }
+    }
+
+    /// A pushed removal prompt with nothing running is on neither axis:
+    /// the worktree is reconstructible and the row has already left the
+    /// user's scope, so there is no safety question for a policy to
+    /// answer. It affirms even with `event: no` shipped.
+    #[test]
+    fn pushed_removal_with_nothing_running_still_affirms() {
+        let mut m = build_model();
+        assert_eq!(
+            m.ui_defaults.confirm_default.event,
+            ConfirmDefault::No,
+            "this test is about the shipped event default",
+        );
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 0,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_default(
+            &mut m,
+            Id::RemoveOutOfScope,
+            true,
+            "pushed removal with nothing running",
+        );
+    }
+
+    /// The worktree-recreate confirm: raised by a spawn that hit the wrong
+    /// branch, and the last bare `destructive()` production call site before
+    /// #1921. Shipped behaviour is unchanged (Yes either way) — the point is
+    /// that the axis has no silent exception, so a user who turns the
+    /// destructive chords down gets this one too.
+    #[test]
+    fn worktree_recreate_confirm_follows_the_shortcut_axis() {
+        use lazybox_ipc::{TerminalKind, WorktreeStep as Step, WorktreeStepStatus as Status};
+
+        let arrange = |shortcut: ConfirmDefault| {
+            let (client, mut server) = channel::pair();
+            let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+            m.ui_defaults.confirm_default.destructive_shortcut = shortcut;
+            let session_key = SessionKey::from(&WorkspaceKey::new("github:acme/widget#42"));
+            m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+                session_key: session_key.clone(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: Some("fix it".into()),
+                initial_snippet: None,
+                on_main: false,
+                force_new: false,
+                role: None,
+            });
+            m.handle_daemon_event(lazybox_ipc::Event::WorktreeProgress {
+                session_key,
+                step: Step::WorktreeAdd,
+                status: Status::Failed(
+                    "worktree: checkout_at: worktree /tmp/wt is checked out on branch \
+                     'feat-42-work', not the requested branch 'issue-42-new' — refusing \
+                     to reuse it"
+                        .into(),
+                ),
+                origin: lazybox_ipc::SpawnOrigin::Interactive,
+            });
+            while server.rx.try_recv().is_ok() {}
+            m.recreate_worktree_provision();
+            m
+        };
+
+        let mut m = arrange(ConfirmDefault::Yes);
+        assert_default(
+            &mut m,
+            Id::WorktreeRecreateConfirm,
+            true,
+            "worktree recreate under the shipped yes",
+        );
+
+        let mut m = arrange(ConfirmDefault::No);
+        assert_default(
+            &mut m,
+            Id::WorktreeRecreateConfirm,
+            false,
+            "worktree recreate under destructive_shortcut: no",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // The documented floors: `default_no()`, on no axis, config-proof.
+    // Each sets the knob to `yes` explicitly, so none of them can go
+    // vacuous if the shipped default ever moves.
+    // ---------------------------------------------------------------
+
+    /// The bulk worktree wipe. One mis-hit takes many trees at once.
+    #[test]
+    fn clean_worktrees_is_a_floor_not_an_axis() {
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::Yes;
+        m.mount_clean_worktrees_confirm();
+        assert_default(
+            &mut m,
+            Id::CleanWorktreesConfirm,
+            false,
+            "clean-worktrees bulk wipe",
+        );
+    }
+
+    /// The inspector's delete, which overrides the dirty-worktree refusal
+    /// and loses uncommitted work off disk.
+    #[test]
+    fn inspector_delete_is_a_floor_not_an_axis() {
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::Yes;
+        m.mount_inspect_confirm(lazybox_ipc::WorktreeInspectionDto {
+            path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
+            bare_path: None,
+            branch: Some("feat".into()),
+            session_id: None,
+            reasons: vec!["untracked".into()],
+            size_bytes: 0,
+            last_modified_unix: Some(0),
+            has_uncommitted_changes: true,
+            has_unpushed_commits: true,
+            is_safe_to_delete: false,
+        });
+        assert_default(
+            &mut m,
+            Id::InspectConfirm,
+            false,
+            "inspector delete of a dirty worktree",
+        );
+    }
+
+    /// The sandbox wizard's auto-connect step. Not a destructive confirm
+    /// at all — No is the *recommended answer*, and the copy is written
+    /// around it being the default — so neither axis owns it. Yes would
+    /// have every launch spin up a billable remote box.
+    #[test]
+    fn sandbox_auto_connect_is_a_recommended_answer_not_an_axis() {
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::Yes;
+        m.mount_sandbox_stage(crate::sandbox_flow::SandboxDraft {
+            provider: "gcp".into(),
+            stage: crate::sandbox_flow::SandboxStage::AutoConnect,
+            ..Default::default()
+        });
+        assert_default(
+            &mut m,
+            Id::SandboxConfirm,
+            false,
+            "sandbox auto-connect-at-launch",
+        );
     }
 }

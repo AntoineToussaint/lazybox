@@ -263,29 +263,54 @@ refuses the **snippet** path into one of these and calls it "a read-only log
 terminal" (`spawn_handler.rs`); this is the same knowledge on the typing
 path, at the boundary where the runner kind is known.
 
-## Which button a Confirm defaults to is a per-site decision
+## Which button a Confirm defaults to is the user's config, on two axes
 
-`Confirm::new` and `destructive()` both leave `Enter` on Yes — the chord that
-raised the prompt is the intent, and `destructive()` conveys the danger with a
-warning border and `⚠` title rather than by moving the default.
-`default_no()` is the one builder that moves it, keeping that coloring: use it
-where a stray keystroke must not fire the action — an unsolicited kill of a
-running agent, a bulk wipe, an out-of-order merge. It used to be an alias for
-`destructive()`, so every call site believing itself guarded was
-Enter-to-confirm (#1899).
+A destructive prompt's `Enter` side is not a per-site decision and not a
+judgement about how scary its copy is — every one of them wears the warning
+border and `⚠` title either way. It is one question: **was there a keystroke
+behind this prompt?** That is the axis, and `ui.confirm_default` keys off it:
 
-The three combinations are named: `ConfirmStyle::{Benign, Destructive, Guarded}`,
-built with `Confirm::styled`. Two booleans admitted a fourth that the component
-cannot represent, and `PendingRemovalRisk` — whose job is to rebuild a prompt
-faithfully when `apply_removal_risks` appends the daemon's risk list — could hold
-it. That re-mount has to reproduce chrome *and* default; deriving the default
-from the destructive flag alone silently traded the guard back for Yes.
+- `destructive_shortcut` (ships `yes`) — the user pressed a chord. The chord
+  *is* the intent, so `Enter` completes it. `x x` archive and the rest of the
+  catalog family, `g m`'s out-of-order override (both mount paths), `c` in the
+  Error Inbox, the spawn key onto a claimed task, a snippet apply that would
+  overwrite, the worktree-recreate confirm.
+- `event` (ships `no`) — the daemon pushed it with nothing behind it. One
+  prompt is on this axis: workspace removal over a row whose agent is live.
+
+`Confirm::from_source(question, ConfirmSource::{Shortcut,Event}, defaults)` is
+**the** entry point, and `ConfirmStyle::destructive_on` is the resolver it and
+`PendingRemovalRisk` share. Do not add a new `default_no()` call site: put the
+prompt on an axis. #1900 is what this replaces — it moved all eight destructive
+prompts to No while fixing one of them, because the policy lived at eight mounts
+and `ui.confirm_default` was parsed and read by nobody, so there was no smaller
+lever to pull (#1899, #1921).
+
+`default_no()` survives as the deliberate opt-out, for a prompt whose Yes loses
+something no re-clone brings back *and* whose chord did not ask for that loss:
+the bulk worktree wipe, the inspector's dirty-worktree delete, the rescope
+sweep's "delete these workspaces" (the chord is the wizard's Finish — "save my
+filter"), and the sandbox wizard's auto-connect step, where No is the
+recommended answer rather than a guard. Each says so where it mounts, and each
+has a test that sets the knob to `yes` explicitly so it cannot go vacuous if
+the shipped default moves. A benign gate is on no axis and always affirms;
+`ConfirmStyle::Benign` is for those.
+
+The three resolved combinations stay named — `ConfirmStyle::{Benign,
+Destructive, Guarded}`, built with `Confirm::styled`. Two booleans admitted a
+fourth that the component cannot represent, and `PendingRemovalRisk` — whose job
+is to rebuild a prompt faithfully when `apply_removal_risks` appends the
+daemon's risk list — could hold it. That re-mount has to reproduce chrome *and*
+default, and it reproduces the **resolved** style rather than re-deriving one:
+re-resolving would be correct today and wrong the moment the resolution depends
+on anything that can change while the modal is up.
 
 ## A guard moves the default, so the default must not decide
 
 A prompt defaults to No because the user may not be reading it — so No there
-cannot commit anything. The workspace-removal prompt is guarded whenever the row
-has a live terminal, and answering a guarded one defers (the silence `Esc`
+cannot commit anything. The workspace-removal prompt is guarded when the row has
+a live terminal *and* the `event` axis resolves to No (the shipped default), and
+answering a guarded one defers (the silence `Esc`
 produces, so the daemon re-prompts) instead of sending `KeepMergedWorkspace`,
 which persists `CleanupPrompt::Declined`, suppresses the prompt permanently
 across restarts, and has no UI to see or undo. Swapping a one-keystroke deletion
@@ -297,6 +322,12 @@ not turn the rendered guard back into a deciding prompt. It is also ORed with th
 client's live terminal count, because the daemon's `active_terminal_count` is a
 snapshot from emit time and `removal_already_pending` drops the re-emit that
 would refresh it.
+
+Read the guard off the resolved `ConfirmStyle`, not off "is a terminal live":
+under `event: yes` the user has asked for a Yes default here, which makes their
+No a deliberate answer that may pin the keep. "This prompt's No must not
+decide" and "this prompt's default is No" are the same condition, so deriving
+one from the other is what keeps them from drifting apart.
 
 ## Markdown is hand-rolled
 

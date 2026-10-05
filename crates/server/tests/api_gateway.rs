@@ -553,6 +553,8 @@ fn desktop_compatibility_fixture_is_current() {
                     }],
                 }],
                 truncated: false,
+                head_sha: None,
+                divergence: None,
             }),
             error: None,
         },
@@ -919,6 +921,8 @@ fn desktop_boundary_forwards_workspace_diff() {
         stat: vec![" src/main.rs | 1 +".into()],
         files: Vec::new(),
         truncated: false,
+        head_sha: None,
+        divergence: None,
     };
 
     // A successful inspection carries the diff and drops the internal-only

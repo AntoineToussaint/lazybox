@@ -2314,6 +2314,15 @@ showing keybinding search only",
                     // is not a request to delete anything, so the reflexive
                     // answer to a prompt that exists to name that damage has to
                     // be the one that cancels.
+                    //
+                    // A deliberate `default_no()` floor, NOT the
+                    // `destructive_shortcut` axis (#1921): the chord behind
+                    // this is the setup wizard's Finish — "save my repo
+                    // filter" — and the deletion is a consequence of it, so
+                    // chord-is-the-intent does not reach it. It is also the
+                    // gate that queues the pushed per-workspace prompts the
+                    // `event` axis guards, which would be a strange thing to
+                    // let one Enter past.
                     self.mount_modal(Id::ScopeRemovalConfirm, Confirm::new(prompt).default_no());
                     return;
                 }

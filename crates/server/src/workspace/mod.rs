@@ -1068,6 +1068,44 @@ pub async fn check_todo_items_linked_to(config: &ServerConfig, task: &lazybox_co
                 .await;
         }
     }
+    check_work_linked_to(config, task).await;
+}
+
+/// The same auto-check over the task/plan store's rows (#1908): a unit of work
+/// whose tracker link just landed is completed, with `lazybox` as the party
+/// that moved it.
+///
+/// It rides the one call site above rather than a second seam of its own, so
+/// the two checklists can never disagree about whether a task landed —
+/// `Workspace::todo_items` is the per-workspace checklist #1898 shipped and
+/// these are the plan rows phases 3–5 subscribe to, and until the fold that
+/// merges them both must tick on the same event.
+async fn check_work_linked_to(config: &ServerConfig, task: &lazybox_core::TaskId) {
+    let store = config.store.clone();
+    let link = lazybox_core::work::Link::Tracker(task.clone());
+    let now = Utc::now();
+    let moved = tokio::task::spawn_blocking(move || {
+        crate::work_store::complete_linked_to(
+            &*store,
+            &link,
+            lazybox_core::work::Party::Lazybox,
+            now,
+        )
+    })
+    .await;
+    match moved {
+        Ok(Ok(moved)) if !moved.is_empty() => tracing::info!(
+            task = %task.key,
+            moved = moved.len(),
+            "work: completed the units of work linked to a task that landed"
+        ),
+        // Nothing linked, or a store that cannot batch. Neither is worth a
+        // warning on every landed task; the rows stay open and the next
+        // observation retries, exactly like the checklist above.
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => tracing::debug!(task = %task.key, %error, "work: auto-check skipped"),
+        Err(error) => tracing::warn!(task = %task.key, %error, "work: auto-check panicked"),
+    }
 }
 
 /// Record a snippet delivery against a workspace (issue #463): the

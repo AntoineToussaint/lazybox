@@ -6,6 +6,55 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Added
+
+- **A unit of work with an id, a lifecycle and a result** (#1908, #1935, #1936,
+  #1937). Asking another agent for something used to mean pasting text into its
+  terminal and being told only that the text landed; whatever came back had to
+  be scraped off its scrollback, and nothing survived the session that asked.
+  Work is now a row: it carries who asked, who owns it, what "done" means, and
+  the result when it is done — with a provenance history, so a disagreement
+  about its state is answerable after the fact rather than a matter of opinion.
+
+  A handoff delivers the brief through the one delivery path and reports back
+  `delivered` / `queued` / `refused`, and **a refused delivery is not a refused
+  assignment**: handing work to a workspace whose agent is not running still
+  records it, and the owner finds it waiting when it starts. Completing work
+  someone else asked for tells them, so nobody polls.
+
+  Tracker records are **links**, never the work's identity, so an issue→PR fold
+  rewrites a link and the id is untouched. A unit of work linked to a PR
+  completes itself when that PR merges, on the same event that ticks a TODO
+  checklist. Work on a plan rolls up `done/total` over the whole tree, and a
+  plan whose tasks span repos is the member list a local epic projects onto.
+
+  Through MCP: `create_work`, `my_work`, `update_work`, `work_status`.
+- **`lazybox work` — the same four verbs from a shell** (#1936), so Codex,
+  Cursor and any session started with `--strict-mcp-config` are no longer
+  locked out. They could previously neither be handed tracked work nor report a
+  result. `lazybox work mine | new | set | done | status`, with the workspace
+  taken from the session and `--workspace` to act on another; exit `2` means
+  the call was wrong and `1` means the store could not be read, so a script can
+  tell a retry that will never work from one that might. Reference:
+  [`docs/reference/cli.md`](https://lazybox.ai/docs/reference/cli/).
+
+### Fixed
+
+- **Work whose agent is gone no longer reads as work in flight.** An agent that
+  exits before reporting leaves its task neither done nor abandoned; it is now
+  failed, with the cause in its history. Deliberately on a delay rather than on
+  the exit itself: `Shift-K`, auto-fix and credit recovery all stop an agent and
+  start a replacement, so failing the instant a terminal went away would have
+  failed the work of every agent lazybox itself restarted.
+- **A result is never reported back to whoever filed it** (#1936) — work a
+  session files for itself and finishes itself would otherwise have had its own
+  summary pasted back into its own session.
+- **A tracker link survives being copied** (#1937). A link printed as
+  `github:owner/repo#7` did not read back as the same link, silently producing
+  a second one that looked right — and because the auto-check on merge matches
+  a link exactly, the row carrying it was never ticked off. Both spellings now
+  mean one link.
+
 ## [0.1.20] - 2026-10-05
 
 The Hopper becomes **TODO**, scrollback stops corrupting itself while an agent

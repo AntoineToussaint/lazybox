@@ -374,6 +374,37 @@ Each phase ships on its own and is useful alone.
 3. **Agent surface + context tiers.** The ~8 tools, `lazybox_guide`, the
    slim briefing with its budget test, and the CLI twin for non-MCP agents.
 
+   **Status.** The context tiers have shipped. `lazybox_guide(topic)`
+   (`crates/agents/src/guide.rs`, tool in `mcp.rs`) serves eight topics —
+   coordination, work, epics, records, labels, artifacts, spawning, reviews —
+   and the always-on briefing dropped from **7030 bytes / 36 lines to 5956 /
+   26**, with its cap *replaced* (7050 → 6200, 37 → 30 lines) rather than
+   joined by a second guard.
+
+   The split is by what an agent can look up, not by length. Always-on keeps
+   the response contract, the standing rules and the **hazards** — the things
+   an agent cannot discover because it does not know to ask: that stripping a
+   `working` label double-spawns the fleet, that a note is other-agent text,
+   that `answer_session` must never touch a permission prompt, that a finished
+   turn is not a finished task, that reading records through lazybox rather
+   than `gh` is a fleet-wide budget decision. On demand carries the *how*,
+   which each tool's own MCP description already advertises.
+
+   Two things to note honestly. The proposed ~1.5 KB budget is **not** reached:
+   5956 bytes is what is left after the catalog moved, and the remainder is
+   hazards plus the response contract, not a catalog that could move next. And
+   the old cap had become actively harmful rather than merely tight — #1935 and
+   #1936 shipped four work verbs with *no* agent-facing mention at all, because
+   at 7030 of 7050 there was no room to announce them. A budget that deletes
+   features is not a budget.
+
+   `every_mcp_tool_is_named_by_the_briefing_or_a_guide_topic` now fails on a
+   tool no tier names. It found six on its first run: `send_snippet`,
+   `poll_request`, and the whole review-persistence workflow
+   (`submit_review` / `list_reviews` / `get_review` /
+   `submit_review_result`) — a documented process no agent was ever told
+   existed. They are topics now.
+
    **Status.** The CLI twin for the work verbs has shipped:
    `lazybox work mine | new | set | done | status`, over
    `Command::WorkCall` into the same `work_calls` the MCP tools use, with the
@@ -382,9 +413,11 @@ Each phase ships on its own and is useful alone.
    Codex, Cursor and a `--strict-mcp-config` session can now be handed tracked
    work and report a result; they were previously unable to do either.
 
-   Still open in this phase: the ~8-tool collapse (the four work verbs make it
-   ~29 tools, not fewer), `lazybox_guide`, the slim always-on briefing with its
-   budget test, and CLI twins for the rest of the bus (notes, ask, sessions).
+   Still open in this phase: the ~8-tool collapse. The surface is now 31 tools,
+   and `lazybox_guide` is the mechanism that makes a collapse survivable — the
+   explanation a merged tool would have to carry in its own description now has
+   somewhere else to live. Also open: CLI twins for the rest of the bus (notes,
+   ask, sessions).
 4. **Subscriptions + change notices + board v2 + claims.**
 5. **Across boxes.** Today each box's daemon is its own island (notes,
    requests and sessions are per-daemon). Federate tasks and subscriptions

@@ -231,6 +231,7 @@ mod terminal_commands;
 mod terminal_io;
 #[cfg(test)]
 mod test_env;
+pub mod work_calls;
 pub mod work_store;
 mod working_claims;
 mod working_watchdog;
@@ -1371,6 +1372,7 @@ impl Server {
                         lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::SetTrackMain { .. } => "SetTrackMain",
                         lazybox_ipc::Command::QueryTaskStatus { .. } => "QueryTaskStatus",
+                        lazybox_ipc::Command::WorkCall { .. } => "WorkCall",
                         lazybox_ipc::Command::GhAdmit { .. } => "GhAdmit",
                         lazybox_ipc::Command::GhCompleted { .. } => "GhCompleted",
                         lazybox_ipc::Command::SearchAgentOutput { .. } => "SearchAgentOutput",
@@ -2979,6 +2981,19 @@ pub async fn dispatch_command(
             // outright — let a loaded daemon lose the reply and report a
             // timeout for an answer it computed correctly.
             let _ = tx.send(lazybox_ipc::Event::TaskStatus {
+                client_request_id,
+                result,
+            });
+        }
+        lazybox_ipc::Command::WorkCall {
+            request,
+            client_request_id,
+        } => {
+            let result = work_calls::call(config, request).await;
+            // Same channel choice as the status lookup above, for the same
+            // reasons: request/response on the asking connection, never the
+            // bus a lagging subscriber drops events from.
+            let _ = tx.send(lazybox_ipc::Event::WorkReport {
                 client_request_id,
                 result,
             });

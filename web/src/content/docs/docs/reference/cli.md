@@ -343,6 +343,62 @@ too; restoring the PR key takes that whole set back out. The row itself returns
 on the next poll — or immediately from a following `workspace create --issue
 <ref>`, which an archived record refuses outright.
 
+## `lazybox work`
+
+The task/plan store from a shell — **the supported surface for an agent that
+cannot receive MCP tools** (Codex, Cursor, `--strict-mcp-config`). Every
+subcommand reaches the same daemon code as the `create_work` / `my_work` /
+`update_work` / `work_status` MCP tools, so a shell and an agent are never told
+different things about the same row.
+
+```bash
+lazybox work mine                                  # what you own, are owed, have queued
+lazybox work new "Fix the flaky clone test" \
+  --brief "Objective: ... Done when: ..." --to github:acme/widget#42
+lazybox work set <id> underway
+lazybox work set <id> held --detail "waiting on a base-branch decision"
+lazybox work done <id> --summary "Landed in #1931" --artifact findings.md
+lazybox work status --json
+```
+
+| Command / option | Effect |
+| --- | --- |
+| `work mine [--all]` | Three lists: work you own, work a sibling owes you, work you filed that nobody owns. `--all` includes finished work |
+| `work new <title>` | Mint a unit of work and print its id |
+| `--brief <text>` | Objective, done-criteria, boundaries, output shape. Delivered to the owner's session |
+| `--to <workspace>` | Assign it, and hand the brief over now |
+| `--no-deliver` | Record the assignment without poking the owner (needs `--to`) |
+| `--plan <id>` / `--parent <id>` | Put it on a plan, or nest it under another unit of work |
+| `--link <ref>` | Repeatable. `owner/repo#N` or an issue URL for a tracker record, `ws:<key>` for a workspace, or an http(s) URL |
+| `work set <id> <lifecycle>` | `underway`, `awaiting-answer`, `held`, `failed` or `canceled` |
+| `--detail <text>` | The question for `awaiting-answer`, the blocker for `held`, the cause for `failed`. Required for the first two |
+| `work done <id> --summary <text>` | Complete it. The summary is required: it is what the requester reads instead of your scrollback |
+| `--artifact <name>` | Repeatable. A file you wrote into `.lazybox/artifacts/`, carried by reference |
+| `work status [--plan <id>]` | A plan's `done/total` roll-up, the workspaces it spans, and the open work on no plan |
+| `--workspace <key>` | Act as this workspace instead of the current session |
+| `--json` / `--socket <path>` | Structured output; daemon socket to use |
+
+The workspace comes from `LAZYBOX_SESSION_KEY`, which lazybox injects into
+every session's PTY at spawn, so inside a session these commands need no
+arguments. Pass `--workspace` to act on another row.
+
+A **unit of work is not a tracker record**. It carries an immutable id for its
+whole life and points at issues, PRs and workspaces through `--link`, so an
+issue→PR fold rewrites a link and never an id. Assigning work also links its
+owner's workspace, which is what gives a plan spanning several repos its member
+list.
+
+Two behaviours worth knowing before scripting this. A **terminal state refuses
+every further move** — a completed, failed or canceled unit of work cannot be
+reopened or re-completed, so a replaced session reporting late cannot overwrite
+a result that already landed; the attempt exits `2`. And a **refused delivery is
+not a refused assignment**: handing work to a workspace with no running agent
+still records it, and the owner finds it in `lazybox work mine` when it starts.
+
+Exit codes: `0` on success, `2` when the call was wrong (a bad id, a missing
+`--summary`, a terminal row), `1` when the daemon could not read the store —
+so a script can tell a mistake that will never work from one worth retrying.
+
 ## `lazybox task status`
 
 Answers **"is anyone working on `owner/repo#N`?"** — the supported lookup for a

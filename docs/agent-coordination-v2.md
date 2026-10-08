@@ -335,10 +335,14 @@ Each phase ships on its own and is useful alone.
    `apply_batch` so a roll-up never half-lands, and an undecodable row is
    skipped and counted rather than failing a listing. Four agent-facing verbs
    ship with it — `create_work`, `my_work`, `update_work`, `work_status` —
-   named `work` rather than the doc's `task` because `task` is already the tool
-   that reads the *tracker record*, which is exactly the confusion the model's
-   own naming rule exists to avoid. Phase 3's collapse to ~8 tools must subsume
-   these four rather than add to them.
+   named `work` rather than this doc's `task` because `task` is already the
+   tool that reads the *tracker record*, which is exactly the confusion the
+   model's own naming rule exists to avoid. Phase 3's collapse to ~8 tools must
+   subsume these four rather than add to them.
+
+   `crates/server/src/work_calls.rs` is the single implementation, and both
+   surfaces are adapters over it — the MCP tools and the CLI twin below. The
+   row shaping lives there and nowhere else.
 
    Three automatic transitions are wired:
 
@@ -359,7 +363,7 @@ Each phase ships on its own and is useful alone.
    Still open from phase 1: #1898's `todo_items` has **not** been folded into
    these rows — that fold is the second migration of the same data #1898
    already called out, and the TUI's TODO list still reads the `Workspace`
-   field. The CLI twin for non-MCP agents is phase 3's.
+   field.
 2. **Delivery + results.** The single delivery owner with receipts;
    `complete_task`; keep the Stop hook's content; tasks for `w w`, ask and
    auto-fix; fix the ask race and per-repo rules as part of it. Adding the
@@ -369,6 +373,18 @@ Each phase ships on its own and is useful alone.
    cargo workspace, so a root `--workspace` run does not cover it.
 3. **Agent surface + context tiers.** The ~8 tools, `lazybox_guide`, the
    slim briefing with its budget test, and the CLI twin for non-MCP agents.
+
+   **Status.** The CLI twin for the work verbs has shipped:
+   `lazybox work mine | new | set | done | status`, over
+   `Command::WorkCall` into the same `work_calls` the MCP tools use, with the
+   workspace taken from `LAZYBOX_SESSION_KEY` and `--workspace` as the
+   override — the pattern `lazybox log` and the `gh` shim already follow. So
+   Codex, Cursor and a `--strict-mcp-config` session can now be handed tracked
+   work and report a result; they were previously unable to do either.
+
+   Still open in this phase: the ~8-tool collapse (the four work verbs make it
+   ~29 tools, not fewer), `lazybox_guide`, the slim always-on briefing with its
+   budget test, and CLI twins for the rest of the bus (notes, ask, sessions).
 4. **Subscriptions + change notices + board v2 + claims.**
 5. **Across boxes.** Today each box's daemon is its own island (notes,
    requests and sessions are per-daemon). Federate tasks and subscriptions

@@ -73,15 +73,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lazybox_core::SessionKey;
-// The work model's names are aliased on import: `Task`, `Party`, `Link` and
-// `Lifecycle` are all words this file already uses for other things (a tracker
-// record, a delivery party, a markdown link, an agent's observed state), and
-// the doc that specifies this model is explicit that a third state enum must
-// not be confusable with the two that exist.
-use lazybox_core::work::{
-    ArtifactRef as WorkArtifactRef, Lifecycle as WorkLifecycle, Link as WorkLink,
-    Party as WorkParty, PlanId, Task as WorkTask, WorkId, WorkResult,
-};
 use lazybox_store::StoreMutation;
 use parking_lot::RwLock;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -2537,606 +2528,27 @@ impl LazyboxMcp {
         ))
     }
 
-    /// Longest `brief` a `create_work` may carry. A brief is the four lines
-    /// the doc names — objective, done-criteria, boundaries, output shape —
-    /// not a pasted transcript, and it is delivered into another agent's
-    /// context when the work is assigned.
-    const MAX_BRIEF_BYTES: usize = 4000;
-
-    /// The caller as a work [`WorkParty`], with the live session recorded as
-    /// provenance only: ownership is addressed by workspace, because a
-    /// session id is replaced on every respawn.
-    fn work_party(key: &SessionKey) -> WorkParty {
-        WorkParty::Agent {
-            workspace: lazybox_core::WorkspaceKey::new(key.as_str()),
-            session: None,
-        }
-    }
-
-    /// Parse one `links` entry. The accepted forms are explicit because a
-    /// workspace key and its tracker record render identically
-    /// (`github:owner/repo#7` is both), and the two mean different things:
-    /// `plan_members` reads workspace links, the auto-check on merge reads
-    /// tracker links.
-    fn parse_work_link(raw: &str) -> Result<WorkLink, McpError> {
-        let raw = raw.trim();
-        if let Some(key) = raw.strip_prefix("ws:") {
-            if key.is_empty() {
-                return Err(McpError::invalid_request(
-                    "`ws:` with no workspace key after it",
-                    None,
-                ));
-            }
-            return Ok(WorkLink::Workspace(lazybox_core::WorkspaceKey::new(key)));
-        }
-        if let Some(id) = lazybox_core::task_ref::parse_task_ref(raw, None) {
-            return Ok(WorkLink::Tracker(id));
-        }
-        if raw.starts_with("http://") || raw.starts_with("https://") {
-            return Ok(WorkLink::Url(raw.to_string()));
-        }
-        Err(McpError::invalid_request(
-            format!(
-                "cannot read {raw:?} as a link — use `owner/repo#N` or an issue URL for a tracker \
-                 record, `ws:<workspace key>` for a workspace, or an http(s) URL"
-            ),
-            None,
-        ))
-    }
-
-    /// Parse the `lifecycle` a caller asked for. `completed` needs a summary,
-    /// so it is built by the caller rather than here.
-    fn parse_lifecycle(name: &str, detail: Option<&str>) -> Result<WorkLifecycle, McpError> {
-        let detail = detail.unwrap_or("").trim();
-        match name.trim().to_ascii_lowercase().as_str() {
-            "pending" => Ok(WorkLifecycle::Pending),
-            "underway" | "working" | "in-progress" => Ok(WorkLifecycle::Underway),
-            "awaiting-answer" | "awaiting_answer" | "input-required" => {
-                if detail.is_empty() {
-                    return Err(McpError::invalid_request(
-                        "awaiting-answer needs `detail`: the question you are waiting on",
-                        None,
-                    ));
-                }
-                Ok(WorkLifecycle::AwaitingAnswer {
-                    question: detail.to_string(),
-                })
-            }
-            "held" | "blocked" => {
-                if detail.is_empty() {
-                    return Err(McpError::invalid_request(
-                        "held needs `detail`: what is blocking it",
-                        None,
-                    ));
-                }
-                Ok(WorkLifecycle::Held {
-                    reason: detail.to_string(),
-                })
-            }
-            "failed" => Ok(WorkLifecycle::Failed {
-                reason: if detail.is_empty() {
-                    "no reason given".to_string()
-                } else {
-                    detail.to_string()
-                },
-            }),
-            "canceled" | "cancelled" => Ok(WorkLifecycle::Canceled),
-            "completed" | "complete" | "done" => Err(McpError::invalid_request(
-                "use lifecycle=\"completed\" with a `summary` — a completion carries its result",
-                None,
-            )),
-            other => Err(McpError::invalid_request(
-                format!(
-                    "unknown lifecycle {other:?} — one of: underway, awaiting-answer, held, \
-                     completed, failed, canceled"
-                ),
-                None,
-            )),
-        }
-    }
-
-    /// One work row, as a caller reads it. Deliberately not the stored row:
-    /// `history` is summarized to its length and the latest entry, so a long
-    /// provenance trail does not cost a reader its context window.
-    fn work_summary(task: &WorkTask) -> serde_json::Value {
-        serde_json::json!({
-            "id": task.id.to_string(),
-            "title": task.title,
-            "brief": task.brief,
-            "lifecycle": task.lifecycle.label(),
-            "detail": match &task.lifecycle {
-                WorkLifecycle::AwaitingAnswer { question } => Some(question.clone()),
-                WorkLifecycle::Held { reason } | WorkLifecycle::Failed { reason } => {
-                    Some(reason.clone())
-                }
-                _ => None,
-            },
-            "owner": work_party_label(task.owner.as_ref()),
-            "requester": work_party_label(Some(&task.requester)),
-            "plan": task.plan.map(|id| id.to_string()),
-            "parent": task.parent.map(|id| id.to_string()),
-            "links": task.links.iter().map(work_link_label).collect::<Vec<_>>(),
-            "result": task.result.as_ref().map(|result| serde_json::json!({
-                "summary": result.summary,
-                "artifacts": result.artifacts.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
-            })),
-            "events": task.history.len(),
-            "last_event": task.history.last().map(|event| serde_json::json!({
-                "at": event.at.to_rfc3339(),
-                "by": work_party_label(Some(&event.by)),
-                "change": event.change,
-            })),
-        })
-    }
-
-    async fn create_work_payload(
+    /// The four work verbs all route through `crate::work_calls`, which the
+    /// `lazybox work …` CLI also calls over `Command::WorkCall`. A tool here
+    /// is an adapter: resolve the caller from its bearer, hand the typed
+    /// request over, and render the typed report as JSON. Nothing about a work
+    /// row is shaped in this file, so the two surfaces cannot drift.
+    async fn work_call(
         &self,
-        caller: &SessionKey,
-        args: &CreateWorkArgs,
+        request: lazybox_ipc::work::WorkRequest,
     ) -> Result<serde_json::Value, McpError> {
-        let title = args.title.trim();
-        if title.is_empty() {
-            return Err(McpError::invalid_request("work needs a title", None));
-        }
-        if args.brief.len() > Self::MAX_BRIEF_BYTES {
-            return Err(McpError::invalid_request(
-                format!(
-                    "brief exceeds {} bytes — a brief is objective, done-criteria, boundaries and \
-                     output shape, not a transcript",
-                    Self::MAX_BRIEF_BYTES
-                ),
-                None,
-            ));
-        }
-
-        let mut task = WorkTask::new(title, Self::work_party(caller), chrono::Utc::now());
-        task.brief = args.brief.trim().to_string();
-
-        if let Some(raw) = &args.plan {
-            let plan: PlanId = raw.parse::<uuid::Uuid>().map(PlanId).map_err(|_| {
-                McpError::invalid_request(format!("`plan` {raw:?} is not a plan id"), None)
+        let report = crate::work_calls::call(&self.config, request)
+            .await
+            .map_err(|error| match error {
+                lazybox_ipc::work::WorkError::BadRequest(message) => {
+                    McpError::invalid_request(message, None)
+                }
+                lazybox_ipc::work::WorkError::Unavailable(message) => {
+                    McpError::internal_error(format!("work store: {message}"), None)
+                }
             })?;
-            let exists = {
-                let store = self.config.store.clone();
-                crate::store_blocking(&store, move |store| {
-                    crate::work_store::load_plan(store, plan)
-                })
-                .await
-                .map_err(store_error)?
-                .is_some()
-            };
-            if !exists {
-                return Err(McpError::invalid_request(
-                    format!("no plan {raw} — call work_status to list the plans that exist"),
-                    None,
-                ));
-            }
-            task.plan = Some(plan);
-        }
-
-        if let Some(raw) = &args.parent {
-            let parent: WorkId = raw.parse().map_err(|_| {
-                McpError::invalid_request(format!("`parent` {raw:?} is not a work id"), None)
-            })?;
-            let found = {
-                let store = self.config.store.clone();
-                crate::store_blocking(&store, move |store| {
-                    crate::work_store::load_task(store, parent)
-                })
-                .await
-                .map_err(store_error)?
-            };
-            let Some(found) = found else {
-                return Err(McpError::invalid_request(
-                    format!("no work {raw} to nest under"),
-                    None,
-                ));
-            };
-            task.parent = Some(parent);
-            // A sub-TODO inherits its parent's plan unless the caller named
-            // one: a child on no plan would not count toward the roll-up the
-            // parent's progress bar shows.
-            if task.plan.is_none() {
-                task.plan = found.plan;
-            }
-        }
-
-        for raw in &args.links {
-            let link = Self::parse_work_link(raw)?;
-            if !task.links.contains(&link) {
-                task.links.push(link);
-            }
-        }
-
-        let owner_key = match &args.owner {
-            Some(raw) if !raw.trim().is_empty() => {
-                let key = SessionKey::from(raw.trim());
-                task.owner = Some(Self::work_party(&key));
-                // The owner's workspace is also a link, so a cross-repo plan
-                // has its member list without the caller restating it.
-                let link = WorkLink::Workspace(lazybox_core::WorkspaceKey::new(key.as_str()));
-                if !task.links.contains(&link) {
-                    task.links.push(link);
-                }
-                Some(key)
-            }
-            _ => None,
-        };
-
-        let stored = task.clone();
-        {
-            let store = self.config.store.clone();
-            crate::store_blocking(&store, move |store| {
-                crate::work_store::save_task(store, &stored)
-            })
-            .await
-            .map_err(store_error)?;
-        }
-
-        tracing::info!(
-            from = %caller.as_str(),
-            work = %task.id,
-            owner = owner_key.as_ref().map(|k| k.as_str()).unwrap_or("-"),
-            "mcp create_work: minted a unit of work"
-        );
-
-        // Hand it over in the same call, through the one delivery owner, so a
-        // handoff is a tracked row and a receipt rather than a poke and hope.
-        let mut delivery = serde_json::Value::Null;
-        let wanted = args.deliver.unwrap_or(owner_key.is_some());
-        if let Some(owner) = &owner_key {
-            if owner == caller {
-                // Assigning work to yourself is legal; delivering it to
-                // yourself would paste your own brief into your own session.
-                delivery = serde_json::json!({ "skipped": "the owner is the caller" });
-            } else if wanted {
-                delivery = self.deliver_work_brief(caller, owner, &task).await;
-            } else {
-                delivery = serde_json::json!({ "skipped": "deliver=false" });
-            }
-        } else if wanted {
-            return Err(McpError::invalid_request(
-                "deliver=true needs an `owner` to deliver to",
-                None,
-            ));
-        }
-
-        Ok(serde_json::json!({
-            "work": Self::work_summary(&task),
-            "delivery": delivery,
-        }))
-    }
-
-    /// Put a work brief in front of its owner, through `crate::delivery` —
-    /// the same gate, dedupe and receipt every other path uses.
-    async fn deliver_work_brief(
-        &self,
-        caller: &SessionKey,
-        owner: &SessionKey,
-        task: &WorkTask,
-    ) -> serde_json::Value {
-        let Some(terminal_id) = self.config.terminal.running_agent_terminal(owner).await else {
-            return serde_json::json!({
-                "refused": format!("no running agent in workspace {}", owner.as_str()),
-                "note": "the work is recorded and assigned; start the agent and it will see it in my_work",
-            });
-        };
-        let body = format!(
-            "<lazybox-work id=\"{id}\" from=\"{from}\">\nYou own this unit of work. Report with \
-             update_work(id=\"{id}\", lifecycle=\"completed\", summary=…) when it is done, or \
-             lifecycle=\"awaiting-answer\"/\"held\" with `detail` if you cannot proceed — the \
-             requester reads your result, not your scrollback.\n\n{title}\n\n{brief}\n</lazybox-work>",
-            id = task.id,
-            from = caller.as_str(),
-            title = task.title,
-            brief = task.brief,
-        );
-        let mut pending = crate::delivery::deliver(
-            &self.config,
-            crate::delivery::DeliveryRequest {
-                terminal_id,
-                body,
-                submit: true,
-                gate: crate::delivery::Gate::Idle,
-                from: crate::delivery::Party::Agent(caller.clone()),
-                wait_limit: Some(ASK_DELIVERY_WAIT),
-            },
-        )
-        .await;
-        let early = pending.landed_within(DELIVERY_RECEIPT_WAIT).await;
-        {
-            let owner = owner.as_str().to_string();
-            let id = task.id.to_string();
-            tokio::spawn(async move {
-                let outcome = pending.receipt().await;
-                tracing::info!(to = %owner, work = %id, ?outcome, "mcp create_work: delivery resolved");
-            });
-        }
-        match early {
-            Some(crate::delivery::EarlyOutcome::Landed) => serde_json::json!({
-                "delivered": owner.as_str(),
-                "note": "the brief is in the owner's input, delivered between turns",
-            }),
-            Some(crate::delivery::EarlyOutcome::Refused { reason }) => serde_json::json!({
-                "refused": reason,
-                "note": "the work is recorded and assigned; it is in the owner's my_work",
-            }),
-            None => serde_json::json!({
-                "queued": owner.as_str(),
-                "note": "the owner is mid-turn; the brief lands when that turn ends",
-            }),
-        }
-    }
-
-    async fn my_work_payload(
-        &self,
-        caller: &SessionKey,
-        include_done: bool,
-    ) -> Result<serde_json::Value, McpError> {
-        let key = lazybox_core::WorkspaceKey::new(caller.as_str());
-        let (owned, requested) = {
-            let store = self.config.store.clone();
-            let mine = key.clone();
-            crate::store_blocking(&store, move |store| {
-                let owned = crate::work_store::tasks_owned_by(store, &mine)?;
-                let requested = crate::work_store::tasks_requested_by(store, &mine)?;
-                Ok::<_, lazybox_store::StoreError>((owned, requested))
-            })
-            .await
-            .map_err(store_error)?
-        };
-        let keep = |task: &WorkTask| include_done || !task.lifecycle.is_terminal();
-        let rows = |tasks: Vec<WorkTask>| {
-            tasks
-                .iter()
-                .filter(|task| keep(task))
-                .map(Self::work_summary)
-                .collect::<Vec<_>>()
-        };
-        // Three buckets, because "I requested it" splits into three cases and
-        // conflating them misreports who is on the hook. Work I also own is
-        // mine (it would otherwise appear twice); work with no owner is my own
-        // backlog, owed by nobody; only the rest is someone else's to do.
-        let mut waiting = Vec::new();
-        let mut unassigned = Vec::new();
-        for task in requested {
-            match crate::work_store::owner_workspace(&task) {
-                Some(owner) if owner == &key => {}
-                Some(_) => waiting.push(task),
-                None if task.owner.is_none() => unassigned.push(task),
-                // Owned by a human: not mine, and not a sibling's to report.
-                None => unassigned.push(task),
-            }
-        }
-        Ok(serde_json::json!({
-            "workspace": caller.as_str(),
-            "mine": rows(owned),
-            "waiting_on_others": rows(waiting),
-            "unassigned": rows(unassigned),
-            "include_done": include_done,
-        }))
-    }
-
-    async fn update_work_payload(
-        &self,
-        caller: &SessionKey,
-        args: &UpdateWorkArgs,
-    ) -> Result<serde_json::Value, McpError> {
-        let id: WorkId = args.id.trim().parse().map_err(|_| {
-            McpError::invalid_request(format!("`id` {:?} is not a work id", args.id), None)
-        })?;
-        let mut task = {
-            let store = self.config.store.clone();
-            crate::store_blocking(&store, move |store| crate::work_store::load_task(store, id))
-                .await
-                .map_err(store_error)?
-                .ok_or_else(|| McpError::invalid_request(format!("no work {id}"), None))?
-        };
-
-        let by = Self::work_party(caller);
-        let now = chrono::Utc::now();
-        let completing = matches!(
-            args.lifecycle.trim().to_ascii_lowercase().as_str(),
-            "completed" | "complete" | "done"
-        );
-
-        let moved = if completing {
-            let summary = args
-                .summary
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    McpError::invalid_request(
-                        "a completion needs a `summary` — it is what the requester reads instead \
-                         of your scrollback",
-                        None,
-                    )
-                })?;
-            let workspace = lazybox_core::WorkspaceKey::new(caller.as_str());
-            let result = WorkResult {
-                summary: summary.to_string(),
-                artifacts: args
-                    .artifacts
-                    .iter()
-                    .map(|name| WorkArtifactRef {
-                        name: name.trim().to_string(),
-                        workspace: workspace.clone(),
-                    })
-                    .collect(),
-            };
-            task.complete(result, by, now)
-        } else {
-            let to = Self::parse_lifecycle(&args.lifecycle, args.detail.as_deref())?;
-            task.transition(to, by, now)
-        };
-
-        if let Err(refused) = moved {
-            // A terminal task refusing a late report is the model's own rule;
-            // surfacing it as a tool error rather than dropping it is how the
-            // caller learns its result landed nowhere.
-            return Err(McpError::invalid_request(refused.to_string(), None));
-        }
-
-        let stored = task.clone();
-        {
-            let store = self.config.store.clone();
-            crate::store_blocking(&store, move |store| {
-                crate::work_store::save_task(store, &stored)
-            })
-            .await
-            .map_err(store_error)?;
-        }
-
-        tracing::info!(
-            from = %caller.as_str(),
-            work = %task.id,
-            lifecycle = task.lifecycle.label(),
-            "mcp update_work: work moved"
-        );
-
-        // Results flow back. The requester hears about a terminal state
-        // without polling for it — the half of the bus that did not exist.
-        let notified = self.notify_requester(&task).await;
-
-        Ok(serde_json::json!({
-            "work": Self::work_summary(&task),
-            "requester_notified": notified,
-        }))
-    }
-
-    /// Tell the requester its work reached a terminal state, if the requester
-    /// is an agent other than the one reporting and has a live session.
-    /// Best-effort by design: a requester that is not running still has the
-    /// result on the row, which is the point of storing it.
-    async fn notify_requester(&self, task: &WorkTask) -> serde_json::Value {
-        if !task.lifecycle.is_terminal() {
-            return serde_json::json!({ "skipped": "not a terminal state" });
-        }
-        let WorkParty::Agent { workspace, .. } = &task.requester else {
-            return serde_json::json!({ "skipped": "the requester is not an agent" });
-        };
-        if crate::work_store::owner_workspace(task) == Some(workspace) {
-            return serde_json::json!({ "skipped": "the requester owns it" });
-        }
-        let target = SessionKey::from(workspace.as_str());
-        let Some(terminal_id) = self.config.terminal.running_agent_terminal(&target).await else {
-            return serde_json::json!({ "skipped": "the requester has no running agent" });
-        };
-        let detail = match &task.lifecycle {
-            WorkLifecycle::Failed { reason } => format!("\nreason: {reason}"),
-            _ => String::new(),
-        };
-        let summary = task
-            .result
-            .as_ref()
-            .map(|r| r.summary.clone())
-            .unwrap_or_default();
-        let artifacts = task
-            .result
-            .as_ref()
-            .map(|r| {
-                r.artifacts
-                    .iter()
-                    .map(|a| a.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default();
-        let body = format!(
-            "<lazybox-work-result id=\"{id}\" lifecycle=\"{state}\">\nWork you requested reached \
-             a terminal state. Read it with my_work; nothing is waiting on you unless this \
-             changes your plan.\n\n{title}{detail}\n\n{summary}{artifacts}\n</lazybox-work-result>",
-            id = task.id,
-            state = task.lifecycle.label(),
-            title = task.title,
-            summary = summary,
-            artifacts = if artifacts.is_empty() {
-                String::new()
-            } else {
-                format!("\n\nartifacts: {artifacts}")
-            },
-        );
-        let mut pending = crate::delivery::deliver(
-            &self.config,
-            crate::delivery::DeliveryRequest {
-                terminal_id,
-                body,
-                submit: true,
-                gate: crate::delivery::Gate::Idle,
-                from: crate::delivery::Party::Lazybox("work result"),
-                wait_limit: Some(ASK_DELIVERY_WAIT),
-            },
-        )
-        .await;
-        let early = pending.landed_within(DELIVERY_RECEIPT_WAIT).await;
-        {
-            let to = workspace.to_string();
-            tokio::spawn(async move {
-                let outcome = pending.receipt().await;
-                tracing::info!(to = %to, ?outcome, "mcp update_work: result notice resolved");
-            });
-        }
-        match early {
-            Some(crate::delivery::EarlyOutcome::Landed) => {
-                serde_json::json!({ "delivered": workspace.to_string() })
-            }
-            Some(crate::delivery::EarlyOutcome::Refused { reason }) => {
-                serde_json::json!({ "refused": reason })
-            }
-            None => serde_json::json!({ "queued": workspace.to_string() }),
-        }
-    }
-
-    async fn work_status_payload(&self, plan: Option<&str>) -> Result<serde_json::Value, McpError> {
-        let wanted = match plan {
-            Some(raw) => Some(raw.trim().parse::<uuid::Uuid>().map(PlanId).map_err(|_| {
-                McpError::invalid_request(format!("`plan` {raw:?} is not a plan id"), None)
-            })?),
-            None => None,
-        };
-        let store = self.config.store.clone();
-        let (plans, tasks) = crate::store_blocking(&store, move |store| {
-            let plans = crate::work_store::all_plans(store)?;
-            let (tasks, skipped) = crate::work_store::all_tasks(store)?;
-            Ok::<_, lazybox_store::StoreError>((plans, (tasks, skipped)))
-        })
-        .await
-        .map_err(store_error)?;
-        let (tasks, skipped) = tasks;
-
-        let rows: Vec<serde_json::Value> = plans
-            .iter()
-            .filter(|plan| wanted.is_none_or(|id| plan.id == id))
-            .map(|plan| {
-                let progress = lazybox_core::work::plan_progress(&tasks, plan.id);
-                let members = lazybox_core::work::plan_members(&tasks, plan.id);
-                serde_json::json!({
-                    "plan": plan.id.to_string(),
-                    "title": plan.title,
-                    "done": progress.done,
-                    "total": progress.total,
-                    "complete": progress.is_complete(),
-                    "members": members.iter().map(|m| m.to_string()).collect::<Vec<_>>(),
-                    "tasks": tasks.iter()
-                        .filter(|task| task.plan == Some(plan.id))
-                        .map(Self::work_summary)
-                        .collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-
-        if let (Some(id), true) = (wanted, rows.is_empty()) {
-            return Err(McpError::invalid_request(format!("no plan {id}"), None));
-        }
-        Ok(serde_json::json!({
-            "plans": rows,
-            "unplanned": tasks.iter()
-                .filter(|task| task.plan.is_none() && !task.lifecycle.is_terminal())
-                .map(Self::work_summary)
-                .collect::<Vec<_>>(),
-            "undecodable_rows": skipped,
-        }))
+        serde_json::to_value(&report)
+            .map_err(|error| McpError::internal_error(format!("encode report: {error}"), None))
     }
 
     #[tool(
@@ -3148,7 +2560,31 @@ impl LazyboxMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let caller = self.caller(&ctx)?;
-        Ok(json_result(self.create_work_payload(&caller, &args).await?))
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Create {
+                requester: caller,
+                title: args.title.clone(),
+                brief: args.brief.clone(),
+                owner: args
+                    .owner
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(SessionKey::from),
+                // Delivering is the default when the work is assigned: an
+                // agent that hands work over and has to remember a second flag
+                // to actually send it has handed over nothing.
+                deliver: args.deliver.unwrap_or_else(|| {
+                    args.owner
+                        .as_deref()
+                        .is_some_and(|key| !key.trim().is_empty())
+                }),
+                plan: args.plan.clone(),
+                parent: args.parent.clone(),
+                links: args.links.clone(),
+            })
+            .await?,
+        ))
     }
 
     #[tool(
@@ -3161,7 +2597,11 @@ impl LazyboxMcp {
     ) -> Result<CallToolResult, McpError> {
         let caller = self.caller(&ctx)?;
         Ok(json_result(
-            self.my_work_payload(&caller, args.include_done).await?,
+            self.work_call(lazybox_ipc::work::WorkRequest::Mine {
+                workspace: caller,
+                include_done: args.include_done,
+            })
+            .await?,
         ))
     }
 
@@ -3174,7 +2614,17 @@ impl LazyboxMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let caller = self.caller(&ctx)?;
-        Ok(json_result(self.update_work_payload(&caller, &args).await?))
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Update {
+                by: caller,
+                id: args.id.clone(),
+                lifecycle: args.lifecycle.clone(),
+                detail: args.detail.clone(),
+                summary: args.summary.clone(),
+                artifacts: args.artifacts.clone(),
+            })
+            .await?,
+        ))
     }
 
     #[tool(
@@ -3187,7 +2637,10 @@ impl LazyboxMcp {
     ) -> Result<CallToolResult, McpError> {
         let _ = self.caller(&ctx)?;
         Ok(json_result(
-            self.work_status_payload(args.plan.as_deref()).await?,
+            self.work_call(lazybox_ipc::work::WorkRequest::Status {
+                plan: args.plan.clone(),
+            })
+            .await?,
         ))
     }
 
@@ -4721,34 +4174,6 @@ fn github_issue_url(id: &lazybox_core::TaskId) -> Option<String> {
 }
 
 /// Wrap a JSON value as a successful single-text tool result.
-/// A store failure, as a tool error. Kept in one place so every work tool
-/// reports a storage problem the same way instead of each inventing a phrase.
-fn store_error(error: lazybox_store::StoreError) -> McpError {
-    McpError::internal_error(format!("work store: {error}"), None)
-}
-
-/// How a [`WorkParty`] renders to a caller. An agent is its workspace — the
-/// address work is actually sent to — and the session id beside it is
-/// provenance, so it is deliberately not shown as identity.
-fn work_party_label(party: Option<&WorkParty>) -> Option<String> {
-    match party? {
-        WorkParty::Human => Some("human".to_string()),
-        WorkParty::Lazybox => Some("lazybox".to_string()),
-        WorkParty::Agent { workspace, .. } => Some(workspace.to_string()),
-    }
-}
-
-/// How a [`WorkLink`] renders. The `ws:` prefix is kept on the way out
-/// because it is required on the way in: a workspace key and its tracker
-/// record are the same string and mean different things.
-fn work_link_label(link: &WorkLink) -> String {
-    match link {
-        WorkLink::Workspace(key) => format!("ws:{key}"),
-        WorkLink::Tracker(id) => id.to_string(),
-        WorkLink::Url(url) => url.clone(),
-    }
-}
-
 fn json_result(payload: serde_json::Value) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()),
@@ -5682,498 +5107,75 @@ mod tests {
     use super::*;
     use crate::backend::SessionBackend;
 
-    fn create_args(title: &str) -> CreateWorkArgs {
-        CreateWorkArgs {
-            title: title.into(),
-            brief: String::new(),
-            owner: None,
-            deliver: None,
-            plan: None,
-            parent: None,
-            links: Vec::new(),
-        }
-    }
-
-    fn update_args(id: &str, lifecycle: &str) -> UpdateWorkArgs {
-        UpdateWorkArgs {
-            id: id.into(),
-            lifecycle: lifecycle.into(),
-            detail: None,
-            summary: None,
-            artifacts: Vec::new(),
-        }
-    }
-
+    /// The MCP tools are adapters over `crate::work_calls`; the one piece of
+    /// logic that lives only here is the `deliver` default, so it is the piece
+    /// that needs pinning. Everything else about a work row is tested where it
+    /// is shaped.
     #[tokio::test]
-    async fn create_work_mints_a_row_the_requester_can_read_back() {
+    async fn assigning_work_through_the_tool_delivers_it_by_default() {
         let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("github:acme/widget#1");
-        let mut args = create_args("wire the store");
-        args.brief = "objective · done · bounds".into();
-
         let payload = handler
-            .create_work_payload(&caller, &args)
+            .work_call(lazybox_ipc::work::WorkRequest::Create {
+                requester: SessionKey::from("github:acme/widget#1"),
+                title: "do this".into(),
+                brief: String::new(),
+                owner: Some(SessionKey::from("github:acme/other#2")),
+                deliver: true,
+                plan: None,
+                parent: None,
+                links: Vec::new(),
+            })
             .await
             .expect("payload");
-        assert_eq!(payload["work"]["lifecycle"], "pending");
-        assert_eq!(payload["work"]["requester"], "github:acme/widget#1");
-        assert!(payload["work"]["owner"].is_null(), "unassigned is no owner");
+        // No agent is running there, so the honest answer is a refusal that
+        // still leaves the work assigned — and it must survive the JSON hop.
         assert!(
-            payload["delivery"].is_null(),
-            "nothing to deliver without an owner"
-        );
-
-        let mine = handler
-            .my_work_payload(&caller, false)
-            .await
-            .expect("payload");
-        assert_eq!(
-            mine["waiting_on_others"].as_array().expect("array").len(),
-            0,
-            "unassigned work is not work someone else owes me"
-        );
-        assert_eq!(
-            mine["unassigned"][0]["title"], "wire the store",
-            "it is my own backlog, owed by nobody"
-        );
-        assert!(mine["mine"].as_array().expect("array").is_empty());
-    }
-
-    #[tokio::test]
-    async fn assigning_work_adds_the_owner_as_a_link_so_a_plan_has_its_members() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("github:acme/widget#1");
-        let mut args = create_args("do this");
-        args.owner = Some("github:acme/other#2".into());
-
-        let payload = handler
-            .create_work_payload(&caller, &args)
-            .await
-            .expect("payload");
-        assert_eq!(payload["work"]["owner"], "github:acme/other#2");
-        let links: Vec<String> = payload["work"]["links"]
-            .as_array()
-            .expect("array")
-            .iter()
-            .map(|l| l.as_str().unwrap_or_default().to_string())
-            .collect();
-        assert_eq!(links, vec!["ws:github:acme/other#2".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn a_handoff_to_a_dead_workspace_still_records_the_assignment() {
-        // The receipt must distinguish "nobody is there" from "it never
-        // happened": the work is assigned and waiting in the owner's my_work
-        // whether or not an agent was up to receive the brief.
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("github:acme/widget#1");
-        let mut args = create_args("do this");
-        args.owner = Some("github:acme/other#2".into());
-
-        let payload = handler
-            .create_work_payload(&caller, &args)
-            .await
-            .expect("payload");
-        assert!(
-            payload["delivery"]["refused"]
+            payload["One"]["delivery"]["Refused"]["reason"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("no running agent"),
-            "{:?}",
-            payload["delivery"]
+            "{payload}"
         );
-
-        let theirs = handler
-            .my_work_payload(&SessionKey::from("github:acme/other#2"), false)
-            .await
-            .expect("payload");
-        assert_eq!(theirs["mine"].as_array().expect("array").len(), 1);
+        assert_eq!(payload["One"]["work"]["lifecycle"], "pending");
     }
 
     #[tokio::test]
-    async fn work_is_not_delivered_to_the_session_that_created_it() {
+    async fn a_work_bad_request_is_a_protocol_error_not_an_error_result() {
+        // A caller's mistake has to reach the agent as an error it can read
+        // and correct, not as a successful tool result it might act on.
         let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let me = SessionKey::from("github:acme/widget#1");
-        let mut args = create_args("my own note to self");
-        args.owner = Some(me.as_str().into());
-
-        let payload = handler
-            .create_work_payload(&me, &args)
-            .await
-            .expect("payload");
-        assert_eq!(payload["delivery"]["skipped"], "the owner is the caller");
-    }
-
-    #[tokio::test]
-    async fn deliver_without_an_owner_is_rejected_rather_than_ignored() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let mut args = create_args("x");
-        args.deliver = Some(true);
-        assert!(
-            handler
-                .create_work_payload(&SessionKey::from("a"), &args)
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn create_work_rejects_an_empty_title_and_an_oversized_brief() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("a");
-        assert!(
-            handler
-                .create_work_payload(&caller, &create_args("   "))
-                .await
-                .is_err()
-        );
-        let mut big = create_args("x");
-        big.brief = "b".repeat(LazyboxMcp::MAX_BRIEF_BYTES + 1);
-        assert!(handler.create_work_payload(&caller, &big).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn create_work_refuses_a_plan_or_parent_that_does_not_exist() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("a");
-
-        let mut bad_plan = create_args("x");
-        bad_plan.plan = Some(uuid::Uuid::new_v4().to_string());
-        assert!(
-            handler
-                .create_work_payload(&caller, &bad_plan)
-                .await
-                .is_err(),
-            "a dangling plan id would make the work invisible to work_status"
-        );
-
-        let mut bad_parent = create_args("x");
-        bad_parent.parent = Some(uuid::Uuid::new_v4().to_string());
-        assert!(
-            handler
-                .create_work_payload(&caller, &bad_parent)
-                .await
-                .is_err()
-        );
-
-        let mut not_a_uuid = create_args("x");
-        not_a_uuid.plan = Some("plan-7".into());
-        assert!(
-            handler
-                .create_work_payload(&caller, &not_a_uuid)
-                .await
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn link_parsing_keeps_a_workspace_and_its_tracker_record_apart() {
-        // The two render identically; only the prefix says which is meant.
-        assert_eq!(
-            LazyboxMcp::parse_work_link("ws:github:acme/widget#7").expect("ws"),
-            WorkLink::Workspace(lazybox_core::WorkspaceKey::new("github:acme/widget#7"))
-        );
-        assert!(matches!(
-            LazyboxMcp::parse_work_link("acme/widget#7").expect("tracker"),
-            WorkLink::Tracker(_)
-        ));
-        assert!(matches!(
-            LazyboxMcp::parse_work_link("https://example.test/doc").expect("url"),
-            WorkLink::Url(_)
-        ));
-        assert!(LazyboxMcp::parse_work_link("ws:").is_err());
-        assert!(LazyboxMcp::parse_work_link("not a reference").is_err());
-    }
-
-    #[tokio::test]
-    async fn a_sub_task_inherits_its_parents_plan_so_the_rollup_counts_it() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("a");
-        let plan = lazybox_core::work::Plan::new("ship it");
-        crate::work_store::save_plan(&*handler.config.store, &plan).expect("plan");
-
-        let mut root = create_args("root");
-        root.plan = Some(plan.id.to_string());
-        let root = handler
-            .create_work_payload(&caller, &root)
-            .await
-            .expect("payload");
-        let root_id = root["work"]["id"].as_str().expect("id").to_string();
-
-        let mut child = create_args("child");
-        child.parent = Some(root_id.clone());
-        let child = handler
-            .create_work_payload(&caller, &child)
-            .await
-            .expect("payload");
-        assert_eq!(child["work"]["plan"], plan.id.to_string());
-
-        let status = handler
-            .work_status_payload(Some(&plan.id.to_string()))
-            .await
-            .expect("payload");
-        assert_eq!(status["plans"][0]["total"], 2);
-        assert_eq!(status["plans"][0]["done"], 0);
-    }
-
-    #[tokio::test]
-    async fn a_completion_needs_a_summary_and_then_carries_it() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("a");
-        let created = handler
-            .create_work_payload(&caller, &create_args("x"))
-            .await
-            .expect("payload");
-        let id = created["work"]["id"].as_str().expect("id").to_string();
-
-        assert!(
-            handler
-                .update_work_payload(&caller, &update_args(&id, "completed"))
-                .await
-                .is_err(),
-            "a result with no summary is the scrollback-scraping this replaces"
-        );
-
-        let mut done = update_args(&id, "completed");
-        done.summary = Some("landed in #1".into());
-        done.artifacts = vec!["findings.md".into()];
-        let payload = handler
-            .update_work_payload(&caller, &done)
-            .await
-            .expect("payload");
-        assert_eq!(payload["work"]["lifecycle"], "completed");
-        assert_eq!(payload["work"]["result"]["summary"], "landed in #1");
-        assert_eq!(payload["work"]["result"]["artifacts"][0], "findings.md");
-    }
-
-    #[tokio::test]
-    async fn a_terminal_task_refuses_a_later_report_as_an_error() {
-        // The property that makes a result trustworthy: a replaced session
-        // reporting late cannot overwrite what already landed.
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("a");
-        let created = handler
-            .create_work_payload(&caller, &create_args("x"))
-            .await
-            .expect("payload");
-        let id = created["work"]["id"].as_str().expect("id").to_string();
-
-        let mut done = update_args(&id, "completed");
-        done.summary = Some("first".into());
-        handler
-            .update_work_payload(&caller, &done)
-            .await
-            .expect("payload");
-
-        let mut again = update_args(&id, "completed");
-        again.summary = Some("second".into());
         let error = handler
-            .update_work_payload(&caller, &again)
+            .work_call(lazybox_ipc::work::WorkRequest::Create {
+                requester: SessionKey::from("a"),
+                title: "   ".into(),
+                brief: String::new(),
+                owner: None,
+                deliver: false,
+                plan: None,
+                parent: None,
+                links: Vec::new(),
+            })
             .await
             .expect_err("refused");
-        assert!(
-            error.to_string().contains("rejects further work"),
-            "{error}"
-        );
-        assert!(
-            handler
-                .update_work_payload(&caller, &update_args(&id, "underway"))
-                .await
-                .is_err(),
-            "nor may it be reopened"
-        );
-
-        let stored = crate::work_store::load_task(&*handler.config.store, id.parse().unwrap())
-            .expect("read")
-            .expect("row");
-        assert_eq!(
-            stored.result.expect("result").summary,
-            "first",
-            "the first result is what survives"
-        );
+        assert!(error.to_string().contains("title"), "{error}");
     }
 
     #[tokio::test]
-    async fn awaiting_answer_and_held_need_their_detail() {
+    async fn my_work_through_the_tool_carries_the_three_lists_as_json() {
         let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("a");
-        let created = handler
-            .create_work_payload(&caller, &create_args("x"))
-            .await
-            .expect("payload");
-        let id = created["work"]["id"].as_str().expect("id").to_string();
-
-        assert!(
-            handler
-                .update_work_payload(&caller, &update_args(&id, "awaiting-answer"))
-                .await
-                .is_err(),
-            "a question nobody can read is not a question"
-        );
-        assert!(
-            handler
-                .update_work_payload(&caller, &update_args(&id, "held"))
-                .await
-                .is_err()
-        );
-
-        let mut asking = update_args(&id, "awaiting-answer");
-        asking.detail = Some("which base branch?".into());
         let payload = handler
-            .update_work_payload(&caller, &asking)
+            .work_call(lazybox_ipc::work::WorkRequest::Mine {
+                workspace: SessionKey::from("github:acme/widget#1"),
+                include_done: false,
+            })
             .await
             .expect("payload");
-        assert_eq!(payload["work"]["lifecycle"], "awaiting answer");
-        assert_eq!(payload["work"]["detail"], "which base branch?");
-    }
-
-    #[tokio::test]
-    async fn update_work_rejects_an_unknown_lifecycle_rather_than_guessing() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("a");
-        let created = handler
-            .create_work_payload(&caller, &create_args("x"))
-            .await
-            .expect("payload");
-        let id = created["work"]["id"].as_str().expect("id").to_string();
-        assert!(
-            handler
-                .update_work_payload(&caller, &update_args(&id, "nearly-done"))
-                .await
-                .is_err()
-        );
-        assert!(
-            handler
-                .update_work_payload(
-                    &caller,
-                    &update_args(&uuid::Uuid::new_v4().to_string(), "underway")
-                )
-                .await
-                .is_err(),
-            "an unknown id is an error, not a silently created row"
-        );
-    }
-
-    #[tokio::test]
-    async fn my_work_separates_what_i_own_from_what_i_am_owed() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let me = SessionKey::from("github:acme/widget#1");
-        let them = SessionKey::from("github:acme/other#2");
-
-        let mut asked = create_args("do this for me");
-        asked.owner = Some(them.as_str().into());
-        handler
-            .create_work_payload(&me, &asked)
-            .await
-            .expect("payload");
-
-        let mut own = create_args("my own job");
-        own.owner = Some(me.as_str().into());
-        handler
-            .create_work_payload(&me, &own)
-            .await
-            .expect("payload");
-
-        let mine = handler.my_work_payload(&me, false).await.expect("payload");
-        let titles = |value: &serde_json::Value| {
-            value
-                .as_array()
-                .expect("array")
-                .iter()
-                .map(|row| row["title"].as_str().unwrap_or_default().to_string())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(titles(&mine["mine"]), vec!["my own job".to_string()]);
-        assert_eq!(
-            titles(&mine["waiting_on_others"]),
-            vec!["do this for me".to_string()],
-            "self-assigned work must not appear in both lists"
-        );
-    }
-
-    #[tokio::test]
-    async fn my_work_hides_finished_work_unless_asked() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let me = SessionKey::from("github:acme/widget#1");
-        let mut own = create_args("job");
-        own.owner = Some(me.as_str().into());
-        let created = handler
-            .create_work_payload(&me, &own)
-            .await
-            .expect("payload");
-        let id = created["work"]["id"].as_str().expect("id").to_string();
-        let mut done = update_args(&id, "completed");
-        done.summary = Some("done".into());
-        handler
-            .update_work_payload(&me, &done)
-            .await
-            .expect("payload");
-
-        let open = handler.my_work_payload(&me, false).await.expect("payload");
-        assert!(open["mine"].as_array().expect("array").is_empty());
-        let all = handler.my_work_payload(&me, true).await.expect("payload");
-        assert_eq!(all["mine"].as_array().expect("array").len(), 1);
-    }
-
-    #[tokio::test]
-    async fn work_status_lists_unplanned_work_and_refuses_an_unknown_plan() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("a");
-        handler
-            .create_work_payload(&caller, &create_args("loose end"))
-            .await
-            .expect("payload");
-
-        let payload = handler.work_status_payload(None).await.expect("payload");
-        assert_eq!(payload["plans"].as_array().expect("array").len(), 0);
-        assert_eq!(payload["unplanned"][0]["title"], "loose end");
-
-        assert!(
-            handler
-                .work_status_payload(Some(&uuid::Uuid::new_v4().to_string()))
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn a_merge_completes_the_work_linked_to_the_record() {
-        // The auto-check, end to end over the store: the same event that ticks
-        // a workspace's TODO checklist completes the plan rows.
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
-        let caller = SessionKey::from("a");
-        let mut args = create_args("ship the fix");
-        args.links = vec!["acme/widget#7".into()];
-        let created = handler
-            .create_work_payload(&caller, &args)
-            .await
-            .expect("payload");
-        let id: WorkId = created["work"]["id"].as_str().expect("id").parse().unwrap();
-
-        let link = WorkLink::Tracker(
-            lazybox_core::task_ref::parse_task_ref("acme/widget#7", None).expect("ref"),
-        );
-        let moved = crate::work_store::complete_linked_to(
-            &*handler.config.store,
-            &link,
-            WorkParty::Lazybox,
-            chrono::Utc::now(),
-        )
-        .expect("auto-check");
-        assert_eq!(moved, vec![id]);
-
-        let stored = crate::work_store::load_task(&*handler.config.store, id)
-            .expect("read")
-            .expect("row");
-        assert_eq!(stored.lifecycle, WorkLifecycle::Completed);
-        assert!(
-            stored
-                .result
-                .expect("result")
-                .summary
-                .contains("acme/widget#7"),
-            "the result says what landed"
-        );
+        for list in ["mine", "waiting_on_others", "unassigned"] {
+            assert!(
+                payload["Mine"][list].is_array(),
+                "{list} missing from the JSON: {payload}"
+            );
+        }
     }
 
     #[test]

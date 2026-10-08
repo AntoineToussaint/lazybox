@@ -204,11 +204,18 @@ documented fallback for a session that gets no MCP tools.
 
 `work_store.rs` persists `lazybox_core::work` — the task/plan rows
 `docs/agent-coordination-v2.md` names as the shared plan — under the `work:`
-and `plan:` kv prefixes, and `create_work` / `my_work` / `update_work` /
-`work_status` in `mcp.rs` are its agent-facing verbs. A handoff made through
-them is a row with a requester, a lifecycle, a result and a provenance
-history, which is what `notify_session` cannot be: that reports only that text
-landed.
+and `plan:` kv prefixes. **`work_calls.rs` is the one implementation of the
+four verbs**, and both surfaces are adapters over it: the `create_work` /
+`my_work` / `update_work` / `work_status` MCP tools in `mcp.rs`, and
+`lazybox work …` over `Command::WorkCall` for agents with no MCP at all. A row
+is shaped in `work_calls` and nowhere else, so a field added to it appears on
+both surfaces without a second edit — `task_status` made the same arrangement
+for the same reason, and the failure it avoids is a shell and an agent being
+told different things about the same record.
+
+A handoff made through these verbs is a row with a requester, a lifecycle, a
+result and a provenance history, which is what `notify_session` cannot be:
+that reports only that text landed.
 
 **`Lifecycle` is the third state enum here and must not be confused with the
 other two.** `AgentState` is liveness *observed* from the PTY and the hooks;
@@ -226,6 +233,11 @@ replacement, so failing on teardown would fail the work of every agent lazybox
 itself restarted. `sweep_stranded` instead fails `Underway` work whose owner
 workspace has had no live agent for `STRANDED_GRACE`, once a minute. If you
 are tempted to move this onto the exit path, that is the regression.
+
+A result is never reported back to whoever filed it. The guard is on the
+**acting party**, not on ownership: work a session files for itself and
+finishes itself is usually *unassigned*, so an owner-based check misses it and
+pastes an agent's own summary back into its own session.
 
 Two other things follow the store's rules rather than their own: multi-row
 writes go through `Store::apply_batch`, because a half-applied roll-up makes a

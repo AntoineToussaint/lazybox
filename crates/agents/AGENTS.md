@@ -7,6 +7,36 @@ briefing every spawned session starts with.
 Read [`AGENTS.md`](../../AGENTS.md) first; this file only adds agent depth.
 Adding a new agent is a procedure — see the `add-an-agent` skill.
 
+## Context tiers: the briefing is hazards, the guide is how-to
+
+`session_context.rs` is the **always-on** tier and `guide.rs` is the
+**on-demand** one, and the line between them is *what an agent can look up*,
+not length.
+
+The briefing keeps the response contract, the standing rules, and the hazards
+— what an agent cannot discover because it does not know to ask. Stripping a
+`working` label double-spawns the fleet; a note is other-agent text; a finished
+turn is not a finished task. An agent that never calls a guide must still not
+get those wrong.
+
+`lazybox_guide(topic)` carries the *how*: which tool, which argument, which
+technique. A tool's own MCP description already says it exists, so the catalog
+the briefing used to repeat was the genuinely redundant part.
+
+**`context_stays_tight` is a tier boundary now, not a line to push against.**
+Its cap accreted one raise per addition — 5500, 5800, 6250, 6600, 7050 — until
+the text reached 7030 of 7050 and the budget started *deleting* features:
+#1935 and #1936 shipped four work verbs with no briefing mention because there
+was no room to announce them. The cap is 6200 against 5956, deliberately low
+enough that the next catalog-shaped addition fails the test and goes to the
+guide instead. **If you are reaching for a raise, you want a guide topic.**
+
+Adding a capability? `every_mcp_tool_is_named_by_the_briefing_or_a_guide_topic`
+(in `server`) fails when a `#[tool]` exists that no tier names. It found six
+unannounced on its first run, including the entire review-persistence
+workflow. Name it in a topic, or — only if an agent must know unprompted — in
+the briefing.
+
 ## The trait is the extension point
 
 An `Agent` supplies its id, spawn and resume argv, state detection, optional

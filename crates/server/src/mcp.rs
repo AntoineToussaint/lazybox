@@ -526,6 +526,14 @@ struct MyWorkArgs {
     include_done: bool,
 }
 
+/// A `lazybox_guide` request.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct LazyboxGuideArgs {
+    /// The topic to read. Omit for the index.
+    #[serde(default)]
+    topic: Option<String>,
+}
+
 /// A `work_status` request.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct WorkStatusArgs {
@@ -2526,6 +2534,29 @@ impl LazyboxMcp {
             self.poll_request_payload(&caller, &args.request_id, now_ms)
                 .await?,
         ))
+    }
+
+    #[tool(
+        description = "How any part of lazybox works, on demand — call this instead of guessing, and instead of carrying it all in every session's opening context. `topic` is one of: `coordination` (notes, notify, ask, answer between sibling sessions), `work` (handing work over with a lifecycle and getting a result back), `epics` (cross-repo status, the ready queue, blockers), `records` (reading issues and PRs without spending the shared GitHub budget), `labels` (the GitHub labels that are live coordination state and must never be stripped), `artifacts` (writing a document lazybox renders in its own reader), `spawning` (handing work to a new agent and picking its model tier). Omit `topic`, or pass one that is not listed, and you get the index — so one call always lands somewhere."
+    )]
+    async fn lazybox_guide(
+        &self,
+        Parameters(args): Parameters<LazyboxGuideArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        // An unknown topic returns the index rather than an error: the caller
+        // asked a reasonable question with the wrong word, and an error would
+        // cost it a turn to learn what the words are.
+        let text = match args
+            .topic
+            .as_deref()
+            .and_then(lazybox_agents::guide::Topic::parse)
+        {
+            Some(topic) => format!("{}\n", topic.body()),
+            None => lazybox_agents::guide::index(),
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     /// The four work verbs all route through `crate::work_calls`, which the
@@ -5176,6 +5207,60 @@ mod tests {
                 "{list} missing from the JSON: {payload}"
             );
         }
+    }
+
+    /// The guard that would have caught #1935 and #1936: four tools shipped
+    /// whose existence no agent-facing text mentioned, because the briefing
+    /// was at 7030 of a 7050-byte cap and there was no room. Now a tool that
+    /// no guide topic names fails here instead of shipping unannounced.
+    #[test]
+    fn every_mcp_tool_is_named_by_the_briefing_or_a_guide_topic() {
+        let source = include_str!("mcp.rs");
+        // Every `#[tool(...)]` attribute is followed by the `async fn` it
+        // decorates; splitting on the attribute is enough and avoids any
+        // index arithmetic over a file full of em dashes.
+        let names: Vec<String> = source
+            .split("#[tool(")
+            .skip(1)
+            .filter_map(|chunk| {
+                let at = chunk.find("async fn ")? + "async fn ".len();
+                let name = chunk[at..].split(['(', '<', ' ']).next()?.trim();
+                // A valid identifier only: the split can otherwise pick up a
+                // fragment from a description that happens to contain the
+                // words, and a phantom name would fail this test forever.
+                let valid = !name.is_empty()
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && name.starts_with(|c: char| c.is_ascii_lowercase());
+                valid.then(|| name.to_string())
+            })
+            .collect();
+        assert!(
+            names.len() >= 25,
+            "the tool scrape found only {} names; it has stopped working: {names:?}",
+            names.len()
+        );
+
+        let briefing = lazybox_agents::session_context::lazybox_mcp_coordination_context();
+        let guide: String = lazybox_agents::guide::Topic::ALL
+            .into_iter()
+            .map(|topic| topic.body())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut unannounced: Vec<&str> = Vec::new();
+        for name in &names {
+            let needle = format!("`{name}`");
+            // `lazybox_guide` itself is named by the briefing's pointer, and a
+            // tool named in either tier is discoverable in one call.
+            if !briefing.contains(&needle) && !guide.contains(&needle) && name != "lazybox_guide" {
+                unannounced.push(name);
+            }
+        }
+        assert!(
+            unannounced.is_empty(),
+            "these tools exist and no agent is ever told so — name them in a \
+             `lazybox_guide` topic (crates/agents/src/guide.rs) or, if an agent must \
+             know unprompted, in the briefing: {unannounced:?}"
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub(crate) mod claude_env;
 /// don't rebuild the path or re-parse the file themselves.
 pub use claude_env::{ambient_model as claude_ambient_model, user_settings_path};
 pub mod detect;
+pub mod guide;
 pub mod hook;
 pub mod hook_settings;
 pub mod pty;

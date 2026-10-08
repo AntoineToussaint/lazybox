@@ -106,7 +106,7 @@ async fn run(args: &[String], verb: Verb) -> anyhow::Result<()> {
 
     let request = match verb {
         Verb::Mine => WorkRequest::Mine {
-            workspace: self_key(workspace.as_deref())?,
+            workspace: self_key(workspace.as_deref()),
             include_done: all,
         },
         Verb::Status => WorkRequest::Status { plan },
@@ -123,7 +123,7 @@ async fn run(args: &[String], verb: Verb) -> anyhow::Result<()> {
                 std::process::exit(2);
             }
             WorkRequest::Create {
-                requester: self_key(workspace.as_deref())?,
+                requester: self_key(workspace.as_deref()),
                 title,
                 brief: brief.unwrap_or_default(),
                 owner: owner.map(lazybox_core::SessionKey::from),
@@ -144,7 +144,7 @@ async fn run(args: &[String], verb: Verb) -> anyhow::Result<()> {
                 std::process::exit(2);
             };
             WorkRequest::Update {
-                by: self_key(workspace.as_deref())?,
+                by: self_key(workspace.as_deref()),
                 id,
                 lifecycle,
                 detail,
@@ -168,7 +168,7 @@ async fn run(args: &[String], verb: Verb) -> anyhow::Result<()> {
                 std::process::exit(2);
             };
             WorkRequest::Update {
-                by: self_key(workspace.as_deref())?,
+                by: self_key(workspace.as_deref()),
                 id,
                 lifecycle: "completed".into(),
                 detail: None,
@@ -204,17 +204,48 @@ async fn run(args: &[String], verb: Verb) -> anyhow::Result<()> {
 
 /// This session's workspace. `--workspace` wins; otherwise
 /// `LAZYBOX_SESSION_KEY`, which lazybox injects at spawn.
-fn self_key(override_key: Option<&str>) -> anyhow::Result<lazybox_core::SessionKey> {
-    override_key
-        .map(str::to_string)
-        .or_else(|| std::env::var("LAZYBOX_SESSION_KEY").ok())
-        .map(|key| key.trim().to_string())
-        .filter(|key| !key.is_empty())
+fn resolve_key(override_key: Option<&str>) -> Option<lazybox_core::SessionKey> {
+    pick_key(
+        override_key,
+        std::env::var("LAZYBOX_SESSION_KEY").ok().as_deref(),
+    )
+}
+
+/// The precedence rule, with the environment passed in rather than read.
+///
+/// Split out so it can be tested without mutating process env: this repo has
+/// lost real time to tests that set a variable and raced the sandbox ctor or
+/// each other (#1737), and the rule is the only part worth testing — reading
+/// one variable is trivially correct. A blank or whitespace-only override
+/// falls through to the environment rather than becoming a workspace named
+/// `"   "`.
+fn pick_key(override_key: Option<&str>, env_key: Option<&str>) -> Option<lazybox_core::SessionKey> {
+    [override_key, env_key]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|key| !key.is_empty())
         .map(lazybox_core::SessionKey::new)
-        .context(
-            "no workspace: run inside a lazybox session (LAZYBOX_SESSION_KEY is injected \
-             automatically) or pass --workspace <key>",
-        )
+}
+
+/// [`resolve_key`], or exit `2`.
+///
+/// Exits rather than returning an `Err`, because an `Err` leaves `main` with
+/// its generic exit `1` — and this command documents `2` for "the call was
+/// wrong" and `1` for "the daemon could not be read". Having no workspace is
+/// squarely the first, and a script that distinguishes them would otherwise be
+/// told to retry something that will never work.
+fn self_key(override_key: Option<&str>) -> lazybox_core::SessionKey {
+    match resolve_key(override_key) {
+        Some(key) => key,
+        None => {
+            println!(
+                "lazybox work: no workspace: run inside a lazybox session \
+                 (LAZYBOX_SESSION_KEY is injected automatically) or pass --workspace <key>"
+            );
+            std::process::exit(2);
+        }
+    }
 }
 
 async fn send(
@@ -561,16 +592,47 @@ mod tests {
 
     #[test]
     fn the_workspace_override_beats_the_injected_env() {
-        // Both are read; the flag has to win, or `--workspace` would be
-        // silently ignored inside a session, which is exactly where it is
-        // needed to act on another row.
+        let env = Some("github:o/r#1");
+        // The flag has to win, or `--workspace` would be silently ignored
+        // inside a session — which is exactly where it is needed, to act on
+        // another row.
         assert_eq!(
-            self_key(Some("github:o/r#9")).expect("key").as_str(),
+            pick_key(Some("github:o/r#9"), env).expect("key").as_str(),
             "github:o/r#9"
         );
-        assert!(
-            self_key(Some("   ")).is_err() || self_key(None).is_ok(),
-            "a blank override must not be taken as a workspace"
+        assert_eq!(pick_key(None, env).expect("key").as_str(), "github:o/r#1");
+    }
+
+    #[test]
+    fn a_blank_override_falls_through_instead_of_naming_a_blank_workspace() {
+        assert_eq!(
+            pick_key(Some("   "), Some("github:o/r#1"))
+                .expect("key")
+                .as_str(),
+            "github:o/r#1"
+        );
+        assert_eq!(
+            pick_key(Some(""), None),
+            None,
+            "and with nothing to fall through to, there is no workspace"
+        );
+        assert_eq!(
+            pick_key(None, Some("  ")),
+            None,
+            "a blank injected value invents nothing either"
+        );
+        assert_eq!(pick_key(None, None), None);
+    }
+
+    #[test]
+    fn a_key_is_trimmed_rather_than_carried_with_its_whitespace() {
+        // A trailing newline from a shell export would otherwise become part
+        // of the workspace key and match no row at all.
+        assert_eq!(
+            pick_key(None, Some("github:o/r#1\n"))
+                .expect("key")
+                .as_str(),
+            "github:o/r#1"
         );
     }
 

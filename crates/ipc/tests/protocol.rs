@@ -381,6 +381,13 @@ fn all_commands() -> Vec<Command> {
             default_repo: Some("o/r".into()),
             client_request_id: Some("req-1".into()),
         },
+        Command::WorkCall {
+            request: lazybox_ipc::work::WorkRequest::Mine {
+                workspace: key.clone(),
+                include_done: false,
+            },
+            client_request_id: Some("req-work".into()),
+        },
         Command::SetMetered {
             session_key: key.clone(),
             enabled: true,
@@ -1652,6 +1659,33 @@ fn all_events() -> Vec<Event> {
                 absorbed: vec!["github-o-r-40".into()],
             }],
         },
+        Event::WorkReport {
+            client_request_id: Some("req-work".into()),
+            result: Ok(lazybox_ipc::work::WorkReport::Mine {
+                workspace: "github:o/r#1".into(),
+                mine: vec![lazybox_ipc::work::WorkRow {
+                    id: "1b4e28ba-2fa1-11d2-883f-0016d3cca427".into(),
+                    title: "wire the store".into(),
+                    brief: "objective · done · bounds".into(),
+                    lifecycle: "underway".into(),
+                    detail: None,
+                    owner: Some("github:o/r#1".into()),
+                    requester: Some("human".into()),
+                    plan: None,
+                    parent: None,
+                    links: vec!["ws:github:o/r#1".into(), "o/r#7".into()],
+                    result: None,
+                    events: 2,
+                    last_event: Some(lazybox_ipc::work::WorkEventView {
+                        at: "2026-10-08T18:00:00Z".into(),
+                        by: Some("human".into()),
+                        change: "pending → underway".into(),
+                    }),
+                }],
+                waiting_on_others: Vec::new(),
+                unassigned: Vec::new(),
+            }),
+        },
     ]
 }
 
@@ -1692,6 +1726,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
         Command::SetTrackMain { .. } => "SetTrackMain",
         Command::QueryTaskStatus { .. } => "QueryTaskStatus",
+        Command::WorkCall { .. } => "WorkCall",
         Command::SetMetered { .. } => "SetMetered",
         Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
         Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
@@ -1899,6 +1934,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentOutputMatches { .. } => "AgentOutputMatches",
         Event::WorkspaceArtifacts { .. } => "WorkspaceArtifacts",
         Event::ArchivedWorkspaces { .. } => "ArchivedWorkspaces",
+        Event::WorkReport { .. } => "WorkReport",
     }
 }
 
@@ -1910,12 +1946,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        112,
+        113,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        117,
+        118,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

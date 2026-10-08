@@ -30,6 +30,7 @@ pub mod port_forward;
 pub mod socket;
 pub mod task_status;
 pub mod transport;
+pub mod work;
 
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
@@ -2559,6 +2560,20 @@ pub enum Command {
         workspace_key: lazybox_core::WorkspaceKey,
         items: Vec<lazybox_core::TodoItem>,
     },
+    /// Read or move the task/plan store (#1935). One command for every verb,
+    /// because the CLI twin and the MCP tools must reach the same code: a
+    /// second path would diverge the first time either was edited, which is
+    /// the lesson [`Command::QueryTaskStatus`] already carries.
+    ///
+    /// The answer comes back as [`Event::WorkReport`] correlated by
+    /// `client_request_id`. The acting party rides inside
+    /// [`work::WorkRequest`] rather than being inferred here, so provenance
+    /// comes from the channel that knows it. Appended last (bincode is
+    /// ordinal-sensitive).
+    WorkCall {
+        request: work::WorkRequest,
+        client_request_id: Option<String>,
+    },
 }
 
 /// How a branch-namespace collision should be cleared (#1742). Both arms
@@ -4176,6 +4191,24 @@ pub enum Event {
     /// refreshes (#1824). Appended last (bincode is ordinal-sensitive).
     ArchivedWorkspaces {
         records: Vec<ArchivedWorkspaceRecord>,
+    },
+    /// Reply to [`Command::WorkCall`] (#1935): what the task/plan store says,
+    /// or why it could not say it.
+    ///
+    /// Sent on the asking connection rather than the bus. The reply belongs to
+    /// one invocation, and a lagging subscriber's dropped event would leave a
+    /// `lazybox work` command hanging for its whole timeout —
+    /// [`Event::GhShimReply`] made the same call for the same reason.
+    ///
+    /// `Err` means the call could not be *answered*: a malformed request, or a
+    /// store the daemon could not read. Work that does not exist, a plan with
+    /// nothing on it and a refused transition are all successful reports whose
+    /// content says so, because a caller must never have to read "there is no
+    /// such work" out of a failure. Appended last (bincode is
+    /// ordinal-sensitive).
+    WorkReport {
+        client_request_id: Option<String>,
+        result: Result<work::WorkReport, work::WorkError>,
     },
 }
 

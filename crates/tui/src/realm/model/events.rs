@@ -1449,8 +1449,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // on the asking connection, so this never reaches a TUI client.
                 // The arm exists because `Event` is one shared exhaustive enum.
                 | IpcEvent::TaskStatus { .. }
-                // Same for the `gh` shim's admission/ack replies (#1801).
+                // Same for the `gh` shim's admission/ack replies (#1801) and
+                // the work store's (#1935).
                 | IpcEvent::GhShimReply { .. }
+                | IpcEvent::WorkReport { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2650,8 +2652,10 @@ impl<T: TerminalAdapter> Model<T> {
             // on the asking connection, so this never reaches a TUI client.
             // The arm exists because `Event` is one shared exhaustive enum.
             | IpcEvent::TaskStatus { .. }
-            // Same for the `gh` shim's admission/ack replies (#1801).
+            // Same for the `gh` shim's admission/ack replies (#1801) and
+            // the work store's (#1935).
             | IpcEvent::GhShimReply { .. }
+            | IpcEvent::WorkReport { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -3037,8 +3041,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // on the asking connection, so this never reaches a TUI client.
                 // The arm exists because `Event` is one shared exhaustive enum.
                 | IpcEvent::TaskStatus { .. }
-                // Same for the `gh` shim's admission/ack replies (#1801).
+                // Same for the `gh` shim's admission/ack replies (#1801) and
+                // the work store's (#1935).
                 | IpcEvent::GhShimReply { .. }
+                | IpcEvent::WorkReport { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

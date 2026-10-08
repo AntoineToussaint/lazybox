@@ -231,6 +231,7 @@ mod terminal_commands;
 mod terminal_io;
 #[cfg(test)]
 mod test_env;
+pub mod work_store;
 mod working_claims;
 mod working_watchdog;
 pub mod workspace;

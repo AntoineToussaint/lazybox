@@ -166,8 +166,8 @@ lazybox armed it.
 not a wrapper around repo actions. Spawned sessions get a per-session bearer
 and a loopback `rmcp` endpoint (identity is the connection) exposing
 `whoami` / `list_sessions` / `read_session`, the `post_note` / `read_notes`
-blackboard, `notify_session`, `task_status`, the epic tools, and
-`spawn_worker`. Agents drive `git` and `gh` directly; adding an approval layer
+blackboard, `notify_session`, `task_status`, the epic tools, the work-store
+verbs (below) and `spawn_worker`. Agents drive `git` and `gh` directly; adding an approval layer
 around those is a design change, not a fix. Design:
 [`docs/mcp-coordination.md`](../../docs/mcp-coordination.md).
 
@@ -199,6 +199,41 @@ the provider — and `Err` is reserved for status that could not be *established
 so a failed lookup can never read as "no worker". The same derivation backs
 `lazybox task status <ref>` over `Command::QueryTaskStatus`, which is the
 documented fallback for a session that gets no MCP tools.
+
+## The work store: declared intent, not observed liveness
+
+`work_store.rs` persists `lazybox_core::work` — the task/plan rows
+`docs/agent-coordination-v2.md` names as the shared plan — under the `work:`
+and `plan:` kv prefixes, and `create_work` / `my_work` / `update_work` /
+`work_status` in `mcp.rs` are its agent-facing verbs. A handoff made through
+them is a row with a requester, a lifecycle, a result and a provenance
+history, which is what `notify_session` cannot be: that reports only that text
+landed.
+
+**`Lifecycle` is the third state enum here and must not be confused with the
+other two.** `AgentState` is liveness *observed* from the PTY and the hooks;
+`lazybox_core::TaskState` is the *tracker record's* state, owned by the
+provider; `Lifecycle` is what whoever owns the work *declares*. They disagree
+routinely and neither is wrong when they do — an agent at a permission prompt
+is `InputNeeded` while its task is legitimately `Underway`. So a `Lifecycle`
+never moves on an `AgentState` change alone.
+
+**The exception is a sweep, not a hook, and that is the whole design.** Work
+whose agent is gone has to fail, or it reads as in flight forever to whoever
+is waiting. But `AgentState::Exited` is the wrong trigger: `Shift-K`,
+auto-fix, `a c` and credit recovery all tear a terminal down and spawn a
+replacement, so failing on teardown would fail the work of every agent lazybox
+itself restarted. `sweep_stranded` instead fails `Underway` work whose owner
+workspace has had no live agent for `STRANDED_GRACE`, once a minute. If you
+are tempted to move this onto the exit path, that is the regression.
+
+Two other things follow the store's rules rather than their own: multi-row
+writes go through `Store::apply_batch`, because a half-applied roll-up makes a
+progress bar disagree with the tasks it counts; and auto-check on merge rides
+`workspace::check_todo_items_linked_to`, the one call site #1898 already had,
+so the per-workspace checklist and the plan rows cannot disagree about
+whether a record landed. The `todo_items` field is **not** yet folded into
+these rows — the TUI's TODO list still reads it.
 
 ## Working claims: a label for presence, a comment for identity
 

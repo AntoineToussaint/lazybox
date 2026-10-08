@@ -324,14 +324,42 @@ Each phase ships on its own and is useful alone.
    shared plan phases 3–4 subscribe to, and records the decision that the store
    is a follow-up which must land before phase 3 starts.
 
-   The store's **model** is now `lazybox_core::work`: `WorkId`/`PlanId` (uuid,
+   The store's **model** is `lazybox_core::work`: `WorkId`/`PlanId` (uuid,
    sanitizer-safe), `Party`, `Link`, `Lifecycle` with terminal states that
    refuse further work, `Task` with provenance history, progress roll-up over
    the tree, auto-completion by link, and `plan_members` for the
-   `anchor: None` epic projection. It is **not wired**: nothing reads or writes
-   these rows yet, and #1898's `todo_items` has not been folded into them — that
-   fold is the second migration of the same data #1898 already called out.
-   `WORK_KEY_PREFIX` / `PLAN_KEY_PREFIX` are the kv prefixes it will use.
+   `anchor: None` epic projection.
+
+   The store is now **wired** (`crates/server/src/work_store.rs`): rows persist
+   under the `work:` / `plan:` kv prefixes, multi-row writes go through
+   `apply_batch` so a roll-up never half-lands, and an undecodable row is
+   skipped and counted rather than failing a listing. Four agent-facing verbs
+   ship with it — `create_work`, `my_work`, `update_work`, `work_status` —
+   named `work` rather than the doc's `task` because `task` is already the tool
+   that reads the *tracker record*, which is exactly the confusion the model's
+   own naming rule exists to avoid. Phase 3's collapse to ~8 tools must subsume
+   these four rather than add to them.
+
+   Three automatic transitions are wired:
+
+   - **Auto-check on merge/close** rides the one call site #1898 already had
+     (`workspace::check_todo_items_linked_to`), so the per-workspace checklist
+     and the plan rows can never disagree about whether a record landed.
+   - **A stranded task fails.** `AgentState::Exited` is deliberately *not* the
+     trigger: lazybox replaces agents constantly and on purpose (`Shift-K`,
+     auto-fix, `a c`, credit recovery), and each replacement is an exit
+     followed by a spawn, so failing on teardown would fail the work of every
+     agent lazybox itself restarted. A one-minute sweep fails `Underway` work
+     whose owner workspace has had no live agent for `STRANDED_GRACE` (10
+     minutes) instead.
+   - **A result reaches its requester.** Completing work another agent asked
+     for delivers a short notice through the one delivery owner, so the
+     requester does not poll.
+
+   Still open from phase 1: #1898's `todo_items` has **not** been folded into
+   these rows — that fold is the second migration of the same data #1898
+   already called out, and the TUI's TODO list still reads the `Workspace`
+   field. The CLI twin for non-MCP agents is phase 3's.
 2. **Delivery + results.** The single delivery owner with receipts;
    `complete_task`; keep the Stop hook's content; tasks for `w w`, ask and
    auto-fix; fix the ask race and per-repo rules as part of it. Adding the

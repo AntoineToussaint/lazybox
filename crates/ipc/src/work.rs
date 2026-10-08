@@ -78,10 +78,13 @@ pub struct WorkRow {
     pub requester: Option<String>,
     pub plan: Option<String>,
     pub parent: Option<String>,
-    /// Links as a caller may pass them back: `ws:<key>` for a workspace,
-    /// `owner/repo#N` for a tracker record, a URL. The prefix is kept because
-    /// a workspace key and its tracker record are the same string and mean
-    /// different things.
+    /// Links in the form a caller may pass straight back — the `ws:` prefix
+    /// for a workspace, `<source>:<key>` for a tracker record, a URL — and the
+    /// round trip is a tested property, not an aspiration: a rendering that
+    /// did not parse back silently produced a *different* link, and the merge
+    /// auto-check matches a link exactly, so the row it was on was never
+    /// ticked off. The prefix is kept because a workspace key and its tracker
+    /// record are the same string and mean different things.
     pub links: Vec<String>,
     pub result: Option<WorkResultView>,
     /// How many transitions this row has recorded. The history itself is not

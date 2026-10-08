@@ -651,6 +651,16 @@ pub fn parse_lifecycle(name: &str, detail: Option<&str>) -> Result<Lifecycle, Wo
 /// and its tracker record render identically (`github:owner/repo#7` is both)
 /// and mean different things: `plan_members` reads workspace links, the
 /// auto-check on merge reads tracker links.
+///
+/// A source-prefixed tracker reference (`github:acme/widget#7`) is built
+/// directly rather than re-parsed, because **that is the form this code prints
+/// back** — `TaskId`'s `Display` is `{source}:{key}` — and
+/// `parse_task_ref` does not understand it: it splits on the first `#`, so the
+/// prefix ends up inside the key and the reference round-trips to
+/// `github:github:acme/widget#7`. That failure is silent and it disables the
+/// feature it touches, because `complete_linked_to` matches a link exactly: a
+/// row carrying the doubled form is never ticked off when the real record
+/// merges. `link_round_trips_through_its_own_rendering` is the regression.
 pub fn parse_link(raw: &str) -> Result<Link, WorkError> {
     let raw = raw.trim();
     if let Some(key) = raw.strip_prefix("ws:") {
@@ -660,6 +670,9 @@ pub fn parse_link(raw: &str) -> Result<Link, WorkError> {
             ));
         }
         return Ok(Link::Workspace(WorkspaceKey::new(key)));
+    }
+    if let Some(id) = source_prefixed(raw) {
+        return Ok(Link::Tracker(id));
     }
     if let Some(id) = lazybox_core::task_ref::parse_task_ref(raw, None) {
         return Ok(Link::Tracker(id));
@@ -671,6 +684,25 @@ pub fn parse_link(raw: &str) -> Result<Link, WorkError> {
         "cannot read {raw:?} as a link — use `owner/repo#N` or an issue URL for a tracker \
          record, `ws:<workspace key>` for a workspace, or an http(s) URL"
     )))
+}
+
+/// A tracker reference already carrying its provider, exactly as
+/// [`link_label`] renders one. Only the canonical sources are accepted, so an
+/// arbitrary `foo:bar` still falls through to the parser and then to the error
+/// rather than minting a link against a provider that does not exist.
+fn source_prefixed(raw: &str) -> Option<lazybox_core::TaskId> {
+    let (source, key) = raw.split_once(':')?;
+    if key.is_empty() {
+        return None;
+    }
+    let known = [
+        lazybox_core::provider::GITHUB_SOURCE,
+        lazybox_core::provider::LINEAR_SOURCE,
+    ];
+    known.contains(&source).then(|| lazybox_core::TaskId {
+        source: source.to_string(),
+        key: key.to_string(),
+    })
 }
 
 fn parse_work_id(raw: &str) -> Result<WorkId, WorkError> {
@@ -869,6 +901,67 @@ mod tests {
         ));
         assert!(parse_link("ws:").is_err());
         assert!(parse_link("not a reference").is_err());
+    }
+
+    /// Found by running the CLI, not by reading the code: a link printed by
+    /// `link_label` was not readable by `parse_link`, so feeding a row's own
+    /// link back produced a *different* link — silently, and the auto-check
+    /// then never fired for that row.
+    #[test]
+    fn link_round_trips_through_its_own_rendering() {
+        for raw in [
+            "acme/widget#7",
+            "ws:github:acme/widget#7",
+            "https://example.test/doc",
+            "ENG-45",
+        ] {
+            let once = parse_link(raw).expect(raw);
+            let printed = link_label(&once);
+            let twice = parse_link(&printed).unwrap_or_else(|error| {
+                panic!("{raw} printed as {printed} and would not parse back: {error}")
+            });
+            assert_eq!(once, twice, "{raw} printed as {printed}");
+            assert_eq!(
+                link_label(&twice),
+                printed,
+                "{raw} is not stable under a second round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_prefixed_tracker_reference_is_not_double_prefixed() {
+        let link = parse_link("github:acme/widget#7").expect("prefixed");
+        assert_eq!(
+            link,
+            Link::Tracker(lazybox_core::TaskId {
+                source: "github".into(),
+                key: "acme/widget#7".into(),
+            })
+        );
+        // The bug: the key must not have swallowed the prefix, or the merge
+        // auto-check will look for a record that does not exist.
+        assert_eq!(link_label(&link), "github:acme/widget#7");
+    }
+
+    #[test]
+    fn a_prefixed_reference_and_a_bare_one_are_the_same_link() {
+        // Otherwise a user who copies the printed form and a user who types
+        // the short form create two rows that both look right and only one of
+        // which the merge auto-check will ever tick off.
+        assert_eq!(
+            parse_link("github:acme/widget#7").expect("prefixed"),
+            parse_link("acme/widget#7").expect("bare")
+        );
+    }
+
+    #[test]
+    fn an_unknown_source_prefix_is_refused_not_minted() {
+        assert!(
+            parse_link("jira:PROJ-1").is_err(),
+            "a provider that does not exist must not get a link minted against it"
+        );
+        assert!(parse_link("github:").is_err());
     }
 
     #[test]

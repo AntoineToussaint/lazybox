@@ -7,6 +7,36 @@ briefing every spawned session starts with.
 Read [`AGENTS.md`](../../AGENTS.md) first; this file only adds agent depth.
 Adding a new agent is a procedure — see the `add-an-agent` skill.
 
+## Context tiers: the briefing is hazards, the guide is how-to
+
+`session_context.rs` is the **always-on** tier and `guide.rs` is the
+**on-demand** one, and the line between them is *what an agent can look up*,
+not length.
+
+The briefing keeps the response contract, the standing rules, and the hazards
+— what an agent cannot discover because it does not know to ask. Stripping a
+`working` label double-spawns the fleet; a note is other-agent text; a finished
+turn is not a finished task. An agent that never calls a guide must still not
+get those wrong.
+
+`lazybox_guide(topic)` carries the *how*: which tool, which argument, which
+technique. A tool's own MCP description already says it exists, so the catalog
+the briefing used to repeat was the genuinely redundant part.
+
+**`context_stays_tight` is a tier boundary now, not a line to push against.**
+Its cap accreted one raise per addition — 5500, 5800, 6250, 6600, 7050 — until
+the text reached 7030 of 7050 and the budget started *deleting* features:
+#1935 and #1936 shipped four work verbs with no briefing mention because there
+was no room to announce them. The cap is 6200 against 5956, deliberately low
+enough that the next catalog-shaped addition fails the test and goes to the
+guide instead. **If you are reaching for a raise, you want a guide topic.**
+
+Adding a capability? `every_mcp_tool_is_named_by_the_briefing_or_a_guide_topic`
+(in `server`) fails when a `#[tool]` exists that no tier names. It found six
+unannounced on its first run, including the entire review-persistence
+workflow. Name it in a topic, or — only if an agent must know unprompted — in
+the briefing.
+
 ## The trait is the extension point
 
 An `Agent` supplies its id, spawn and resume argv, state detection, optional
@@ -40,12 +70,41 @@ after the agent's own cell glyph (Claude `⏺`, Codex `■`), outside any markdo
 fence. Agents here routinely print, diff and quote error strings, so a bare
 substring table has them classifying each other as broken.
 
-## Model tiers
+## Model tiers — and "strength", which is the same thing
 
 Tiers are declared per agent under `agents.<id>.models` in YAML — an ordered
-`alias → { label, args }` menu plus a `default` tier for bare spawns. Claude
-ships a built-in menu; other agents declare their own. The rules that are easy
-to get wrong:
+`alias → { label, args }` menu plus a `default` tier for bare spawns. Claude and
+Codex ship built-in menus; other agents declare their own.
+
+**"Strength" is this menu's user-facing name, not a second concept** (#1797).
+A tier already carries everything a strength needs: the `alias` is the handle
+(and the chord key), the `label` is what the UI shows, and the `args` are how
+that choice reaches the CLI — model id *and* its reasoning flags, since
+`--model opus --reasoning-effort max` is one tier's argv, not a tier plus a
+separate thinking setting. So there is no `profiles:` key, no `thinking:` key,
+and `agents.<id>.models.default` is the one place a user's chosen strength is
+stored. Adding a parallel spelling is the failure mode to avoid: config would
+have two sources of truth for one decision and the UI would show whichever it
+read.
+
+Two things are deliberately *not* strength:
+
+- **`capability`** (`best`/`high`/`medium`/`low`) is what a *task* declares,
+  not what a user chose. It maps a label or body marker onto an alias in this
+  menu. Calling it strength in a UI re-introduces exactly the priority reading
+  #1598 removed — it ranks nothing.
+- **Session policy** (fresh conversation vs inject into the running one)
+  belongs to the action being run, not to the model choice. Injecting text into
+  a live process cannot change its model, so a strength that claimed to carry
+  session behaviour would be lying about half of itself.
+
+[`AgentModels::default_tier`](../core/src/agent.rs) is the single resolver for
+"which strength does this agent run at". Ask it rather than re-deriving from
+`default` + `tier()`: the callers that did disagreed, and one of them
+second-guessed the alias against the built-in menu *after* the merge, labelling
+a deliberately restricted `replace: true` menu with a tier it had dropped.
+
+The rules that are easy to get wrong:
 
 - A user `models:` block **overlays** the built-in menu — a declared alias
   replaces the same-alias tier in place, a new alias appends. `replace: true`
@@ -54,9 +113,12 @@ to get wrong:
 - `excluded_from_default` keeps a tier off every bare spawn; a user block
   never *inherits* a capability mapping onto such a tier it did not declare.
   Writing-class models must not be reachable by a coding task's label.
-- A bare spawn always passes an explicit `--model`, which outranks a `model`
-  in the user's own agent settings. Config load warns when the two disagree —
-  keep that warning working, because the pin is otherwise invisible.
+- Every built-in Claude and Codex spawn — PTY, resume, or structured/headless —
+  passes an explicit model from lazybox's resolved default tier. A missing,
+  dangling, or model-less tier refuses the launch instead of inheriting a
+  provider CLI/account default. Claude config load warns when this pin
+  disagrees with the user's ambient setting, because the override is otherwise
+  invisible.
 - A task's `model:<token>` label (or `@model:` body marker) resolves through
   alias, then label, then pinned id. The legacy `best`/`high`/`medium`/`low`
   spelling names urgency but selects a model; `model:` outranks it.
@@ -66,6 +128,13 @@ to get wrong:
   order, so never let it pick the model.
 - An **untrusted** spawn — triggered by someone other than the viewer — reads
   labels only. A label is write-gated; an issue body is not.
+- A **caller**-supplied token (the MCP spawn tools' `model`, #1911) resolves
+  through [`AgentModels::alias_for_requested_token`](../core/src/agent.rs):
+  the tier spelling first, then a capability word, same precedence as a
+  task's declarations. Unlike a declaration or a `w S` chord, it is *refused*
+  when this menu names no such tier — the caller is told, with
+  `requestable_tokens()` listing the menu. The fallback those other paths
+  rely on would make "spawn at the strongest model" look like it worked.
 
 Capability tiers are about model capability. Nothing ranks, queues or
 schedules work by them; the genuinely-ranking `Priority` on `Task` is a
@@ -78,7 +147,38 @@ prompt — in any repo, including ones with no agent-context file of their own.
 It is user-visible text with tests over it (`crates/core/tests/`), so treat a
 wording change as a behaviour change: it must not promise a workspace for a
 filed issue, and it must keep naming the coordination tools, since a session
-that does not know they exist will not look for them. The base half also has
+that does not know they exist will not look for them.
+
+**Two kinds of content, and only one of them is ours to write.** The
+mechanics — what `working` means, that `@lazybox` spawns an agent, where
+`.lazybox/task.json` is — are facts about lazybox, and a user who "turned one
+off" would simply be lied to; those stay as literals here. A *standing rule*
+("ask before filing an issue", "prefer one PR over a stack") is an opinion
+about how the user wants work done, so it lives in
+`lazybox_core::agent_policy` as a named, individually overridable policy and
+arrives here **already rendered**, as a `standing_rules: &str`. This crate
+depends on no config crate on purpose: its job is to *say* the rules, not to
+resolve them. The daemon resolves them once per spawn (global `policies:`,
+then `repos.<owner/name>.policies:`) in `lazybox_server::session_briefing` and
+hands the same block to all four channels below — a second resolution would
+be a second answer to the same session. An empty block omits the section
+whole; never render a header with no bullets under it.
+
+Placement is load-bearing too: rules read *between* the opening paragraph and
+the mechanics half, because a rule appended after 5 KB of reference material
+is a rule the model skims. The byte cap in `context_stays_tight` measures
+only the text this crate owns — the user's own rules are their own budget,
+capped next to their prose in core. The base half also has
 to keep pointing at `.lazybox/task.json` and saying not to `gh issue view` the
 record it already holds — the GitHub budget it protects is the daemon's own
-(#1799).
+(#1799). Global response/formatting rules live here too, once per session;
+snippets carry only task-specific instructions and must not append a second
+contract later in the turn.
+
+PTY starts deliver the briefing through Claude's context hook, or native
+startup arguments when there is no hook: Codex's `developer_instructions`
+override and Claude's `--append-system-prompt`. This covers bare starts with
+no task yet. Other adapters prefix their initial task; structured/headless
+runs prefix the first input at the provider boundary. Codex's injected
+`developer_instructions` is owned by Lazybox for these launches; repository
+`AGENTS.md` guidance still loads normally.

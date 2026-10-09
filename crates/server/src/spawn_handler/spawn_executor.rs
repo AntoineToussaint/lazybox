@@ -153,11 +153,22 @@ pub(super) async fn execute_spawn_plan(
     if hook_settings.is_some()
         && let Some(exe) = hook_exe()
     {
+        // The workspace's repo rides the hook command so the SessionStart
+        // briefing states THIS repo's standing rules, not only the box-wide
+        // ones (the hook runs out of band and cannot look the repo up).
+        let workspace = super::load_workspace(
+            config,
+            &lazybox_core::WorkspaceKey::new(session_key.as_str()),
+        )
+        .ok();
+        let repo = workspace
+            .as_ref()
+            .and_then(lazybox_core::Workspace::repo_slug);
         let _ = write_hook_settings(
             config,
             &kind,
             terminal_id,
-            &hook_command(&exe, &backend_key, flags.mcp_wired),
+            &hook_command(&exe, &backend_key, flags.mcp_wired, repo.as_deref()),
         );
     }
     if flags.uses_argv_hooks {

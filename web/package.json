@@ -3,7 +3,7 @@
   "type": "module",
   "version": "0.1.0",
   "private": true,
-  "description": "Marketing homepage for lazybox — a reactive PR inbox in your terminal.",
+  "description": "Marketing homepage for lazybox \u2014 a reactive PR inbox in your terminal.",
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
@@ -14,10 +14,10 @@
   },
   "dependencies": {
     "@astrojs/check": "^0.9.10",
-    "@astrojs/markdown-remark": "7.3.0",
+    "@astrojs/markdown-remark": "7.3.1",
     "@astrojs/sitemap": "^3.7.4",
-    "@astrojs/starlight": "^0.42.0",
-    "astro": "^7.2.9",
+    "@astrojs/starlight": "^0.42.5",
+    "astro": "^7.3.8",
     "typescript": "^6.0.3"
   },
   "overrides": {
@@ -25,9 +25,10 @@
       "yaml": "^2.8.3"
     },
     "js-yaml": "4.3.2",
-    "fast-uri": "^3.1.7"
+    "fast-uri": "^3.1.7",
+    "postcss-selector-parser": "^7.1.6"
   },
   "devDependencies": {
-    "lighthouse": "13.4.1"
+    "lighthouse": "13.5.0"
   }
 }

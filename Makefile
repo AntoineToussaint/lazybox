@@ -30,23 +30,26 @@ else ifeq ($(UNAME_M),x86_64)
 else
   HOST_ARCH := unknown
 endif
-# Single source of truth, shared with scripts/bootstrap.sh and CI.
+# Single sources of truth, shared with scripts/bootstrap.sh and CI.
 ZIG_VERSION := $(shell cat .zig-version)
+CARGO_DENY_VERSION := $(shell cat .cargo-deny-version)
 ZIG_SLUG := $(HOST_ARCH)-$(HOST_OS)-$(ZIG_VERSION)
 # Pinned zig lives in a HOST-LEVEL cache, not inside the checkout, so
 # every clone and worktree shares one download. Override the cache
 # root with `LAZYBOX_ZIG_CACHE` (forwarded to bootstrap.sh by `setup`).
 ZIG_CACHE ?= $(HOME)/.cache/lazybox/zig
 GHOSTTY_CACHE ?= $(HOME)/.cache/lazybox/ghostty
+CARGO_DENY_CACHE ?= $(HOME)/.cache/lazybox/cargo-deny
 CACHE_ZIG_DIR := $(ZIG_CACHE)/$(ZIG_SLUG)
+CARGO_DENY_DIR := $(CARGO_DENY_CACHE)/$(CARGO_DENY_VERSION)/bin
 # Resolve zig from either a per-worktree local install or the shared
 # cache. A local vendor/zig wins when present (lets a worktree pin its
 # own zig); otherwise use the cache `setup` populates.
 LOCAL_ZIG_DIR := vendor/zig/$(ZIG_SLUG)
 ZIG_DIR := $(if $(wildcard $(LOCAL_ZIG_DIR)/zig),$(LOCAL_ZIG_DIR),$(CACHE_ZIG_DIR))
-PINNED_PATH := $(abspath $(ZIG_DIR)):$(PATH)
+PINNED_PATH := $(abspath $(CARGO_DENY_DIR)):$(abspath $(ZIG_DIR)):$(PATH)
 
-.PHONY: all setup build release run run-perf run-fresh run-test run-connect dev dev-fresh desktop desktop-deps desktop-preview desktop-build desktop-test desktop-contract web-control-contract contracts rebase-main test lint clean distclean install install-hooks help
+.PHONY: all setup build release release-gates cut-release run run-perf run-fresh run-test run-connect dev dev-fresh desktop desktop-deps desktop-preview desktop-build desktop-test desktop-contract web-control-contract contracts rebase-main test lint clean distclean install install-hooks help
 
 # Side-by-side dev profile root. Picked up by `lazybox_core::paths`
 # everywhere — independent state.db, worktrees, daemon socket, tmux
@@ -61,9 +64,13 @@ help: ## Show this help
 
 all: setup build ## Setup dependencies and build
 
-setup: ## Prepare pinned Zig, Ghostty, and Cargo caches for offline builds (network used once).
+setup: ## Prepare pinned Zig, Ghostty, cargo-deny, and Cargo caches (network used once).
 	@command -v cargo >/dev/null || { echo "Error: cargo not found. Install Rust: https://rustup.rs"; exit 1; }
-	@LAZYBOX_ZIG_CACHE="$(ZIG_CACHE)" LAZYBOX_GHOSTTY_CACHE="$(GHOSTTY_CACHE)" LAZYBOX_PREFETCH_BUILD=1 ./scripts/bootstrap.sh
+	@LAZYBOX_ZIG_CACHE="$(ZIG_CACHE)" \
+		LAZYBOX_GHOSTTY_CACHE="$(GHOSTTY_CACHE)" \
+		LAZYBOX_CARGO_DENY_CACHE="$(CARGO_DENY_CACHE)" \
+		LAZYBOX_INSTALL_RELEASE_TOOLS=1 \
+		LAZYBOX_PREFETCH_BUILD=1 ./scripts/bootstrap.sh
 	@command -v gh >/dev/null || echo "warning: gh not found — --test works, but GitHub-backed runs need the GitHub CLI or GH_TOKEN"
 
 build: ## Build lazybox (debug). Uses pinned zig.
@@ -71,6 +78,24 @@ build: ## Build lazybox (debug). Uses pinned zig.
 
 release: ## Build lazybox optimized, strictly offline (run `make setup` once first).
 	@PATH="$(PINNED_PATH)" LAZYBOX_GHOSTTY_CACHE="$(GHOSTTY_CACHE)" LAZYBOX_OFFLINE=1 CARGO_NET_OFFLINE=true cargo build --offline --locked -p lazybox-tui-boot --release
+
+release-gates: ## Run every automatable source/web gate required before a release.
+	@bash scripts/cut-release_test.sh
+	@$(MAKE) fmt-check
+	@$(MAKE) pre-commit
+	@PATH="$(PINNED_PATH)" cargo nextest run --workspace --profile ci
+	@PATH="$(PINNED_PATH)" cargo deny check advisories bans licenses sources
+	@PATH="$(PINNED_PATH)" cargo check --manifest-path $(DESKTOP_MANIFEST) --all-targets --locked
+	@npm --prefix web ci
+	@npm --prefix web run check
+	@npm --prefix web run build
+	@npm --prefix web run lighthouse
+
+cut-release: ## Validate a release; publish with PUBLISH=1 MANUAL_CHECKS_CONFIRMED=1.
+	@test -n "$(VERSION)" || { echo "Error: VERSION=x.y.z is required"; exit 1; }
+	@./scripts/cut-release.sh "$(VERSION)" \
+		$(if $(filter 1,$(PUBLISH)),--publish,) \
+		$(if $(filter 1,$(MANUAL_CHECKS_CONFIRMED)),--manual-checks-confirmed,)
 
 # `make run` accepts args via ARGS=... (`make run ARGS="--fresh"`).
 # Convenience targets below shorten the common cases.
@@ -154,6 +179,14 @@ rebase-main: ## Rebase the current branch onto origin/main, auto-regenerating th
 
 test: ## Run all tests (cargo-nextest enforces a 10s per-test deadline).
 	@PATH="$(PINNED_PATH)" cargo nextest run --workspace
+
+bench: ## Wall-clock numbers for the terminal/UI hot paths (#1919). Run on a QUIET box — state the load average alongside any figure you quote.
+	@uptime
+	@PATH="$(PINNED_PATH)" cargo bench -p lazybox-tui --bench terminal_feed --bench client_hot_paths
+
+bench-cpu: ## Per-call CPU time of the hot-path VT calls. Load-robust (CLOCK_THREAD_CPUTIME_ID), so usable on a busy shared box — unlike `make bench`.
+	@uptime
+	@PATH="$(PINNED_PATH)" cargo bench -p lazybox-tui --bench vt_call_cost
 
 test-ignored: ## Run #[ignore]'d real-backend integration tests on demand.
 	@PATH="$(PINNED_PATH)" cargo nextest run --workspace --run-ignored only

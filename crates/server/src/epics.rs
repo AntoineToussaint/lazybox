@@ -32,6 +32,7 @@ use lazybox_ipc::{
     AgentState, Blocker, BlockerKind, BlockerOwner, EdgeKind, EpicDelta, EpicEdge, EpicMember,
     EpicMemberStatus, EpicSnapshot, Event, MergeOrderEntry,
 };
+use lazybox_store::StoreMutation;
 use tokio::sync::broadcast;
 
 use crate::ServerConfig;
@@ -223,6 +224,132 @@ pub fn clear_declared(config: &ServerConfig, workspace: &str) -> Result<(), Stri
         .store
         .delete_kv(&declared_storage_key(workspace))
         .map_err(|e| e.to_string())
+}
+
+/// The store mutations that move every declared blocker on `from` onto
+/// `into` — the issue→PR fold's half of the blocker's life.
+///
+/// Returned rather than applied so the caller commits them in the *same*
+/// transaction as the workspace fold itself. Applying them separately leaves a
+/// crash window in which the issue row is gone and its blocker is either lost
+/// or duplicated; the blocker must move exactly when the work does.
+///
+/// Blockers already declared on `into` are merged in, never overwritten: the
+/// oldest declaration wins and the reasons are joined, so the fold cannot
+/// silently drop one.
+pub fn absorb_declared_mutations(
+    config: &ServerConfig,
+    from: &[WorkspaceKey],
+    into: &WorkspaceKey,
+) -> Vec<StoreMutation> {
+    let mut candidates = Vec::new();
+    let mut mutations = Vec::new();
+    for key in from {
+        match load_declared(config, key.as_str()) {
+            Ok(Some(blocker)) => {
+                candidates.push(blocker);
+                mutations.push(StoreMutation::DeleteKv {
+                    key: declared_storage_key(key.as_str()),
+                });
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("epics: reading declared blocker for {key} failed: {e}"),
+        }
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    match load_declared(config, into.as_str()) {
+        Ok(Some(existing)) => candidates.push(existing),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("epics: reading declared blocker for {into} failed: {e}"),
+    }
+    let merged = merge_declared(candidates, into);
+    match serde_json::to_string(&merged) {
+        Ok(json) => mutations.push(StoreMutation::SetKv {
+            key: declared_storage_key(into.as_str()),
+            value: json,
+        }),
+        Err(e) => {
+            tracing::warn!("epics: encoding the folded declared blocker for {into} failed: {e}");
+            // Dropping the deletes too keeps the source rows readable rather
+            // than retiring a blocker we could not re-key.
+            return Vec::new();
+        }
+    }
+    mutations
+}
+
+/// Fold several declared blockers into the one row `into` may hold.
+///
+/// One workspace carries at most one blocker, so a fold has to choose. It
+/// keeps the *oldest* declaration — the work has been stuck since then, and
+/// `since` is what the stale-blocker alert ages on — and appends the other
+/// reasons so none is silently dropped. An operator-owned blocker keeps that
+/// owner whichever declaration wins, since that is the one that raises `!`.
+fn merge_declared(mut candidates: Vec<DeclaredBlocker>, into: &WorkspaceKey) -> DeclaredBlocker {
+    candidates.sort_by_key(|blocker| blocker.since);
+    let operator_owned = candidates
+        .iter()
+        .any(|blocker| matches!(blocker.owner, BlockerOwner::Operator));
+    let mut reasons: Vec<String> = Vec::with_capacity(candidates.len());
+    for blocker in &candidates {
+        if !reasons.iter().any(|seen| seen == &blocker.reason) {
+            reasons.push(blocker.reason.clone());
+        }
+    }
+    let mut merged = candidates.swap_remove(0);
+    merged.workspace = into.clone();
+    merged.reason = reasons.join("; ");
+    if operator_owned {
+        merged.owner = BlockerOwner::Operator;
+    }
+    merged
+}
+
+/// Drop every `declared-blocker:` row whose workspace no longer exists.
+///
+/// A removed workspace (and, before the fold carried it, a folded issue) left
+/// its blocker behind with nothing to read it: a row no reader can reach and
+/// no writer will ever clear. Runs on every recompute, so the strays already
+/// in `state.db` are collected at the next one.
+///
+/// Keys come from the store's workspace listing rather than the decoded
+/// workspaces: a row whose JSON fails to decode is *preserved* by
+/// `load_workspaces`, and pruning against the decoded set would delete the
+/// blocker of a workspace that is still there. An unreadable listing prunes
+/// nothing at all.
+fn prune_declared_blockers(
+    config: &ServerConfig,
+    mut declared: HashMap<WorkspaceKey, DeclaredBlocker>,
+) -> HashMap<WorkspaceKey, DeclaredBlocker> {
+    if declared.is_empty() {
+        return declared;
+    }
+    let live: HashSet<WorkspaceKey> = match config.store.list_workspaces() {
+        Ok(records) => records
+            .into_iter()
+            .map(|record| WorkspaceKey::new(record.key))
+            .collect(),
+        Err(error) => {
+            tracing::warn!(%error, "epics: skipping the declared-blocker prune");
+            return declared;
+        }
+    };
+    declared.retain(|workspace, _| {
+        if live.contains(workspace) {
+            return true;
+        }
+        tracing::info!(
+            %workspace,
+            "epics: dropping a declared blocker whose workspace is gone"
+        );
+        if let Err(e) = clear_declared(config, workspace.as_str()) {
+            tracing::warn!("epics: clearing the orphaned declared blocker failed: {e}");
+        }
+        false
+    });
+    declared
 }
 
 /// Load every declared blocker, keyed by workspace. A row that fails to decode
@@ -1528,6 +1655,16 @@ pub async fn recompute_all(config: &ServerConfig) {
             return;
         }
     };
+    // Declared blockers are not epic-scoped — `task_status` and the `!` alert
+    // read them for any workspace — so their prune runs ahead of the
+    // no-epics exit, not beside the review-row one below.
+    let declared = prune_declared_blockers(
+        config,
+        list_declared(config).unwrap_or_else(|e| {
+            tracing::warn!("epics: list declared blockers failed: {e}");
+            HashMap::new()
+        }),
+    );
     if records.is_empty() {
         // No epic owns anything, so no review row can be legitimate. Falling
         // through to the prune (rather than returning) is what stops a hold
@@ -1537,10 +1674,6 @@ pub async fn recompute_all(config: &ServerConfig) {
     }
 
     let agent_states = config.terminal.agent_states_by_workspace().await;
-    let declared = list_declared(config).unwrap_or_else(|e| {
-        tracing::warn!("epics: list declared blockers failed: {e}");
-        HashMap::new()
-    });
     let workspaces = crate::load_workspaces(&*config.store).values;
     let latches = LatchInputs::load(config, &records);
     let now = chrono::Utc::now().timestamp_millis();
@@ -1885,19 +2018,21 @@ pub async fn all_snapshots(config: &ServerConfig) -> Vec<EpicSnapshot> {
 ///
 /// Cheap in the common case: with no epic records the prefix scan returns empty
 /// before any workspace load.
-pub fn held_by(config: &ServerConfig, key: &WorkspaceKey) -> Vec<WorkspaceKey> {
-    let records = match list_all(config) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("epics: held_by list failed: {e}");
-            return Vec::new();
-        }
-    };
+///
+/// `Err` when the epic store cannot be read. That is not "held by nothing":
+/// an unreadable store used to answer an empty list, which released every
+/// merge-after hold and let auto-merge land members out of order. Callers
+/// treat `Err` as held.
+pub fn held_by(config: &ServerConfig, key: &WorkspaceKey) -> Result<Vec<WorkspaceKey>, String> {
+    let records = list_all(config).map_err(|e| {
+        tracing::warn!("epics: held_by list failed: {e}");
+        e.to_string()
+    })?;
     if records.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let workspaces = crate::load_workspaces(&*config.store).values;
-    held_by_in(&records, &workspaces, key)
+    Ok(held_by_in(&records, &workspaces, key))
 }
 
 /// Is `key` a member of a live epic whose merge-in-order (`E M`) latch is
@@ -2127,14 +2262,15 @@ pub async fn role_prompt_ctx(
 
 /// Record a declared blocker on `workspace` (the caller's own), then recompute
 /// so the epic status reflects it immediately. Backs the `report_blocker` MCP
-/// tool.
+/// tool, which must not claim a blocker was recorded when it wasn't — `Err`
+/// when the write failed.
 pub async fn report_blocker(
     config: &ServerConfig,
     workspace: WorkspaceKey,
     reason: String,
     kind: BlockerKind,
     owner: BlockerOwner,
-) {
+) -> Result<(), String> {
     let blocker = DeclaredBlocker {
         workspace,
         reason,
@@ -2147,19 +2283,21 @@ pub async fn report_blocker(
             "epics: report_blocker for {} failed: {e}",
             blocker.workspace
         );
-        return;
+        return Err(e);
     }
     recompute_all(config).await;
+    Ok(())
 }
 
 /// Clear `workspace`'s declared blocker (if any), then recompute. Backs the
 /// `clear_blocker` MCP tool.
-pub async fn clear_blocker(config: &ServerConfig, workspace: &str) {
+pub async fn clear_blocker(config: &ServerConfig, workspace: &str) -> Result<(), String> {
     if let Err(e) = clear_declared(config, workspace) {
         tracing::warn!("epics: clear_blocker for {workspace} failed: {e}");
-        return;
+        return Err(e.to_string());
     }
     recompute_all(config).await;
+    Ok(())
 }
 
 /// Create or overwrite an epic record, then recompute so the new/changed epic
@@ -2844,14 +2982,26 @@ fn labels_opt_out(ws: &Workspace, opt_out_labels: &[String]) -> bool {
 /// Whether the merge of `key` is held by a blocking review (#1525). Checked
 /// beside [`held_by`] on the auto-merge and manual-merge paths, so a PR the
 /// Reviewer flagged does not land while the findings stand.
+///
+/// Fails closed: a review row that cannot be read or decoded holds the
+/// merge. It used to read as "no review", so a store hiccup or a row from
+/// a newer schema released a Reviewer's blocking verdict and auto-merge
+/// landed the PR it had flagged.
 pub fn review_blocks_merge(config: &ServerConfig, key: &WorkspaceKey) -> bool {
-    config
-        .store
-        .get_kv(&review_storage_key(key.as_str()))
-        .ok()
-        .flatten()
-        .and_then(|json| serde_json::from_str::<ReviewState>(&json).ok())
-        .is_some_and(|state| state.blocking)
+    match config.store.get_kv(&review_storage_key(key.as_str())) {
+        Ok(None) => false,
+        Ok(Some(json)) => match serde_json::from_str::<ReviewState>(&json) {
+            Ok(state) => state.blocking,
+            Err(error) => {
+                tracing::warn!(workspace = %key, %error, "review row undecodable — holding the merge");
+                true
+            }
+        },
+        Err(error) => {
+            tracing::warn!(workspace = %key, %error, "review row unreadable — holding the merge");
+            true
+        }
+    }
 }
 
 /// A blackboard note just landed. When it is a Reviewer's verdict for a member
@@ -4510,6 +4660,146 @@ mod tests {
         assert!(list_declared(&config).expect("list").is_empty());
     }
 
+    fn declared(workspace: &str, reason: &str, since: i64, owner: BlockerOwner) -> DeclaredBlocker {
+        DeclaredBlocker {
+            workspace: WorkspaceKey::new(workspace),
+            reason: reason.into(),
+            kind: BlockerKind::Contract,
+            owner,
+            since,
+        }
+    }
+
+    #[tokio::test]
+    async fn absorbing_a_declared_blocker_rekeys_it_onto_the_absorbing_row() {
+        let config = ServerConfig::in_memory();
+        persist_declared(
+            &config,
+            &declared(
+                "issue",
+                "waiting on the API contract",
+                100,
+                BlockerOwner::Operator,
+            ),
+        )
+        .expect("persist");
+
+        let mutations = absorb_declared_mutations(
+            &config,
+            &[WorkspaceKey::new("issue")],
+            &WorkspaceKey::new("pr"),
+        );
+        config.store.apply_batch(&mutations).expect("apply");
+
+        let moved = load_declared(&config, "pr")
+            .expect("load")
+            .expect("present");
+        assert_eq!(moved.workspace, WorkspaceKey::new("pr"));
+        assert_eq!(moved.reason, "waiting on the API contract");
+        assert_eq!(
+            moved.since, 100,
+            "the blocker keeps the age it was declared at"
+        );
+        assert!(
+            load_declared(&config, "issue").expect("load").is_none(),
+            "the absorbed row must not be left behind",
+        );
+    }
+
+    #[tokio::test]
+    async fn absorbing_into_a_row_that_already_declared_one_keeps_both_reasons() {
+        let config = ServerConfig::in_memory();
+        persist_declared(
+            &config,
+            &declared(
+                "issue",
+                "waiting on the API contract",
+                100,
+                BlockerOwner::Operator,
+            ),
+        )
+        .expect("persist");
+        persist_declared(
+            &config,
+            &declared(
+                "pr",
+                "needs STRIPE_KEY",
+                400,
+                BlockerOwner::Agent(WorkspaceKey::new("pr")),
+            ),
+        )
+        .expect("persist");
+
+        let mutations = absorb_declared_mutations(
+            &config,
+            &[WorkspaceKey::new("issue")],
+            &WorkspaceKey::new("pr"),
+        );
+        config.store.apply_batch(&mutations).expect("apply");
+
+        let merged = load_declared(&config, "pr")
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            merged.reason, "waiting on the API contract; needs STRIPE_KEY",
+            "neither declaration may be dropped silently",
+        );
+        assert_eq!(
+            merged.since, 100,
+            "the work has been blocked since the older one"
+        );
+        assert!(
+            matches!(merged.owner, BlockerOwner::Operator),
+            "an operator-owned declaration keeps raising `!` after the fold",
+        );
+    }
+
+    #[tokio::test]
+    async fn absorbing_nothing_writes_nothing() {
+        let config = ServerConfig::in_memory();
+        persist_declared(
+            &config,
+            &declared("pr", "needs a decision", 5, BlockerOwner::Operator),
+        )
+        .expect("persist");
+
+        assert!(
+            absorb_declared_mutations(
+                &config,
+                &[WorkspaceKey::new("issue")],
+                &WorkspaceKey::new("pr"),
+            )
+            .is_empty(),
+            "an issue with no blocker must not rewrite the PR's own",
+        );
+    }
+
+    #[tokio::test]
+    async fn recompute_sweeps_a_blocker_whose_workspace_is_gone() {
+        // The orphan left by every pre-fix fold (and by any workspace removal):
+        // a row no reader can reach and no writer will ever clear.
+        let config = ServerConfig::in_memory();
+        save_ws(&config, &ws("live"));
+        persist_declared(
+            &config,
+            &declared("live", "waiting on review", 1, BlockerOwner::Operator),
+        )
+        .expect("persist");
+        persist_declared(
+            &config,
+            &declared("gone", "orphaned", 1, BlockerOwner::Operator),
+        )
+        .expect("persist");
+
+        recompute_all(&config).await;
+
+        assert!(load_declared(&config, "live").expect("load").is_some());
+        assert!(
+            load_declared(&config, "gone").expect("load").is_none(),
+            "a blocker whose workspace no longer exists must be collected",
+        );
+    }
+
     #[tokio::test]
     async fn report_then_clear_blocker_moves_status() {
         // End-to-end through the command handlers: an epic member with nothing
@@ -4535,13 +4825,14 @@ mod tests {
             BlockerKind::Review,
             BlockerOwner::Agent(WorkspaceKey::new("w")),
         )
-        .await;
+        .await
+        .expect("report");
         let snaps = all_snapshots(&config).await;
         let m = &snaps.iter().find(|s| s.key == "e").expect("epic e").members[0];
         assert_eq!(m.status, EpicMemberStatus::Blocked);
         assert!(m.blockers.iter().any(|b| b.kind == BlockerKind::Review));
 
-        clear_blocker(&config, "w").await;
+        clear_blocker(&config, "w").await.expect("clear");
         let snaps = all_snapshots(&config).await;
         let m = &snaps.iter().find(|s| s.key == "e").expect("epic e").members[0];
         assert_eq!(m.status, EpicMemberStatus::Ready);
@@ -4635,7 +4926,8 @@ mod tests {
             BlockerKind::Review,
             BlockerOwner::Operator,
         )
-        .await;
+        .await
+        .expect("report");
 
         let after: Workspace = serde_json::from_str(
             config
@@ -4702,7 +4994,8 @@ mod tests {
                 BlockerKind::Review,
                 BlockerOwner::Operator,
             )
-            .await;
+            .await
+            .expect("report");
         });
 
         // Give the recompute time to snapshot "w" and park on the held lock. Its
@@ -5379,6 +5672,24 @@ mod tests {
     /// End-to-end through `post_note`'s hook: a Reviewer's `blocking` verdict
     /// records the hold (which gates the merge and shows as `ReviewBlocked`),
     /// and a later `clean` verdict releases it.
+    /// A review row that no longer decodes (a newer schema, a torn write)
+    /// holds the merge. It used to read as "no review" and release a
+    /// Reviewer's blocking verdict to auto-merge.
+    #[test]
+    fn an_undecodable_review_row_holds_the_merge() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("w");
+        assert!(!review_blocks_merge(&config, &key), "no row, no hold");
+        config
+            .store
+            .set_kv(
+                &review_storage_key(key.as_str()),
+                "{\"blocking\": [unterminated",
+            )
+            .unwrap();
+        assert!(review_blocks_merge(&config, &key));
+    }
+
     #[tokio::test]
     async fn a_review_note_records_then_releases_the_hold() {
         let config = ServerConfig::in_memory();

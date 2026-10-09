@@ -940,16 +940,14 @@ mod tests {
         );
     }
 
-    /// An agent with no low tier (Codex ships no built-in menu) falls back
+    /// An agent configured with no low tier falls back
     /// to the configured model, and condenses not at all without one.
     #[test]
     fn model_for_falls_back_to_the_configured_model_then_gives_up() {
-        assert_eq!(
-            summarizer(lazybox_config::Config::default()).model_for("codex"),
-            None
-        );
-
-        let mut config = lazybox_config::Config::default();
+        let mut config =
+            lazybox_config::Config::parse("agents:\n  codex:\n    models:\n      replace: true\n")
+                .expect("model-less Codex config");
+        assert_eq!(summarizer(config.clone()).model_for("codex"), None);
         config.agent.context_hygiene.condense_model = Some("  gpt-5-mini  ".into());
         assert_eq!(
             summarizer(config).model_for("codex").as_deref(),
@@ -961,7 +959,10 @@ mod tests {
     /// No model means no call: the caller gets `Err` and sends the original.
     #[tokio::test]
     async fn condense_without_a_model_errors_instead_of_calling_anything() {
-        let summarizer = summarizer(lazybox_config::Config::default());
+        let summarizer = summarizer(
+            lazybox_config::Config::parse("agents:\n  codex:\n    models:\n      replace: true\n")
+                .expect("model-less Codex config"),
+        );
         let served = ServedRequest::new(
             "codex",
             LlmProvider::OpenAI,

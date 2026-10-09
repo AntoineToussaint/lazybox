@@ -116,6 +116,21 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws, options).await,
         }
     }
+    pub async fn record_merged_trailers(
+        &self,
+        ws: &lazybox_core::Workspace,
+        trailers: &lazybox_core::PrTrailers,
+        policy: &lazybox_core::TrailerPolicy,
+    ) -> lazybox_core::TrailerOutcome {
+        match self {
+            Self::Github(c) => {
+                lazybox_core::TaskProvider::record_merged_trailers(c, ws, trailers, policy).await
+            }
+            Self::Linear(c) => {
+                lazybox_core::TaskProvider::record_merged_trailers(c, ws, trailers, policy).await
+            }
+        }
+    }
     pub async fn update_branch(
         &self,
         ws: &lazybox_core::Workspace,
@@ -247,6 +262,169 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::post_reply(c, ws, body).await,
         }
     }
+}
+/// How long after an observed merge the external-merge recorder waits
+/// before measuring. lazybox's own merge path marks its cost reported right
+/// after the merge call returns; waiting past that means a merge lazybox
+/// performed measures zero unreported cost here and records nothing twice.
+const EXTERNAL_MERGE_SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// kv prefix under which an observed-but-unrecorded external merge waits for
+/// its cost to be measured.
+///
+/// The intent has to be DURABLE. A bare in-memory `sleep` lost the record
+/// whenever the 60s window did not survive: the same upsert that observes the
+/// merge goes on to prompt the user to remove the merged workspace (or reaps
+/// it silently under `worktree.auto_cleanup_merged`), so a user answering
+/// that prompt inside a minute — which is what someone watching their PR
+/// merge does — dropped the figure for good, with no log and no retry, and
+/// the unreported cost stayed on the watermark to be misattributed to the
+/// next PR on that workspace key. A daemon restart lost it the same way.
+pub(crate) const PENDING_MERGE_COST_PREFIX: &str = "pending-merge-cost:";
+
+/// Mark `key`'s merge as owing a cost record. Written synchronously at the
+/// merge transition so the intent exists before anything can remove the
+/// workspace or stop the daemon.
+pub(crate) fn note_merge_owes_cost(config: &ServerConfig, key: &WorkspaceKey) {
+    let kv_key = format!("{PENDING_MERGE_COST_PREFIX}{key}");
+    let observed = chrono::Utc::now().timestamp_millis().to_string();
+    if let Err(error) = config.store.set_kv(&kv_key, &observed) {
+        tracing::warn!(workspace = %key, "external-merge cost: intent not persisted ({error})");
+    }
+}
+
+/// Forget `key`'s pending cost record — it was recorded, or there is nothing
+/// left to record it against.
+fn clear_merge_cost_intent(config: &ServerConfig, key: &WorkspaceKey) {
+    let kv_key = format!("{PENDING_MERGE_COST_PREFIX}{key}");
+    if let Err(error) = config.store.delete_kv(&kv_key) {
+        tracing::warn!(workspace = %key, "external-merge cost: intent not cleared ({error})");
+    }
+}
+
+/// Re-run every external merge still owing a cost record whose settle window
+/// has passed. Level-triggered off the poll tick, so a daemon that died
+/// inside the window — or a recorder whose provider call failed — picks the
+/// work back up instead of losing it.
+pub(crate) async fn sweep_pending_merge_costs(config: &ServerConfig) {
+    let rows = match config.store.list_kv_prefix(PENDING_MERGE_COST_PREFIX) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("external-merge cost: pending sweep failed to read ({error})");
+            return;
+        }
+    };
+    let settled_before =
+        chrono::Utc::now().timestamp_millis() - EXTERNAL_MERGE_SETTLE.as_millis() as i64;
+    for (kv_key, observed) in rows {
+        let Some(key) = kv_key.strip_prefix(PENDING_MERGE_COST_PREFIX) else {
+            continue;
+        };
+        // Still inside the settle window: the recorder spawned at the merge
+        // is expected to take it, and measuring early would read a cost
+        // lazybox's own merge path is about to mark reported.
+        if observed.parse::<i64>().is_ok_and(|at| at > settled_before) {
+            continue;
+        }
+        record_pending_merge_cost(config, &WorkspaceKey::new(key)).await;
+    }
+}
+
+/// Record the cost of a PR that merged WITHOUT lazybox writing the commit
+/// body — GitHub's native auto-merge (`enablePullRequestAutoMerge` carries
+/// no body), an agent's `gh pr merge`, the web UI. Those were the common
+/// case, so most merges carried no `Lazybox-Cost` at all.
+///
+/// Idempotent through the cost watermark: only cost not yet reported is
+/// measured, and a recorded figure is marked reported, so a merge lazybox
+/// performed itself (already marked) records nothing here.
+pub(crate) async fn record_external_merge_trailers(config: ServerConfig, key: WorkspaceKey) {
+    tokio::time::sleep(EXTERNAL_MERGE_SETTLE).await;
+    record_pending_merge_cost(&config, &key).await;
+}
+
+/// One attempt at recording a merged workspace's cost. Clears the durable
+/// intent only when there is nothing left to do — recorded, nothing to
+/// record, or nothing to record it against — so a transient provider failure
+/// is retried by the next [`sweep_pending_merge_costs`].
+async fn record_pending_merge_cost(config: &ServerConfig, key: &WorkspaceKey) {
+    let Some(workspace) = crate::polling::upsert::load_workspace_offloaded(config, key).await
+    else {
+        // The workspace was removed inside the settle window. Say so: the
+        // cost is genuinely unrecoverable (the row that carried the PR is
+        // gone), and a silent return made it look like nothing was owed.
+        tracing::warn!(
+            workspace = %key,
+            "external-merge cost: the workspace was removed before its cost could be recorded"
+        );
+        clear_merge_cost_intent(config, key);
+        return;
+    };
+    let trailers = crate::pr_trailers::measure(config, &workspace, chrono::Utc::now()).await;
+    if !external_merge_has_unreported_cost(&trailers) {
+        clear_merge_cost_intent(config, key);
+        return;
+    }
+    let provider = match build_provider_for_workspace(config, key).await {
+        Ok(provider) => provider,
+        Err(error) => {
+            // Leave the intent: a provider that cannot be built now (no
+            // credentials yet, a repo not in scope this tick) may build on
+            // the next sweep.
+            tracing::warn!(workspace = %key, "external-merge cost: no provider ({error})");
+            return;
+        }
+    };
+    let policy = lazybox_config::Config::load()
+        .unwrap_or_default()
+        .providers
+        .github
+        .pr_trailers;
+    let outcome = provider
+        .record_merged_trailers(&workspace, &trailers, &policy)
+        .await;
+    if outcome.is_recorded() {
+        crate::pr_trailers::mark_reported(config, key, &trailers).await;
+        clear_merge_cost_intent(config, key);
+        tracing::info!(workspace = %key, "recorded the cost of an external merge");
+    } else if let lazybox_core::TrailerOutcome::Dropped { reason } = outcome {
+        // `Dropped` is the provider declining for a reason that will not
+        // change by itself — no node id on the merged PR, an unaddressable
+        // PR key — so retrying forever would spend GitHub budget on a no-op
+        // every tick. (Policy `off` is NOT this case: it returns `Nothing`.)
+        // The figure stays unreported, so it rides to the next merge on this
+        // key rather than being written off.
+        tracing::warn!(workspace = %key, "external-merge cost not recorded: {reason}");
+        clear_merge_cost_intent(config, key);
+    } else {
+        // `Nothing`: this repo's policy withheld publication. Settled — but
+        // say so. Silence here is what made #1917 undiagnosable: a public
+        // repo defaults to `off`, so 25 merges measured a real cost,
+        // published nothing, and reported that decision nowhere. The figure
+        // is still marked reported, because leaving it would roll it onto
+        // whatever PR lands next on this key.
+        if let Some(micros) = trailers.cost.as_ref().and_then(|cost| cost.micros) {
+            tracing::info!(
+                workspace = %key,
+                "external-merge cost withheld by `providers.github.pr_trailers` \
+                 policy — ${:.2} measured, nothing published",
+                micros as f64 / 1_000_000.0,
+            );
+        }
+        crate::pr_trailers::mark_reported(config, key, &trailers).await;
+        clear_merge_cost_intent(config, key);
+    }
+}
+
+/// Only a measured, still-unreported cost is worth a record: an unmetered
+/// PR gets no line at all (never `$0.00`), and a PR lazybox merged itself has
+/// already reported its cost.
+fn external_merge_has_unreported_cost(trailers: &lazybox_core::PrTrailers) -> bool {
+    trailers
+        .cost
+        .as_ref()
+        .and_then(|cost| cost.micros)
+        .is_some_and(|micros| micros > 0)
 }
 
 /// The provider prefix of a workspace key (`"github-acme-widget-186"` →
@@ -766,13 +944,16 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
             });
             return;
         }
-        let held = crate::epics::held_by(config, &workspace_key);
-        if !held.is_empty() {
-            let names = held
+        let held = match crate::epics::held_by(config, &workspace_key) {
+            Ok(held) => held
                 .iter()
-                .map(|k| k.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+                .map(|k| k.as_str().to_string())
+                .collect::<Vec<_>>(),
+            // Fail closed: name why instead of merging past an unknown hold.
+            Err(error) => vec![format!("the epic graph could not be read ({error})")],
+        };
+        if !held.is_empty() {
+            let names = held.join(", ");
             let label = pr_label
                 .clone()
                 .unwrap_or_else(|| workspace_key.as_str().to_string());
@@ -982,17 +1163,24 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
         return;
     }
     tracing::info!("merged PR for workspace {workspace_key}");
+    // The outcome, not the merge, decides whether the cost slice may close:
+    // a `Dropped` record was measured, permitted by policy, and lost, so it
+    // stays owed to the next merge rather than being retired in silence
+    // (#1917). Read by reference — the `Err` and `Queued` shapes already
+    // returned above, so this is the merged case.
+    let outcome = match &merge_result {
+        Ok(lazybox_core::MergeOutcome::Merged(outcome)) => outcome.clone(),
+        _ => lazybox_core::TrailerOutcome::Nothing,
+    };
     crate::pr_trailers::mark_merge_reported(
         config,
         &workspace_key,
         &trailers,
         &merge_options.progress,
+        &outcome,
     )
     .await;
-    if let Ok(lazybox_core::MergeOutcome::Merged(lazybox_core::TrailerOutcome::Dropped {
-        reason,
-    })) = merge_result
-    {
+    if let lazybox_core::TrailerOutcome::Dropped { reason } = &outcome {
         let _ = config.bus.send(Event::provider_error_retryable(
             "merge",
             format!("merged, but the cost record was not written: {reason}"),
@@ -2665,93 +2853,262 @@ fn to_dto(row: lazybox_git_ops::WorktreeInspection) -> lazybox_ipc::WorktreeInsp
     }
 }
 
+fn diff_line_to_dto(line: lazybox_git_ops::DiffLine) -> lazybox_ipc::DiffLineDto {
+    lazybox_ipc::DiffLineDto {
+        kind: match line.kind {
+            lazybox_git_ops::DiffLineKind::Context => lazybox_ipc::DiffLineKindDto::Context,
+            lazybox_git_ops::DiffLineKind::Addition => lazybox_ipc::DiffLineKindDto::Addition,
+            lazybox_git_ops::DiffLineKind::Deletion => lazybox_ipc::DiffLineKindDto::Deletion,
+            lazybox_git_ops::DiffLineKind::Meta => lazybox_ipc::DiffLineKindDto::Meta,
+        },
+        text: line.text,
+        old_line: line.old_line,
+        new_line: line.new_line,
+    }
+}
+
+fn diff_file_to_dto(file: lazybox_git_ops::DiffFile) -> lazybox_ipc::DiffFileDto {
+    lazybox_ipc::DiffFileDto {
+        old_path: file.old_path,
+        path: file.path,
+        headers: file.headers,
+        hunks: file.hunks.into_iter().map(hunk_to_dto).collect(),
+    }
+}
+
 fn diff_to_dto(diff: lazybox_git_ops::WorktreeDiff) -> lazybox_ipc::WorkspaceDiffDto {
     lazybox_ipc::WorkspaceDiffDto {
         status: diff.status,
         stat: diff.stat,
         truncated: diff.truncated,
-        files: diff
-            .files
-            .into_iter()
-            .map(|file| lazybox_ipc::DiffFileDto {
-                old_path: file.old_path,
-                path: file.path,
-                headers: file.headers,
-                hunks: file
-                    .hunks
-                    .into_iter()
-                    .map(|hunk| lazybox_ipc::DiffHunkDto {
-                        header: hunk.header,
-                        old_start: hunk.old_start,
-                        new_start: hunk.new_start,
-                        lines: hunk
-                            .lines
-                            .into_iter()
-                            .map(|line| lazybox_ipc::DiffLineDto {
-                                kind: match line.kind {
-                                    lazybox_git_ops::DiffLineKind::Context => {
-                                        lazybox_ipc::DiffLineKindDto::Context
-                                    }
-                                    lazybox_git_ops::DiffLineKind::Addition => {
-                                        lazybox_ipc::DiffLineKindDto::Addition
-                                    }
-                                    lazybox_git_ops::DiffLineKind::Deletion => {
-                                        lazybox_ipc::DiffLineKindDto::Deletion
-                                    }
-                                    lazybox_git_ops::DiffLineKind::Meta => {
-                                        lazybox_ipc::DiffLineKindDto::Meta
-                                    }
-                                },
-                                text: line.text,
-                                old_line: line.old_line,
-                                new_line: line.new_line,
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-            })
-            .collect(),
+        head_sha: None,
+        divergence: None,
+        files: diff.files.into_iter().map(diff_file_to_dto).collect(),
     }
 }
 
-/// Read one workspace checkout's worktree diff and emit it to clients.
+/// The header rows the viewer prints above a file's hunks. Display
+/// text only — the paths that drive commenting come straight from
+/// GitHub's structured fields, never from re-reading these.
+fn pr_diff_headers(file: &lazybox_gh::PullRequestDiffFile) -> Vec<String> {
+    use lazybox_gh::PullRequestFileChange;
+
+    let old_path = file.previous_path.as_deref().unwrap_or(&file.path);
+    vec![
+        format!("diff --git a/{old_path} b/{}", file.path),
+        match file.change {
+            PullRequestFileChange::Added => "--- /dev/null".to_string(),
+            _ => format!("--- a/{old_path}"),
+        },
+        match file.change {
+            PullRequestFileChange::Removed => "+++ /dev/null".to_string(),
+            _ => format!("+++ b/{}", file.path),
+        },
+    ]
+}
+
+/// `git diff --stat`'s job for a document git never produced. Not git's
+/// own format — the scaled bar chart would be a fiction here — but the
+/// same three facts, so the viewer's STAT block reads the same.
+fn pr_diff_stat(files: &[lazybox_gh::PullRequestDiffFile]) -> Vec<String> {
+    let mut lines: Vec<String> = files
+        .iter()
+        .map(|file| format!(" {} | +{} -{}", file.path, file.additions, file.deletions))
+        .collect();
+    let additions: u64 = files.iter().map(|file| file.additions).sum();
+    let deletions: u64 = files.iter().map(|file| file.deletions).sum();
+    lines.push(format!(
+        " {} file{} changed, {additions} insertion{}(+), {deletions} deletion{}(-)",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        if additions == 1 { "" } else { "s" },
+        if deletions == 1 { "" } else { "s" },
+    ));
+    lines
+}
+
+/// Project one of GitHub's changed files onto the viewer's shape.
+///
+/// The paths are carried across as data. An earlier cut assembled a
+/// `diff --git` document and re-parsed it to recover them, which can
+/// only lose information: git quotes a path holding a tab, the
+/// hand-written marker lines did not, and the path a review comment
+/// posts against came back truncated at the tab.
+fn pr_file_to_dto(file: lazybox_gh::PullRequestDiffFile) -> lazybox_ipc::DiffFileDto {
+    use lazybox_gh::PullRequestFileChange;
+
+    let headers = pr_diff_headers(&file);
+    let hunks = file
+        .patch
+        .as_deref()
+        .map(lazybox_git_ops::parse_diff_hunks)
+        .unwrap_or_default();
+    lazybox_ipc::DiffFileDto {
+        // An added file has no pre-image, matching what the local
+        // parser reads out of `--- /dev/null`.
+        old_path: match file.change {
+            PullRequestFileChange::Added => None,
+            _ => Some(file.previous_path.unwrap_or_else(|| file.path.clone())),
+        },
+        path: file.path,
+        headers,
+        hunks: hunks.into_iter().map(hunk_to_dto).collect(),
+    }
+}
+
+fn hunk_to_dto(hunk: lazybox_git_ops::DiffHunk) -> lazybox_ipc::DiffHunkDto {
+    lazybox_ipc::DiffHunkDto {
+        header: hunk.header,
+        old_start: hunk.old_start,
+        new_start: hunk.new_start,
+        lines: hunk.lines.into_iter().map(diff_line_to_dto).collect(),
+    }
+}
+
+fn pr_diff_to_dto(
+    diff: lazybox_gh::PullRequestDiff,
+    divergence: Option<lazybox_ipc::WorkspaceDiffDivergenceDto>,
+) -> lazybox_ipc::WorkspaceDiffDto {
+    lazybox_ipc::WorkspaceDiffDto {
+        // A pull request has no working tree, so there is no porcelain
+        // status to report; the viewer shows the divergence notice in
+        // that block's place.
+        status: Vec::new(),
+        stat: pr_diff_stat(&diff.files),
+        truncated: diff.truncated,
+        head_sha: Some(diff.head_sha.clone()),
+        divergence,
+        files: diff.files.into_iter().map(pr_file_to_dto).collect(),
+    }
+}
+
+/// Project a checkout comparison onto the wire, dropping it entirely
+/// when nothing about the checkout could be read. A banner assembled
+/// from two failed probes says only that both probes failed, and a
+/// warning that fires every time is one nobody reads when it matters.
+fn divergence_to_dto(
+    divergence: lazybox_git_ops::CheckoutDivergence,
+) -> Option<lazybox_ipc::WorkspaceDiffDivergenceDto> {
+    use lazybox_git_ops::CommitComparison;
+
+    if divergence.is_unknown() {
+        return None;
+    }
+    Some(lazybox_ipc::WorkspaceDiffDivergenceDto {
+        dirty_files: divergence.dirty_files.map(|files| files as u32),
+        commits: match divergence.commits {
+            CommitComparison::Counted {
+                local_only,
+                reference_only,
+            } => lazybox_ipc::CommitComparisonDto::Counted(lazybox_ipc::CommitSpreadDto {
+                local_only,
+                pr_only: reference_only,
+            }),
+            CommitComparison::ReferenceAbsent => lazybox_ipc::CommitComparisonDto::ReferenceAbsent,
+            CommitComparison::Unknown => lazybox_ipc::CommitComparisonDto::Unknown,
+        },
+    })
+}
+
+/// The workspace's checkout — the newest session's worktree, else a
+/// linked checkout. This is what a pull request's diff is compared
+/// against; which *session* asked does not change the answer.
+fn workspace_checkout(workspace: &lazybox_core::Workspace) -> Option<std::path::PathBuf> {
+    workspace
+        .default_session()
+        .map(|session| session.worktree_path.clone())
+        .or_else(|| workspace.linked_checkout.clone())
+}
+
+/// Read the pull request's diff from GitHub, annotated with how far the
+/// local checkout has drifted from the commit it was read at.
+async fn inspect_pull_request_diff(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+) -> Result<lazybox_ipc::WorkspaceDiffDto, String> {
+    let workspace =
+        load_workspace(config, workspace_key).ok_or_else(|| "workspace not found".to_string())?;
+    let pr = workspace
+        .pr
+        .as_ref()
+        .ok_or_else(|| "this workspace has no pull request".to_string())?;
+    let repo = pr
+        .repo
+        .as_deref()
+        .ok_or_else(|| "pull request has no repo".to_string())?;
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| format!("can't parse owner/name from `{repo}`"))?;
+    let number = pr
+        .id
+        .number()
+        .ok_or_else(|| format!("can't parse PR number from `{}`", pr.id.key))?;
+    let client = resolve_gh_client_result(config).await?;
+    let diff = client
+        .fetch_pr_diff(owner, name, number)
+        .await
+        .map_err(|error| error.to_string())?;
+    let divergence = match workspace_checkout(&workspace) {
+        Some(path) => {
+            divergence_to_dto(lazybox_git_ops::checkout_divergence(&path, &diff.head_sha).await)
+        }
+        // No checkout at all — a PR row the reviewer never checked out.
+        None => None,
+    };
+    Ok(pr_diff_to_dto(diff, divergence))
+}
+
+/// Read the diff the client asked for — a checkout's working tree, or
+/// the workspace's pull request as GitHub renders it — and emit it.
 pub async fn handle_inspect_workspace_diff(
     config: &ServerConfig,
     workspace_key: WorkspaceKey,
     target: lazybox_ipc::WorkspaceDiffTarget,
 ) {
-    let result = load_workspace(config, &workspace_key)
-        .ok_or_else(|| "workspace not found".to_string())
-        .and_then(|workspace| match &target {
-            lazybox_ipc::WorkspaceDiffTarget::Session(session_id) => workspace
-                .sessions
-                .iter()
-                .find(|session| session.id == *session_id)
-                .map(|session| session.worktree_path.clone())
-                .ok_or_else(|| "session worktree not found".to_string()),
-            lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout => workspace
-                .linked_checkout
-                .clone()
-                .ok_or_else(|| "linked checkout not found".to_string()),
-        });
     let session_key: lazybox_core::SessionKey = workspace_key.as_str().into();
     let session_id = match &target {
         lazybox_ipc::WorkspaceDiffTarget::Session(session_id) => Some(*session_id),
-        lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout => None,
+        lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout
+        | lazybox_ipc::WorkspaceDiffTarget::PullRequest => None,
     };
     let agent_terminal_ids = config
         .terminal
         .agent_terminals_for_review(&session_key, session_id)
         .await;
-    let (diff, error) = match result {
-        Ok(path) => match lazybox_git_ops::inspect_worktree_diff(&path).await {
-            Ok(diff) => (Some(diff_to_dto(diff)), None),
-            Err(error) => {
-                tracing::warn!(workspace = %workspace_key, "inspect workspace diff failed: {error}");
-                (None, Some(error.to_string()))
+    let result = match &target {
+        lazybox_ipc::WorkspaceDiffTarget::PullRequest => {
+            inspect_pull_request_diff(config, &workspace_key).await
+        }
+        local => {
+            let path = load_workspace(config, &workspace_key)
+                .ok_or_else(|| "workspace not found".to_string())
+                .and_then(|workspace| match local {
+                    lazybox_ipc::WorkspaceDiffTarget::Session(session_id) => workspace
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == *session_id)
+                        .map(|session| session.worktree_path.clone())
+                        .ok_or_else(|| "session worktree not found".to_string()),
+                    _ => workspace
+                        .linked_checkout
+                        .clone()
+                        .ok_or_else(|| "linked checkout not found".to_string()),
+                });
+            match path {
+                Ok(path) => lazybox_git_ops::inspect_worktree_diff(&path)
+                    .await
+                    .map(diff_to_dto)
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
             }
-        },
-        Err(error) => (None, Some(error)),
+        }
+    };
+    let (diff, error) = match result {
+        Ok(diff) => (Some(diff), None),
+        Err(error) => {
+            tracing::warn!(workspace = %workspace_key, "inspect workspace diff failed: {error}");
+            (None, Some(error))
+        }
     };
     let _ = config.bus.send(Event::WorkspaceDiffInspected {
         workspace_key,
@@ -2760,6 +3117,110 @@ pub async fn handle_inspect_workspace_diff(
         diff,
         error,
     });
+}
+
+/// Handle `Command::SubmitPullRequestReview`: post the drafted inline
+/// comments to the workspace's pull request as one review.
+pub async fn handle_submit_pull_request_review(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    head_sha: String,
+    summary: String,
+    verdict: lazybox_ipc::ReviewVerdictDto,
+    comments: Vec<lazybox_ipc::ReviewCommentDto>,
+) {
+    let config = config.clone();
+    detach_mutation(async move {
+        let count = comments.len() as u32;
+        let result = submit_pull_request_review(
+            &config,
+            &workspace_key,
+            &head_sha,
+            &summary,
+            verdict,
+            &comments,
+        )
+        .await;
+        let (url, error) = match result {
+            Ok(url) => {
+                tracing::info!("submitted a {count}-comment review on {workspace_key}");
+                // The PR's own review state just changed; pull it back
+                // rather than leaving the row stale for a poll cycle.
+                config.poll.wake(true);
+                (url, None)
+            }
+            Err(error) => {
+                tracing::warn!("submit review {workspace_key}: {error}");
+                (None, Some(error))
+            }
+        };
+        let _ = config.bus.send(Event::PullRequestReviewSubmitted {
+            workspace_key,
+            comments: count,
+            url,
+            error,
+        });
+    });
+}
+
+async fn submit_pull_request_review(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+    head_sha: &str,
+    summary: &str,
+    verdict: lazybox_ipc::ReviewVerdictDto,
+    comments: &[lazybox_ipc::ReviewCommentDto],
+) -> Result<Option<String>, String> {
+    let workspace =
+        load_workspace(config, workspace_key).ok_or_else(|| "workspace not found".to_string())?;
+    let pr = workspace
+        .pr
+        .as_ref()
+        .ok_or_else(|| "this workspace has no pull request".to_string())?;
+    let repo = pr
+        .repo
+        .as_deref()
+        .ok_or_else(|| "pull request has no repo".to_string())?;
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| format!("can't parse owner/name from `{repo}`"))?;
+    let number = pr
+        .id
+        .number()
+        .ok_or_else(|| format!("can't parse PR number from `{}`", pr.id.key))?;
+    let client = resolve_gh_client_result(config).await?;
+    let comments = comments
+        .iter()
+        .map(|comment| lazybox_gh::ReviewComment {
+            path: comment.path.clone(),
+            line: comment.line,
+            side: match comment.side {
+                lazybox_ipc::DiffSideDto::Left => lazybox_gh::DiffSide::Left,
+                lazybox_ipc::DiffSideDto::Right => lazybox_gh::DiffSide::Right,
+            },
+            body: comment.body.clone(),
+        })
+        .collect::<Vec<_>>();
+    client
+        .submit_pr_review(
+            owner,
+            name,
+            number,
+            &lazybox_gh::PullRequestReview {
+                commit_id: head_sha,
+                summary,
+                verdict: match verdict {
+                    lazybox_ipc::ReviewVerdictDto::Comment => lazybox_gh::ReviewVerdict::Comment,
+                    lazybox_ipc::ReviewVerdictDto::Approve => lazybox_gh::ReviewVerdict::Approve,
+                    lazybox_ipc::ReviewVerdictDto::RequestChanges => {
+                        lazybox_gh::ReviewVerdict::RequestChanges
+                    }
+                },
+                comments: &comments,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Run the worktree inspector and emit the result on the bus.
@@ -3010,17 +3471,32 @@ pub async fn on_terminal_transition(
 /// Inspect a terminal-state workspace's backing worktrees and emit
 /// [`Event::MergedPrRemovable`] so the TUI can prompt. Read-only — no
 /// deletion happens until the user confirms (which comes back as
-/// `Command::RemoveMergedWorkspace`). `has_local_work` is set when any
-/// session worktree has uncommitted or unpushed work, so the modal can
-/// warn before the force-delete. `terminal_state` (merged PR vs closed
-/// issue) only steers the confirm-modal wording.
+/// `Command::RemoveMergedWorkspace`). `has_local_work` is set when a
+/// reclaimed worktree holds work the removal would destroy, so the
+/// modal can warn before the force-delete. `terminal_state` (merged PR
+/// vs closed issue) only steers the confirm-modal wording.
+///
+/// **A cleanup the removal gate would refuse is never offered** (#1867).
+/// The destructive path re-inspects and refuses on local work, so a
+/// prompt issued over a dirty checkout could only ever end in that
+/// refusal — and it left nothing behind, so the next sweep issued it
+/// again, and the user collected the red refusal notice forever.
+/// [`crate::workspace::removal_outlook_with`] answers "would the gate
+/// allow this?" with the gate's own predicate; when it would not, the
+/// workspace is parked by [`park_blocked_cleanup`] with a one-shot
+/// notice instead, keyed on the blocking state so it re-arms when the
+/// checkout changes.
 ///
 /// Every emit path (the open→terminal transition and the per-tick
 /// reprompt sweep) funnels through here. A durable "keep" answer
 /// ([`lazybox_core::CleanupPrompt::Declined`], issue #499) suppresses permanently;
 /// re-emits are otherwise throttled to [`super::REMOVAL_REPROMPT_AFTER`]
 /// via [`super::RemovalPromptMemory`] so a user staring at the modal
-/// doesn't collect a fresh copy every tick.
+/// doesn't collect a fresh copy every tick. That throttle also bounds
+/// how often the gate preflight runs its git inspection: a parked
+/// workspace is re-checked once per `REMOVAL_REPROMPT_AFTER`, not once
+/// per poll tick, so a checkout cleaned up mid-window re-arms within
+/// that window rather than instantly.
 ///
 /// A session-less **merged PR** still prompts (issue #499): removal just
 /// drops the tracking row, but a merged PR shouldn't linger unprompted
@@ -3094,6 +3570,10 @@ pub(crate) async fn prompt_merged_pr_removal_with(
                 config,
                 key,
                 crate::workspace::WorkspaceRemovalReason::ClosedAuto,
+                // Unattended: nobody asked for this one, so it keeps
+                // failing closed. (It is reached only for a session-less
+                // row, so there is nothing on disk for the gate to find.)
+                crate::workspace::RemovalForce::Gated,
             )
             .await
         {
@@ -3126,13 +3606,44 @@ pub(crate) async fn prompt_merged_pr_removal_with(
         prompts.prompted.insert(key.as_str().to_string(), now);
     }
 
-    let session_paths = workspace_worktree_paths(&workspace);
     let active_terminal_count = count_live_terminals(config, key).await;
-    let has_local_work = workspace_local_work(config, mgr, key, &session_paths)
+    // Ask the removal gate itself what it would do, rather than
+    // re-deriving "is this checkout dirty?" beside it. Offering a
+    // cleanup the gate is already certain to refuse is what made the
+    // refusal loop: the prompt fired, the removal was refused for local
+    // work, nothing recorded that, and the next sweep prompted again
+    // (#1867). `Err` is unsafe, never clean — the gate fails closed the
+    // same way, so a workspace we cannot inspect is parked too.
+    let outlook = crate::workspace::removal_outlook_with(config, mgr, &workspace).await;
+    let blocked_detail = match &outlook {
+        Ok(outlook) if outlook.is_blocked() => Some(outlook.blocked_detail()),
+        Ok(_) => None,
+        Err(error) => Some(format!("worktrees could not be inspected: {error}")),
+    };
+
+    if let Some(detail) = blocked_detail {
+        park_blocked_cleanup(config, key, &label, terminal_state, detail).await;
+        return;
+    }
+
+    // Reaching here means the gate would let the removal through, so
+    // any parked state is stale: drop it, and the next blocking state
+    // (or this same one, if the user dirties the checkout again) gets
+    // its own notice.
+    config
+        .poll
+        .removal_prompts
+        .lock()
         .await
-        // A failed inspection is a warning, never a clean bill of health.
-        // The destructive command performs the same fail-closed check again.
-        .unwrap_or(true);
+        .blocked
+        .remove(key.as_str());
+
+    // A merged PR's squash-merged tip reads as unpushed and does NOT
+    // block removal (the work is upstream under another SHA), but those
+    // commits still exist only here — the confirm modal has to warn
+    // before it destroys them. That is why this is a separate fact from
+    // the blockers above and comes off the same inspection.
+    let has_local_work = outlook.map(|o| o.destroys_work()).unwrap_or(true);
 
     tracing::info!(
         workspace = %key,
@@ -3150,6 +3661,67 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     });
 }
 
+/// A terminal-state workspace whose cleanup the removal gate would
+/// refuse: say so once, then stay quiet until the checkout changes.
+///
+/// The suppression is keyed on the refusal's own detail string — the
+/// paths and the reasons — not on an "already prompted" boolean. That matters
+/// for the half of the bug that is NOT the loop: a boolean would
+/// survive the user fixing the thing it was set for, and the workspace
+/// would then sit merged and cleanable with nobody ever asking. Commit,
+/// push, discard or delete anything in one of these checkouts and the
+/// detail changes (or empties, which re-arms the real prompt through the
+/// caller above), so the next sweep speaks again.
+///
+/// The notice is an `Event::Notification`, which the TUI flashes as Info
+/// and keeps in the durable messages log (`Shift-M`) — visible, but not
+/// the red permanent-error footer the repeated refusal was raising, and
+/// not a modal demanding an answer the user cannot give. The row itself
+/// stays in the inbox showing its merged/closed state, and `x x` removes
+/// it whenever the user is ready — that path is an explicit delete
+/// ([`crate::workspace::RemovalForce::Explicit`]), so the gate that
+/// refused this unattended cleanup does not refuse it.
+async fn park_blocked_cleanup(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    label: &str,
+    terminal_state: lazybox_ipc::RemovableTerminalState,
+    detail: String,
+) {
+    {
+        // Read and record under one lock: a concurrent sweep must not be
+        // able to see "not recorded yet" twice and emit the notice twice.
+        let mut prompts = config.poll.removal_prompts.lock().await;
+        let previous = prompts
+            .blocked
+            .insert(key.as_str().to_string(), detail.clone());
+        if previous.as_deref() == Some(detail.as_str()) {
+            // The same workspace, blocked by the same thing, as last
+            // time. This is the whole fix: no prompt, no notice, no log
+            // line — until that string changes.
+            return;
+        }
+    }
+
+    let verb = match terminal_state {
+        lazybox_ipc::RemovableTerminalState::Merged => "merged",
+        lazybox_ipc::RemovableTerminalState::Closed => "closed",
+    };
+    tracing::info!(
+        workspace = %key,
+        %detail,
+        ?terminal_state,
+        "terminal state — cleanup parked, the removal gate would refuse it"
+    );
+    let _ = config.bus.send(Event::Notification {
+        title: "lazybox".into(),
+        body: format!(
+            "{label} was {verb} — keeping its workspace, it has local work: \
+             {detail} · x x removes it once you have committed, pushed or discarded"
+        ),
+    });
+}
+
 /// Handle `Command::RemoveMergedWorkspace`: the user confirmed the
 /// merged-PR removal modal. Kills the sessions, drops the row, and
 /// reclaims the now-idle worktree directories via the internal
@@ -3160,10 +3732,15 @@ pub async fn remove_merged_workspace(
     config: &ServerConfig,
     key: &WorkspaceKey,
 ) -> Option<crate::workspace::Reclaimed> {
+    // A human read the prompt — which already names the local work it
+    // would lose — and pressed Yes. That is an explicit delete, so the
+    // cleanliness gate does not get to refuse it and send the row back
+    // to an inbox the user just cleared.
     remove_merged_workspace_with(
         config,
         key,
         crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+        crate::workspace::RemovalForce::Explicit,
     )
     .await
 }
@@ -3178,6 +3755,7 @@ pub(crate) async fn remove_merged_workspace_with(
     config: &ServerConfig,
     key: &WorkspaceKey,
     reason: crate::workspace::WorkspaceRemovalReason,
+    force: crate::workspace::RemovalForce,
 ) -> Option<crate::workspace::Reclaimed> {
     // Kills backing terminals, removes the row, and reclaims each
     // session's worktree dir; `reason` decides whether the next poll
@@ -3185,19 +3763,18 @@ pub(crate) async fn remove_merged_workspace_with(
     // lifecycle/store path already emitted a precise error — keep the
     // removal-prompt memory intact so the user can retry.
     let reclaimed = crate::workspace::WorkspaceLifecycle::new(config)
+        .forcing(force)
         .remove(key, reason)
         .await?;
 
     // The row is actually gone — now drop its reprompt bookkeeping. On a
     // failed prerequisite it must remain so the level-triggered prompt can
     // offer the destructive action again.
-    config
-        .poll
-        .removal_prompts
-        .lock()
-        .await
-        .prompted
-        .remove(key.as_str());
+    {
+        let mut prompts = config.poll.removal_prompts.lock().await;
+        prompts.prompted.remove(key.as_str());
+        prompts.blocked.remove(key.as_str());
+    }
 
     Some(reclaimed)
 }
@@ -3221,63 +3798,20 @@ fn workspace_worktree_paths(
         .collect()
 }
 
-/// Whether any of a workspace's session worktrees hold uncommitted or
-/// unpushed work. `Some(false)` — clean, and also the answer for a
-/// session-less workspace (no worktree to inspect). `Some(true)` — at
-/// least one worktree is dirty or ahead of its remote. `None` — the
-/// inspect itself failed, so cleanliness is unknown: callers that would
-/// destroy a worktree must treat `None` as unsafe, never as clean.
-async fn workspace_local_work(
-    config: &ServerConfig,
-    mgr: &lazybox_git_ops::WorktreeManager,
-    key: &WorkspaceKey,
-    session_paths: &std::collections::HashSet<std::path::PathBuf>,
-) -> Option<bool> {
-    if session_paths.is_empty() {
-        return Some(false);
-    }
-    let tracked = match crate::workspace::collect_tracked_sessions(config).await {
-        Ok(tracked) => tracked,
-        Err(error) => {
-            tracing::warn!(workspace = %key, %error, "prompt_merged_pr_removal: tracked-session scan failed");
-            return None;
-        }
-    };
-    let paths: Vec<std::path::PathBuf> = session_paths.iter().cloned().collect();
-    match mgr.inspect_paths(&paths, &tracked).await {
-        Ok(rows) => Some(session_paths.iter().any(|path| {
-            rows.iter()
-                .find(|row| canon(&row.path) == *path)
-                .map(|row| {
-                    row.has_uncommitted_changes
-                        || row.has_unpushed_commits
-                        || row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
-                })
-                // The path exists in the workspace record but the inspector
-                // cannot account for it. Warn and let the final server gate
-                // refuse removal rather than presenting an unsafe "clean".
-                .unwrap_or_else(|| path.exists())
-        })),
-        Err(e) => {
-            tracing::warn!(workspace = %key, "prompt_merged_pr_removal: inspect failed: {e}");
-            None
-        }
-    }
-}
-
 /// Cancel a pending workspace-removal prompt (issue #552): drop the
 /// reprompt throttle memory so a re-close prompts cleanly, then
 /// broadcast [`Event::RemovalCancelled`] so any TUI dismisses a still-
 /// mounted "remove closed issue?" modal. Called when a closed issue
 /// reopens before its removal was acted on.
 pub(crate) async fn cancel_pending_removal(config: &ServerConfig, key: &WorkspaceKey) {
-    config
-        .poll
-        .removal_prompts
-        .lock()
-        .await
-        .prompted
-        .remove(key.as_str());
+    {
+        let mut prompts = config.poll.removal_prompts.lock().await;
+        prompts.prompted.remove(key.as_str());
+        // A reopened issue is no longer a parked cleanup at all; if it
+        // closes again with the same dirty checkout, that is worth
+        // saying again.
+        prompts.blocked.remove(key.as_str());
+    }
     let _ = config.bus.send(Event::RemovalCancelled {
         workspace_key: key.clone(),
     });
@@ -3941,6 +4475,187 @@ mod prefetch_score_tests {
         noisy.unread_count = 5;
         let warm = prefetch_rank_score(&noisy, EngagementSignals::default(), EngagementTier::Warm);
         assert!(hot > warm);
+    }
+}
+
+#[cfg(test)]
+mod pr_diff_tests {
+    //! GitHub's per-file patches become the same document the local
+    //! reader produces (#1808), so one viewer renders both sources.
+
+    use super::*;
+    use lazybox_gh::{PullRequestDiff, PullRequestDiffFile, PullRequestFileChange};
+
+    fn file(
+        path: &str,
+        change: PullRequestFileChange,
+        patch: &str,
+        additions: u64,
+        deletions: u64,
+    ) -> PullRequestDiffFile {
+        PullRequestDiffFile {
+            path: path.into(),
+            previous_path: None,
+            change,
+            additions,
+            deletions,
+            patch: Some(patch.into()),
+        }
+    }
+
+    /// GitHub serves hunks with no `diff --git` preamble, so each
+    /// file's patch is parsed on its own and the paths come across as
+    /// data — which is what keeps two files from collapsing into one
+    /// and keeps a line's numbers attached to the right side.
+    #[test]
+    fn github_patches_become_per_file_hunks_with_line_numbers() {
+        let files = vec![
+            file(
+                "src/lib.rs",
+                PullRequestFileChange::Modified,
+                "@@ -41,2 +41,2 @@\n-gone();\n+fix();",
+                1,
+                1,
+            ),
+            file(
+                "src/new.rs",
+                PullRequestFileChange::Added,
+                "@@ -0,0 +1 @@\n+fresh();",
+                1,
+                0,
+            ),
+        ];
+        let dto = pr_diff_to_dto(
+            PullRequestDiff {
+                head_sha: "feedface".into(),
+                files,
+                truncated: false,
+            },
+            None,
+        );
+
+        assert_eq!(dto.head_sha.as_deref(), Some("feedface"));
+        assert_eq!(dto.files.len(), 2, "each file must stay its own file");
+        let hunk = &dto.files[0].hunks[0];
+        assert_eq!(hunk.old_start, 41);
+        assert_eq!(
+            (hunk.lines[0].old_line, hunk.lines[0].new_line),
+            (Some(41), None),
+            "the deletion keeps the old-side number a LEFT comment anchors to",
+        );
+        assert_eq!(
+            (hunk.lines[1].old_line, hunk.lines[1].new_line),
+            (None, Some(41)),
+            "the addition keeps the new-side number a RIGHT comment anchors to",
+        );
+        assert_eq!(dto.files[1].path, "src/new.rs");
+    }
+
+    /// A pull request has no working tree, so there is no porcelain
+    /// status to report — the stat block carries the summary instead.
+    #[test]
+    fn the_stat_block_summarizes_what_git_would_have_counted() {
+        let dto = pr_diff_to_dto(
+            PullRequestDiff {
+                head_sha: "feedface".into(),
+                files: vec![file(
+                    "src/lib.rs",
+                    PullRequestFileChange::Modified,
+                    "@@ -1 +1 @@\n-a\n+b",
+                    1,
+                    1,
+                )],
+                truncated: false,
+            },
+            None,
+        );
+
+        assert!(dto.status.is_empty());
+        assert_eq!(dto.stat[0], " src/lib.rs | +1 -1");
+        assert_eq!(
+            dto.stat[1],
+            " 1 file changed, 1 insertion(+), 1 deletion(-)"
+        );
+    }
+
+    /// A file with no patch (too large, or a pure mode change) must
+    /// still appear: silently dropping it would tell the reviewer the
+    /// PR does not touch it.
+    #[test]
+    fn a_file_without_a_patch_still_gets_a_header() {
+        let dto = pr_file_to_dto(PullRequestDiffFile {
+            path: "logo.png".into(),
+            previous_path: None,
+            change: PullRequestFileChange::Modified,
+            additions: 0,
+            deletions: 0,
+            patch: None,
+        });
+
+        assert_eq!(dto.path, "logo.png");
+        assert!(dto.hunks.is_empty());
+        assert_eq!(dto.headers[0], "diff --git a/logo.png b/logo.png");
+    }
+
+    /// A rename's pre-image lives at the old path. Pointing both
+    /// markers at the new one would render every line of a moved file
+    /// as though it had been edited in place.
+    #[test]
+    fn a_rename_keeps_its_old_path_on_the_pre_image_side() {
+        let dto = pr_file_to_dto(PullRequestDiffFile {
+            path: "src/new.rs".into(),
+            previous_path: Some("src/old.rs".into()),
+            change: PullRequestFileChange::Modified,
+            additions: 0,
+            deletions: 0,
+            patch: None,
+        });
+
+        assert_eq!(dto.path, "src/new.rs");
+        assert_eq!(dto.old_path.as_deref(), Some("src/old.rs"));
+        assert_eq!(dto.headers[1], "--- a/src/old.rs");
+        assert_eq!(dto.headers[2], "+++ b/src/new.rs");
+    }
+
+    /// An added file has no pre-image — the same thing the local
+    /// parser reads out of a `--- /dev/null` marker, so both sources
+    /// hand the viewer the same shape.
+    #[test]
+    fn an_added_file_has_no_pre_image() {
+        let dto = pr_file_to_dto(PullRequestDiffFile {
+            path: "src/new.rs".into(),
+            previous_path: None,
+            change: PullRequestFileChange::Added,
+            additions: 1,
+            deletions: 0,
+            patch: Some("@@ -0,0 +1 @@\n+fresh();".into()),
+        });
+
+        assert_eq!(dto.old_path, None);
+        assert_eq!(dto.headers[1], "--- /dev/null");
+    }
+
+    /// The path a review comment posts against comes from GitHub's own
+    /// field, not from re-reading a marker line this code wrote.
+    ///
+    /// Regression for the round-trip: the diff document was assembled
+    /// as text and parsed back, and `+++ b/<path>` is split on a TAB —
+    /// so a path holding one (git quotes it, hand-written markers do
+    /// not) came back truncated, and the review comment carried a
+    /// path GitHub would reject or, worse, match to another file.
+    #[test]
+    fn a_path_holding_a_tab_survives_intact() {
+        let dto = pr_file_to_dto(PullRequestDiffFile {
+            path: "src/od\td.rs".into(),
+            previous_path: None,
+            change: PullRequestFileChange::Modified,
+            additions: 1,
+            deletions: 0,
+            patch: Some("@@ -1 +1,2 @@\n keep();\n+fix();".into()),
+        });
+
+        assert_eq!(dto.path, "src/od\td.rs");
+        assert_eq!(dto.old_path.as_deref(), Some("src/od\td.rs"));
     }
 }
 
@@ -5144,11 +5859,12 @@ mod inspect_tests {
         assert!(wt.exists(), "prompt must not delete anything");
     }
 
-    /// A merged worktree with uncommitted work flags
-    /// `has_local_work = true` so the confirm modal warns before the
-    /// force-delete.
+    /// #1867: a merged worktree the removal gate would refuse is NOT
+    /// offered for cleanup — the prompt it used to emit could only end
+    /// in that refusal. It is announced once, quietly, and the row and
+    /// worktree are left alone.
     #[tokio::test]
-    async fn prompt_flags_local_work_for_dirty_merged_worktree() {
+    async fn prompt_parks_dirty_merged_worktree_instead_of_offering_cleanup() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "dirty", "feat").await;
         delete_remote_ref(&fx, "feat").await;
@@ -5168,24 +5884,269 @@ mod inspect_tests {
         )
         .await;
 
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
+        let Event::Notification { body, .. } = evt else {
+            unreachable!()
+        };
+        assert!(
+            body.contains("o/r#1") && body.contains("local work"),
+            "the parked cleanup must name the workspace and why: {body}"
+        );
+        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        assert!(wt.exists(), "parking must not delete anything");
+        assert!(load_workspace(&config, &key).is_some(), "row must remain");
+    }
+
+    /// The other half of #1867: `has_local_work` still means "a confirmed
+    /// removal destroys work", which is NOT the same as "the gate
+    /// refuses". A merged PR's squash-merged tip reads as unpushed —
+    /// the gate relaxes that (the work is upstream under another SHA) so
+    /// the prompt IS offered, and it must still warn, because those
+    /// commits exist nowhere else.
+    #[tokio::test]
+    async fn prompt_warns_about_unpushed_commits_on_a_merged_pr() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "unpushed", "feat").await;
+        std::fs::write(wt.join("local.txt"), "local\n").unwrap();
+        run(&wt, &["add", "."]).await;
+        run(&wt, &["commit", "-q", "-m", "local only"]).await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Merged,
+        )
+        .await;
+
         let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
         let Event::MergedPrRemovable { has_local_work, .. } = evt else {
             unreachable!()
         };
-        assert!(has_local_work, "dirty worktree must warn before delete");
+        assert!(
+            has_local_work,
+            "commits no remote has must warn even when they do not block"
+        );
     }
 
-    /// A closed **issue** whose worktree has local work emits the same
-    /// `MergedPrRemovable` prompt as a merged PR, but tags
-    /// `terminal_state = Closed` so the modal copy reads "closed" (#250).
-    /// The worktree is dirtied so the assertion is meaningful even under
-    /// the pre-#1129 clean-auto-remove behavior.
+    /// The explicit delete's preflight reports what the removal
+    /// DESTROYS, not what blocks it.
+    ///
+    /// Same merged-PR shape as the test above: the unpushed tip does
+    /// not block (the gate relaxes it — the work is upstream under
+    /// another SHA), so a preflight built from the blockers would hand
+    /// the confirm an empty list and the user would answer "yes" to a
+    /// prompt that named nothing while local-only commits disappeared.
+    #[tokio::test]
+    async fn the_removal_preflight_names_work_the_gate_does_not_block_on() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "preflight", "feat").await;
+        std::fs::write(wt.join("local.txt"), "local\n").unwrap();
+        run(&wt, &["add", "."]).await;
+        run(&wt, &["commit", "-q", "-m", "local only"]).await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
+        let mut rx = config.bus.subscribe();
+
+        // The gate itself would let this removal through.
+        let outlook = crate::workspace::removal_outlook_with(
+            &config,
+            &lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf()),
+            &load_workspace(&config, &key).expect("workspace"),
+        )
+        .await
+        .expect("outlook");
+        assert!(!outlook.is_blocked(), "the merged relaxation un-blocks it");
+
+        crate::workspace::inspect_removal_risks(
+            &config,
+            lazybox_ipc::RemovalTarget::Workspace((&key).into()),
+        )
+        .await;
+
+        let evt = drain_until(&mut rx, |e| {
+            matches!(e, Event::RemovalRisksInspected { .. })
+        })
+        .await;
+        let Event::RemovalRisksInspected { risks, error, .. } = evt else {
+            unreachable!()
+        };
+        assert_eq!(error, None, "the inspection ran");
+        let reasons: Vec<String> = risks.iter().flat_map(|r| r.reasons.clone()).collect();
+        assert!(
+            reasons.iter().any(|r| r.contains("unpushed")),
+            "the confirm must name commits no remote has: {risks:?}",
+        );
+        assert!(
+            risks.iter().any(|r| r.path.ends_with("preflight")),
+            "and the checkout they are in: {risks:?}",
+        );
+    }
+
+    /// Regression for #1867 — the loop itself. A merged workspace the
+    /// gate refuses is announced ONCE and then stays silent across every
+    /// later sweep, with the reprompt throttle expired each time so the
+    /// silence is the new suppression and not the cadence gate. When the
+    /// user cleans the checkout, the real cleanup prompt arrives.
+    ///
+    /// Without the fix the second and third sweeps re-emit
+    /// `MergedPrRemovable`, which is exactly the prompt the user
+    /// answered into the `store:local-work` refusal every minute.
+    #[tokio::test]
+    async fn refused_cleanup_is_announced_once_and_rearms_when_clean() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "loop", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        let sweep = async |config: &ServerConfig, mgr: &lazybox_git_ops::WorktreeManager| {
+            prompt_merged_pr_removal_with(
+                config,
+                mgr,
+                &key,
+                lazybox_ipc::RemovableTerminalState::Merged,
+            )
+            .await;
+        };
+
+        sweep(&config, &mgr).await;
+        let first = drain_until(&mut rx, |e| {
+            matches!(
+                e,
+                Event::MergedPrRemovable { .. } | Event::Notification { .. }
+            )
+        })
+        .await;
+
+        // Every later tick: nothing at all. This is the loop — before
+        // the fix, each of these sweeps re-emitted `MergedPrRemovable`,
+        // and each answer to it came back as the red `store:local-work`
+        // refusal.
+        for _ in 0..3 {
+            expire_reprompt_throttle(&config, &key).await;
+            sweep(&config, &mgr).await;
+        }
+        assert_no_event(&mut rx, |e| {
+            matches!(
+                e,
+                Event::MergedPrRemovable { .. } | Event::Notification { .. }
+            )
+        })
+        .await;
+
+        // …and what it said once was the quiet notice, not a cleanup
+        // offer the gate was always going to refuse.
+        assert!(
+            matches!(first, Event::Notification { .. }),
+            "a refused cleanup must be announced, not offered: {first:?}"
+        );
+
+        // The user commits/discards: the situation changed, so the
+        // cleanup the daemon parked is offered for real.
+        std::fs::remove_file(wt.join("scratch.txt")).unwrap();
+        expire_reprompt_throttle(&config, &key).await;
+        sweep(&config, &mgr).await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        let Event::MergedPrRemovable { has_local_work, .. } = evt else {
+            unreachable!()
+        };
+        assert!(!has_local_work, "a cleaned checkout has nothing to lose");
+    }
+
+    /// #1867: the parked announcement is re-made when the BLOCKING state
+    /// changes but still blocks — the user rescued one checkout's work
+    /// and left another reason behind, so the notice must name the new
+    /// one rather than stay pinned to the first.
+    #[tokio::test]
+    async fn parked_cleanup_reannounces_when_the_blocker_changes() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "changed-blocker", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Merged,
+        )
+        .await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
+        let Event::Notification { body, .. } = evt else {
+            unreachable!()
+        };
+        assert!(body.contains("new untracked files"), "got: {body}");
+
+        // Track the file (still uncommitted) — a different reason.
+        run(&wt, &["add", "scratch.txt"]).await;
+        expire_reprompt_throttle(&config, &key).await;
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Merged,
+        )
+        .await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
+        let Event::Notification { body, .. } = evt else {
+            unreachable!()
+        };
+        assert!(
+            body.contains("uncommitted changes to tracked files"),
+            "a changed blocker must be re-announced: {body}"
+        );
+    }
+
+    /// Backdate a workspace's reprompt stamp so the next sweep is not
+    /// silenced by `REMOVAL_REPROMPT_AFTER`. `checked_sub` can return
+    /// `None` on a host whose uptime is under the interval (a fresh CI
+    /// VM); dropping the stamp models the same "nothing recorded" state.
+    async fn expire_reprompt_throttle(config: &ServerConfig, key: &WorkspaceKey) {
+        let mut prompts = config.poll.removal_prompts.lock().await;
+        match std::time::Instant::now().checked_sub(crate::polling::REMOVAL_REPROMPT_AFTER) {
+            Some(past) => {
+                prompts.prompted.insert(key.as_str().to_string(), past);
+            }
+            None => {
+                prompts.prompted.remove(key.as_str());
+            }
+        }
+    }
+
+    /// A closed **issue** emits the same `MergedPrRemovable` prompt as a
+    /// merged PR, but tags `terminal_state = Closed` so the modal copy
+    /// reads "closed" (#250). The checkout is clean: since #1867 a
+    /// checkout the removal gate would refuse is parked rather than
+    /// prompted, so dirtying it here would test the other path.
     #[tokio::test]
     async fn prompt_emits_closed_terminal_state_for_issue() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "issue", "feat").await;
         delete_remote_ref(&fx, "feat").await;
-        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
         let store = Arc::new(MemoryStore::new());
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
@@ -5366,11 +6327,12 @@ mod inspect_tests {
         assert!(load_workspace(&config, &key).is_some());
     }
 
-    /// #552: a closed issue whose worktree has uncommitted work is NOT
-    /// destroyed — it prompts (`MergedPrRemovable`, `has_local_work`)
-    /// and leaves the worktree + row intact until the user answers.
+    /// #552 + #1867: a closed issue whose worktree has uncommitted work
+    /// is NOT destroyed — and is no longer offered for a cleanup the
+    /// removal gate would refuse either. It is announced once and the
+    /// worktree + row are left intact.
     #[tokio::test]
-    async fn closed_issue_dirty_session_prompts() {
+    async fn closed_issue_dirty_session_is_parked_not_prompted() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "issue-dirty", "feat").await;
         std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
@@ -5389,21 +6351,19 @@ mod inspect_tests {
         )
         .await;
 
-        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
-        let Event::MergedPrRemovable {
-            has_local_work,
-            terminal_state,
-            ..
-        } = evt
-        else {
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
+        let Event::Notification { body, .. } = evt else {
             unreachable!()
         };
-        assert!(has_local_work, "dirty worktree must warn, not auto-remove");
-        assert_eq!(terminal_state, lazybox_ipc::RemovableTerminalState::Closed);
-        assert!(wt.exists(), "dirty worktree must survive the prompt");
+        assert!(
+            body.contains("closed") && body.contains("local work"),
+            "the parked cleanup must read as a closed issue kept for its work: {body}"
+        );
+        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        assert!(wt.exists(), "dirty worktree must survive");
         assert!(
             load_workspace(&config, &key).is_some(),
-            "row must remain until the user answers"
+            "row must remain — nothing was removed"
         );
     }
 
@@ -5797,6 +6757,7 @@ mod inspect_tests {
             &config,
             &key,
             crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+            crate::workspace::RemovalForce::Explicit,
         )
         .await;
 
@@ -5823,9 +6784,13 @@ mod inspect_tests {
         let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
 
         assert!(
-            crate::workspace::delete_workspace(&config, &key)
-                .await
-                .is_some()
+            crate::workspace::delete_workspace(
+                &config,
+                &key,
+                crate::workspace::RemovalForce::Gated
+            )
+            .await
+            .is_some()
         );
         drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
         assert!(load_workspace(&config, &key).is_none(), "store row removed");
@@ -5853,9 +6818,13 @@ mod inspect_tests {
         );
         let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
 
-        let reclaimed = crate::workspace::delete_workspace(&config, &key)
-            .await
-            .expect("delete should succeed");
+        let reclaimed = crate::workspace::delete_workspace(
+            &config,
+            &key,
+            crate::workspace::RemovalForce::Gated,
+        )
+        .await
+        .expect("delete should succeed");
 
         assert!(
             !wt.exists(),
@@ -5898,10 +6867,13 @@ mod inspect_tests {
         );
     }
 
-    /// A confirmation is intent, not a stale cleanliness capability: work
-    /// added after the modal opened must still survive the server-side gate.
+    /// The **unattended** half of the removal contract: a gated removal
+    /// re-inspects and preserves a dirty checkout. Nothing with no human
+    /// in the loop may destroy work no remote has, so this must keep
+    /// refusing even though the user-confirmed path above no longer does
+    /// (`remove_merged_workspace` passes `RemovalForce::Explicit`).
     #[tokio::test]
-    async fn remove_merged_reinspects_and_preserves_dirty_worktree() {
+    async fn unattended_merged_removal_reinspects_and_preserves_dirty_worktree() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "remove-dirty", "feat").await;
         delete_remote_ref(&fx, "feat").await;
@@ -5919,6 +6891,7 @@ mod inspect_tests {
             &config,
             &key,
             crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+            crate::workspace::RemovalForce::Gated,
         )
         .await;
 
@@ -5927,6 +6900,113 @@ mod inspect_tests {
         assert!(
             load_workspace(&config, &key).is_some(),
             "row must remain reachable for retry"
+        );
+    }
+
+    /// The user-confirmed half of the merged-PR cleanup. #1867 keeps the
+    /// prompt from being raised at all when the gate would refuse it, so
+    /// this is the race it cannot cover: the checkout went dirty while
+    /// the modal was open. A human read the prompt and pressed Yes, so
+    /// the removal is explicit and the gate does not send the row back
+    /// to an inbox the user just cleared.
+    #[tokio::test]
+    async fn a_confirmed_merged_removal_deletes_a_dirty_checkout() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "confirmed-dirty", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("README.md"), "edited while the modal was open\n").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
+
+        assert!(
+            remove_merged_workspace(&config, &key).await.is_some(),
+            "a confirmed removal deletes — a refusal here is the bug",
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        assert!(!wt.exists(), "and the checkout with it");
+    }
+
+    /// The same unattended contract for a **modified tracked file** —
+    /// the shape the user's explicit delete now destroys on purpose.
+    /// With nobody in the loop the edit is kept, byte for byte.
+    #[tokio::test]
+    async fn unattended_merged_removal_preserves_modified_tracked_files() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "remove-tracked", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("README.md"), "edited, never committed\n").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
+
+        let removed = remove_merged_workspace_with(
+            &config,
+            &key,
+            crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+            crate::workspace::RemovalForce::Gated,
+        )
+        .await;
+
+        assert!(removed.is_none(), "an uncommitted edit must refuse removal");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("README.md")).unwrap(),
+            "edited, never committed\n",
+            "the edit survives untouched",
+        );
+        assert!(
+            load_workspace(&config, &key).is_some(),
+            "row must remain reachable for retry"
+        );
+    }
+
+    /// And for a checkout nothing can classify: severing the worktree's
+    /// admin directory leaves git unable to say whether it holds work.
+    /// The explicit path removes it (`x x`); an unattended cleanup must
+    /// not, because "I could not read it" is not "it is empty".
+    #[tokio::test]
+    async fn unattended_merged_removal_preserves_an_uninspectable_checkout() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "remove-severed", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("unsaved.txt"), "content nobody vetted").unwrap();
+        // `.git` still names a gitdir; the gitdir is gone.
+        std::fs::remove_dir_all(fx.bare.join("worktrees")).unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
+
+        let removed = remove_merged_workspace_with(
+            &config,
+            &key,
+            crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+            crate::workspace::RemovalForce::Gated,
+        )
+        .await;
+
+        assert!(
+            removed.is_none(),
+            "nothing unattended may destroy what it could not classify",
+        );
+        config.drain_maintenance_tasks().await;
+        assert!(
+            wt.join("unsaved.txt").exists(),
+            "and every byte of it survives",
         );
     }
 
@@ -5954,7 +7034,12 @@ mod inspect_tests {
             fx.base.path().to_path_buf(),
         );
 
-        let removed = crate::workspace::delete_workspace(&config, &key).await;
+        let removed = crate::workspace::delete_workspace(
+            &config,
+            &key,
+            crate::workspace::RemovalForce::Gated,
+        )
+        .await;
 
         assert!(
             removed.is_some(),
@@ -6002,7 +7087,12 @@ mod inspect_tests {
         )
         .await;
 
-        let removed = crate::workspace::delete_workspace(&config, &key).await;
+        let removed = crate::workspace::delete_workspace(
+            &config,
+            &key,
+            crate::workspace::RemovalForce::Gated,
+        )
+        .await;
 
         assert!(
             removed.is_none(),
@@ -7122,5 +8212,119 @@ mod sync_workspace_discovery_tests {
                 "g s on a PR workspace must upsert the repo's new open issue #{number}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod external_merge_cost_tests {
+    use super::{
+        PENDING_MERGE_COST_PREFIX, clear_merge_cost_intent, external_merge_has_unreported_cost,
+        note_merge_owes_cost, sweep_pending_merge_costs,
+    };
+    use crate::ServerConfig;
+    use lazybox_core::{CostTrailer, PrTrailers, WorkspaceKey};
+
+    /// Regression: the intent to record an external merge's cost survives
+    /// everything the in-memory 60s sleep did not.
+    ///
+    /// The same upsert that observes the merge goes on to reap or
+    /// prompt-to-remove the workspace, so a user answering that prompt
+    /// inside the minute dropped the figure permanently — no log, no retry,
+    /// and the unreported cost stayed on the watermark to be misattributed
+    /// to the next PR on that key. A daemon restart lost it identically.
+    /// The intent is a durable row now, written at the transition.
+    #[tokio::test]
+    async fn the_cost_intent_is_durable_and_survives_a_restart() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github-acme-widget-7");
+        note_merge_owes_cost(&config, &key);
+
+        // A "restart" is just a fresh read of the same store — nothing about
+        // the pending record lives in the process.
+        let pending = config
+            .store
+            .list_kv_prefix(PENDING_MERGE_COST_PREFIX)
+            .expect("read pending rows");
+        assert_eq!(
+            pending.len(),
+            1,
+            "the merge's cost intent outlives the recorder's sleep: {pending:?}"
+        );
+        assert!(pending[0].0.ends_with(key.as_str()), "{pending:?}");
+
+        clear_merge_cost_intent(&config, &key);
+        assert!(
+            config
+                .store
+                .list_kv_prefix(PENDING_MERGE_COST_PREFIX)
+                .expect("read pending rows")
+                .is_empty(),
+            "a recorded cost clears its intent"
+        );
+    }
+
+    /// A workspace removed inside the settle window is settled, not retried
+    /// forever — and the sweep says so rather than dropping it in silence.
+    #[tokio::test]
+    async fn a_removed_workspace_settles_its_intent_instead_of_looping() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github-acme-gone-9");
+        // Backdate past the settle window so the sweep acts on it now.
+        config
+            .store
+            .set_kv(&format!("{PENDING_MERGE_COST_PREFIX}{key}"), "0")
+            .expect("seed a settled pending row");
+
+        sweep_pending_merge_costs(&config).await;
+
+        assert!(
+            config
+                .store
+                .list_kv_prefix(PENDING_MERGE_COST_PREFIX)
+                .expect("read pending rows")
+                .is_empty(),
+            "a workspace that no longer exists cannot be recorded against — settle it"
+        );
+    }
+
+    /// A row still inside its settle window is left for the recorder that
+    /// the merge transition already spawned; sweeping it early would measure
+    /// a cost lazybox's own merge path is about to mark reported.
+    #[tokio::test]
+    async fn a_fresh_intent_is_left_alone_by_the_sweep() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github-acme-fresh-1");
+        note_merge_owes_cost(&config, &key);
+        sweep_pending_merge_costs(&config).await;
+        assert_eq!(
+            config
+                .store
+                .list_kv_prefix(PENDING_MERGE_COST_PREFIX)
+                .expect("read pending rows")
+                .len(),
+            1,
+            "the settle window is still open"
+        );
+    }
+
+    #[test]
+    fn only_a_measured_unreported_cost_is_recorded() {
+        assert!(!external_merge_has_unreported_cost(&PrTrailers::default()));
+        let already_reported = PrTrailers {
+            cost: Some(CostTrailer {
+                micros: Some(0),
+                tokens: None,
+            }),
+            ..PrTrailers::default()
+        };
+        assert!(!external_merge_has_unreported_cost(&already_reported));
+        let unreported = PrTrailers {
+            cost: Some(CostTrailer {
+                micros: Some(7_090_000),
+                tokens: None,
+            }),
+            ..PrTrailers::default()
+        };
+        assert!(external_merge_has_unreported_cost(&unreported));
     }
 }

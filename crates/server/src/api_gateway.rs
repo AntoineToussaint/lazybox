@@ -520,7 +520,11 @@ pub enum DesktopCommand {
         session_key: lazybox_core::SessionKey,
     },
     /// Archive the workspace: kill its sessions and drop the row (the TUI's
-    /// `x x` on a workspace). Maps to [`Command::Kill`].
+    /// `x x` on a workspace). Maps to [`Command::Kill`] with the local-work
+    /// gate ON. The TUI's `x x` is an *explicit* delete and sends
+    /// `force: true`, but only because its confirm renders the removal-risk
+    /// preflight first; the desktop shell has no such prompt, so it must not
+    /// claim the user was shown what the delete destroys.
     Archive {
         session_key: lazybox_core::SessionKey,
     },
@@ -734,7 +738,10 @@ impl DesktopCommand {
             DesktopCommand::UpdateBranch { session_key } => Command::UpdateBranch {
                 workspace_key: workspace_key_of(&session_key),
             },
-            DesktopCommand::Archive { session_key } => Command::Kill { session_key },
+            DesktopCommand::Archive { session_key } => Command::Kill {
+                session_key,
+                force: false,
+            },
             DesktopCommand::CloseIssue { session_key } => Command::CloseIssue {
                 workspace_key: workspace_key_of(&session_key),
             },
@@ -2007,6 +2014,9 @@ fn command_request_id(command: &Command) -> Option<String> {
             client_request_id, ..
         }
         | Command::CreateWorkspace {
+            client_request_id, ..
+        }
+        | Command::CreateFloatingWorkspace {
             client_request_id, ..
         } => client_request_id.clone(),
         _ => None,

@@ -11,9 +11,15 @@ Read [`AGENTS.md`](../../AGENTS.md) first; this file only adds provider depth.
 With scoped or watched repos, the daemon sweeps every roster member with one
 windowed PR query plus one issue query, on a rotation sized by
 `providers.github.repo_refresh_interval`. A periodic unwindowed reconcile
-sweeps the whole roster and is the only pass allowed to retire rows. The
-user-centric `involves:USER` global sweep runs only when no scopes are
-configured.
+sweeps the whole roster and is the only pass allowed to retire a row by its
+ABSENCE — a windowed pass drops `is:open`, so it observes a close or a merge
+directly and retires that row itself. The user-centric `involves:USER` global
+sweep runs only when no scopes are configured.
+
+The reconcile drains one governor-sized batch per tick, so its admission is
+priced at a single roster member (`RECONCILE_ADMISSION_MEMBERS`). Pricing it
+at the whole roster is what starved it — and absence-based retirement with it
+— past ~25 repos (#1806).
 
 A rotation batch is preceded by one batched freshness probe: GraphQL has no
 ETag, so a watermark stands in for `If-None-Match`, and a member whose newest
@@ -82,3 +88,50 @@ the budget bootstrap sends a `rateLimit`-only probe.
 feels slow is usually the governor doing its job — measure before widening a
 window or shortening an interval, and see
 [`docs/github-api-governor.md`](../../docs/github-api-governor.md).
+
+## A claim is a label plus a comment
+
+"An agent is working on this" is two upstream facts, and the split is what
+makes it affordable (#1922):
+
+- **Presence** is the one stable `working` label
+  (`lazybox_core::WORKING_LABEL_NAME`). It rides free in the poll payload, so
+  `Task::has_working_claim()` costs no request on any tick, and attaching it
+  needs repository write access — the same property
+  `DeclarationScope::LabelsOnly` rests on (#1600).
+- **Identity** is one sticky comment per record, marked
+  `<!-- lazybox:claim -->` and carrying holder / agent / model / started /
+  heartbeat / expiry (`lazybox_core::WorkingClaimNote`). `apply_working_claim`
+  edits it in place on every heartbeat, so four heartbeats leave one comment,
+  not four.
+
+Read the label for presence; fetch the comment only at a decision point —
+`read_working_claim_note`, from `task_status` or the lapsed-claim sweep. Never
+from a poll tick.
+
+**A claim comment counts only when lazybox authored it.** Anyone can post the
+marker; only writers can label. `find_sticky_comment_body` matches on
+`c.user.login == self.user` *and* the marker, and
+`WorkingClaimNote::parse` anchors the marker at the start of the body so a
+quoted copy is not a second claim. Both halves are the trust property — a
+reader that drops either lets a drive-by comment cancel or fake a claim.
+
+`StickyComment` descriptors (`TRAILER_STICKY`, `CLAIM_STICKY`) carry the
+operation labels their REST calls are budgeted under, because
+`request_profile` keys on the label and its fallback arm is `Interactive`. A
+claim heartbeat on that tier would bypass the reserve and the per-tick
+allowance exactly as the claim label writes did before #1218 — so the four
+claim-comment operations are spelled out in the `Cold` arm, separately from
+the `post issue comment` / `update issue comment` labels a user's own comment
+uses.
+
+Per-heartbeat cost, steady state: **one** request (the in-place comment edit).
+`attach_label` comes from the caller's poll payload, so a label that never
+moved costs nothing and a label a human stripped is re-attached. The
+predecessor spent two (list the issue's labels, rename the per-claim label to
+its new expiry) and minted one label per claim on the repository forever.
+
+`lazybox:w:<device>:<session>:<expiry>` labels are legacy and read-only:
+`QualifiedWorkingClaim` still parses them so a claim held by a box on an older
+build is honoured, and `remove_working_claim_labels_target` retires one. The
+`role:<…>` labels are a separate mechanism and untouched by any of this.

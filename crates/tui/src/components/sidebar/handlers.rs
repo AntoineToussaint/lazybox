@@ -385,6 +385,7 @@ impl Sidebar {
             }
             Event::WorkspaceRemoved(key) => {
                 let session_key: SessionKey = key.into();
+                self.pending_removals.remove(&session_key);
                 let created_at = self
                     .workspaces
                     .remove(&session_key)

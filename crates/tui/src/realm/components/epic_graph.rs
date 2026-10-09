@@ -252,12 +252,37 @@ impl Component for EpicGraph {
             );
         }
 
+        // The selected member's detail row — its status in words and what
+        // holds it — sits above the hint when there is room for it.
+        let detail_h: u16 = u16::from(inner.height >= 4 + banner_h);
         let body = Rect {
             x: inner.x,
             y: inner.y + banner_h,
             width: inner.width,
-            height: inner.height - 1 - banner_h,
+            height: inner.height - 1 - banner_h - detail_h,
         };
+        if detail_h == 1
+            && let Some(member) = self
+                .selected_member()
+                .and_then(|i| self.snapshot.members.get(i))
+        {
+            let detail_rect = Rect {
+                x: inner.x,
+                y: inner.y + inner.height - 2,
+                width: inner.width,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(crate::components::table::truncate_line(
+                    Line::from(Span::styled(
+                        format!("  {}", lazybox_tui_core::epic_graph::member_detail(member)),
+                        Style::default().fg(theme.text_strong),
+                    )),
+                    detail_rect.width as usize,
+                )),
+                detail_rect,
+            );
+        }
         let hint = Rect {
             x: inner.x,
             y: inner.y + inner.height - 1,
@@ -475,6 +500,18 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The selected member's status and blockers are spelled out on the
+    /// detail row, and it follows the cursor.
+    #[test]
+    fn the_detail_row_describes_the_selected_member() {
+        let mut comp = EpicGraph::new("Epic", snapshot());
+        let first = render(&mut comp, 100, 24);
+        assert!(first.contains("  o/r#1 · "), "{first}");
+        comp.on(&ke(Key::Char('l')));
+        let second = render(&mut comp, 100, 24);
+        assert!(second.contains("  o/r#2 · "), "{second}");
     }
 
     #[test]

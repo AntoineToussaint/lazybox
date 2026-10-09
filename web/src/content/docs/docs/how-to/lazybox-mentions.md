@@ -59,7 +59,7 @@ task and compute profile, and the mention starts it without opening the TUI.
 An explicit model alias in the directive, such as `@lazybox codex S`, overrides
 the issue's own declaration. Labels take precedence over body markers. The
 deprecated `best` / `high` / `medium` / `low` keys still resolve through
-`models.priority`; a `model:` declaration on the same task outranks them.
+`models.capability`; a `model:` declaration on the same task outranks them.
 
 See [Run an agent per workspace → Let GitHub choose the model and
 effort](/docs/how-to/run-an-agent-per-workspace/#let-github-choose-the-model-and-effort)

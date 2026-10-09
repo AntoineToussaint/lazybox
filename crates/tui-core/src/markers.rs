@@ -229,7 +229,7 @@ const ROW_BADGES: &[MarkerDoc] = &[
         when: "Shows while the task carries an active owner-qualified lazybox claim (or a conservatively preserved legacy `working` label); starting another agent names known device/session owners and asks for confirmation.",
     },
     MarkerDoc {
-        label: "⚡",
+        label: "⚡\u{FE0E}",
         meaning: "ARM — this PR will auto-merge once CI goes green; lazybox's client-side merge, which only fires while lazybox is running.",
         when: "Shows once you arm merge-on-green (`g g`).",
     },
@@ -262,6 +262,11 @@ const ROW_BADGES: &[MarkerDoc] = &[
         label: "]N",
         meaning: "Count of distinct snippets/prompts you've recently sent to this workspace's agent.",
         when: "Shows once at least one snippet was sent to the workspace.",
+    },
+    MarkerDoc {
+        label: "▤N",
+        meaning: "Count of markdown artifacts this workspace's agents wrote to `.lazybox/artifacts/`; `a A` reads them.",
+        when: "Shows once an agent has spooled at least one artifact.",
     },
     MarkerDoc {
         label: "⌕ …excerpt…",

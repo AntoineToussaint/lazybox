@@ -40,7 +40,7 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `Shift-M` | messages | Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. |
 | `Shift-E` | errors | Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. |
 | `Shift-U` | usage stats | Open the usage-stats view — a day/week breakdown of what you've done, built from the daemon's persisted event history: agent sessions, prompts, PRs merged, agent turns, tokens, and cost. |
-| `Shift-H` | hopper | Open the personal Hopper editor. |
+| `Shift-H` | todo | Open your TODO list — the personal cross-project juggler. |
 | `Esc` | dismiss | Clear the current footer notice, whatever its severity — retryable, info, permanent, or auth. |
 | `Enter` | detail | Open the current footer error in a full-text detail modal. |
 | `` ` `` | jump to workspace | Open a fuzzy picker over every workspace (across repos) and jump to the one you pick. |
@@ -48,10 +48,11 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `Shift-F` | next failing | Jump the cursor to the next PR whose CI is failing (a quick jump; the workspace picker `` ` `` reaches any workspace). |
 | `Shift-L` | next stopped agent | Jump the cursor to the next workspace whose agent has stopped and needs you — blocked on its provider usage / rate limit (#847), or stopped on an infrastructure failure such as a 502 or a refused gateway connection (#1782). |
 | `Shift-N` | next unread | Jump the cursor to the next workspace with unread activity, wrapping around (#1502). |
+| `Shift-O` | next review | Jump the cursor to the next workspace with a reviewer requested or a review pending, wrapping around. |
 | `.` | focus mode | Maximize the focused workspace's terminal to near-fullscreen behind a slim event header, hiding the sidebar and activity pane. |
 | `Shift-W` | start work | Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane. |
 | `Shift-C` | connect box | Connect to (or disconnect from) the remote box on demand. |
-| `Shift-K` | resume stopped agents | Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike. |
+| `Shift-K` | resume stopped agents | Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike — except an agent whose login has died, which is held back and offered sign-in instead, because 'continue' cannot move a logged-out agent and the notice would otherwise claim a recovery that did not happen. |
 | `Ctrl-k` | recover credit | Select the provider's Wait for credit option for the focused blocked agent, wait for its composer, and submit the configured continuation prompt. |
 | `Shift-P` | activity pane | Cycle the activity pane: full feed → one-line summary (new-activity / failing-CI counts) → hidden → full. |
 | `F8 \| Alt-s \| Ctrl-Alt-s` | text selection | Toggle lazybox's mouse capture so the host terminal regains native text selection (trackpad-select + Cmd-C in agent scrollback). |
@@ -82,8 +83,8 @@ Manage the sidebar list itself — only while the sidebar has focus.
 
 | Key | Action | What it does |
 | --- | --- | --- |
-| `{` | prev group | Move the cursor to the previous group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502). |
-| `}` | next group | Move the cursor to the next group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502). |
+| `{` | prev group | Move the cursor to the previous group header (Space / repo / Focused / TODO) so a long inbox can be crossed a group at a time (#1502). |
+| `}` | next group | Move the cursor to the next group header (Space / repo / Focused / TODO) so a long inbox can be crossed a group at a time (#1502). |
 | `f` | filter | Open the filter menu — toggle state (with-agent, CI-failing, conflict, unread, asking, …), role, and kind predicates. |
 | `o` | order | Cycle the sort order (recency → by-role → by-role with section headers). |
 | `Shift-S` | switch mailbox | Cycle the mailbox view (Inbox → Inactive → Snoozed). |
@@ -144,8 +145,9 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | `]]\|` | Split the focused tile side-by-side (`]]\` is an alias) |
 | `]]-` | Split the focused tile stacked |
 | `]]←↓↑→` | Move tile focus; Left/Right cycles tabs in Tabs mode |
+| `]]Shift-←↓↑→` | Move the divider between the focused tile and its neighbour that way, by `ui.split_step_percent` — the keyboard half of dragging that divider with the mouse |
 | `]]x` | Close the focused terminal (tile or active tab) |
-| `]]H` | Open the personal Hopper editor |
+| `]]H` | Open your TODO list |
 | `]]z` | Toggle tmux-style zoom of the focused tile (maximize / restore); Splits grid only |
 | `]]t` | Switch this session's terminals between tabs and side-by-side tiles, and set how the next one opens (persists `ui.terminal_new_layout`) |
 
@@ -165,15 +167,17 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 
 `w` opens a deterministic work menu: press `w w` for the default or already-running agent, or choose an agent / model tier below. Nothing waits on a timeout, so the second key acts immediately.
 
+The strength rows carry the agent whose menu the model name was read from (here, the default `claude`). The alias itself is agent-agnostic: on a row already running another agent, `w` targets that agent and the which-key popup relabels the row with *its* model — or `agent default` when its menu defines no such tier, since nothing is then pinned.
+
 | Chord | Action |
 | --- | --- |
 | `w w` | work on this |
 | `w c` | work in claude |
 | `w x` | work in codex |
 | `w u` | work in cursor |
-| `w S` | Haiku |
-| `w M` | Sonnet |
-| `w L` | Opus |
+| `w S` | Haiku · claude |
+| `w M` | Sonnet · claude |
+| `w L` | Opus · claude |
 
 ### `a` — agent
 
@@ -181,6 +185,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | --- | --- |
 | `a R` | restart stopped agents |
 | `a K` | recover all credit |
+| `a A` | artifacts |
 | `a c` | spawn claude |
 | `a x` | spawn codex |
 | `a u` | spawn cursor |
@@ -223,7 +228,10 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 
 | Chord | Action |
 | --- | --- |
+| `x U` | archived |
 | `x n` | new workspace |
+| `x F` | floating workspace |
+| `x c` | coordination workspace |
 | `x R` | rename |
 | `x m` | move to space |
 | `x p` | new project |
@@ -236,7 +244,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `x j` | join into PR |
 | `x z` | long snooze *(confirmed first)* |
 | `x x` | archive *(confirmed first)* |
-| `x c` | close issue *(confirmed first)* |
+| `x C` | close issue *(confirmed first)* |
 | `x k` | close & kill *(confirmed first)* |
 | `x w` | reset agent *(confirmed first)* |
 | `x $` | meter |

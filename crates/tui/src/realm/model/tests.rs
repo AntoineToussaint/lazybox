@@ -8,7 +8,7 @@
 /// would let two modules' mutators race. Held for the whole body of
 /// each such test.
 #[cfg(test)]
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Seed a bare workspace into the sidebar's workspace map so a removal
 /// prompt targeting `key` passes the mount-time liveness gate
@@ -280,7 +280,7 @@ mod agent_auth_recovery_tests {
                 model_label: None,
                 authenticating: false,
             });
-            assert!(!model.auth_failed_terminals.contains(&TerminalId(id)));
+            assert!(!model.auth_failed_terminals.contains_key(&TerminalId(id)));
         }
         assert!(model.auth_prompt_queue.is_empty());
         assert!(model.top_modal().is_none());
@@ -425,6 +425,61 @@ mod effects_tests {
             m.handle_confirmed(true).as_slice(),
             [Command::ClearErrors]
         ));
+    }
+
+    /// #1824: `x x` deletes the row and tombstones the key, so an archived
+    /// record is in no mailbox. The browser is the only surface that shows
+    /// the set, and its restore is the only caller of the daemon's
+    /// unarchive — so the round trip (ask → repaint → restore) is what makes
+    /// `x x` reversible at all.
+    #[test]
+    fn archive_browser_lists_the_tombstones_and_restores_one() {
+        use lazybox_tui_core::action::Action;
+
+        let (client, mut server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        m.handle_daemon_event(empty_snapshot());
+        while server.rx.try_recv().is_ok() {}
+
+        m.dispatch_action(&Action::OpenArchive);
+        assert_eq!(m.top_modal(), Some(&Id::ArchiveBrowser));
+        assert!(
+            std::iter::from_fn(|| server.rx.try_recv().ok())
+                .any(|cmd| matches!(cmd, IpcCommand::ListArchivedWorkspaces)),
+            "opening the browser asks the daemon for the archived set",
+        );
+
+        m.handle_daemon_event(lazybox_ipc::Event::ArchivedWorkspaces {
+            records: vec![lazybox_ipc::ArchivedWorkspaceRecord {
+                key: "github-o-r-42".into(),
+                absorbed: vec!["github-o-r-40".into()],
+            }],
+        });
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::ArchiveBrowser),
+            "the snapshot repaints the browser rather than closing it",
+        );
+
+        // `u` on the row restores the whole set the row stands for; the
+        // daemon's refreshed broadcast is what reports the outcome.
+        m.dispatch_modal_key(tuirealm::event::KeyEvent::new(
+            tuirealm::event::Key::Char('u'),
+            tuirealm::event::KeyModifiers::NONE,
+        ));
+        let restored = std::iter::from_fn(|| server.rx.try_recv().ok()).find_map(|cmd| match cmd {
+            IpcCommand::UnarchiveWorkspace { key, .. } => Some(key),
+            _ => None,
+        });
+        assert_eq!(restored.as_deref(), Some("github-o-r-42"));
+    }
+
+    /// A snapshot that lands after the browser closed must not re-mount it.
+    #[test]
+    fn a_late_archived_snapshot_does_not_reopen_the_browser() {
+        let mut m = build_model();
+        m.handle_daemon_event(lazybox_ipc::Event::ArchivedWorkspaces { records: vec![] });
+        assert!(m.top_modal().is_none());
     }
 
     /// The empty-inbox doctor's sync facts must track real poll events end
@@ -641,6 +696,8 @@ mod effects_tests {
                 stat: Vec::new(),
                 files: Vec::new(),
                 truncated: false,
+                head_sha: None,
+                divergence: None,
             }),
             error: None,
         });
@@ -914,7 +971,7 @@ mod effects_tests {
         // Rising edge: indicator asserted + a one-shot attention flash.
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: true,
-            watched_repos: 30,
+            deferred_secs: 420,
             required_points: 900,
             allowance: 120,
         });
@@ -923,11 +980,30 @@ mod effects_tests {
             .discovery_behind
             .as_ref()
             .expect("standing indicator asserted");
-        assert_eq!(behind.watched_repos, 30);
+        assert_eq!(
+            behind.label(),
+            "discovery behind · Shift-R · 7m, needs 900 pts vs 120",
+            "the advisory prints the governor's own refusal, not a count that can read 0 (#1806)"
+        );
         assert!(
             m.status.notice.is_some(),
             "rising edge raises an attention flash"
         );
+        // Regression (#1806): the flash must name only levers that move
+        // the refused number. The sweep is priced per member now, so its
+        // required points carry no roster term and muting repos cannot
+        // change admission by a single point — offering it sends the user
+        // to do work that provably does nothing, the same dead end as the
+        // "0 watched repos over budget" line. What moves it is the
+        // allowance: Shift-R's widened refresh grant, or a larger
+        // background share.
+        let flash = m.status.notice.as_ref().unwrap().message.clone();
+        assert!(
+            !flash.contains("mute"),
+            "muting no longer lowers the required points: {flash}"
+        );
+        assert!(flash.contains("Shift-R"), "{flash}");
+        assert!(flash.contains("background_budget_share"), "{flash}");
 
         // The daemon re-sends the level every deferred tick. The indicator
         // must persist, and the flash must NOT re-fire — otherwise the
@@ -935,7 +1011,7 @@ mod effects_tests {
         m.status.notice = None;
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: true,
-            watched_repos: 31,
+            deferred_secs: 480,
             required_points: 930,
             allowance: 120,
         });
@@ -944,8 +1020,8 @@ mod effects_tests {
             "the level keeps the indicator standing"
         );
         assert_eq!(
-            m.status.discovery_behind.as_ref().unwrap().watched_repos,
-            31,
+            m.status.discovery_behind.as_ref().unwrap().required_points,
+            930,
             "the standing figures refresh from the latest level"
         );
         assert!(
@@ -956,7 +1032,7 @@ mod effects_tests {
         // Recovery retracts the standing indicator.
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: false,
-            watched_repos: 0,
+            deferred_secs: 0,
             required_points: 0,
             allowance: 0,
         });
@@ -971,7 +1047,7 @@ mod effects_tests {
         // daemon re-asserts the level within a tick if still behind.
         m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
             behind: true,
-            watched_repos: 30,
+            deferred_secs: 420,
             required_points: 900,
             allowance: 120,
         });
@@ -1047,6 +1123,49 @@ mod effects_tests {
 
     // Dismissing routes through the daemon (`SetUpdateDismissal`) instead of
     // a client-local store write, so it sticks across clients/restarts (#548).
+    /// Keys belong to the top modal alone. Every modal used to subscribe
+    /// to every event, so Esc on the update notice (mounted by the first
+    /// snapshot) also reached the first-run splash beneath it, which maps
+    /// Esc to "quit" — first launch closed lazybox.
+    #[test]
+    fn esc_on_a_stacked_modal_never_reaches_the_one_beneath() {
+        use crate::realm::components::splash::Splash;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (client, _server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        m.mount_modal(Id::Splash, Splash::new());
+        m.handle_daemon_event(empty_snapshot());
+        m.show_update_if_new(release_update("v0.2.0"));
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Update),
+            "update notice over the splash"
+        );
+
+        m.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        // Give a leaked key every chance to surface from the modal below.
+        for _ in 0..5 {
+            if let Ok(messages) = m.app.tick(tuirealm::application::PollStrategy::Once(
+                std::time::Duration::from_millis(20),
+            )) {
+                for msg in messages {
+                    m.update(msg);
+                }
+            }
+        }
+
+        assert!(
+            !m.quit,
+            "Esc on the update notice must not quit via the splash"
+        );
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Splash),
+            "only the update notice closed"
+        );
+    }
+
     #[test]
     fn update_dismissal_routes_through_the_daemon() {
         use tuirealm::event::{Key, KeyEvent, KeyModifiers};
@@ -1748,14 +1867,46 @@ mod effects_tests {
         }
     }
 
-    /// `x n` under a REPO project must declare itself scratch (#1586).
-    ///
-    /// The daemon refuses an anchor-less named create under a tracker-backed
-    /// project, and the TUI has no keybinding for "yes, this is scratch" — so
-    /// sending `scratch: false` here dead-ends an action the Start sheet still
-    /// offers, with a CLI flag (`--scratch`) as the only stated way out and no
-    /// way to reach it. `scratch` suppresses only the refusal, so the record
-    /// attach still applies and `x n` "#7" continues to land on issue #7's row.
+    #[test]
+    fn floating_actions_work_without_a_selected_project_and_correlate_creation() {
+        for (action, expected) in [
+            (
+                lazybox_tui_core::action::Action::NewWorkspace,
+                lazybox_core::FloatingWorkspaceKind::Thinking,
+            ),
+            (
+                lazybox_tui_core::action::Action::NewCoordinationWorkspace,
+                lazybox_core::FloatingWorkspaceKind::Coordination,
+            ),
+        ] {
+            let mut m = build_model();
+            m.dispatch_action(&action);
+            assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspace));
+            let cmds = m.handle_input_submitted("  Think it through  ".into());
+            match cmds.as_slice() {
+                [
+                    IpcCommand::CreateFloatingWorkspace {
+                        name,
+                        kind,
+                        spawn_agent,
+                        client_request_id,
+                    },
+                ] => {
+                    assert_eq!(name, "Think it through");
+                    assert_eq!(*kind, expected);
+                    assert!(spawn_agent.is_some());
+                    assert!(
+                        m.pending_workspace_creates
+                            .contains_key(client_request_id.as_ref().unwrap())
+                    );
+                }
+                _ => panic!("expected correlated floating create: {cmds:?}"),
+            }
+        }
+    }
+
+    /// The repo-project creation modal still declares named work as scratch
+    /// (#1586). It is distinct from `x n`, which now creates a floating folder.
     #[test]
     fn new_workspace_under_a_repo_declares_scratch_so_it_cannot_dead_end() {
         let mut m = build_model();
@@ -1773,7 +1924,7 @@ mod effects_tests {
                 ..
             } => {
                 assert_eq!(project_key, &pk);
-                assert_eq!(*anchor, None, "`x n` resolves the name daemon-side");
+                assert_eq!(*anchor, None, "the modal resolves the name daemon-side");
                 assert!(
                     *scratch,
                     "a human who typed a name in the New-workspace modal must not be refused \
@@ -1902,7 +2053,7 @@ mod effects_tests {
             request_id.clone(),
             super::super::PendingWorkspaceCreate {
                 name: "Disconnected".into(),
-                spawn_agent: true,
+                runner: super::super::SessionRunner::Agent("claude".into()),
                 workspace_key: None,
             },
         );
@@ -2123,7 +2274,10 @@ mod effects_tests {
             matches!(&cmds[..], [IpcCommand::CreateProject { name }] if name == "scratch"),
             "chat first creates the scratch project: {cmds:?}"
         );
-        assert!(m.deferred_chat, "chat is deferred until scratch lands");
+        assert!(
+            m.deferred_chat.is_some(),
+            "chat is deferred until scratch lands"
+        );
         // The scratch store write fails on the daemon: its
         // ProjectUpserted never arrives. The user instead creates a
         // real project via `x p`, which re-aims the deferred focus.
@@ -2152,7 +2306,7 @@ mod effects_tests {
         // The leaked flag survives harmlessly — only a scratch upsert
         // consumes it, so a later real Chat still works.
         assert!(
-            m.deferred_chat,
+            m.deferred_chat.is_some(),
             "a non-scratch upsert must leave the flag for the scratch that owns it"
         );
     }
@@ -2241,6 +2395,65 @@ mod effects_tests {
         assert!(m.modal_stack.is_empty(), "menu closes on pick");
         let active: Vec<Filter> = m.sidebar.filters().iter().collect();
         assert_eq!(active, vec![Filter::Author, Filter::Pr]);
+    }
+
+    /// End-to-end on the real `f` menu (#1914): the reported bug was
+    /// that `rate-limited` appeared nowhere on screen, so the user
+    /// concluded the filter did not exist. Type the old name into the
+    /// mounted menu and the `needs-recovery` row — and only it — must
+    /// be what is left rendered.
+    #[test]
+    fn typing_the_old_rate_limited_name_narrows_the_f_menu_to_needs_recovery() {
+        use lazybox_tui_core::action::Action;
+        use tuirealm::ratatui::layout::Rect;
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let mut m = build_model();
+        m.dispatch_action(&Action::OpenFilterMenu);
+        assert_eq!(m.modal_stack.last(), Some(&Id::FilterMenu));
+
+        let rendered = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| -> String {
+            let mut term = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+            term.draw(|frame| m.app.view(&Id::FilterMenu, frame, Rect::new(0, 0, 100, 30)))
+                .expect("render filter menu");
+            let buffer = term.backend().buffer();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|col| buffer[(col, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let before = rendered(&mut m);
+        assert!(
+            before.contains("needs-recovery") && before.contains("unread"),
+            "the unfiltered menu lists every predicate, got:\n{before}",
+        );
+
+        for ch in "rate-limited".chars() {
+            m.app
+                .get_component_mut(&Id::FilterMenu)
+                .expect("filter menu mounted")
+                .on(&tuirealm::event::Event::Keyboard(
+                    tuirealm::event::KeyEvent::from(tuirealm::event::Key::Char(ch)),
+                ));
+        }
+        let after = rendered(&mut m);
+        assert!(
+            after.contains("needs-recovery"),
+            "typing the pre-rename name must leave the entry on screen, got:\n{after}",
+        );
+        assert!(
+            !after.contains("unread"),
+            "every other predicate is filtered out, got:\n{after}",
+        );
+        assert!(
+            after.contains("rate-limited"),
+            "the typed query is echoed, got:\n{after}",
+        );
     }
 
     /// An empty pick clears every active filter.
@@ -2366,6 +2579,7 @@ mod effects_tests {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: ws_key.clone(),
             reason: super::super::RemovalReason::OutOfScope,
         });
@@ -2373,7 +2587,7 @@ mod effects_tests {
         let cmds = m.handle_confirmed(true);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::Kill { session_key } => {
+            IpcCommand::Kill { session_key, .. } => {
                 assert_eq!(session_key, &SessionKey::from(&ws_key));
             }
             other => panic!("expected Kill, got {other:?}"),
@@ -2388,6 +2602,7 @@ mod effects_tests {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: ws_key.clone(),
             reason: super::super::RemovalReason::Merged,
         });
@@ -2400,6 +2615,30 @@ mod effects_tests {
             }
             other => panic!("expected RemoveMergedWorkspace, got {other:?}"),
         }
+    }
+
+    /// Sending a removal takes the row out of the sidebar before the daemon
+    /// answers: the teardown (terminal kills, the local-work check) runs
+    /// behind it instead of leaving the row on screen for up to 30s.
+    #[test]
+    fn a_sent_removal_hides_the_row_before_the_daemon_answers() {
+        let mut m = build_model();
+        let ws = lazybox_core::Workspace::empty(
+            WorkspaceKey::new("github:o/r#1"),
+            "main",
+            chrono::Utc::now(),
+        );
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            ws,
+        )));
+        assert_eq!(m.sidebar.visible_workspace_count(), 1);
+        m.dispatch_cmds(vec![IpcCommand::RemoveMergedWorkspace { session_key: key }]);
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            0,
+            "the row leaves at once; the daemon finishes the teardown behind it"
+        );
     }
 
     /// Regression: a removal prompt for a workspace the client doesn't
@@ -2669,6 +2908,7 @@ mod effects_tests {
             Some(super::super::ModalFlow::RemovalPrompt {
                 workspace,
                 reason: super::super::RemovalReason::Merged,
+                ..
             }) => {
                 assert_eq!(workspace.as_str(), "github:o/r#2");
             }
@@ -2758,6 +2998,7 @@ mod effects_tests {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: ws_key.clone(),
             reason: super::super::RemovalReason::Merged,
         });
@@ -2779,6 +3020,7 @@ mod effects_tests {
     fn modal_dismissed_on_merged_removal_is_silent_deferral() {
         let mut m = build_model();
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: WorkspaceKey::new("github:o/r#1"),
             reason: super::super::RemovalReason::Merged,
         });
@@ -2797,6 +3039,7 @@ mod effects_tests {
     fn confirmed_no_on_remove_out_of_scope_returns_no_commands() {
         let mut m = build_model();
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: WorkspaceKey::new("github:o/r#1"),
             reason: super::super::RemovalReason::OutOfScope,
         });
@@ -2865,7 +3108,7 @@ mod effects_tests {
     /// Read the initial Enter default of the Confirm modal mounted
     /// under `id`. `Confirm::state()` exposes the highlighted button as
     /// a bool so the mount site's default is assertable end-to-end.
-    fn mounted_confirm_default_yes(
+    pub(super) fn mounted_confirm_default_yes(
         m: &Model<tuirealm::terminal::TestTerminalAdapter>,
         id: Id,
     ) -> bool {
@@ -2957,10 +3200,10 @@ mod effects_tests {
         );
     }
 
-    /// Every confirm now defaults to Yes for speed — including the
-    /// unsolicited workspace-removal prompt — with the danger conveyed by
-    /// the modal's warning coloring (a destructive confirm) rather than by
-    /// defaulting to No.
+    /// A removal prompt with nothing running still defaults to Yes: the
+    /// worktree is reconstructible, and the danger is conveyed by the
+    /// modal's warning coloring. Contrast
+    /// [`removal_prompt_with_live_terminals_defaults_to_no`].
     #[test]
     fn removal_prompt_defaults_to_yes() {
         let mut m = build_model();
@@ -2983,48 +3226,210 @@ mod effects_tests {
         );
     }
 
-    /// Issue #525: a user who sets `event: yes` opts the unsolicited
-    /// removal prompt into a Yes default.
+    /// #1899: an unsolicited removal prompt for a workspace with a LIVE
+    /// terminal defaults to No. Yes here kills a running agent mid-turn,
+    /// and nobody asked for the prompt — a provider event raised it. In
+    /// the incident four such prompts were answered by one Enter each, two
+    /// of them over embargoed work.
     #[test]
-    fn removal_prompt_respects_yes_event_override() {
-        use lazybox_config::ConfirmDefault;
-
+    fn removal_prompt_with_live_terminals_defaults_to_no() {
         let mut m = build_model();
         super::seed_ws(&mut m, "github:o/r#1");
-        super::seed_ws(&mut m, "github:o/r#2");
-        m.ui_defaults.confirm_default.event = ConfirmDefault::Yes;
         m.removal_prompt_queue
             .push_back(super::super::RemovalPrompt {
                 workspace_key: WorkspaceKey::new("github:o/r#1"),
                 label: "o/r#1".into(),
                 title: None,
+                terminal_count: 1,
+                reason: super::super::RemovalReason::OutOfScope,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "a removal prompt over a live terminal defaults to No",
+        );
+    }
+
+    /// The same guard on the merged/closed removal prompts: the reason the
+    /// row is being removed does not change what Yes destroys.
+    #[test]
+    fn merged_removal_prompt_with_live_terminals_defaults_to_no() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 2,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: true,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "a merged-PR removal over live terminals defaults to No",
+        );
+    }
+
+    /// #1899 follow-up (r1/f1): the guard must not trust the count the daemon
+    /// snapshotted at emit time. A merged PR with no session legitimately emits
+    /// `active_terminal_count: 0`; the prompt then queues behind any open modal,
+    /// and `removal_already_pending` drops the daemon's re-emit rather than
+    /// refreshing that count. So an agent started on the row while the prompt
+    /// waited used to face a Yes default — Enter killing it and deleting the
+    /// worktree. The live client-side count is what closes that window.
+    #[test]
+    fn stale_zero_count_still_guards_when_a_terminal_is_live_now() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        let session_key = SessionKey::from("github:o/r#1");
+        // The agent the user started while the prompt sat in the queue.
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        assert_eq!(
+            m.terminals.terminal_count_for(&session_key),
+            1,
+            "fixture must have a live terminal for the guard to find"
+        );
+
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                // The daemon's stale figure.
                 terminal_count: 0,
                 reason: super::super::RemovalReason::Merged,
                 has_local_work: false,
             });
         m.maybe_mount_next_removal_prompt();
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
         assert!(
-            mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
-            "event: yes flips the removal prompt to Yes",
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "a live terminal guards the prompt even when the event said 0",
         );
     }
 
-    /// The clean-worktrees bulk-wipe confirm now defaults Yes for speed,
-    /// with the danger shown by the destructive warning coloring.
+    /// #1899 follow-up (r1/f3): No on a GUARDED merged/closed prompt must not
+    /// send `KeepMergedWorkspace`. That command persists
+    /// `CleanupPrompt::Declined` on the row, which suppresses the prompt
+    /// permanently, survives restarts, and has no UI to see or undo — so a
+    /// prompt whose default was moved to No *because the user may not be
+    /// reading it* would trade one one-keystroke irreversible outcome for
+    /// another. It defers instead, and says so.
     #[test]
-    fn clean_worktrees_prompt_defaults_to_yes() {
+    fn no_on_a_guarded_removal_prompt_defers_instead_of_pinning_it() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: true,
+            workspace: WorkspaceKey::new("github:o/r#1"),
+            reason: super::super::RemovalReason::Merged,
+        });
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_confirmed(false);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, lazybox_ipc::Command::KeepMergedWorkspace { .. })),
+            "a guarded No must not persist the permanent keep pin, got: {cmds:?}",
+        );
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a keystroke that decides nothing still has to explain itself");
+        assert!(
+            notice.message.contains("ask again"),
+            "the notice must say the decision was deferred, got {:?}",
+            notice.message,
+        );
+    }
+
+    /// The other half of the same guard: an UNGUARDED No is a real decision and
+    /// still tells the daemon to stop asking.
+    #[test]
+    fn no_on_an_unguarded_removal_prompt_still_pins_the_keep() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
+            workspace: WorkspaceKey::new("github:o/r#1"),
+            reason: super::super::RemovalReason::Merged,
+        });
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_confirmed(false);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, lazybox_ipc::Command::KeepMergedWorkspace { .. })),
+            "an explicit No with nothing running is a decision, got: {cmds:?}",
+        );
+    }
+
+    /// #1899: the daemon's removal-risk reply rebuilds the open confirm in
+    /// place. That re-mount must reproduce the No guard — deriving the
+    /// default from the destructive flag alone handed the prompt back with
+    /// Enter on Yes, undoing the guard a moment after it appeared.
+    #[test]
+    fn removal_risk_remount_preserves_the_no_default() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 1,
+                reason: super::super::RemovalReason::OutOfScope,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert!(!mounted_confirm_default_yes(&m, Id::RemoveOutOfScope));
+
+        let target = lazybox_ipc::RemovalTarget::Workspace(SessionKey::from("github:o/r#1"));
+        m.apply_removal_risks(
+            &target,
+            &[lazybox_ipc::RemovalRiskDto {
+                path: std::path::PathBuf::from("/tmp/worktrees/o-r-1"),
+                reasons: vec!["uncommitted changes to tracked files".into()],
+            }],
+            None,
+        );
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "the risk-block re-mount kept the No default",
+        );
+    }
+
+    /// #1899: the clean-worktrees bulk-wipe confirm keeps a hard No floor
+    /// — one mis-hit could wipe many trees at once, so Enter cancels.
+    #[test]
+    fn clean_worktrees_prompt_defaults_to_no() {
         let mut m = build_model();
         m.mount_clean_worktrees_confirm();
         assert!(
-            mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
-            "clean-worktrees prompt defaults to Yes (danger shown by coloring)",
+            !mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
+            "clean-worktrees prompt defaults to No",
         );
     }
 
-    /// The inspector's delete-worktree confirm now defaults Yes, with the
-    /// danger shown by the destructive warning coloring.
+    /// #1899: the inspector's delete-worktree confirm keeps a hard No
+    /// floor — it deletes a worktree off disk, losing uncommitted work.
     #[test]
-    fn inspect_delete_prompt_defaults_to_yes() {
+    fn inspect_delete_prompt_defaults_to_no() {
         let mut m = build_model();
         m.mount_inspect_confirm(lazybox_ipc::WorktreeInspectionDto {
             path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
@@ -3039,8 +3444,8 @@ mod effects_tests {
             is_safe_to_delete: false,
         });
         assert!(
-            mounted_confirm_default_yes(&m, Id::InspectConfirm),
-            "inspector delete prompt defaults to Yes (danger shown by coloring)",
+            !mounted_confirm_default_yes(&m, Id::InspectConfirm),
+            "inspector delete prompt defaults to No",
         );
     }
 
@@ -3066,9 +3471,11 @@ mod effects_tests {
         );
     }
 
-    /// Every destructive confirm now defaults to Yes for speed — the old
-    /// `destructive_shortcut: no` opt-out no longer flips it to No; the
-    /// danger is conveyed by the modal's warning coloring instead.
+    /// A destructive confirm reached by a chord defaults to Yes for speed,
+    /// and the danger is conveyed by the modal's warning coloring. #1921: it
+    /// is the *shipped* `destructive_shortcut: yes` that says so, not a
+    /// hardcoded choice — `no_shortcut_flips_every_chord_prompt` pins the
+    /// other side of the same knob.
     #[test]
     fn destructive_action_confirm_defaults_yes() {
         use lazybox_tui_core::action::Action;
@@ -3091,6 +3498,9 @@ mod effects_tests {
     /// not a destructive action — it always defaults Yes, even when a
     /// cautious user has forced `destructive_shortcut: no` for the
     /// genuinely destructive prompts.
+    ///
+    /// #1921 is what gives this test teeth: until the knob was wired, the
+    /// override it sets changed nothing and the assertion held for free.
     #[test]
     fn on_main_spawn_confirm_stays_yes_despite_no_shortcut_override() {
         use lazybox_config::ConfirmDefault;
@@ -3118,6 +3528,7 @@ mod effects_tests {
     fn modal_dismissed_on_remove_out_of_scope_clears_slot_silently() {
         let mut m = build_model();
         m.modal_flow = Some(super::super::ModalFlow::RemovalPrompt {
+            guarded: false,
             workspace: WorkspaceKey::new("github:o/r#1"),
             reason: super::super::RemovalReason::OutOfScope,
         });
@@ -3309,7 +3720,7 @@ mod effects_tests {
             dismissed_updates: Vec::new(),
         });
         assert!(m.sidebar.focus_workspace_key(&session_key));
-        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
             model_label: None,
             terminal_id: TerminalId(1),
             session_key: session_key.clone(),
@@ -5050,6 +5461,143 @@ snippets:
                 && notice.message.contains("1 parked"),
             "the notice reports both resumes and names the single parked agent: {}",
             notice.message
+        );
+    }
+
+    /// `Shift-K` must not type `continue` into an agent whose login has died
+    /// (#1847). A limited agent and a signed-out one are not the same kind of
+    /// stuck: the first can act on the keystroke and report back, the second
+    /// can do nothing until `/login` happens — so the prompt lands in a dead
+    /// pane and the notice claims a recovery that did not occur.
+    ///
+    /// The healthy limited sibling still resumes in the same press: holding
+    /// back the signed-out pane must not cost the user the bulk action.
+    #[test]
+    fn resume_rate_limited_holds_back_a_signed_out_agent() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        m.ui_defaults.usage_limit_alerts = false;
+        // Both agents are limit-blocked, and that reading is sticky — which
+        // is precisely how the user's path produces this state: they hit the
+        // limit, then logged out and back in on another subscription, so the
+        // credential died underneath a pane still reading `LimitReached`.
+        for (i, key) in keys.iter().enumerate().take(2) {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: key.clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state: AgentState::LimitReached,
+            });
+        }
+        m.handle_daemon_event(IpcEvent::AgentAuthRequired {
+            terminal_id: TerminalId(2),
+            agent_id: "claude".into(),
+            display_name: "Claude Code".into(),
+            reason: "Claude Code authentication is no longer valid.".into(),
+            other_session_count: 0,
+        });
+        // The user dismissed the prompt that arrived with the failure; the
+        // standing record outlives it, which is what lets `Shift-K` re-offer.
+        assert_eq!(m.top_modal(), Some(&Id::AgentAuth));
+        assert!(m.handle_modal_dismissed().is_empty());
+
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        let injected: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt { terminal_id, .. } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            injected,
+            vec![1],
+            "only the agent that can act on `continue` is injected; the \
+             signed-out one is held back: {cmds:?}",
+        );
+        let notice = m.status.notice.as_ref().expect("a notice is shown");
+        assert!(
+            notice.message.contains("resuming 1 stopped agent")
+                && notice.message.contains("1 signed-out agent held back"),
+            "the count names only what was resumed, and says the other was \
+             held back: {}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("resuming 2"),
+            "the notice must never claim to have resumed an agent it did not: {}",
+            notice.message
+        );
+        // Held back is not dropped: the pane is re-offered the sign-in that
+        // is its actual remedy, through the same flow the daemon drives.
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::AgentAuth),
+            "the signed-out pane is routed to re-authentication",
+        );
+        assert!(matches!(
+            m.handle_confirmed(true).as_slice(),
+            [IpcCommand::ReauthenticateAgent {
+                terminal_id: TerminalId(2),
+            }],
+        ));
+    }
+
+    /// The whole target set is signed out — the user's reported case with one
+    /// subscription's worth of agents. There is no resume to report, so the
+    /// notice must say that plainly instead of "resuming N", which is how
+    /// #1847 read as a successful recovery that recovered nothing.
+    #[test]
+    fn resume_rate_limited_with_only_signed_out_agents_resumes_nothing() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        m.ui_defaults.usage_limit_alerts = false;
+        for (i, state) in [AgentState::LimitReached, AgentState::AwaitingReset]
+            .into_iter()
+            .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+            m.handle_daemon_event(IpcEvent::AgentAuthRequired {
+                terminal_id: TerminalId(i as u64 + 1),
+                agent_id: "claude".into(),
+                display_name: "Claude Code".into(),
+                reason: "Claude Code authentication is no longer valid.".into(),
+                other_session_count: 1,
+            });
+        }
+        while m.top_modal().is_some() {
+            assert!(m.handle_modal_dismissed().is_empty());
+        }
+
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "nothing is injected when every target is logged out: {cmds:?}",
+        );
+        let notice = m.status.notice.as_ref().expect("a notice is shown");
+        assert!(
+            notice.message.contains("not resuming 2 signed-out agents"),
+            "the notice says what actually happened: {}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("resuming 2 stopped"),
+            "it must not read as a successful bulk resume: {}",
+            notice.message
+        );
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::AgentAuth),
+            "sign-in is re-offered rather than the press doing nothing",
         );
     }
 
@@ -9097,6 +9645,8 @@ mod stale_input_tests {
                 | Id::JumpPicker
                 | Id::PromptHistoryPicker
                 | Id::UrlPicker
+                | Id::MobileLinks
+                | Id::MobileCopyText
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
@@ -9105,7 +9655,7 @@ mod stale_input_tests {
                 | Id::ViewPicker
                 | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
-                | Id::DefaultModelPicker
+                | Id::StrengthPicker
                 | Id::MergeHistory
                 | Id::WorkAgentPicker
                 | Id::IssueBrowser => true,
@@ -9133,7 +9683,8 @@ mod stale_input_tests {
                 // Drop — destructive-action menus / delete-routing lists.
                 // (HeaderContext's entries are all local/reversible, but
                 // a menu popped under a buffered Enter should never act.)
-                Id::SidebarContext | Id::HeaderContext | Id::InspectList
+                Id::MobileNewSession | Id::MobileRunner
+                | Id::MobileDeleteSession | Id::SidebarContext | Id::HeaderContext | Id::InspectList
                 | Id::ImportCheckoutList => false,
                 // Drop — outward-effect inputs (post/label/deliver).
                 Id::Reply
@@ -9189,6 +9740,11 @@ mod stale_input_tests {
                 | Id::Messages
                 | Id::Legend
                 | Id::ErrorInbox
+                // The archive browser's one immediate key (`u`) restores a
+                // row — reversible (`x x` re-archives it), but classified
+                // drop with the other read-only overlays: a stale buffered
+                // key needn't reach it.
+                | Id::ArchiveBrowser
                 | Id::Stats
                 | Id::InspectLoading
                 | Id::WorktreeProgress
@@ -9205,6 +9761,9 @@ mod stale_input_tests {
         };
 
         for id in [
+            Id::MobileNewSession,
+            Id::MobileRunner,
+            Id::MobileDeleteSession,
             Id::Splash,
             Id::Help,
             Id::HelpAsk,
@@ -9261,6 +9820,7 @@ mod stale_input_tests {
             Id::SyncStatus,
             Id::Messages,
             Id::ErrorInbox,
+            Id::ArchiveBrowser,
             Id::ErrorInboxClearConfirm,
             Id::WorktreeProgress,
             Id::JumpPicker,
@@ -9278,7 +9838,7 @@ mod stale_input_tests {
             Id::ConvertSessionRole,
             Id::RolePicker,
             Id::DefaultAgentPicker,
-            Id::DefaultModelPicker,
+            Id::StrengthPicker,
             Id::HelpActionConfirm,
             Id::WorkAgentPicker,
             Id::DescriptionModal,
@@ -9901,7 +10461,6 @@ mod modal_input_responsiveness_tests {
         let mut m = build_model();
         m.dispatch_settings_action(SettingsAction::EditDefaultAgent {
             current: "claude".into(),
-            tier: None,
         });
         assert_eq!(m.modal_stack.last(), Some(&Id::DefaultAgentPicker));
         m.dispatch_modal_key(key(Key::Esc));
@@ -9914,12 +10473,17 @@ mod modal_input_responsiveness_tests {
     /// the aliases + target agent for the pick. Esc releases both
     /// without changing anything. Disk-free: mounting only reads the
     /// in-memory tier menus.
-    /// `default_model_labels` resolves each agent's default tier to the
-    /// label the sidebar badge compares against (#1502): the YAML default
-    /// alias wins, the built-in default is the fallback, and an alias no
-    /// tier declares yields no entry (so that agent always badges).
+    /// `default_model_labels` resolves each agent's strength to the
+    /// label the sidebar badge compares against (#1502) — through the
+    /// one core resolver, against the menu it was handed and nothing
+    /// else. A menu whose `default` names no tier it declares has no
+    /// label (so that agent always badges) rather than borrowing the
+    /// built-in menu's: `Config::agent_models` has already folded the
+    /// built-in menu in by this point, so a second fallback here could
+    /// only fire for a menu that deliberately dropped that tier —
+    /// labelling a Sonnet-only `replace: true` menu "Opus" (#1797).
     #[test]
-    fn default_model_labels_resolve_yaml_then_builtin_default() {
+    fn default_model_labels_resolve_only_the_menus_own_default() {
         use super::super::default_model_labels;
         let mut pinned = lazybox_core::AgentModels::builtin("claude").unwrap();
         pinned.default = Some("L".into());
@@ -9927,13 +10491,27 @@ mod modal_input_responsiveness_tests {
         let labels = default_model_labels(&[("claude".to_string(), pinned)].into());
         assert_eq!(labels.get(&'C'), Some(&expected));
 
-        let mut builtin = lazybox_core::AgentModels::builtin("claude").unwrap();
-        builtin.default = None;
-        let fallback = lazybox_core::AgentModels::builtin("claude")
-            .and_then(|b| b.default)
-            .and_then(|a| builtin.tier(&a).map(|t| t.label.clone()));
-        let labels = default_model_labels(&[("claude".to_string(), builtin)].into());
-        assert_eq!(labels.get(&'C'), fallback.as_ref());
+        let mut unpinned = lazybox_core::AgentModels::builtin("claude").unwrap();
+        unpinned.default = None;
+        let labels = default_model_labels(&[("claude".to_string(), unpinned)].into());
+        assert!(labels.get(&'C').is_none(), "no default pinned, no label");
+
+        let restricted = lazybox_core::AgentModels {
+            replace: true,
+            default: Some("L".into()),
+            tiers: vec![lazybox_core::ModelTier {
+                alias: "M".into(),
+                label: "Sonnet".into(),
+                short: None,
+                args: vec!["--model".into(), "claude-sonnet-5".into()],
+            }],
+            ..Default::default()
+        };
+        let labels = default_model_labels(&[("claude".to_string(), restricted)].into());
+        assert!(
+            labels.get(&'C').is_none(),
+            "a menu that dropped `L` must not be labelled with the built-in `L`",
+        );
 
         let mut unknown = lazybox_core::AgentModels::builtin("claude").unwrap();
         unknown.default = Some("nope".into());
@@ -9945,28 +10523,29 @@ mod modal_input_responsiveness_tests {
     }
 
     #[test]
-    fn default_model_picker_offers_tiers_and_cancels_clean() {
+    fn strength_picker_offers_tiers_and_cancels_clean() {
         let mut m = build_model();
         let mut models = lazybox_core::AgentModels::builtin("claude").unwrap();
         models.default = Some("L".into());
         m.set_agent_models([("claude".to_string(), models)].into());
 
-        m.mount_default_model_picker("claude");
-        assert_eq!(m.modal_stack.last(), Some(&Id::DefaultModelPicker));
-        assert_eq!(m.default_model_agent.as_deref(), Some("claude"));
+        m.mount_strength_picker("claude");
+        assert_eq!(m.modal_stack.last(), Some(&Id::StrengthPicker));
+        assert_eq!(m.strength_agent.as_deref(), Some("claude"));
 
         m.dispatch_modal_key(key(Key::Esc));
         assert!(m.top_modal().is_none(), "Esc closes the picker");
-        assert!(m.default_model_agent.is_none(), "agent stash is released");
+        assert!(m.strength_agent.is_none(), "agent stash is released");
     }
 
-    /// An agent with no declared tier menu has nothing to pick — the
-    /// default-model step is skipped entirely (no modal mounts).
+    /// An agent with no declared tier menu has nothing to pick, so the
+    /// low-level mount is a no-op. `open_strength` is the entry point
+    /// that turns that into something the user can see.
     #[test]
-    fn default_model_picker_skips_agents_without_tiers() {
+    fn strength_picker_mount_skips_agents_without_tiers() {
         let mut m = build_model();
-        m.mount_default_model_picker("codex");
-        assert!(m.top_modal().is_none(), "no tier menu → no second step");
+        m.mount_strength_picker("cursor");
+        assert!(m.top_modal().is_none(), "no tier menu → no picker");
     }
 
     /// End-to-end settings flow on a temp `LAZYBOX_HOME`: picking the
@@ -9998,7 +10577,7 @@ mod modal_input_responsiveness_tests {
         let _ = m.handle_choice_picked(vec![ChoicePayload::Text("claude".into())]);
         assert_eq!(
             m.modal_stack.last(),
-            Some(&Id::DefaultModelPicker),
+            Some(&Id::StrengthPicker),
             "agent pick chains into the tier picker",
         );
 
@@ -10012,6 +10591,256 @@ mod modal_input_responsiveness_tests {
             m.agent_models["claude"].default.as_deref(),
             Some("L"),
             "mirrored into the in-memory menu",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The reload derives the roster and the menus from the SAME config
+    /// read. It used to iterate the startup roster while reading a fresh
+    /// file, so an agent added by a hand edit got no menu and no Strength
+    /// row out of a config lazybox had just parsed (#1797 review).
+    #[test]
+    fn reload_picks_up_an_agent_added_to_the_roster_by_a_hand_edit() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-roster-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+
+        std::fs::write(
+            home.join("config.yaml"),
+            concat!(
+                "setup:\n  agents: [claude, aider]\n",
+                "agents:\n  aider:\n    command: aider\n",
+                "    models:\n      default: H\n      tiers:\n",
+                "        - alias: H\n          label: House\n",
+                "          args: [--model, house]\n",
+            ),
+        )
+        .unwrap();
+
+        m.open_settings();
+        assert_eq!(
+            m.strength_label("aider").as_deref(),
+            Some("House"),
+            "the agent named by the edited roster gets its menu",
+        );
+        let rows: Vec<String> = m
+            .setup
+            .settings_actions
+            .iter()
+            .filter_map(|a| match a {
+                SettingsAction::EditStrength { agent_id, .. } => Some(agent_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(rows.contains(&"aider".to_string()), "{rows:?}");
+        assert!(
+            !rows.contains(&"cursor".to_string()),
+            "an agent the edited roster drops loses its row too: {rows:?}",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A roster that omits the configured default agent makes
+    /// `set_agents` reassign the default to the roster's first entry.
+    /// That is the existing invariant — so every agent with a Strength
+    /// row is rostered, and the default is one of them — but reaching it
+    /// by *opening Settings* moves which agent bare `w` spawns, so the
+    /// refresh has to say it did (#1797 review).
+    #[test]
+    fn a_roster_that_drops_the_default_agent_reports_the_move() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-offroster-default-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        std::fs::write(
+            home.join("config.yaml"),
+            "setup:\n  agents: [claude]\n  default_agent: codex\n",
+        )
+        .unwrap();
+        m.set_default_agent("codex");
+
+        m.open_settings();
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a silent change of `w`'s target is the bug");
+        assert!(
+            notice.message.contains("codex") && notice.message.contains("claude"),
+            "the notice must name both agents: {}",
+            notice.message,
+        );
+
+        let rows: Vec<String> = m
+            .setup
+            .settings_actions
+            .iter()
+            .filter_map(|a| match a {
+                SettingsAction::EditStrength { agent_id, .. } => Some(agent_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["claude".to_string()],
+            "one row per rostered agent, no duplicate for the old default: {rows:?}",
+        );
+        assert!(
+            m.setup.settings_actions.iter().any(|a| matches!(
+                a,
+                SettingsAction::EditDefaultAgent { current } if current == "claude"
+            )),
+            "the default-agent row names the agent actually in use",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Invalid YAML must not be presented as applied. The reload keeps
+    /// the menus it already has and says the file didn't parse —
+    /// `unwrap_or_default()` would silently re-key every chord and badge
+    /// to the built-in menus over one typo.
+    #[test]
+    fn reload_keeps_the_loaded_menus_when_config_does_not_parse() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-strength-badyaml-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let restricted = lazybox_core::AgentModels {
+            replace: true,
+            default: Some("M".into()),
+            tiers: vec![lazybox_core::ModelTier {
+                alias: "M".into(),
+                label: "House blend".into(),
+                short: None,
+                args: vec!["--model".into(), "house".into()],
+            }],
+            ..Default::default()
+        };
+        m.set_agent_models([("claude".to_string(), restricted)].into());
+
+        std::fs::write(home.join("config.yaml"), "agents: [not, a, map\n").unwrap();
+        m.reload_agent_models();
+
+        assert_eq!(
+            m.strength_label("claude").as_deref(),
+            Some("House blend"),
+            "a config that doesn't parse must not replace the loaded menus",
+        );
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("the parse failure surfaces");
+        assert!(
+            notice.message.contains("didn't parse"),
+            "the notice must say the file didn't parse: {}",
+            notice.message,
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Saving a strength re-derives everything keyed off the tier menus,
+    /// not just the map entry. The save used to `insert` straight into
+    /// `agent_models`, bypassing `set_agent_models` — so the sidebar kept
+    /// comparing runs against the PREVIOUS default tier and badged a run
+    /// at the strength the user had just chosen as a deviation from it,
+    /// until restart.
+    #[test]
+    fn saving_a_strength_refreshes_the_badge_comparison() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-strength-badge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.reload_agent_models();
+        assert_eq!(
+            m.sidebar.default_model_label('C'),
+            Some("Opus"),
+            "the built-in default is what a run is compared against",
+        );
+
+        m.mount_strength_picker("claude");
+        let _ = m.handle_choice_picked(vec![ChoicePayload::OptText(Some("M".into()))]);
+        assert_eq!(
+            m.sidebar.default_model_label('C'),
+            Some("Sonnet"),
+            "the badge must compare against the strength just saved",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Switching the default agent to one with no tier menu still ends
+    /// the flow visibly: no picker to show, but a notice naming the key
+    /// that would declare its strengths. Before, the second step
+    /// early-returned and the flow just stopped.
+    #[test]
+    fn default_agent_pick_without_a_menu_explains_the_missing_strength() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-menuless-agent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        m.mount_default_agent_picker();
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("cursor".into())]);
+        assert!(m.top_modal().is_none(), "no menu, no second step");
+        let notice = m.status.notice.as_ref().expect("a notice explains why");
+        assert!(
+            notice.message.contains("agents.cursor.models.tiers"),
+            "the notice must name the key: {}",
+            notice.message,
+        );
+        let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
+        assert_eq!(
+            cfg.setup.default_agent.as_deref(),
+            Some("cursor"),
+            "the agent switch still persisted",
         );
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
@@ -10867,7 +11696,7 @@ mod modal_input_responsiveness_tests {
             )]
             .into(),
         );
-        m.mount_default_model_picker("claude");
+        m.mount_strength_picker("claude");
         // Row 0 unpins → OptText(None), the "agent default" payload.
         let _ = m.handle_choice_picked(vec![ChoicePayload::OptText(None)]);
 
@@ -10892,9 +11721,9 @@ mod modal_input_responsiveness_tests {
     /// model too, but must NOT name an alias it doesn't pin, and must not
     /// read as a duplicate of the real tier row.
     #[test]
-    fn default_model_picker_rows_show_the_resolved_model_id() {
+    fn strength_picker_rows_show_the_resolved_model_id() {
         let claude = lazybox_core::AgentModels::builtin("claude").unwrap();
-        let rows = crate::realm::model::default_model_rows("claude", &claude);
+        let rows = crate::realm::model::strength_rows("claude", &claude);
         let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
             labels,
@@ -10917,12 +11746,52 @@ mod modal_input_responsiveness_tests {
             !row_zero.ends_with(row_l),
             "row 0 duplicates the L row: {row_zero}"
         );
+        // A strength respects `excluded_from_default` (#1797): the
+        // built-in menu declares an `XL` Fable tier, which stays
+        // spawnable through its chord but is never offered as the
+        // strength an agent runs at by default.
+        assert!(
+            claude.tier("XL").is_some_and(|t| t.excluded_from_default()),
+            "the built-in menu must still carry the excluded tier for this to prove anything",
+        );
+        assert!(
+            !labels.iter().any(|l| l.contains("Fable")),
+            "a writing-class tier must not be offered as a strength: {labels:?}",
+        );
+    }
+
+    /// The second step of the default-agent flow is only a choice if the
+    /// agent has a ladder to choose from. Codex used to ship one tier, so
+    /// picking "default agent → codex" opened a picker with a single real
+    /// row and the strength was decided for you. Both built-ins now offer
+    /// the same four rungs, named by strength and by the model each pins.
+    #[test]
+    fn the_strength_picker_offers_codex_a_full_strength_ladder() {
+        let codex = lazybox_core::AgentModels::builtin("codex").unwrap();
+        let rows = crate::realm::model::strength_rows("codex", &codex);
+        let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Built-in default  ·  Sol  ·  gpt-5.6-sol",
+                "Luna  ·  S  ·  gpt-5.6-luna",
+                "Terra  ·  M  ·  gpt-5.6-terra",
+                "Sol  ·  L  ·  gpt-5.6-sol",
+                "Astra  ·  XL  ·  gpt-6-astra",
+            ]
+        );
+        // Every rung is selectable — none is filtered out as
+        // creative-class the way Claude's Fable is.
+        assert_eq!(
+            rows.iter().filter(|(_, alias)| alias.is_some()).count(),
+            codex.tiers.len()
+        );
     }
 
     /// A tier that selects its model some other way keeps a two-part row
     /// rather than printing a guessed id.
     #[test]
-    fn default_model_picker_row_omits_an_unreadable_model() {
+    fn strength_picker_row_omits_an_unreadable_model() {
         let models = lazybox_core::AgentModels {
             default: Some("X".into()),
             tiers: vec![lazybox_core::ModelTier {
@@ -10933,7 +11802,7 @@ mod modal_input_responsiveness_tests {
             }],
             ..Default::default()
         };
-        let rows = crate::realm::model::default_model_rows("codex", &models);
+        let rows = crate::realm::model::strength_rows("codex", &models);
         assert_eq!(rows[1].0, "House  ·  X");
     }
 
@@ -10978,7 +11847,7 @@ mod modal_input_responsiveness_tests {
     /// still mounts; the filtered set is verified via the same
     /// predicate the mount loop applies.
     #[test]
-    fn default_model_picker_excludes_fable_tiers() {
+    fn strength_picker_excludes_fable_tiers() {
         let mut m = build_model();
         let mut models = lazybox_core::AgentModels::builtin("claude").unwrap();
         let fable = lazybox_core::ModelTier {
@@ -11008,19 +11877,19 @@ mod modal_input_responsiveness_tests {
         models.tiers.push(fable);
         m.set_agent_models([("claude".to_string(), models)].into());
 
-        m.mount_default_model_picker("claude");
+        m.mount_strength_picker("claude");
         assert_eq!(
             m.modal_stack.last(),
-            Some(&Id::DefaultModelPicker),
+            Some(&Id::StrengthPicker),
             "the picker still mounts with the Fable tier filtered out",
         );
         m.dispatch_modal_key(key(Key::Esc));
     }
 
-    /// The per-agent "Default model" settings row opens the tier
-    /// picker for that agent directly — no default-agent step first.
+    /// The per-agent "Strength" settings row opens the tier picker for
+    /// that agent directly — no default-agent step first.
     #[test]
-    fn edit_default_model_action_mounts_the_picker_for_that_agent() {
+    fn edit_strength_action_mounts_the_picker_for_that_agent() {
         use crate::realm::setup_ctx::SettingsAction;
         let mut m = build_model();
         m.set_agent_models(
@@ -11030,20 +11899,21 @@ mod modal_input_responsiveness_tests {
             )]
             .into(),
         );
-        m.dispatch_settings_action(SettingsAction::EditDefaultModel {
+        m.dispatch_settings_action(SettingsAction::EditStrength {
             agent_id: "claude".into(),
-            tier: None,
+            strength: None,
+            configurable: true,
         });
-        assert_eq!(m.modal_stack.last(), Some(&Id::DefaultModelPicker));
-        assert_eq!(m.default_model_agent.as_deref(), Some("claude"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::StrengthPicker));
+        assert_eq!(m.strength_agent.as_deref(), Some("claude"));
         m.dispatch_modal_key(key(Key::Esc));
     }
 
-    /// The Settings palette lists one "Default model" row per enabled
-    /// agent with a tier menu, badged with the current default tier —
-    /// Opus out of the box for Claude.
+    /// The Settings palette lists one "Strength" row per enabled agent,
+    /// badged with the strength it currently runs at — Opus out of the
+    /// box for Claude.
     #[test]
-    fn settings_lists_a_default_model_row_per_tiered_agent() {
+    fn settings_lists_a_strength_row_per_agent() {
         use crate::realm::setup_ctx::SettingsAction;
         let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!("lazybox-model-rows-{}", std::process::id()));
@@ -11063,17 +11933,154 @@ mod modal_input_responsiveness_tests {
             .settings_actions
             .iter()
             .find_map(|a| match a {
-                SettingsAction::EditDefaultModel { agent_id, tier } if agent_id == "claude" => {
-                    Some(tier.clone())
-                }
+                SettingsAction::EditStrength {
+                    agent_id, strength, ..
+                } if agent_id == "claude" => Some(strength.clone()),
                 _ => None,
             })
-            .expect("claude gets a direct default-model row");
+            .expect("claude gets a direct strength row");
         assert_eq!(
             row.as_deref(),
             Some("Opus"),
             "the badge names the pinned built-in default",
         );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Every enabled agent gets a strength row, including one lazybox
+    /// ships no menu for. Skipping those rows was how "default agent:
+    /// <that agent>" left the strength unmentioned anywhere in Settings,
+    /// so it silently ran whatever its CLI defaults to.
+    ///
+    /// The fixture is `cursor` because it is the enabled agent
+    /// `AgentModels::builtin` returns `None` for. Claude and Codex both
+    /// ship pinned defaults (#1857), so neither can play this role — if a
+    /// later change gives cursor a built-in menu too, move this fixture
+    /// to an agent that still has none rather than dropping the case.
+    #[test]
+    fn settings_lists_a_strength_row_for_an_agent_with_no_menu() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-menuless-strength-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        m.open_settings();
+        let row = m
+            .setup
+            .settings_actions
+            .iter()
+            .find_map(|a| match a {
+                SettingsAction::EditStrength {
+                    agent_id,
+                    strength,
+                    configurable,
+                } if agent_id == "cursor" => Some((strength.clone(), *configurable)),
+                _ => None,
+            })
+            .expect("cursor gets a strength row even with no built-in menu");
+        assert_eq!(row, (None, false));
+        assert_eq!(
+            m.setup
+                .settings_actions
+                .iter()
+                .find(|a| matches!(a, SettingsAction::EditStrength { agent_id, .. } if agent_id == "cursor"))
+                .map(|a| a.label()),
+            Some("Strength · cursor · not configured".to_string()),
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Picking that row names the config key instead of doing nothing.
+    /// The old per-agent row early-returned inside the picker mount, so
+    /// Enter on a menu-less agent was indistinguishable from a dead key.
+    #[test]
+    fn strength_row_without_a_menu_names_the_key_to_declare() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let mut m = build_model();
+        m.set_agent_models(
+            [(
+                "claude".to_string(),
+                lazybox_core::AgentModels::builtin("claude").unwrap(),
+            )]
+            .into(),
+        );
+        m.dispatch_settings_action(SettingsAction::EditStrength {
+            agent_id: "cursor".into(),
+            strength: None,
+            configurable: false,
+        });
+        assert!(m.top_modal().is_none(), "no menu, no picker");
+        let notice = m.status.notice.as_ref().expect("a notice explains why");
+        assert!(
+            notice.message.contains("agents.cursor.models.tiers"),
+            "the notice must name the key: {}",
+            notice.message,
+        );
+    }
+
+    /// Opening Settings re-reads the tier menus from disk, so the rows
+    /// AND the picker they open describe the same config. They used to
+    /// read different snapshots — the row a fresh `Config::load()`, the
+    /// picker the map cached at startup — so a hand-edited YAML showed
+    /// the new strength on the row and offered the old menu to change it.
+    #[test]
+    fn open_settings_rereads_the_menus_from_disk() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-strength-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let mut persisted = lazybox_core::PersistedSetup::default();
+        persisted.enabled_providers.insert("github".into());
+        m.cache_persisted_setup(persisted);
+        m.open_settings();
+        assert_eq!(m.strength_label("claude").as_deref(), Some("Opus"));
+        m.dispatch_modal_key(key(Key::Esc));
+
+        // A hand edit outside lazybox: pin the strength to Sonnet.
+        std::fs::write(
+            home.join("config.yaml"),
+            "agents:\n  claude:\n    models:\n      default: M\n",
+        )
+        .unwrap();
+
+        m.open_settings();
+        assert_eq!(
+            m.strength_label("claude").as_deref(),
+            Some("Sonnet"),
+            "the reopened Settings reads the edit",
+        );
+        let row = m
+            .setup
+            .settings_actions
+            .iter()
+            .find_map(|a| match a {
+                SettingsAction::EditStrength {
+                    agent_id, strength, ..
+                } if agent_id == "claude" => Some(strength.clone()),
+                _ => None,
+            })
+            .expect("claude strength row");
+        assert_eq!(row.as_deref(), Some("Sonnet"));
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
         let _ = std::fs::remove_dir_all(&home);
@@ -11128,6 +12135,158 @@ mod modal_input_responsiveness_tests {
         assert!(
             !labels.contains(&"Opus".to_string()),
             "claude's rows are gone",
+        );
+    }
+
+    /// Agent menus for the #1827 label tests: the two built-in ladders,
+    /// which resolve the same aliases to different models, plus cursor —
+    /// which ships no menu at all, so every alias resolves to nothing.
+    fn tier_menus() -> std::collections::BTreeMap<String, lazybox_core::AgentModels> {
+        [
+            (
+                "claude".to_string(),
+                lazybox_core::AgentModels::builtin("claude").unwrap(),
+            ),
+            (
+                "codex".to_string(),
+                lazybox_core::AgentModels::builtin("codex").unwrap(),
+            ),
+            ("cursor".to_string(), lazybox_core::AgentModels::default()),
+        ]
+        .into()
+    }
+
+    /// Put a live agent terminal of `agent` on `key`, the way a daemon
+    /// `TerminalSpawned` would — what makes `w` target that agent
+    /// instead of spawning the default.
+    fn spawn_agent_terminal(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        key: &lazybox_core::SessionKey,
+        terminal_id: u64,
+        agent: &str,
+    ) {
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+            terminal_id: lazybox_ipc::TerminalId(terminal_id),
+            session_key: key.clone(),
+            kind: lazybox_ipc::TerminalKind::Agent(agent.into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            agent_state: None,
+        });
+    }
+
+    /// #1827: the `w S/M/L` strength chords are labelled from the
+    /// DEFAULT agent's menu but dispatched against the row's live agent,
+    /// so the painted model and the launched one diverged. The label now
+    /// resolves against the contextual target — and an agent whose menu
+    /// has no such tier says "agent default", because the alias then
+    /// passes no model flag at all.
+    #[test]
+    fn work_tier_label_resolves_against_the_target_agent() {
+        let mut m = build_model();
+        m.set_agent_models(tier_menus());
+        assert_eq!(m.sidebar.default_agent(), "claude");
+
+        // No workspace → a fresh spawn of the default agent, so the
+        // default's own menu is the honest answer.
+        assert_eq!(m.work_tier_label("M"), "Sonnet");
+
+        let key = WorkspaceKey::new("github:o/r#1");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            lazybox_core::Workspace::empty(key, "work", chrono::Utc::now()),
+        )));
+        m.sidebar.reveal_workspace_key(&session_key);
+
+        // Still no live conversation: `w` would spawn the default.
+        assert_eq!(m.work_tier_label("M"), "Sonnet");
+
+        // A live codex session takes over the target: `M` is Terra on
+        // its ladder, never claude's Sonnet.
+        spawn_agent_terminal(&mut m, &session_key, 7, "codex");
+        assert_eq!(m.work_tier_label("M"), "Terra");
+
+        // A menu-less agent resolves the alias to nothing, so the run
+        // gets no model flag — say that instead of borrowing a name.
+        let bare = WorkspaceKey::new("github:o/r#2");
+        let bare_key: lazybox_core::SessionKey = (&bare).into();
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            lazybox_core::Workspace::empty(bare, "bare", chrono::Utc::now()),
+        )));
+        m.sidebar.reveal_workspace_key(&bare_key);
+        spawn_agent_terminal(&mut m, &bare_key, 8, "cursor");
+        assert_eq!(m.work_tier_label("M"), "agent default");
+
+        // Two live conversations → the chooser picks the agent, and the
+        // two menus disagree, so the row promises neither.
+        m.sidebar.reveal_workspace_key(&session_key);
+        spawn_agent_terminal(&mut m, &session_key, 9, "claude");
+        assert_eq!(m.work_tier_label("M"), "varies by agent");
+    }
+
+    /// The which-key popup is the surface the user actually reads before
+    /// pressing the second key, so the contextual label has to reach it
+    /// — the repro in #1827 is `w` on a codex row painting "Sonnet".
+    #[test]
+    fn work_which_key_popup_names_the_target_agents_model() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        m.set_agent_models(tier_menus());
+        let key = WorkspaceKey::new("github:o/r#1");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            lazybox_core::Workspace::empty(key, "work", chrono::Utc::now()),
+        )));
+        m.sidebar.reveal_workspace_key(&session_key);
+        spawn_agent_terminal(&mut m, &session_key, 7, "codex");
+        m.set_focus(crate::realm::model::PaneFocus::Sidebar);
+
+        use tuirealm::terminal::TerminalAdapter as _;
+        let popup_text = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| -> String {
+            m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+            m.view();
+            let buffer = m.terminal.raw().backend().buffer();
+            let mut text = String::new();
+            for row in 0..buffer.area.height {
+                for col in 0..buffer.area.width {
+                    text.push_str(buffer[(col, row)].symbol());
+                }
+                text.push('\n');
+            }
+            m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+            text
+        };
+
+        let text = popup_text(&mut m);
+        assert!(
+            text.contains("Terra"),
+            "the popup names codex's own `M` tier: {text}",
+        );
+        assert!(
+            !text.contains("Sonnet"),
+            "claude's menu must not label a chord that runs codex: {text}",
+        );
+
+        // A menu-less agent pins no model, so the rows say so rather
+        // than borrowing claude's names.
+        let bare = WorkspaceKey::new("github:o/r#2");
+        let bare_key: lazybox_core::SessionKey = (&bare).into();
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            lazybox_core::Workspace::empty(bare, "bare", chrono::Utc::now()),
+        )));
+        m.sidebar.reveal_workspace_key(&bare_key);
+        spawn_agent_terminal(&mut m, &bare_key, 8, "cursor");
+        m.set_focus(crate::realm::model::PaneFocus::Sidebar);
+        let text = popup_text(&mut m);
+        assert!(
+            text.contains("agent default"),
+            "cursor resolves the strengths to nothing: {text}",
+        );
+        assert!(
+            !text.contains("Haiku") && !text.contains("Terra"),
+            "no surface may name a model the run will not use: {text}",
         );
     }
 
@@ -11378,6 +12537,133 @@ mod merge_focus_follow_tests {
                 ..
             }] if request_id == "claim-test-2"
         ));
+    }
+
+    /// #1899 follow-up (r1/f2): the UPSTREAM half. Yes on the safe-unsubscribe
+    /// confirm authorises the rescope sweep that deletes these workspaces with
+    /// their notes, read state and stars, and only then queues the
+    /// per-workspace prompts. Un-ticking a repo to tidy a filter is not a
+    /// request to delete anything, so the prompt that exists to name that
+    /// damage must not be answerable by a reflexive Enter.
+    ///
+    /// #1921: a documented `default_no()` floor, not the
+    /// `destructive_shortcut` axis — the chord behind this prompt is the
+    /// wizard's Finish, and the deletion is a consequence of it. The knob is
+    /// set to `yes` here on purpose, so the test cannot go vacuous if the
+    /// shipped default ever moves.
+    #[test]
+    fn scope_removal_confirm_defaults_to_no() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.ui_defaults.confirm_default.destructive_shortcut = lazybox_config::ConfirmDefault::Yes;
+        // The `task` fixture reports repo `owner/repo`, which the un-ticked
+        // scope below covers — so this workspace is the doomed one.
+        let doomed = workspace("owner/repo#1", false, Duration::hours(1));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(doomed)));
+        while server.rx.try_recv().is_ok() {}
+
+        let scopes = |list: &[&str]| -> BTreeMap<String, BTreeSet<String>> {
+            let mut out = BTreeMap::new();
+            out.insert(
+                "github".to_string(),
+                list.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>(),
+            );
+            out
+        };
+        m.setup.persisted = Some(lazybox_core::PersistedSetup {
+            enabled_providers: BTreeSet::new(),
+            enabled_agents: BTreeSet::new(),
+            provider_filters: BTreeMap::new(),
+            selected_scopes: scopes(&["github:owner/repo", "github:owner/other"]),
+        });
+        let report = crate::setup::SetupReport { tools: vec![] };
+        let outcome = crate::setup_flow::SetupOutcome {
+            report: report.clone(),
+            enabled_providers: BTreeSet::new(),
+            enabled_agents: BTreeSet::new(),
+            provider_filters: BTreeMap::new(),
+            selected_scopes: scopes(&["github:owner/other"]),
+        };
+        m.handle_runner_step(
+            crate::setup_flow::SetupRunner::new(report, BTreeSet::new()),
+            crate::setup_flow::RunnerStep::Finish(outcome),
+        );
+
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::ScopeRemovalConfirm),
+            "un-ticking a repo with workspaces must interpose the confirm",
+        );
+        assert!(
+            !super::effects_tests::mounted_confirm_default_yes(&m, Id::ScopeRemovalConfirm),
+            "Enter must not authorise the rescope sweep, whatever the knob says",
+        );
+    }
+
+    /// Press the spawn chord at a workspace whose task carries the `working`
+    /// claim label, and return the model with the resulting prompt up.
+    fn spawn_onto_a_claimed_workspace(
+        shortcut_default: lazybox_config::ConfirmDefault,
+    ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.ui_defaults.confirm_default.destructive_shortcut = shortcut_default;
+        let mut claimed = workspace("owner/repo#1899", false, Duration::hours(1));
+        claimed
+            .gh_issues
+            .first_mut()
+            .unwrap()
+            .labels
+            .push(lazybox_core::Label::new("working"));
+        let session_key = SessionKey::from(&claimed.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(claimed)));
+        while server.rx.try_recv().is_ok() {}
+
+        m.flush_dispatched_cmds(vec![lazybox_ipc::Command::Spawn {
+            session_key,
+            session_id: None,
+            client_request_id: Some("claim-default-test".into()),
+            kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
+            cwd: None,
+            initial_prompt: Some("fix it".into()),
+            initial_snippet: None,
+            on_main: false,
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
+            role: None,
+        }]);
+        assert_eq!(m.top_modal(), Some(&Id::ClaimedSpawnConfirm));
+        m
+    }
+
+    /// #1921: `ClaimedSpawnConfirm` is on the `destructive_shortcut` axis, so
+    /// it defaults to Yes. #1900 moved it to No as part of making
+    /// `default_no()` honest, and its own PR body conceded that cut against
+    /// chord-is-the-intent: the user pressed the spawn key, and this prompt
+    /// destroys nothing — a second agent on a claimed row is a coordination
+    /// warning, undone by stopping it. The claim is still *named* before the
+    /// spawn; it just is not a No default.
+    #[test]
+    fn claimed_spawn_confirm_defaults_to_yes_on_a_chord() {
+        let m = spawn_onto_a_claimed_workspace(lazybox_config::ConfirmDefault::Yes);
+        assert!(
+            super::effects_tests::mounted_confirm_default_yes(&m, Id::ClaimedSpawnConfirm),
+            "the spawn chord is the intent — Enter starts the agent",
+        );
+    }
+
+    /// And the knob flips it, which is the point of routing it to an axis
+    /// rather than deciding at the mount site.
+    #[test]
+    fn claimed_spawn_confirm_follows_a_no_shortcut_override() {
+        let m = spawn_onto_a_claimed_workspace(lazybox_config::ConfirmDefault::No);
+        assert!(
+            !super::effects_tests::mounted_confirm_default_yes(&m, Id::ClaimedSpawnConfirm),
+            "destructive_shortcut: no moves it to No",
+        );
     }
 
     #[test]
@@ -12154,20 +13440,197 @@ mod merge_focus_follow_tests {
         let session = SessionKey::from(&ws_key);
         assert_eq!(m.sidebar.open_requests(&session), 0);
 
+        let asked = |q: &str| lazybox_ipc::OpenAgentRequest {
+            asker: lazybox_core::WorkspaceKey::new("github:o/r#9"),
+            question: q.into(),
+            asked_at: 1,
+        };
         m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
             workspace_key: ws_key.clone(),
             open: 2,
+            requests: vec![asked("status?"), asked("contract?")],
         });
         assert_eq!(m.sidebar.open_requests(&session), 2);
+        assert_eq!(
+            m.sidebar.open_request_rows(&session).len(),
+            2,
+            "who asked what is kept for the right pane"
+        );
 
         m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
             workspace_key: ws_key,
             open: 0,
+            requests: Vec::new(),
         });
         assert_eq!(
             m.sidebar.open_requests(&session),
             0,
             "an answered workspace stops badging"
+        );
+        assert!(m.sidebar.open_request_rows(&session).is_empty());
+    }
+
+    /// The pane resync is now scoped to the SELECTED workspace — the daemon
+    /// broadcasts this event on every ask, reply and turn-end capture across
+    /// the fleet, and `sync_panes` is a full rebuild. The scoping must not
+    /// cost the selected workspace its own update, which is what this
+    /// guards: the right pane still learns who asked it what.
+    #[test]
+    fn an_open_request_for_the_selected_workspace_still_reaches_the_right_pane() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        let other = workspace("owner/repo#4", true, Duration::hours(1));
+        let other_key = other.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(other)));
+
+        let session = SessionKey::from(&ws_key);
+        assert!(
+            m.sidebar.focus_workspace_key(&session),
+            "select the workspace under test"
+        );
+        m.sync_panes();
+
+        let asked = |q: &str| lazybox_ipc::OpenAgentRequest {
+            asker: lazybox_core::WorkspaceKey::new("github:o/r#9"),
+            question: q.into(),
+            asked_at: 1,
+        };
+        m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
+            workspace_key: ws_key.clone(),
+            open: 1,
+            requests: vec![asked("what is the token contract?")],
+        });
+        assert_eq!(
+            m.right.inbound_requests().len(),
+            1,
+            "the selected workspace's inbound question reaches the pane"
+        );
+        assert!(
+            m.right.inbound_requests()[0]
+                .question
+                .contains("token contract"),
+        );
+
+        // An event about a DIFFERENT workspace records its rows without
+        // touching the selected workspace's pane.
+        m.handle_daemon_event(IpcEvent::AgentRequestsOpen {
+            workspace_key: other_key.clone(),
+            open: 1,
+            requests: vec![asked("someone else's question")],
+        });
+        assert_eq!(
+            m.sidebar
+                .open_request_rows(&SessionKey::from(&other_key))
+                .len(),
+            1,
+            "the other workspace's rows are still recorded for its own badge"
+        );
+        assert_eq!(
+            m.right.inbound_requests().len(),
+            1,
+            "and the selected workspace's pane is untouched by it"
+        );
+    }
+
+    fn rendered_description_modal(
+        model: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+    ) -> String {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                model
+                    .app
+                    .view(&Id::DescriptionModal, frame, Rect::new(0, 0, 100, 20))
+            })
+            .expect("render description modal");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The `▤N` badge's carrier and the `a A` reader (#1822): the daemon
+    /// owns the spool and pushes what it holds, an empty set clears the row,
+    /// and the reader opens whatever is attached.
+    #[test]
+    fn spooled_artifacts_badge_the_row_and_open_in_the_reader() {
+        use lazybox_core::Artifact;
+
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        let session = SessionKey::from(&ws_key);
+        assert!(m.sidebar.focus_workspace_key(&session));
+        assert_eq!(m.sidebar.artifact_count(&session), 0);
+
+        // `a A` on a workspace with no spool says so rather than opening an
+        // empty reader: the catalog gates the chord on the workspace, not on
+        // its spool, so the user has to learn which is missing.
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenArtifacts);
+        assert_ne!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+
+        let at = chrono::Utc::now();
+        m.handle_daemon_event(IpcEvent::WorkspaceArtifacts {
+            workspace_key: ws_key.clone(),
+            artifacts: vec![
+                Artifact::from_markdown("findings.md", "# Findings\n\nIt works.\n", at),
+                Artifact::from_markdown("plan.md", "# The plan\n\nStep one.\n", at),
+            ],
+            hidden: 1,
+        });
+        assert_eq!(m.sidebar.artifact_count(&session), 2);
+
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenArtifacts);
+        assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+
+        // The artifact reader shares `Id::DescriptionModal` so it keeps the
+        // wheel (`Id::consumes_scroll` whitelists that id alone), and
+        // `mount_description_modal` is idempotent on it — so `a A` over an
+        // already-open reader has to pop before it mounts, or it would do
+        // nothing at all.
+        m.update(Msg::ModalDismissed);
+        m.mount_description_modal("A task description".into(), "its body".into(), None);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenArtifacts);
+        assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+        assert_eq!(
+            m.modal_stack
+                .iter()
+                .filter(|id| **id == Id::DescriptionModal)
+                .count(),
+            1,
+            "the artifacts replace the open reader rather than stacking on it"
+        );
+        let rendered = rendered_description_modal(&mut m);
+        assert!(
+            rendered.contains("artifacts"),
+            "the reader must now show the artifacts, not the description it replaced: {rendered}"
+        );
+        assert!(
+            !rendered.contains("A task description"),
+            "the replaced description must be gone: {rendered}"
+        );
+
+        m.handle_daemon_event(IpcEvent::WorkspaceArtifacts {
+            workspace_key: ws_key,
+            artifacts: vec![],
+            hidden: 0,
+        });
+        assert_eq!(
+            m.sidebar.artifact_count(&session),
+            0,
+            "a cleared spool stops badging"
         );
     }
 
@@ -12883,6 +14346,54 @@ mod merge_focus_follow_tests {
         assert!(m.pending_hopper_action.is_none());
     }
 
+    /// A checklist edit in the TODO editor reaches the daemon as one
+    /// `SaveTodoItems` carrying the whole list, and the editor stays open.
+    #[test]
+    fn a_checklist_edit_is_saved_to_the_daemon() {
+        use lazybox_core::HopperMeta;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(lazybox_ipc::EVENT_CHANNEL_CAPACITY);
+        let client = lazybox_ipc::Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        let mut todo = Workspace::empty(WorkspaceKey::new("ship"), "main", Utc::now());
+        todo.name = "Ship".into();
+        todo.hopper = Some(HopperMeta {
+            position: 0,
+            completed_at: None,
+            canceled_at: None,
+        });
+        let key = todo.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(todo)));
+        m.mount_hopper();
+        while cmd_rx.try_recv().is_ok() {}
+
+        let item = lazybox_core::TodoItem {
+            id: "a".into(),
+            parent: None,
+            text: "cut the release".into(),
+            done_at: None,
+            canceled_at: None,
+            link: None,
+            auto_checked: false,
+        };
+        m.update(Msg::TodoItemsChanged {
+            workspace_key: key.clone(),
+            items: vec![item.clone()],
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::Hopper));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(IpcCommand::SaveTodoItems { workspace_key, items })
+                if workspace_key == key && items == vec![item]
+        ));
+    }
+
     #[test]
     fn hopper_lifecycle_actions_keep_the_modal_open_for_batching() {
         use lazybox_core::HopperMeta;
@@ -12937,10 +14448,15 @@ mod merge_focus_follow_tests {
         // running agent.
         m.update(Msg::HopperDeleteRequested(key.clone()));
         assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
-        assert!(
-            cmd_rx.try_recv().is_err(),
-            "delete must wait for confirmation before dispatching Kill"
-        );
+        // The confirm's read-only risk preflight is allowed — it is what
+        // lets the prompt name what the delete destroys — but nothing
+        // destructive may leave before the answer.
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            assert!(
+                matches!(cmd, IpcCommand::InspectRemovalRisks { .. }),
+                "delete must wait for confirmation before dispatching Kill, got {cmd:?}",
+            );
+        }
     }
 
     /// Issue #224: default work (`w w`) whose only running agent is
@@ -14938,7 +16454,7 @@ mod merge_focus_follow_tests {
                     assert_eq!(workspace_key, &wskey);
                     "delete"
                 }
-                IpcCommand::Kill { session_key } => {
+                IpcCommand::Kill { session_key, .. } => {
                     assert_eq!(session_key, &key);
                     "kill"
                 }
@@ -16145,7 +17661,7 @@ mod daemon_event_fastpath_tests {
         let key = seed_workspace(&mut m);
         let session_key: lazybox_core::SessionKey = (&key).into();
 
-        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
             model_label: None,
             terminal_id: TerminalId(1),
             session_key: session_key.clone(),
@@ -16397,6 +17913,30 @@ mod wheel_routing_tests {
             m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 4));
         }
         assert_eq!(scroll_offset(&m), bottom_offset - 18);
+    }
+
+    #[test]
+    fn mobile_wheel_scrolls_history_at_screen_edges_and_verifies_reporting() {
+        let (mut m, _server, _) = build_model_with_terminal();
+        m.presentation = crate::realm::presentation::Presentation::Mobile;
+        let bytes = (0..200)
+            .map(|i| format!("line {i}\r\n"))
+            .collect::<String>();
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: Arc::from(bytes.into_bytes()),
+            first_seq: 1,
+            seq: 1,
+            cols: 0,
+            rows: 0,
+        });
+        let mut before = scroll_offset(&m);
+        for (x, y) in [(0, 3), (4, 0), (4, m.layout.last_area.bottom() - 1), (4, 4)] {
+            m.handle_mouse(wheel_up_at(x, y));
+            assert_eq!(scroll_offset(&m), before - 3, "wheel at {x},{y}");
+            assert!(m.mouse_input_verified());
+            before -= 3;
+        }
     }
 
     /// Agent identity is not part of wheel routing. Once the backend has
@@ -16749,6 +18289,117 @@ mod input_priority_tests {
         assert!(redraw_is_input, "a discrete key arms the immediate paint");
     }
 
+    #[test]
+    fn mobile_delayed_agent_typing_survives_a_busy_frame() {
+        for agent in ["claude", "codex"] {
+            let (mut m, mut server) = model_with_focused_agent();
+            m.presentation = crate::realm::presentation::Presentation::Mobile;
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                terminal_id: TID,
+                session_key: SessionKey::new("github:o/r#1"),
+                kind: TerminalKind::Agent(agent.into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                agent_state: None,
+            });
+            drain_startup(&mut server);
+            m.redraw = true;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+            for code in [
+                KeyCode::Char('h'),
+                KeyCode::Char('i'),
+                KeyCode::Backspace,
+                KeyCode::Char('o'),
+                KeyCode::Enter,
+            ] {
+                tx.try_send(TimedInput {
+                    read_at: Instant::now() - std::time::Duration::from_secs(2),
+                    event: CtEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+                })
+                .expect("room");
+            }
+            drain_priority_input(
+                &mut m,
+                &mut rx,
+                &mut StaleInputTally::default(),
+                &mut PerfMonitor::new(),
+                &mut PhaseTimings::default(),
+                &mut false,
+            );
+            assert_eq!(
+                written_bytes(&mut server),
+                b"hi\x7fo\r",
+                "{agent} typing was lost"
+            );
+        }
+    }
+
+    #[test]
+    fn mobile_delayed_management_and_exited_terminal_keys_stay_guarded() {
+        for state in ["sessions", "settings", "exited", "control-t", "control-g"] {
+            let (mut m, mut server) = model_with_focused_agent();
+            m.presentation = crate::realm::presentation::Presentation::Mobile;
+            match state {
+                "sessions" => m.open_mobile_sessions(),
+                "settings" => {
+                    m.cache_persisted_setup(lazybox_core::PersistedSetup::default());
+                    m.open_settings();
+                    assert!(!m.modal_stack.is_empty());
+                }
+                "exited" => m.handle_daemon_event(IpcEvent::TerminalExited {
+                    terminal_id: TID,
+                    exit_code: Some(0),
+                    last_output: None,
+                }),
+                _ => (),
+            }
+            drain_startup(&mut server);
+            let modal = m.modal_stack.last().cloned();
+            let rail_open = m.mobile_rail.is_open();
+            m.redraw = true;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            let key = match state {
+                "control-t" => KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+                "control-g" => KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+                "sessions" => KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                _ => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            };
+            tx.try_send(TimedInput {
+                read_at: Instant::now() - std::time::Duration::from_secs(2),
+                event: CtEvent::Key(key),
+            })
+            .expect("room");
+            if matches!(state, "control-t" | "control-g") {
+                tx.try_send(TimedInput {
+                    read_at: Instant::now() - std::time::Duration::from_secs(2),
+                    event: CtEvent::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)),
+                })
+                .expect("room");
+            }
+            drain_priority_input(
+                &mut m,
+                &mut rx,
+                &mut StaleInputTally::default(),
+                &mut PerfMonitor::new(),
+                &mut PhaseTimings::default(),
+                &mut false,
+            );
+            if state == "settings" {
+                // Settings already retains its keys; its async metadata
+                // requests are allowed, but input must never leak to a PTY.
+                assert!(written_bytes(&mut server).is_empty());
+            } else {
+                assert!(
+                    server.rx.try_recv().is_err(),
+                    "{state}: stale input emitted a command"
+                );
+            }
+            assert_eq!(m.modal_stack.last(), modal.as_ref(), "{state}");
+            assert_eq!(m.mobile_rail.is_open(), rail_open, "{state}");
+        }
+    }
+
     /// A no-op unless a build is pending — with nothing to render there is
     /// no frame to jump ahead of, so the key rides the normal post-wait
     /// path and the buffer is left untouched.
@@ -16970,6 +18621,16 @@ mod leader_tile_tests {
             focused: vec![1],
         });
         m.terminals.set_active_tab(1);
+        // The program in tile 1 asked for bracketed paste, so the paste
+        // below is framed — `handle_paste` frames per terminal mode.
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(1),
+            bytes: Arc::<[u8]>::from(b"\x1b[?2004h".to_vec()),
+            first_seq: 1,
+            seq: 1,
+            cols: 0,
+            rows: 0,
+        });
 
         let area = m.layout.last_area;
         let (_, _, bottom) = m.effective_pane_rects(area);
@@ -17032,6 +18693,40 @@ mod leader_tile_tests {
                 (TerminalId(1), b"a".to_vec()),
             ]
         );
+    }
+
+    /// A desktop paste follows the FOCUSED tile, not the active tab index.
+    /// The two agree in Tabs and can disagree in Splits, where the old
+    /// `active_terminal_id()` target typed into whichever terminal sat at
+    /// `active_tab_idx` instead of the pane the user was looking at.
+    #[test]
+    fn desktop_split_paste_reaches_the_focused_tile_not_the_active_tab_index() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        m.terminals.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        });
+        // Leave the tab index pointing at the OTHER leaf, so the two differ.
+        m.terminals.set_active_tab(0);
+        m.set_focus(PaneFocus::Terminals);
+        assert_eq!(m.terminals.focused_terminal_id(), Some(TerminalId(2)));
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+        while server.rx.try_recv().is_ok() {}
+        m.handle_paste("hello");
+        let writes: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .filter_map(|cmd| match cmd {
+                IpcCommand::Write {
+                    terminal_id, bytes, ..
+                } => Some((terminal_id, bytes)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes, vec![(TerminalId(2), b"hello".to_vec())]);
     }
 
     #[test]
@@ -17320,6 +19015,67 @@ mod leader_tile_tests {
         );
     }
 
+    /// `]]Shift-→` moves the DIVIDER, where the bare `]]→` moved tile
+    /// focus (#1920). Driven through `dispatch_key` rather than against
+    /// `TerminalStack` directly, because "the key does nothing" is
+    /// usually resolution or availability and not dispatch — the stack
+    /// method being right proves nothing about the chord reaching it.
+    #[test]
+    fn terminal_leader_shift_arrows_move_the_divider_not_the_focus() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals.set_layout(two_leaf_split());
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+
+        m.dispatch_key(RealmKey::new(Key::Right, RealmMods::SHIFT));
+        assert!(
+            !m.terminal_leader_pending(),
+            "the shifted arrow fired a command and consumed the leader",
+        );
+        assert_eq!(
+            m.terminal_leader_highlight(),
+            None,
+            "shifted arrows don't navigate the popup either",
+        );
+        assert_eq!(
+            m.terminals.focused_terminal_id(),
+            Some(TerminalId(1)),
+            "resizing must NOT move tile focus — that is the bare arrow",
+        );
+        let ratio = m.terminals.split_ratio_at(&[]);
+        assert!(
+            ratio.is_some_and(|r| r > 50),
+            "the divider moved right, got {ratio:?}",
+        );
+
+        // And it reaches the daemon, so the position survives a restart.
+        let mut sent_layout = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(cmd, IpcCommand::SetSessionLayout { .. }) {
+                sent_layout = true;
+            }
+        }
+        assert!(sent_layout, "a moved divider is persisted");
+    }
+
+    /// In Tabs mode there is no divider, so the chord says so rather
+    /// than doing nothing visible.
+    #[test]
+    fn terminal_leader_shift_arrows_explain_themselves_in_tabs_mode() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+
+        m.dispatch_key(RealmKey::new(Key::Right, RealmMods::SHIFT));
+        let notice = m.status.notice.as_ref().map(|n| n.message.clone());
+        assert!(
+            notice.as_deref().is_some_and(|n| n.contains("no divider")),
+            "the user is told why nothing moved, got {notice:?}",
+        );
+    }
+
     /// In a split layout the popup carries a `←↓↑→ move tile` aggregate
     /// row that has no single `Enter`-fireable key; `j`/`k` step past it
     /// so the highlight only ever lands on a dispatchable row (#343).
@@ -17402,6 +19158,20 @@ mod leader_tile_tests {
             Some(&Id::UrlPicker),
             "`]]u` mounts the URL picker for multiple URLs",
         );
+    }
+
+    /// The header's Checks line offers its checks through the same picker
+    /// as `]]u`; an empty list mounts nothing.
+    #[test]
+    fn the_link_picker_mounts_over_its_links_only_when_there_are_some() {
+        let (mut m, _server) = build_model_with_terminals(1);
+        m.mount_link_picker("Checks", Vec::new());
+        assert_ne!(m.top_modal(), Some(&Id::UrlPicker));
+        m.mount_link_picker(
+            "Checks",
+            vec![("✗ build".into(), "https://ci.example/build".into())],
+        );
+        assert_eq!(m.top_modal(), Some(&Id::UrlPicker));
     }
 
     /// With nothing openable on screen, `]]u` opens no picker — just a
@@ -17977,6 +19747,82 @@ mod terminal_url_mouse_tests {
         assert!(
             model.terminal_selection.is_none(),
             "typing dismisses the word highlight",
+        );
+    }
+
+    /// With mouse capture ON, the lazybox-side selection gestures are
+    /// what copy is: the host never sees the drag. Both the word/line
+    /// gesture and a drag must hand their exact text to the clipboard
+    /// boundary, and the footer must report what that boundary did
+    /// rather than assume success (#1798).
+    #[test]
+    fn copy_under_capture_hands_the_selection_to_the_clipboard_boundary() {
+        let (mut model, _server, _opened) = build_model(1);
+        let copies = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&copies);
+        model.clipboard = Box::new(move |text: &str| {
+            recorder.lock().expect("copy mutex").push(text.to_string());
+            super::super::helpers::ClipboardDelivery::Host
+        });
+        assert!(
+            model.mouse_capture_on,
+            "precondition: lazybox owns the mouse"
+        );
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, "run src/main.rs now\r\n".as_bytes().to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+        ] {
+            left(&mut model, kind, x + 8, y);
+        }
+
+        assert_eq!(
+            *copies.lock().expect("copy mutex"),
+            vec!["src/main.rs".to_string()],
+            "the double-click copies exactly the word under the pointer",
+        );
+        let notice = model.status.notice.as_ref().expect("copy notice");
+        assert_eq!(
+            notice.message, "copied word to clipboard",
+            "a delivered copy says so plainly",
+        );
+    }
+
+    /// The same gesture over a boundary that only managed the escape
+    /// transport must not claim the clipboard (#1798).
+    #[test]
+    fn a_best_effort_copy_is_not_reported_as_a_clipboard_write() {
+        let (mut model, _server, _opened) = build_model(1);
+        model.clipboard = Box::new(|_| super::super::helpers::ClipboardDelivery::Terminal);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, "run src/main.rs now\r\n".as_bytes().to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+        ] {
+            left(&mut model, kind, x + 8, y);
+        }
+
+        let notice = &model.status.notice.as_ref().expect("copy notice").message;
+        assert!(notice.contains("OSC 52"), "{notice}");
+        assert!(
+            !notice.ends_with("to clipboard"),
+            "an unconfirmed escape must not read as a landed copy: {notice}",
         );
     }
 
@@ -18754,7 +20600,7 @@ mod destructive_confirm_tests {
         let cmds = m.handle_confirmed(true);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::Kill { session_key } => assert_eq!(session_key, &sk),
+            IpcCommand::Kill { session_key, .. } => assert_eq!(session_key, &sk),
             other => panic!("expected Kill after Yes, got {other:?}"),
         }
     }
@@ -19056,7 +20902,7 @@ mod destructive_confirm_tests {
         let cmds = m.handle_confirmed(true);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::Kill { session_key } => assert_eq!(
+            IpcCommand::Kill { session_key, .. } => assert_eq!(
                 session_key, &sa,
                 "Yes must kill the workspace the prompt named, not the drifted selection",
             ),
@@ -21694,6 +23540,18 @@ mod worktree_progress_recovery_tests {
         Model::new_for_test(client, Size::new(120, 40)).expect("model init")
     }
 
+    /// Record that THIS client asked for the spawn on `key` — the
+    /// follow pin an `x n` create leaves behind, or the spawn spinner a
+    /// `w` arms. A provisioning checklist only mounts for a spawn this
+    /// client requested, so a test about the checklist's own mechanics
+    /// has to be the client that asked for it.
+    fn asked_for(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        key: &lazybox_core::SessionKey,
+    ) {
+        m.spawn_follow_to = Some(key.clone());
+    }
+
     fn terminal_snapshot(session_key: lazybox_core::SessionKey) -> TerminalSnapshot {
         TerminalSnapshot {
             model_label: None,
@@ -21718,6 +23576,7 @@ mod worktree_progress_recovery_tests {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:mind-build/mind#1");
         let session_key: lazybox_core::SessionKey = (&key).into();
+        asked_for(&mut m, &session_key);
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![Workspace::empty(key.clone(), "main", Utc::now())],
             terminals: vec![],
@@ -21773,6 +23632,7 @@ mod worktree_progress_recovery_tests {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:mind-build/mind#1");
         let session_key: lazybox_core::SessionKey = (&key).into();
+        asked_for(&mut m, &session_key);
 
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key: session_key.clone(),
@@ -21854,6 +23714,7 @@ mod worktree_progress_recovery_tests {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:mind-build/mind#1");
         let session_key: lazybox_core::SessionKey = (&key).into();
+        asked_for(&mut m, &session_key);
 
         // Mount on the first step, then drive the daemon truth forward so
         // the display has somewhere to walk to.
@@ -21892,6 +23753,7 @@ mod worktree_progress_recovery_tests {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:mind-build/mind#1");
         let session_key: lazybox_core::SessionKey = (&key).into();
+        asked_for(&mut m, &session_key);
         let other: lazybox_core::SessionKey =
             (&WorkspaceKey::new("github:mind-build/mind#2")).into();
 
@@ -22111,6 +23973,7 @@ mod worktree_progress_recovery_tests {
         });
         let key = WorkspaceKey::new("linear:OBI-1749");
         let session_key: lazybox_core::SessionKey = (&key).into();
+        asked_for(&mut m, &session_key);
         m.last_spawn = Some(remembered_spawn(session_key.clone()));
 
         // Provisioning starts — the spinner mounts.
@@ -22461,6 +24324,7 @@ mod worktree_progress_recovery_tests {
         let mut m = build_model();
         let other_key = WorkspaceKey::new("github:acme/widget#7");
         let other_session: lazybox_core::SessionKey = (&other_key).into();
+        asked_for(&mut m, &other_session);
         // A different spawn's checklist is live and still provisioning.
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key: other_session.clone(),
@@ -23320,6 +25184,11 @@ mod click_outside_modal_dismiss_tests {
         // Park the selection on WS-A so the click has to move it.
         assert!(m.__test_sidebar_mut().focus_workspace_key(&a));
 
+        // This client asked for WS-A's spawn — the follow pin an `x n`
+        // create leaves behind. Provisioning only raises a checklist for
+        // a spawn this client requested.
+        m.spawn_follow_to = Some(a.clone());
+
         // The provisioning checklist for WS-A mounts.
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key: a.clone(),
@@ -23373,6 +25242,9 @@ mod click_outside_modal_dismiss_tests {
         let (sidebar_rect, _, _) = m.effective_pane_rects(area);
         let row_b = row_of(&mut m, sidebar_rect, &b);
         assert!(m.__test_sidebar_mut().focus_workspace_key(&a));
+        // This client asked for WS-A's spawn, so its provisioning raises
+        // a checklist here.
+        m.spawn_follow_to = Some(a.clone());
 
         // Provisioning is genuinely in flight (a Started step — not
         // failed/warned), i.e. exactly the state where an Esc WOULD
@@ -23551,6 +25423,32 @@ mod click_outside_modal_dismiss_tests {
             m.footer_more_popup.is_none(),
             "clicking the cell again closes the popup"
         );
+    }
+
+    /// The footer's right zone opens what it is about: the polling status
+    /// opens the sync view, a routine notice opens the message log. Both
+    /// used to be dead text.
+    #[test]
+    fn footer_right_zone_click_opens_what_it_shows() {
+        use crate::realm::components::footer::FooterRight;
+        let area = Rect::new(0, 0, 120, 40);
+        let zone = Rect::new(90, 39, 30, 1);
+        for (right, modal) in [
+            (FooterRight::Polling, Id::SyncStatus),
+            (FooterRight::Notice { sticky: false }, Id::Messages),
+        ] {
+            let mut m = build_model();
+            m.handle_daemon_event(IpcEvent::Snapshot {
+                workspaces: vec![empty_ws("github:o/r#1")],
+                terminals: vec![],
+                projects: vec![],
+                recent_snippets: Vec::new(),
+                dismissed_updates: Vec::new(),
+            });
+            m.footer_right = Some((zone, right));
+            m.dispatch_mouse_in(left_down(zone.x + 3, zone.y), area);
+            assert_eq!(m.top_modal(), Some(&modal), "{right:?}");
+        }
     }
 
     /// A click that misses the overflow cell must not pop anything —
@@ -23917,6 +25815,40 @@ mod inspect_list_remount_tests {
         assert!(
             !out.contains("beta-tree"),
             "the deleted row must not linger in the re-rendered list:\n{out}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod setup_modal_scope_tests {
+    use super::super::{Id, Model};
+    use crate::realm::components::confirm::Confirm;
+    use crate::setup_flow::{PartialEntry, SetupOutcome, SetupRunner};
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    /// Esc on a modal stacked OVER the setup flow closes that modal only.
+    /// It used to be routed to the setup runner, which cancelled the whole
+    /// Settings flow and popped the modal on top — never the setup modal.
+    #[test]
+    fn dismissing_a_modal_over_the_setup_flow_leaves_the_flow_alone() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        let (runner, _) = SetupRunner::at_partial(
+            SetupOutcome::default_enabled(crate::setup::SetupReport { tools: Vec::new() }),
+            ["github".to_string()].into_iter().collect(),
+            PartialEntry::EditScopes("github".into()),
+        );
+        m.setup.runner = Some(runner);
+        m.mount_modal(Id::Setup, Confirm::new("pick orgs"));
+        m.mount_modal(Id::Error, Confirm::new("a provision failed"));
+
+        let _ = m.handle_modal_dismissed();
+
+        assert_eq!(m.modal_stack, vec![Id::Setup], "only the error closed");
+        assert!(
+            m.setup.runner.is_some(),
+            "the Settings flow is still running"
         );
     }
 }
@@ -25294,6 +27226,8 @@ mod pr_chat_tests {
                 }],
             }],
             truncated: false,
+            head_sha: None,
+            divergence: None,
         }
     }
 
@@ -25548,6 +27482,36 @@ mod dismiss_and_messages_tests {
                 |e| e.message.contains("maps it to none") && e.severity == NoticeSeverity::Info
             ),
             "the daemon notice must outlive the footer: {logged:?}"
+        );
+    }
+
+    /// #1867, the client half: the daemon now *parks* a merged workspace
+    /// whose cleanup its removal gate would refuse, announcing it once as
+    /// a plain `Notification` instead of emitting `MergedPrRemovable`.
+    /// That must land as an Info notice in the durable log and mount NO
+    /// modal — the unsolicited destructive confirm (which defaults to
+    /// Yes) answering into `store:local-work` is what re-raised the red
+    /// footer refusal every poll tick.
+    #[test]
+    fn a_parked_cleanup_notice_informs_without_mounting_a_confirm() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.handle_daemon_event(lazybox_ipc::Event::Notification {
+            title: "lazybox".into(),
+            body: "o/r#1 was merged — keeping its workspace, it has local work: \
+                   /tmp/wt (uncommitted changes to tracked files) · x x removes it"
+                .into(),
+        });
+
+        assert_eq!(m.top_modal(), None, "a parked cleanup must not prompt");
+        let notice = m.status.notice.as_ref().expect("footer notice");
+        assert_eq!(notice.severity, NoticeSeverity::Info, "quiet, not red");
+        assert!(
+            m.status
+                .messages
+                .recent()
+                .any(|e| e.message.contains("keeping its workspace")),
+            "the parked cleanup must stay readable in Shift-M"
         );
     }
 
@@ -26741,10 +28705,20 @@ mod worktree_progress_dismiss_tests {
         }
     }
 
+    /// Record that THIS client asked for the spawn on `key` — the
+    /// follow pin an `x n` create leaves behind, or the spawn spinner a
+    /// `w` arms. A provisioning checklist only mounts for a spawn this
+    /// client requested, so a test about the checklist's own mechanics
+    /// has to be the client that asked for it.
+    fn asked_for(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &SessionKey) {
+        m.spawn_follow_to = Some(key.clone());
+    }
+
     #[test]
     fn dismissed_checklist_does_not_resurrect_on_next_progress_event() {
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
+        asked_for(&mut m, &key);
 
         m.handle_daemon_event(progress(
             &key,
@@ -26782,6 +28756,7 @@ mod worktree_progress_dismiss_tests {
     fn esc_mid_provision_sends_cancel_spawn() {
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
+        asked_for(&mut m, &key);
 
         m.handle_daemon_event(progress(
             &key,
@@ -26806,6 +28781,7 @@ mod worktree_progress_dismiss_tests {
         use crate::realm::components::footer::NoticeSeverity;
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
+        asked_for(&mut m, &key);
 
         m.handle_daemon_event(progress(
             &key,
@@ -26860,6 +28836,7 @@ mod worktree_progress_dismiss_tests {
         use crate::realm::components::footer::NoticeSeverity;
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
+        asked_for(&mut m, &key);
 
         m.handle_daemon_event(progress(
             &key,
@@ -26889,6 +28866,7 @@ mod worktree_progress_dismiss_tests {
         let mut m = build_model();
         let a = SessionKey::from("github:o/r#1");
         let b = SessionKey::from("github:o/r#2");
+        asked_for(&mut m, &a);
 
         m.handle_daemon_event(progress(
             &a,
@@ -26897,6 +28875,9 @@ mod worktree_progress_dismiss_tests {
         ));
         let _ = m.handle_modal_dismissed();
 
+        // The user starts a second workspace: a separate request of
+        // their own, so it gets its own checklist.
+        asked_for(&mut m, &b);
         m.handle_daemon_event(progress(
             &b,
             WorktreeStep::Clone,
@@ -26915,6 +28896,7 @@ mod worktree_progress_dismiss_tests {
     fn completion_releases_the_dismissal_marker() {
         let mut m = build_model();
         let key = SessionKey::from("github:o/r#1");
+        asked_for(&mut m, &key);
 
         m.handle_daemon_event(progress(
             &key,
@@ -26938,6 +28920,9 @@ mod worktree_progress_dismiss_tests {
             "op completed — the dismissal must not outlive it"
         );
 
+        // The user asks again (`w` on the same row): a second request,
+        // so a second checklist.
+        asked_for(&mut m, &key);
         m.handle_daemon_event(progress(
             &key,
             WorktreeStep::Clone,
@@ -28352,11 +30337,36 @@ mod keybinding_audit_tests {
     #[test]
     fn mouse_capture_default_chords_toggle_and_remap_moves_them() {
         let (mut m, _server) = build_model();
+        // Every toggle must reach the host boundary: releasing capture
+        // is what hands the trackpad back for native selection and
+        // Cmd-C, so a chord that flips the flag without issuing
+        // `DisableMouseCapture` leaves host copy broken (#1798).
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&requested);
+        m.mouse_capture_requester = Box::new(move |enabled| {
+            captured.lock().expect("mouse request mutex").push(enabled);
+            Ok(())
+        });
         let initial = m.mouse_capture_on;
         press(&mut m, Key::Function(8));
         assert_eq!(m.mouse_capture_on, !initial, "F8 toggles capture");
         m.dispatch_key(KeyEvent::new(Key::Char('s'), KeyModifiers::ALT));
         assert_eq!(m.mouse_capture_on, initial, "Alt-s toggles it back");
+        // The third catalog alias, for terminals that swallow the other two.
+        m.dispatch_key(KeyEvent::new(
+            Key::Char('s'),
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+        ));
+        assert_eq!(m.mouse_capture_on, !initial, "Ctrl-Alt-s toggles too");
+        m.dispatch_key(KeyEvent::new(
+            Key::Char('s'),
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+        ));
+        assert_eq!(
+            *requested.lock().expect("mouse request mutex"),
+            vec![!initial, initial, !initial, initial],
+            "each toggle drives the host boundary with the new mode",
+        );
 
         // A remap moves the binding: the old default goes dead, the
         // new chord fires.
@@ -28383,7 +30393,7 @@ mod dispatch_coverage_tests {
     //! that consumes it). A new catalog row wired to neither fails the
     //! build here instead of rendering everywhere and no-oping.
     use super::super::keys::{PANE_NATIVE_KINDS, action_from_entry};
-    use lazybox_tui_core::action::ActionDef;
+    use lazybox_tui_core::action::{ActionDef, TierMenu};
 
     #[test]
     fn every_catalog_row_dispatches_or_is_allowlisted() {
@@ -28394,8 +30404,11 @@ mod dispatch_coverage_tests {
         let tiers = lazybox_core::AgentModels::builtin("claude")
             .expect("claude builtin tiers")
             .tiers;
-        let catalog =
-            ActionDef::catalog_with_tiers(&agents, &std::collections::BTreeMap::new(), &tiers);
+        let catalog = ActionDef::catalog_with_tiers(
+            &agents,
+            &std::collections::BTreeMap::new(),
+            TierMenu::new("claude", &tiers),
+        );
         for entry in &catalog {
             let dispatchable = action_from_entry(entry).is_some();
             let allowlisted = PANE_NATIVE_KINDS.iter().any(|(k, _, _)| *k == entry.kind);
@@ -29172,6 +31185,39 @@ mod optimistic_mutation_tests {
         ws_key
     }
 
+    /// A project row the `Archive` chord can target from a repo header.
+    fn seed_project(m: &mut TestModel) -> lazybox_core::ProjectKey {
+        let project = lazybox_core::Project::github("owner", "repo", Utc::now());
+        let project_key = project.key.clone();
+        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(project)));
+        project_key
+    }
+
+    /// The text the mounted `ActionConfirm` actually paints. The prompt
+    /// is what the user decides on, so the assertions read the rendered
+    /// frame rather than a string the model happens to hold.
+    fn render_modal_text(m: &mut TestModel) -> String {
+        render_modal_text_of(m, Id::ActionConfirm)
+    }
+
+    fn render_modal_text_of(m: &mut TestModel, id: Id) -> String {
+        use tuirealm::ratatui::layout::Rect;
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| m.app.view(&id, frame, Rect::new(0, 0, 120, 40)))
+            .expect("render confirm");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn reviewers_of(m: &TestModel, sk: &SessionKey) -> Vec<String> {
         m.sidebar
             .workspace_by_key(sk)
@@ -29402,6 +31448,236 @@ mod optimistic_mutation_tests {
             n.message.find("then retry") < n.message.find("uncommitted changes"),
             "the diagnostic must trail: {:?}",
             n.message,
+        );
+    }
+
+    /// The explicit delete: `x x`, one confirm, gone.
+    ///
+    /// The daemon's cleanliness gate may not refuse what a human asked
+    /// for, so the confirmed archive has to reach it as an explicit
+    /// removal (`force: true`). This is the whole user requirement —
+    /// "when I say I want to delete a workspace I want to delete a
+    /// workspace" — expressed at the one place the client controls.
+    #[test]
+    fn a_confirmed_archive_sends_an_explicit_delete() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#7");
+        let sk: SessionKey = (&ws_key).into();
+
+        let cmds = m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Workspace(sk.clone()),
+        );
+
+        match cmds.as_slice() {
+            [IpcCommand::Kill { session_key, force }] => {
+                assert_eq!(session_key, &sk);
+                assert!(
+                    force,
+                    "an explicit delete must not be gated — a refusal is the bug",
+                );
+            }
+            other => panic!("expected an explicit Kill, got {other:?}"),
+        }
+    }
+
+    /// The same for a project header: the cascade must not stop on one
+    /// dirty child either.
+    #[test]
+    fn a_confirmed_project_delete_is_explicit_too() {
+        let mut m = build_model();
+        let project = seed_project(&mut m);
+
+        let cmds = m.dispatch_action_confirmed(
+            &Action::Archive,
+            &ActionConfirmTarget::Project(project.clone()),
+        );
+
+        match cmds.as_slice() {
+            [IpcCommand::DeleteProject { project_key, force }] => {
+                assert_eq!(project_key, &project);
+                assert!(force, "a confirmed project delete deletes");
+            }
+            other => panic!("expected an explicit DeleteProject, got {other:?}"),
+        }
+    }
+
+    /// Mounting the delete confirm asks the daemon what the checkout
+    /// holds, so the one prompt the user answers can name it.
+    #[test]
+    fn mounting_the_delete_confirm_preflights_its_risks() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#11");
+        let sk: SessionKey = (&ws_key).into();
+
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(sk.clone())],
+            None,
+        );
+
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        let pending = m
+            .pending_removal_risk
+            .as_ref()
+            .expect("the confirm arms a preflight");
+        assert_eq!(
+            pending.target,
+            lazybox_ipc::RemovalTarget::Workspace(sk.clone()),
+        );
+    }
+
+    /// And the reply lands *in that prompt*: the paths and the kinds of
+    /// work, not a generic "this may destroy something". No second
+    /// chord, no typed word — the user decides once, with the facts.
+    #[test]
+    fn the_preflight_reply_names_the_damage_in_the_open_confirm() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#12");
+        let sk: SessionKey = (&ws_key).into();
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(sk.clone())],
+            None,
+        );
+
+        m.handle_daemon_event(IpcEvent::RemovalRisksInspected {
+            target: lazybox_ipc::RemovalTarget::Workspace(sk.clone()),
+            risks: vec![lazybox_ipc::RemovalRiskDto {
+                path: std::path::PathBuf::from("/wt/owner-repo/pr-12"),
+                reasons: vec![
+                    "uncommitted changes to tracked files".into(),
+                    "unpushed commits".into(),
+                ],
+            }],
+            error: None,
+        });
+
+        let rendered = render_modal_text(&mut m);
+        assert!(
+            rendered.contains("pr-12"),
+            "the confirm must name the checkout it destroys: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("uncommitted changes to tracked files"),
+            "and the kind of work in it: {rendered:?}",
+        );
+        assert!(
+            rendered.contains("unpushed"),
+            "including the commits no remote has: {rendered:?}",
+        );
+        // Answering is still one key, and it still fires the explicit
+        // delete the prompt described.
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            matches!(cmds.as_slice(), [IpcCommand::Kill { force: true, .. }],),
+            "got {cmds:?}",
+        );
+    }
+
+    /// A checkout the daemon could not read at all is the case where
+    /// silence would mislead most — an empty risk list reads as "clean".
+    #[test]
+    fn an_uninspectable_checkout_is_named_in_the_confirm() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#13");
+        let sk: SessionKey = (&ws_key).into();
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(sk.clone())],
+            None,
+        );
+
+        m.handle_daemon_event(IpcEvent::RemovalRisksInspected {
+            target: lazybox_ipc::RemovalTarget::Workspace(sk.clone()),
+            risks: vec![],
+            error: Some("could not inspect worktrees safely: gitdir is missing".into()),
+        });
+
+        let rendered = render_modal_text(&mut m);
+        assert!(
+            rendered.contains("could not be inspected"),
+            "an unreadable checkout must be said out loud: {rendered:?}",
+        );
+    }
+
+    /// The daemon-raised out-of-scope prompt is an explicit removal too
+    /// — its Yes sends `force: true`, so it may not be the one prompt
+    /// that deletes unpushed work without saying so.
+    ///
+    /// It cannot derive that from the event: `WorkspaceOutOfScope`
+    /// carries no local-work fact at all. The preflight is what closes
+    /// that gap, and this pins both halves — the copy names the work,
+    /// and Yes is explicit.
+    #[test]
+    fn the_out_of_scope_prompt_names_its_damage_and_deletes() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#21");
+        let sk: SessionKey = (&ws_key).into();
+
+        m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+            workspace_key: ws_key.clone(),
+            label: "owner/repo#21".into(),
+            title: None,
+            active_terminal_count: 1,
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::RemoveOutOfScope));
+
+        m.handle_daemon_event(IpcEvent::RemovalRisksInspected {
+            target: lazybox_ipc::RemovalTarget::Workspace(sk.clone()),
+            risks: vec![lazybox_ipc::RemovalRiskDto {
+                path: std::path::PathBuf::from("/wt/owner-repo/pr-21"),
+                reasons: vec!["unpushed commits".into()],
+            }],
+            error: None,
+        });
+
+        let rendered = render_modal_text_of(&mut m, Id::RemoveOutOfScope);
+        assert!(
+            rendered.contains("pr-21") && rendered.contains("unpushed"),
+            "the prompt must name the work its Yes destroys: {rendered:?}",
+        );
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [IpcCommand::Kill {
+                    force: true,
+                    session_key
+                }] if session_key == &sk,
+            ),
+            "got {cmds:?}",
+        );
+    }
+
+    /// A reply for a different row must not repaint this prompt.
+    #[test]
+    fn a_stale_preflight_reply_is_ignored() {
+        let mut m = build_model();
+        let ws_key = seed_pr_workspace(&mut m, "github:owner/repo#14");
+        let other = seed_pr_workspace(&mut m, "github:owner/repo#15");
+        let sk: SessionKey = (&ws_key).into();
+        let other_sk: SessionKey = (&other).into();
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(sk.clone())],
+            None,
+        );
+
+        m.handle_daemon_event(IpcEvent::RemovalRisksInspected {
+            target: lazybox_ipc::RemovalTarget::Workspace(other_sk),
+            risks: vec![lazybox_ipc::RemovalRiskDto {
+                path: std::path::PathBuf::from("/wt/somebody-else"),
+                reasons: vec!["unpushed commits".into()],
+            }],
+            error: None,
+        });
+
+        let rendered = render_modal_text(&mut m);
+        assert!(
+            !rendered.contains("somebody-else"),
+            "another row's risks must never appear in this confirm: {rendered:?}",
         );
     }
 
@@ -32329,6 +34605,1628 @@ mod follow_up_chain_tests {
             m.sidebar.broadcast_selected_count(),
             2,
             "a no-op bulk run leaves the marks for a retry",
+        );
+    }
+}
+
+#[cfg(test)]
+mod clipboard_and_paste_tests {
+    //! The terminal's two human-facing clipboard contracts (#1798,
+    //! consolidating #1685).
+    //!
+    //! **Copy** has two transports with different guarantees, and the
+    //! footer used to claim the same success for both — a copy the host
+    //! terminal silently dropped read exactly like one that landed.
+    //!
+    //! **Paste** is framed per terminal: `ESC[200~ … ESC[201~` only for
+    //! a program that enabled DECSET 2004. Framing a program that never
+    //! asked for it puts the literal markers into its input, which is
+    //! what `cat`, a bracketed-paste-off shell and anything reading raw
+    //! bytes showed.
+    use super::super::helpers::ClipboardDelivery;
+    use super::super::*;
+    use lazybox_ipc::{
+        Command as IpcCommand, Event as IpcEvent, TerminalId, TerminalKind, channel,
+    };
+    use std::sync::Arc;
+    use tuirealm::ratatui::layout::Size;
+
+    type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
+
+    fn model_with_terminal() -> (TestModel, lazybox_ipc::Connection) {
+        let (client, server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = lazybox_core::SessionKey::from("github:o/r#1");
+        m.terminals.set_active_session(Some(key.clone()));
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: key,
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        m.focus = PaneFocus::Terminals;
+        (m, server)
+    }
+
+    /// `seq` must advance across calls — a chunk at or below the slot's
+    /// watermark is dropped as already applied.
+    fn feed(m: &mut TestModel, seq: u64, bytes: &[u8]) {
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(1),
+            bytes: Arc::<[u8]>::from(bytes.to_vec()),
+            first_seq: seq,
+            seq,
+            cols: 0,
+            rows: 0,
+        });
+    }
+
+    fn pasted_bytes(
+        m: &mut TestModel,
+        server: &mut lazybox_ipc::Connection,
+        text: &str,
+    ) -> Vec<u8> {
+        while server.rx.try_recv().is_ok() {}
+        m.handle_paste(text);
+        let mut out = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let IpcCommand::Write { bytes, .. } = cmd {
+                out.extend_from_slice(&bytes);
+            }
+        }
+        out
+    }
+
+    /// The escape-transport copy is best effort and says so; only the
+    /// native path claims the clipboard outright.
+    #[test]
+    fn a_copy_notice_names_the_transport_that_ran() {
+        assert_eq!(
+            ClipboardDelivery::Host.notice("3 lines"),
+            "copied 3 lines to clipboard"
+        );
+        let escaped = ClipboardDelivery::Terminal.notice("word");
+        assert!(escaped.starts_with("copied word"), "{escaped}");
+        assert!(
+            escaped.contains("OSC 52") && escaped.contains("host terminal decides"),
+            "a best-effort escape must not read as a confirmed clipboard write: {escaped}",
+        );
+    }
+
+    /// DECSET 2004 on: the program parses the markers, so it gets them
+    /// and sees one paste instead of a run of keystrokes.
+    #[test]
+    fn paste_is_bracketed_for_a_program_that_enabled_the_mode() {
+        let (mut m, mut server) = model_with_terminal();
+        feed(&mut m, 1, b"\x1b[?2004h");
+        assert!(
+            m.terminals.terminal_accepts_bracketed_paste(TerminalId(1)),
+            "precondition: the mode is on",
+        );
+
+        assert_eq!(
+            pasted_bytes(&mut m, &mut server, "one\ntwo"),
+            b"\x1b[200~one\ntwo\x1b[201~".to_vec(),
+        );
+    }
+
+    /// Mode off: the bytes go through unframed. A terminal that never
+    /// enabled bracketed paste has no parser for `ESC[200~` and prints
+    /// it — and nothing is added to submit the paste either.
+    #[test]
+    fn paste_is_unframed_for_a_program_that_did_not() {
+        let (mut m, mut server) = model_with_terminal();
+        assert!(
+            !m.terminals.terminal_accepts_bracketed_paste(TerminalId(1)),
+            "precondition: a fresh terminal has not enabled the mode",
+        );
+
+        assert_eq!(
+            pasted_bytes(&mut m, &mut server, "one\ntwo"),
+            b"one\ntwo".to_vec(),
+            "exact bytes: no markers, no translated newline, no added CR",
+        );
+    }
+
+    /// A program that turns the mode back off (DECRST 2004) stops
+    /// getting the framing — the mode is read per paste, not latched at
+    /// spawn.
+    #[test]
+    fn paste_framing_follows_the_mode_back_off() {
+        let (mut m, mut server) = model_with_terminal();
+        feed(&mut m, 1, b"\x1b[?2004h");
+        assert!(pasted_bytes(&mut m, &mut server, "x").starts_with(b"\x1b[200~"));
+
+        feed(&mut m, 2, b"\x1b[?2004l");
+        assert_eq!(pasted_bytes(&mut m, &mut server, "x"), b"x".to_vec());
+    }
+
+    /// Non-ASCII and multi-line payloads reach the PTY byte for byte in
+    /// both modes — the copy/paste round trip is only as good as what
+    /// the paste side forwards.
+    #[test]
+    fn paste_passes_unicode_through_unchanged() {
+        let text = "héllo → wörld\nsecond ligne ✓";
+        let (mut m, mut server) = model_with_terminal();
+        assert_eq!(
+            pasted_bytes(&mut m, &mut server, text),
+            text.as_bytes().to_vec()
+        );
+
+        feed(&mut m, 1, b"\x1b[?2004h");
+        assert_eq!(
+            pasted_bytes(&mut m, &mut server, text),
+            [b"\x1b[200~".as_slice(), text.as_bytes(), b"\x1b[201~"].concat(),
+        );
+    }
+}
+
+/// A provisioning checklist belongs to whoever asked for the spawn.
+///
+/// `Event::WorktreeProgress` is broadcast to every connected client and
+/// its `SpawnOrigin` only says whether a *human* was in the loop
+/// anywhere — not whether that human is at this keyboard. An agent
+/// running `lazybox workspace create --issue … --agent codex` sends a
+/// correlated `CreateWorkspace`, so its provisioning is `Interactive`,
+/// and it used to mount this modal over a user who asked for nothing.
+mod worktree_progress_ownership_tests {
+    use super::super::{Id, ModalFlow, Model};
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{
+        Command as IpcCommand, Event as IpcEvent, SpawnOrigin, WorktreeStep, WorktreeStepStatus,
+        channel,
+    };
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn progress(key: &SessionKey, status: WorktreeStepStatus) -> IpcEvent {
+        IpcEvent::WorktreeProgress {
+            session_key: key.clone(),
+            step: WorktreeStep::Clone,
+            status,
+            origin: SpawnOrigin::Interactive,
+        }
+    }
+
+    /// The bug, as reported: "when lazybox create workspace, don't show
+    /// modal, only show modal when it's created by the user".
+    #[test]
+    fn a_workspace_this_client_did_not_create_provisions_without_a_modal() {
+        let mut m = build_model();
+        let elsewhere = SessionKey::from("github:obin-ai/module-document-store#326");
+
+        for step in [
+            WorktreeStep::Clone,
+            WorktreeStep::Fetch,
+            WorktreeStep::Setup,
+        ] {
+            m.handle_daemon_event(IpcEvent::WorktreeProgress {
+                session_key: elsewhere.clone(),
+                step,
+                status: WorktreeStepStatus::Started,
+                origin: SpawnOrigin::Interactive,
+            });
+        }
+
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "a provision this client never asked for must not mount a modal",
+        );
+        assert!(
+            m.worktree_progress.is_none(),
+            "nor accumulate a checklist behind it",
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "and it must not be swapped for a notice either — the row \
+             appearing in the inbox is the signal",
+        );
+    }
+
+    /// The other half of the rule: the user's own `x n` still mounts its
+    /// checklist, driven through the real flow (submit → correlated
+    /// `CreateWorkspace` → `WorkspaceCreated` → provisioning).
+    #[test]
+    fn the_users_own_new_workspace_still_mounts_its_checklist() {
+        let mut m = build_model();
+        let project = lazybox_core::ProjectKey::github("AntoineToussaint", "lazybox");
+
+        m.modal_stack.push(Id::NewWorkspace);
+        m.modal_flow = Some(ModalFlow::NewWorkspaceProject {
+            project: project.clone(),
+        });
+        let commands = m.handle_input_submitted("Spike".into());
+        let request_id = match commands.as_slice() {
+            [
+                IpcCommand::CreateWorkspace {
+                    client_request_id: Some(request_id),
+                    ..
+                },
+            ] => request_id.clone(),
+            other => panic!("expected one correlated CreateWorkspace, got {other:?}"),
+        };
+
+        let allocated = lazybox_core::WorkspaceKey::new("spike");
+        m.handle_daemon_event(IpcEvent::WorkspaceCreated {
+            client_request_id: request_id,
+            workspace_key: allocated.clone(),
+        });
+        m.handle_daemon_event(progress(
+            &SessionKey::from(&allocated),
+            WorktreeStepStatus::Started,
+        ));
+
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "the workspace the user just created keeps its checklist",
+        );
+    }
+
+    /// `x F` is the same rule on the floating path — a different command
+    /// (`CreateFloatingWorkspace`) arming the same follow pin.
+    #[test]
+    fn the_users_own_floating_workspace_still_mounts_its_checklist() {
+        let mut m = build_model();
+
+        m.modal_stack.push(Id::NewWorkspace);
+        m.modal_flow = Some(ModalFlow::FloatingWorkspace {
+            kind: lazybox_core::FloatingWorkspaceKind::Coordination,
+        });
+        let commands = m.handle_input_submitted("Coordinate".into());
+        let request_id = match commands.as_slice() {
+            [
+                IpcCommand::CreateFloatingWorkspace {
+                    client_request_id: Some(request_id),
+                    ..
+                },
+            ] => request_id.clone(),
+            other => panic!("expected one correlated CreateFloatingWorkspace, got {other:?}"),
+        };
+
+        let allocated = lazybox_core::WorkspaceKey::new("coordinate");
+        m.handle_daemon_event(IpcEvent::WorkspaceCreated {
+            client_request_id: request_id,
+            workspace_key: allocated.clone(),
+        });
+        m.handle_daemon_event(progress(
+            &SessionKey::from(&allocated),
+            WorktreeStepStatus::Started,
+        ));
+
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "a floating workspace the user created keeps its checklist",
+        );
+    }
+
+    /// Silence applies to the *working* path only. A provision that
+    /// genuinely broke still reaches the checklist whoever asked for it
+    /// — unchanged by this rule, and the reason #594 put the recovery
+    /// affordance there. A quiet failure would be a swallowed error.
+    #[test]
+    fn a_failed_provision_still_surfaces_for_a_spawn_this_client_did_not_ask_for() {
+        let mut m = build_model();
+        let elsewhere = SessionKey::from("github:obin-ai/module-document-store#326");
+
+        m.handle_daemon_event(progress(
+            &elsewhere,
+            WorktreeStepStatus::Failed("disk full".into()),
+        ));
+
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "a broken provision is never swallowed, whoever asked for it",
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_output_search_tests {
+    //! The daemon-side terminal-OUTPUT scan behind `agent:` / `said:`
+    //! (#1780). Unlike the two prompt corpora, this one is asynchronous and
+    //! unordered with respect to typing, so the model owes the search three
+    //! things the client-side halves never needed: a debounce, a request id,
+    //! and a rule for a reply that outlived its query.
+    use super::super::*;
+    use lazybox_ipc::{Client, Command};
+    use std::time::Duration;
+    use tuirealm::ratatui::layout::Size;
+
+    const WS_ASKED: &str = "github:o/r#1";
+    const WS_SAID: &str = "github:o/r#2";
+
+    fn model_and_commands() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = tokio::sync::mpsc::channel(64);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        super::seed_ws(&mut m, WS_ASKED);
+        super::seed_ws(&mut m, WS_SAID);
+        (m, cmd_rx)
+    }
+
+    fn type_query(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, query: &str) {
+        m.sidebar.open_global_search();
+        for c in query.chars() {
+            m.sidebar.handle_search_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+    }
+
+    /// Tick past the debounce and return whatever scan it issued. The FIRST
+    /// tick after a query change is what records the change, so backdating
+    /// before it is overwritten — which is exactly the collapsing the
+    /// debounce is for.
+    fn settle(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) -> Vec<(u64, Vec<String>)> {
+        m.tick_agent_output_search();
+        m.agent_output_search.changed_at =
+            Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        m.tick_agent_output_search();
+        scans(rx)
+    }
+
+    fn scans(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<(u64, Vec<String>)> {
+        let mut scans = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let Command::SearchAgentOutput {
+                request_id,
+                needles,
+            } = cmd
+            {
+                scans.push((request_id, needles));
+            }
+        }
+        scans
+    }
+
+    /// A query with no agent term costs nothing. The scan reads the tail of
+    /// every live agent ring, so the qualifier has to be the only thing
+    /// that buys it — exactly as stage 1 (#1774) made the corpus opt-in.
+    #[test]
+    fn a_query_without_an_agent_term_never_scans() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "login is:pr");
+        m.agent_output_search.changed_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+        m.tick_agent_output_search();
+        assert!(scans(&mut rx).is_empty());
+    }
+
+    /// Typing `said:borrow` is six keystrokes and six different questions.
+    /// Each would re-scan every ring, so the needles must hold still before
+    /// one is issued — and then exactly one is, not one per tick.
+    #[test]
+    fn a_typed_needle_is_debounced_into_one_scan() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+
+        m.tick_agent_output_search();
+        assert!(
+            scans(&mut rx).is_empty(),
+            "the needles just moved — nothing is owed yet"
+        );
+
+        m.agent_output_search.changed_at =
+            Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        m.tick_agent_output_search();
+        let issued = scans(&mut rx);
+        assert_eq!(issued.len(), 1, "{issued:?}");
+        assert_eq!(issued[0].1, vec!["borrow".to_string()]);
+
+        m.tick_agent_output_search();
+        m.tick_agent_output_search();
+        assert!(
+            scans(&mut rx).is_empty(),
+            "a settled query is scanned once, not once per run-loop iteration"
+        );
+    }
+
+    /// The reply the user is waiting for lands, and only it. The scan is
+    /// asynchronous, so a reply for a needle already typed past would
+    /// filter the sidebar by a question nobody asked.
+    #[test]
+    fn a_stale_reply_is_dropped_and_the_live_one_filters() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+        let (request_id, _) = settle(&mut m, &mut rx).pop().expect("one scan issued");
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            0,
+            "before the scan answers, the client's own corpora select nothing"
+        );
+
+        let matched = vec![(
+            WS_SAID.to_string(),
+            "error[E0502]: cannot borrow `self` as mutable".to_string(),
+        )];
+        m.apply_agent_output_matches(request_id.wrapping_add(1), matched.clone());
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            0,
+            "a reply the client never asked for must not reach the corpus"
+        );
+
+        m.apply_agent_output_matches(request_id, matched);
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            1,
+            "the awaited reply selects the workspace whose OUTPUT matched"
+        );
+        assert_eq!(
+            m.sidebar.selected_workspace().map(|w| w.key.to_string()),
+            Some(WS_SAID.to_string()),
+        );
+    }
+
+    /// Regression for the permanent wedge: the reply can be lost without any
+    /// error reaching this client — a full event queue makes the daemon close
+    /// the connection, taking the request with it. Before the deadline the
+    /// `dispatched` latch never released, so the tick early-returned forever,
+    /// the bar read `scanning output…` permanently, and output-only matches
+    /// stayed hidden until the user retyped the query.
+    #[test]
+    fn a_reply_that_never_arrives_is_retried_not_waited_on_forever() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+        let (first, _) = settle(&mut m, &mut rx).pop().expect("one scan issued");
+
+        // No reply. Ticking does nothing until the deadline passes.
+        m.tick_agent_output_search();
+        assert!(scans(&mut rx).is_empty(), "still within the deadline");
+
+        m.agent_output_search.dispatched_at =
+            Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_TIMEOUT);
+        m.tick_agent_output_search();
+        let (second, needles) = scans(&mut rx)
+            .pop()
+            .expect("a lost reply must be retried, not waited on forever");
+        assert_ne!(second, first, "the retry carries a fresh request id");
+        assert_eq!(needles, vec!["borrow".to_string()]);
+
+        // The retry's reply still lands; the stale first id does not.
+        m.apply_agent_output_matches(
+            first,
+            vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
+        );
+        assert_eq!(m.sidebar.visible_workspace_count(), 0);
+        m.apply_agent_output_matches(
+            second,
+            vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
+        );
+        assert_eq!(m.sidebar.visible_workspace_count(), 1);
+    }
+
+    /// A committed query must not freeze: the prompt half of the same query
+    /// re-filters on every new prompt, so leaving the output half pinned to
+    /// dispatch time made one query half-live — a workspace that hit the
+    /// searched error after the query was typed never appeared, and nothing
+    /// distinguished that from "it isn't there".
+    #[test]
+    fn a_standing_query_re_scans_so_its_rows_stay_live() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+        let (first, _) = settle(&mut m, &mut rx).pop().expect("one scan issued");
+        m.apply_agent_output_matches(first, Vec::new());
+        assert_eq!(m.sidebar.visible_workspace_count(), 0);
+
+        // Settled: no re-ask until the refresh cadence comes round.
+        m.tick_agent_output_search();
+        assert!(scans(&mut rx).is_empty(), "a fresh answer is not re-asked");
+
+        m.agent_output_search.dispatched_at =
+            Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_REFRESH);
+        m.tick_agent_output_search();
+        let (second, _) = scans(&mut rx)
+            .pop()
+            .expect("a standing query re-scans rather than freezing");
+        assert_ne!(second, first);
+
+        // The agent said it since, and the row appears without retyping.
+        m.apply_agent_output_matches(
+            second,
+            vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
+        );
+        assert_eq!(m.sidebar.visible_workspace_count(), 1);
+    }
+
+    /// A reconnect is the precise terminating outcome: the daemon lost the
+    /// request with the old connection, so the latch releases on the fresh
+    /// `Snapshot` rather than waiting out the whole deadline.
+    #[test]
+    fn a_reconnect_releases_the_scan_without_waiting_out_the_deadline() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+        let (first, _) = settle(&mut m, &mut rx).pop().expect("one scan issued");
+
+        m.handle_daemon_event(lazybox_ipc::Event::Snapshot {
+            workspaces: Vec::new(),
+            terminals: Vec::new(),
+            projects: Vec::new(),
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+
+        m.agent_output_search.changed_at =
+            Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        m.tick_agent_output_search();
+        let (second, _) = scans(&mut rx)
+            .pop()
+            .expect("the reconnect re-asks instead of stranding the latch");
+        assert_ne!(second, first);
+    }
+
+    /// Moving the needles invalidates both the in-flight request and the
+    /// results it would have produced: text scanned for `bor` is not
+    /// evidence about `borrow`, and leaving it up shows rows the query no
+    /// longer selects.
+    #[test]
+    fn changing_the_needles_drops_the_previous_answer() {
+        let (mut m, mut rx) = model_and_commands();
+        type_query(&mut m, "said:borrow");
+        let (first, _) = settle(&mut m, &mut rx).pop().expect("one scan issued");
+        m.apply_agent_output_matches(
+            first,
+            vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
+        );
+        assert_eq!(m.sidebar.visible_workspace_count(), 1);
+
+        // One more keystroke: a different question entirely.
+        m.sidebar.handle_search_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        m.tick_agent_output_search();
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            0,
+            "the previous scan's rows go with the query that asked for them"
+        );
+
+        let (second, needles) = settle(&mut m, &mut rx)
+            .pop()
+            .expect("the new needles are scanned");
+        assert_eq!(needles, vec!["borrowx".to_string()]);
+        assert_ne!(second, first);
+
+        // And the first request's reply, arriving late, is inert.
+        m.apply_agent_output_matches(
+            first,
+            vec![(WS_SAID.to_string(), "cannot borrow here".to_string())],
+        );
+        assert_eq!(m.sidebar.visible_workspace_count(), 0);
+    }
+}
+
+/// Issue #1921: every destructive confirm's `Enter` side comes from
+/// `ui.confirm_default`, on the axis the prompt was raised from — and
+/// nowhere else. One test per prompt under the shipped config, one per
+/// axis showing the config field flips it, and one per documented floor
+/// showing it does not.
+///
+/// #1900 moved eight prompts to a No default while fixing one of them,
+/// because the policy lived at eight mount sites and the config key that
+/// should have decided it was read by nobody. These tests pin the axis, so
+/// the next policy change stays a config line.
+#[cfg(test)]
+mod confirm_default_axis_tests {
+    use super::super::{ActionConfirmTarget, Id, Model};
+    use lazybox_config::ConfirmDefault;
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::channel;
+    use lazybox_tui_core::action::Action;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// Which side the *rendered* modal highlights — true when `[Y]es` is
+    /// the bold one.
+    ///
+    /// `state()` alone is not enough here: a mount that no-ops over an
+    /// already-open modal leaves the previous component in place, and
+    /// reading its state would report the default this prompt never got.
+    /// The drawn frame is what the user answers, so it is what the
+    /// assertions check.
+    fn rendered_default_yes(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        id: Id,
+    ) -> bool {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        use tuirealm::ratatui::layout::Rect;
+        use tuirealm::ratatui::style::Modifier;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| m.app.view(&id, frame, Rect::new(0, 0, 100, 40)))
+            .expect("render the confirm");
+        let buf = terminal.backend().buffer().clone();
+        let find = |label: &str| -> Option<(u16, u16)> {
+            let chars: Vec<String> = label.chars().map(|c| c.to_string()).collect();
+            let span = chars.len() as u16;
+            (0..buf.area.height).find_map(|y| {
+                (0..buf.area.width.saturating_sub(span))
+                    .find(|&x| {
+                        chars
+                            .iter()
+                            .enumerate()
+                            .all(|(i, c)| buf[(x + i as u16, y)].symbol() == c.as_str())
+                    })
+                    .map(|x| (x, y))
+            })
+        };
+        let yes = find("[Y]es").expect("the rendered confirm shows [Y]es");
+        let no = find("[N]o").expect("the rendered confirm shows [N]o");
+        let yes_bold = buf[yes].modifier.contains(Modifier::BOLD);
+        let no_bold = buf[no].modifier.contains(Modifier::BOLD);
+        assert_ne!(
+            yes_bold, no_bold,
+            "exactly one button carries the Enter highlight",
+        );
+        yes_bold
+    }
+
+    /// Assert the prompt mounted under `id` defaults to Yes (`yes`) or No,
+    /// from the component's own state *and* from the frame it draws.
+    fn assert_default(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        id: Id,
+        yes: bool,
+        what: &str,
+    ) {
+        assert_eq!(
+            m.top_modal(),
+            Some(&id),
+            "{what}: the prompt must be the modal on top",
+        );
+        assert_eq!(
+            super::effects_tests::mounted_confirm_default_yes(m, id.clone()),
+            yes,
+            "{what}: component state",
+        );
+        assert_eq!(rendered_default_yes(m, id), yes, "{what}: rendered frame",);
+    }
+
+    // ---------------------------------------------------------------
+    // The shortcut axis: a chord raised it, so Enter completes it.
+    // ---------------------------------------------------------------
+
+    /// `x x` archive and every other destructive catalog action. This is
+    /// the family the dead `destructive_shortcut` key was written for.
+    #[test]
+    fn archive_confirm_defaults_to_yes_on_a_chord() {
+        let mut m = build_model();
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(SessionKey::from(
+                "github:o/r#1",
+            ))],
+            None,
+        );
+        assert_default(&mut m, Id::ActionConfirm, true, "x x archive");
+    }
+
+    /// `c` inside the Error Inbox. The chord *is* "clear", and what Yes
+    /// loses is a log the next failure re-records.
+    #[test]
+    fn error_inbox_clear_defaults_to_yes_on_a_chord() {
+        let mut m = build_model();
+        m.mount_error_inbox_clear_confirm();
+        assert_default(
+            &mut m,
+            Id::ErrorInboxClearConfirm,
+            true,
+            "error-inbox clear-all",
+        );
+    }
+
+    /// `g m` on a PR GitHub holds behind its predecessors. The refusal
+    /// lands async, but the merge the user pressed for is what it answers.
+    #[test]
+    fn merge_held_override_defaults_to_yes_on_a_chord() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.mount_merge_held_confirm(&WorkspaceKey::new("github:o/r#1"), "o/r#1", "o/r#2");
+        assert_default(
+            &mut m,
+            Id::MergeHeldConfirm,
+            true,
+            "held-merge override (fresh mount)",
+        );
+    }
+
+    /// The second mount path: a bulk `g m` produces one refusal per held
+    /// PR, and a later one folds into the prompt already open rather than
+    /// being dropped. That fold rebuilds the component, so it has to
+    /// resolve the axis too — #1900 had both paths on `default_no()`.
+    #[test]
+    fn merge_held_fold_path_defaults_to_yes_on_a_chord() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
+        m.mount_merge_held_confirm(&WorkspaceKey::new("github:o/r#1"), "o/r#1", "o/r#3");
+        // Second refusal, same prompt still on top: folds in.
+        m.mount_merge_held_confirm(&WorkspaceKey::new("github:o/r#2"), "o/r#2", "o/r#3");
+        match m.modal_flow.as_ref() {
+            Some(super::super::ModalFlow::MergeHeldConfirm { held }) => assert_eq!(
+                held.len(),
+                2,
+                "the second refusal folded into the open prompt",
+            ),
+            other => panic!("expected a MergeHeldConfirm flow, got {other:?}"),
+        }
+        assert_default(
+            &mut m,
+            Id::MergeHeldConfirm,
+            true,
+            "held-merge override (fold path)",
+        );
+    }
+
+    /// The help assistant's apply gate when it would overwrite a snippet
+    /// that already exists. The user asked for the snippet and is looking
+    /// at a preview of exactly what gets written.
+    #[test]
+    fn snippet_overwrite_defaults_to_yes_on_a_chord() {
+        let mut m = build_model();
+        m.snippets = lazybox_config::Snippets::builtin();
+        let key = m
+            .snippets
+            .all()
+            .next()
+            .map(|(k, _)| k.to_string())
+            .expect("the builtin snippet catalog is not empty");
+        m.modal_stack.push(Id::HelpAsk);
+        m.propose_help_action(lazybox_tui_core::help::HelpActionIntent::AddSnippet {
+            key: key.clone(),
+            category: String::new(),
+            description: "replace it".into(),
+            body: "a new body".into(),
+        });
+        assert_default(
+            &mut m,
+            Id::HelpActionConfirm,
+            true,
+            &format!("snippet overwrite of `{key}`"),
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // `destructive_shortcut: no` flips that axis — all of it, at once.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn no_shortcut_flips_every_chord_prompt() {
+        // Archive.
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
+        m.mount_action_confirm(
+            Action::Archive,
+            vec![ActionConfirmTarget::Workspace(SessionKey::from(
+                "github:o/r#1",
+            ))],
+            None,
+        );
+        assert_default(&mut m, Id::ActionConfirm, false, "x x archive under no");
+
+        // Error-inbox clear-all.
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
+        m.mount_error_inbox_clear_confirm();
+        assert_default(
+            &mut m,
+            Id::ErrorInboxClearConfirm,
+            false,
+            "error-inbox clear-all under no",
+        );
+
+        // Held-merge override, both mount paths.
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
+        m.mount_merge_held_confirm(&WorkspaceKey::new("github:o/r#1"), "o/r#1", "o/r#3");
+        assert_default(
+            &mut m,
+            Id::MergeHeldConfirm,
+            false,
+            "held-merge override under no (fresh mount)",
+        );
+        m.mount_merge_held_confirm(&WorkspaceKey::new("github:o/r#2"), "o/r#2", "o/r#3");
+        assert_default(
+            &mut m,
+            Id::MergeHeldConfirm,
+            false,
+            "held-merge override under no (fold path)",
+        );
+
+        // Snippet overwrite.
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
+        m.snippets = lazybox_config::Snippets::builtin();
+        let key = m
+            .snippets
+            .all()
+            .next()
+            .map(|(k, _)| k.to_string())
+            .expect("the builtin snippet catalog is not empty");
+        m.modal_stack.push(Id::HelpAsk);
+        m.propose_help_action(lazybox_tui_core::help::HelpActionIntent::AddSnippet {
+            key,
+            category: String::new(),
+            description: "replace it".into(),
+            body: "a new body".into(),
+        });
+        assert_default(
+            &mut m,
+            Id::HelpActionConfirm,
+            false,
+            "snippet overwrite under no",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // The event axis: nobody pressed anything, so Enter must not kill.
+    // ---------------------------------------------------------------
+
+    /// The one pushed prompt, and the whole reason #1899 was filed: a
+    /// removal prompt over a workspace whose agent is still running.
+    /// Shipped `event: no`, so Enter cancels.
+    #[test]
+    fn pushed_removal_over_a_live_agent_defaults_to_no() {
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 1,
+                reason: super::super::RemovalReason::OutOfScope,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_default(
+            &mut m,
+            Id::RemoveOutOfScope,
+            false,
+            "pushed removal over a live agent",
+        );
+    }
+
+    /// `event: yes` flips it — the knob is the whole point, and a user who
+    /// wants the pre-#1900 speed back sets this instead of patching
+    /// `maybe_mount_next_removal_prompt`.
+    #[test]
+    fn yes_event_flips_the_pushed_removal_prompt() {
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.event = ConfirmDefault::Yes;
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 1,
+                reason: super::super::RemovalReason::OutOfScope,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_default(
+            &mut m,
+            Id::RemoveOutOfScope,
+            true,
+            "pushed removal under event: yes",
+        );
+    }
+
+    /// `event: yes` also lifts the "a guarded No must not decide" rule it
+    /// implies. The guard exists because the user may not be reading a
+    /// prompt that defaults to No; once they have asked for a Yes default
+    /// here, their No is a deliberate answer and may pin the keep.
+    #[test]
+    fn yes_event_makes_the_pushed_prompts_no_a_decision() {
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.event = ConfirmDefault::Yes;
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 1,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        match m.modal_flow.as_ref() {
+            Some(super::super::ModalFlow::RemovalPrompt { guarded, .. }) => assert!(
+                !guarded,
+                "event: yes puts the default on Yes, so the prompt is not guarded",
+            ),
+            other => panic!("expected a RemovalPrompt flow, got {other:?}"),
+        }
+        let cmds = m.handle_confirmed(false);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, lazybox_ipc::Command::KeepMergedWorkspace { .. })),
+            "No under event: yes is a decision that pins the keep, got: {cmds:?}",
+        );
+    }
+
+    /// The pushed prompt's re-mount: `apply_removal_risks` rebuilds the
+    /// open modal in place to append what the daemon found, and must
+    /// reproduce the resolved default rather than re-derive it (#1900's
+    /// fix, kept). Asserted on the drawn frame, since a re-mount that
+    /// silently failed would leave the old component's state behind.
+    #[test]
+    fn the_risk_remount_reproduces_the_resolved_default() {
+        for (event, want_yes, label) in [
+            (ConfirmDefault::No, false, "event: no"),
+            (ConfirmDefault::Yes, true, "event: yes"),
+        ] {
+            let mut m = build_model();
+            m.ui_defaults.confirm_default.event = event;
+            super::seed_ws(&mut m, "github:o/r#1");
+            m.removal_prompt_queue
+                .push_back(super::super::RemovalPrompt {
+                    workspace_key: WorkspaceKey::new("github:o/r#1"),
+                    label: "o/r#1".into(),
+                    title: None,
+                    terminal_count: 1,
+                    reason: super::super::RemovalReason::OutOfScope,
+                    has_local_work: false,
+                });
+            m.maybe_mount_next_removal_prompt();
+            assert_default(&mut m, Id::RemoveOutOfScope, want_yes, label);
+
+            m.apply_removal_risks(
+                &lazybox_ipc::RemovalTarget::Workspace(SessionKey::from("github:o/r#1")),
+                &[lazybox_ipc::RemovalRiskDto {
+                    path: std::path::PathBuf::from("/tmp/worktrees/o-r-1"),
+                    reasons: vec!["uncommitted changes to tracked files".into()],
+                }],
+                None,
+            );
+            assert_default(
+                &mut m,
+                Id::RemoveOutOfScope,
+                want_yes,
+                &format!("{label}, after the risk-block re-mount"),
+            );
+        }
+    }
+
+    /// A pushed removal prompt with nothing running is on neither axis:
+    /// the worktree is reconstructible and the row has already left the
+    /// user's scope, so there is no safety question for a policy to
+    /// answer. It affirms even with `event: no` shipped.
+    #[test]
+    fn pushed_removal_with_nothing_running_still_affirms() {
+        let mut m = build_model();
+        assert_eq!(
+            m.ui_defaults.confirm_default.event,
+            ConfirmDefault::No,
+            "this test is about the shipped event default",
+        );
+        super::seed_ws(&mut m, "github:o/r#1");
+        m.removal_prompt_queue
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 0,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_default(
+            &mut m,
+            Id::RemoveOutOfScope,
+            true,
+            "pushed removal with nothing running",
+        );
+    }
+
+    /// The worktree-recreate confirm: raised by a spawn that hit the wrong
+    /// branch, and the last bare `destructive()` production call site before
+    /// #1921. Shipped behaviour is unchanged (Yes either way) — the point is
+    /// that the axis has no silent exception, so a user who turns the
+    /// destructive chords down gets this one too.
+    #[test]
+    fn worktree_recreate_confirm_follows_the_shortcut_axis() {
+        use lazybox_ipc::{TerminalKind, WorktreeStep as Step, WorktreeStepStatus as Status};
+
+        let arrange = |shortcut: ConfirmDefault| {
+            let (client, mut server) = channel::pair();
+            let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+            m.ui_defaults.confirm_default.destructive_shortcut = shortcut;
+            let session_key = SessionKey::from(&WorkspaceKey::new("github:acme/widget#42"));
+            m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+                session_key: session_key.clone(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: Some("fix it".into()),
+                initial_snippet: None,
+                on_main: false,
+                force_new: false,
+                role: None,
+            });
+            m.handle_daemon_event(lazybox_ipc::Event::WorktreeProgress {
+                session_key,
+                step: Step::WorktreeAdd,
+                status: Status::Failed(
+                    "worktree: checkout_at: worktree /tmp/wt is checked out on branch \
+                     'feat-42-work', not the requested branch 'issue-42-new' — refusing \
+                     to reuse it"
+                        .into(),
+                ),
+                origin: lazybox_ipc::SpawnOrigin::Interactive,
+            });
+            while server.rx.try_recv().is_ok() {}
+            m.recreate_worktree_provision();
+            m
+        };
+
+        let mut m = arrange(ConfirmDefault::Yes);
+        assert_default(
+            &mut m,
+            Id::WorktreeRecreateConfirm,
+            true,
+            "worktree recreate under the shipped yes",
+        );
+
+        let mut m = arrange(ConfirmDefault::No);
+        assert_default(
+            &mut m,
+            Id::WorktreeRecreateConfirm,
+            false,
+            "worktree recreate under destructive_shortcut: no",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // The documented floors: `default_no()`, on no axis, config-proof.
+    // Each sets the knob to `yes` explicitly, so none of them can go
+    // vacuous if the shipped default ever moves.
+    // ---------------------------------------------------------------
+
+    /// The bulk worktree wipe. One mis-hit takes many trees at once.
+    #[test]
+    fn clean_worktrees_is_a_floor_not_an_axis() {
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::Yes;
+        m.mount_clean_worktrees_confirm();
+        assert_default(
+            &mut m,
+            Id::CleanWorktreesConfirm,
+            false,
+            "clean-worktrees bulk wipe",
+        );
+    }
+
+    /// The inspector's delete, which overrides the dirty-worktree refusal
+    /// and loses uncommitted work off disk.
+    #[test]
+    fn inspector_delete_is_a_floor_not_an_axis() {
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::Yes;
+        m.mount_inspect_confirm(lazybox_ipc::WorktreeInspectionDto {
+            path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
+            bare_path: None,
+            branch: Some("feat".into()),
+            session_id: None,
+            reasons: vec!["untracked".into()],
+            size_bytes: 0,
+            last_modified_unix: Some(0),
+            has_uncommitted_changes: true,
+            has_unpushed_commits: true,
+            is_safe_to_delete: false,
+        });
+        assert_default(
+            &mut m,
+            Id::InspectConfirm,
+            false,
+            "inspector delete of a dirty worktree",
+        );
+    }
+
+    /// The sandbox wizard's auto-connect step. Not a destructive confirm
+    /// at all — No is the *recommended answer*, and the copy is written
+    /// around it being the default — so neither axis owns it. Yes would
+    /// have every launch spin up a billable remote box.
+    #[test]
+    fn sandbox_auto_connect_is_a_recommended_answer_not_an_axis() {
+        let mut m = build_model();
+        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::Yes;
+        m.mount_sandbox_stage(crate::sandbox_flow::SandboxDraft {
+            provider: "gcp".into(),
+            stage: crate::sandbox_flow::SandboxStage::AutoConnect,
+            ..Default::default()
+        });
+        assert_default(
+            &mut m,
+            Id::SandboxConfirm,
+            false,
+            "sandbox auto-connect-at-launch",
+        );
+    }
+}
+
+#[cfg(test)]
+mod diff_review_source_tests {
+    //! Which diff `g v` opens, how `p` moves between the two, and what
+    //! the GitHub review verb sends (#1808).
+    //!
+    //! The PR diff and the worktree diff are different documents — the
+    //! PR carries other people's commits and none of your unpushed work
+    //! — so "which one is this" is a correctness question, not a
+    //! cosmetic one, and these tests pin the answer at every hop.
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::{
+        CiStatus, Mergeable, ReviewStatus, SessionKind, Task, TaskId, TaskKind, TaskRole,
+        TaskState, Workspace, WorkspaceKey, WorkspaceSession,
+    };
+    use lazybox_ipc::{
+        Command as IpcCommand, DiffSideDto, ReviewCommentDto, ReviewVerdictDto, WorkspaceDiffDto,
+        WorkspaceDiffTarget, channel,
+    };
+    use lazybox_tui_core::action::Action;
+
+    fn pr_task() -> Task {
+        Task {
+            author: "octocat".into(),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "Add retry to the poller".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Reviewer,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat/retry".into()),
+            base_branch: Some("main".into()),
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Unknown,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 4,
+            deletions: 0,
+            changed_files: 1,
+            kind: Some(TaskKind::Pr),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+            blocked_by: vec![],
+            merge_after: vec![],
+            contracts: vec![],
+            blocked_on: None,
+        }
+    }
+
+    fn empty_diff(head_sha: Option<&str>) -> WorkspaceDiffDto {
+        WorkspaceDiffDto {
+            status: Vec::new(),
+            stat: Vec::new(),
+            files: Vec::new(),
+            truncated: false,
+            head_sha: head_sha.map(str::to_string),
+            divergence: None,
+        }
+    }
+
+    /// A workspace whose PR is the thing under review, with a worktree
+    /// beside it so both sources exist and the choice is a real one.
+    fn build(
+        with_pr: bool,
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+        WorkspaceKey,
+        lazybox_core::SessionId,
+    ) {
+        let (client, mut server) = channel::pair();
+        let mut model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model init");
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let mut workspace = Workspace::empty(workspace_key.clone(), "review", Utc::now());
+        if with_pr {
+            workspace.pr = Some(pr_task());
+        }
+        let session = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            "/tmp/review-pr".into(),
+            Utc::now(),
+        );
+        let session_id = session.id;
+        workspace.sessions.push(session);
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        while server.rx.try_recv().is_ok() {}
+        (model, server, workspace_key, session_id)
+    }
+
+    /// The PR wins the default: it is what reviewers see, the document
+    /// being merged, and the only one a GitHub comment can attach to.
+    #[test]
+    fn view_diff_defaults_to_the_pull_request_when_the_workspace_has_one() {
+        let (mut model, _server, workspace_key, _) = build(true);
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [IpcCommand::InspectWorkspaceDiff {
+                    workspace_key: key,
+                    target: WorkspaceDiffTarget::PullRequest,
+                }] if key == &workspace_key
+            ),
+            "expected a PR-diff read, got {commands:?}"
+        );
+    }
+
+    /// The case the second source exists for, from the entry point that
+    /// hits it most: an inbox PR row nobody has checked out. The
+    /// diffstat line — `+N −M · N files changed` — is a click target
+    /// for `ViewDiff` (`components/right_pane/mod.rs`), and resolving
+    /// the target from a session worktree or a linked checkout alone
+    /// finds neither on that row, so the click flashed *"this workspace
+    /// has no worktree to review"* on precisely the PR whose diff
+    /// GitHub was already serving.
+    #[test]
+    fn view_diff_reads_the_pull_request_with_no_session_and_no_checkout() {
+        let (client, mut server) = channel::pair();
+        let mut model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model init");
+        let workspace = Workspace::from_task(pr_task(), Utc::now());
+        let workspace_key = workspace.key.clone();
+        assert!(
+            workspace.sessions.is_empty() && workspace.linked_checkout.is_none(),
+            "the fixture must carry NEITHER local source or it proves nothing",
+        );
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        while server.rx.try_recv().is_ok() {}
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [IpcCommand::InspectWorkspaceDiff {
+                    workspace_key: key,
+                    target: WorkspaceDiffTarget::PullRequest,
+                }] if key == &workspace_key
+            ),
+            "a PR row with no checkout must still read the PR diff, got {commands:?}"
+        );
+        // And the footer says which document is being read, rather
+        // than the refusal this row used to get.
+        let notice = model
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert_eq!(notice, "reading the PR diff…", "footer said {notice:?}");
+    }
+
+    /// Without a PR there is nothing to read but the checkout — which
+    /// is also the only diff that exists before a branch is pushed.
+    #[test]
+    fn view_diff_falls_to_the_checkout_when_there_is_no_pull_request() {
+        let (mut model, _server, _, session_id) = build(false);
+
+        let commands = model.dispatch_action(&Action::ViewDiff);
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [IpcCommand::InspectWorkspaceDiff {
+                    target: WorkspaceDiffTarget::Session(id),
+                    ..
+                }] if id == &session_id
+            ),
+            "expected a worktree read, got {commands:?}"
+        );
+    }
+
+    /// `p` re-reads the OTHER source and remounts on it. The two are
+    /// different documents, so the switch is a fetch — and the viewer
+    /// it replaces is a legitimate mount site, not "a modal is open".
+    #[test]
+    fn switching_the_source_refetches_and_replaces_the_open_viewer() {
+        let (mut model, mut server, workspace_key, session_id) = build(true);
+        model.dispatch_action(&Action::ViewDiff);
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key: workspace_key.clone(),
+            target: WorkspaceDiffTarget::PullRequest,
+            agent_terminal_ids: vec![],
+            diff: Some(empty_diff(Some("f00d"))),
+            error: None,
+        });
+        assert_eq!(model.modal_stack, vec![Id::DiffReview]);
+        while server.rx.try_recv().is_ok() {}
+
+        model.update(Msg::DiffReviewSourceSwitched {
+            workspace_key: workspace_key.clone(),
+            showing: WorkspaceDiffTarget::PullRequest,
+        });
+        let sent: Vec<IpcCommand> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        assert!(
+            sent.iter().any(|command| matches!(
+                command,
+                IpcCommand::InspectWorkspaceDiff {
+                    target: WorkspaceDiffTarget::Session(id),
+                    ..
+                } if id == &session_id
+            )),
+            "the switch must ask the daemon for the checkout, got {sent:?}"
+        );
+
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key,
+            target: WorkspaceDiffTarget::Session(session_id),
+            agent_terminal_ids: vec![],
+            diff: Some(empty_diff(None)),
+            error: None,
+        });
+        assert_eq!(
+            model.modal_stack,
+            vec![Id::DiffReview],
+            "the reply replaces the open viewer, it does not stack a second one"
+        );
+    }
+
+    /// `p` must land on the SAME checkout `g v` resolved. A workspace
+    /// can run several agents; switching to "the newest session"
+    /// silently showed a different agent's worktree while looking
+    /// exactly like the one the reviewer had been reading.
+    #[test]
+    fn switching_the_source_keeps_the_session_the_reviewer_focused() {
+        use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
+
+        let (client, mut server) = channel::pair();
+        let mut model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model init");
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let mut workspace = Workspace::empty(workspace_key.clone(), "review", Utc::now());
+        workspace.pr = Some(pr_task());
+        let older = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            "/tmp/review-older".into(),
+            Utc::now() - chrono::Duration::hours(1),
+        );
+        let older_id = older.id;
+        workspace.sessions.push(older);
+        workspace.sessions.push(WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            "/tmp/review-newer".into(),
+            Utc::now(),
+        ));
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        assert!(
+            model.sidebar.focus_session_id(older_id),
+            "focus the OLDER session — the one `default_session` would not pick"
+        );
+        while server.rx.try_recv().is_ok() {}
+
+        model.update(Msg::DiffReviewSourceSwitched {
+            workspace_key: workspace_key.clone(),
+            showing: WorkspaceDiffTarget::PullRequest,
+        });
+
+        assert_eq!(
+            model.pending_diff_session.as_ref(),
+            Some(&(workspace_key, WorkspaceDiffTarget::Session(older_id))),
+            "the switch must read the focused session's worktree, not the newest"
+        );
+    }
+
+    /// Closing the viewer abandons the read still in flight. The source
+    /// switch waits on a GitHub round-trip, so a late reply would
+    /// otherwise re-mount a viewer the reviewer had deliberately shut.
+    #[test]
+    fn closing_the_viewer_abandons_an_in_flight_read() {
+        let (mut model, mut server, workspace_key, session_id) = build(true);
+        model.dispatch_action(&Action::ViewDiff);
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key: workspace_key.clone(),
+            target: WorkspaceDiffTarget::PullRequest,
+            agent_terminal_ids: vec![],
+            diff: Some(empty_diff(Some("f00d"))),
+            error: None,
+        });
+        model.update(Msg::DiffReviewSourceSwitched {
+            workspace_key: workspace_key.clone(),
+            showing: WorkspaceDiffTarget::PullRequest,
+        });
+        while server.rx.try_recv().is_ok() {}
+
+        model.update(Msg::ModalDismissed);
+        assert!(model.modal_stack.is_empty());
+        assert!(
+            model.pending_diff_session.is_none(),
+            "the abandoned read must stop correlating"
+        );
+
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key,
+            target: WorkspaceDiffTarget::Session(session_id),
+            agent_terminal_ids: vec![],
+            diff: Some(empty_diff(None)),
+            error: None,
+        });
+        assert!(
+            model.modal_stack.is_empty(),
+            "a late reply must not reopen a viewer the reviewer closed"
+        );
+    }
+
+    /// A PR diff that will not load (offline, no credential, a repo the
+    /// token cannot see) must not leave the reviewer with nothing.
+    #[test]
+    fn a_failed_pull_request_read_falls_back_to_the_checkout() {
+        let (mut model, mut server, workspace_key, session_id) = build(true);
+        model.dispatch_action(&Action::ViewDiff);
+        while server.rx.try_recv().is_ok() {}
+
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceDiffInspected {
+            workspace_key: workspace_key.clone(),
+            target: WorkspaceDiffTarget::PullRequest,
+            agent_terminal_ids: vec![],
+            diff: None,
+            error: Some("github credentials: none".into()),
+        });
+        assert_eq!(
+            model.pending_diff_session.as_ref(),
+            Some(&(workspace_key, WorkspaceDiffTarget::Session(session_id))),
+            "the failure must re-aim at the local checkout"
+        );
+    }
+
+    /// The batch goes out as ONE command carrying every comment — the
+    /// whole point of the verb is one review thread, not N of them.
+    #[test]
+    fn posting_a_review_sends_one_command_for_the_whole_batch() {
+        let (mut model, mut server, workspace_key, _) = build(true);
+        model.modal_stack.push(Id::DiffReview);
+
+        model.update(Msg::DiffReviewPosted {
+            workspace_key,
+            head_sha: "f00d".into(),
+            summary: "two nits".into(),
+            verdict: ReviewVerdictDto::RequestChanges,
+            comments: vec![
+                ReviewCommentDto {
+                    path: "src/lib.rs".into(),
+                    line: 12,
+                    side: DiffSideDto::Right,
+                    body: "drops the error".into(),
+                },
+                ReviewCommentDto {
+                    path: "src/lib.rs".into(),
+                    line: 30,
+                    side: DiffSideDto::Left,
+                    body: "why remove this?".into(),
+                },
+            ],
+        });
+
+        let sent: Vec<IpcCommand> = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .filter(|command| matches!(command, IpcCommand::SubmitPullRequestReview { .. }))
+            .collect();
+        match sent.as_slice() {
+            [
+                IpcCommand::SubmitPullRequestReview {
+                    head_sha,
+                    verdict,
+                    comments,
+                    ..
+                },
+            ] => {
+                assert_eq!(head_sha, "f00d");
+                assert_eq!(*verdict, ReviewVerdictDto::RequestChanges);
+                assert_eq!(comments.len(), 2);
+            }
+            other => panic!("expected exactly one review command, got {other:?}"),
+        }
+        assert_eq!(
+            model.modal_stack,
+            vec![Id::DiffReview],
+            "the viewer holds the comments until GitHub answers"
+        );
+    }
+
+    /// The reply decides the viewer's fate: success closes it, a
+    /// refusal leaves it open with the drafted comments intact.
+    ///
+    /// Closing on submit destroyed them — a stale `commit_id` after
+    /// someone pushed to the PR is enough to trigger it, and the
+    /// comments exist nowhere else.
+    #[test]
+    fn a_refused_review_leaves_the_viewer_open_and_a_posted_one_closes_it() {
+        let (mut model, _server, workspace_key, _) = build(true);
+        model.modal_stack.push(Id::DiffReview);
+
+        model.handle_daemon_event(lazybox_ipc::Event::PullRequestReviewSubmitted {
+            workspace_key: workspace_key.clone(),
+            comments: 2,
+            url: None,
+            error: Some("422 commit_id is not part of the pull request".into()),
+        });
+        assert_eq!(
+            model.modal_stack,
+            vec![Id::DiffReview],
+            "a refusal must not take the viewer — and the comments — with it"
+        );
+
+        model.handle_daemon_event(lazybox_ipc::Event::PullRequestReviewSubmitted {
+            workspace_key,
+            comments: 2,
+            url: None,
+            error: None,
+        });
+        assert!(
+            model.modal_stack.is_empty(),
+            "a post that succeeded without a parseable URL is still a post"
         );
     }
 }

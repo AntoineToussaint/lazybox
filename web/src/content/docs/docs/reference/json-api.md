@@ -165,7 +165,27 @@ connection *is* the session, so no tool takes a "who am I" argument.
 | `ask_session(workspace, text? \| snippet?, timeout_s?, mode?)` | The inject above, wrapped in a `<lazybox-request>` envelope, plus a request row in the kv (`lazybox:request:*`). `wait` blocks up to `timeout_s` (default 120 s, max 600 s — your MCP client's call timeout is the real ceiling); `async` returns a `request_id` |
 | `reply_request(request_id, text)` | Answers a request; only the session it was asked of may. Wakes a waiting asker and emits `AgentRequestReplied` |
 | `poll_request(request_id)` | The request row plus the target's live agent state, so "pending" can be told from "parked at a prompt" |
+| `lazybox_guide(topic?)` | How any part of lazybox works, on demand: `coordination`, `work`, `epics`, `records`, `labels`, `artifacts`, `spawning`, `reviews`. Omit `topic` or pass an unknown one and you get the index, so one call always lands. This is the on-demand half of a session's context — the opening briefing carries the hazards, this carries the how-to |
+| `create_work(title, brief?, owner?, deliver?, plan?, parent?, links?)` | Mint a unit of work with an immutable id — and with an `owner`, hand it to that sibling in the same call. Returns the row plus a delivery receipt. Same code as `lazybox work new` |
+| `my_work(include_done?)` | Three lists for the calling session: work it owns, work a sibling owes it, work it filed that nobody owns. Matched on the WORKSPACE, so it survives a respawn. Same as `lazybox work mine` |
+| `update_work(id, lifecycle, detail?, summary?, artifacts?)` | Move a unit of work and report its result. A terminal state refuses every further move. Completing work a sibling requested notifies it. Same as `lazybox work set` / `done` |
+| `work_status(plan?)` | A plan's `done/total` roll-up, the workspaces it spans and its tasks; omit `plan` for every plan plus the open work on none. Same as `lazybox work status` |
 | `task_status(task, repo?)` | "Is anyone working on `owner/repo#N`?" — the record's workspace(s), live agent turn, working-claim, blocker and tracker state as separate facts, plus a verdict with its evidence. Resolves an issue through the PR workspace it folded into. Read-only. Same report as `lazybox task status` |
+| `task()` / `get_issue(repo, number)` / `get_pr(repo, number)` / `list_issues(repo, state?, limit?)` | Tracker records already held by the daemon. These never fall back to a provider fetch, so agent reconnaissance cannot spend the poller's shared quota |
+| `epic_status(epic?)` | The live epic snapshot: members, derived state, done/total, blockers, and critical path |
+| `epic_ready(epic?)` | Only unblocked, unclaimed epic members that can start now |
+| `report_blocker(reason, kind?)` / `clear_blocker()` | Add or lift the caller's durable blocker and recompute epic status |
+| `spawn_worker(task? \| create_issue?, brief, agent?, model?)` | Coordinator-only. Resolve or create an issue in the caller's epic, attach its one existing workspace, set Worker, and spawn there. Refuses duplicate live work and the `agent.max_epic_workers` cap |
+| `start_workspace(task, brief, agent?, model?)` | Any role. Hand independent work on an existing record to an agent in that record's own workspace. Never files a record; refuses the caller's own row, a row already running an agent, and the per-caller, depth and fleet bounds |
+
+Both spawn tools take `model`: the tier the new agent runs at, named on **that
+agent's own** menu — a tier alias (`S`/`M`/`L`/`XL`…), the model's name or the
+id a tier pins, or a capability word (`best`/`high`/`medium`/`low`) each agent
+maps onto its own ladder. The ladders differ per agent, so `XL` is not the same
+model for `claude` and `codex` and a word is the portable spelling. A tier the
+target agent's menu does not define is refused with the valid ones listed —
+never run at the default, which would make "spawn at the best model" look like
+it worked.
 
 An unanswered request does not hang the asker: when the target ends a turn
 without replying, the tail of its output is captured as the answer with
@@ -175,6 +195,8 @@ Bearers are revoked when a session's last agent terminal ends and persist with
 the bound port across a daemon restart, so a tmux-surviving agent keeps
 working. How agents use it: [Orchestrate multiple agents → the MCP
 bus](/docs/how-to/orchestrate-multiple-agents/#let-agents-coordinate-themselves-the-mcp-bus).
+For the epic workflow, see [Run a cross-repo
+epic](/docs/how-to/run-cross-repo-epic/).
 
 ## Example
 

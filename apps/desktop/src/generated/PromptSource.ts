@@ -6,4 +6,4 @@
  * picker, so the per-session prompt history can tag snippet-sourced
  * entries (issue #523).
  */
-export type PromptSource = "Typed" | { "Snippet": { key: string, category: string, } };
+export type PromptSource = "Typed" | { "Snippet": { key: string, category: string, } } | { "Agent": { from: string, } } | { "Lazybox": { reason: string, } };

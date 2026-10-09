@@ -30,6 +30,7 @@ mod helpers;
 mod host_terminal;
 mod inputs;
 mod keys;
+mod mobile;
 mod modals;
 mod optimistic;
 pub(crate) mod render_writer;
@@ -53,9 +54,9 @@ pub fn terminal_leader_reference_rows() -> Vec<(String, String)> {
 // (`keys.rs`, etc.) can keep their `super::foo` import shape after
 // the helpers moved out of mod.rs.
 pub(crate) use helpers::{
-    emit_clipboard_copy, find_action_for_seq, find_action_for_stroke, key_event_to_stroke,
-    paint_selection, rect_contains, section_rank, seq_continuations, seq_continuations_available,
-    split_coach, split_for_footer,
+    find_action_for_seq, find_action_for_stroke, key_event_to_stroke, paint_selection,
+    rect_contains, section_rank, seq_continuations, seq_continuations_available, split_coach,
+    split_for_footer,
 };
 
 use crate::PaneId;
@@ -81,12 +82,25 @@ const RIGHT_PID: PaneId = PaneId::new(2);
 const TERMINALS_PID: PaneId = PaneId::new(3);
 
 type UrlOpener = dyn Fn(&str, Option<&str>) -> std::io::Result<()> + Send + Sync;
+/// Client-side clipboard boundary. Returns how far the copy actually
+/// got so the caller can say so instead of assuming.
+type ClipboardWriter = dyn Fn(&str) -> helpers::ClipboardDelivery + Send + Sync;
 type MouseCaptureRequester = dyn Fn(bool) -> std::io::Result<()> + Send + Sync;
 
 /// Component IDs for modal-side mounts only. Pane access is via
 /// typed fields, so panes don't appear here.
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub enum Id {
+    /// Minimal mobile session creation: no repo or a known repo.
+    MobileNewSession,
+    /// Second mobile creation step: choose an enabled agent or shell.
+    MobileRunner,
+    /// Copy a complete URL from a mobile terminal, without selecting UI chrome.
+    MobileLinks,
+    /// Select and review terminal lines for clipboard copying.
+    MobileCopyText,
+    /// Explicit confirmation to delete a single mobile terminal.
+    MobileDeleteSession,
     Splash,
     Help,
     /// "Ask Lazybox" help modal (#302), opened by pressing `?` on the
@@ -391,6 +405,12 @@ pub enum Id {
     /// issue / routes to an agent / exports JSONL from the selected
     /// row; `d`/`c` delete/clear via the daemon.
     ErrorInbox,
+    /// Archive browser (default `x U`, #1824). Lists the tombstones `x x`
+    /// wrote — the only surface that shows them, since an archived record's
+    /// row is deleted and so appears in no mailbox — each with the keys its
+    /// row absorbed. `u` / Enter sends `Command::UnarchiveWorkspace`, whose
+    /// refreshed broadcast repaints the list.
+    ArchiveBrowser,
     /// Confirm gate for the Error Inbox's `c` (clear-all). Wiping the
     /// durable store is irreversible, so — like the other destructive
     /// confirms — a single stray key must not do it; only an explicit
@@ -505,9 +525,9 @@ pub enum Id {
     /// auto-work spawns use it; per-spawn tier chords (`w S`) still
     /// override. Each row carries its tier alias as a
     /// [`ChoicePayload::OptText`] (`None` = the agent-default row); the
-    /// target agent lives in `default_model_agent`. Esc keeps the
+    /// target agent lives in `strength_agent`. Esc keeps the
     /// current tier.
-    DefaultModelPicker,
+    StrengthPicker,
     /// Confirm-with-preview for an action the Ask Lazybox help agent
     /// proposed (#353) — `add_snippet` or `edit_config`. The pending
     /// intent lives in `ModalFlow::HelpAction`; `Msg::Confirmed(true)`
@@ -600,6 +620,7 @@ impl Id {
                 | Id::Messages
                 | Id::Legend
                 | Id::ErrorInbox
+                | Id::ArchiveBrowser
                 | Id::Stats
                 | Id::Error
                 | Id::SnippetPicker
@@ -616,7 +637,18 @@ impl Id {
     /// channel to be ignored (#448). Today only the description reader
     /// scrolls on the wheel.
     pub(crate) fn consumes_scroll(&self) -> bool {
-        matches!(self, Id::DescriptionModal)
+        matches!(
+            self,
+            Id::DescriptionModal
+                // Mobile's long-text surfaces. A phone keyboard has no arrow
+                // keys, so the wheel/touch report is how these get read at
+                // all; each implements an `Event::Mouse` scroll arm that this
+                // gate has to let through, or that arm is dead code
+                // (#1877 review B8/B9).
+                | Id::MobileCopyText
+                | Id::Setup
+                | Id::HelpAsk
+        )
     }
 
     /// Whether a *buffered* keystroke should still be delivered to this
@@ -665,6 +697,13 @@ impl Id {
                 | Id::JumpPicker
                 | Id::PromptHistoryPicker
                 | Id::UrlPicker
+                // The mobile copy picker and its review sheet. Their one
+                // immediate effect is a clipboard write — outward, but
+                // non-destructive and undone by the next copy — and mobile
+                // forwards ordinary keys literally, so dropping a buffered
+                // key here would discard a selection already made.
+                | Id::MobileLinks
+                | Id::MobileCopyText
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
@@ -673,7 +712,7 @@ impl Id {
                 | Id::ViewPicker
                 | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
-                | Id::DefaultModelPicker
+                | Id::StrengthPicker
                 | Id::WorkAgentPicker
                 // The issue browser (#1436) is a local navigation/filter
                 // picker. Its `l`/`r`/`n` keys only *open* the label / reply
@@ -849,10 +888,17 @@ pub(crate) struct PendingConversion {
     pub(crate) phase: ConversionPhase,
 }
 
+/// What to start in a newly created workspace, without changing the default agent.
+#[derive(Debug, Clone, PartialEq)]
+enum SessionRunner {
+    Agent(String),
+    Shell,
+}
+
 #[derive(Debug, Clone)]
 struct PendingWorkspaceCreate {
     name: String,
-    spawn_agent: bool,
+    runner: SessionRunner,
     workspace_key: Option<lazybox_core::SessionKey>,
 }
 
@@ -940,6 +986,34 @@ impl BulkSpawnBatch {
             )
         }
     }
+}
+
+/// A [`lazybox_ipc::Command::InspectRemovalRisks`] in flight behind an
+/// open delete confirm.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingRemovalRisk {
+    /// What the preflight was asked about. A reply naming anything else
+    /// is a stale answer to a confirm that has already gone, and is
+    /// ignored — a prompt must never grow a risk list belonging to a
+    /// different row.
+    pub(crate) target: lazybox_ipc::RemovalTarget,
+    /// The prompt as first mounted. Kept so the amended copy is built
+    /// by appending once, rather than by appending to whatever is
+    /// already on screen — two replies would otherwise stack two risk
+    /// blocks onto the same modal.
+    pub(crate) base_prompt: String,
+    /// The chrome and `Enter` default of the confirm this belongs to, so
+    /// the re-mount reproduces the modal it replaces rather than quietly
+    /// dropping the warning border or the No guard. Carried as one value
+    /// because the two are not independent: a guard implies the warning
+    /// chrome, and a pair of booleans could hold a combination the
+    /// component cannot build.
+    pub(crate) style: crate::realm::components::confirm::ConfirmStyle,
+    /// Which modal the reply amends — [`Id::ActionConfirm`] for `x x`
+    /// and the project delete, [`Id::RemoveOutOfScope`] for the
+    /// daemon-raised removal prompts. Checked against the top of the
+    /// stack so a reply can only ever repaint the prompt that asked.
+    pub(crate) id: Id,
 }
 
 /// One queued workspace-removal prompt. Surfaced one at a time as a
@@ -1062,6 +1136,13 @@ pub(crate) enum ModalFlow {
     RemovalPrompt {
         workspace: lazybox_core::WorkspaceKey,
         reason: RemovalReason,
+        /// Whether this prompt was mounted with the No guard because the
+        /// workspace had a live terminal. Carried rather than re-derived at
+        /// answer time so the answer matches the modal that was actually
+        /// rendered: an agent that exits while the modal is up must not
+        /// silently turn a guarded prompt back into one whose Enter writes a
+        /// permanent `CleanupPrompt::Declined`.
+        guarded: bool,
     },
     /// Active issue→PR merge confirm. The queue lives in
     /// `merge_prompt_queue`; this is only the one on screen.
@@ -1163,6 +1244,15 @@ pub(crate) enum ModalFlow {
     JiraProjectRepo { project: String },
     /// New-workspace name input, carrying the project to create under.
     NewWorkspaceProject { project: lazybox_core::ProjectKey },
+    FloatingWorkspace {
+        kind: lazybox_core::FloatingWorkspaceKind,
+    },
+    /// Mobile runner picker; the area picker remains below it for Escape/back.
+    MobileRunner { project: lazybox_core::ProjectKey },
+    /// Capture the precise target before showing confirmation.
+    MobileDeleteSession {
+        terminal_id: lazybox_ipc::TerminalId,
+    },
     /// Rename-workspace name input (#744), carrying the workspace to
     /// rename. Consumed by `handle_input_submitted` →
     /// `Command::RenameWorkspace`.
@@ -1253,6 +1343,20 @@ pub(crate) enum EditorFormStage {
     AwaitCommand { id: String, display: Option<String> },
 }
 
+/// What a signed-out pane remembers about its own failure, so an action
+/// taken long after the daemon reported it can still route the user back to
+/// sign-in with the provider named (#1847).
+#[derive(Debug, Clone)]
+pub(crate) struct AuthFailedPane {
+    pub display_name: String,
+    /// Other running sessions of this agent at the moment the failure was
+    /// detected. Carried for the prompt's copy only — it describes the
+    /// present, and the prompt is careful to promise a policy rather than a
+    /// headcount, because an interactive login takes minutes and the fleet
+    /// moves underneath it.
+    pub other_session_count: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AgentAuthPrompt {
     pub terminal_id: lazybox_ipc::TerminalId,
@@ -1306,6 +1410,13 @@ pub enum Msg {
         canceled: bool,
     },
     HopperDeleteRequested(lazybox_core::WorkspaceKey),
+    /// A TODO's checklist changed in the editor: save the whole list.
+    TodoItemsChanged {
+        workspace_key: lazybox_core::WorkspaceKey,
+        items: Vec<lazybox_core::TodoItem>,
+    },
+    /// Open what a TODO item links to.
+    TodoLinkOpened(lazybox_core::TodoLink),
     /// A picker (`Choice`, jump/snippet picker, settings palette)
     /// resolved. Each entry is the *typed value* of a picked row —
     /// never a bare positional index into a parallel "shadow Vec" —
@@ -1382,6 +1493,11 @@ pub enum Msg {
     /// or a stalled task). Flash a notice so the modal doesn't just vanish
     /// unexplained, then dismiss it.
     LoadingTimedOut,
+    /// The `Loading` modal's producer died without an answer (a panicked
+    /// task, a dropped sender). It used to surface as `ModalDismissed` —
+    /// indistinguishable from the user pressing Esc — so a flow like
+    /// Settings → "Add / remove repos" vanished with only a log line.
+    LoadingFailed,
     /// Spinner heartbeat from the `WorktreeProgress` modal. Carries no
     /// data — its only job is to be a non-empty message so the run loop
     /// repaints the advancing spinner during the silent checkout.
@@ -1458,6 +1574,10 @@ pub enum Msg {
     ErrorInboxDeleteRequested(String),
     /// `c` in the Error Inbox — wipe the durable error store.
     ErrorInboxClearRequested,
+    /// `u` / Enter in the archive browser (#1824) — drop the selected key's
+    /// tombstone, and those of the keys its row absorbed, so the record can
+    /// return to the inbox.
+    ArchiveRestoreRequested(String),
     /// `c` pressed in the messages window (#309) — wipe the notice
     /// history and re-render the (now empty) window.
     MessagesCleared,
@@ -1466,6 +1586,22 @@ pub enum Msg {
         target: lazybox_ipc::WorkspaceDiffTarget,
         agent_terminal_ids: Vec<lazybox_ipc::TerminalId>,
         comments: Vec<crate::realm::components::diff_review::DiffReviewComment>,
+    },
+    /// `p` in the review modal — read the other source. `showing` is
+    /// what is on screen now; the model owns which checkout the local
+    /// side resolves to, so the component never has to.
+    DiffReviewSourceSwitched {
+        workspace_key: lazybox_core::WorkspaceKey,
+        showing: lazybox_ipc::WorkspaceDiffTarget,
+    },
+    /// The review modal's drafted comments, submitted to GitHub as one
+    /// pending review on the PR they were read from.
+    DiffReviewPosted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        head_sha: String,
+        summary: String,
+        verdict: lazybox_ipc::ReviewVerdictDto,
+        comments: Vec<lazybox_ipc::ReviewCommentDto>,
     },
     /// Sidebar / Right / Terminals routes — kept in case a future
     /// pane goes through tuirealm. Today panes drain themselves
@@ -1527,6 +1663,10 @@ pub enum ChoicePayload {
     /// cross-struct shadow Vec that could drift from the rendered
     /// order.
     Index(usize),
+    /// Stable source terminal for a copy action.
+    Terminal(lazybox_ipc::TerminalId),
+    /// A suggested terminal block, to review before clipboard copying.
+    CopyBlock(String),
     /// A stable string value — a login, theme name, agent id, snippet
     /// key, or label. The top modal disambiguates its meaning.
     Text(String),
@@ -1652,11 +1792,29 @@ pub enum PaneFocus {
     Terminals,
 }
 
-/// `badge_letter → label` of every agent's default tier: the YAML
-/// `agents.<id>.models.default` alias when set, else the built-in default
-/// alias, resolved against the agent's declared tiers (falling back to the
-/// built-in tier list). Agents with no resolvable default are absent, so
-/// their runs always badge (#1502).
+/// The agent roster a config enables, or the built-in trio when it names
+/// none — so the zero-config `a c` / `a x` / `a u` chords still work out
+/// of the box. Using the enabled set rather than unioning it with the
+/// built-ins avoids binding both `cursor` and `cursor-agent` to `u`.
+///
+/// Shared by the boot path and [`Model::reload_agent_models`]: both
+/// derive the roster and the per-agent menus from the *same* config read,
+/// so a reload can't pair a fresh menu with a stale roster and leave a
+/// newly enabled agent with no row.
+pub(crate) fn enabled_agents(config: &lazybox_config::Config) -> Vec<String> {
+    if config.setup.agents.is_empty() {
+        ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        config.setup.agents.iter().cloned().collect()
+    }
+}
+
+/// `badge_letter → label` of every agent's default strength — the tier
+/// `agents.<id>.models.default` names. Agents whose strength doesn't
+/// resolve are absent, so their runs always badge (#1502).
 pub(crate) fn default_model_labels(
     models: &std::collections::BTreeMap<String, lazybox_core::AgentModels>,
 ) -> std::collections::HashMap<char, String> {
@@ -1675,18 +1833,7 @@ pub(crate) fn default_tier_labels(
 ) -> Vec<(String, String)> {
     models
         .iter()
-        .filter_map(|(agent_id, m)| {
-            let builtin = lazybox_core::AgentModels::builtin(agent_id);
-            let alias = m
-                .default
-                .clone()
-                .or_else(|| builtin.as_ref().and_then(|b| b.default.clone()))?;
-            let label = m
-                .tier(&alias)
-                .or_else(|| builtin.as_ref().and_then(|b| b.tier(&alias)))
-                .map(|t| t.label.clone())?;
-            Some((agent_id.clone(), label))
-        })
+        .filter_map(|(agent_id, m)| Some((agent_id.clone(), m.default_tier()?.label.clone())))
         .collect()
 }
 
@@ -1787,6 +1934,9 @@ pub struct Model<T: TerminalAdapter> {
     pub viewer_logins: std::collections::HashMap<String, String>,
     /// Which pane has focus when no modal is active.
     focus: PaneFocus,
+    presentation: crate::realm::presentation::Presentation,
+    mobile_sessions: crate::realm::components::mobile_sessions::MobileSessions,
+    mobile_rail: crate::realm::components::mobile_rail::MobileRail,
     /// Focus mode (issue #156): when `true`, the sidebar and activity
     /// pane are hidden and the focused workspace's terminal expands to
     /// near-fullscreen behind a slim event header. Focus is pinned to
@@ -1887,6 +2037,9 @@ pub struct Model<T: TerminalAdapter> {
     /// `agent:` search corpus (#1774), so `view` rebuilds it only when
     /// the terminal stack's history actually moved.
     agent_text_rev: u64,
+    /// The daemon output scan backing the `agent:` / `said:` qualifiers
+    /// over what the agent SAID (#1780).
+    agent_output_search: AgentOutputSearch,
     /// UI→worker control channel for the remote box: explicit
     /// connect/disconnect (the `Shift-C` action) and the startup
     /// auto-connect (#1066). `None` when no `sandbox:` box is configured.
@@ -1978,6 +2131,19 @@ pub struct Model<T: TerminalAdapter> {
     /// fits). A left-click inside it pops those hints so the count is
     /// not a dead end (#805, #1502).
     footer_overflow: Option<crate::realm::components::footer::FooterOverflow>,
+    /// The footer's right zone (notice pill or polling status) as last
+    /// drawn, so a click on it opens what it is about.
+    /// Row, column range and kind of each attention count on the
+    /// focus-mode strip as last drawn; empty outside focus mode.
+    focus_count_hits: Vec<(
+        u16,
+        std::ops::Range<u16>,
+        crate::realm::components::focus_header::FocusCount,
+    )>,
+    footer_right: Option<(
+        tuirealm::ratatui::layout::Rect,
+        crate::realm::components::footer::FooterRight,
+    )>,
     /// The `+N more` popup's rows while it is open (#1502): the hints the
     /// footer could not fit, drawn with the which-key chrome. Purely
     /// informational — the next key or click closes it and is then
@@ -2089,6 +2255,11 @@ pub struct Model<T: TerminalAdapter> {
     /// tests never mutate the terminal running the test process.
     mouse_capture_requester: Box<MouseCaptureRequester>,
     url_opener: Box<UrlOpener>,
+    /// Clipboard I/O boundary, injected for the same reason as
+    /// `mouse_capture_requester`: the real one reaches the clipboard of
+    /// the machine lazybox runs on, and a test must not write to the
+    /// developer's.
+    clipboard: Box<ClipboardWriter>,
     /// Active lazybox-side drag-selection in the terminal pane. Set on
     /// mouse Down inside the terminal rect and extended on Drag; while a
     /// drag is parked against the top/bottom edge the idle tick
@@ -2177,7 +2348,15 @@ pub struct Model<T: TerminalAdapter> {
     /// the same conversation, continue — is exactly what that action already
     /// does for a rate-limited agent. Without this set the one action that
     /// unsticks them can't see them.
-    auth_failed_terminals: std::collections::HashSet<lazybox_ipc::TerminalId>,
+    ///
+    /// Keyed to what the re-auth prompt needs rather than a bare set
+    /// (#1847): `Shift-K` must *re-offer* sign-in for a pane it refuses to
+    /// inject `continue` into, and a modal that can't name the provider is
+    /// not an offer. The queue itself is drained the moment its modal
+    /// mounts, and the user may well have dismissed that modal minutes ago
+    /// — so the details have to live with the standing record, not with the
+    /// prompt that already went by.
+    auth_failed_terminals: std::collections::HashMap<lazybox_ipc::TerminalId, AuthFailedPane>,
     /// Terminals with a `]]R` restart already sent and not yet answered by
     /// the daemon's replacement pane.
     ///
@@ -2236,6 +2415,18 @@ pub struct Model<T: TerminalAdapter> {
     /// round-trip rolls back; the success echo drops the entry. See
     /// `optimistic.rs`.
     pending_mutations: Vec<optimistic::OptimisticMutation>,
+    /// The removal-risk preflight the currently-mounted
+    /// [`Id::ActionConfirm`] is waiting on.
+    ///
+    /// An explicit delete costs exactly one confirm, so the facts the
+    /// user decides on have to reach *that* confirm: the keypress
+    /// mounts the modal immediately with the catalog copy and asks the
+    /// daemon what the checkout holds in the same breath, and the reply
+    /// re-renders the open prompt with the paths and the kinds of work
+    /// found. NOT a `ModalFlow` — the flow already carries the action
+    /// and its targets; this is the in-flight question, and it is
+    /// dropped the moment the confirm resolves or is replaced.
+    pending_removal_risk: Option<PendingRemovalRisk>,
     /// Event-fed queue of workspace-removal prompts — out-of-scope
     /// workspaces with running terminals (`WorkspaceOutOfScope`) or
     /// merged/closed PRs (`MergedPrRemovable`). The daemon won't
@@ -2432,7 +2623,7 @@ pub struct Model<T: TerminalAdapter> {
     /// Start sheet → Chat while the `scratch` project does not exist
     /// yet (#1502): the `ProjectUpserted` hand-off creates the chat
     /// workspace directly instead of mounting the name input.
-    deferred_chat: bool,
+    deferred_chat: Option<SessionRunner>,
     /// Issue workspace the user was viewing when it was removed by a
     /// merge. Set in the `WorkspaceRemoved` handler (before the sidebar
     /// moves the cursor off the gone row) and consumed by the matching
@@ -2519,6 +2710,13 @@ pub struct Model<T: TerminalAdapter> {
     /// DAG (`E g`) readouts render from this cache, and the held-merge
     /// confirm on `g m` consults it to name unmerged predecessors.
     pub(crate) epic_snapshots: std::collections::HashMap<String, lazybox_ipc::EpicSnapshot>,
+    /// Markdown artifacts agents spooled per workspace (#1822) and the count
+    /// the daemon's cap left out, from `Event::WorkspaceArtifacts` (seeded on
+    /// connect, refreshed on every spool change). `a A` renders these through
+    /// the description reader. Not persisted: the spool files in the worktree
+    /// are the durable copy, and the daemon re-derives this from them.
+    pub(crate) artifacts:
+        std::collections::HashMap<lazybox_core::WorkspaceKey, (Vec<lazybox_core::Artifact>, usize)>,
     /// Skill names triggered this session, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Feeds the skills picker's "Recent" group so
     /// a repeated skill is one `]]k` + `Enter` away, mirroring
@@ -2602,9 +2800,9 @@ pub struct Model<T: TerminalAdapter> {
     /// The first question, held until the diff reply lands so it enters
     /// the run's opening (and only context-bearing) turn.
     pr_chat_held_question: Option<(String, HelpQuestionKind)>,
-    /// Agent id the active `DefaultModelPicker` persists against —
+    /// Agent id the active `StrengthPicker` persists against —
     /// stashed at mount so a pick can't land on a drifted default.
-    pub(crate) default_model_agent: Option<String>,
+    pub(crate) strength_agent: Option<String>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
     /// the onboarding coach should auto-launch once the panes are
     /// visible. Cleared the moment the coach starts so it never
@@ -2803,6 +3001,77 @@ fn opened_file_notice(
 /// session. See `Model::tick_tips`.
 const TIP_IDLE_DELAY: Duration = Duration::from_secs(8);
 
+/// How long the `agent:` / `said:` needles must hold still before the
+/// client asks the daemon to scan terminal output for them (#1780).
+///
+/// Each scan reads the tail of EVERY live agent ring, so dispatching per
+/// keystroke would re-scan the whole fleet once per character of a typed
+/// word. 180ms is past a fast typist's inter-key interval and well under
+/// the ~250ms at which a user starts to perceive a wait — the rows from
+/// the client's own prompt corpora are already on screen throughout.
+const AGENT_OUTPUT_SEARCH_DEBOUNCE: Duration = Duration::from_millis(180);
+
+/// How long a dispatched scan may stay in flight before the client stops
+/// waiting for it and asks again (#1780).
+///
+/// The reply can be lost without any error reaching this client: a full
+/// event queue makes the daemon's forwarder CLOSE the connection
+/// (`EventSender`'s documented overload behaviour), and the request dies
+/// with it — as it does on a daemon restart. Without a deadline the
+/// `dispatched` latch below would never release, so the tick would
+/// early-return forever, the search bar would read `scanning output…`
+/// permanently, and every row that matches only on output would stay
+/// hidden until the user retyped the query.
+///
+/// This is the same rule `restart_in_flight` states in `events.rs`: a
+/// stale in-flight guard is strictly worse than an early release. Set well
+/// past a healthy scan (tens of ms) so a slow daemon is waited for, not
+/// raced.
+const AGENT_OUTPUT_SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often a STANDING `agent:` query re-scans (#1780).
+///
+/// Without this the two halves of one query disagree: the prompt corpus
+/// re-filters on every new prompt (`refresh_agent_search_text`,
+/// `ingest_durable_agent_text`), so a committed query stays live for what
+/// agents are *asked* while frozen at dispatch time for what they *said*.
+/// A workspace that hits the searched error a minute after the query was
+/// typed simply never appears, and nothing distinguishes that from "it
+/// isn't there". The scan is bounded per terminal, so re-asking on a slow
+/// cadence costs a fixed amount rather than growing with the session.
+const AGENT_OUTPUT_SEARCH_REFRESH: Duration = Duration::from_secs(5);
+
+/// The daemon output scan behind an `agent:` / `said:` query (#1780).
+///
+/// `needles` is the derived form of the live query, not the query itself:
+/// two queries that differ only outside their agent terms ask for the same
+/// scan, and re-issuing it would re-scan every ring for nothing.
+#[derive(Debug, Default)]
+struct AgentOutputSearch {
+    /// Needles the sidebar's query currently implies. Empty for every
+    /// query without an agent term — the common case, and the one that
+    /// keeps the qualifier's cost opt-in.
+    needles: Vec<String>,
+    /// When `needles` last changed, for the debounce.
+    changed_at: Option<std::time::Instant>,
+    /// Whether the current `needles` have already been sent. A scan is
+    /// issued once per distinct needle set, not once per tick.
+    dispatched: bool,
+    /// When the current scan was sent. Kept after its reply lands, because
+    /// it times both [`AGENT_OUTPUT_SEARCH_TIMEOUT`] (a reply that never
+    /// came) and [`AGENT_OUTPUT_SEARCH_REFRESH`] (a standing query going
+    /// stale); `in_flight` is what distinguishes the two.
+    dispatched_at: Option<std::time::Instant>,
+    /// The request the client will accept a reply for. `None` once a reply
+    /// has been applied, or as soon as the needles move — which is how a
+    /// reply that outlived its query is dropped rather than filtering the
+    /// sidebar by a needle the user has typed past.
+    in_flight: Option<u64>,
+    /// Monotonic request ids. Wrapping is harmless: an id only has to be
+    /// distinct from the one request that may still be in flight.
+    next_request_id: u64,
+}
+
 /// How long the first `q` stays armed waiting for the second tap.
 // `Q_DOUBLE_TAP_WINDOW` retired — value lives on `ui_defaults`
 // now, sourced from `~/.lazybox/config.yaml::ui.quit_double_tap_window`
@@ -2846,6 +3115,9 @@ impl<T: TerminalAdapter> Model<T> {
             modal_stack: Vec::new(),
             viewer_logins: std::collections::HashMap::new(),
             focus: PaneFocus::Sidebar,
+            presentation: crate::realm::presentation::Presentation::Desktop,
+            mobile_sessions: Default::default(),
+            mobile_rail: Default::default(),
             focus_mode: false,
             visual_select: false,
             focus_layout: lazybox_config::FocusLayout::Single,
@@ -2864,6 +3136,7 @@ impl<T: TerminalAdapter> Model<T> {
             remote_notice_rx: None,
             remote_marks: std::collections::HashMap::new(),
             agent_text_rev: 0,
+            agent_output_search: AgentOutputSearch::default(),
             remote_control: None,
             remote_require_connect: false,
             event_backlog: helpers::BacklogMonitor::default(),
@@ -2888,6 +3161,8 @@ impl<T: TerminalAdapter> Model<T> {
             leader_target: None,
             last_click: None,
             footer_overflow: None,
+            footer_right: None,
+            focus_count_hits: Vec::new(),
             footer_more_popup: None,
             last_render_build: std::time::Duration::ZERO,
             last_render_flush: std::time::Duration::ZERO,
@@ -2908,6 +3183,7 @@ impl<T: TerminalAdapter> Model<T> {
             mouse_capture_requested_at: Instant::now(),
             mouse_capture_requester,
             url_opener: Box::new(crate::editors::open_url),
+            clipboard: Box::new(helpers::emit_clipboard_copy),
             terminal_drag: None,
             terminal_selection: None,
             terminal_click: None,
@@ -2916,7 +3192,7 @@ impl<T: TerminalAdapter> Model<T> {
             modal_flow: None,
             pending_hopper_action: None,
             auth_prompt_queue: std::collections::VecDeque::new(),
-            auth_failed_terminals: std::collections::HashSet::new(),
+            auth_failed_terminals: std::collections::HashMap::new(),
             restart_in_flight: std::collections::HashSet::new(),
             conversion: None,
             last_reply_body: None,
@@ -2926,6 +3202,7 @@ impl<T: TerminalAdapter> Model<T> {
             awaiting_assignable_users: None,
             pending_diff_session: None,
             pending_mutations: Vec::new(),
+            pending_removal_risk: None,
             removal_prompt_queue: std::collections::VecDeque::new(),
             merge_prompt_queue: std::collections::VecDeque::new(),
             worktree_progress: None,
@@ -2967,7 +3244,7 @@ impl<T: TerminalAdapter> Model<T> {
                 &std::collections::BTreeMap::new(),
             ),
             deferred_focus_project: None,
-            deferred_chat: false,
+            deferred_chat: None,
             merge_follow_from: None,
             spawn_follow_to: None,
             pending_workspace_creates: std::collections::HashMap::new(),
@@ -2980,6 +3257,7 @@ impl<T: TerminalAdapter> Model<T> {
             unconfirmed_snippet: std::collections::HashMap::new(),
             mastery: std::collections::HashMap::new(),
             epic_snapshots: std::collections::HashMap::new(),
+            artifacts: std::collections::HashMap::new(),
             recent_skills: Vec::new(),
             dismissed_updates: Vec::new(),
             snippet_keepmine: Vec::new(),
@@ -3000,7 +3278,7 @@ impl<T: TerminalAdapter> Model<T> {
             pr_chat_diff: None,
             pr_chat_diff_target: None,
             pr_chat_held_question: None,
-            default_model_agent: None,
+            strength_agent: None,
             auto_tour_pending: false,
             coach: None,
             coach_ascii: false,
@@ -3100,7 +3378,11 @@ impl Model<tuirealm::terminal::TestTerminalAdapter> {
     ) -> anyhow::Result<Self> {
         let terminal = tuirealm::terminal::TestTerminalAdapter::new(size)
             .map_err(|e| anyhow::anyhow!("test adapter init: {e:?}"))?;
-        Ok(Self::build(terminal, client, Box::new(|_| Ok(()))))
+        let mut model = Self::build(terminal, client, Box::new(|_| Ok(())));
+        // Headless: the copy gestures run, but nothing leaves the
+        // process. A test that asserts on delivery installs its own.
+        model.clipboard = Box::new(|_| helpers::ClipboardDelivery::Terminal);
+        Ok(model)
     }
 
     #[cfg(test)]
@@ -3512,6 +3794,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// wizard seeding, editor/open-with discovery) stays with the boot
     /// paths.
     pub fn apply_client_config(&mut self, user_config: &lazybox_config::Config) {
+        self.mobile_sessions
+            .restore_order(user_config.ui.mobile_session_order.clone());
         // Apply the persisted theme before the first render so the UI
         // boots in the user's palette. An unknown name (theme renamed /
         // removed since they picked it) leaves the default active.
@@ -3563,22 +3847,10 @@ impl<T: TerminalAdapter> Model<T> {
             user_config.auto_fix.opt_out_labels.clone(),
         );
         // Generate the per-agent SpawnAgent catalog rows (#102 P2):
-        // exactly the agents the wizard enabled. An unconfigured user
-        // (empty `setup.agents`) falls back to the built-in trio so the
-        // zero-config `a c` / `a x` / `a u` chords still work out of
-        // the box.
-        // Using the enabled set (rather than unioning it with the
-        // built-ins) avoids binding both `cursor` and `cursor-agent` to
-        // `u`. Per-agent key remaps live in `ui.action_keys` under
-        // `spawn_agent.<id>`.
-        let agents: Vec<String> = if user_config.setup.agents.is_empty() {
-            ["claude", "codex", "cursor"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        } else {
-            user_config.setup.agents.iter().cloned().collect()
-        };
+        // exactly the agents the wizard enabled — see [`enabled_agents`]
+        // for the roster rule. Per-agent key remaps live in
+        // `ui.action_keys` under `spawn_agent.<id>`.
+        let agents = enabled_agents(user_config);
         self.set_agents(agents.clone());
         // Keymap = the selected in-tree preset (#102 P4) as a base
         // layer, with the user's explicit `ui.action_keys` on top so
@@ -3637,6 +3909,17 @@ impl<T: TerminalAdapter> Model<T> {
     #[doc(hidden)]
     pub fn __test_sidebar(&self) -> &Sidebar {
         &self.sidebar
+    }
+
+    /// Test-only: record that THIS client asked for the spawn on
+    /// `session_key` — the follow pin an `x n` create leaves behind, or
+    /// the spawn spinner a `w` arms. A provisioning checklist mounts
+    /// only for a spawn this client requested (see
+    /// `route_worktree_progress`), so an out-of-crate test about the
+    /// checklist's own mechanics has to be the client that asked.
+    #[doc(hidden)]
+    pub fn __test_asked_for_spawn(&mut self, session_key: lazybox_core::SessionKey) {
+        self.spawn_follow_to = Some(session_key);
     }
 
     /// Test-only: whether the right pane is painting a repo / Space
@@ -4723,10 +5006,7 @@ impl<T: TerminalAdapter> Model<T> {
         let rows: Vec<(PromptRow, String)> = history
             .into_iter()
             .map(|prompt| {
-                let tag = match &prompt.source {
-                    lazybox_ipc::PromptSource::Snippet { key, .. } => Some(format!("]{key}")),
-                    lazybox_ipc::PromptSource::Typed => None,
-                };
+                let tag = prompt_source_tag(&prompt.source);
                 let row = PromptRow {
                     when: relative_age(prompt.timestamp_ms, now),
                     tag,
@@ -4807,15 +5087,16 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::DefaultAgentPicker, modal);
     }
 
-    /// Mount the default-model picker — the second step of the
-    /// default-agent flow, offering `agent_id`'s declared tiers plus an
-    /// "agent default" row, opened on the current default tier. Pick →
+    /// Mount the strength picker — the second step of the default-agent
+    /// flow, offering `agent_id`'s declared tiers plus an "agent
+    /// default" row, opened on the current one. Pick →
     /// `handle_choice_picked` persists `agents.<id>.models.default` so
     /// bare spawns use it (per-spawn tier chords still override); Esc
-    /// keeps the current tier. No-op for an agent with no tier menu.
-    pub(crate) fn mount_default_model_picker(&mut self, agent_id: &str) {
+    /// keeps the current strength. No-op for an agent with no tier menu
+    /// — [`Self::open_strength`] is the entry point that handles that.
+    pub(crate) fn mount_strength_picker(&mut self, agent_id: &str) {
         use crate::realm::components::choice::Choice;
-        if matches!(self.modal_stack.last(), Some(Id::DefaultModelPicker)) {
+        if matches!(self.modal_stack.last(), Some(Id::StrengthPicker)) {
             return;
         }
         let Some(models) = self.agent_models.get(agent_id) else {
@@ -4824,19 +5105,63 @@ impl<T: TerminalAdapter> Model<T> {
         if models.tiers.is_empty() {
             return;
         }
-        let items = default_model_rows(agent_id, models);
+        let items = strength_rows(agent_id, models);
         let start = models
             .default
             .as_ref()
             .and_then(|d| items.iter().position(|(_, a)| a.as_ref() == Some(d)))
             .unwrap_or(0);
-        self.default_model_agent = Some(agent_id.to_string());
-        let modal = Choice::single("Used by bare spawns · `w S/M/L` still overrides", items)
-            .title(format!("Default model · {agent_id}"))
-            .label(|(label, _): &ModelRow| label.clone())
-            .payload_for(|(_, alias): &ModelRow| ChoicePayload::OptText(alias.clone()))
-            .select_index(start);
-        self.mount_modal(Id::DefaultModelPicker, modal);
+        self.strength_agent = Some(agent_id.to_string());
+        let modal = Choice::single(
+            "The strength bare spawns run at · `w S/M/L` picks another for one run",
+            items,
+        )
+        .title(format!("Strength · {agent_id}"))
+        .label(|(label, _): &ModelRow| label.clone())
+        .payload_for(|(_, alias): &ModelRow| ChoicePayload::OptText(alias.clone()))
+        .select_index(start);
+        self.mount_modal(Id::StrengthPicker, modal);
+    }
+
+    /// Open `agent_id`'s strength: its tier menu when it declares one,
+    /// otherwise the config file at the key that would declare it.
+    /// A menu-less agent used to hit an early return and do nothing
+    /// visible, which left the user with no way to tell "this agent runs
+    /// whatever its CLI defaults to" from "this setting is broken".
+    pub(crate) fn open_strength(&mut self, agent_id: &str) {
+        if self
+            .agent_models
+            .get(agent_id)
+            .is_some_and(|m| !m.tiers.is_empty())
+        {
+            self.mount_strength_picker(agent_id);
+            return;
+        }
+        self.open_config_for_strength(agent_id);
+    }
+
+    /// Open `config.yaml` in the configured editor and name the key that
+    /// declares `agent_id`'s strengths. lazybox ships built-in menus only
+    /// for agents whose model flag takes stable aliases, so for the rest
+    /// the file *is* the editor.
+    fn open_config_for_strength(&mut self, agent_id: &str) {
+        let path = lazybox_core::paths::config_yaml();
+        let key = format!("agents.{agent_id}.models.tiers");
+        if self.setup.editors.is_empty() {
+            self.flash_info(format!(
+                "{agent_id} declares no strengths — add `{key}` in {}",
+                path.display(),
+            ));
+            return;
+        }
+        let editor = self.setup.editors[0].clone();
+        match crate::editors::open_file(&editor, &path, None, None) {
+            Ok(_) => self.flash_info(format!(
+                "declare `{key}` in {} — reopen Settings to pick one",
+                path.display(),
+            )),
+            Err(error) => self.flash_error(format!("failed to open {}: {error}", path.display())),
+        }
     }
 
     /// Update the default agent both panes resolve `w` against, live —
@@ -4970,15 +5295,82 @@ impl<T: TerminalAdapter> Model<T> {
         self.rebuild_catalog();
     }
 
+    /// Re-read every enabled agent's tier menu from
+    /// `~/.lazybox/config.yaml` and re-derive everything keyed off it
+    /// (chords, sidebar badges, tab strip). The same wiring the startup
+    /// path does, re-runnable so a hand edit — or a save from another
+    /// lazybox — lands without a restart.
+    ///
+    /// A config that doesn't parse keeps the menus already loaded and
+    /// says so. `unwrap_or_default()` here would be worse than doing
+    /// nothing: one YAML typo would re-key every chord and badge to the
+    /// built-in menus, presenting fallback defaults as though the user's
+    /// config had applied.
+    pub(crate) fn reload_agent_models(&mut self) -> Option<lazybox_config::Config> {
+        let cfg = match lazybox_config::Config::load() {
+            Ok(cfg) => cfg,
+            Err(error) => {
+                self.flash_error(format!(
+                    "{} didn't parse ({error}) — keeping the models already loaded",
+                    lazybox_core::paths::config_yaml().display(),
+                ));
+                return None;
+            }
+        };
+        // Roster and menus from the one read, through the same rule the
+        // boot path uses. Iterating the startup roster here instead left
+        // an agent added by a hand edit with a menu nobody asked for and
+        // no row at all, out of a file lazybox had just parsed.
+        let agents = enabled_agents(&cfg);
+        let models = agents
+            .iter()
+            .map(|id| (id.clone(), cfg.agent_models(id)))
+            .collect();
+        if agents != self.agents {
+            // `set_agents` keeps the default agent inside the roster by
+            // reassigning it to the first entry when a roster omits it.
+            // That is right on a boot path and silent here: a refresh
+            // triggered by opening Settings would otherwise move which
+            // agent bare `w` spawns, mid-session, with the config still
+            // naming the old one. Report it, because the user did not ask
+            // for it and nothing else on screen would say.
+            let before = self.sidebar.default_agent().to_string();
+            self.set_agents(agents);
+            let after = self.sidebar.default_agent();
+            if after != before {
+                let moved = format!(
+                    "default agent {before} is not in `setup.agents` — using {after} for this session",
+                );
+                self.flash_info(moved);
+            }
+        }
+        self.set_agent_models(models);
+        Some(cfg)
+    }
+
+    /// The label of the strength `agent_id` currently runs at — the tier
+    /// its `models.default` names. `None` when nothing is pinned or the
+    /// agent declares no menu, which the caller renders differently.
+    pub(crate) fn strength_label(&self, agent_id: &str) -> Option<String> {
+        self.agent_models
+            .get(agent_id)?
+            .default_tier()
+            .map(|tier| tier.label.clone())
+    }
+
     fn rebuild_catalog(&mut self) {
         // Tier chords track the default work agent's menu — the alias is
         // agent-agnostic at spawn, so one menu of chords serves whatever
-        // agent `w` ends up targeting.
+        // agent `w` ends up targeting. The menu carries the agent it was
+        // read from so the generated `w <alias>` rows can say so rather
+        // than painting its model names on another agent's run (#1827).
+        let default_agent = self.sidebar.default_agent();
         let tiers = self
             .agent_models
-            .get(self.sidebar.default_agent())
+            .get(default_agent)
             .map(|m| m.tiers.as_slice())
             .unwrap_or(&[]);
+        let tier_menu = lazybox_tui_core::action::TierMenu::new(default_agent, tiers);
         // Remote names gate the `r <agent>` chords — no remotes, no `r`
         // leader (the default keymap is byte-for-byte unchanged).
         let remotes: Vec<String> = self.remote_clients.keys().cloned().collect();
@@ -4993,7 +5385,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.catalog = lazybox_tui_core::action::ActionDef::catalog_complete(
             &self.agents,
             &self.action_key_overrides,
-            tiers,
+            tier_menu,
             &remotes,
             &open_with_binds,
         );
@@ -5003,6 +5395,80 @@ impl<T: TerminalAdapter> Model<T> {
     /// generated Keys screen.
     pub fn catalog(&self) -> &[lazybox_tui_core::action::CatalogEntry] {
         &self.catalog
+    }
+
+    /// What a `w <alias>` strength chord will actually launch, for the
+    /// which-key row.
+    ///
+    /// The catalog labels those chords from the DEFAULT agent's menu,
+    /// but `Action::WorkTier` dispatches against whichever agent the
+    /// row's live conversation runs, and the daemon resolves the alias
+    /// on *that* agent's menu — so the painted model and the launched
+    /// one diverge the moment the two differ (#1827). Resolve against
+    /// the real target here instead. An agent whose menu has no such
+    /// tier is launched with no model flag at all, so the row says
+    /// "agent default" rather than borrowing another menu's name.
+    pub(crate) fn work_tier_label(&self, alias: &str) -> String {
+        let mut labels: Vec<String> = self
+            .work_target_agents()
+            .iter()
+            .map(|agent| self.tier_label(agent, alias))
+            .collect();
+        labels.sort();
+        labels.dedup();
+        match labels.as_slice() {
+            [only] => only.clone(),
+            // A chooser (or a `v` fan-out) whose candidates resolve the
+            // alias differently has no single model to promise.
+            _ => "varies by agent".to_string(),
+        }
+    }
+
+    /// Every agent a `w` could land on from the current selection: the
+    /// one live conversation's agent, each candidate a chooser would
+    /// offer, or the default a fresh spawn would start. A `v`
+    /// multi-select resolves per row, so it contributes one per marked
+    /// workspace — the same resolution `dispatch_work` /
+    /// `dispatch_bulk_agent` perform.
+    fn work_target_agents(&self) -> Vec<String> {
+        use crate::components::sidebar::WorkTarget;
+        let default_agent = self.sidebar.default_agent();
+        let keys: Vec<lazybox_core::SessionKey> = if self.bulk_active() {
+            self.sidebar.selected_broadcast_keys()
+        } else {
+            self.sidebar
+                .selected_workspace_key()
+                .cloned()
+                .into_iter()
+                .collect()
+        };
+        if keys.is_empty() {
+            return vec![default_agent.to_string()];
+        }
+        keys.iter()
+            .flat_map(|key| match self.sidebar.work_target(key, default_agent) {
+                WorkTarget::Spawn(agent) => vec![agent],
+                WorkTarget::Running(target) => vec![target.agent_id],
+                WorkTarget::Choose(targets) => targets.into_iter().map(|t| t.agent_id).collect(),
+            })
+            .collect()
+    }
+
+    /// `alias` as `agent_id`'s own menu names it. An agent that defines
+    /// no such tier resolves to nothing, and the daemon then passes no
+    /// model flag at all — the agent's own ambient default.
+    ///
+    /// The config-derived menu already has the built-in one merged in
+    /// (or deliberately `replace`d), so the built-in is consulted only
+    /// for an agent the map doesn't carry at all — never as a second
+    /// chance for a tier a `replace:` menu dropped on purpose.
+    fn tier_label(&self, agent_id: &str, alias: &str) -> String {
+        self.agent_models
+            .get(agent_id)
+            .cloned()
+            .or_else(|| lazybox_core::AgentModels::builtin(agent_id))
+            .and_then(|m| m.tier(alias).map(|t| t.label.clone()))
+            .unwrap_or_else(|| "agent default".to_string())
     }
 
     /// Synthesize Project records for every scope the user is
@@ -6022,27 +6488,57 @@ impl<T: TerminalAdapter> Model<T> {
     pub fn mount_modal_boxed(
         &mut self,
         id: Id,
-        component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
+        mut component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
     ) {
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
+        // Every shared component reads its presentation from one attribute,
+        // so a mobile client gets the compact layout without a second
+        // component tree.
+        component.attr(
+            crate::realm::presentation::MOBILE_ATTRIBUTE,
+            tuirealm::props::AttrValue::Flag(
+                self.presentation == crate::realm::presentation::Presentation::Mobile,
+            ),
+        );
         // `remount`, not `mount`: a modal re-mounted under an id that is
         // still live in the view (e.g. the `WorktreeProgress` checklist
         // re-mounting itself on every step advance) must *replace* the
         // stale component. `mount` errors with `ComponentAlreadyMounted`
         // and we swallow the result, which left the first-step component
         // frozen on screen while `modal_stack` tracked it as current.
+        // Subscriptions: see [`modal_subscriptions`].
+        let _ = self
+            .app
+            .remount(id.clone(), component, modal_subscriptions());
         self.modal_stack.retain(|mounted| mounted != &id);
-        let _ = self.app.remount(
-            id.clone(),
-            component,
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
         // A modal captures the keyboard, so an armed visual-select sweep
         // must not survive it (see `push_modal`) — the mode would come
         // back live after the modal closes and eat the next j/k (#1448).
         self.visual_select = false;
         self.modal_stack.push(id.clone());
         let _ = self.app.active(&id);
+        self.redraw = true;
+    }
+
+    /// Re-render a modal that may already be on the stack WITHOUT moving
+    /// it. A modal that refreshes itself — the worktree checklist
+    /// advancing a step — must not jump above a modal stacked on it (the
+    /// branch-name input of its own recovery flow): that covered the input
+    /// and stole its focus mid-typing. Not on the stack yet: mounts on top
+    /// like [`Self::mount_modal`].
+    pub(super) fn remount_modal_in_place<C>(&mut self, id: Id, component: C)
+    where
+        C: tuirealm::component::AppComponent<Msg, UserEvent> + 'static,
+    {
+        if !self.modal_stack.contains(&id) {
+            self.mount_modal(id, component);
+            return;
+        }
+        let _ = self
+            .app
+            .remount(id, Box::new(component), modal_subscriptions());
+        if let Some(top) = self.modal_stack.last() {
+            let _ = self.app.active(top);
+        }
         self.redraw = true;
     }
 
@@ -6056,6 +6552,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// observe; rendering across the short window guarantees the
     /// change is shown without a per-keystroke busy-wait.
     pub(crate) fn forward_modal_event(&mut self, ev: RealmEvent<UserEvent>) {
+        if let RealmEvent::Keyboard(key) = &ev
+            && self.mobile_modal_key(key)
+        {
+            return;
+        }
         let _ = self.modal_event_tx.send(ev);
         self.modal_redraw_until = Some(std::time::Instant::now() + MODAL_REDRAW_WINDOW);
     }
@@ -6081,8 +6582,25 @@ impl<T: TerminalAdapter> Model<T> {
     /// without ever needing a real IPC client.
     fn dispatch_cmds(&mut self, cmds: Vec<IpcCommand>) {
         for cmd in cmds {
+            // A removal takes the row out of the list now; the daemon's
+            // teardown finishes behind it (see `hide_pending_removal`).
+            if let IpcCommand::Kill { session_key, .. }
+            | IpcCommand::RemoveMergedWorkspace { session_key } = &cmd
+            {
+                self.sidebar.hide_pending_removal(session_key.clone());
+                self.sync_panes();
+                self.redraw = true;
+            }
             let workspace_create = match &cmd {
                 IpcCommand::CreateWorkspace {
+                    client_request_id: Some(id),
+                    ..
+                }
+                | IpcCommand::CreateFloatingWorkspace {
+                    client_request_id: Some(id),
+                    ..
+                }
+                | IpcCommand::Spawn {
                     client_request_id: Some(id),
                     ..
                 } => Some(id.clone()),
@@ -6092,8 +6610,16 @@ impl<T: TerminalAdapter> Model<T> {
                 && let Some(request_id) = workspace_create
                 && let Some(pending) = self.pending_workspace_creates.remove(&request_id)
             {
+                let failure = if pending.workspace_key.is_some() {
+                    "was created, but its terminal could not start"
+                } else {
+                    "was not created"
+                };
+                if pending.workspace_key.as_ref() == self.spawn_follow_to.as_ref() {
+                    self.spawn_follow_to = None;
+                }
                 self.flash_error(format!(
-                    "✗ workspace {} was not created — daemon command channel is unavailable",
+                    "✗ workspace {} {failure} — daemon command channel is unavailable",
                     pending.name
                 ));
             }
@@ -6499,6 +7025,21 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::UrlPicker, modal);
     }
 
+    /// A titled picker over `(label, url)` links — the header's Checks
+    /// line. Shares the URL picker's flow: Enter opens the highlighted
+    /// link in the browser.
+    pub(crate) fn mount_link_picker(&mut self, title: &str, links: Vec<(String, String)>) {
+        use crate::realm::components::choice::Choice;
+        if links.is_empty() || matches!(self.modal_stack.last(), Some(Id::UrlPicker)) {
+            return;
+        }
+        let modal = Choice::single("Enter opens the highlighted link in your browser", links)
+            .title(title.to_string())
+            .label(|(label, _): &(String, String)| label.clone())
+            .payload_for(|(_, url): &(String, String)| ChoicePayload::Text(url.clone()));
+        self.mount_modal(Id::UrlPicker, modal);
+    }
+
     /// Hand `url` to the platform browser launcher and surface the
     /// outcome in the footer.
     fn open_external_url(&mut self, url: &str) {
@@ -6702,7 +7243,14 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
 
-        let actions = self.build_settings_actions();
+        // Re-read the per-agent menus from disk before building the
+        // rows, and build every row from that one snapshot. The rows and
+        // the pickers they open used to read different snapshots — the
+        // row a fresh `Config::load()`, the picker the cached map — so a
+        // hand-edited YAML showed the new strength on the row and offered
+        // the old menu in the editor.
+        let reloaded = self.reload_agent_models();
+        let actions = self.build_settings_actions(reloaded);
         if actions.is_empty() {
             // No persisted setup → fall back to the full wizard.
             self.reopen_setup();
@@ -6728,58 +7276,52 @@ impl<T: TerminalAdapter> Model<T> {
     /// Build the visible actions from the user's cached persisted
     /// setup. Per-provider actions only appear if the provider is
     /// enabled. Always includes the "full setup" escape hatch.
-    fn build_settings_actions(&self) -> Vec<SettingsAction> {
+    fn build_settings_actions(
+        &self,
+        reloaded: Option<lazybox_config::Config>,
+    ) -> Vec<SettingsAction> {
         let Some(p) = &self.setup.persisted else {
             return Vec::new();
         };
-        let mut actions = Vec::new();
-        for provider_id in &p.enabled_providers {
-            let label = match provider_id.as_str() {
-                "github" => "GitHub".to_string(),
-                "linear" => "Linear".to_string(),
-                other => other.to_string(),
-            };
-            actions.push(SettingsAction::EditScopes {
-                provider_id: provider_id.clone(),
-                label: label.clone(),
-            });
-            actions.push(SettingsAction::EditFilters {
-                provider_id: provider_id.clone(),
-                label,
-            });
-        }
+        // Only providers with a registered ScopeSource get an
+        // "Add / remove repos" row — the executor cannot enumerate orgs
+        // for the others, and a row that can only ever fail belongs
+        // gated here rather than surfaced as an error modal.
+        let scope_capable = self
+            .setup
+            .inputs
+            .as_ref()
+            .map(|(_, sources)| scope_provider_ids(sources))
+            .unwrap_or_default();
+        let mut actions =
+            crate::realm::setup_ctx::provider_setting_rows(&p.enabled_providers, &scope_capable);
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
-        // One fresh load feeds every config-backed row below, so even a
-        // hand-edited YAML shows its current values without a restart.
-        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        // One read feeds every config-backed row below, so even a
+        // hand-edited YAML shows its current values without a restart —
+        // and so no two rows can disagree about what the file says. The
+        // caller's snapshot is that read; `None` means it didn't parse
+        // (already reported), and the defaults stand in for the rows that
+        // have nothing better to show.
+        let cfg = reloaded.unwrap_or_default();
         let default_agent = self.sidebar.default_agent().to_string();
-        let models = cfg.agent_models(&default_agent);
-        let default_tier = models
-            .default
-            .as_deref()
-            .and_then(|a| models.tier(a))
-            .map(|t| t.label.clone());
         actions.push(SettingsAction::EditDefaultAgent {
-            current: default_agent,
-            tier: default_tier,
+            current: default_agent.clone(),
         });
-        // One direct default-model row per enabled agent with a tier
-        // menu — picking a default model must not require making that
-        // agent the default first.
+        // One strength row per enabled agent — picking one must not
+        // require making that agent the default first, and an agent
+        // with no tier menu gets a row saying so rather than no row at
+        // all. The default agent needs no special case: `set_agents`
+        // reassigns it into the roster whenever a roster omits it, so it
+        // is always one of these.
         for agent_id in &self.agents {
-            let models = cfg.agent_models(agent_id);
-            if models.tiers.is_empty() {
-                continue;
-            }
-            let tier = models
-                .default
-                .as_deref()
-                .and_then(|a| models.tier(a))
-                .map(|t| t.label.clone());
-            actions.push(SettingsAction::EditDefaultModel {
+            actions.push(SettingsAction::EditStrength {
+                strength: self.strength_label(agent_id),
+                configurable: self
+                    .agent_models
+                    .get(agent_id)
+                    .is_some_and(|m| !m.tiers.is_empty()),
                 agent_id: agent_id.clone(),
-                tier,
             });
         }
         actions.push(SettingsAction::ToggleSkipPermissions {
@@ -6882,11 +7424,11 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_default_agent_picker();
             return;
         }
-        // Per-agent default-model picker — same modal as the second
-        // step of the default-agent flow, minus the agent switch.
-        if let SettingsAction::EditDefaultModel { agent_id, .. } = &action {
+        // Per-agent strength picker — same modal as the second step of
+        // the default-agent flow, minus the agent switch.
+        if let SettingsAction::EditStrength { agent_id, .. } = &action {
             let agent_id = agent_id.clone();
-            self.mount_default_model_picker(&agent_id);
+            self.open_strength(&agent_id);
             return;
         }
         // Agent-CLI update actions are fire-and-forget daemon commands;
@@ -6935,7 +7477,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::SetUpSandbox { .. } => return,
             SettingsAction::ShellCommand { .. } => return,
             SettingsAction::EditDefaultAgent { .. } => return,
-            SettingsAction::EditDefaultModel { .. } => return,
+            SettingsAction::EditStrength { .. } => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.
@@ -7012,6 +7554,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// summary line is a non-focusable header, so Tab / click / Enter
     /// route past it exactly like a hidden pane.
     pub(super) fn activity_pane_visible(&self) -> bool {
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            return false;
+        }
         self.activity_pane.visible(
             self.sidebar.selected_workspace().map(|ws| &ws.key),
             self.right.has_visible_content(),
@@ -7024,6 +7569,18 @@ impl<T: TerminalAdapter> Model<T> {
     /// height `right_top`); a `Summary` pane keeps a single slim row
     /// and hands the rest to the terminal.
     pub(super) fn effective_pane_rects(&self, area: Rect) -> (Rect, Rect, Rect) {
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            let (area, _) = split_for_footer(area);
+            let (_, area) = crate::realm::presentation::mobile_header(area);
+            return match self.focus {
+                PaneFocus::Sidebar | PaneFocus::Right => (area, Rect::default(), Rect::default()),
+                PaneFocus::Terminals => (
+                    Rect::default(),
+                    Rect::default(),
+                    crate::realm::presentation::mobile_terminal(area).1,
+                ),
+            };
+        }
         let rects = pane_areas(
             area,
             self.layout.sidebar_pct,
@@ -7077,6 +7634,116 @@ impl<T: TerminalAdapter> Model<T> {
             .set_agent_text(self.terminals.agent_text_by_session());
     }
 
+    /// Keep the daemon's terminal-OUTPUT scan in step with the live query
+    /// (#1780). Called once per run-loop iteration; a no-op for every query
+    /// that carries no `agent:` / `said:` term, which is almost all of them.
+    ///
+    /// Debounced rather than dispatched per keystroke: `agent:par` and
+    /// `agent:parser` are two different scans over every live ring, and a
+    /// user types the second within a few tens of milliseconds of the first.
+    /// Waiting [`AGENT_OUTPUT_SEARCH_DEBOUNCE`] after the needles last moved
+    /// costs the user nothing they can perceive and collapses a typed word
+    /// into one scan.
+    pub(super) fn tick_agent_output_search(&mut self) {
+        let needles = self.sidebar.agent_qualifier_needles();
+        let now = std::time::Instant::now();
+        if needles != self.agent_output_search.needles {
+            // The needles moved, so any in-flight reply now answers a
+            // question the user has typed past. Drop the previous results
+            // with it: text scanned for `par` is not evidence about
+            // `parser`, and leaving it up would show rows the query no
+            // longer selects.
+            self.agent_output_search.needles = needles;
+            self.agent_output_search.changed_at = Some(now);
+            self.agent_output_search.in_flight = None;
+            self.agent_output_search.dispatched = false;
+            self.agent_output_search.dispatched_at = None;
+            self.sidebar.set_agent_output_text(Vec::new());
+            self.sidebar
+                .set_agent_output_scanning(!self.agent_output_search.needles.is_empty());
+            self.redraw = true;
+        }
+        // Release a scan whose reply is never coming. The connection can end
+        // under the daemon's own overload handling, taking the request with
+        // it and leaving nothing to answer this latch — so the latch has to
+        // time itself out rather than trust a reply that may not exist.
+        if self
+            .agent_output_search
+            .dispatched_at
+            .is_some_and(|at| now.duration_since(at) >= AGENT_OUTPUT_SEARCH_TIMEOUT)
+        {
+            self.agent_output_search.in_flight = None;
+            self.agent_output_search.dispatched = false;
+            self.agent_output_search.dispatched_at = None;
+            self.agent_output_search.changed_at = Some(now - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        }
+        // A settled query re-asks on a slow cadence so its rows stay as live
+        // as the prompt half of the same query already is.
+        if self.agent_output_search.in_flight.is_none()
+            && self.agent_output_search.dispatched
+            && self
+                .agent_output_search
+                .dispatched_at
+                .is_some_and(|at| now.duration_since(at) >= AGENT_OUTPUT_SEARCH_REFRESH)
+        {
+            self.agent_output_search.dispatched = false;
+            self.agent_output_search.changed_at = Some(now - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        }
+        if self.agent_output_search.dispatched
+            || self.agent_output_search.needles.is_empty()
+            || self
+                .agent_output_search
+                .changed_at
+                .is_none_or(|at| now.duration_since(at) < AGENT_OUTPUT_SEARCH_DEBOUNCE)
+        {
+            return;
+        }
+        self.agent_output_search.next_request_id =
+            self.agent_output_search.next_request_id.wrapping_add(1);
+        let request_id = self.agent_output_search.next_request_id;
+        self.agent_output_search.in_flight = Some(request_id);
+        self.agent_output_search.dispatched = true;
+        self.agent_output_search.dispatched_at = Some(now);
+        self.send_cmd(IpcCommand::SearchAgentOutput {
+            request_id,
+            needles: self.agent_output_search.needles.clone(),
+        });
+    }
+
+    /// Release an in-flight output scan because the connection it was sent
+    /// on is gone (#1780). A fresh `Event::Snapshot` is the client's
+    /// reconnect signal, and the daemon-side request died with the old
+    /// connection — so the reply this latch waits for will never arrive.
+    /// Clearing it here makes the next tick re-dispatch immediately rather
+    /// than waiting out [`AGENT_OUTPUT_SEARCH_TIMEOUT`]; the timeout stays
+    /// as the catch-all for losses that produce no Snapshot at all.
+    pub(super) fn release_agent_output_scan_on_reconnect(&mut self) {
+        if self.agent_output_search.in_flight.take().is_some() {
+            self.agent_output_search.dispatched = false;
+            self.agent_output_search.dispatched_at = None;
+            self.agent_output_search.changed_at =
+                Some(std::time::Instant::now() - AGENT_OUTPUT_SEARCH_DEBOUNCE);
+        }
+    }
+
+    /// Adopt one `Event::AgentOutputMatches` (#1780), or drop it when the
+    /// query has moved on. Staleness is decided by request id and nothing
+    /// else: the scan is asynchronous and unordered with respect to typing,
+    /// so a reply that outlived its query would filter the sidebar by a
+    /// needle no longer in the box.
+    pub(super) fn apply_agent_output_matches(
+        &mut self,
+        request_id: u64,
+        entries: Vec<(String, String)>,
+    ) {
+        if self.agent_output_search.in_flight != Some(request_id) {
+            return;
+        }
+        self.agent_output_search.in_flight = None;
+        self.sidebar.set_agent_output_text(entries);
+        self.redraw = true;
+    }
+
     pub fn view(&mut self) {
         // Refresh the agent tabs' live spend/headroom badges (#1490) from the
         // usage tracker before drawing, so the figure tracks live usage and a
@@ -7087,6 +7754,11 @@ impl<T: TerminalAdapter> Model<T> {
         // Pull state out before the closure so the borrow checker is
         // happy — `terminal.draw` takes `&mut self.terminal` while we
         // also need `&mut self.app` etc. inside.
+        let mobile = self.presentation == crate::realm::presentation::Presentation::Mobile;
+        if mobile {
+            self.refresh_mobile_sessions();
+        }
+        let mobile_focus = self.focus;
         let sidebar_pct = self.layout.sidebar_pct;
         let right_top_pct = self.layout.right_top_pct;
         let sidebar_user_resized = self.layout.sidebar_user_resized;
@@ -7262,7 +7934,20 @@ impl<T: TerminalAdapter> Model<T> {
                 (
                     conts
                         .into_iter()
-                        .map(|(stroke, entry)| (stroke.display(), entry.label.to_string()))
+                        .map(|(stroke, entry)| {
+                            use lazybox_tui_core::action::{ActionKind, Param};
+                            // The `w <alias>` strength rows carry the
+                            // DEFAULT agent's model name; this popup knows
+                            // the contextual target, so it names what the
+                            // chord will really launch (#1827).
+                            let label = match (entry.kind, entry.param.as_ref()) {
+                                (ActionKind::WorkWith, Some(Param::Tier(alias))) => {
+                                    self.work_tier_label(alias)
+                                }
+                                _ => entry.label.to_string(),
+                            };
+                            (stroke.display(), label)
+                        })
                         .collect(),
                     group,
                 )
@@ -7291,6 +7976,16 @@ impl<T: TerminalAdapter> Model<T> {
         // Resolve the header's contents out here so the draw closure
         // doesn't need to borrow `self` immutably while it also holds
         // the mutable terminal borrow.
+        let mobile_title = self
+            .terminals
+            .active_session()
+            .map(|key| {
+                self.sidebar
+                    .workspace_by_key(key)
+                    .map(|workspace| workspace.name.clone())
+                    .unwrap_or_else(|| key.to_string())
+            })
+            .unwrap_or_default();
         let focus_mode = self.focus_mode;
         let (focus_title, focus_summary, focus_hint) = if focus_mode {
             let active = self.terminals.active_session();
@@ -7382,13 +8077,18 @@ impl<T: TerminalAdapter> Model<T> {
                 Vec::new()
             };
         let mut captured_area = Rect::default();
-        let mut footer_overflow: Option<crate::realm::components::footer::FooterOverflow> = None;
+        let mut footer_hits = crate::realm::components::footer::FooterHits::default();
+        let mut focus_count_hits: Vec<(
+            u16,
+            std::ops::Range<u16>,
+            crate::realm::components::focus_header::FocusCount,
+        )> = Vec::new();
         let footer_more_rows = self.footer_more_popup.clone();
         // The coach rail (#1460) is carved out of the pane area inside
         // the draw closure so it never occludes a pane. Resolve its
         // active/spotlight state out here (immutable borrow) so the
         // closure's disjoint `&mut self.coach` render borrow is free.
-        let coach_active = self.coach.is_some();
+        let coach_active = self.coach.is_some() && !mobile;
         let coach_spot = self.coach.as_ref().map(|c| c.current_spot());
         let coach_ascii = self.coach_ascii;
         let practice = self.practice;
@@ -7418,15 +8118,75 @@ impl<T: TerminalAdapter> Model<T> {
             captured_area = area;
             let (pane_area, footer_area) = split_for_footer(area);
             let (pane_area, coach_area) = split_coach(pane_area, coach_active);
-            let right_bottom = if focus_mode {
+            let pane_area = if mobile {
+                let (header, body) = crate::realm::presentation::mobile_header(pane_area);
+                let label = match mobile_focus {
+                    PaneFocus::Sidebar | PaneFocus::Right => {
+                        format!(
+                            "Sessions ({}) · j/k move · Enter open",
+                            self.mobile_sessions.len()
+                        )
+                    }
+                    PaneFocus::Terminals => format!("Ctrl-T Sessions | {mobile_title}"),
+                };
+                f.render_widget(
+                    tuirealm::ratatui::widgets::Paragraph::new(label).style(
+                        tuirealm::ratatui::style::Style::default()
+                            .fg(crate::theme::current().accent),
+                    ),
+                    header,
+                );
+                body
+            } else {
+                pane_area
+            };
+            let right_bottom = if mobile {
+                match mobile_focus {
+                    PaneFocus::Sidebar | PaneFocus::Right => {
+                        self.terminals.begin_focus_frame();
+                        self.mobile_rail.render(
+                            f,
+                            pane_area,
+                            self.mobile_sessions.rows(),
+                            self.terminals.focused_terminal_id(),
+                            true,
+                        );
+                        Rect::default()
+                    }
+                    PaneFocus::Terminals => {
+                        self.terminals.begin_focus_frame();
+                        let (_, terminal_area) =
+                            crate::realm::presentation::mobile_terminal(pane_area);
+                        if let Some(id) = self.terminals.focused_terminal_id() {
+                            self.terminals.render_terminal_by_id(
+                                id,
+                                terminal_area,
+                                f,
+                                !self.mobile_rail.is_open(),
+                            );
+                        } else {
+                            f.render_widget(
+                                tuirealm::ratatui::widgets::Paragraph::new(
+                                    "No terminal open. Ctrl-T for sessions.",
+                                ),
+                                pane_area,
+                            );
+                        }
+                        terminal_area
+                    }
+                }
+            } else if focus_mode {
                 let (header, body) = focus_mode_areas(pane_area);
-                crate::realm::components::focus_header::render(
+                focus_count_hits = crate::realm::components::focus_header::render(
                     f,
                     header,
                     &focus_title,
                     focus_summary,
                     &focus_hint,
-                );
+                )
+                .into_iter()
+                .map(|(cols, kind)| (header.y, cols, kind))
+                .collect();
                 if focus_panes.is_empty() {
                     // Single layout (and pane zoom): the historical
                     // fullscreen render, untouched.
@@ -7548,20 +8308,69 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
 
+            if mobile {
+                let active = self.terminals.focused_terminal_id();
+                if mobile_focus == PaneFocus::Terminals {
+                    let (rail, _) = crate::realm::presentation::mobile_terminal(pane_area);
+                    crate::realm::components::mobile_rail::MobileRail::render_collapsed(
+                        f,
+                        rail,
+                        self.mobile_sessions.rows(),
+                        active,
+                    );
+                }
+                if self.mobile_rail.is_open()
+                    && mobile_focus == PaneFocus::Terminals
+                    && self.modal_stack.is_empty()
+                {
+                    self.mobile_rail.render(
+                        f,
+                        pane_area,
+                        self.mobile_sessions.rows(),
+                        active,
+                        false,
+                    );
+                }
+            }
+
+            if mobile && !self.modal_stack.is_empty() {
+                f.render_widget(tuirealm::ratatui::widgets::Clear, pane_area);
+            }
+
             // Footer: keymap + globals + polling status + notice. The
             // returned overflow (if any) is the `… +N more` cell + the
             // hints it hides, stashed so a click on it pops exactly those
             // (#805, #1502).
-            footer_overflow = crate::realm::components::footer::render(
-                f,
-                footer_area,
-                Some(&focus_chip),
-                &keymap,
-                &globals,
-                &evergreen,
-                polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
-                notice.as_ref(),
-            );
+            if mobile {
+                use tuirealm::ratatui::{style::Style, widgets::Paragraph};
+                let theme = crate::theme::current();
+                let hint = if self.mobile_rail.is_open() || mobile_focus != PaneFocus::Terminals {
+                    self.mobile_rail.footer()
+                } else {
+                    "^T sessions ^G settings ^D live"
+                };
+                let text = if self.mobile_rail.is_open() || mobile_focus != PaneFocus::Terminals {
+                    hint
+                } else {
+                    notice.as_ref().map(|n| n.message.as_str()).unwrap_or(hint)
+                };
+                f.render_widget(
+                    Paragraph::new(text)
+                        .style(Style::default().fg(theme.text_strong).bg(theme.fill)),
+                    footer_area,
+                );
+            } else {
+                footer_hits = crate::realm::components::footer::render(
+                    f,
+                    footer_area,
+                    Some(&focus_chip),
+                    &keymap,
+                    &globals,
+                    &evergreen,
+                    polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
+                    notice.as_ref(),
+                );
+            }
             // The `+N more` popup (#1502): the hidden footer hints, in
             // which-key chrome, until the next key or click.
             if let Some(rows) = footer_more_rows.as_deref() {
@@ -7639,7 +8448,9 @@ impl<T: TerminalAdapter> Model<T> {
         self.last_render_build = render_build;
         self.last_render_flush = render_flush;
         self.layout.last_area = captured_area;
-        self.footer_overflow = footer_overflow;
+        self.footer_overflow = footer_hits.overflow;
+        self.footer_right = footer_hits.right;
+        self.focus_count_hits = focus_count_hits;
         // Resize commands are queued by the terminal stack's render
         // path each time a slot's rect changes. Drain + ship them so
         // libghostty's PTY learns the new size — without this,
@@ -7743,6 +8554,14 @@ impl<T: TerminalAdapter> Model<T> {
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
             }
+            Msg::LoadingFailed => {
+                self.flash(
+                    "a background step failed without an answer (see /tmp/lazybox.log) — dismissing",
+                    crate::realm::components::footer::NoticeSeverity::Retryable,
+                );
+                let cmds = self.handle_modal_dismissed();
+                self.dispatch_cmds(cmds);
+            }
             Msg::OpenUrl(url) => {
                 // A link clicked inside the description-reader modal. The
                 // modal stays open (reading isn't over); hand the URL to
@@ -7795,6 +8614,16 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::ErrorInboxDeleteRequested(dedupe_key) => {
                 self.send_cmd(IpcCommand::DeleteError { dedupe_key });
             }
+            Msg::ArchiveRestoreRequested(key) => {
+                // No confirm: restoring is the reversal of a destructive
+                // action, and `x x` puts the row straight back. The daemon's
+                // refreshed `ArchivedWorkspaces` repaints the open browser,
+                // so the list is the outcome the user reads.
+                self.send_cmd(IpcCommand::UnarchiveWorkspace {
+                    key,
+                    client_request_id: None,
+                });
+            }
             Msg::ErrorInboxFileIssue(record) => {
                 self.error_inbox_file_issue(record);
             }
@@ -7813,6 +8642,35 @@ impl<T: TerminalAdapter> Model<T> {
                 let commands =
                     self.dispatch_diff_review(workspace_key, target, agent_terminal_ids, comments);
                 self.dispatch_cmds(commands);
+            }
+            Msg::DiffReviewSourceSwitched {
+                workspace_key,
+                showing,
+            } => self.switch_diff_review_source(workspace_key, showing),
+            Msg::DiffReviewPosted {
+                workspace_key,
+                head_sha,
+                summary,
+                verdict,
+                comments,
+            } => {
+                let count = comments.len();
+                self.dispatch_cmds(vec![IpcCommand::SubmitPullRequestReview {
+                    workspace_key,
+                    head_sha,
+                    summary,
+                    verdict,
+                    comments,
+                }]);
+                // The viewer stays mounted until GitHub answers. It is
+                // the only place the drafted comments exist, so closing
+                // it here turned every refusal — a stale `commit_id`, a
+                // 403, a 502 — into an unrecoverable loss of everything
+                // the reviewer had written.
+                self.flash_info(format!(
+                    "submitting {count} comment{} as one review…",
+                    if count == 1 { "" } else { "s" }
+                ));
             }
             Msg::OpenSnippetsFile => {
                 // `e` in the browser: drop the modal, then open the YAML
@@ -7855,7 +8713,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
                     self.pop_modal();
                     self.dispatch_cmds(vec![IpcCommand::SaveHopper { entries }]);
-                    self.flash_info("Hopper saved");
+                    self.flash_info("TODO saved");
                 }
             }
             Msg::HopperCompletionRequested {
@@ -7868,9 +8726,9 @@ impl<T: TerminalAdapter> Model<T> {
                         completed,
                     }]);
                     self.flash_info(if completed {
-                        "Hopper item completed"
+                        "TODO completed"
                     } else {
-                        "Hopper item reopened"
+                        "TODO reopened"
                     });
                 }
             }
@@ -7884,11 +8742,40 @@ impl<T: TerminalAdapter> Model<T> {
                         canceled,
                     }]);
                     self.flash_info(if canceled {
-                        "Hopper item canceled"
+                        "TODO canceled"
                     } else {
-                        "Hopper item reopened"
+                        "TODO reopened"
                     });
                 }
+            }
+            Msg::TodoItemsChanged {
+                workspace_key,
+                items,
+            } => {
+                self.dispatch_cmds(vec![IpcCommand::SaveTodoItems {
+                    workspace_key,
+                    items,
+                }]);
+            }
+            Msg::TodoLinkOpened(link) => {
+                // Leave the TODO for what the item points at, the way the
+                // header's blocker links do.
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.pop_modal();
+                }
+                match link {
+                    lazybox_core::TodoLink::Task(task) => self.open_task_reference(&task),
+                    lazybox_core::TodoLink::Workspace(key) => {
+                        let key: lazybox_core::SessionKey = (&key).into();
+                        if self.sidebar.focus_workspace_key(&key) {
+                            self.sync_panes();
+                        } else {
+                            self.flash_hint("that workspace is not in the inbox");
+                        }
+                    }
+                    lazybox_core::TodoLink::Url(url) => self.open_external_url(&url),
+                }
+                self.redraw = true;
             }
             Msg::HopperDeleteRequested(workspace_key) => {
                 if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
@@ -8022,13 +8909,10 @@ fn user_skills_root() -> Option<std::path::PathBuf> {
 /// (`None` = unpin, the agent's own default — the payload at #512).
 pub(crate) type ModelRow = (String, Option<String>);
 
-/// The rows `mount_default_model_picker` offers. Extracted so the row
+/// The rows `mount_strength_picker` offers. Extracted so the row
 /// *strings* are testable: the label is the only thing distinguishing two
 /// rows with different payloads, and nothing covered it (#1568).
-pub(crate) fn default_model_rows(
-    agent_id: &str,
-    models: &lazybox_core::AgentModels,
-) -> Vec<ModelRow> {
+pub(crate) fn strength_rows(agent_id: &str, models: &lazybox_core::AgentModels) -> Vec<ModelRow> {
     // Row 0 unpins the YAML override. With a built-in default in play
     // that lands back on the built-in tier, not on the agent's ambient
     // model — say so in the label. It names the tier and the model, but
@@ -8067,5 +8951,141 @@ fn tier_row_label(tier: &lazybox_core::ModelTier) -> String {
     match tier.model_id() {
         Some(model) => format!("{}  ·  {}  ·  {}", tier.label, tier.alias, model),
         None => format!("{}  ·  {}", tier.label, tier.alias),
+    }
+}
+
+/// What a mounted modal subscribes to: ticks, resizes and daemon events —
+/// never keys or mouse. tuirealm hands the FOCUSED component every event
+/// and then forwards it to every other subscriber, so the old catch-all
+/// subscription delivered each key to every modal on the stack: Esc on the
+/// update notice over the first-run splash also reached the splash, which
+/// quit lazybox; typing `r` into a branch-name input over the worktree
+/// checklist fired the checklist's retry. Input belongs to the top modal
+/// alone (it holds focus: `app.active` on every push and pop); ticks and
+/// daemon events still reach the modals beneath, which animate and track
+/// state from them.
+fn modal_subscriptions() -> Vec<tuirealm::subscription::Sub<Id, UserEvent>> {
+    use tuirealm::subscription::{EventClause, Sub, SubClause};
+    let daemon = UserEvent::Daemon(std::sync::Arc::new(lazybox_ipc::Event::AgentSearchText {
+        entries: Vec::new(),
+    }));
+    vec![
+        Sub::new(EventClause::Tick, SubClause::Always),
+        Sub::new(EventClause::WindowResize, SubClause::Always),
+        Sub::new(EventClause::Discriminant(daemon), SubClause::Always),
+    ]
+}
+
+impl<T: TerminalAdapter> Model<T> {
+    /// Go to a task someone clicked (a blocker in the header): its own
+    /// workspace when this client has one, otherwise the task on GitHub.
+    pub(crate) fn open_task_reference(&mut self, task: &lazybox_core::TaskId) {
+        if let Some(key) = self.sidebar.workspace_key_for_task(task)
+            && self.sidebar.focus_workspace_key(&key)
+        {
+            self.sync_panes();
+            self.redraw = true;
+            return;
+        }
+        match github_task_url(task) {
+            Some(url) => self.open_external_url(&url),
+            None => self.flash_hint(format!("{} has no workspace here", task.key)),
+        }
+    }
+}
+
+/// The GitHub URL for an `owner/repo#N` task. GitHub serves an issue URL
+/// for a PR number too (it redirects), so one form covers both.
+fn github_task_url(task: &lazybox_core::TaskId) -> Option<String> {
+    if task.source != lazybox_core::GITHUB_SOURCE {
+        return None;
+    }
+    let (repo, number) = task.key.rsplit_once('#')?;
+    (repo.contains('/') && number.chars().all(|c| c.is_ascii_digit()) && !number.is_empty())
+        .then(|| format!("https://github.com/{repo}/issues/{number}"))
+}
+
+/// The short provenance tag a prompt-history row carries: `]key` for a
+/// snippet, `← sender` for a message another agent sent, `lazybox · reason`
+/// for lazybox's own automation, nothing for what the user typed.
+pub(crate) fn prompt_source_tag(source: &lazybox_ipc::PromptSource) -> Option<String> {
+    match source {
+        lazybox_ipc::PromptSource::Snippet { key, .. } => Some(format!("]{key}")),
+        lazybox_ipc::PromptSource::Typed => None,
+        lazybox_ipc::PromptSource::Agent { from } => Some(format!("← {}", short_session(from))),
+        lazybox_ipc::PromptSource::Lazybox { reason } => Some(format!("lazybox · {reason}")),
+    }
+}
+
+/// A session key trimmed for a narrow tag: the tail, which carries the
+/// repo and number (`…lazybox-1830`), capped so the tag never crowds out
+/// the prompt text.
+fn short_session(key: &str) -> String {
+    const MAX: usize = 24;
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= MAX {
+        return key.to_string();
+    }
+    let tail: String = chars[chars.len() - (MAX - 1)..].iter().collect();
+    format!("…{tail}")
+}
+
+#[cfg(test)]
+mod github_task_url_tests {
+    use super::github_task_url;
+    use lazybox_core::TaskId;
+
+    fn id(source: &str, key: &str) -> TaskId {
+        TaskId {
+            source: source.into(),
+            key: key.into(),
+        }
+    }
+
+    #[test]
+    fn only_a_github_owner_repo_number_key_becomes_a_url() {
+        assert_eq!(
+            github_task_url(&id("github", "o/r#7")).as_deref(),
+            Some("https://github.com/o/r/issues/7")
+        );
+        assert_eq!(github_task_url(&id("linear", "ENG-45")), None);
+        assert_eq!(github_task_url(&id("github", "r#7")), None);
+        assert_eq!(github_task_url(&id("github", "o/r#")), None);
+        assert_eq!(github_task_url(&id("github", "o/r#7a")), None);
+    }
+}
+
+#[cfg(test)]
+mod prompt_source_tag_tests {
+    use super::prompt_source_tag;
+    use lazybox_ipc::PromptSource;
+
+    #[test]
+    fn every_source_names_itself_briefly() {
+        assert_eq!(prompt_source_tag(&PromptSource::Typed), None);
+        assert_eq!(
+            prompt_source_tag(&PromptSource::Snippet {
+                key: "rev".into(),
+                category: String::new()
+            })
+            .as_deref(),
+            Some("]rev")
+        );
+        let agent = prompt_source_tag(&PromptSource::Agent {
+            from: "github-AntoineToussaint-lazybox-1830".into(),
+        })
+        .expect("tag");
+        assert!(
+            agent.starts_with("← ") && agent.ends_with("lazybox-1830"),
+            "{agent}"
+        );
+        assert!(agent.chars().count() <= 26, "{agent}");
+        assert_eq!(
+            prompt_source_tag(&PromptSource::Lazybox {
+                reason: "auto-fix".into()
+            })
+            .as_deref(),
+            Some("lazybox · auto-fix")
+        );
     }
 }

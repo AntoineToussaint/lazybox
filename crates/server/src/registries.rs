@@ -1157,6 +1157,34 @@ impl TerminalRegistry {
             .min_by_key(|id| id.0)
     }
 
+    /// Every live agent terminal as `(session_key, backend_key)`, oldest
+    /// terminal first — the scan set for [`crate::agent_output_search`].
+    /// Shells are excluded: `agent:` / `said:` ask what an AGENT said, and
+    /// a user's own shell output is not that.
+    ///
+    /// A workspace with several agent terminals appears once per terminal;
+    /// the caller folds them, because the search filters workspaces, not
+    /// tabs.
+    pub async fn agent_terminal_backends(&self) -> Vec<(SessionKey, String)> {
+        let entries = self.lock_entries().await;
+        let mut targets: Vec<(TerminalId, SessionKey, String)> = entries
+            .iter()
+            .filter(|(_, entry)| !entry.finishing)
+            .filter_map(|(id, entry)| {
+                let (session_key, kind) = entry.meta.as_ref()?;
+                if !matches!(kind, TerminalKind::Agent(_)) {
+                    return None;
+                }
+                Some((*id, session_key.clone(), entry.backend_key.clone()?))
+            })
+            .collect();
+        targets.sort_unstable_by_key(|(id, _, _)| id.0);
+        targets
+            .into_iter()
+            .map(|(_, session_key, backend_key)| (session_key, backend_key))
+            .collect()
+    }
+
     pub(crate) async fn agent_terminals_for_review(
         &self,
         session_key: &SessionKey,
@@ -1633,8 +1661,13 @@ impl PollState {
 pub struct SpawnCoordinator {
     /// Lets an inject task verify submit via the structured hook and retry Enter once.
     pub(crate) prompt_submit_signals: Arc<Mutex<HashMap<TerminalId, Arc<Notify>>>>,
-    /// Enforces one readiness-gated injection per terminal.
-    pub(crate) pending_prompt_injections: Arc<parking_lot::Mutex<HashSet<TerminalId>>>,
+    /// Enforces one readiness-gated injection per terminal *per lane*. The
+    /// human's `w w` and an agent's idle-gated message wait on different
+    /// things for very different lengths of time, so they reserve
+    /// separately: a single slot let a 20-minute agent wait refuse every
+    /// keypress the user made in the meantime (see `InjectLane`).
+    pub(crate) pending_prompt_injections:
+        Arc<parking_lot::Mutex<HashSet<(TerminalId, crate::spawn_handler::InjectLane)>>>,
     /// Holds keyboard→PTY writes for a terminal whose spawn-time context
     /// injection has not yet been submitted, so the injected brief is
     /// guaranteed to reach the agent before any racing user keystroke (#1444).

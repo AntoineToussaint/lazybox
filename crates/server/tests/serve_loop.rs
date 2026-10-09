@@ -822,17 +822,20 @@ fn all_non_shutdown_commands() -> Vec<Command> {
                 cwd: None,
                 tool_name: None,
                 notification: None,
+                turn_result: None,
             },
             backend_key: None,
         },
         Command::Kill {
             session_key: "test:ws".into(),
+            force: false,
         },
         Command::RemoveMergedWorkspace {
             session_key: "test:ws".into(),
         },
         Command::DeleteProject {
             project_key: pkey(),
+            force: false,
         },
         Command::CollapseIntoPr {
             issue_workspace_key: "test:ws".into(),

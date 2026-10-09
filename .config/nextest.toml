@@ -116,7 +116,10 @@ failure-output = "immediate-final"
 
 # Nightly lane: the full workspace including #[ignore]'d real-backend /
 # live-agent tests (`--run-ignored all` in the workflow). No retries —
-# a flaky real-path test is a signal, not noise to absorb.
+# a flaky real-path test is a signal, not noise to absorb. No fail-fast
+# either: nightly is the only lane that runs the whole suite on macOS, and
+# stopping at the first failure hid ~half of it behind one broken e2e test.
 [profile.nightly]
 slow-timeout = { period = "10s", terminate-after = 1 }
 failure-output = "immediate-final"
+fail-fast = false

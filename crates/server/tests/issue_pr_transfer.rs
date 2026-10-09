@@ -374,6 +374,12 @@ async fn run_case(case: Case) {
         terminal_ids.len(),
         "one backend session per spawned terminal",
     );
+    // The agent's MCP bearer, as spawn provisioning binds it: to the issue
+    // key it spawned under (#1837).
+    config.mcp.tokens().register(
+        "fold-agent-bearer",
+        lazybox_core::SessionKey::from(&issue_key),
+    );
     for key in &backend_keys {
         mock.emit(key, "scrollback-marker").await;
     }
@@ -392,6 +398,7 @@ async fn run_case(case: Case) {
                 cwd: None,
                 tool_name: None,
                 notification: None,
+                turn_result: None,
             },
         })
         .unwrap();
@@ -483,6 +490,13 @@ async fn run_case(case: Case) {
     assert!(
         rebadged.is_some(),
         "collapse must broadcast TerminalsRebadged issue→PR",
+    );
+    // #1837: the bearer follows the agent onto the PR row, or every MCP call
+    // it makes from here resolves to a workspace that no longer exists.
+    assert_eq!(
+        config.mcp.tokens().resolve("fold-agent-bearer"),
+        Some(pr_sk.clone()),
+        "the agent's MCP token must be rebadged with its terminal",
     );
     let merged = wait_for(
         &mut client,
@@ -1223,4 +1237,77 @@ async fn collapse_keeps_pr_session_with_uncommitted_work() {
     })
     .await
     .expect("deadline");
+}
+
+/// An issue's agent opens a PR that only *references* the issue ("refs #50",
+/// no closing keyword), so nothing folds the two rows. A spawn on the PR row
+/// then moves the agent — it owns the PR's branch — off the issue row. The
+/// issue row must follow it: before, it was left behind with the issue's
+/// title, no agent and a live working claim, so the user found an empty row
+/// and a "Start anyway?" prompt where their agent had been (#680 / #679).
+#[tokio::test]
+async fn moving_an_issues_agent_onto_its_pr_folds_the_issue_row_in() {
+    let _home = IsolatedConfigHome::new();
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let _upstream = seed_local_remote(&config, "o", "r");
+
+    let issue_task = gh_task("o/r#50", false, None, vec![]);
+    let issue_task_id = issue_task.id.clone();
+    let issue = Workspace::from_task(issue_task, chrono::Utc::now());
+    let issue_key = issue.key.clone();
+    save_workspace(&config, &issue);
+
+    let mut client = subscribed(config.clone()).await;
+    spawn_and_capture(
+        &mut client,
+        &issue_key,
+        TerminalKind::Agent("claude".into()),
+    )
+    .await;
+    let issue_now = load_workspace(&config, &issue_key).expect("issue row");
+    let branch = issue_now.sessions[0]
+        .worktree_branch
+        .clone()
+        .expect("the provisioned session records its branch");
+
+    // The PR the agent opened on that branch, referencing — not closing — the
+    // issue.
+    let pr_task = gh_task("o/r#51", true, Some(&branch), vec![]);
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&pr_task));
+    save_workspace(&config, &Workspace::from_task(pr_task, chrono::Utc::now()));
+
+    client
+        .send(Command::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: pr_key.as_str().into(),
+            session_id: None,
+            client_request_id: None,
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: None,
+            initial_prompt: Some("review this".into()),
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        })
+        .unwrap();
+
+    let folded = timeout(Duration::from_secs(5), async {
+        loop {
+            if load_workspace(&config, &issue_key).is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(folded.is_ok(), "the emptied issue row is folded away");
+    let pr = load_workspace(&config, &pr_key).expect("PR row");
+    assert_eq!(pr.sessions.len(), 1, "the agent is on the PR row");
+    assert!(
+        pr.gh_issues.iter().any(|t| t.id == issue_task_id),
+        "the issue now rides on the PR row: {:?}",
+        pr.gh_issues.iter().map(|t| &t.id).collect::<Vec<_>>()
+    );
 }

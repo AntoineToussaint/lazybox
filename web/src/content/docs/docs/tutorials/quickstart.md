@@ -139,7 +139,7 @@ Snippet bodies are submitted to the focused terminal. Start an agent with
 Now experience the fleet workflow instead of visiting each terminal:
 
 1. Make sure the sidebar has at least two workspaces. In `--test` mode, press
-   `x n` to create a second workspace under the seeded project. In a real
+   `x n` to create a second, repo-free floating workspace. In a real
    inbox, choose rows from two different repo groups.
 2. Start a coding agent in each workspace with `w w`, returning to the sidebar
    with `]]q` after each spawn.

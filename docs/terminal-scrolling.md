@@ -53,11 +53,21 @@ impl TerminalVt {
 }
 ```
 
-`ScrollRequest` is the entire vocabulary — `By(delta)`, `Top`, `Bottom`.
-`scroll` is the only caller of libghostty's `scroll_viewport` in the
-whole TUI; `scroll_viewport_has_a_single_owner` reads the source and
-fails the build if a second call appears anywhere else. No handler pokes
-a raw offset.
+`ScrollRequest` is the entire vocabulary — `By(delta)`, `Top`, `Bottom`,
+and `ToRow(row)`. `scroll` is the only caller of libghostty's
+`scroll_viewport` in the whole TUI; `scroll_viewport_has_a_single_owner`
+reads the source and fails the build if a second call appears anywhere
+else. No handler pokes a raw offset.
+
+`ToRow` is the only **absolute** verb and the only one no gesture
+produces: it exists for `restore_anchor` (below), which has to re-place
+the pin on a grid that was just rebuilt underneath it. It maps to
+libghostty's `GHOSTTY_SCROLL_VIEWPORT_ROW`, whose row space is the one
+`Scrollbar.offset` reports — so a position read off the VT round-trips
+back into it unchanged. Until #1909 the Rust binding exposed only
+TOP/BOTTOM/DELTA, so the client could *read* an absolute viewport
+position and not *write* one, and every restore was re-derived as a
+delta from wherever the viewport happened to be.
 
 Every surface funnels through it:
 
@@ -115,16 +125,94 @@ The scroll *mutation* for every one of those still funnels through the
 single owner (`TerminalVt::scroll`), so per-tile targeting and the
 no-silent-no-op guarantee compose rather than fight.
 
-## Where scroll state is initialised, mutated, or can (legitimately) reset
+## The other mutator: writes (#1909)
 
-- **Fresh spawn / reattach** — `make_slot`; viewport starts pinned at the
-  bottom. Identical init (see above).
-- **Resync after dropped output** (`resync_terminal`) and **hidden-buffer
-  overflow** (`flush_pending`) rebuild the parser from the daemon ring;
-  the viewport resets to the bottom. This is correct: the byte stream is
-  being reconstructed, and the ring is authoritative.
+The single owner above makes *scrolling* total and observable. It says
+nothing about what a **write** does to the pin it just moved — and a write
+is the other mutation of the viewport's meaning, because it changes the
+content the pin points into. `scroll()` moved the pin, `feed()` mutated
+what it pointed at, and the two shared no contract: no parked state in the
+type, nothing re-asserted after a write. That gap is why scrollback
+corruption kept coming back through #909, #1547, #1548, #1550 and #1554 —
+each of those treated it as a painting problem, and the paint path is
+sound (the widget distrusts libghostty's dirty flags and walks every row
+every frame, #239). Repaint correctness cannot fix an anchor nobody owns.
+
+`TerminalVt` now owns the pin's meaning across content mutation:
+
+```rust
+enum ViewportAnchor { Bottom, Parked { rows_above_bottom: u64 } }
+```
+
+- **Rows above the live bottom, not an absolute row.** An absolute row
+  names a position in one particular grid; a rebuild produces a grid whose
+  history above the tail has a different depth, so the same integer would
+  name different content. Distance from the tail survives a rebuild that
+  only changes what is *above* the tail — and holding that invariant is a
+  responsibility, not an assumption (see the straddle refusal below).
+- **`scroll()` sets it.** A move there is the user choosing a place to
+  read.
+- **`feed()` re-derives it.** Not re-imposes: libghostty holds a real
+  *content* pin and compensates across appends, so a viewport parked 7
+  rows up is 10 rows up after 3 lines arrive, still on the same rows. The
+  anchor follows that. Forcing the old 7 back would drag the user down the
+  buffer on every chunk. (Verified on #1909: park mid-scrollback, feed, and
+  the visible rows are byte-identical. The "ring eviction renumbers the
+  pin" theory was tested and refuted.)
+- **`restore_anchor()` re-places it**, absolutely, through the owner's
+  `ToRow` verb, computed against the new grid's own extent.
+
+### Where the grid is replaced, and what that does to the pin
+
+`TerminalSlot::rebuild_grid` is the one place a grid is thrown away, and
+its `GridPin` argument forces each site to *state* its policy instead of
+inheriting whatever a fresh parser does (which is: start at the bottom).
+
+- **Deep-scrollback capture adoption** (`apply_scrollback`) — `Keep`. The
+  user is mid-scroll; that is what triggered the fetch. The rebuild
+  deepens history above them and leaves the tail alone.
+- **Resync after dropped output** (`resync_terminal`) — `LiveBottom`. The
+  ring replay is a bounded tail of dropped output and may hold *less*
+  history than the grid it replaces, so no row in it reliably means "where
+  the user was". Returning to the tail is a decision here, not an
+  accident.
+- **A rebuild that fails** (libghostty allocation failure) leaves the grid
+  *and* the pin alone — degrading to the last coherent grid includes the
+  viewport the user was reading.
+- **Fresh spawn / reattach** — `make_slot`; the viewport starts at the
+  bottom, identical init for both (see above). **Hidden-buffer flush**
+  (`flush_pending`) is an ordinary `feed`, so the anchor is re-derived.
 - **`\x1b[3J`** (erase-scrollback) from the inner program legitimately
   empties scrollback → the next scroll reports `NoScrollback`. Not a bug.
+
+### Why a straddling batch refuses the capture
+
+`GridPin::Keep` is sound only while the rebuild leaves the live tail
+alone, because that tail is what the anchor is measured from. A delivered
+`TerminalOutput` is a **run** of chunks — the client coalesces adjacent
+output (`realm/model/helpers.rs::coalesce_adjacent_output`) and keeps only
+the run's `first_seq..=seq`, so the byte offset where one chunk inside it
+ends is unrecoverable. A retained batch is therefore wholly covered by the
+capture's watermark, wholly uncovered, or straddling it and unsplittable.
+
+Re-feeding a straddling batch whole re-draws rows the capture already
+holds. That is #1909's reported symptom twice over: the duplicated block
+(the second copy continuing on the capture's unterminated last row, so it
+reads as "truncated at the same word"), *and* a parked viewport dragged
+down by exactly the duplicated row count, because the tail the anchor
+measures from just grew. So a straddling batch refuses the capture, like a
+hole in the retained stream does: the local grid holds every byte and is
+only shallower, `scrollback_stale` is still set, and the next upward
+scroll re-captures. Declining costs depth for one visit; re-feeding costs
+correctness every time.
+
+### Asserting the distance is not asserting the pin
+
+The pre-#1909 regression test checked that the viewport's
+distance-from-bottom survived a capture adoption. It did — while the
+content at that distance moved. A viewport assertion compares the rendered
+rows (`viewport_rows` in the test module, read through the same render
+state the widget walks), not `grid_text` and not scrollbar arithmetic.
 
 ## Wheel ownership
 
@@ -161,16 +249,33 @@ lockstep:
   (`crates/server/src/backend/tmux.rs`), and the deep-scrollback fetch
   captures from `-S -{history-limit}`, so the fetch can never under-read
   what tmux was told to keep.
-- Each client VT sizes its `max_scrollback` from the same line count
-  (`CLIENT_SCROLLBACK_LINES` in `terminal_stack.rs`). libghostty caps
-  scrollback by **bytes** of page memory, not line count — the C header's
-  "number of lines" wording is misleading — so the line count is converted
-  through a per-line byte budget (`client_scrollback_bytes`). If the cap
-  were shallower, a deep fetch would replay the full history into the VT
-  but the parser would silently drop everything past its byte budget — the
+- Each client VT takes that same line count as its
+  `max_scrollback_lines` (`CLIENT_SCROLLBACK_LINES` in
+  `terminal_stack.rs`). libghostty now exposes a **real line limit**
+  (`GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES`); the older binding bounded
+  scrollback by bytes of page memory despite the C header's "number of
+  lines" wording, which is why `client_scrollback_bytes` still sets an
+  explicit byte backstop — a fresh terminal carries a modest *default*
+  byte limit that would otherwise bind long before a large line count is
+  reached. Both are set; whichever is hit first prunes. If the cap were
+  shallower than tmux's, a deep fetch would replay the full history into
+  the VT and the parser would silently drop everything past the cap — the
   deeper tmux history would never become scrollable. (The old flat
   `10_000` was ~10 KB, only a few hundred lines — a client-side bottleneck
   in its own right, #857.)
+
+  The line limit prunes at **page granularity**, so retention is an
+  estimate in one direction only: usually somewhat *higher* than asked
+  for, and it cannot go below one page. A small cap therefore reads far
+  above its own number, and that is the floor rather than an unenforced
+  cap. Measured on this tree at 120 cols (#1909): asking for 100 lines
+  and feeding 3 000 retains 229 rows, 30 000 retains 301, 120 000 retains
+  409. At production depth the limit is what binds —
+  `max_scrollback_lines: 10_000` fed 60 000 lines retains 9 709 — so
+  client VT history is bounded by the line limit, not only by the byte
+  backstop. `crates/libghostty-vt/tests/scrollback_limits.rs` pins both
+  directions, including
+  `a_shallow_line_limit_prunes_regardless_of_the_byte_ceiling`.
 
 Both come from **`terminal.scrollback_lines`** (default 50000). Raising
 it keeps more of a long session at the cost of per-pane RAM on the tmux

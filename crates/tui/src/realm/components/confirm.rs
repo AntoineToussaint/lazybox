@@ -1,11 +1,19 @@
 //! `Confirm` — yes/no prompt. tuirealm port of
 //! `tui_kit::widgets::ConfirmModal`.
 //!
-//! Returns `Msg::Confirmed(true)` on Y/Enter, `Msg::Confirmed(false)`
-//! on N. Esc maps to `Msg::ModalDismissed`. Unlike the tui-kit
-//! version, the boolean lives inside `Msg` rather than being passed
-//! via a generic `Done(Box<Any>)` payload — that's the whole point of
-//! tuirealm's typed Msg approach.
+//! `y` returns `Msg::Confirmed(true)` and `n` returns
+//! `Msg::Confirmed(false)`, always. `Enter` fires whichever side is
+//! highlighted, and for a destructive prompt *the user's config* chooses
+//! which that is, on the axis the prompt was raised from — see
+//! [`ConfirmSource`] and [`Confirm::from_source`], the one entry point
+//! every destructive mount site goes through. Benign prompts
+//! ([`Confirm::new`], [`Confirm::default_yes`]) always affirm;
+//! [`Confirm::default_no`] is the deliberate opt-out, for the handful of
+//! prompts that keep a hard No floor whatever the config says. Esc maps
+//! to `Msg::ModalDismissed`. Unlike the tui-kit version, the boolean
+//! lives inside `Msg` rather than being passed via a generic
+//! `Done(Box<Any>)` payload — that's the whole point of tuirealm's typed
+//! Msg approach.
 
 use crate::realm::DOUBLE_CLICK_WINDOW;
 use crate::realm::Msg;
@@ -23,12 +31,86 @@ use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use tuirealm::state::{State, StateValue};
 
+/// The chrome and `Enter` default of a mounted prompt, as one value — the
+/// *resolved* pair that [`ConfirmStyle::destructive_on`] produces from an
+/// axis and the user's config, and the value a re-mount reproduces.
+///
+/// Two independent booleans (`destructive`, `default_no`) admitted a
+/// fourth combination the component cannot represent — `default_no` implies
+/// the warning chrome — so `(destructive: false, default_no: true)` quietly
+/// produced a destructive modal the caller had not asked for. Three named
+/// states make the invalid pair unwritable, which matters most for the model's
+/// `PendingRemovalRisk`: its whole job is to rebuild a modal faithfully when the
+/// daemon's risk list lands, and it cannot do that for a state it can hold but
+/// the component cannot produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmStyle {
+    /// Neutral chrome; `Enter` fires Yes.
+    Benign,
+    /// Warning chrome; `Enter` fires Yes.
+    Destructive,
+    /// Warning chrome and `Enter` fires No — for a prompt a stray keystroke
+    /// must not answer.
+    Guarded,
+}
+
+/// Which axis of `ui.confirm_default` decides a destructive prompt's
+/// `Enter` side (issue #1921).
+///
+/// The question is never "how dangerous is this copy?" — every prompt here
+/// wears the warning chrome either way — but "was there a keystroke behind
+/// it?". #1900 answered it per call site and put all eight destructive
+/// prompts on No; seven of them had been opened by a chord the user
+/// pressed. The axis is the thing that actually differs, so it is the thing
+/// the config keys off, and the policy lives in
+/// [`ConfirmStyle::destructive_on`] rather than at eight mounts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmSource {
+    /// The user pressed a chord (`x x` archive, `g m` merge, `c` clear).
+    /// The chord *is* the intent, so `Enter` completing it is not a
+    /// surprise: `ui.confirm_default.destructive_shortcut`, `yes` by
+    /// default.
+    Shortcut,
+    /// The daemon pushed this prompt with no keystroke behind it — a row
+    /// is leaving and its agent is still running. There is no intent to
+    /// honour and the user may not even be reading it, so
+    /// `ui.confirm_default.event`, `no` by default. This is the case the
+    /// #1899 incident was about: four such prompts answered by a reflexive
+    /// Enter each, in 13 seconds.
+    Event,
+}
+
+impl ConfirmStyle {
+    /// The style a *destructive* prompt wears when `source` raised it,
+    /// under `defaults`. Warning chrome either way — the axis decides only
+    /// which button `Enter` fires.
+    ///
+    /// Exposed (rather than hidden inside [`Confirm::from_source`]) because
+    /// `PendingRemovalRisk` carries the resolved style so the in-place
+    /// re-mount that appends the daemon's risk list reproduces this
+    /// prompt's default instead of re-deriving it.
+    pub fn destructive_on(
+        source: ConfirmSource,
+        defaults: lazybox_config::ConfirmDefaults,
+    ) -> Self {
+        let enter = match source {
+            ConfirmSource::Shortcut => defaults.destructive_shortcut,
+            ConfirmSource::Event => defaults.event,
+        };
+        if enter.is_yes() {
+            ConfirmStyle::Destructive
+        } else {
+            ConfirmStyle::Guarded
+        }
+    }
+}
+
 /// Y/N confirmation prompt.
 pub struct Confirm {
     question: String,
     /// Currently-highlighted option. True = Yes, false = No. Initialized
-    /// from `default_yes` (or `default_no`); ←/→ arrows flip it; Enter
-    /// fires the highlighted side.
+    /// from the resolved [`ConfirmStyle`] (or a builder); ←/→ arrows flip
+    /// it; Enter fires the highlighted side.
     selected_yes: bool,
     /// Screen rect of the `[Y]es` / `[N]o` buttons, recorded on each
     /// `view()` so mouse clicks can be hit-tested against them.
@@ -38,10 +120,12 @@ pub struct Confirm {
     /// side (true = Yes) plus the click instant.
     last_click: Option<(bool, Instant)>,
     /// Whether this confirm guards a destructive / hard-to-undo action
-    /// (archive, merge, delete, close, reset). It does NOT change the
-    /// default button — every confirm defaults to Yes so the user can
-    /// move fast — it colors the modal (warning border + `⚠` title) so
-    /// the danger is unmistakable *before* pressing Enter.
+    /// (archive, merge, delete, close, reset). On its own it only colors
+    /// the modal (warning border + `⚠` title) so the danger is
+    /// unmistakable *before* pressing Enter; the default button stays Yes
+    /// so an action the user explicitly asked for is fast to accept.
+    /// [`Confirm::default_no`] adds the coloring *and* moves the default
+    /// to No, for the prompts where a stray Enter must not fire.
     destructive: bool,
 }
 
@@ -60,22 +144,39 @@ impl Confirm {
         }
     }
 
-    /// Mark this confirm as guarding a destructive / hard-to-undo action.
-    /// The default stays Yes (fast to accept an action you explicitly
-    /// asked for), but the modal renders with a warning border + `⚠`
+    /// Mark this confirm as guarding a destructive / hard-to-undo action,
+    /// with `Enter` on Yes: the modal renders with a warning border + `⚠`
     /// title so you can *see* it can destroy something before you commit.
+    ///
+    /// A mount site does not normally pick this directly — it is the Yes
+    /// half of what [`Confirm::from_source`] resolves, and reaching for it
+    /// by hand re-hardcodes the policy #1921 moved into the config. It
+    /// stays public for [`Self::styled`], which a re-mount calls with an
+    /// already-resolved [`ConfirmStyle`].
     pub fn destructive(mut self) -> Self {
         self.destructive = true;
         self.selected_yes = true;
         self
     }
 
-    /// Back-compat alias for the destructive marker: previously these
-    /// prompts defaulted to No; they now default to Yes and are
-    /// distinguished by the danger coloring instead. Kept so the call
-    /// sites don't churn.
-    pub fn default_no(self) -> Self {
-        self.destructive()
+    /// Mark this confirm destructive *and* put the default on No, so
+    /// `Enter` cancels and firing the action takes an explicit ←/Tab (or
+    /// `y`) first.
+    ///
+    /// This is the deliberate opt-out from [`Confirm::from_source`], not
+    /// the way a destructive prompt normally picks its default: it ignores
+    /// `ui.confirm_default`, so a user who sets `destructive_shortcut: yes`
+    /// still gets No here. Reserved for the few prompts whose Yes loses
+    /// something no re-clone brings back and whose chord did not ask for
+    /// that loss — the bulk worktree wipe, the inspector's dirty-worktree
+    /// delete, the rescope sweep's "delete these workspaces", and the
+    /// sandbox wizard's auto-connect step, where No is the recommended
+    /// answer rather than a guard. Each one says so where it mounts. For
+    /// anything else, go through [`Confirm::from_source`].
+    pub fn default_no(mut self) -> Self {
+        self.destructive = true;
+        self.selected_yes = false;
+        self
     }
 
     /// Make `Enter` default to "yes" (the default already). Retained for
@@ -83,6 +184,34 @@ impl Confirm {
     pub fn default_yes(mut self) -> Self {
         self.selected_yes = true;
         self
+    }
+
+    /// Build a prompt carrying `style`, for the callers that decide the
+    /// chrome and the default together and for the re-mount that has to
+    /// reproduce them.
+    pub fn styled(question: impl Into<String>, style: ConfirmStyle) -> Self {
+        let confirm = Self::new(question);
+        match style {
+            ConfirmStyle::Benign => confirm.default_yes(),
+            ConfirmStyle::Destructive => confirm.destructive(),
+            ConfirmStyle::Guarded => confirm.default_no(),
+        }
+    }
+
+    /// Build a destructive prompt raised from `source`, with the `Enter`
+    /// side taken from the user's `ui.confirm_default` on that axis.
+    ///
+    /// **The** entry point for a destructive confirm (#1921). Before it,
+    /// each of eight mount sites decided its own default and the config
+    /// key that should have decided them was parsed and read by nobody, so
+    /// the policy could only be changed by editing eight call sites — which
+    /// is how #1900 moved all eight to No while fixing one of them.
+    pub fn from_source(
+        question: impl Into<String>,
+        source: ConfirmSource,
+        defaults: lazybox_config::ConfirmDefaults,
+    ) -> Self {
+        Self::styled(question, ConfirmStyle::destructive_on(source, defaults))
     }
 
     /// Which button `Enter` currently fires (true = Yes). Reads the
@@ -360,23 +489,234 @@ mod tests {
         ");
     }
 
+    /// #1899: `default_no()` puts the highlight on No, so the modal that
+    /// kills a running agent cannot be answered by a reflexive Enter.
+    /// The `bold=false` on Yes is the same signal read the other way.
     #[test]
-    fn builders_set_the_initial_default() {
-        // Every builder now defaults Enter to Yes — `new`, `default_yes`,
-        // and the destructive marker (`destructive` / its `default_no`
-        // alias) alike. A destructive action's danger is shown by the
-        // warning coloring, not by defaulting to No, so the user can
-        // move fast.
-        assert!(Confirm::new("q").selected_yes());
-        assert!(Confirm::new("q").default_yes().selected_yes());
-        assert!(Confirm::new("q").destructive().selected_yes());
-        assert!(Confirm::new("q").default_no().selected_yes());
+    fn highlighted_button_snapshot_default_no() {
+        let mut c = Confirm::new("o/r#1 has 1 running terminal — kill and remove?").default_no();
+        insta::assert_snapshot!(highlight_snapshot(&mut c), @r"
+        YES: [Y]es  bold=false
+        NO : [N]o  bold=true
+        ");
+    }
+
+    /// `default_no()` keeps the danger chrome it inherited from
+    /// `destructive()` — the `⚠` title is on the border row — rather than
+    /// trading the warning for the safer default.
+    #[test]
+    fn default_no_keeps_the_warning_chrome() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        // The glyph is deliberately in the question too: the assertion pins
+        // it to the bordered title row, so a prompt that merely mentions ⚠
+        // cannot stand in for the chrome this test exists to guarantee.
+        let mut c = Confirm::new("⚠ Wipe every worktree?").default_no();
+        terminal.draw(|f| c.view(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row_has = |y: u16, sym: &str| (0..100u16).any(|x| buf[(x, y)].symbol() == sym);
+        let titled = (0..30u16)
+            .filter(|y| row_has(*y, "\u{26a0}") && row_has(*y, "\u{256d}"))
+            .count();
+        assert_eq!(
+            titled, 1,
+            "default_no keeps the ⚠ title on the modal's rounded top border",
+        );
+    }
+
+    /// #1899: Enter on a `default_no()` prompt cancels. This is the whole
+    /// point of the guard — before the fix it returned `Confirmed(true)`.
+    #[test]
+    fn enter_cancels_a_default_no_prompt() {
+        let mut c = Confirm::new("kill and remove?").default_no();
+        assert_eq!(
+            c.on(&Event::Keyboard(KeyEvent {
+                code: Key::Enter,
+                modifiers: KeyModifiers::empty(),
+            })),
+            Some(Msg::Confirmed(false)),
+        );
+    }
+
+    /// The guard is a default, not a lock: `y` still fires immediately and
+    /// ← moves the highlight back to Yes so Enter confirms.
+    #[test]
+    fn default_no_is_still_answerable_with_yes() {
+        let mut c = Confirm::new("kill and remove?").default_no();
+        assert_eq!(
+            c.on(&Event::Keyboard(KeyEvent {
+                code: Key::Char('y'),
+                modifiers: KeyModifiers::empty(),
+            })),
+            Some(Msg::Confirmed(true)),
+        );
+
+        let mut c = Confirm::new("kill and remove?").default_no();
+        assert_eq!(
+            c.on(&Event::Keyboard(KeyEvent {
+                code: Key::Left,
+                modifiers: KeyModifiers::empty(),
+            })),
+            None,
+        );
+        assert_eq!(
+            c.on(&Event::Keyboard(KeyEvent {
+                code: Key::Enter,
+                modifiers: KeyModifiers::empty(),
+            })),
+            Some(Msg::Confirmed(true)),
+        );
+    }
+
+    /// #1921: `from_source` is the one entry point for a destructive
+    /// prompt, and the axis it is given picks which config field decides.
+    /// Shipped defaults: a chord affirms, a pushed prompt does not.
+    #[test]
+    fn from_source_reads_the_axis_the_prompt_was_raised_on() {
+        let shipped = lazybox_config::ConfirmDefaults::default();
+        assert!(
+            Confirm::from_source("q", ConfirmSource::Shortcut, shipped).selected_yes(),
+            "a chord-raised prompt affirms under the shipped config",
+        );
+        assert!(
+            !Confirm::from_source("q", ConfirmSource::Event, shipped).selected_yes(),
+            "a daemon-pushed prompt does not",
+        );
+    }
+
+    /// Each field moves exactly its own axis, and neither moves the other —
+    /// the property that makes two keys worth having.
+    #[test]
+    fn each_config_field_flips_only_its_own_axis() {
+        use lazybox_config::{ConfirmDefault, ConfirmDefaults};
+
+        let cautious = ConfirmDefaults {
+            destructive_shortcut: ConfirmDefault::No,
+            event: ConfirmDefault::No,
+        };
+        assert!(!Confirm::from_source("q", ConfirmSource::Shortcut, cautious).selected_yes());
+        assert!(!Confirm::from_source("q", ConfirmSource::Event, cautious).selected_yes());
+
+        let fast = ConfirmDefaults {
+            destructive_shortcut: ConfirmDefault::Yes,
+            event: ConfirmDefault::Yes,
+        };
+        assert!(Confirm::from_source("q", ConfirmSource::Shortcut, fast).selected_yes());
+        assert!(Confirm::from_source("q", ConfirmSource::Event, fast).selected_yes());
+
+        // Crossed: the shortcut axis down, the event axis up.
+        let crossed = ConfirmDefaults {
+            destructive_shortcut: ConfirmDefault::No,
+            event: ConfirmDefault::Yes,
+        };
+        assert!(!Confirm::from_source("q", ConfirmSource::Shortcut, crossed).selected_yes());
+        assert!(Confirm::from_source("q", ConfirmSource::Event, crossed).selected_yes());
+    }
+
+    /// Whichever side the axis lands on, the prompt still *looks*
+    /// dangerous: the axis moves the default, never the chrome. A Yes
+    /// default that dropped the `⚠` would hide the danger exactly where it
+    /// is one keystroke away.
+    #[test]
+    fn the_axis_never_trades_away_the_warning_chrome() {
+        use lazybox_config::{ConfirmDefault, ConfirmDefaults};
+
+        for enter in [ConfirmDefault::Yes, ConfirmDefault::No] {
+            let defaults = ConfirmDefaults {
+                destructive_shortcut: enter,
+                event: enter,
+            };
+            for source in [ConfirmSource::Shortcut, ConfirmSource::Event] {
+                let c = Confirm::from_source("Wipe it?", source, defaults);
+                assert!(
+                    c.destructive,
+                    "{source:?} under {enter:?} keeps the warning chrome",
+                );
+            }
+        }
+    }
+
+    /// The resolver `PendingRemovalRisk` carries, so the in-place re-mount
+    /// reproduces a default rather than re-deriving one.
+    #[test]
+    fn destructive_on_resolves_to_a_style_a_remount_can_reproduce() {
+        use lazybox_config::{ConfirmDefault, ConfirmDefaults};
+
+        let shipped = ConfirmDefaults::default();
+        assert_eq!(
+            ConfirmStyle::destructive_on(ConfirmSource::Shortcut, shipped),
+            ConfirmStyle::Destructive,
+        );
+        assert_eq!(
+            ConfirmStyle::destructive_on(ConfirmSource::Event, shipped),
+            ConfirmStyle::Guarded,
+        );
+        let fast = ConfirmDefaults {
+            destructive_shortcut: ConfirmDefault::Yes,
+            event: ConfirmDefault::Yes,
+        };
+        assert_eq!(
+            ConfirmStyle::destructive_on(ConfirmSource::Event, fast),
+            ConfirmStyle::Destructive,
+        );
+        // Round-trip through `styled`, which is what the re-mount calls.
+        for style in [ConfirmStyle::Destructive, ConfirmStyle::Guarded] {
+            let fresh = Confirm::styled("q", style);
+            assert_eq!(
+                fresh.selected_yes(),
+                style == ConfirmStyle::Destructive,
+                "{style:?} round-trips through styled()",
+            );
+            assert!(fresh.destructive, "{style:?} keeps the chrome");
+        }
+    }
+
+    /// The whole chain, from a line in `~/.lazybox/config.yaml` to the
+    /// button `Enter` fires. #1921's defect was a parsed key nothing read,
+    /// and asserting the resolver against a hand-built `ConfirmDefaults`
+    /// would reproduce exactly that blind spot: the config could stop
+    /// reaching the resolver and every other test here would still pass.
+    #[test]
+    fn a_config_file_reaches_the_resolved_default() {
+        let cfg: lazybox_config::Config = serde_yaml::from_str(
+            "ui:\n  confirm_default:\n    destructive_shortcut: no\n    event: yes\n",
+        )
+        .expect("parse the ui block");
+        let defaults = cfg.resolved_ui().confirm_default;
+        assert!(
+            !Confirm::from_source("q", ConfirmSource::Shortcut, defaults).selected_yes(),
+            "`destructive_shortcut: no` from the file moves the chord axis to No",
+        );
+        assert!(
+            Confirm::from_source("q", ConfirmSource::Event, defaults).selected_yes(),
+            "`event: yes` from the file moves the pushed axis to Yes",
+        );
+
+        // And an empty config ships the policy the issue asked for.
+        let shipped = lazybox_config::Config::default()
+            .resolved_ui()
+            .confirm_default;
+        assert!(Confirm::from_source("q", ConfirmSource::Shortcut, shipped).selected_yes());
+        assert!(!Confirm::from_source("q", ConfirmSource::Event, shipped).selected_yes());
     }
 
     #[test]
-    fn enter_fires_yes_for_every_builder() {
+    fn builders_set_the_initial_default() {
+        // `new`, `default_yes` and the bare destructive marker default
+        // Enter to Yes — an action the user invoked is fast to accept, and
+        // `destructive` conveys the danger by coloring alone.
+        // `default_no` is the one builder that moves the default, and it
+        // keeps the coloring.
+        assert!(Confirm::new("q").selected_yes());
+        assert!(Confirm::new("q").default_yes().selected_yes());
+        assert!(Confirm::new("q").destructive().selected_yes());
+        assert!(!Confirm::new("q").default_no().selected_yes());
+        assert!(Confirm::new("q").default_no().destructive);
+    }
+
+    #[test]
+    fn enter_fires_yes_for_every_yes_builder() {
         // Bare Enter returns `Confirmed(true)` for benign, destructive,
-        // and explicit-yes prompts — they all default to Yes now.
+        // and explicit-yes prompts — every builder but `default_no`.
         for mut c in [
             Confirm::new("q"),
             Confirm::new("q").default_yes(),

@@ -249,6 +249,21 @@ pub const COMPOSING_CAP: usize = 8 * 1024;
 /// without being visually loud.
 const RECAP_PREFIX: &str = "you ▸ ";
 
+/// Whose message the pinned recap shows. It used to say `you ▸` for every
+/// entry; now that a sibling agent's message or lazybox's automation is
+/// recorded too, it names the sender instead of claiming the user wrote it.
+fn recap_prefix(source: &lazybox_ipc::PromptSource) -> String {
+    match source {
+        lazybox_ipc::PromptSource::Typed | lazybox_ipc::PromptSource::Snippet { .. } => {
+            RECAP_PREFIX.to_string()
+        }
+        lazybox_ipc::PromptSource::Agent { .. } | lazybox_ipc::PromptSource::Lazybox { .. } => {
+            let tag = crate::realm::model::prompt_source_tag(source).unwrap_or_default();
+            format!("{tag} ▸ ")
+        }
+    }
+}
+
 /// Client-side cap on the retained per-terminal prompt history. Keeps
 /// the optimistic (pre-reconnect) history bounded to match the daemon's
 /// own eviction; the authoritative capped list arrives on the next
@@ -545,7 +560,7 @@ pub enum ScrollOutcome {
 /// A viewport scroll request — the entire vocabulary the scroll owner
 /// (`TerminalVt::scroll`) accepts. Every scroll surface (wheel,
 /// `Shift-PgUp/PgDn`, `Shift-Home/End`, the per-tile hover scroll)
-/// speaks only these three verbs; nothing outside `TerminalVt::scroll`
+/// speaks only these verbs; nothing outside `TerminalVt::scroll`
 /// calls libghostty's `scroll_viewport` directly. That single choke
 /// point is what makes a silent no-op impossible (the #42/#371 promise):
 /// a request either moves the viewport or comes back with a typed
@@ -559,10 +574,61 @@ pub enum ScrollRequest {
     Top,
     /// Jump the viewport to the live bottom.
     Bottom,
+    /// Put the viewport on an **absolute** scrollback row — the row
+    /// space `scrollbar().offset` reports, so a position read back from
+    /// the VT can be written to it unchanged.
+    ///
+    /// Not a user-facing gesture: no key or wheel produces it. It exists
+    /// for `TerminalVt::restore_anchor`, which has to re-place the pin on
+    /// a grid that was just rebuilt underneath it. Every other verb is
+    /// relative, and a relative restore is only correct while the thing it
+    /// is relative to has not moved — which, across a rebuild, is exactly
+    /// what did move (#1909).
+    ToRow(u64),
+}
+
+/// Where a terminal's viewport is pinned, expressed in the one unit that
+/// still means something after the grid is rebuilt underneath it: rows
+/// between the bottom of the viewport and the live bottom.
+///
+/// This is the pin's *owner-side* representation, and it is deliberately
+/// not an absolute row. An absolute row names a position in one
+/// particular grid; a rebuild (a ring resync, a deep-scrollback capture
+/// adoption) produces a different grid whose history above the live
+/// content has a different depth, so the same integer names different
+/// content. Distance from the live bottom survives that, because a
+/// rebuild only ever changes the history *above* the live tail — an
+/// invariant [`TerminalSlot::rebuild_grid`] is responsible for holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewportAnchor {
+    /// Following the live tail: new output scrolls the view.
+    Bottom,
+    /// Parked `rows_above_bottom` rows above the live bottom. The user
+    /// is reading history and new output must not move what they see.
+    Parked { rows_above_bottom: u64 },
+}
+
+/// What a wholesale grid rebuild does to the viewport pin. Passed to
+/// [`TerminalSlot::rebuild_grid`] so each rebuild site *states* its
+/// policy instead of inheriting whatever a fresh parser happens to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridPin {
+    /// Re-assert the anchor the old grid carried: the user was reading
+    /// history and the rebuild only deepened what is above them.
+    Keep,
+    /// Return to the live tail on purpose, because the rebuild cannot
+    /// promise the old anchor still names anything.
+    LiveBottom,
 }
 
 /// Classify the observed state transition after a request that passed
 /// the empty-scrollback and boundary preflight checks.
+///
+/// An unchanged offset is [`ScrollOutcome::Stalled`] for every verb: the
+/// preflight has already filtered out the requests that legitimately
+/// cannot move (empty scrollback, already at the requested boundary,
+/// [`ScrollRequest::ToRow`] onto the row the viewport is already on), so
+/// a request that reaches here and does not move is a broken VT scroll.
 fn classify_scroll_transition(
     request: ScrollRequest,
     before: vt::terminal::Scrollbar,
@@ -582,6 +648,18 @@ fn classify_scroll_transition(
             total: after.total,
             len: after.len,
         }
+    }
+}
+
+/// The anchor a scrollbar reading describes: following the live tail, or
+/// parked that many rows above it. One definition, used by every site
+/// that records or re-derives the pin.
+fn anchor_of(bar: vt::terminal::Scrollbar) -> ViewportAnchor {
+    let rows_above_bottom = bar.total.saturating_sub(bar.offset.saturating_add(bar.len));
+    if rows_above_bottom == 0 {
+        ViewportAnchor::Bottom
+    } else {
+        ViewportAnchor::Parked { rows_above_bottom }
     }
 }
 
@@ -653,6 +731,25 @@ struct TerminalHit {
     offset: Option<u64>,
 }
 
+/// One tile divider as the last frame drew it (#1920). Recorded so a
+/// click can be resolved back to the split it belongs to without the
+/// hit-test re-walking the tree and re-deriving the same arithmetic —
+/// the drag must act on the geometry the user actually aimed at, which
+/// is the frame on screen, not a recomputation that may already
+/// disagree. Same reason `TerminalHit` records its rects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TileDividerHit {
+    /// Path to the split node, which is what [`lazybox_core::TileTree`]
+    /// addresses a ratio by.
+    path: Vec<u8>,
+    /// The 1-cell line the renderer painted.
+    line: Rect,
+    /// The split's whole rect — the denominator a pointer position is
+    /// turned into a percentage against.
+    container: Rect,
+    axis: lazybox_core::TileAxis,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RenderedClickTarget {
     pub(crate) terminal_id: TerminalId,
@@ -665,12 +762,14 @@ pub(crate) struct RenderedClickTarget {
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
-    /// `agent_id → label of that agent's DEFAULT model tier`
-    /// (`agents.<id>.models.default`, else the built-in default), fed by
-    /// [`Self::set_default_model_labels`]. A tab running its agent's
-    /// default tier renders no `◆` badge — the badge marks a deliberate
-    /// deviation, the same rule the sidebar row follows (#1502/#1745).
-    /// An agent with no resolvable default is absent, so its runs badge.
+    /// `agent_id → label of the strength that agent runs at` — the tier
+    /// `agents.<id>.models.default` names, resolved in that agent's own
+    /// menu and nowhere else, fed by
+    /// [`Self::set_default_model_labels`]. A tab running that strength
+    /// renders no `◆` badge — the badge marks a deliberate deviation, the
+    /// same rule the sidebar row follows (#1502/#1745). An agent whose
+    /// strength doesn't resolve is absent, so its runs badge; there is
+    /// deliberately no fall back to the built-in menu (#1797).
     default_model_labels: HashMap<String, String>,
     /// Bumped whenever the visible-set inputs change (slot
     /// membership / kinds / active session) — invalidates
@@ -771,11 +870,32 @@ pub struct TerminalStack {
     /// Cleared at the start of every render so removed terminals
     /// don't leave stale hit targets.
     tab_strip_hits: Vec<(usize, std::ops::Range<u16>, u16)>,
+    /// Column range and row of each tab's spend / headroom badge. A click
+    /// opens the Stats view; the badge sat outside the tab's own range.
+    usage_badge_hits: Vec<(std::ops::Range<u16>, u16)>,
     /// Per-tile mouse targets, populated each render — one entry per
     /// visible terminal. The full tile drives click-to-focus while its
     /// body preserves the narrower hover-to-scroll target. Cleared at
     /// the start of every render so a closed tile leaves no stale target.
     tile_hits: Vec<TerminalHit>,
+    /// Every tile divider the last frame painted, in render order
+    /// (#1920). Cleared and repopulated per frame alongside
+    /// `tile_hits`.
+    divider_hits: Vec<TileDividerHit>,
+    /// A refusal the pane needs the Model to say out loud — set when a
+    /// keystroke was dropped for a reason the user cannot see (#1920).
+    /// Drained by [`Self::take_input_refusal`]; the pane has no footer
+    /// of its own and only ever gets a `cmds` vec, so a notice has to
+    /// ride out through the Model the same way `take_open_description`
+    /// does.
+    input_refusal: Option<String>,
+    /// The divider currently being dragged, highlighted so the user can
+    /// see which line they grabbed. `None` outside a drag. This is the
+    /// only hover-style cue in the pane: an idle hover would need a
+    /// `MouseEventKind::Moved` arm, which the Model does not have, and
+    /// a redraw per pointer motion — see the PR for why that is not
+    /// "cheap" while the client hot paths are being budgeted.
+    dragging_divider: Option<Vec<u8>>,
     /// Last-focused terminal per session. Recorded when we leave a
     /// session so returning restores the pane the user was last on
     /// instead of snapping back to the first. Keyed by terminal id
@@ -1069,6 +1189,29 @@ impl UsageBadge {
     }
 }
 
+/// What [`TerminalStack::close_terminal`] did with a close request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseOutcome {
+    /// The slot was already exited, so it was removed locally with no command.
+    Removed,
+    /// `Close` was sent; the row disappears when `TerminalExited` arrives.
+    Requested,
+    /// A `Close` was already outstanding for this terminal, and was re-sent.
+    Retried,
+    /// No such terminal — nothing to close.
+    Unknown,
+}
+
+/// Read-only terminal metadata for compact client-side session lists.
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalSummary {
+    pub id: TerminalId,
+    pub session_key: SessionKey,
+    pub kind: TerminalKind,
+    pub state: lazybox_ipc::AgentState,
+    pub exited: bool,
+}
+
 struct TerminalSlot {
     session_key: SessionKey,
     kind: TerminalKind,
@@ -1244,11 +1387,89 @@ struct TerminalSlot {
     /// every wheel notch into a multi-megabyte capture, including the
     /// notches that land while the first reply is still in flight.
     last_scrollback_fetch: Option<std::time::Instant>,
+    /// Live output delivered since the current visit's capture was
+    /// armed. A capture is a snapshot of an older instant, and adopting
+    /// it replaces the whole grid — so without this the output that
+    /// arrived while the fetch was in flight was erased from the screen
+    /// and never re-delivered (`last_seq` had already moved past it).
+    /// [`Self::apply_scrollback`] re-feeds the part of this the capture
+    /// does not cover. `None` when no fetch is outstanding.
+    scrollback_catchup: Option<ScrollbackCatchup>,
 }
 
 /// Minimum spacing between two deep-scrollback re-fetches for the same
 /// terminal while its output keeps flowing.
 const SCROLLBACK_REFETCH_MIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Cap on the live output retained across one in-flight deep-scrollback
+/// fetch ([`ScrollbackCatchup`]). The window is a single request/reply
+/// round trip, so this is generous; past it the capture is refused
+/// outright rather than adopted with a hole in the middle.
+const SCROLLBACK_CATCHUP_CAP: usize = 4 * 1024 * 1024;
+
+/// Live output delivered while a deep-scrollback capture is in flight,
+/// kept per delivered batch so the capture's watermark can select the
+/// suffix it does not cover.
+#[derive(Default)]
+struct ScrollbackCatchup {
+    /// `(first_seq, end_seq, cols, rows, bytes)` per `TerminalOutput`
+    /// batch, in delivery order. The size travels with the bytes: a batch
+    /// is re-fed at the PTY size it was produced for, never the grid's
+    /// current one (#1547).
+    ///
+    /// `first_seq` is what makes the capture's watermark answerable. A
+    /// delivered batch is a *run* of chunks the client coalesced
+    /// (`coalesce_adjacent_output`), and coalescing keeps only the run's
+    /// seq range — the byte offset where any one chunk inside it ends is
+    /// gone. So a batch is either wholly covered by the capture, wholly
+    /// uncovered, or **straddling it and unsplittable**; without
+    /// `first_seq` the third case is indistinguishable from the second
+    /// and gets re-fed whole, re-drawing rows the capture already holds
+    /// (#1909).
+    batches: Vec<(u64, u64, u16, u16, Vec<u8>)>,
+    bytes: usize,
+    /// Set once what survives here is no longer a faithful continuation
+    /// of the capture in flight — [`SCROLLBACK_CATCHUP_CAP`] was hit and
+    /// a batch went unrecorded, or a ring resync rebuilt the grid from a
+    /// different baseline underneath it. Re-feeding either would corrupt
+    /// the grid, so the capture is refused instead and the local grid —
+    /// which holds every byte, just less history — stands.
+    unusable: bool,
+}
+
+impl ScrollbackCatchup {
+    fn record(&mut self, first_seq: u64, seq: u64, cols: u16, rows: u16, bytes: &[u8]) {
+        if self.unusable {
+            return;
+        }
+        if self.bytes.saturating_add(bytes.len()) > SCROLLBACK_CATCHUP_CAP {
+            self.invalidate();
+            return;
+        }
+        self.bytes += bytes.len();
+        self.batches
+            .push((first_seq, seq, cols, rows, bytes.to_vec()));
+    }
+
+    fn invalidate(&mut self) {
+        self.unusable = true;
+        self.batches.clear();
+        self.bytes = 0;
+    }
+
+    /// Whether any retained batch spans `watermark` — i.e. the capture
+    /// already drew some of that batch's chunks and not others.
+    ///
+    /// Such a batch cannot be split (see [`Self::batches`]), so there is
+    /// no lossless way to splice it onto the capture: re-feeding it whole
+    /// duplicates the covered prefix on screen, and dropping it loses
+    /// every chunk after the watermark. The capture is refused instead.
+    fn straddles(&self, watermark: u64) -> bool {
+        self.batches
+            .iter()
+            .any(|(first_seq, end_seq, _, _, _)| *first_seq <= watermark && *end_seq > watermark)
+    }
+}
 
 impl TerminalSlot {
     /// Whether an upward scroll should ship a `FetchScrollback`: the first
@@ -1263,6 +1484,26 @@ impl TerminalSlot {
             && self
                 .last_scrollback_fetch
                 .is_none_or(|at| at.elapsed() >= SCROLLBACK_REFETCH_MIN)
+    }
+
+    /// Mark a deep-scrollback capture as outstanding and start retaining
+    /// the live output it will race. Stamped at the request, not the
+    /// reply: the notches that land while the capture is in flight must
+    /// not each ship another multi-megabyte fetch (11 in 700 ms was
+    /// observed).
+    fn arm_scrollback_fetch(&mut self) {
+        self.deep_scrollback_requested = true;
+        self.last_scrollback_fetch = Some(std::time::Instant::now());
+        self.scrollback_catchup = Some(ScrollbackCatchup::default());
+    }
+
+    /// The viewport is back at the live bottom. The next visit re-fetches
+    /// so its history is current, and retaining output for a capture that
+    /// may never arrive — a raw-PTY pane answers `FetchScrollback` with
+    /// nothing at all — stops here.
+    fn end_scrollback_visit(&mut self) {
+        self.deep_scrollback_requested = false;
+        self.scrollback_catchup = None;
     }
 
     /// Append one char to the composing buffer when it fits within
@@ -1352,6 +1593,67 @@ impl TerminalSlot {
                 self.vt.feed(&bytes[start..end]);
             }
         }
+    }
+
+    /// Replace this slot's grid wholesale, stating in one place what
+    /// happens to the viewport pin.
+    ///
+    /// Two paths rebuild a grid — the ring replay in
+    /// [`TerminalStack::resync_terminal`] and the deep-scrollback capture
+    /// adoption in [`TerminalStack::apply_scrollback`] — and a rebuild is
+    /// the one content mutation [`TerminalVt::feed`] cannot cover: the
+    /// parser that held the pin is gone, and the fresh one starts at the
+    /// live bottom. Both come through here so neither can drop the user's
+    /// place by omission, which is how #1909 kept coming back.
+    ///
+    /// `pin` is the policy, and it is an argument rather than a default
+    /// because the two sites genuinely differ:
+    ///
+    /// - [`GridPin::Keep`] for the capture adoption. It is sound only
+    ///   because that rebuild grows history *above* the live tail and
+    ///   leaves the tail itself alone — the invariant the anchor's unit
+    ///   (rows above the bottom) is measured against. A rebuild that
+    ///   changes the tail breaks the anchor's meaning, which is why a
+    ///   capture whose racing output cannot be re-fed without
+    ///   re-drawing rows is refused rather than adopted.
+    /// - [`GridPin::LiveBottom`] for the ring resync. That replay is a
+    ///   bounded tail of dropped output and may hold *less* history than
+    ///   the grid it replaces, so no row in it reliably means "where the
+    ///   user was". Returning to the tail is a decision, not an accident
+    ///   (`docs/terminal-scrolling.md`).
+    /// `rebuild` returns whether it actually replaced the grid. `false`
+    /// leaves the pin and the cached frame untouched: a rebuild that
+    /// could not happen (a libghostty allocation failure) must degrade to
+    /// the last coherent grid *including* the viewport the user was on,
+    /// not snap them somewhere on the way out.
+    fn rebuild_grid(&mut self, pin: GridPin, rebuild: impl FnOnce(&mut Self) -> bool) -> bool {
+        let carried = self.vt.anchor;
+        if !rebuild(self) {
+            return false;
+        }
+        // The rebuild's own feeds re-derived the anchor against the fresh
+        // grid, where it means nothing yet — restore the policy's value
+        // and then put the pin on it.
+        self.vt.anchor = match pin {
+            GridPin::Keep => carried,
+            GridPin::LiveBottom => ViewportAnchor::Bottom,
+        };
+        let outcome = self.vt.restore_anchor();
+        if matches!(
+            outcome,
+            ScrollOutcome::Stalled { .. } | ScrollOutcome::StateUnavailable
+        ) {
+            tracing::error!(
+                ?pin,
+                ?outcome,
+                anchor = ?self.vt.anchor,
+                "viewport anchor could not be re-asserted after a grid rebuild"
+            );
+        }
+        // A fresh parser restarts its revision counter — a stale cached
+        // frame keyed to the old counter must never blit.
+        self.last_frame_rev = None;
+        true
     }
 
     /// The daemon stamped its PTY as `cols` × `rows`: size the grid to
@@ -1532,6 +1834,23 @@ struct TerminalVt {
     /// paint, the grid literally cannot differ — skipping the full
     /// per-cell FFI walk is sound (2026-08-19 audit, U1).
     content_rev: u64,
+    /// Where the user has parked this terminal's viewport — the pin's
+    /// meaning, owned here rather than re-derived at each call site.
+    ///
+    /// libghostty owns the pin *mechanically* (there is still no
+    /// lazybox-side offset field; `scrollbar()` is read on demand) and it
+    /// holds a real content pin across appends, compensating when the
+    /// ring evicts the oldest rows. What it cannot do is survive its own
+    /// replacement: a rebuild throws the grid away and the fresh parser
+    /// starts at the live bottom. This field is what carries the user's
+    /// place across that boundary, and it is the contract [`Self::feed`]
+    /// and [`Self::scroll`] state about each other — `scroll` moves the
+    /// pin and records where it put it, `feed` mutates the content under
+    /// the pin and re-derives the anchor so it keeps naming the same
+    /// place. Before #1909 neither said anything about the other: the
+    /// choke point made *scrolling* total and observable and left the
+    /// pin's meaning across *writes* owned by nobody.
+    anchor: ViewportAnchor,
     /// Deterministic fault injection for the resync retry contract.
     #[cfg(test)]
     fail_next_reset: bool,
@@ -1560,15 +1879,115 @@ impl TerminalVt {
             shadow: None,
             last_visible_cursor: None,
             content_rev: 0,
+            anchor: ViewportAnchor::Bottom,
             #[cfg(test)]
             fail_next_reset: false,
             _not_send: std::marker::PhantomData,
         }))
     }
 
+    /// Write `bytes` into the parser, re-deriving the viewport anchor
+    /// while the viewport is PARKED and not otherwise.
+    ///
+    /// A write is the other mutation of the viewport's meaning: it moves
+    /// the content the pin points into. libghostty keeps the pin on the
+    /// same *content* across an append (verified on #1909: park
+    /// mid-scrollback, feed, and the visible rows are byte-identical), so
+    /// while parked the anchor is **re-derived, never re-imposed** — a
+    /// viewport that was 5 rows above the bottom is 8 rows above it after
+    /// 3 lines arrive, and that is correct, not drift. Forcing the old
+    /// number back would be the bug: it would drag the user down the
+    /// buffer on every chunk. That is the case [`Self::anchor`] exists
+    /// for, and it is what gives the rebuild paths a trustworthy value to
+    /// re-assert instead of a one-shot reading taken whenever they happen
+    /// to run.
+    ///
+    /// **Following the tail, the read is skipped entirely** (#1918).
+    /// Appending cannot un-park a viewport already at the live bottom: it
+    /// stays at the bottom, so the cached `Bottom` is already what a read
+    /// would return. `following_a_tail_is_equivalent_to_re_deriving` in
+    /// `tests/terminal_hot_paths.rs` holds that equivalence against
+    /// escape-heavy traffic (scroll regions, an alt-screen round trip, a
+    /// hard reset) rather than leaving it as an argument, and entering the
+    /// parked state goes through [`Self::scroll`], which reads anyway — so
+    /// no transition is missed by not reading here.
+    ///
+    /// The reason is the contract, not a measured cost, and the
+    /// distinction matters for whoever edits this next.
+    /// `vt::Terminal::scrollbar`'s own doc says "arbitrary pins are
+    /// expensive … not too frequently", and this is the hottest path in
+    /// the client — every output chunk of every terminal — which is why
+    /// #1910 doing it per write was wrong. But measured
+    /// (`make bench-cpu`) the call is **~5 ns of CPU at any viewport
+    /// depth**, against ~960 ns for the `vt_write` beside it, so it was
+    /// never what made typing feel slow: that box was at load average 75.
+    /// The warning is the implementation's licence to become expensive,
+    /// and a per-chunk path built on "it happens to be 5 ns today" breaks
+    /// silently the day it is not. Keep it off this path for that reason,
+    /// and do not spend complexity shaving the remaining calls.
     fn feed(&mut self, bytes: &[u8]) {
         self.content_rev = self.content_rev.wrapping_add(1);
         self.terminal.vt_write(bytes);
+        if matches!(self.anchor, ViewportAnchor::Parked { .. }) {
+            self.observe_anchor();
+        }
+    }
+
+    /// The ONE place this crate reads libghostty's scrollbar.
+    ///
+    /// Routing every read through here is what makes the derivation
+    /// countable, and so what makes the hot-path budgets in
+    /// `crates/tui/AGENTS.md` assertable instead of aspirational
+    /// (#1919). `tests/terminal_hot_paths.rs::
+    /// scrollbar_reads_have_a_single_counted_owner` brace-matches this
+    /// body and fails the build on a raw `.terminal.scrollbar()` anywhere
+    /// else in the crate's sources — the same mechanical backstop
+    /// `scroll_viewport` has had since #371.
+    fn scrollbar(&self) -> vt::error::Result<vt::terminal::Scrollbar> {
+        lazybox_tui_term::vt_budget::record_scrollbar();
+        self.terminal.scrollbar()
+    }
+
+    /// Re-derive [`Self::anchor`] from the live scrollbar. Called after
+    /// every mutation that can move the viewport or the content under it.
+    /// A terminal whose viewport sits at (or past) the live bottom is
+    /// following the tail; anything else is parked.
+    ///
+    /// A scrollbar read that fails leaves the previous anchor in place:
+    /// a transient FFI error must not silently convert "parked" into
+    /// "following the tail" and snap the user to the bottom on the next
+    /// rebuild.
+    fn observe_anchor(&mut self) {
+        let Ok(bar) = self.scrollbar() else {
+            return;
+        };
+        self.anchor = anchor_of(bar);
+    }
+
+    /// Put the viewport back where [`Self::anchor`] says the user was,
+    /// after the grid underneath it was replaced.
+    ///
+    /// Goes through the scroll owner like every other viewport movement,
+    /// using the absolute [`ScrollRequest::ToRow`] verb: the target is
+    /// computed from the *new* grid's own extent, so it does not depend
+    /// on where the fresh parser happened to leave the pin. The previous
+    /// shape — a `By(-distance)` delta that was only correct because a
+    /// fresh grid starts at the bottom — is what made every restore a
+    /// guess (#1909, VERIFIED 1: the client could read an absolute
+    /// position and not write one).
+    fn restore_anchor(&mut self) -> ScrollOutcome {
+        let rows_above_bottom = match self.anchor {
+            ViewportAnchor::Bottom => return self.scroll(ScrollRequest::Bottom),
+            ViewportAnchor::Parked { rows_above_bottom } => rows_above_bottom,
+        };
+        let Ok(bar) = self.scrollbar() else {
+            tracing::error!("terminal scroll state unavailable restoring the viewport anchor");
+            return ScrollOutcome::StateUnavailable;
+        };
+        let max_offset = bar.total.saturating_sub(bar.len);
+        self.scroll(ScrollRequest::ToRow(
+            max_offset.saturating_sub(rows_above_bottom),
+        ))
     }
 
     /// THE one and only mutation of this terminal's viewport pin. Every
@@ -1582,11 +2001,18 @@ impl TerminalVt {
     /// silently no-op.
     /// That single choke point is the #42/#371 encapsulation: one owner
     /// of scroll state, and it cannot fail quietly.
+    ///
+    /// It is also where [`Self::anchor`] is *set*: a move here is the
+    /// user choosing a place to read, and every content mutation after it
+    /// only re-derives the anchor to keep naming that same place
+    /// ([`Self::feed`]). That pairing is the half #371 left open — the
+    /// owner made scrolling total and observable, and said nothing about
+    /// what a write does to the pin it had just moved (#1909).
     fn scroll(&mut self, request: ScrollRequest) -> ScrollOutcome {
         if matches!(request, ScrollRequest::By(0)) {
             return ScrollOutcome::Noop;
         }
-        let Ok(before) = self.terminal.scrollbar() else {
+        let Ok(before) = self.scrollbar() else {
             tracing::error!(?request, "terminal scroll state unavailable before request");
             return ScrollOutcome::StateUnavailable;
         };
@@ -1596,6 +2022,16 @@ impl TerminalVt {
         }
 
         let max_offset = before.total.saturating_sub(before.len);
+        // An absolute request is clamped to the grid it is being applied
+        // to before anything else looks at it, so the preflight below and
+        // the outcome classification both reason about the row the
+        // viewport will actually land on rather than the one asked for.
+        // libghostty clamps too; doing it here as well is what keeps a
+        // clamped request from being reported as `Stalled`.
+        let request = match request {
+            ScrollRequest::ToRow(row) => ScrollRequest::ToRow(row.min(max_offset)),
+            other => other,
+        };
         let boundary = match request {
             ScrollRequest::By(delta) if delta < 0 && before.offset == 0 => {
                 Some(ScrollBoundary::Top)
@@ -1615,6 +2051,12 @@ impl TerminalVt {
                 len: before.len,
             };
         }
+        // The viewport is already on the requested row: nothing to do,
+        // and reporting it as `Stalled` would make a correct restore look
+        // like a broken VT scroll.
+        if matches!(request, ScrollRequest::ToRow(row) if row == before.offset) {
+            return ScrollOutcome::Noop;
+        }
 
         self.content_rev = self.content_rev.wrapping_add(1);
         match request {
@@ -1627,11 +2069,22 @@ impl TerminalVt {
             ScrollRequest::Bottom => self
                 .terminal
                 .scroll_viewport(vt::terminal::ScrollViewport::Bottom),
+            // The absolute verb (#1909): the row space is `scrollbar()`'s
+            // own, so the pin lands exactly where it was read from.
+            ScrollRequest::ToRow(row) => {
+                self.terminal
+                    .scroll_viewport(vt::terminal::ScrollViewport::Row(
+                        usize::try_from(row).unwrap_or(usize::MAX),
+                    ))
+            }
         }
-        let Ok(after) = self.terminal.scrollbar() else {
+        let Ok(after) = self.scrollbar() else {
             tracing::error!(?request, "terminal scroll state unavailable after request");
             return ScrollOutcome::StateUnavailable;
         };
+        // The user moved the pin deliberately: this is where the anchor
+        // is set, and every later write only re-derives it.
+        self.anchor = anchor_of(after);
         let outcome = classify_scroll_transition(request, before, after);
         if let ScrollOutcome::Stalled {
             offset, total, len, ..
@@ -1705,7 +2158,11 @@ impl TerminalStack {
             abandoned_resumes: HashSet::new(),
             swallow_repeats: false,
             tab_strip_hits: Vec::new(),
+            usage_badge_hits: Vec::new(),
             tile_hits: Vec::new(),
+            divider_hits: Vec::new(),
+            input_refusal: None,
+            dragging_divider: None,
             last_focused: HashMap::new(),
             closing: HashSet::new(),
             dead_on_arrival: DEFAULT_DEAD_ON_ARRIVAL,
@@ -2294,6 +2751,22 @@ impl TerminalStack {
         self.active_tab_idx
     }
 
+    pub(crate) fn terminal_summaries(&self) -> Vec<TerminalSummary> {
+        let mut rows: Vec<_> = self
+            .terminals
+            .iter()
+            .map(|(id, slot)| TerminalSummary {
+                id: *id,
+                session_key: slot.session_key.clone(),
+                kind: slot.kind.clone(),
+                state: slot.agent_state,
+                exited: slot.exited.is_some(),
+            })
+            .collect();
+        rows.sort_by_key(|row| row.id.0);
+        rows
+    }
+
     pub fn terminal_count(&self) -> usize {
         self.terminals.len()
     }
@@ -2317,6 +2790,17 @@ impl TerminalStack {
             return false;
         };
         self.terminal_tracks_mouse(id)
+    }
+
+    /// True when `id`'s inner program has enabled bracketed paste
+    /// (DECSET 2004) and therefore parses `ESC[200~` / `ESC[201~`
+    /// instead of printing them. Unknown terminals read as `false`:
+    /// unframed bytes are always understood, framing bytes are not.
+    pub fn terminal_accepts_bracketed_paste(&self, id: TerminalId) -> bool {
+        self.terminals
+            .get(&id)
+            .and_then(|s| s.vt.terminal.mode(vt::terminal::Mode::BRACKETED_PASTE).ok())
+            .unwrap_or(false)
     }
 
     /// True when `id`'s inner program has enabled terminal mouse tracking.
@@ -2407,7 +2891,7 @@ impl TerminalStack {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get(&id)?;
         let screen = slot.vt.terminal.active_screen().ok();
-        let bar = slot.vt.terminal.scrollbar().ok()?;
+        let bar = slot.vt.scrollbar().ok()?;
         Some(format!(
             "screen={:?} total={} offset={} len={}",
             screen, bar.total, bar.offset, bar.len,
@@ -2428,8 +2912,7 @@ impl TerminalStack {
         // (#393) — jumping straight to the top is the strongest
         // possible "show me the history" signal.
         if slot.exited.is_none() && slot.wants_scrollback_fetch() {
-            slot.deep_scrollback_requested = true;
-            slot.last_scrollback_fetch = Some(std::time::Instant::now());
+            slot.arm_scrollback_fetch();
             self.pending_scrollback_fetch = Some(id);
         }
         outcome
@@ -2445,10 +2928,135 @@ impl TerminalStack {
             return ScrollOutcome::NoTerminal;
         };
         let outcome = slot.vt.scroll(ScrollRequest::Bottom);
-        // Back at the live bottom — this scrollback visit is over; see
-        // `scroll_terminal`.
-        slot.deep_scrollback_requested = false;
+        slot.end_scrollback_visit();
         outcome
+    }
+
+    /// Color for the divider at `path`: the accent while it is being
+    /// dragged, the pane's own chrome otherwise. The one affordance
+    /// that says "this line is the thing you have hold of".
+    fn divider_color(&self, path: &[u8], chrome: Color) -> Color {
+        match &self.dragging_divider {
+            Some(active) if active.as_slice() == path => crate::theme::current().accent,
+            _ => chrome,
+        }
+    }
+
+    /// Resolve `(col, row)` to the tile divider under it, if any
+    /// (#1920). Returns the path of the split that divider belongs to,
+    /// which is how [`lazybox_core::TileTree`] addresses its ratio.
+    ///
+    /// Tolerance is ±1 cell, giving the same 3-cell grab zone the
+    /// sidebar and activity splitters use (`hit_test_splitter` in
+    /// `realm/layout.rs`) — a 1-cell line is not something a pointer
+    /// lands on reliably, and a divider that needs a pixel-perfect aim
+    /// reads as not draggable at all.
+    ///
+    /// Later dividers win on an overlap: nested splits are pushed after
+    /// their parents, so where a child's divider ends within a cell of
+    /// its parent's the user gets the inner one, which is the smaller
+    /// and harder target.
+    pub fn hit_test_tile_divider(&self, col: u16, row: u16) -> Option<Vec<u8>> {
+        self.divider_hits
+            .iter()
+            .rev()
+            .find(|hit| {
+                let line = hit.line;
+                match hit.axis {
+                    lazybox_core::TileAxis::Horizontal => {
+                        col + 1 >= line.x
+                            && col <= line.x + 1
+                            && row >= line.y
+                            && row < line.y + line.height
+                    }
+                    lazybox_core::TileAxis::Vertical => {
+                        row + 1 >= line.y
+                            && row <= line.y + 1
+                            && col >= line.x
+                            && col < line.x + line.width
+                    }
+                }
+            })
+            .map(|hit| hit.path.clone())
+    }
+
+    /// Mark `path` as the divider under an active drag so the next
+    /// frame paints it accented. Idempotent.
+    pub fn begin_divider_drag(&mut self, path: Vec<u8>) {
+        self.dragging_divider = Some(path);
+    }
+
+    /// End a divider drag. Returns `true` when one was in progress, so
+    /// the caller knows to redraw the un-accented line and to persist
+    /// the layout ONCE — a drag delivers a position per pointer motion,
+    /// and a `Command::SetSessionLayout` per motion would put the
+    /// daemon's workspace writer on the mouse.
+    pub fn end_divider_drag(&mut self) -> bool {
+        self.dragging_divider.take().is_some()
+    }
+
+    /// Move the divider at `path` to follow the pointer. Returns `true`
+    /// when the stored ratio actually changed.
+    ///
+    /// The percentage is taken against the rect the frame drew that
+    /// split into, so a drag inside a nested split is relative to its
+    /// own container and not to the whole pane. Deliberately does NOT
+    /// persist: see [`Self::end_divider_drag`].
+    pub fn drag_tile_divider(&mut self, path: &[u8], col: u16, row: u16) -> bool {
+        let Some(hit) = self
+            .divider_hits
+            .iter()
+            .find(|hit| hit.path == path)
+            .cloned()
+        else {
+            return false;
+        };
+        let lazybox_core::SessionLayout::Splits { tree, .. } = &mut self.layout else {
+            return false;
+        };
+        let (span, rel) = match hit.axis {
+            lazybox_core::TileAxis::Horizontal => (
+                hit.container.width,
+                col.saturating_sub(hit.container.x) as u32,
+            ),
+            lazybox_core::TileAxis::Vertical => (
+                hit.container.height,
+                row.saturating_sub(hit.container.y) as u32,
+            ),
+        };
+        if span == 0 {
+            return false;
+        }
+        let pct = (rel * 100 / span as u32).min(100) as u8;
+        tree.set_ratio_at(path, pct)
+    }
+
+    /// Move the divider nearest the focused tile one step in `dir` —
+    /// the keyboard half of the same gesture (`]]Shift-<arrow>`).
+    /// Returns the label of the divider moved so the caller can say
+    /// what happened, or `None` when no divider lies that way or the
+    /// ratio is already clamped.
+    ///
+    /// `step` is `ui.split_step_percent`, the same knob the sidebar and
+    /// activity splitters nudge by, so one tap means the same amount of
+    /// movement everywhere in the UI.
+    pub fn resize_focused_divider(
+        &mut self,
+        dir: lazybox_core::TileDirection,
+        step: i16,
+        cmds: &mut Vec<Command>,
+    ) -> Option<&'static str> {
+        let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout else {
+            return None;
+        };
+        let focused = focused.clone();
+        let moved = tree.resize_toward(&focused, dir, step)?;
+        let axis = tree.axis_at(&moved)?;
+        self.persist_layout(cmds);
+        Some(match axis {
+            lazybox_core::TileAxis::Horizontal => "columns",
+            lazybox_core::TileAxis::Vertical => "rows",
+        })
     }
 
     /// Did the user click on a terminal-tab label? Returns the tab
@@ -2462,6 +3070,14 @@ impl TerminalStack {
             .iter()
             .find(|(_, range, hit_row)| *hit_row == row && range.contains(&col))
             .map(|(idx, _, _)| *idx)
+    }
+
+    /// Did the user click a tab's spend / headroom badge? The caller opens
+    /// the Stats view.
+    pub fn usage_badge_at(&self, col: u16, row: u16) -> bool {
+        self.usage_badge_hits
+            .iter()
+            .any(|(range, hit_row)| *hit_row == row && range.contains(&col))
     }
 
     /// Terminal whose tile the point `(col, row)` lands in, from the
@@ -2568,7 +3184,6 @@ impl TerminalStack {
                 .terminals
                 .get(&id)?
                 .vt
-                .terminal
                 .scrollbar()
                 .ok()
                 .map(|b| b.offset),
@@ -2896,6 +3511,123 @@ impl TerminalStack {
         ))
     }
 
+    /// Screen-row budget for one clipboard snapshot.
+    ///
+    /// A pane retains up to `terminal.scrollback_lines` rows (50_000 by
+    /// default — see [`client_scrollback_lines`]), and both halves of the
+    /// copy picker walk the window cell by cell through libghostty. Scanning
+    /// all of it cost 374ms on the render thread and produced 11_039
+    /// candidate rows on a 50_001-row x 120-col pane (measured, release).
+    /// A clipboard picker only ever wants the recent end of a session, so the
+    /// window is bounded here rather than at the caller: nothing downstream
+    /// can re-widen it.
+    const COPY_SNAPSHOT_ROWS: usize = 4_000;
+
+    /// The window one clipboard snapshot covers: its first screen row, and
+    /// how many logical lines it holds.
+    ///
+    /// Both halves of the picker number positions from line 0 of *this*
+    /// window — [`Self::copy_lines`] by dropping the formatter lines above it,
+    /// [`Self::positioned_links`] by starting its scan at the row — so a
+    /// block and a link on the same line sort together. The two agree while
+    /// one formatter line is one unwrapped row, which is the same equivalence
+    /// the cursor calculation below already rests on; `trim: true` can drop
+    /// trailing blank lines, which skews the *ordering* of interleaved items
+    /// by those few lines and never the text that gets copied.
+    fn copy_window(&mut self, id: TerminalId) -> Option<(u32, usize)> {
+        let slot = self.terminals.get_mut(&id)?;
+        slot.flush_pending();
+        let terminal = &slot.vt.terminal;
+        let total = terminal.total_rows().ok()?;
+        if total == 0 {
+            return Some((0, 0));
+        }
+        let last = (total - 1) as u32;
+        let wrapped = |y: u32| {
+            terminal
+                .grid_ref(vt::terminal::Point::Screen(vt::terminal::PointCoordinate {
+                    x: 0,
+                    y,
+                }))
+                .ok()
+                .and_then(|grid| grid.row().ok())
+                .and_then(|row| row.is_wrapped().ok())
+                .unwrap_or(false)
+        };
+        let mut start = total.saturating_sub(Self::COPY_SNAPSHOT_ROWS) as u32;
+        // Never begin mid-line: when the row above the window is soft-wrapped,
+        // this row continues text the window cannot see, so step forward to
+        // the next line boundary instead of copying a fragment.
+        while start > 0 && start < last && wrapped(start - 1) {
+            start += 1;
+        }
+        // One logical line per unwrapped row, plus a trailing partial line
+        // when the window ends mid-wrap — the same rule `positioned_links`
+        // flushes on, so the two line counts cannot disagree.
+        let mut lines = (start..=last).filter(|y| !wrapped(*y)).count();
+        if wrapped(last) {
+            lines += 1;
+        }
+        Some((start, lines))
+    }
+
+    /// Snapshot loaded terminal text for a line-range clipboard picker.
+    /// Soft wraps are joined; hard line breaks, blank lines and leading
+    /// indentation are retained. The cursor starts at the current viewport.
+    /// No viewport or PTY state is changed. Trailing screen padding is trimmed.
+    /// Bounded to the `copy_window` tail of the history, not the whole
+    /// retained scrollback.
+    pub fn copy_lines(&mut self, id: TerminalId) -> Option<(Vec<String>, usize)> {
+        let (_, budget) = self.copy_window(id)?;
+        self.copy_lines_within(id, budget)
+    }
+
+    fn copy_lines_within(&mut self, id: TerminalId, budget: usize) -> Option<(Vec<String>, usize)> {
+        let slot = self.terminals.get_mut(&id)?;
+        slot.flush_pending();
+        let terminal = &slot.vt.terminal;
+        let offset = terminal.scrollbar().ok()?.offset;
+        let mut cursor = 0usize;
+        for y in 0..offset {
+            let row = terminal
+                .grid_ref(vt::terminal::Point::Screen(vt::terminal::PointCoordinate {
+                    x: 0,
+                    y: y as u32,
+                }))
+                .ok()?
+                .row()
+                .ok()?;
+            if !row.is_wrapped().unwrap_or(false) {
+                cursor += 1;
+            }
+        }
+        let mut formatter = vt::fmt::Formatter::new(
+            terminal,
+            vt::fmt::FormatterOptions {
+                format: vt::fmt::Format::Plain,
+                trim: true,
+                unwrap: true,
+                selection: None,
+            },
+        )
+        .ok()?;
+        let bytes = formatter.format_alloc(None).ok()?;
+        let text = String::from_utf8_lossy(&bytes);
+        let mut lines: Vec<String> = text
+            .trim_end_matches('\n')
+            .split('\n')
+            .map(str::to_owned)
+            .collect();
+        // Keep the window's tail and renumber into it, so a block's index and
+        // a link's logical line are positions in the same snapshot.
+        let skipped = lines.len().saturating_sub(budget);
+        lines.drain(..skipped);
+        let cursor = cursor
+            .saturating_sub(skipped)
+            .min(lines.len().saturating_sub(1));
+        Some((lines, cursor))
+    }
+
     /// Plain-text dump of a terminal's whole visible grid — every row
     /// top to bottom, trailing spaces trimmed, pure box-drawing border
     /// rows dropped, and blank rows dropped off both ends. Seeds an
@@ -3044,7 +3776,9 @@ impl TerminalStack {
             slot.displayed = false;
         }
         self.tab_strip_hits.clear();
+        self.usage_badge_hits.clear();
         self.tile_hits.clear();
+        self.divider_hits.clear();
     }
 
     /// Render one specific terminal into `area` — the focus-mode pane
@@ -3210,46 +3944,157 @@ impl TerminalStack {
     /// sidebar `]]u` scans the cursor workspace's terminal, which may not
     /// be the focused tile (#871).
     pub fn urls_for(&mut self, id: TerminalId) -> Option<Vec<String>> {
+        Some(
+            self.positioned_links(id, None)?
+                .into_iter()
+                .map(|(url, _)| url)
+                .collect(),
+        )
+    }
+
+    /// Ceiling on candidates handed to the copy picker. The picker resolves
+    /// rows by single letters, so an unbounded list is unreachable past its
+    /// first pages as well as slow to build; the caller tells the user how
+    /// many of the total it is showing.
+    pub(crate) const COPY_ITEM_LIMIT: usize = 200;
+
+    /// Newest-first links and code/text blocks from the snapshot window, with
+    /// the total number of candidates found so the caller can say what it cut.
+    pub(crate) fn copy_items(
+        &mut self,
+        id: TerminalId,
+    ) -> Option<(Vec<super::copy_text::CopyItem>, usize)> {
+        use super::copy_text::{CopyItem, blocks, newest_first};
+        let (start, budget) = self.copy_window(id)?;
+        let (lines, _) = self.copy_lines_within(id, budget)?;
+        let mut items = blocks(&lines);
+        items.extend(
+            self.positioned_links(id, Some(start))?
+                .into_iter()
+                .map(|(url, line)| (line, CopyItem::Link(url))),
+        );
+        let mut items = newest_first(items);
+        let found = items.len();
+        items.truncate(Self::COPY_ITEM_LIMIT);
+        Some((items, found))
+    }
+
+    /// `history_from` scans whole logical lines from that screen row to the
+    /// live end (the copy picker's snapshot window); `None` reads only the
+    /// logical lines intersecting the viewport (the `]]u` URL picker).
+    fn positioned_links(
+        &mut self,
+        id: TerminalId,
+        history_from: Option<u32>,
+    ) -> Option<Vec<(String, usize)>> {
         let slot = self.terminals.get_mut(&id)?;
         // Reflect every byte received, not just what arrived on screen —
         // mirrors `visible_text` / `target_at`.
         slot.flush_pending();
-        // A snapshot-read failure is not "no terminal" — the terminal is
-        // right here, we just couldn't extract its grid. Report it as an
-        // empty scan so the caller says "no URLs", not "no terminal".
-        let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) else {
+        let terminal = &slot.vt.terminal;
+        let (Ok(scrollbar), Ok(cols), Ok(total)) =
+            (terminal.scrollbar(), terminal.cols(), terminal.total_rows())
+        else {
             return Some(Vec::new());
         };
-        let Ok(mut row_iter) = slot.vt.row_iter.update(&snapshot) else {
+        if total == 0 || cols == 0 {
             return Some(Vec::new());
-        };
-        let mut rows: Vec<(String, bool)> = Vec::new();
-        while let Some(r) = row_iter.next() {
-            let wrapped = r
-                .raw_row()
-                .ok()
-                .and_then(|raw| raw.is_wrapped().ok())
-                .unwrap_or(false);
-            let (text, _) = row_text_and_starts(&mut slot.vt.cell_iter, r);
-            rows.push((text, wrapped));
         }
-        let mut urls: Vec<String> = Vec::new();
-        let mut i = 0;
-        while i < rows.len() {
-            // Fold this row and any it wraps into one logical line.
-            let mut line = rows[i].0.clone();
-            while rows[i].1 && i + 1 < rows.len() {
-                i += 1;
-                line.push_str(&rows[i].0);
-            }
-            i += 1;
-            for url in scan_urls(&line) {
-                // Keep the URL at its LATEST position: drop any earlier
-                // sighting before re-appending, so recency ordering holds.
-                if let Some(prev) = urls.iter().position(|u| u == url) {
-                    urls.remove(prev);
+        let point = |x, y| vt::terminal::Point::Screen(vt::terminal::PointCoordinate { x, y });
+        let row_at = |y| terminal.grid_ref(point(0, y)).ok()?.row().ok();
+        let mut start = scrollbar.offset as u32;
+        let mut end = (scrollbar.offset + scrollbar.len)
+            .saturating_sub(1)
+            .min((total - 1) as u64) as u32;
+        // Read the WHOLE logical lines intersecting the viewport. A link may
+        // begin in scrollback or continue below the visible bottom. Never
+        // move/resize the viewport just to reconstruct it.
+        while start > 0 && row_at(start).is_some_and(|r| r.is_wrap_continuation().unwrap_or(false))
+        {
+            start -= 1;
+        }
+        while (end as usize) + 1 < total
+            && row_at(end).is_some_and(|r| r.is_wrapped().unwrap_or(false))
+        {
+            end += 1;
+        }
+        if let Some(from) = history_from {
+            start = from.min((total - 1) as u32);
+            end = (total - 1) as u32;
+        }
+        let mut logical_line = 0;
+        let mut urls: Vec<(String, usize)> = Vec::new();
+        let mut line = String::new();
+        let mut explicit = Vec::new();
+        let mut chars = vec!['\0'; 8];
+        // One buffer for the whole scan: a fresh 256-byte Vec per cell made
+        // every hyperlink row allocate `cols` times.
+        let mut uri_buf = vec![0u8; 256];
+        for row in start..=end {
+            let Some(raw_row) = row_at(row) else {
+                continue;
+            };
+            let has_links = raw_row.has_hyperlink().unwrap_or(false);
+            for col in 0..cols {
+                let Ok(cell) = terminal.grid_ref(point(col, row)) else {
+                    continue;
+                };
+                if has_links
+                    && let Some(uri) = hyperlink_uri_from_grid(&cell, &mut uri_buf)
+                    && (uri.starts_with("https://") || uri.starts_with("http://"))
+                {
+                    // Explicit web hyperlinks override URL-shaped display
+                    // labels. A target we cannot offer (file://, vscode://)
+                    // falls through instead, so its visible label still
+                    // reaches `scan_urls` the way it did before OSC 8 was
+                    // read here at all.
+                    line.push(' ');
+                    if !explicit.contains(&uri) {
+                        explicit.push(uri);
+                    }
+                    continue;
                 }
-                urls.push(url.to_string());
+                if matches!(
+                    cell.cell().and_then(|c| c.wide()),
+                    Ok(vt::screen::CellWide::SpacerHead | vt::screen::CellWide::SpacerTail)
+                ) {
+                    continue;
+                }
+                loop {
+                    match cell.graphemes(&mut chars) {
+                        Ok(0) => {
+                            line.push(' ');
+                            break;
+                        }
+                        Ok(n) => {
+                            line.extend(&chars[..n]);
+                            break;
+                        }
+                        Err(vt::error::Error::OutOfSpace { required })
+                            if required > chars.len() =>
+                        {
+                            chars.resize(required, '\0')
+                        }
+                        Err(_) => {
+                            line.push(' ');
+                            break;
+                        }
+                    }
+                }
+            }
+            if !raw_row.is_wrapped().unwrap_or(false) || row == end {
+                for url in scan_urls(&line)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .chain(explicit.drain(..))
+                {
+                    if let Some(prev) = urls.iter().position(|(u, _)| u == &url) {
+                        urls.remove(prev);
+                    }
+                    urls.push((url, logical_line));
+                }
+                line.clear();
+                logical_line += 1;
             }
         }
         Some(urls)
@@ -3314,17 +4159,11 @@ impl TerminalStack {
         // reply rebuilds the grid via `apply_scrollback`.
         if delta < 0 {
             if slot.exited.is_none() && slot.wants_scrollback_fetch() {
-                slot.deep_scrollback_requested = true;
-                // Stamped at the request, not the reply: the notches that
-                // land while the capture is in flight must not each ship
-                // another multi-megabyte fetch (11 in 700 ms was observed).
-                slot.last_scrollback_fetch = Some(std::time::Instant::now());
+                slot.arm_scrollback_fetch();
                 self.pending_scrollback_fetch = Some(id);
             }
         } else if delta > 0 && at_live_bottom(outcome) {
-            // Back at the live bottom — this scrollback visit is over.
-            // The next visit re-fetches so its history is current.
-            slot.deep_scrollback_requested = false;
+            slot.end_scrollback_visit();
         }
         outcome
     }
@@ -3485,6 +4324,13 @@ impl TerminalStack {
             let excess = slot.recent.len() - RECENT_OUTPUT_CAP;
             slot.recent.drain(..excess);
         }
+        // Retain the batch while a capture is outstanding: the reply
+        // rebuilds the grid from an instant that predates it, and
+        // `apply_scrollback` puts back whatever the capture's watermark
+        // says it missed.
+        if let Some(catchup) = slot.scrollback_catchup.as_mut() {
+            catchup.record(first_seq, seq, cols, rows, bytes);
+        }
         slot.last_seq = seq;
     }
 
@@ -3545,7 +4391,18 @@ impl TerminalStack {
         if !slot.sync.is_desynced() && seq == slot.last_seq {
             return;
         }
-        if !slot.vt.reset() {
+        // One rebuild owner (`rebuild_grid`), so the pin policy is stated
+        // rather than inherited: a ring replay is a bounded tail of
+        // dropped output and may be shallower than the grid it replaces,
+        // so the viewport deliberately returns to the live bottom.
+        let adopted = slot.rebuild_grid(GridPin::LiveBottom, |slot| {
+            if !slot.vt.reset() {
+                return false;
+            }
+            slot.feed_sized(replay, sizes);
+            true
+        });
+        if !adopted {
             // The replay was authoritative, but the local parser could
             // not adopt it. Keep the last coherent grid and immediately
             // request another replay; leaving the old request latch set
@@ -3562,10 +4419,6 @@ impl TerminalStack {
             self.pending_resync_requests.push(id);
             return;
         }
-        slot.feed_sized(replay, sizes);
-        // The reset parser restarted its revision counter — a stale
-        // cached frame keyed to the old counter must never blit.
-        slot.last_frame_rev = None;
         // Drop any half-buffered clipboard sequence — the stream is being
         // rebuilt from the ring and we don't re-forward OSC 52 here.
         slot.osc52_carry.clear();
@@ -3582,6 +4435,13 @@ impl TerminalStack {
         // backoff so the next episode starts fast again.
         slot.resync_retry_at = None;
         slot.resync_retry_backoff = RESYNC_RETRY_INITIAL;
+        // The grid this rebuild produced is not the one the in-flight
+        // capture's watermark describes, so its retained live output is
+        // no longer a continuation of that capture. Refuse the reply
+        // when it lands rather than splicing two baselines together.
+        if let Some(catchup) = slot.scrollback_catchup.as_mut() {
+            catchup.invalidate();
+        }
         // The raw-stream rebuild just replaced any capture-fed deep
         // scrollback with the ring's shallow history, so the current
         // scrollback visit's fetch is spent. Release the latch: the
@@ -3615,6 +4475,14 @@ impl TerminalStack {
     /// back onto the history-bearing primary screen. A desynced slot
     /// (mid gap-recovery) keeps its flags: the ring resync it already
     /// requested still arrives and re-feeds the authoritative stream.
+    ///
+    /// The capture is a snapshot of an instant that the reply's `seq`
+    /// names, and live output kept flowing while it travelled. Adopting
+    /// it alone would erase every batch delivered since — permanently,
+    /// because `last_seq` never rewinds and the daemon therefore never
+    /// re-sends them. Those batches were retained by `append_output`
+    /// from the moment the fetch was armed, and the ones the watermark
+    /// does not cover are re-fed on top of the rebuilt grid (#1798).
     fn apply_scrollback(&mut self, id: TerminalId, replay: &[u8], seq: u64) {
         if replay.is_empty() {
             return;
@@ -3622,6 +4490,38 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
+        let catchup = slot.scrollback_catchup.take();
+        // A batch went unrecorded, so what survives is a stream with a
+        // hole and re-feeding it would corrupt the grid. The local grid
+        // still holds every byte — it is only shallower — so keep it and
+        // let the next upward scroll re-capture.
+        if catchup.as_ref().is_some_and(|c| c.unusable) {
+            tracing::debug!(
+                terminal_id = ?id,
+                seq,
+                "deep-scrollback capture refused — the live output it predates can no longer be re-fed"
+            );
+            return;
+        }
+        // #1909, the duplicate-block cause. A delivered batch is a run of
+        // coalesced chunks and the client kept only its seq range, so a
+        // batch spanning the capture's watermark cannot be cut at it.
+        // Re-feeding it whole re-draws the rows the capture already holds
+        // — the same lines twice, the second cut at the same word, which
+        // is the reported symptom — and it lengthens the grid below the
+        // user's parked anchor, dragging their view down by exactly the
+        // duplicated row count. Refuse the capture, as for a hole: the
+        // local grid holds every byte and is only shallower, and the next
+        // upward scroll re-captures.
+        if catchup.as_ref().is_some_and(|c| c.straddles(seq)) {
+            tracing::debug!(
+                terminal_id = ?id,
+                seq,
+                "deep-scrollback capture refused — a delivered batch straddles its watermark \
+                 and cannot be split at it"
+            );
+            return;
+        }
         let t = &slot.vt.terminal;
         // Pre-flight the rebuild in a scratch parser at the same width
         // and adopt it when it is DEEPER than the current grid, or when
@@ -3641,18 +4541,13 @@ impl TerminalStack {
         // the very junk this fetch exists to replace makes the local grid
         // *deeper* than tmux's clean history — and the clean capture was
         // rejected every time, one repeated block per scroll.
-        let current_total = t.scrollbar().ok().map(|b| b.total).unwrap_or(0);
+        let current_total = slot.vt.scrollbar().ok().map(|b| b.total).unwrap_or(0);
         let Some(mut scratch) = TerminalVt::new() else {
             return;
         };
         scratch.ensure_size(slot.vt.cols, slot.vt.rows);
         scratch.feed(replay);
-        let rebuilt_total = scratch
-            .terminal
-            .scrollbar()
-            .ok()
-            .map(|b| b.total)
-            .unwrap_or(0);
+        let rebuilt_total = scratch.scrollbar().ok().map(|b| b.total).unwrap_or(0);
         let capture_has_history = rebuilt_total > u64::from(slot.vt.rows);
         if rebuilt_total <= current_total && !(capture_has_history && slot.scrollback_stale) {
             return;
@@ -3661,33 +4556,54 @@ impl TerminalStack {
             .iter()
             .filter_map(|m| t.mode(*m).ok().map(|on| (m.value(), on)))
             .collect();
-        let dist_from_bottom = t
-            .scrollbar()
-            .ok()
-            .map(|b| b.total.saturating_sub(b.offset + b.len))
-            .unwrap_or(0);
-        // Adopt the scratch parser we already built and fed instead of
-        // resetting `slot.vt` and re-parsing the capture a second time — a
-        // deep capture is multiple megabytes and the pre-flight already did
-        // the full parse. Dropping the old parser here is the same grid
-        // replacement `reset()` performed, minus the wasted second pass.
-        slot.vt = scratch;
-        // The fresh parser restarts its revision counter — a stale
-        // cached frame keyed to the old counter must never blit.
-        slot.last_frame_rev = None;
         let mut modes = Vec::with_capacity(preserved.len() * 8);
         for (value, on) in preserved {
             let flag = if on { 'h' } else { 'l' };
             modes.extend_from_slice(format!("\x1b[?{value}{flag}").as_bytes());
         }
-        slot.vt.feed(&modes);
-        if dist_from_bottom > 0 {
-            // Through the single scroll owner; the restore is
-            // best-effort (a capture shallower than the old offset
-            // simply lands at the top).
-            let _ = slot.vt.scroll(ScrollRequest::By(
-                -(dist_from_bottom.min(isize::MAX as u64) as isize),
-            ));
+        // Everything the capture missed, in delivery order and each run
+        // at the PTY size it was produced for. A batch straddling the
+        // watermark is re-fed whole: re-painting cells the capture
+        // already drew costs a repeat, dropping the batch costs the
+        // output after the watermark, and only one of those is silent.
+        // These bytes were OSC 52-forwarded on first delivery, so they
+        // go straight into the parser — `forward_osc52` must not see
+        // them twice.
+        let uncovered: Vec<&(u64, u64, u16, u16, Vec<u8>)> = catchup
+            .iter()
+            .flat_map(|c| c.batches.iter())
+            .filter(|(_, end_seq, _, _, _)| *end_seq > seq)
+            .collect();
+        // One owner for the pin across the replacement (`rebuild_grid`):
+        // the user is mid-scroll — that is what triggered this fetch — and
+        // the rebuild only deepens the history above them, so their anchor
+        // is re-asserted on the new grid rather than re-derived from a
+        // distance measured a moment earlier. The straddle refusal above
+        // is what keeps `GridPin::Keep` honest: nothing is appended below
+        // the tail the anchor is measured from.
+        slot.rebuild_grid(GridPin::Keep, |slot| {
+            // Adopt the scratch parser we already built and fed instead of
+            // resetting `slot.vt` and re-parsing the capture a second time
+            // — a deep capture is multiple megabytes and the pre-flight
+            // already did the full parse. Dropping the old parser here is
+            // the same grid replacement `reset()` performed, minus the
+            // wasted second pass.
+            slot.vt = scratch;
+            slot.vt.feed(&modes);
+            for (_, _, cols, rows, bytes) in &uncovered {
+                slot.adopt_pty_size(*cols, *rows);
+                slot.vt.feed(bytes);
+            }
+            true
+        });
+        if !uncovered.is_empty() {
+            tracing::debug!(
+                terminal_id = ?id,
+                seq,
+                last_seq = slot.last_seq,
+                batches = uncovered.len(),
+                "re-fed live output the deep-scrollback capture predates"
+            );
         }
         // Same bookkeeping as `resync_terminal`: the capture replaces
         // everything, including any bytes buffered while hidden, and
@@ -3699,9 +4615,18 @@ impl TerminalStack {
         slot.recent.clear();
         let tail_start = replay.len().saturating_sub(RECENT_OUTPUT_CAP);
         slot.recent.extend_from_slice(&replay[tail_start..]);
+        for (_, _, _, _, bytes) in &uncovered {
+            slot.recent.extend_from_slice(bytes);
+        }
+        if slot.recent.len() > RECENT_OUTPUT_CAP {
+            let excess = slot.recent.len() - RECENT_OUTPUT_CAP;
+            slot.recent.drain(..excess);
+        }
         // The capture may lag chunks the client already applied (the
         // fetch raced live output) — never move the high-water mark
         // backwards or those chunks would be double-fed on re-delivery.
+        // Their content is not lost with it: the batches above put it
+        // back on the grid.
         slot.last_seq = slot.last_seq.max(seq);
         // This visit's history is tmux's again, as of now.
         slot.scrollback_stale = false;
@@ -3753,6 +4678,7 @@ impl TerminalStack {
             deep_scrollback_requested: false,
             scrollback_stale: false,
             last_scrollback_fetch: None,
+            scrollback_catchup: None,
         }
     }
 
@@ -3813,14 +4739,18 @@ impl TerminalStack {
     /// The searchable agent text per workspace, for the `/` search's
     /// `agent:` / `said:` qualifiers (#1774).
     ///
-    /// Stage 1 of the corpus is the prompt history: what the agent was
-    /// asked. It's small, already structured, already keyed by
-    /// workspace, and the daemon replays it for EVERY live terminal in
+    /// This is the client's half of the corpus: the prompt history, what
+    /// the agent was asked. It's small, already structured, already keyed
+    /// by workspace, and the daemon replays it for EVERY live terminal in
     /// its bulk snapshot — so "which workspace did I ask about X?"
     /// answers from data the client is already holding, with no new
-    /// storage and no scan of the megabyte-scale output rings. What the
-    /// agent *said* back lives only in those rings and needs a
-    /// daemon-side search to reach; it is not in this corpus yet.
+    /// storage and no scan of the megabyte-scale output rings.
+    ///
+    /// What the agent *said* back is never here. It lives only in those
+    /// rings, and the client's own `TerminalSlot.recent` is a 4 KiB
+    /// window kept for agent-state detection. It reaches the search as a
+    /// separate, daemon-scanned corpus (`Command::SearchAgentOutput`,
+    /// #1780) that the sidebar appends to this one.
     ///
     /// A workspace with several agent terminals contributes all of
     /// them — the search asks about the workspace, not the tab. Newest
@@ -4119,10 +5049,12 @@ impl TerminalStack {
         // ordinary typing cannot produce. A bare letter can't be: `exit`
         // ends the pane on its `x`. Nor can a same-key double-press on a
         // plain letter, the guard `q q` quit uses — English and shell
-        // words double letters (`add` fires `d d`). And a Confirm modal
-        // is no guard here either: `Confirm` defaults to Yes on Enter, and
-        // `exit⏎` supplies exactly that. A modifier is the one thing no
-        // shell reflex (`exit`, `quit`, `:q`, `clear`, `ls -l`) emits.
+        // words double letters (`add` fires `d d`). And a Confirm modal is
+        // no guard here either, whichever button it defaults to: a surface
+        // that receives arbitrary typed text is one where the typist never
+        // reads the modal, so `exit⏎` answers it either way. A modifier is
+        // the one thing no shell reflex (`exit`, `quit`, `:q`, `clear`,
+        // `ls -l`) emits.
         //
         // `Shift-X` specifically: `x` alone is out because typing produces
         // it, and `x x` is already `Archive` — two destructive actions one
@@ -4207,6 +5139,44 @@ impl TerminalStack {
             return PaneOutcome::Pass;
         }
 
+        // A log window takes no typed input (#1920).
+        //
+        // A `LogTail` runner is `tail -F <path>` (`spawn_plan.rs`): it
+        // never reads its stdin, so every byte routed here went to a
+        // process that cannot use it — and `Enter` additionally shipped
+        // `TerminalInputIntent::Submit`, which `lazybox_ipc` documents
+        // as "authoritative evidence that a turn may start" and which
+        // arms `submission_in_flight` on this runner's activity entry.
+        // The daemon already refuses the SNIPPET path into one of these
+        // and calls it "a read-only log terminal"
+        // (`spawn_handler.rs`); this is the same knowledge applied to
+        // the typing path, at the boundary where the runner kind is
+        // known.
+        //
+        // Refusing EVERY byte rather than filtering for printables is
+        // the narrow choice here, not the broad one: there is no
+        // keystroke `tail -F` has a use for, so a byte that still got
+        // through would be one with no reader. What the user can still
+        // do is unaffected by construction, because none of it reaches
+        // this point — scrollback keys returned at the top of this
+        // function, the wheel and text selection are mouse paths in the
+        // Model, and search is a sidebar action.
+        //
+        // Only a *typing* attempt earns a notice. Someone who pressed
+        // `k` or `Enter` is owed an answer for why nothing happened; an
+        // arrow or a stray `Ctrl-C` is not worth a footer line.
+        if self
+            .terminals
+            .get(&id)
+            .is_some_and(|slot| matches!(slot.kind, TerminalKind::LogTail { .. }))
+        {
+            if Self::is_typing_attempt(&key) {
+                self.input_refusal =
+                    Some("read-only log window — it takes no typed input".to_string());
+            }
+            return PaneOutcome::Consumed;
+        }
+
         let Some(bytes) = key_to_bytes(&key) else {
             return PaneOutcome::Consumed;
         };
@@ -4278,6 +5248,29 @@ impl TerminalStack {
     /// `cmds` vec (and later the same ordered command channel), so the
     /// PTY receives the identical byte stream; splitting mid-UTF-8 or
     /// mid-escape is fine for a byte-oriented PTY.
+    /// Whether this keystroke reads as an attempt to type something —
+    /// a printable character or a submit. CONTROL / ALT / SUPER /
+    /// HYPER / META all belong to an inner program's vocabulary rather
+    /// than to prose, so a chord carrying one is not a typing attempt;
+    /// SHIFT is subtracted instead of listed because a capital letter
+    /// is still typing, and subtracting keeps the test closed if
+    /// crossterm ever adds a modifier bit (the same reasoning the
+    /// exited-pane keys use).
+    fn is_typing_attempt(key: &KeyEvent) -> bool {
+        if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+            return false;
+        }
+        matches!(key.code, KeyCode::Char(_) | KeyCode::Enter)
+    }
+
+    /// Take the pending input refusal, if the last keystroke produced
+    /// one. The Model drains this after dispatching a key and flashes
+    /// it, so "I typed into the log window and nothing happened" has an
+    /// answer on screen instead of being a silent swallow.
+    pub fn take_input_refusal(&mut self) -> Option<String> {
+        self.input_refusal.take()
+    }
+
     fn push_write(
         cmds: &mut Vec<Command>,
         terminal_id: TerminalId,
@@ -4836,10 +5829,12 @@ impl TerminalStack {
         // come or gone, indices shifted, area resized. We'll
         // repopulate as the tab spans go in.
         self.tab_strip_hits.clear();
+        self.usage_badge_hits.clear();
         // Cleared for the same reason as the tab hits — each render
         // re-records every visible tile's rect from scratch so the
         // wheel handler hit-tests against the current layout.
         self.tile_hits.clear();
+        self.divider_hits.clear();
         // Title row: a mode label plus an icon+label per active terminal
         // (e.g. `Terminals    claude   _ shell`). Active is bold-accent;
         // inactive is dim grey. Two-tab common case looks like a tab
@@ -4994,6 +5989,8 @@ impl TerminalStack {
                 };
                 let badge_text = format!(" {glyph}{}", badge.text());
                 let width = badge_text.chars().count() as u16;
+                self.usage_badge_hits
+                    .push((cursor..cursor.saturating_add(width), title_area.y));
                 title_spans.push(Span::styled(badge_text, style));
                 cursor = cursor.saturating_add(width);
             }
@@ -5273,6 +6270,7 @@ impl TerminalStack {
     }
 
     fn drop_slot(&mut self, terminal_id: TerminalId) {
+        let keep_focus = self.focused_terminal_id().filter(|id| *id != terminal_id);
         // Removing a tile from the active grid reshuffles focus (the
         // collapse below re-points `focused` at the removed tile's
         // sibling) and can drop the tree back to Tabs — so a live zoom can
@@ -5337,6 +6335,22 @@ impl TerminalStack {
             }
         }
         self.clamp_active_tab();
+        // Removing an unfocused sibling must not change which surviving
+        // terminal the user is reading. Both tab indices and split paths can
+        // shift during pruning; restore by identity without expanding a pane.
+        if let Some(id) = keep_focus
+            && let Some(index) = self.visible_terminals().iter().position(|t| *t == id)
+        {
+            self.active_tab_idx = index;
+            match &mut self.layout {
+                lazybox_core::SessionLayout::Tabs { active } => *active = index,
+                lazybox_core::SessionLayout::Splits { tree, focused } => {
+                    if let Some(path) = tree.path_to(id.0) {
+                        *focused = path;
+                    }
+                }
+            }
+        }
         self.auto_collapse_on_emptiness();
     }
 
@@ -5510,6 +6524,40 @@ impl TerminalStack {
         } else {
             cmds.push(Command::ResumeAgent { terminal_id });
         }
+    }
+
+    /// Close a specific terminal without retargeting the active workspace/tile.
+    /// The exit event prunes live panes; already exited panes are removed locally.
+    ///
+    /// Reports what it did, because a live pane's row only disappears when the
+    /// daemon's `TerminalExited` comes back: if that event is lost (daemon
+    /// restart, dropped connection, a dropped `Close`) the id stays in
+    /// `closing` and the caller must be able to say so instead of closing its
+    /// confirmation over an untouched row.
+    pub(crate) fn close_terminal(
+        &mut self,
+        id: TerminalId,
+        cmds: &mut Vec<Command>,
+    ) -> CloseOutcome {
+        if !self.terminals.contains_key(&id) {
+            return CloseOutcome::Unknown;
+        }
+        if self.closing.contains(&id) {
+            // Re-send rather than drop the request: `Close` on a terminal the
+            // daemon has already torn down is a no-op, so a retry costs one
+            // command and recovers the case where the first one never landed.
+            cmds.push(Command::Close {
+                terminal_id: id,
+                client_request_id: None,
+            });
+            return CloseOutcome::Retried;
+        }
+        if self.queue_terminal_teardown(id, cmds) {
+            self.drop_slot(id);
+            self.persist_layout(cmds);
+            return CloseOutcome::Removed;
+        }
+        CloseOutcome::Requested
     }
 
     /// Close the focused terminal (`]]x`). In Splits, collapses the
@@ -5724,6 +6772,14 @@ impl TerminalStack {
         Some(now)
     }
 
+    /// Public door onto the private `persist_layout`, for the Model's
+    /// end-of-drag save (#1920). A tile divider's position is part of
+    /// the session layout, so it travels the same way `]]t` and a
+    /// split do.
+    pub fn persist_session_layout(&mut self, cmds: &mut Vec<Command>) {
+        self.persist_layout(cmds);
+    }
+
     /// Push a `Command::SetSessionLayout` for the currently-active
     /// session if we know which one we're on. The daemon writes the
     /// new layout to the workspace record + rebroadcasts.
@@ -5752,7 +6808,13 @@ impl TerminalStack {
     /// the user has to parse. Truncates with `…` when the message
     /// overflows the row width — same affordance the empty-state
     /// hint uses elsewhere in this pane.
-    fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str, age: &str) {
+    fn render_user_message_recap(
+        frame: &mut Frame,
+        area: Rect,
+        prefix: &str,
+        msg: &str,
+        age: &str,
+    ) {
         let theme = crate::theme::current();
         let summary = summarize_message(msg);
         // A relative age ("5m ago") on the right lets the user judge whether
@@ -5771,7 +6833,7 @@ impl TerminalStack {
         };
         let line = ratatui::text::Line::from(vec![
             Span::styled(
-                RECAP_PREFIX,
+                prefix.to_string(),
                 Style::default()
                     .fg(theme.text_dim)
                     .add_modifier(Modifier::BOLD),
@@ -5855,7 +6917,8 @@ impl TerminalStack {
                     height: 1,
                 };
                 let age = crate::realm::model::relative_age(last.timestamp_ms, now_ms());
-                Self::render_user_message_recap(frame, header_rect, &last.text, &age);
+                let prefix = recap_prefix(&last.source);
+                Self::render_user_message_recap(frame, header_rect, &prefix, &last.text, &age);
             }
             // Reserve the rightmost column of the body as a scrollbar
             // gutter. Held back unconditionally so the PTY width stays
@@ -5897,11 +6960,24 @@ impl TerminalStack {
                 slot.vt.ensure_size(grid.width, grid.height);
             }
             slot.flush_pending();
-            // Record the viewport offset of the frame we're painting AFTER
-            // the flush — the widget below renders from this same post-flush
-            // state, so this is the offset the selection mapping must reuse
-            // (see `TerminalHit::offset`).
-            let frame_offset = slot.vt.terminal.scrollbar().ok().map(|b| b.offset);
+            // ONE scrollbar derivation per tile per frame (#1919). The
+            // frame needs the reading twice — the viewport offset recorded
+            // on the tile hit, which the selection mapping must read back
+            // (see `TerminalHit::offset`), and the gutter's extent below —
+            // and read it twice until this was hoisted. Read AFTER the
+            // flush: the widget below renders from this same post-flush
+            // state, so this is the offset the mapping must reuse.
+            //
+            // Deliberately NOT cached across frames on the
+            // `(content_rev, rect)` key the frame blit uses. That would
+            // make it zero on an unchanged frame, and the measurement says
+            // the call costs ~5 ns at any viewport depth (`make bench-cpu`)
+            // — so caching would buy ~10 ns a frame in exchange for a new
+            // staleness obligation on every future parser-replacement
+            // site, where a missed invalidation hands the selection
+            // mapping an offset from a grid that no longer exists.
+            let bar = slot.vt.scrollbar().ok();
+            let frame_offset = bar.map(|b| b.offset);
             if let Some(hit) = self.tile_hits.last_mut() {
                 hit.offset = frame_offset;
             }
@@ -5963,7 +7039,7 @@ impl TerminalStack {
                 slot.last_frame_rev = Some(rev_key);
             }
             if let Some(gutter) = gutter
-                && let Ok(bar) = slot.vt.terminal.scrollbar()
+                && let Some(bar) = bar
             {
                 crate::components::scrollbar::render_vertical(
                     frame,
@@ -6410,10 +7486,17 @@ impl TerminalStack {
                         width: 1,
                         height: rect.height,
                     };
+                    let color = self.divider_color(current_path, chrome);
                     let lines: Vec<Line> = (0..rect.height)
-                        .map(|_| Line::from(Span::styled("│", Style::default().fg(chrome))))
+                        .map(|_| Line::from(Span::styled("│", Style::default().fg(color))))
                         .collect();
                     frame.render_widget(Paragraph::new(lines), div);
+                    self.divider_hits.push(TileDividerHit {
+                        path: current_path.to_vec(),
+                        line: div,
+                        container: rect,
+                        axis: lazybox_core::TileAxis::Horizontal,
+                    });
                 }
             }
             lazybox_core::TileTree::VSplit { top, bottom, ratio } => {
@@ -6463,13 +7546,20 @@ impl TerminalStack {
                         width: rect.width,
                         height: 1,
                     };
+                    let color = self.divider_color(current_path, chrome);
                     frame.render_widget(
                         Paragraph::new(Line::from(Span::styled(
                             "─".repeat(div.width as usize),
-                            Style::default().fg(chrome),
+                            Style::default().fg(color),
                         ))),
                         div,
                     );
+                    self.divider_hits.push(TileDividerHit {
+                        path: current_path.to_vec(),
+                        line: div,
+                        container: rect,
+                        axis: lazybox_core::TileAxis::Vertical,
+                    });
                 }
             }
         }
@@ -6821,9 +7911,17 @@ fn hyperlink_uri_at(
         y: row as u32,
     });
     let grid_ref = terminal.grid_ref(point).ok()?;
-    let mut buf = vec![0u8; 256];
+    hyperlink_uri_from_grid(&grid_ref, &mut vec![0u8; 256])
+}
+
+/// `buf` is the caller's scratch space, reused across cells: a per-cell
+/// allocation here is paid `cols` times for every row carrying a hyperlink.
+fn hyperlink_uri_from_grid(
+    grid_ref: &vt::screen::GridRef<'_>,
+    buf: &mut Vec<u8>,
+) -> Option<String> {
     loop {
-        match grid_ref.hyperlink_uri(&mut buf) {
+        match grid_ref.hyperlink_uri(buf) {
             Ok(0) => return None,
             Ok(n) => return String::from_utf8(buf[..n].to_vec()).ok(),
             Err(vt::error::Error::OutOfSpace { required }) if required > buf.len() => {
@@ -7023,6 +8121,187 @@ mod scroll_outcome_tests {
                 total: 100,
                 len: 20,
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod viewport_anchor_tests {
+    use super::*;
+
+    /// A terminal with `lines` rows of history above a 10-row screen.
+    fn vt(lines: usize) -> Box<TerminalVt> {
+        let mut vt = TerminalVt::new().expect("vt");
+        vt.ensure_size(80, 10);
+        let mut payload = String::new();
+        for i in 0..lines {
+            payload.push_str(&format!("line {i}\r\n"));
+        }
+        payload.push_str("tail");
+        vt.feed(payload.as_bytes());
+        vt
+    }
+
+    /// A fresh terminal, and one whose viewport sits at the live bottom,
+    /// are both "following the tail" — there is no parked state to carry.
+    #[test]
+    fn a_terminal_at_the_bottom_is_anchored_to_the_bottom() {
+        let vt = vt(200);
+        assert_eq!(vt.anchor, ViewportAnchor::Bottom);
+    }
+
+    /// Scrolling is where the anchor is SET: the user chose this place.
+    #[test]
+    fn scrolling_up_records_the_parked_distance() {
+        let mut vt = vt(200);
+        assert!(matches!(
+            vt.scroll(ScrollRequest::By(-7)),
+            ScrollOutcome::Moved { .. }
+        ));
+        assert_eq!(
+            vt.anchor,
+            ViewportAnchor::Parked {
+                rows_above_bottom: 7
+            }
+        );
+    }
+
+    /// And scrolling back to the bottom clears it, so the next rebuild
+    /// follows the tail instead of restoring a stale park.
+    #[test]
+    fn scrolling_back_to_the_bottom_clears_the_park() {
+        let mut vt = vt(200);
+        let _ = vt.scroll(ScrollRequest::By(-7));
+        let _ = vt.scroll(ScrollRequest::Bottom);
+        assert_eq!(vt.anchor, ViewportAnchor::Bottom);
+    }
+
+    /// The contract `feed` owes `scroll`: a write moves the content under
+    /// the pin, so the anchor is RE-DERIVED to keep naming the same place.
+    /// Three lines arriving under a viewport parked 7 rows up leaves the
+    /// user on the same rows, now 10 rows above the bottom — and the
+    /// anchor says so. Re-imposing the old 7 would drag them down.
+    #[test]
+    fn a_write_re_derives_the_anchor_instead_of_re_imposing_it() {
+        let mut vt = vt(200);
+        let _ = vt.scroll(ScrollRequest::By(-7));
+        let offset_before = vt.terminal.scrollbar().expect("bar").offset;
+
+        vt.feed(b"new 1\r\nnew 2\r\nnew 3\r\n");
+
+        assert_eq!(
+            vt.anchor,
+            ViewportAnchor::Parked {
+                rows_above_bottom: 10
+            },
+            "three new rows at the bottom put the user three rows further from it"
+        );
+        assert_eq!(
+            vt.terminal.scrollbar().expect("bar").offset,
+            offset_before,
+            "and libghostty kept the pin on the same content"
+        );
+    }
+
+    /// Output arriving at the live bottom keeps the viewport following it.
+    #[test]
+    fn a_write_at_the_bottom_keeps_following_the_tail() {
+        let mut vt = vt(200);
+        vt.feed(b"new\r\n");
+        assert_eq!(vt.anchor, ViewportAnchor::Bottom);
+    }
+
+    /// The absolute restore: after the grid is replaced the anchor is put
+    /// back exactly, through the scroll owner's `ToRow` verb — not
+    /// re-derived as a delta from wherever the fresh parser landed.
+    #[test]
+    fn restore_anchor_puts_the_pin_back_absolutely() {
+        let mut shallow = vt(200);
+        let _ = shallow.scroll(ScrollRequest::By(-7));
+        let parked = shallow.anchor;
+
+        // Simulate the grid being replaced: a fresh parser at the live
+        // bottom, carrying the old anchor.
+        let mut rebuilt = vt(400);
+        assert_eq!(rebuilt.anchor, ViewportAnchor::Bottom);
+        rebuilt.anchor = parked;
+        assert!(matches!(
+            rebuilt.restore_anchor(),
+            ScrollOutcome::Moved { .. }
+        ));
+
+        let bar = rebuilt.terminal.scrollbar().expect("bar");
+        assert_eq!(
+            bar.total.saturating_sub(bar.offset + bar.len),
+            7,
+            "the pin lands 7 rows above the new grid's bottom: {bar:?}"
+        );
+        assert_eq!(rebuilt.anchor, parked, "and the anchor still says so");
+    }
+
+    /// Restoring a park deeper than the rebuilt grid can hold clamps to
+    /// the top rather than reporting a bogus move or scrolling off the
+    /// end — a capture shallower than the local grid degrades gracefully.
+    #[test]
+    fn restore_anchor_clamps_a_park_deeper_than_the_grid() {
+        let mut vt = vt(30);
+        vt.anchor = ViewportAnchor::Parked {
+            rows_above_bottom: 10_000,
+        };
+        let _ = vt.restore_anchor();
+        assert_eq!(
+            vt.terminal.scrollbar().expect("bar").offset,
+            0,
+            "clamped to the top of what the grid actually holds"
+        );
+    }
+
+    /// Restoring `Bottom` returns to the live tail.
+    #[test]
+    fn restore_anchor_follows_the_tail_when_not_parked() {
+        let mut vt = vt(200);
+        let _ = vt.scroll(ScrollRequest::By(-7));
+        vt.anchor = ViewportAnchor::Bottom;
+        let _ = vt.restore_anchor();
+        let bar = vt.terminal.scrollbar().expect("bar");
+        assert_eq!(bar.offset + bar.len, bar.total, "back on the live tail");
+    }
+
+    /// `ToRow` onto the row the viewport already occupies is a `Noop`, not
+    /// a `Stalled` — a correct restore must not look like a broken VT.
+    #[test]
+    fn to_row_onto_the_current_row_is_a_noop() {
+        let mut vt = vt(200);
+        let _ = vt.scroll(ScrollRequest::By(-7));
+        let offset = vt.terminal.scrollbar().expect("bar").offset;
+        assert_eq!(vt.scroll(ScrollRequest::ToRow(offset)), ScrollOutcome::Noop);
+    }
+
+    /// A `ToRow` past the live bottom is clamped before classification,
+    /// so it reports the bottom boundary rather than a phantom move.
+    #[test]
+    fn to_row_past_the_bottom_lands_on_the_bottom() {
+        let mut vt = vt(200);
+        let _ = vt.scroll(ScrollRequest::By(-7));
+        assert!(matches!(
+            vt.scroll(ScrollRequest::ToRow(u64::MAX)),
+            ScrollOutcome::Moved { .. }
+        ));
+        let bar = vt.terminal.scrollbar().expect("bar");
+        assert_eq!(bar.offset + bar.len, bar.total);
+        assert_eq!(vt.anchor, ViewportAnchor::Bottom);
+    }
+
+    /// Without scrollback there is nowhere to restore to, and the owner
+    /// says so rather than pretending.
+    #[test]
+    fn to_row_without_scrollback_reports_no_scrollback() {
+        let mut vt = TerminalVt::new().expect("vt");
+        vt.ensure_size(80, 10);
+        vt.feed(b"one line");
+        assert_eq!(
+            vt.scroll(ScrollRequest::ToRow(3)),
+            ScrollOutcome::NoScrollback
         );
     }
 }
@@ -8024,7 +9303,13 @@ mod selection_offset_tests {
         let area = Rect::new(0, 0, W, 1);
         let mut term = Terminal::new(TestBackend::new(W, 1)).unwrap();
         term.draw(|f| {
-            TerminalStack::render_user_message_recap(f, area, "review the diff", "5m ago")
+            TerminalStack::render_user_message_recap(
+                f,
+                area,
+                RECAP_PREFIX,
+                "review the diff",
+                "5m ago",
+            )
         })
         .unwrap();
         let buf = term.backend().buffer();
@@ -8046,8 +9331,10 @@ mod selection_offset_tests {
         const W: u16 = 14;
         let area = Rect::new(0, 0, W, 1);
         let mut term = Terminal::new(TestBackend::new(W, 1)).unwrap();
-        term.draw(|f| TerminalStack::render_user_message_recap(f, area, "hello there", "5m ago"))
-            .unwrap();
+        term.draw(|f| {
+            TerminalStack::render_user_message_recap(f, area, RECAP_PREFIX, "hello there", "5m ago")
+        })
+        .unwrap();
         let buf = term.backend().buffer();
         let row: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(
@@ -8307,6 +9594,32 @@ mod selection_offset_tests {
         let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
         // Headroom and this session's cost paint together, not either/or.
         assert!(top.contains("◔ wk 38% left · $0.42"), "{top:?}");
+    }
+
+    /// The badge is a way into Stats: a click on it is a hit, a click on
+    /// the tab label is still the tab.
+    #[test]
+    fn a_click_on_the_usage_badge_is_its_own_target() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 60;
+        const H: u16 = 6;
+        let area = Rect::new(0, 0, W, H);
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &[]);
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().usage_badge = Some(UsageBadge {
+            headroom: None,
+            cost: Some("$0.42".into()),
+        });
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let buf = term.backend().buffer();
+        let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
+        let dollar = top.chars().position(|c| c == '$').expect("badge drawn") as u16;
+        assert!(stack.usage_badge_at(dollar, 0), "{top:?}");
+        assert_eq!(stack.tab_at(dollar, 0), None, "the badge is not the tab");
+        let tab = stack.tab_strip_hits[0].1.start;
+        assert!(!stack.usage_badge_at(tab, 0));
     }
 
     /// A cost-only badge (API-key user, no plan window) paints the dollars
@@ -8849,6 +10162,141 @@ mod selection_offset_tests {
     }
 
     #[test]
+    fn copy_items_order_mixed_links_and_scripts_by_latest_logical_line() {
+        use crate::components::copy_text::CopyItem;
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            SessionKey::new("copy"),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 4);
+        let script = "echo 'a long shell argument which wraps across terminal rows'\n\necho done";
+        let source = format!(
+            "https://old.example\n```bash\n{script}\n```\n\x1b]8;;https://hidden.example\x1b\\Open report\x1b]8;;\x1b\\\n  echo newest\n"
+        );
+        slot.vt.feed(source.replace('\n', "\r\n").as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        assert_eq!(
+            stack.copy_items(TerminalId(1)),
+            Some((
+                vec![
+                    CopyItem::Block("  echo newest".into()),
+                    CopyItem::Link("https://hidden.example".into()),
+                    CopyItem::Block(script.into()),
+                    CopyItem::Link("https://old.example".into())
+                ],
+                4
+            ))
+        );
+    }
+
+    #[test]
+    fn copy_snapshot_is_bounded_by_its_window_not_the_retained_history() {
+        // The picker used to walk every retained row cell by cell and hand
+        // back every candidate: 374ms and 11_039 rows on a 50_001-row pane.
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            SessionKey::new("deep"),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(120, 40);
+        let deep: String = (0..20_000)
+            .map(|i| {
+                if i % 3 == 0 {
+                    format!(
+                        "  indented candidate {i}
+"
+                    )
+                } else {
+                    format!(
+                        "see https://example.com/path/{i}
+"
+                    )
+                }
+            })
+            .collect();
+        slot.vt.feed(deep.as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        let total = stack.terminals[&TerminalId(1)]
+            .vt
+            .terminal
+            .total_rows()
+            .unwrap();
+        assert!(total > TerminalStack::COPY_SNAPSHOT_ROWS, "{total} rows");
+        let (start, budget) = stack.copy_window(TerminalId(1)).unwrap();
+        assert!(
+            start as usize >= total - TerminalStack::COPY_SNAPSHOT_ROWS - 1,
+            "scan starts at {start} of {total}"
+        );
+        assert!(
+            budget <= TerminalStack::COPY_SNAPSHOT_ROWS,
+            "window holds {budget} lines"
+        );
+        let (lines, cursor) = stack.copy_lines(TerminalId(1)).unwrap();
+        assert_eq!(lines.len(), budget);
+        assert!(cursor < lines.len());
+        // The snapshot is the recent end of the session, renumbered into it.
+        assert!(
+            lines.last().unwrap().contains("19999"),
+            "{:?}",
+            lines.last()
+        );
+        let (items, found) = stack.copy_items(TerminalId(1)).unwrap();
+        assert!(found > TerminalStack::COPY_ITEM_LIMIT, "{found} candidates");
+        assert_eq!(items.len(), TerminalStack::COPY_ITEM_LIMIT);
+    }
+
+    #[test]
+    fn copy_lines_preserves_multiline_script_across_soft_wraps_and_history() {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            SessionKey::new("copy"),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 4);
+        let script = "#!/bin/sh\ncat <<'EOF'\n  日本語 é and a long argument that wraps\n\nEOF\nprintf '%s\\n' done";
+        slot.vt.feed(script.replace('\n', "\r\n").as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        let before = stack.terminals[&TerminalId(1)]
+            .vt
+            .terminal
+            .scrollbar()
+            .unwrap()
+            .offset;
+        let (lines, cursor) = stack.copy_lines(TerminalId(1)).unwrap();
+        assert_eq!(lines.join("\n"), script);
+        assert!(cursor > 0);
+        assert_eq!(
+            stack.terminals[&TerminalId(1)]
+                .vt
+                .terminal
+                .scrollbar()
+                .unwrap()
+                .offset,
+            before
+        );
+        assert!(stack.copy_lines(TerminalId(999)).is_none());
+    }
+
+    #[test]
     fn focused_urls_collects_scans_and_dedups_including_wrapped() {
         let sk = SessionKey::new("session");
         let mut stack = TerminalStack::new(PaneId::new(0));
@@ -8880,6 +10328,156 @@ mod selection_offset_tests {
                 "https://b.example.com/a/long/wrapping/path".to_string(),
             ]),
         );
+    }
+
+    #[test]
+    fn focused_urls_preserves_osc8_targets_and_ignores_their_display_labels() {
+        let sk = SessionKey::new("links");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 12);
+        let url = format!(
+            "https://example.com/{}?a=1&b=2#section",
+            "long-path/".repeat(30)
+        );
+        slot.vt.feed(
+            format!("\x1b]8;;{url}\x1b\\https://different.example/label\x1b]8;;\x1b\\\r\n")
+                .as_bytes(),
+        );
+        slot.vt.feed(b"https://plain.example/wrapped/path\r\n");
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        assert_eq!(
+            stack.focused_urls(),
+            Some(vec![url, "https://plain.example/wrapped/path".into()])
+        );
+    }
+
+    #[test]
+    fn a_non_web_osc8_target_leaves_its_url_shaped_label_scannable() {
+        // Reading OSC 8 made every hyperlink cell blank, then kept the target
+        // only when it was http(s) — so a `file://` link whose label is a URL
+        // lost both, where scanning the glyphs alone used to find it.
+        let sk = SessionKey::new("mixed-links");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(60, 6);
+        slot.vt.feed(
+            b"\x1b]8;;file:///Users/x/report.html\x1b\\https://docs.example/page\x1b]8;;\x1b\\\r\n",
+        );
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        assert_eq!(
+            stack.focused_urls(),
+            Some(vec!["https://docs.example/page".into()]),
+            "a rejected target must not take the label with it"
+        );
+    }
+
+    #[test]
+    fn an_unfocused_siblings_exit_leaves_the_focused_terminal_alone() {
+        // Pruning a slot reshuffles both tab indices and split paths, so the
+        // user's pane used to move when an unrelated terminal exited.
+        for split in [false, true] {
+            let sk = SessionKey::new("siblings");
+            let mut stack = TerminalStack::new(PaneId::new(0));
+            for id in [7, 8, 9] {
+                let slot = TerminalStack::make_slot(
+                    sk.clone(),
+                    TerminalKind::Shell,
+                    0,
+                    false,
+                    false,
+                    None,
+                    Vec::new(),
+                    String::new(),
+                );
+                stack.insert_slot_for_test(TerminalId(id), slot);
+            }
+            stack.set_active_session(Some(sk));
+            if split {
+                stack.set_layout(lazybox_core::SessionLayout::Splits {
+                    tree: lazybox_core::TileTree::VSplit {
+                        top: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 7 }),
+                        bottom: Box::new(lazybox_core::TileTree::VSplit {
+                            top: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 8 }),
+                            bottom: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 9 }),
+                            ratio: 50,
+                        }),
+                        ratio: 50,
+                    },
+                    focused: vec![1, 1],
+                });
+            }
+            stack.focus_terminal(TerminalId(9));
+            assert_eq!(stack.focused_terminal_id(), Some(TerminalId(9)));
+            stack.drop_slot(TerminalId(7));
+            assert_eq!(
+                stack.focused_terminal_id(),
+                Some(TerminalId(9)),
+                "split={split}: focus followed the pruning instead of the user"
+            );
+        }
+    }
+
+    #[test]
+    fn focused_urls_reconstructs_links_across_both_viewport_edges_without_scrolling() {
+        let sk = SessionKey::new("long-link");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 4);
+        let url = format!("https://example.com/{}?x=1&y=2#end", "segment/".repeat(30));
+        slot.vt.feed(format!("界 é {url}\r\nnext\r\n").as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        for top in [false, true] {
+            if top {
+                let _ = stack.scroll_to_top();
+            }
+            let before = stack.terminals[&TerminalId(1)]
+                .vt
+                .terminal
+                .scrollbar()
+                .unwrap()
+                .offset;
+            assert_eq!(stack.focused_urls(), Some(vec![url.clone()]));
+            assert_eq!(
+                stack.terminals[&TerminalId(1)]
+                    .vt
+                    .terminal
+                    .scrollbar()
+                    .unwrap()
+                    .offset,
+                before
+            );
+        }
     }
 
     #[test]
@@ -9455,6 +11053,109 @@ mod resync_tests {
         );
     }
 
+    /// `rebuild_grid(GridPin::LiveBottom)`: a ring resync is drop
+    /// recovery. The replay is a bounded tail that may hold *less*
+    /// history than the grid it replaces, so no row in it reliably means
+    /// "where the user was" — the viewport deliberately returns to the
+    /// live bottom (`docs/terminal-scrolling.md`). Asserted so the policy
+    /// is a decision the code states rather than whatever a fresh parser
+    /// happens to do.
+    #[test]
+    fn a_ring_resync_deliberately_returns_the_viewport_to_the_bottom() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = shell_stack(id, &sk);
+        let mut history = String::new();
+        for i in 0..200 {
+            history.push_str(&format!("line {i}\r\n"));
+        }
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: history.into_bytes().into(),
+            first_seq: 1,
+            seq: 1,
+            cols: 0,
+            rows: 0,
+        });
+        let _ = stack.scroll_active(-20);
+        assert!(matches!(
+            stack.terminals[&id].vt.anchor,
+            ViewportAnchor::Parked { .. }
+        ));
+
+        let mut replay = String::new();
+        for i in 0..200 {
+            replay.push_str(&format!("line {i}\r\n"));
+        }
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: replay.into_bytes(),
+            seq: 4,
+            sizes: Vec::new(),
+        });
+
+        let slot = &stack.terminals[&id];
+        assert_eq!(slot.vt.anchor, ViewportAnchor::Bottom);
+        let bar = slot.vt.terminal.scrollbar().expect("bar");
+        assert_eq!(
+            bar.offset + bar.len,
+            bar.total,
+            "the viewport is on the live tail: {bar:?}"
+        );
+    }
+
+    /// A rebuild that could not happen must not move the pin either: the
+    /// grid degrades to the last coherent one *including* the viewport
+    /// the user was reading, instead of snapping them to the bottom on
+    /// the way out.
+    #[test]
+    fn a_failed_rebuild_leaves_the_parked_viewport_alone() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = shell_stack(id, &sk);
+        let mut history = String::new();
+        for i in 0..200 {
+            history.push_str(&format!("line {i}\r\n"));
+        }
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: history.into_bytes().into(),
+            first_seq: 1,
+            seq: 1,
+            cols: 0,
+            rows: 0,
+        });
+        let _ = stack.scroll_active(-20);
+        let parked = stack.terminals[&id].vt.anchor;
+        let offset = stack.terminals[&id]
+            .vt
+            .terminal
+            .scrollbar()
+            .expect("bar")
+            .offset;
+        stack
+            .terminals
+            .get_mut(&id)
+            .expect("slot")
+            .vt
+            .fail_next_reset = true;
+
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: b"authoritative".to_vec(),
+            seq: 4,
+            sizes: Vec::new(),
+        });
+
+        let slot = &stack.terminals[&id];
+        assert_eq!(slot.vt.anchor, parked, "the pin survives a failed rebuild");
+        assert_eq!(
+            slot.vt.terminal.scrollbar().expect("bar").offset,
+            offset,
+            "and so does the viewport itself"
+        );
+    }
+
     #[test]
     fn local_vt_reset_failure_releases_latch_and_retries_immediately() {
         let sk = SessionKey::new("s");
@@ -9580,12 +11281,102 @@ mod deep_scrollback_tests {
         payload.into_bytes()
     }
 
+    /// The rows the widget would actually paint — the *viewport*, read
+    /// through the same render state `GhosttyTerminal` walks.
+    ///
+    /// Distinct from [`grid_text`] on purpose. `grid_text` answers "what
+    /// does the terminal retain", which is the right question for history
+    /// adoption and the wrong one for a parked viewport: a rebuild can
+    /// retain every byte and still move the user somewhere else. #1909's
+    /// symptom was invisible to every existing assertion because the
+    /// closest one (`apply_scrollback_keeps_viewport_distance_from_bottom`)
+    /// checks the distance *number*, which was preserved while the content
+    /// at that distance changed.
+    fn viewport_rows(stack: &mut TerminalStack, id: TerminalId) -> Vec<String> {
+        let slot = stack.terminals.get_mut(&id).expect("slot");
+        let snapshot = slot
+            .vt
+            .render_state
+            .update(&slot.vt.terminal)
+            .expect("render snapshot");
+        let mut row_iter = slot.vt.row_iter.update(&snapshot).expect("row iterator");
+        let mut rows = Vec::new();
+        while let Some(row) = row_iter.next() {
+            let mut line = String::new();
+            if let Ok(mut cells) = slot.vt.cell_iter.update(row) {
+                while let Some(cell) = cells.next() {
+                    let graphemes = cell.graphemes().unwrap_or_default();
+                    if graphemes.is_empty() {
+                        line.push(' ');
+                    } else {
+                        for g in graphemes {
+                            line.push(g);
+                        }
+                    }
+                }
+            }
+            rows.push(line.trim_end().to_string());
+        }
+        rows
+    }
+
     fn scrollbar(stack: &TerminalStack, id: TerminalId) -> vt::terminal::Scrollbar {
         stack.terminals[&id].vt.terminal.scrollbar().unwrap()
     }
 
     fn mode(stack: &TerminalStack, id: TerminalId, mode: vt::terminal::Mode) -> bool {
         stack.terminals[&id].vt.terminal.mode(mode).unwrap()
+    }
+
+    /// Every row the grid holds — scrollback and live screen — as plain
+    /// text. Read straight off the parser, so a content assertion is
+    /// about what the terminal actually retains and not about what a
+    /// particular viewport happens to be showing.
+    fn grid_text(stack: &TerminalStack, id: TerminalId) -> String {
+        let terminal = &stack.terminals[&id].vt.terminal;
+        let rows = terminal.total_rows().unwrap();
+        let point = |y: u32| vt::terminal::Point::Screen(vt::terminal::PointCoordinate { x: 0, y });
+        let start = terminal.grid_ref(point(0)).unwrap();
+        let end = terminal
+            .grid_ref(point(rows.saturating_sub(1) as u32))
+            .unwrap();
+        let mut formatter = vt::fmt::Formatter::new(
+            terminal,
+            vt::fmt::FormatterOptions {
+                format: vt::fmt::Format::Plain,
+                trim: true,
+                unwrap: false,
+                selection: Some(vt::screen::Selection {
+                    start,
+                    end,
+                    rectangle: false,
+                }),
+            },
+        )
+        .unwrap();
+        String::from_utf8_lossy(&formatter.format_alloc(None).unwrap()).into_owned()
+    }
+
+    /// Drive one scrollback visit: scroll up (arming the fetch), let
+    /// `live` batches land while the capture is in flight, then deliver
+    /// the capture with the watermark it was taken at.
+    fn visit_with_racing_output(
+        stack: &mut TerminalStack,
+        id: TerminalId,
+        live: &[(&[u8], u64)],
+        replay: Vec<u8>,
+        capture_seq: u64,
+    ) {
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id), "fetch armed");
+        for (bytes, seq) in live {
+            feed(stack, id, bytes, *seq, *seq);
+        }
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay,
+            seq: capture_seq,
+        });
     }
 
     /// The trigger fires even when the local grid has NO scrollback yet
@@ -10080,6 +11871,193 @@ mod deep_scrollback_tests {
         );
     }
 
+    /// #1909, the reported symptom. The user is parked in scrollback,
+    /// the agent keeps talking, and the block they are reading appears
+    /// **twice** — the second copy cut at the same word — while their
+    /// view slides down by the duplicated row count.
+    ///
+    /// The mechanism, end to end: scrolling up arms a deep-scrollback
+    /// fetch (#393); output that lands while the capture is in flight is
+    /// retained so adopting the capture cannot erase it (#1798); the
+    /// client coalesces adjacent output chunks into one event and keeps
+    /// only the run's seq range (`coalesce_adjacent_output`). So when the
+    /// capture's watermark falls *inside* a delivered run, the batch is
+    /// unsplittable — and re-feeding it whole re-draws the chunks the
+    /// capture already contains.
+    ///
+    /// Both halves of the symptom are asserted, because fixing the
+    /// duplicate without the pin (or the reverse) would leave a passing
+    /// test and a broken screen:
+    ///   - no duplicated block anywhere in the retained grid, and
+    ///   - the rows the user was looking at are byte-identical.
+    #[test]
+    fn a_batch_straddling_the_capture_watermark_never_duplicates_the_parked_view() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        let mut local = String::new();
+        for i in 0..80 {
+            local.push_str(&format!("agent line {i}\r\n"));
+        }
+        feed(&mut stack, id, local.as_bytes(), 1, 4);
+
+        // The user scrolls up to read. This arms the fetch.
+        let _ = stack.scroll_active(-20);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id), "fetch armed");
+        let parked = viewport_rows(&mut stack, id);
+        assert!(
+            parked.iter().any(|r| r == "agent line 29"),
+            "precondition: parked mid-history, not at the tail: {parked:?}"
+        );
+
+        // ONE coalesced event covering chunks 5..=8, exactly as the
+        // drain delivers a burst from a chatty agent.
+        feed(
+            &mut stack,
+            id,
+            b"COALESCED A\r\nCOALESCED B\r\nCOALESCED C\r\nCOALESCED D\r\n",
+            5,
+            8,
+        );
+        let after_live = viewport_rows(&mut stack, id);
+        assert_eq!(
+            after_live, parked,
+            "output arriving under a parked viewport must not move it"
+        );
+
+        // The capture was taken after chunk 6 landed, so it already holds
+        // COALESCED A and B. Its watermark (6) falls inside the 5..=8 run.
+        let mut capture = String::new();
+        for i in 0..80 {
+            capture.push_str(&format!("agent line {i}\r\n"));
+        }
+        capture.push_str("COALESCED A\r\nCOALESCED B");
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: capture.into_bytes(),
+            seq: 6,
+        });
+
+        let text = grid_text(&stack, id);
+        for line in ["COALESCED A", "COALESCED B"] {
+            assert_eq!(
+                text.matches(line).count(),
+                1,
+                "{line:?} must appear once; a second copy is the #1909 \
+                 duplicate block:\n{text}"
+            );
+        }
+        for line in ["COALESCED C", "COALESCED D"] {
+            assert!(
+                text.contains(line),
+                "{line:?} landed after the watermark and must not be lost"
+            );
+        }
+        assert_eq!(
+            viewport_rows(&mut stack, id),
+            parked,
+            "the rows the user was reading must be exactly what they were"
+        );
+    }
+
+    /// The refusal the test above depends on, stated on its own: a
+    /// straddling batch cannot be cut at the watermark, so the capture is
+    /// declined and the local grid — every byte, just shallower — stands.
+    /// The next upward scroll re-captures (`scrollback_stale` is still
+    /// set), so declining costs depth for one visit, never content.
+    #[test]
+    fn a_capture_is_refused_when_a_batch_straddles_its_watermark() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"start\r\n", 1, 1);
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id));
+        feed(&mut stack, id, b"straddling run\r\n", 2, 5);
+        let before = scrollbar(&stack, id);
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep_history(400),
+            seq: 3,
+        });
+
+        let after = scrollbar(&stack, id);
+        assert_eq!(
+            after.total, before.total,
+            "the capture was refused, so the grid is untouched: {after:?}"
+        );
+        assert!(
+            stack.terminals[&id].scrollback_stale,
+            "the next scroll re-captures"
+        );
+    }
+
+    /// A batch wholly after the watermark still splices on, so the
+    /// refusal above cannot be read as "give up on racing output". This
+    /// is the #1798 guarantee, kept.
+    #[test]
+    fn a_capture_is_still_adopted_when_no_batch_straddles() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"start\r\n", 1, 4);
+
+        visit_with_racing_output(&mut stack, id, &[(b"racing\r\n", 5)], deep_history(200), 4);
+
+        let text = grid_text(&stack, id);
+        assert!(text.contains("history line 0"), "capture adopted");
+        assert!(text.contains("racing"), "racing output re-fed");
+        assert_eq!(text.matches("racing").count(), 1, "and only once:\n{text}");
+    }
+
+    /// The pin is re-asserted *on content*, not on a number. A capture of
+    /// the same pane holds the same tail and more history above it, and
+    /// the user must still be looking at the rows they were looking at —
+    /// the assertion the pre-#1909 distance check could not make, since it
+    /// compared the distance and never the content at it.
+    #[test]
+    fn a_deeper_capture_leaves_the_parked_rows_identical() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        // The client parsed only the recent tail of the session …
+        let mut local = String::new();
+        for i in 240..300 {
+            local.push_str(&format!("history line {i}\r\n"));
+        }
+        local.push_str("live bottom");
+        feed(&mut stack, id, local.as_bytes(), 1, 1);
+        let _ = stack.scroll_active(-5);
+        let parked = viewport_rows(&mut stack, id);
+        assert!(
+            !parked.iter().any(|r| r == "live bottom"),
+            "precondition: parked above the live bottom, not on it: {parked:?}"
+        );
+
+        // … while tmux retained the whole thing. Same tail, deeper above:
+        // the shape `GridPin::Keep` is sound for.
+        let mut capture = String::new();
+        for i in 0..300 {
+            capture.push_str(&format!("history line {i}\r\n"));
+        }
+        capture.push_str("live bottom");
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: capture.into_bytes(),
+            seq: 2,
+        });
+
+        let bar = scrollbar(&stack, id);
+        assert!(bar.total > 290, "the deeper history was adopted: {bar:?}");
+        assert_eq!(
+            viewport_rows(&mut stack, id),
+            parked,
+            "deepening the history above the user must not move the user"
+        );
+    }
+
     /// Deep history is the scrolling source of truth, so adopting it
     /// also brings an unexpected alternate-screen client back to the
     /// history-bearing primary screen.
@@ -10125,6 +12103,146 @@ mod deep_scrollback_tests {
         assert_eq!(stack.terminals[&TerminalId(1)].last_seq, 9);
         let after = scrollbar(&stack, TerminalId(1));
         assert!(after.total > after.len, "grid still rebuilt: {after:?}");
+    }
+
+    /// #1798, the correctness core: output that lands while a
+    /// deep-scrollback capture is in flight must still be on the grid
+    /// once the capture is adopted. The capture is a snapshot of an
+    /// older instant and adopting it replaces the whole grid, while
+    /// `last_seq` never rewinds — so a batch dropped here is dropped
+    /// for good, with nothing on screen to say so.
+    #[test]
+    fn racing_live_output_survives_the_capture_it_predates() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"before the visit\r\n", 1, 4);
+
+        visit_with_racing_output(
+            &mut stack,
+            id,
+            &[
+                (b"racing line A\r\n", 5),
+                (b"racing line B\r\n", 6),
+                (b"racing line C\r\n", 7),
+            ],
+            deep_history(200),
+            // The capture covers everything up to the arm, nothing after.
+            4,
+        );
+
+        let text = grid_text(&stack, id);
+        for line in ["racing line A", "racing line B", "racing line C"] {
+            assert!(
+                text.contains(line),
+                "{line:?} arrived while the capture was in flight and must survive it"
+            );
+        }
+        assert!(
+            text.contains("history line 0"),
+            "the capture's deep history is still adopted"
+        );
+        assert_eq!(stack.terminals[&id].last_seq, 7);
+        let after = scrollbar(&stack, id);
+        assert!(after.total > after.len, "grid still deepened: {after:?}");
+    }
+
+    /// The watermark selects the suffix: batches the capture already
+    /// covers are not replayed on top of it, or every scroll would
+    /// print the tail of the screen twice.
+    #[test]
+    fn covered_batches_are_not_re_fed_over_the_capture() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"start\r\n", 1, 1);
+
+        visit_with_racing_output(
+            &mut stack,
+            id,
+            &[(b"covered-by-capture\r\n", 2), (b"after-capture\r\n", 3)],
+            // The capture was taken after seq 2 landed, so it already
+            // rendered that line — its text is part of the replay.
+            [deep_history(200), b"\r\ncovered-by-capture".to_vec()].concat(),
+            2,
+        );
+
+        let text = grid_text(&stack, id);
+        assert_eq!(
+            text.matches("covered-by-capture").count(),
+            1,
+            "a batch at or below the watermark is already in the capture:\n{text}"
+        );
+        assert!(
+            text.contains("after-capture"),
+            "the uncovered batch is re-fed"
+        );
+    }
+
+    /// Live output that outruns the retained window leaves a stream with
+    /// a hole, which cannot be spliced onto the capture. The capture is
+    /// refused rather than adopted lossily — the local grid holds every
+    /// byte already, it is only shallower.
+    #[test]
+    fn a_capture_is_refused_when_the_racing_output_cannot_be_re_fed() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"start\r\n", 1, 1);
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id));
+        let flood = vec![b'x'; SCROLLBACK_CATCHUP_CAP + 1];
+        feed(&mut stack, id, &flood, 2, 2);
+        feed(&mut stack, id, b"\r\nstill here\r\n", 3, 3);
+        let before = scrollbar(&stack, id);
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep_history(400),
+            seq: 1,
+        });
+
+        assert!(
+            grid_text(&stack, id).contains("still here"),
+            "the local grid is kept intact instead of being replaced lossily"
+        );
+        let after = scrollbar(&stack, id);
+        assert_eq!(
+            after.total, before.total,
+            "the capture was refused, so the grid is untouched"
+        );
+    }
+
+    /// A ring resync rebuilds the grid from a different baseline than
+    /// the in-flight capture's watermark describes, so that capture's
+    /// retained output can no longer be spliced onto it.
+    #[test]
+    fn a_resync_under_an_in_flight_capture_refuses_it() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"start\r\n", 1, 1);
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id));
+        feed(&mut stack, id, b"racing\r\n", 2, 2);
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: b"start\r\nracing\r\nfrom the ring\r\n".to_vec(),
+            seq: 5,
+            sizes: Vec::new(),
+        });
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep_history(400),
+            seq: 1,
+        });
+        assert!(
+            grid_text(&stack, id).contains("from the ring"),
+            "the resynced grid stands; the stale capture is refused"
+        );
     }
 }
 
@@ -14582,5 +16700,526 @@ mod zoom_and_tile_header_tests {
         );
         let text: String = bg.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("limited"), "shows the limited chip: {text}");
+    }
+}
+
+#[cfg(test)]
+mod recap_prefix_tests {
+    use super::{RECAP_PREFIX, recap_prefix};
+    use lazybox_ipc::PromptSource;
+
+    /// The recap names the sender: a sibling's message must not read as
+    /// something the user typed.
+    #[test]
+    fn the_recap_names_who_sent_the_last_message() {
+        assert_eq!(recap_prefix(&PromptSource::Typed), RECAP_PREFIX);
+        let agent = recap_prefix(&PromptSource::Agent {
+            from: "coordinator".into(),
+        });
+        assert_eq!(agent, "← coordinator ▸ ");
+        assert!(!agent.starts_with("you"));
+        assert_eq!(
+            recap_prefix(&PromptSource::Lazybox {
+                reason: "auto-fix".into()
+            }),
+            "lazybox · auto-fix ▸ "
+        );
+    }
+}
+
+// ── #1920: a log window is read-only, and tile dividers move ─────────
+
+/// Two halves of #1920, sharing one fixture.
+///
+/// **Typed input into a `LogTail` slot.** A log runner is `tail -F`
+/// (`spawn_plan.rs`), a process that never reads its stdin — and before
+/// this, `handle_key` classified intent by the key alone and
+/// `push_write` forwarded regardless of runner kind, so every keystroke
+/// in a log window became a `Command::Write` to a reader that did not
+/// exist, with `Enter` additionally shipping
+/// `TerminalInputIntent::Submit` — documented in `lazybox_ipc` as
+/// "authoritative evidence that a turn may start".
+///
+/// **Divider ratios.** A tiled session draws a divider between its
+/// tiles and, before this, nothing could move it: `ratio` was written
+/// once as a hardcoded 50 and read only by the renderer.
+#[cfg(test)]
+mod log_window_and_divider_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn slot(kind: TerminalKind) -> TerminalSlot {
+        TerminalStack::make_slot(
+            SessionKey::new("session"),
+            kind,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        )
+    }
+
+    /// An agent with its `lazybox log` window beside it — the shape the
+    /// issue is about, and the shape `lazybox log` actually produces
+    /// (`auto_split_on_spawn` defaults to `Split`, so the log lands as a
+    /// tile rather than a tab).
+    fn agent_and_log() -> TerminalStack {
+        let sk = SessionKey::new("session");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.insert_slot_for_test(TerminalId(1), slot(TerminalKind::Agent("claude".into())));
+        stack.insert_slot_for_test(
+            TerminalId(2),
+            slot(TerminalKind::LogTail {
+                path: "/w/target/test.log".into(),
+            }),
+        );
+        stack.set_active_session(Some(sk));
+        stack.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        });
+        stack
+    }
+
+    fn writes(cmds: &[Command]) -> Vec<&Command> {
+        cmds.iter()
+            .filter(|c| matches!(c, Command::Write { .. }))
+            .collect()
+    }
+
+    /// Render once at a known size so the divider geometry the
+    /// hit-tests read is the geometry a frame actually painted.
+    fn render(stack: &mut TerminalStack, w: u16, h: u16) -> Rect {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("test backend");
+        let area = Rect::new(0, 0, w, h);
+        term.draw(|frame| {
+            stack.begin_focus_frame();
+            stack.render(area, frame, true);
+        })
+        .expect("render");
+        area
+    }
+
+    // ── Part 2: the log window takes no typed input ──────────────────
+
+    /// THE regression test. Revert the `LogTail` arm in `handle_key` and
+    /// the two `Write` assertions fail: `k` produces
+    /// `Write{intent:Compose}` and `Enter` produces
+    /// `Write{intent:Submit}`.
+    #[test]
+    fn typing_into_a_log_window_writes_nothing_and_records_nothing() {
+        let mut stack = agent_and_log();
+        assert!(stack.focus_terminal(TerminalId(2)), "focus the log window");
+
+        let mut cmds = Vec::new();
+        for key in [
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            stack.handle_key(key, &mut cmds);
+        }
+
+        assert!(
+            writes(&cmds).is_empty(),
+            "no byte may reach a `tail -F` that cannot read it: {cmds:#?}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::RecordUserMessage { .. })),
+            "nothing typed here is a user prompt: {cmds:#?}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::RecordComposingBuffer { .. })),
+            "and nothing here is a draft: {cmds:#?}",
+        );
+    }
+
+    /// `Submit` is the consequence with the longest reach — the daemon
+    /// treats it as turn-start evidence and arms `submission_in_flight`
+    /// — so it gets its own assertion rather than riding on "no writes".
+    #[test]
+    fn enter_in_a_log_window_emits_no_submit_intent() {
+        let mut stack = agent_and_log();
+        assert!(stack.focus_terminal(TerminalId(2)));
+        let mut cmds = Vec::new();
+        stack.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut cmds);
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                Command::Write {
+                    intent: TerminalInputIntent::Submit,
+                    ..
+                }
+            )),
+            "a log window must not claim a turn started: {cmds:#?}",
+        );
+    }
+
+    /// "Refuse text", not "swallow all keys": scrolling keeps working.
+    /// Scroll is resolved above the guard in `handle_key`, so this pins
+    /// the ordering — a guard placed earlier would silently take the
+    /// scrollback with it.
+    #[test]
+    fn a_log_window_still_scrolls() {
+        let mut stack = agent_and_log();
+        assert!(stack.focus_terminal(TerminalId(2)));
+        // Enough history to have somewhere to scroll to.
+        let payload: String = (0..200).map(|i| format!("line {i}\r\n")).collect();
+        stack
+            .terminals
+            .get_mut(&TerminalId(2))
+            .expect("the log slot")
+            .vt
+            .feed(payload.as_bytes());
+
+        let mut cmds = Vec::new();
+        let up = KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT);
+        assert_eq!(stack.handle_key(up, &mut cmds), PaneOutcome::Consumed);
+        let parked = stack
+            .terminals
+            .get(&TerminalId(2))
+            .expect("the log slot")
+            .vt
+            .anchor;
+        assert!(
+            !matches!(parked, ViewportAnchor::Bottom),
+            "Shift-PageUp must still park the viewport, got {parked:?}",
+        );
+        assert!(
+            writes(&cmds).is_empty(),
+            "and scrolling is still not a write: {cmds:#?}",
+        );
+
+        assert_eq!(
+            stack.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT), &mut cmds),
+            PaneOutcome::Consumed,
+        );
+        assert!(matches!(
+            stack
+                .terminals
+                .get(&TerminalId(2))
+                .expect("the log slot")
+                .vt
+                .anchor,
+            ViewportAnchor::Bottom,
+        ));
+    }
+
+    /// The guard is scoped to the runner kind, not to the pane: the
+    /// agent in the very same tiled session still takes input, and
+    /// still records it. Without this, "fixing" #1920 by muting the
+    /// pane would pass every assertion above.
+    #[test]
+    fn the_agent_beside_it_still_takes_typed_input() {
+        let mut stack = agent_and_log();
+        assert!(stack.focus_terminal(TerminalId(1)), "focus the agent");
+        let mut cmds = Vec::new();
+        stack.handle_key(
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+        stack.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut cmds);
+        assert_eq!(writes(&cmds).len(), 2, "both keystrokes reach the agent");
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::Write {
+                    intent: TerminalInputIntent::Submit,
+                    ..
+                }
+            )),
+            "and Enter still starts a turn: {cmds:#?}",
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::RecordUserMessage { .. })),
+            "and still lands in prompt history: {cmds:#?}",
+        );
+    }
+
+    /// Only a typing attempt earns a footer line. An arrow or a
+    /// `Ctrl-C` is refused in silence — a notice on every keystroke
+    /// would be its own noise.
+    #[test]
+    fn only_a_typing_attempt_is_reported_to_the_user() {
+        let mut stack = agent_and_log();
+        assert!(stack.focus_terminal(TerminalId(2)));
+        let mut cmds = Vec::new();
+
+        for (key, expected) in [
+            (KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), true),
+            (KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT), true),
+            (KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), true),
+            (KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), false),
+            (
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                false,
+            ),
+            (KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), false),
+        ] {
+            stack.handle_key(key, &mut cmds);
+            assert_eq!(
+                stack.take_input_refusal().is_some(),
+                expected,
+                "{key:?} should {} be reported",
+                if expected { "" } else { "not" },
+            );
+        }
+    }
+
+    // ── Part 1: the divider between them moves ───────────────────────
+
+    /// The divider is drawn at the ratio boundary and a click within a
+    /// cell of it resolves to the split that owns the ratio — the same
+    /// 3-cell grab zone the pane splitters use, because a 1-cell line
+    /// is not a target a pointer hits reliably.
+    #[test]
+    fn a_click_near_the_divider_resolves_to_its_split() {
+        let mut stack = agent_and_log();
+        render(&mut stack, 80, 24);
+        // 50% of 80 columns, offset by the pane's own border.
+        let seam = stack
+            .divider_hits
+            .first()
+            .expect("the agent/log divider was painted")
+            .line
+            .x;
+
+        for col in [seam - 1, seam, seam + 1] {
+            assert_eq!(
+                stack.hit_test_tile_divider(col, 12),
+                Some(vec![]),
+                "column {col} is within the grab zone of a seam at {seam}",
+            );
+        }
+        assert_eq!(
+            stack.hit_test_tile_divider(seam + 6, 12),
+            None,
+            "well clear of the seam is not a grab",
+        );
+    }
+
+    /// Dragging moves the stored ratio, and the percentage is taken
+    /// against the split's own rect.
+    #[test]
+    fn dragging_the_divider_moves_the_stored_ratio() {
+        let mut stack = agent_and_log();
+        render(&mut stack, 80, 24);
+        let container = stack
+            .divider_hits
+            .first()
+            .expect("a painted divider")
+            .container;
+
+        // Drop the pointer at three quarters across the split's rect.
+        let target = container.x + container.width * 3 / 4;
+        assert!(stack.drag_tile_divider(&[], target, 12));
+        let ratio = match &stack.layout {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.ratio_at(&[]),
+            other => panic!("expected Splits, got {other:?}"),
+        };
+        // Within a point of three quarters: a percentage derived from a
+        // whole number of cells cannot land exactly, and pinning the
+        // quantised value would make this a test of the arithmetic
+        // rather than of the ratio following the pointer.
+        let ratio = ratio.expect("the split has a ratio");
+        assert!(
+            ratio.abs_diff(75) <= 1,
+            "the ratio should follow the pointer to ~75%, got {ratio}",
+        );
+
+        // The same position again is not a change — a drag delivers one
+        // of these per pointer motion.
+        assert!(!stack.drag_tile_divider(&[], target, 12));
+    }
+
+    /// A drag past the edge cannot produce an invisible-but-live tile.
+    #[test]
+    fn dragging_past_the_edge_clamps() {
+        let mut stack = agent_and_log();
+        render(&mut stack, 80, 24);
+        let container = stack
+            .divider_hits
+            .first()
+            .expect("a painted divider")
+            .container;
+
+        assert!(stack.drag_tile_divider(&[], container.x, 12));
+        let ratio = match &stack.layout {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.ratio_at(&[]),
+            other => panic!("expected Splits, got {other:?}"),
+        };
+        assert_eq!(ratio, Some(lazybox_core::TILE_RATIO_MIN));
+    }
+
+    /// The keyboard half. `]]Shift-<arrow>` moves the same divider, and
+    /// persists it the same way a `]]t` or a split does — so the
+    /// position survives a restart with no new config knob.
+    #[test]
+    fn the_keyboard_moves_the_same_divider_and_persists_it() {
+        let mut stack = agent_and_log();
+        let mut cmds = Vec::new();
+
+        assert_eq!(
+            stack.resize_focused_divider(lazybox_core::TileDirection::Right, 5, &mut cmds),
+            Some("columns"),
+        );
+        let ratio = match &stack.layout {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.ratio_at(&[]),
+            other => panic!("expected Splits, got {other:?}"),
+        };
+        assert_eq!(ratio, Some(55));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::SetSessionLayout { .. })),
+            "the moved divider is persisted: {cmds:#?}",
+        );
+    }
+
+    /// In Tabs mode there is no divider, so the keystroke reports
+    /// nothing and the caller can say so instead of doing nothing
+    /// visible.
+    #[test]
+    fn the_keyboard_reports_nothing_in_tabs_mode() {
+        let mut stack = agent_and_log();
+        stack.set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        let mut cmds = Vec::new();
+        assert_eq!(
+            stack.resize_focused_divider(lazybox_core::TileDirection::Right, 5, &mut cmds),
+            None,
+        );
+        assert!(cmds.is_empty(), "and nothing is persisted: {cmds:#?}");
+    }
+
+    /// The grabbed divider paints accented, which is the whole of the
+    /// drag cue — there is no idle hover state (see the PR body).
+    #[test]
+    fn the_grabbed_divider_is_painted_accented() {
+        let mut stack = agent_and_log();
+        render(&mut stack, 80, 24);
+        let chrome = Color::Rgb(1, 2, 3);
+        assert_eq!(stack.divider_color(&[], chrome), chrome);
+
+        stack.begin_divider_drag(Vec::new());
+        assert_eq!(
+            stack.divider_color(&[], chrome),
+            crate::theme::current().accent,
+        );
+        // A *different* divider is unaffected.
+        assert_eq!(stack.divider_color(&[1], chrome), chrome);
+
+        assert!(stack.end_divider_drag());
+        assert_eq!(stack.divider_color(&[], chrome), chrome);
+        assert!(
+            !stack.end_divider_drag(),
+            "releasing twice is not a release"
+        );
+    }
+
+    /// Nothing is grabbable where no divider is painted (#1920).
+    ///
+    /// A zoomed tile renders through `render_tile_leaf`, and Tabs mode
+    /// through `render_one_terminal` — neither walks the tree, so
+    /// neither records a divider. That makes the hit-test correct here
+    /// *only* because `divider_hits` is cleared at the start of every
+    /// frame: without that clear, the last split frame's geometry would
+    /// still be live and a click in the middle of a zoomed terminal
+    /// would start a phantom drag on an invisible line.
+    #[test]
+    fn a_zoomed_tile_and_tabs_mode_expose_no_divider_to_grab() {
+        let mut stack = agent_and_log();
+        render(&mut stack, 80, 24);
+        let seam = stack
+            .divider_hits
+            .first()
+            .expect("the split frame painted a divider")
+            .line
+            .x;
+        assert!(stack.hit_test_tile_divider(seam, 12).is_some());
+
+        // Zoom: the grid is hidden, so its divider is gone with it.
+        assert_eq!(stack.toggle_zoom(), Some(true), "zoom the focused tile");
+        render(&mut stack, 80, 24);
+        assert!(
+            stack.divider_hits.is_empty(),
+            "a zoomed tile paints no divider: {:?}",
+            stack.divider_hits,
+        );
+        assert_eq!(
+            stack.hit_test_tile_divider(seam, 12),
+            None,
+            "and last frame's seam must not still be grabbable",
+        );
+
+        // Restoring the grid brings it back.
+        assert_eq!(stack.toggle_zoom(), Some(false));
+        render(&mut stack, 80, 24);
+        assert!(stack.hit_test_tile_divider(seam, 12).is_some());
+
+        // Tabs mode: one terminal fills the pane, no divider either.
+        stack.set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut stack, 80, 24);
+        assert!(
+            stack.divider_hits.is_empty(),
+            "Tabs mode paints no divider: {:?}",
+            stack.divider_hits,
+        );
+        assert_eq!(stack.hit_test_tile_divider(seam, 12), None);
+    }
+
+    /// A nested split records its own divider against its own
+    /// container, so a drag inside it is relative to that rect and not
+    /// to the whole pane.
+    #[test]
+    fn a_nested_split_records_its_own_divider() {
+        let mut stack = agent_and_log();
+        stack.insert_slot_for_test(TerminalId(3), slot(TerminalKind::Shell));
+        stack.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::VSplit {
+                    top: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                    bottom: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 3 }),
+                    ratio: 50,
+                }),
+                ratio: 50,
+            },
+            focused: vec![0],
+        });
+        render(&mut stack, 100, 30);
+
+        let paths: Vec<Vec<u8>> = stack
+            .divider_hits
+            .iter()
+            .map(|hit| hit.path.clone())
+            .collect();
+        assert!(paths.contains(&vec![]), "the outer divider: {paths:?}");
+        assert!(paths.contains(&vec![1]), "the inner divider: {paths:?}");
+
+        let inner = stack
+            .divider_hits
+            .iter()
+            .find(|hit| hit.path == vec![1])
+            .expect("the inner divider");
+        assert_eq!(inner.axis, lazybox_core::TileAxis::Vertical);
+        assert!(
+            inner.container.width < 100,
+            "the inner split's container is its own half, not the pane: {:?}",
+            inner.container,
+        );
     }
 }

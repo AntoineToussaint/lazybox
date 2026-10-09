@@ -28,6 +28,7 @@
 //! portable fallback worth shipping.
 
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lazybox_config::KeepAwake;
@@ -41,6 +42,53 @@ use crate::{ServerConfig, TerminalRegistry};
 /// transition to wake the loop. When not holding the timer does no work
 /// at all (no config read, no probe).
 const BATTERY_POLL: Duration = Duration::from_secs(20);
+
+/// How long `working` / `asking` keep holding after the last moment an agent
+/// qualified. Releasing the instant no agent was mid-turn let the Mac
+/// idle-sleep two minutes after the last `Done` — while agents sat on
+/// background builds, deploys and questions, and between turns of the same
+/// task — and every such sleep cost a restart. Half an hour spans those
+/// gaps; a machine that is genuinely done still sleeps after it. The
+/// periodic tick keeps running while the inhibitor is held, so the linger
+/// expires on time without another agent event.
+const LINGER: Duration = Duration::from_secs(30 * 60);
+
+/// The handoff to leave behind if the process exits while holding: set when
+/// an inhibitor with a handoff acquires, cleared when it releases. Process
+/// level because a signal exit (`std::process::exit`) skips every
+/// destructor, `Inhibitor::drop` included — the one exit a restart or an
+/// install actually takes.
+static EXIT_HANDOFF: parking_lot::Mutex<Option<Vec<String>>> = parking_lot::Mutex::new(None);
+
+/// Leave the bounded inhibitor behind if one is pending. Called by the
+/// signal-exit path just before `std::process::exit`; a normal shutdown
+/// reaches the same handoff through `Inhibitor::drop`. Idempotent.
+pub fn hand_off_before_exit() {
+    if let Some(argv) = EXIT_HANDOFF.lock().take() {
+        spawn_handoff(&argv);
+    }
+}
+
+fn spawn_handoff(argv: &[String]) {
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Its own process group, never waited on: it must outlive us.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    match cmd.spawn() {
+        Ok(child) => tracing::info!(
+            pid = child.id(),
+            "keep-awake: daemon stopping while holding — handing off a bounded inhibitor"
+        ),
+        Err(e) => tracing::warn!("keep-awake: could not hand off the inhibitor: {e}"),
+    }
+}
 
 /// Spawn the keep-awake watcher. `None` only on platforms with no
 /// known inhibitor — the task itself is cheap and re-reads
@@ -59,8 +107,20 @@ pub fn spawn(config: &ServerConfig) -> Option<tokio::task::JoinHandle<()>> {
     let rx = config.bus.subscribe();
     let bus = config.bus.clone();
     let terminals = config.terminal.clone();
+    let handoff = handoff_argv(LINGER);
+    let decided = config.keep_awake_active.clone();
     Some(tokio::spawn(async move {
-        run(rx, bus, terminals, argv, keep_awake_mode, on_battery).await;
+        run_with(
+            rx,
+            bus,
+            terminals,
+            Inhibitor::new(argv).with_handoff(handoff),
+            keep_awake_mode,
+            on_battery,
+            LINGER,
+            decided,
+        )
+        .await;
     }))
 }
 
@@ -121,15 +181,43 @@ pub(crate) fn on_battery() -> bool {
 /// runtime, which drops this task's future mid-`recv` and releases a
 /// held inhibitor via `Inhibitor::drop`; a hard kill is covered by the
 /// pid tether in [`inhibit_argv`].
+#[cfg(test)]
 async fn run(
-    mut rx: broadcast::Receiver<Event>,
+    rx: broadcast::Receiver<Event>,
     bus: broadcast::Sender<Event>,
     terminals: TerminalRegistry,
     argv: Vec<String>,
     mode: impl Fn() -> KeepAwake,
     on_battery: impl Fn() -> bool + Clone + Send + 'static,
 ) -> Inhibitor {
-    let mut inhibitor = Inhibitor::new(argv);
+    run_with(
+        rx,
+        bus,
+        terminals,
+        Inhibitor::new(argv),
+        mode,
+        on_battery,
+        Duration::ZERO,
+        Arc::default(),
+    )
+    .await
+}
+
+/// [`run`] with a linger: once an agent qualifies, the hold persists for
+/// `linger` after it stops qualifying (see [`LINGER`]). Each decision is
+/// recorded in `decided` for the subscribe path's badge prime.
+#[allow(clippy::too_many_arguments)]
+async fn run_with(
+    mut rx: broadcast::Receiver<Event>,
+    bus: broadcast::Sender<Event>,
+    terminals: TerminalRegistry,
+    mut inhibitor: Inhibitor,
+    mode: impl Fn() -> KeepAwake,
+    on_battery: impl Fn() -> bool + Clone + Send + 'static,
+    linger: Duration,
+    decided: Arc<parking_lot::Mutex<Option<bool>>>,
+) -> Inhibitor {
+    let mut last_qualified: Option<Instant> = None;
     let mut last_status: Option<(bool, bool)> = None;
     let mut poll = tokio::time::interval(BATTERY_POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -140,6 +228,9 @@ async fn run(
     tick(
         &mut inhibitor,
         &mut last_status,
+        &mut last_qualified,
+        linger,
+        &decided,
         &terminals,
         &bus,
         &mode,
@@ -163,6 +254,9 @@ async fn run(
             tick(
                 &mut inhibitor,
                 &mut last_status,
+                &mut last_qualified,
+                linger,
+                &decided,
                 &terminals,
                 &bus,
                 &mode,
@@ -177,9 +271,13 @@ async fn run(
 /// One recompute: acquire/release the inhibitor per the mode's
 /// `should_hold`, then broadcast the (active, on_battery) status when it
 /// changed so a connected client keeps the badge honest.
+#[allow(clippy::too_many_arguments)]
 async fn tick(
     inhibitor: &mut Inhibitor,
     last_status: &mut Option<(bool, bool)>,
+    last_qualified: &mut Option<Instant>,
+    linger: Duration,
+    decided: &parking_lot::Mutex<Option<bool>>,
     terminals: &TerminalRegistry,
     bus: &broadcast::Sender<Event>,
     mode: &impl Fn() -> KeepAwake,
@@ -190,8 +288,15 @@ async fn tick(
     // Only `asking` mode cares about the parked-on-input set, so skip the
     // extra scan otherwise.
     let asking = matches!(mode, KeepAwake::Asking) && terminals.any_agent_asking().await;
-    let active = mode.should_hold(working, asking);
+    let active = hold_with_linger(
+        mode.should_hold(working, asking),
+        mode,
+        last_qualified,
+        Instant::now(),
+        linger,
+    );
     inhibitor.recompute(active);
+    *decided.lock() = Some(inhibitor.holding());
     // The badge — and thus the power source — only matter while holding,
     // so the (blocking) `pmset` probe is short-circuited unless active and
     // run off the async worker via `spawn_blocking`.
@@ -208,6 +313,66 @@ async fn tick(
             active,
             on_battery: on_batt,
         });
+    }
+}
+
+/// Whether to hold, given whether the mode qualifies right now: a
+/// qualifying moment is remembered, and the hold lasts `linger` past the
+/// last one. `off` never lingers — turning keep-awake off releases now.
+fn hold_with_linger(
+    qualifies: bool,
+    mode: KeepAwake,
+    last_qualified: &mut Option<Instant>,
+    now: Instant,
+    linger: Duration,
+) -> bool {
+    if mode == KeepAwake::Off {
+        *last_qualified = None;
+        return false;
+    }
+    if qualifies {
+        *last_qualified = Some(now);
+        return true;
+    }
+    last_qualified.is_some_and(|at| now.duration_since(at) < linger)
+}
+
+/// A time-bounded inhibitor NOT tethered to the daemon, left behind when
+/// the daemon stops while holding. Agents run in tmux and outlive the
+/// lazybox process; the tethered inhibitor does not, so a lazybox restart
+/// used to hand the machine straight to idle sleep with agents still at
+/// work (02:16 stop → 02:24 sleep). Bounded by `secs`, so it can never
+/// leak: a relaunched daemon takes over with its own tethered hold.
+fn handoff_argv(grace: Duration) -> Option<Vec<String>> {
+    let secs = grace.as_secs().to_string();
+    #[cfg(target_os = "macos")]
+    {
+        Some(
+            ["caffeinate", "-dims", "-t", &secs]
+                .map(String::from)
+                .to_vec(),
+        )
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Some(
+            [
+                "systemd-inhibit",
+                "--what=idle:sleep",
+                "--who=lazybox",
+                "--why=lazybox agents running (daemon restarting)",
+                "--mode=block",
+                "sleep",
+                &secs,
+            ]
+            .map(String::from)
+            .to_vec(),
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = secs;
+        None
     }
 }
 
@@ -272,6 +437,9 @@ struct Inhibitor {
     last_recompute: Option<Instant>,
     /// Minimum interval between recompute calls to reduce overhead.
     throttle_interval: Duration,
+    /// Spawned, detached, when the inhibitor is dropped while holding —
+    /// see [`handoff_argv`]. `None` in tests and on platforms without one.
+    handoff: Option<Vec<String>>,
 }
 
 impl Inhibitor {
@@ -282,6 +450,24 @@ impl Inhibitor {
             spawn_warned: false,
             last_recompute: None,
             throttle_interval: Duration::from_secs(10),
+            handoff: None,
+        }
+    }
+
+    fn with_handoff(mut self, handoff: Option<Vec<String>>) -> Self {
+        self.handoff = handoff;
+        self
+    }
+
+    /// Leave the bounded, untethered hold behind (the daemon is stopping).
+    /// Spawns only while the process-level record is still pending, so a
+    /// signal exit that already handed off never gets a second one.
+    fn hand_off(&self) {
+        if self.holding()
+            && self.handoff.is_some()
+            && let Some(argv) = EXIT_HANDOFF.lock().take()
+        {
+            spawn_handoff(&argv);
         }
     }
 
@@ -341,6 +527,9 @@ impl Inhibitor {
             Ok(child) => {
                 tracing::info!(pid = child.id(), cmd = %self.argv[0], "keep-awake: holding sleep inhibitor");
                 self.child = Some(child);
+                if let Some(handoff) = &self.handoff {
+                    *EXIT_HANDOFF.lock() = Some(handoff.clone());
+                }
                 self.spawn_warned = false;
             }
             Err(e) if !self.spawn_warned => {
@@ -357,6 +546,9 @@ impl Inhibitor {
         let Some(mut child) = self.child.take() else {
             return;
         };
+        if self.handoff.is_some() {
+            EXIT_HANDOFF.lock().take();
+        }
         tracing::info!(pid = child.id(), "keep-awake: releasing sleep inhibitor");
         #[cfg(unix)]
         // SAFETY: plain killpg on the child's own process group.
@@ -372,6 +564,7 @@ impl Inhibitor {
 
 impl Drop for Inhibitor {
     fn drop(&mut self) {
+        self.hand_off();
         self.release();
     }
 }
@@ -493,6 +686,160 @@ mod tests {
             !inhibitor.holding(),
             "working mode must not hold for a merely asking agent"
         );
+    }
+
+    /// The hold outlasts the last qualifying moment by the linger, then
+    /// ends — releasing the instant no agent was mid-turn let the Mac
+    /// idle-sleep two minutes after the last `Done`.
+    #[test]
+    fn a_hold_lingers_past_the_last_working_agent_then_ends() {
+        let linger = Duration::from_secs(30 * 60);
+        let t0 = Instant::now();
+        let mut last = None;
+        assert!(hold_with_linger(
+            true,
+            KeepAwake::Working,
+            &mut last,
+            t0,
+            linger
+        ));
+        let later = t0 + Duration::from_secs(10 * 60);
+        assert!(
+            hold_with_linger(false, KeepAwake::Working, &mut last, later, linger),
+            "ten quiet minutes still hold"
+        );
+        let past = t0 + linger + Duration::from_secs(1);
+        assert!(
+            !hold_with_linger(false, KeepAwake::Working, &mut last, past, linger),
+            "past the linger the machine may sleep"
+        );
+        // A new qualifying moment restarts it.
+        assert!(hold_with_linger(
+            true,
+            KeepAwake::Asking,
+            &mut last,
+            past,
+            linger
+        ));
+    }
+
+    /// Turning keep-awake off releases at once, linger or not.
+    #[test]
+    fn off_never_lingers() {
+        let linger = Duration::from_secs(30 * 60);
+        let t0 = Instant::now();
+        let mut last = None;
+        assert!(hold_with_linger(
+            true,
+            KeepAwake::Working,
+            &mut last,
+            t0,
+            linger
+        ));
+        assert!(!hold_with_linger(
+            false,
+            KeepAwake::Off,
+            &mut last,
+            t0,
+            linger
+        ));
+        assert!(
+            !hold_with_linger(false, KeepAwake::Working, &mut last, t0, linger),
+            "switching off forgot the last qualifying moment"
+        );
+    }
+
+    /// A daemon that stops while holding leaves a bounded inhibitor behind,
+    /// so a lazybox restart does not hand the machine to idle sleep while
+    /// agents keep working in tmux: on drop (a normal stop), and through
+    /// `hand_off_before_exit` on a signal exit, which skips destructors —
+    /// exactly once either way. One that was not holding leaves nothing.
+    /// One test, because the exit record is process-level.
+    #[test]
+    fn a_held_inhibitor_hands_off_once_on_drop_or_signal_exit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = |name: &str| dir.path().join(name);
+        let handoff = |name: &str| {
+            Some(vec![
+                "sh".into(),
+                "-c".into(),
+                format!("echo x >> '{}'", marker(name).display()),
+            ])
+        };
+        let wait_for = |name: &str| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !marker(name).exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+
+        let mut held = Inhibitor::new(sleep_argv()).with_handoff(handoff("drop"));
+        held.set_active(true);
+        drop(held);
+        wait_for("drop");
+        assert!(
+            marker("drop").exists(),
+            "a held inhibitor hands off on drop"
+        );
+
+        let mut signalled = Inhibitor::new(sleep_argv()).with_handoff(handoff("signal"));
+        signalled.set_active(true);
+        hand_off_before_exit();
+        drop(signalled);
+        wait_for("signal");
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            std::fs::read_to_string(marker("signal"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "the signal path hands off, and the later drop does not add a second"
+        );
+
+        let mut released = Inhibitor::new(sleep_argv()).with_handoff(handoff("released"));
+        released.set_active(true);
+        released.set_active(false);
+        hand_off_before_exit();
+        drop(released);
+        let idle = Inhibitor::new(sleep_argv()).with_handoff(handoff("idle"));
+        drop(idle);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !marker("released").exists(),
+            "released: nothing to hand off"
+        );
+        assert!(!marker("idle").exists(), "never held: nothing to hand off");
+    }
+
+    /// The watcher records what it decided, so a connecting client's badge
+    /// reads the daemon's truth, linger included.
+    #[tokio::test]
+    async fn the_watcher_records_its_decision_for_the_badge() {
+        let (tx, rx) = broadcast::channel(8);
+        drop(tx);
+        let (bus, _bus_rx) = inspect_bus();
+        let decided = Arc::new(parking_lot::Mutex::new(None));
+        let _inhibitor = run_with(
+            rx,
+            bus,
+            working_terminals().await,
+            Inhibitor::new(sleep_argv()),
+            || KeepAwake::Working,
+            || false,
+            LINGER,
+            decided.clone(),
+        )
+        .await;
+        assert_eq!(*decided.lock(), Some(true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_handoff_is_bounded_and_untethered() {
+        let argv = handoff_argv(Duration::from_secs(1800)).expect("macOS has one");
+        assert_eq!(argv, ["caffeinate", "-dims", "-t", "1800"]);
+        assert!(!argv.contains(&"-w".to_string()), "must outlive the daemon");
     }
 
     /// `always` mode holds even with no agent at all.

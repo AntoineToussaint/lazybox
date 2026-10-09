@@ -20,7 +20,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use lazybox_core::{
     Activity, ActivityKind, AutoFixKind, CheckRun, CiStatus, CleanupPrompt, Label, Mergeable,
     PolicyArm, ReviewState, ReviewStatus, Reviewer, SessionId, SessionKind, SessionLayout,
-    SessionRunState, Task, TaskId, TaskKind, TaskRole, TaskState, TileTree,
+    SessionRunState, Task, TaskId, TaskKind, TaskRole, TaskState, TileTree, TodoItem, TodoLink,
     WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceKey, WorkspaceSession,
 };
 use std::collections::HashSet;
@@ -257,6 +257,33 @@ fn maximal_workspace() -> Workspace {
             provider_session_ids: Default::default(),
         },
     ];
+    // A TODO checklist: a top-level item and a nested one that lazybox
+    // checked off when its linked PR merged.
+    ws.todo_items = vec![
+        TodoItem {
+            id: "4b1a0c7e-2f38-4d6a-9d0b-7a1c2e3f4a5b".into(),
+            parent: None,
+            text: "ship the frobnicator".into(),
+            done_at: None,
+            canceled_at: None,
+            link: Some(TodoLink::Workspace(WorkspaceKey::new(
+                "github-acme-widget-7",
+            ))),
+            auto_checked: false,
+        },
+        TodoItem {
+            id: "9c2d1e0f-3a47-4b5c-8e6d-1f2a3b4c5d6e".into(),
+            parent: Some("4b1a0c7e-2f38-4d6a-9d0b-7a1c2e3f4a5b".into()),
+            text: "merge #7".into(),
+            done_at: Some(at(12, 0)),
+            canceled_at: None,
+            link: Some(TodoLink::Task(TaskId {
+                source: "github".into(),
+                key: "acme/widget#7".into(),
+            })),
+            auto_checked: true,
+        },
+    ];
     ws
 }
 
@@ -297,6 +324,7 @@ fn v0_legacy_minimal_blob_deserializes() {
     assert_eq!(ws.schema, 0);
     assert_eq!(ws.key.as_str(), "old");
     assert!(ws.sessions.is_empty());
+    assert!(ws.floating.is_none());
     assert!(ws.read_indices.is_empty());
     assert!(ws.snoozed_until.is_none());
     assert_eq!(ws.cleanup_prompt, CleanupPrompt::Unresolved);
@@ -352,6 +380,20 @@ fn v1_sessions_without_worktree_branch_deserialize() {
             .iter()
             .all(|session| session.worktree_branch.is_none())
     );
+}
+
+/// Schema v14 rows predate the TODO checklist. They load with no items.
+#[test]
+fn v14_rows_without_todo_items_deserialize_with_an_empty_checklist() {
+    let mut legacy = serde_json::to_value(maximal_workspace()).expect("serialize fixture");
+    legacy["schema"] = serde_json::json!(14);
+    legacy
+        .as_object_mut()
+        .expect("workspace object")
+        .remove("todo_items");
+    let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
+        .expect("v14 workspace remains readable");
+    assert!(ws.todo_items.is_empty());
 }
 
 /// Schema v3 tasks predate provider-native parent links. Every task slot

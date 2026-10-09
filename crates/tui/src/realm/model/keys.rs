@@ -9,14 +9,14 @@
 //!
 //! Free helpers used only by this surface (`rect_contains`,
 //! `key_event_to_chord`, `find_action_for_chord`,
-//! `emit_clipboard_copy`) live in `mod.rs`
+//! the clipboard boundary) live in `mod.rs`
 //! today and are reachable from this submodule because child
 //! modules can see their parent's private items.
 
 use super::{
-    Id, Model, PaneFocus, TerminalDrag, TerminalSelection, emit_clipboard_copy,
-    find_action_for_seq, find_action_for_stroke, key_event_to_stroke, rect_contains, section_rank,
-    seq_continuations, seq_continuations_available,
+    Id, Model, PaneFocus, TerminalDrag, TerminalSelection, find_action_for_seq,
+    find_action_for_stroke, key_event_to_stroke, rect_contains, section_rank, seq_continuations,
+    seq_continuations_available,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
 use lazybox_ipc::Command as IpcCommand;
@@ -80,6 +80,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
     pub(super) fn handle_pane_key(&mut self, key: RealmKey) {
+        if self.mobile_key(&key) {
+            return;
+        }
         // The footer's `+N more` popup is informational (#1502): any key
         // closes it and is then handled normally, so a hint the user
         // just read fires on the very next press.
@@ -909,6 +912,16 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         self.flush_dispatched_cmds(cmds);
+        // A keystroke the pane dropped for a reason the user cannot see
+        // — typing into a read-only log window (#1920). The pane has no
+        // footer of its own, so it hands the words back here. Drained
+        // on every key so a refusal can never outlive its keystroke.
+        if let Some(message) = self.terminals.take_input_refusal() {
+            self.flash(
+                message,
+                crate::realm::components::footer::NoticeSeverity::Retryable,
+            );
+        }
         // A `d` on an overflowing description preview asks to read the
         // whole thing in the reader modal (#448) — the pane can't mount
         // it, so drain the request here.
@@ -952,27 +965,10 @@ impl<T: TerminalAdapter> Model<T> {
                     .workspace_by_key(session_key)
                     .filter(|workspace| workspace.is_claimed())
                     .map(|workspace| {
-                        let Some(task) = workspace.primary_task() else {
-                            return (
-                                session_key.to_string(),
-                                (session_key.to_string(), vec!["unknown owner".into()]),
-                            );
-                        };
-                        let mut owners = task
-                            .active_qualified_working_claims(chrono::Utc::now())
-                            .into_iter()
-                            .map(|claim| {
-                                format!(
-                                    "device {}/session {}",
-                                    &claim.device[..8],
-                                    &claim.session[..6]
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        if task.has_label(lazybox_core::WORKING_LABEL_NAME) {
-                            owners.push("legacy claim (unknown owner)".into());
-                        }
-                        (session_key.to_string(), (task.title.clone(), owners))
+                        (
+                            session_key.to_string(),
+                            claim_owners(workspace, session_key),
+                        )
                     }),
                 IpcCommand::StartAgentRun {
                     session_key,
@@ -983,27 +979,10 @@ impl<T: TerminalAdapter> Model<T> {
                     .workspace_by_key(session_key)
                     .filter(|workspace| workspace.is_claimed())
                     .map(|workspace| {
-                        let Some(task) = workspace.primary_task() else {
-                            return (
-                                session_key.to_string(),
-                                (session_key.to_string(), vec!["unknown owner".into()]),
-                            );
-                        };
-                        let mut owners = task
-                            .active_qualified_working_claims(chrono::Utc::now())
-                            .into_iter()
-                            .map(|claim| {
-                                format!(
-                                    "device {}/session {}",
-                                    &claim.device[..8],
-                                    &claim.session[..6]
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        if task.has_label(lazybox_core::WORKING_LABEL_NAME) {
-                            owners.push("legacy claim (unknown owner)".into());
-                        }
-                        (session_key.to_string(), (task.title.clone(), owners))
+                        (
+                            session_key.to_string(),
+                            claim_owners(workspace, session_key),
+                        )
                     }),
                 _ => None,
             })
@@ -1030,10 +1009,18 @@ impl<T: TerminalAdapter> Model<T> {
                 )
             };
             self.set_modal_flow(super::ModalFlow::ClaimedSpawnConfirm { commands: planned });
-            self.mount_modal(
-                super::Id::ClaimedSpawnConfirm,
-                crate::realm::components::confirm::Confirm::new(prompt).default_no(),
+            // The spawn chord is behind this prompt, so it sits on the
+            // `destructive_shortcut` axis (#1921). It destroys nothing at
+            // all — a second agent on a claimed task is a coordination
+            // warning, undone by stopping it — so a No default here was the
+            // clearest case of #1900's overreach: the user pressed the key
+            // and the prompt exists only to name who else is on the row.
+            let modal = crate::realm::components::confirm::Confirm::from_source(
+                prompt,
+                crate::realm::components::confirm::ConfirmSource::Shortcut,
+                self.ui_defaults.confirm_default,
             );
+            self.mount_modal(super::Id::ClaimedSpawnConfirm, modal);
             return;
         }
         self.note_spawn_feedback(&cmds);
@@ -1098,6 +1085,28 @@ impl<T: TerminalAdapter> Model<T> {
                     role: None,
                 });
             }
+        }
+    }
+
+    /// `]]Shift-<arrow>` — move the divider between the focused tile and
+    /// its neighbour that way (#1920), by `ui.split_step_percent`: the
+    /// same step the sidebar and activity splitters nudge by, so one tap
+    /// means the same amount of movement everywhere.
+    ///
+    /// Flashes when there is no such divider, because otherwise this is
+    /// the "key does nothing" failure: in Tabs mode, or on a lone
+    /// terminal, there is no line to move and nothing on screen says so.
+    pub(super) fn resize_focused_tile_divider(
+        &mut self,
+        dir: lazybox_core::TileDirection,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        let step = self.ui_defaults.split_step_percent;
+        match self.terminals.resize_focused_divider(dir, step, cmds) {
+            Some(_) => self.redraw = true,
+            None => self.flash_info(
+                "no divider that way — `]]|` / `]]-` split the pane first, and `]]t` turns tabs into tiles",
+            ),
         }
     }
 
@@ -1231,6 +1240,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::SplitHorizontal => self.terminals.split_tile(PendingSplit::Horizontal, cmds),
             LeaderCmd::MoveTile(dir) if self.focus_multi_pane_active() => self.move_focus_pane(dir),
             LeaderCmd::MoveTile(dir) => self.terminals.move_tile_focus(dir, cmds),
+            LeaderCmd::ResizeTile(dir) => self.resize_focused_tile_divider(dir, cmds),
             LeaderCmd::CloseTerminal => self.terminals.close_focused_tile(cmds),
             LeaderCmd::ZoomTile if self.focus_multi_pane_active() => self.toggle_focus_pane_zoom(),
             LeaderCmd::ZoomTile => self.toggle_terminal_zoom(),
@@ -1556,7 +1566,9 @@ impl<T: TerminalAdapter> Model<T> {
         let (_, history) = self.terminals.prompt_history_for(terminal_id)?;
         history.into_iter().find_map(|prompt| match prompt.source {
             lazybox_ipc::PromptSource::Snippet { key, .. } => Some(key),
-            lazybox_ipc::PromptSource::Typed => None,
+            lazybox_ipc::PromptSource::Typed
+            | lazybox_ipc::PromptSource::Agent { .. }
+            | lazybox_ipc::PromptSource::Lazybox { .. } => None,
         })
     }
 
@@ -1741,6 +1753,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// iteration). The wait parks inside `tick`'s `recv_timeout` —
     /// no sleep/poll spin.
     pub fn dispatch_modal_key(&mut self, key: RealmKey) {
+        if self.mobile_modal_key(&key) {
+            return;
+        }
         let _ = self.modal_event_tx.send(RealmEvent::Keyboard(key));
         let deadline = std::time::Instant::now() + Duration::from_millis(500);
         loop {
@@ -1976,19 +1991,28 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Handle a bracketed-paste event from the host terminal. The
     /// host wraps the pasted text in `ESC[200~ … ESC[201~` and
-    /// crossterm hands us the inner string. We forward the same
-    /// wrapped sequence to the focused terminal's PTY so the
-    /// inner program (Claude, shell, vim) sees a single paste
-    /// instead of a stream of keystrokes.
+    /// crossterm hands us the inner string. We forward it to the
+    /// focused terminal's PTY so the inner program (Claude, shell, vim)
+    /// sees a single paste instead of a stream of keystrokes.
+    ///
+    /// The markers go back on only when that inner program asked for
+    /// them (DECSET 2004). Host paste detection and inner-application
+    /// framing are separate contracts: a program that never enabled
+    /// bracketed paste has no parser for `ESC[200~` and prints it, so
+    /// re-wrapping unconditionally put literal markers into `cat`, into
+    /// a shell with the mode off, and into anything reading raw bytes.
+    /// The payload itself is passed through byte for byte in both modes
+    /// — no newline translation, which would turn a multi-line paste
+    /// into a run of submits.
     ///
     /// Only fires when the terminal pane is focused. Other panes
     /// don't have a useful paste-target today (reply textarea has
     /// its own keyboard path through tuirealm).
     pub fn handle_paste(&mut self, text: &str) {
-        if self.focus != PaneFocus::Terminals {
+        if self.focus != PaneFocus::Terminals || self.mobile_rail.is_open() {
             return;
         }
-        let Some(terminal_id) = self.terminals.active_terminal_id() else {
+        let Some(terminal_id) = self.terminals.focused_terminal_id() else {
             return;
         };
         // Update the pinned-recap composing buffer for agent
@@ -1996,10 +2020,15 @@ impl<T: TerminalAdapter> Model<T> {
         // Enter as a blank recap (the keystroke tracker only sees the
         // CR, not the paste payload).
         let draft = self.terminals.record_paste(text);
+        let bracketed = self.terminals.terminal_accepts_bracketed_paste(terminal_id);
         let mut bytes = Vec::with_capacity(text.len() + 12);
-        bytes.extend_from_slice(b"\x1b[200~");
+        if bracketed {
+            bytes.extend_from_slice(b"\x1b[200~");
+        }
         bytes.extend_from_slice(text.as_bytes());
-        bytes.extend_from_slice(b"\x1b[201~");
+        if bracketed {
+            bytes.extend_from_slice(b"\x1b[201~");
+        }
         self.send_cmd(IpcCommand::Write {
             terminal_id,
             bytes,
@@ -2077,9 +2106,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// - ScrollUp/Down over the terminal pane → move the terminal's
     ///   lazybox scrollback (libghostty handles the actual move).
     pub fn handle_mouse(&mut self, m: crossterm::event::MouseEvent) {
-        use crossterm::event::MouseEventKind;
-
         self.note_host_mouse_input();
+        if self.mobile_mouse(m) {
+            return;
+        }
+        use crossterm::event::MouseEventKind;
         if self.layout.last_area.width == 0 || self.layout.last_area.height == 0 {
             return;
         }
@@ -2096,7 +2127,9 @@ impl<T: TerminalAdapter> Model<T> {
         // hidden Activity pane: when hidden, `right_top` is zero-height
         // so mouse events there target the terminal stack (and the
         // horizontal splitter disappears).
-        let (sidebar_rect, right_top_rect, right_bottom_rect) = if self.focus_mode {
+        let (sidebar_rect, right_top_rect, right_bottom_rect) = if self.focus_mode
+            && self.presentation != crate::realm::presentation::Presentation::Mobile
+        {
             let (pane_area, _) = super::split_for_footer(self.layout.last_area);
             let (_, body) = crate::realm::layout::focus_mode_areas(pane_area);
             (Rect::default(), Rect::default(), body)
@@ -2156,6 +2189,56 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                     return;
                 }
+                // A left-click on a focus-mode attention count jumps to the
+                // next workspace it counts (`!`, `Shift-F`, `Shift-N`); the
+                // review count selects the review-requested lens's next row.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && let Some(kind) = self
+                        .focus_count_hits
+                        .iter()
+                        .find(|(row, cols, _)| *row == m.row && cols.contains(&m.column))
+                        .map(|(_, _, kind)| *kind)
+                {
+                    use crate::realm::components::focus_header::FocusCount;
+                    use lazybox_tui_core::action::Action;
+                    let action = match kind {
+                        FocusCount::Asking => Action::JumpToAsking,
+                        FocusCount::CiFailing => Action::JumpToFailingCi,
+                        FocusCount::Unread => Action::JumpToUnread,
+                        FocusCount::Review => Action::JumpToReviewPending,
+                    };
+                    let cmds = self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Mouse);
+                    self.dispatch_cmds(cmds);
+                    self.redraw = true;
+                    return;
+                }
+                // A left-click on the footer's right zone opens what it is
+                // about: a sticky notice inspects itself, any other notice
+                // opens the message log, and the polling status opens the
+                // sync view. All three were dead text.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && let Some((_, right)) = self
+                        .footer_right
+                        .filter(|(rect, _)| rect_contains(*rect, m.column, m.row))
+                {
+                    use crate::realm::components::footer::FooterRight;
+                    use lazybox_tui_core::action::Action;
+                    let action = match right {
+                        FooterRight::Notice { sticky: true } => None,
+                        FooterRight::Notice { sticky: false } => Some(Action::OpenMessages),
+                        FooterRight::Polling => Some(Action::OpenSyncStatus),
+                    };
+                    match action {
+                        Some(action) => {
+                            let cmds =
+                                self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Mouse);
+                            self.dispatch_cmds(cmds);
+                        }
+                        None => self.inspect_notice(),
+                    }
+                    self.redraw = true;
+                    return;
+                }
                 // A left-click on the coach rail's skip / end tokens
                 // (#1460). The rail sits in its own carved band outside
                 // every pane rect, so like the footer this is the only
@@ -2210,6 +2293,18 @@ impl<T: TerminalAdapter> Model<T> {
                 // switch active tab. Checked BEFORE the
                 // "forward to inner program" path because the tab
                 // strip belongs to lazybox, not to Claude/shell.
+                // The spend / headroom badge beside a tab opens Stats.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && self.terminals.usage_badge_at(m.column, m.row)
+                {
+                    let cmds = self.dispatch_action_via(
+                        &lazybox_tui_core::action::Action::OpenStats,
+                        lazybox_ipc::ActionVia::Mouse,
+                    );
+                    self.dispatch_cmds(cmds);
+                    self.redraw = true;
+                    return;
+                }
                 if matches!(button, crossterm::event::MouseButton::Left)
                     && let Some(idx) = self.terminals.tab_at(m.column, m.row)
                 {
@@ -2368,14 +2463,31 @@ impl<T: TerminalAdapter> Model<T> {
                 // Splitter drag wins over both focus changes and
                 // terminal interaction — clicking a splitter resizes,
                 // it never refocuses or types into a pane.
-                if let Some(target) = self.layout.hit_test_splitter(
-                    m.column,
-                    m.row,
-                    sidebar_rect,
-                    right_top_rect,
-                    horizontal_splitter,
-                ) {
+                if self.presentation != crate::realm::presentation::Presentation::Mobile
+                    && let Some(target) = self.layout.hit_test_splitter(
+                        m.column,
+                        m.row,
+                        sidebar_rect,
+                        right_top_rect,
+                        horizontal_splitter,
+                    )
+                {
                     self.layout.active_drag = Some(target);
+                    return;
+                }
+                // Same rule one level in: a divider between two tiles of
+                // the terminal stack resizes, it never refocuses the
+                // tile or types into it (#1920). Checked after the two
+                // pane splitters, because their lines bound this pane
+                // and an overlap at the seam belongs to the outer one.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && rect_contains(right_bottom_rect, m.column, m.row)
+                    && let Some(path) = self.terminals.hit_test_tile_divider(m.column, m.row)
+                {
+                    self.terminals.begin_divider_drag(path.clone());
+                    self.layout.active_drag =
+                        Some(crate::realm::layout::DragTarget::TileDivider(path));
+                    self.redraw = true;
                     return;
                 }
                 // Move focus to the clicked pane BEFORE any
@@ -2520,8 +2632,18 @@ impl<T: TerminalAdapter> Model<T> {
                         if search_hit {
                             self.sidebar.open_global_search();
                         }
+                        // The usage row and today-spend strip open Stats.
+                        let stats_hit = self.sidebar.stats_hit(m.column, m.row);
+                        if stats_hit {
+                            let cmds = self.dispatch_action_via(
+                                &lazybox_tui_core::action::Action::OpenStats,
+                                lazybox_ipc::ActionVia::Mouse,
+                            );
+                            self.dispatch_cmds(cmds);
+                        }
                         let handled = filter_hit
                             || search_hit
+                            || stats_hit
                             || self.sidebar.click_to_cycle_sort(m.column, m.row)
                             || self.sidebar.click_to_select(sidebar_rect, m.row);
                         if handled {
@@ -2629,11 +2751,12 @@ impl<T: TerminalAdapter> Model<T> {
                             if let Some((text, anchor, focus_pt)) = span
                                 && !text.trim().is_empty()
                             {
-                                emit_clipboard_copy(&text);
-                                self.flash_hint(format!(
-                                    "copied {} to clipboard",
-                                    if clicks == 2 { "word" } else { "line" }
-                                ));
+                                let delivery = (self.clipboard)(&text);
+                                self.flash_hint(delivery.notice(if clicks == 2 {
+                                    "word"
+                                } else {
+                                    "line"
+                                }));
                                 self.terminal_selection = Some(TerminalSelection {
                                     terminal,
                                     anchor,
@@ -2686,6 +2809,17 @@ impl<T: TerminalAdapter> Model<T> {
                         if let Some(url) = self.right.take_open_url() {
                             self.open_external_url(&url);
                         }
+                        if let Some(task) = self.right.take_open_task() {
+                            self.open_task_reference(&task);
+                        }
+                        if let Some((title, links)) = self.right.take_links() {
+                            self.mount_link_picker(&title, links);
+                        }
+                        if let Some(action) = self.right.take_action() {
+                            let cmds =
+                                self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Mouse);
+                            self.dispatch_cmds(cmds);
+                        }
                         if self.right.take_request_reviewers()
                             && let Some(cmd) = self.begin_request_reviewers()
                         {
@@ -2706,8 +2840,14 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::Drag(_) => {
-                if let Some(target) = self.layout.active_drag {
-                    if self.layout.update_drag(target, m.column, m.row) {
+                if let Some(target) = self.layout.active_drag.clone() {
+                    let changed = match &target {
+                        crate::realm::layout::DragTarget::TileDivider(path) => {
+                            self.terminals.drag_tile_divider(path, m.column, m.row)
+                        }
+                        other => self.layout.update_drag(other, m.column, m.row),
+                    };
+                    if changed {
                         self.redraw = true;
                     }
                     return;
@@ -2717,9 +2857,28 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::Up(button) => {
-                let was_drag = self.layout.active_drag.take().is_some();
-                if was_drag {
-                    self.layout.persist();
+                // A finished splitter drag saves where the user left
+                // the divider. Which store depends on which divider:
+                // the two pane splitters are `ui:` percentages, while a
+                // tile divider's ratio lives in the session's tile tree
+                // and goes through the daemon — so each persists its
+                // own and neither rewrites the other's.
+                //
+                // Either way it happens ONCE, at the end of the
+                // gesture, not per pointer motion: a
+                // `Command::SetSessionLayout` per motion would put the
+                // daemon's workspace writer on the mouse (#1920).
+                match self.layout.active_drag.take() {
+                    Some(crate::realm::layout::DragTarget::TileDivider(_)) => {
+                        let mut cmds: Vec<IpcCommand> = Vec::new();
+                        self.terminals.persist_session_layout(&mut cmds);
+                        self.flush_dispatched_cmds(cmds);
+                    }
+                    Some(_) => self.layout.persist(),
+                    None => {}
+                }
+                if self.terminals.end_divider_drag() {
+                    self.redraw = true;
                 }
                 let mut click_no_drag_at: Option<(u16, u16)> = None;
                 if let Some(drag) = self.terminal_drag.take() {
@@ -2730,13 +2889,12 @@ impl<T: TerminalAdapter> Model<T> {
                             drag.focus,
                         );
                         if !text.trim().is_empty() {
-                            emit_clipboard_copy(&text);
+                            let delivery = (self.clipboard)(&text);
                             let lines = text.lines().count();
-                            self.flash_hint(format!(
-                                "copied {} line{} to clipboard",
-                                lines,
+                            self.flash_hint(delivery.notice(&format!(
+                                "{lines} line{}",
                                 if lines == 1 { "" } else { "s" }
-                            ));
+                            )));
                         }
                     } else {
                         click_no_drag_at = Some(drag.down);
@@ -3147,6 +3305,8 @@ pub(super) fn action_from_kind(
         ActionKind::OpenWith => Action::OpenWith,
         ActionKind::ViewDiff => Action::ViewDiff,
         ActionKind::NewWorkspace => Action::NewWorkspace,
+        ActionKind::FloatingWorkspace => Action::FloatingWorkspace,
+        ActionKind::NewCoordinationWorkspace => Action::NewCoordinationWorkspace,
         ActionKind::RenameWorkspace => Action::RenameWorkspace,
         ActionKind::MoveToSpace => Action::MoveToSpace,
         ActionKind::NewProject => Action::NewProject,
@@ -3177,6 +3337,7 @@ pub(super) fn action_from_kind(
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
         ActionKind::Reply => Action::Reply,
         ActionKind::EditNotes => Action::EditNotes,
+        ActionKind::OpenArtifacts => Action::OpenArtifacts,
         ActionKind::SetRole => Action::SetRole,
         ActionKind::SpawnPlanner => Action::SpawnPlanner,
         ActionKind::SpawnCoordinator => Action::SpawnCoordinator,
@@ -3236,6 +3397,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
         ActionKind::OpenMessages => Action::OpenMessages,
         ActionKind::OpenErrorInbox => Action::OpenErrorInbox,
+        ActionKind::OpenArchive => Action::OpenArchive,
         ActionKind::OpenStats => Action::OpenStats,
         ActionKind::OpenHopper => Action::OpenHopper,
         // DismissNotice is deliberately absent: it's routed through the
@@ -3250,6 +3412,7 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,
         ActionKind::JumpToLimited => Action::JumpToLimited,
         ActionKind::JumpToUnread => Action::JumpToUnread,
+        ActionKind::JumpToReviewPending => Action::JumpToReviewPending,
         ActionKind::JumpToBlocked => Action::JumpToBlocked,
         ActionKind::EpicMergeOrder => Action::EpicMergeOrder,
         ActionKind::EpicGraph => Action::EpicGraph,
@@ -3493,4 +3656,45 @@ mod popup_nav_tests {
         assert_eq!(single_menu_char("←→"), None);
         assert_eq!(single_menu_char(""), None);
     }
+}
+
+/// The claim owners to name in the "already claimed, start anyway?" prompt,
+/// with the workspace's title.
+///
+/// The client reads claims from the poll payload alone, which is the point:
+/// presence is a label and costs nothing (#1922). A stable `working` label
+/// therefore names no holder here — the holder lives in the claim comment,
+/// which only a decision point on the daemon side fetches — so the prompt says
+/// that plainly and points at the command that will answer it, rather than
+/// inventing an owner or implying there isn't one. A claim from a box on an
+/// older build still carries its holder in the label name, so it is still
+/// named.
+fn claim_owners(
+    workspace: &lazybox_core::Workspace,
+    session_key: &lazybox_core::SessionKey,
+) -> (String, Vec<String>) {
+    let Some(task) = workspace.primary_task() else {
+        return (session_key.to_string(), vec!["unknown owner".into()]);
+    };
+    let mut owners = task
+        .active_qualified_working_claims(chrono::Utc::now())
+        .into_iter()
+        .map(|claim| {
+            format!(
+                "device {}/session {}",
+                &claim.device[..8],
+                &claim.session[..6]
+            )
+        })
+        .collect::<Vec<_>>();
+    if task.has_stable_working_claim() {
+        owners.push(format!(
+            "a lazybox agent (`lazybox task status {}` names it)",
+            task.id.key
+        ));
+    }
+    if owners.is_empty() {
+        owners.push("unknown owner".into());
+    }
+    (task.title.clone(), owners)
 }

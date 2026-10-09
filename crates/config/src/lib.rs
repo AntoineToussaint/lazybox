@@ -13,8 +13,8 @@ pub use skills::{
     validate_skill_name,
 };
 pub use snippets::{
-    Snippet, SnippetOrigin, SnippetState, Snippets, SnippetsError, body_hash, classify_snippet,
-    export_body_hash, keep_mine_target,
+    Snippet, SnippetAction, SnippetOrigin, SnippetState, Snippets, SnippetsError, body_hash,
+    classify_snippet, export_body_hash, keep_mine_target,
 };
 
 use serde::{Deserialize, Serialize};
@@ -157,6 +157,24 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub conventions: lazybox_core::Conventions,
+    /// Standing agent policies — the house rules lazybox states in every
+    /// spawned agent's briefing. A map from policy id to `false` (drop
+    /// the rule), `true` (keep lazybox's wording), or replacement prose;
+    /// an id no built-in defines adds a rule of your own. Layered under
+    /// `repos.<owner/name>.policies`. See
+    /// [`lazybox_core::AgentPolicies`].
+    ///
+    /// ```yaml
+    /// policies:
+    ///   one-self-contained-pr: false
+    ///   ask-before-filing-a-record: "Ask me before filing anything."
+    ///   house-rule: "Never touch `main` directly."
+    /// ```
+    #[serde(
+        default,
+        skip_serializing_if = "lazybox_core::AgentPolicyOverrides::is_empty"
+    )]
+    pub policies: lazybox_core::AgentPolicyOverrides,
 }
 
 /// `setup:` block — wizard-driven user config. Mirrors
@@ -1196,6 +1214,13 @@ pub struct LensSection {
     pub mailbox: Option<String>,
 }
 
+/// Stable identity of one terminal tab in the saved mobile presentation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileSessionTab {
+    pub session_key: String,
+    pub terminal_id: u64,
+}
+
 /// `ui:` block — user-facing view state lazybox writes back so UI
 /// preferences survive restart.
 ///
@@ -1206,6 +1231,10 @@ pub struct LensSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiSection {
+    /// Mobile tab priority, shared by launches using this config profile.
+    /// Terminal IDs survive daemon reconnects; workspace keys guard identities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mobile_session_order: Vec<MobileSessionTab>,
     /// Repo names whose workspace rows should start collapsed.
     pub collapsed_repos: std::collections::BTreeSet<String>,
     /// Repo names the user has pinned to the top of the sidebar, in
@@ -1476,6 +1505,7 @@ fn default_true() -> bool {
 impl Default for UiSection {
     fn default() -> Self {
         Self {
+            mobile_session_order: Vec::new(),
             collapsed_repos: std::collections::BTreeSet::new(),
             pinned_repos: Vec::new(),
             focused_workspaces: Vec::new(),
@@ -1892,6 +1922,22 @@ pub struct RepoConfig {
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<bool>,
+    /// Per-repo standing agent policies, layered ON TOP of the global
+    /// `policies:` map — so a repo can drop a rule the box keeps, or
+    /// re-assert with `true` one the box turned off. Same shape as the
+    /// global map.
+    ///
+    /// ```yaml
+    /// repos:
+    ///   acme/api:
+    ///     policies:
+    ///       ask-before-filing-a-record: false   # this repo wants the issues
+    /// ```
+    #[serde(
+        default,
+        skip_serializing_if = "lazybox_core::AgentPolicyOverrides::is_empty"
+    )]
+    pub policies: lazybox_core::AgentPolicyOverrides,
 }
 
 /// Per-repo approval policy (`repos.<owner/name>.approval`). Maps to the
@@ -2097,6 +2143,10 @@ impl AgentEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSection {
+    /// Override the built-in brief on coordination workspaces (`x c`). An
+    /// explicit empty string disables the extra brief; shared startup rules
+    /// still apply. Read on each agent launch, including resumes.
+    pub coordination_prompt: Option<String>,
     #[serde(flatten)]
     pub config: lazybox_core::AgentConfig,
     /// Launch lazybox-spawned autonomous sessions (e.g. `@lazybox`-triggered
@@ -2155,7 +2205,8 @@ pub struct AgentSection {
     /// Per-model price overrides for cost attribution, keyed by **model-id
     /// prefix** (`claude-opus`, `gpt-4o`, …), longest prefix wins. Values are
     /// USD per million tokens (`input` / `output` / `cache_write` /
-    /// `cache_read`). Merged over lazybox's built-in rate card, so this is
+    /// `cache_read`, and optionally `cache_write_1h`, which otherwise
+    /// defaults to 2× `input`). Merged over lazybox's built-in rate card, so this is
     /// only needed for a brand-new model or a negotiated rate — a matching
     /// entry here always beats the built-in. See `lazybox_core::pricing`.
     #[serde(default)]
@@ -2262,7 +2313,12 @@ pub struct AgentSection {
     /// of use reached tens of GB across never-reaped sessions). Reaped
     /// sessions stop being restored at startup too; `w w` respawns one
     /// fresh in a keystroke, prompt history persists either way.
-    /// Unset → 48h. `0s` disables reaping entirely.
+    ///
+    /// **Opt-in.** Unset (and `0s`) → no reaping, ever. Reaping kills a
+    /// tmux session, which destroys its scrollback — the user's own work
+    /// — and nothing unattended may do that (#1869). Setting a duration
+    /// here is the user asking for it; [`DEFAULT_REAP_CLOSED_AFTER`] is
+    /// the suggested one.
     #[serde(with = "duration_human_opt", default)]
     pub reap_closed_after: Option<Duration>,
     /// Scheduling niceness for spawned agent processes (and their
@@ -2294,10 +2350,14 @@ pub const DEFAULT_MAX_EPIC_WORKERS: usize = 6;
 /// Default for [`AgentSection::max_live_agents`] when unset.
 pub const DEFAULT_MAX_LIVE_AGENTS: usize = 32;
 
-/// Default for [`AgentSection::reap_closed_after`] when unset: two days
-/// of grace after a PR/issue closes before its sessions are reaped —
-/// long enough to hand off or recall an agent's context, short enough
-/// to stop the fleet ratchet (#1198).
+/// Suggested value for [`AgentSection::reap_closed_after`] when a user
+/// opts in: two days of grace after a PR/issue closes — long enough to
+/// hand off or recall an agent's context, short enough to stop the fleet
+/// ratchet (#1198).
+///
+/// NOT a default. Unset means no reaping at all (#1869): an unattended
+/// sweep that kills tmux sessions destroys the user's scrollback without
+/// anyone asking, and only an explicit action may remove a session.
 pub const DEFAULT_REAP_CLOSED_AFTER: Duration = Duration::from_secs(48 * 3600);
 
 /// Default per-terminal ring buffer size (bytes). 2 MiB provides adequate
@@ -2363,14 +2423,22 @@ impl AgentSection {
         self.nice.unwrap_or(10).clamp(0, 20)
     }
 
-    /// Effective closed-workspace session-reap grace: unset →
-    /// [`DEFAULT_REAP_CLOSED_AFTER`], explicit `0s` → `None` (never
-    /// reap).
+    /// Effective closed-workspace session-reap grace: **unset → `None`**
+    /// (never reap), explicit `0s` → `None` too, any other duration →
+    /// that duration.
+    ///
+    /// Unset used to mean [`DEFAULT_REAP_CLOSED_AFTER`], which made an
+    /// hourly background sweep destroy tmux sessions nobody asked it to
+    /// touch. A tmux session is the user's work — its scrollback is often
+    /// the only surviving record of what an agent did — and a session is
+    /// removed on an explicit user action alone (#1869). Reaping is now
+    /// strictly opt-in: writing a duration into the config IS the user
+    /// saying so, and the constant remains as the suggested value.
     pub fn reap_closed_after(&self) -> Option<Duration> {
         match self.reap_closed_after {
             Some(d) if d.is_zero() => None,
             Some(d) => Some(d),
-            None => Some(DEFAULT_REAP_CLOSED_AFTER),
+            None => None,
         }
     }
 
@@ -2792,6 +2860,24 @@ impl Config {
     ///
     /// The deprecated `models.priority` key is already folded into
     /// `capability` by `Config::parse` (#1598), so this reads one map.
+    /// The standing agent policies in force for work in `repo`
+    /// (`owner/name`), or box-wide when `repo` is `None` / unknown:
+    /// lazybox's built-ins with the global `policies:` map applied, then
+    /// the repo's own on top.
+    ///
+    /// Resolved here rather than at each spawn site so the global→repo
+    /// layering has exactly one implementation — the briefing reaches an
+    /// agent through four different channels (Claude's hook, Codex's
+    /// `developer_instructions`, a prompt prefix, a structured run) and
+    /// they must all state the same rules.
+    pub fn agent_policies(&self, repo: Option<&str>) -> lazybox_core::AgentPolicies {
+        let mut layers = vec![&self.policies];
+        if let Some(entry) = repo.and_then(|repo| self.repos.get(repo)) {
+            layers.push(&entry.policies);
+        }
+        lazybox_core::AgentPolicies::resolve(layers)
+    }
+
     pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
         let builtin = lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default();
         let mut models = match self.agents.get(agent_id) {
@@ -2944,10 +3030,10 @@ impl Config {
 
     /// Human-readable warnings for every configured agent whose model
     /// menu names an alias no tier defines — a `default` or `capability.*`
-    /// that dangles. Such a reference resolves to no args, so the spawn
-    /// silently keeps the agent's own hard-coded model instead of the
-    /// tier the config appears to request; surfacing it makes that no-op
-    /// discoverable (issue #748).
+    /// that dangles. Such a reference resolves to no args. Built-in Claude
+    /// and Codex launches refuse it rather than inheriting a provider model;
+    /// other adapters may still use their own default. Surface it before the
+    /// user meets that refusal at spawn time (issue #748).
     pub fn model_alias_warnings(&self) -> Vec<String> {
         self.agents
             .keys()
@@ -2970,8 +3056,8 @@ impl Config {
                         };
                         format!(
                             "agents.{agent_id}.models.{source} names alias {alias:?}, \
-                             which no tier defines — the spawn will silently keep \
-                             {agent_id}'s own default model"
+                             which no tier defines — built-in agents that require a model \
+                             pin will refuse the spawn"
                         )
                     })
             })
@@ -3304,6 +3390,12 @@ impl Config {
         use std::sync::Mutex;
         static SAVE_LOCK: Mutex<()> = Mutex::new(());
         let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The in-process mutex orders this process's writers; the file lock
+        // orders them against every OTHER process — a second TUI, the
+        // desktop app, the daemon (#1828). Without it two processes each
+        // loaded, mutated their own copy and renamed it into place, and
+        // the later rename silently discarded the earlier change.
+        let _file_lock = Self::lock_for_update(path)?;
         let mut cfg = if path.exists() {
             Self::load_from(path)?
         } else {
@@ -3315,6 +3407,29 @@ impl Config {
 
     pub fn default_path() -> PathBuf {
         lazybox_core::paths::config_yaml()
+    }
+
+    /// Take the cross-process lock that serializes every read-modify-write
+    /// of the config at `path`, held until the returned handle drops.
+    ///
+    /// It locks a stable sibling (`config.yaml.lock`), never the YAML
+    /// itself: [`Self::save_to`] replaces the YAML's inode by rename, so a
+    /// lock on it would guard a file that is about to stop existing (the
+    /// same reasoning as the snippets file lock). Anything that loads the
+    /// config, changes it and writes it back outside [`Self::save_with`]
+    /// must hold this across the whole cycle.
+    pub fn lock_for_update(path: &Path) -> Result<std::fs::File, ConfigError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path.with_extension("yaml.lock"))?;
+        fs2::FileExt::lock_exclusive(&lock)?;
+        Ok(lock)
     }
 }
 
@@ -4185,9 +4300,23 @@ mod tests {
     /// #1198: unset → 48h default, explicit `0s` opts out entirely, an
     /// explicit duration wins, and the human form parses from YAML.
     #[test]
-    fn reap_closed_after_defaults_and_opt_out() {
+    fn reap_closed_after_is_opt_in() {
         let unset = AgentSection::default();
-        assert_eq!(unset.reap_closed_after(), Some(DEFAULT_REAP_CLOSED_AFTER));
+        assert_eq!(
+            unset.reap_closed_after(),
+            None,
+            "#1869: killing a tmux session is an explicit user action — \
+             an unconfigured lazybox must never reap one",
+        );
+        assert_eq!(
+            AgentSection {
+                reap_closed_after: Some(DEFAULT_REAP_CLOSED_AFTER),
+                ..AgentSection::default()
+            }
+            .reap_closed_after(),
+            Some(DEFAULT_REAP_CLOSED_AFTER),
+            "the suggested grace still applies once the user opts in",
+        );
 
         let off = Config::parse("agent:\n  reap_closed_after: 0s\n").unwrap();
         assert_eq!(off.agent.reap_closed_after(), None);
@@ -4458,6 +4587,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #1828: `save_with` serialized only within one process. Another
+    /// process (modelled by an independent lock handle, as `flock` locks
+    /// are per open file) writing between our load and our rename had its
+    /// change silently discarded. The save must wait for the lock and then
+    /// apply its mutation ON TOP of the other writer's result.
+    #[test]
+    fn a_save_waits_for_another_writer_and_keeps_its_change() {
+        let dir = std::env::temp_dir().join(format!("lazybox-config-xproc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("config.yaml");
+        Config::default().save_to(&path).expect("seed");
+
+        let other = Config::lock_for_update(&path).expect("the other writer locks");
+        let saver = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                Config::save_with_at(&path, |c| c.ui.coach_step = 7).expect("save");
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(
+            !saver.is_finished(),
+            "the save must wait for the other writer's lock"
+        );
+        // The other writer finishes its own read-modify-write, then releases.
+        let mut theirs = Config::load_from(&path).expect("load");
+        theirs.ui.theme = Some("Gruvbox Dark".into());
+        theirs.save_to(&path).expect("their write");
+        drop(other);
+        saver.join().expect("saver thread");
+
+        let merged = Config::load_from(&path).expect("load");
+        assert_eq!(
+            merged.ui.theme.as_deref(),
+            Some("Gruvbox Dark"),
+            "their change survives"
+        );
+        assert_eq!(merged.ui.coach_step, 7, "and ours landed on top of it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Regression (#tmp-name race): `save_to` used a FIXED sibling
     /// temp path (`config.yaml.tmp`), so two lazybox processes —
     /// explicitly supported — racing a save could interleave writes
@@ -4515,7 +4686,9 @@ mod tests {
             .expect("read dir")
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n != "config.yaml" && n != "config.yaml.tmp")
+            // The cross-process lock file is permanent by design: it must
+            // be a stable inode that no rename replaces (#1828).
+            .filter(|n| n != "config.yaml" && n != "config.yaml.tmp" && n != "config.yaml.lock")
             .collect();
         assert!(strays.is_empty(), "no stray temp files: {strays:?}");
 
@@ -6224,9 +6397,14 @@ ui:
     #[test]
     fn agent_models_falls_back_to_builtin_then_empty() {
         let cfg = Config::default();
-        // Claude ships a built-in tier menu; unknown agents get none.
+        // Built-in LLM agents ship pinned defaults; unknown agents get none.
         assert!(!cfg.agent_models("claude").tiers.is_empty());
-        assert!(cfg.agent_models("codex").tiers.is_empty());
+        assert!(!cfg.agent_models("codex").tiers.is_empty());
+        assert_eq!(
+            cfg.agent_models("codex").resolve_args(None),
+            vec!["--model".to_string(), "gpt-5.6-sol".to_string()]
+        );
+        assert!(cfg.agent_models("no-such-agent").tiers.is_empty());
     }
 
     #[test]
@@ -6280,6 +6458,18 @@ agents:
             m.resolve_args(None),
             vec!["--model".to_string(), "claude-opus-5".to_string()],
             "a bare spawn always pins an explicit coding model"
+        );
+    }
+
+    #[test]
+    fn agent_models_builtin_codex_defaults_to_a_pinned_model() {
+        let cfg = Config::default();
+        let models = cfg.agent_models("codex");
+        assert_eq!(models.default.as_deref(), Some("L"));
+        assert_eq!(
+            models.resolve_args(None),
+            vec!["--model".to_string(), "gpt-5.6-sol".to_string()],
+            "a bare Codex spawn always pins Lazybox's explicit model"
         );
     }
 
@@ -7066,5 +7256,123 @@ open_with:
         let dumped = serde_yaml::to_string(&cfg).expect("dump");
         let back: Config = serde_yaml::from_str(&dumped).expect("reparse");
         assert_eq!(back.ui.views, cfg.ui.views);
+    }
+
+    #[test]
+    fn policies_parse_from_yaml_in_both_spellings() {
+        let cfg = Config::parse(
+            r#"
+policies:
+  one-self-contained-pr: false
+  ask-before-filing-a-record: Ask me before filing anything.
+  house-rule: Never touch `main` directly.
+"#,
+        )
+        .expect("parse");
+        let policies = cfg.agent_policies(None);
+        assert!(policies.text("one-self-contained-pr").is_none());
+        assert_eq!(
+            policies.text("ask-before-filing-a-record"),
+            Some("Ask me before filing anything.")
+        );
+        assert_eq!(
+            policies.text("house-rule"),
+            Some("Never touch `main` directly.")
+        );
+    }
+
+    #[test]
+    fn an_unset_policies_block_is_lazyboxs_builtins() {
+        let cfg = Config::parse("").expect("parse");
+        assert_eq!(
+            cfg.agent_policies(None),
+            lazybox_core::AgentPolicies::builtin()
+        );
+        // ...and never written back into a config file the user did not
+        // ask for it in.
+        assert!(
+            !serde_yaml::to_string(&cfg)
+                .expect("dump")
+                .contains("policies")
+        );
+    }
+
+    #[test]
+    fn a_repo_policies_block_layers_over_the_global_one() {
+        let cfg = Config::parse(
+            r#"
+policies:
+  one-self-contained-pr: false
+repos:
+  acme/api:
+    policies:
+      one-self-contained-pr: true
+      ask-before-filing-a-record: This repo wants the issues.
+"#,
+        )
+        .expect("parse");
+        // Box-wide, the rule is off.
+        assert!(
+            cfg.agent_policies(None)
+                .text("one-self-contained-pr")
+                .is_none()
+        );
+        // In the repo, it is back — and the other rule is reworded.
+        let repo = cfg.agent_policies(Some("acme/api"));
+        assert_eq!(
+            repo.text("one-self-contained-pr"),
+            lazybox_core::AgentPolicies::builtin().text("one-self-contained-pr")
+        );
+        assert_eq!(
+            repo.text("ask-before-filing-a-record"),
+            Some("This repo wants the issues.")
+        );
+        // A repo with no block of its own reads the global layer only.
+        assert_eq!(
+            cfg.agent_policies(Some("acme/other")),
+            cfg.agent_policies(None)
+        );
+    }
+
+    #[test]
+    fn policies_survive_a_write_read_round_trip() {
+        let cfg = Config::parse("policies:\n  house-rule: Never touch main.\n").expect("parse");
+        let back: Config =
+            serde_yaml::from_str(&serde_yaml::to_string(&cfg).expect("dump")).expect("reparse");
+        assert_eq!(back.agent_policies(None), cfg.agent_policies(None));
+    }
+}
+
+#[cfg(test)]
+mod mobile_order_tests {
+    use super::*;
+    #[test]
+    fn mobile_session_order_round_trips_and_defaults_for_older_configs() {
+        let mut config = Config::default();
+        config.ui.mobile_session_order = vec![
+            MobileSessionTab {
+                session_key: "scratch:second".into(),
+                terminal_id: 8,
+            },
+            MobileSessionTab {
+                session_key: "scratch:first".into(),
+                terminal_id: 7,
+            },
+        ];
+        let written = serde_yaml::to_string(&config).unwrap();
+        assert_eq!(
+            serde_yaml::from_str::<Config>(&written)
+                .unwrap()
+                .ui
+                .mobile_session_order,
+            config.ui.mobile_session_order
+        );
+        assert!(
+            serde_yaml::from_str::<Config>("ui: {}\n")
+                .unwrap()
+                .ui
+                .mobile_session_order
+                .is_empty()
+        );
     }
 }

@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: confirm
+---
+╭ Delete session? ────────────────────╮
+│Delete phone · codex (session 2)?    │
+│                                     │
+│This stops this session and removes  │
+│it from the list. Other sessions and │
+│workspace files are kept.            │
+│                                     │
+│Press y to delete, or n to cancel.   │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│y delete  n/Enter/Esc cancel         │
+╰─────────────────────────────────────╯

@@ -294,6 +294,28 @@ fn truncate_title(title: &str) -> String {
 }
 
 impl<T: TerminalAdapter> Model<T> {
+    /// Explicit target shared by desktop spawning, mobile, and creation hand-offs.
+    pub(super) fn shell_spawn_cmd(
+        session_key: lazybox_core::SessionKey,
+        session_id: Option<lazybox_core::SessionId>,
+        client_request_id: Option<String>,
+    ) -> IpcCommand {
+        IpcCommand::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key,
+            session_id,
+            client_request_id,
+            kind: lazybox_ipc::TerminalKind::Shell,
+            cwd: None,
+            initial_prompt: None,
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        }
+    }
+
     fn execute_dispatch_intent(
         &mut self,
         intent: crate::intent::Intent,
@@ -836,8 +858,14 @@ impl<T: TerminalAdapter> Model<T> {
                         // `WorkspaceRemoved` echo. A failed delete
                         // re-inserts it (#476).
                         self.optimistic_remove_workspace(session_key);
+                        // `force: true` because a human pressed `x x`
+                        // and answered the confirm — which names the
+                        // local work it destroys. An explicit delete
+                        // deletes; the daemon may not send the row back
+                        // with advice the user has no way to act on.
                         vec![IpcCommand::Kill {
                             session_key: session_key.clone(),
+                            force: true,
                         }]
                     }
                     Action::CloseIssue => match workspace.as_ref() {
@@ -974,8 +1002,11 @@ impl<T: TerminalAdapter> Model<T> {
                             self.optimistic_remove_workspace(session_key);
                             vec![
                                 IpcCommand::DeleteOrClose { workspace_key },
+                                // Explicit + confirmed: same rule as
+                                // `Action::Archive` above.
                                 IpcCommand::Kill {
                                     session_key: session_key.clone(),
+                                    force: true,
                                 },
                             ]
                         }
@@ -1110,8 +1141,11 @@ impl<T: TerminalAdapter> Model<T> {
                         // rows now; a failed cascade re-inserts them all
                         // (#476).
                         self.optimistic_remove_project(project_key);
+                        // Explicit + confirmed, so the cascade does not
+                        // refuse on one dirty child either.
                         vec![IpcCommand::DeleteProject {
                             project_key: project_key.clone(),
+                            force: true,
                         }]
                     }
                     other => self.dispatch_action_unchecked(other),
@@ -1392,20 +1426,7 @@ impl<T: TerminalAdapter> Model<T> {
                     return self.dispatch_bulk_agent(BulkOp::SpawnShell, None);
                 }
                 if let Some(sk) = session_key {
-                    cmds.push(IpcCommand::Spawn {
-                        model_alias: None,
-                        access: lazybox_ipc::AgentRunAccess::Default,
-                        session_key: sk,
-                        session_id,
-                        client_request_id: None,
-                        kind: lazybox_ipc::TerminalKind::Shell,
-                        cwd: None,
-                        initial_prompt: None,
-                        initial_snippet: None,
-                        on_main: false,
-                        force_new: false,
-                        role: None,
-                    });
+                    cmds.push(Self::shell_spawn_cmd(sk, session_id, None));
                 }
             }
             Action::SpawnAgent(agent_id) => {
@@ -1653,65 +1674,65 @@ impl<T: TerminalAdapter> Model<T> {
             Action::ViewDiff => {
                 if let Some((workspace_key, target)) =
                     self.sidebar.selected_workspace().and_then(|workspace| {
-                        let target = session_id
-                            .or_else(|| workspace.default_session().map(|session| session.id))
-                            .map(lazybox_ipc::WorkspaceDiffTarget::Session)
-                            .or_else(|| {
-                                workspace
-                                    .linked_checkout
-                                    .as_ref()
-                                    .map(|_| lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout)
-                            })?;
+                        let target = crate::realm::model::inputs::default_diff_target(
+                            workspace, session_id,
+                        )?;
                         Some((workspace.key.clone(), target))
                     })
                 {
+                    let pull_request =
+                        matches!(target, lazybox_ipc::WorkspaceDiffTarget::PullRequest);
                     self.pending_diff_session = Some((workspace_key.clone(), target.clone()));
-                    self.flash_hint("reading worktree diff…");
+                    self.flash_hint(if pull_request {
+                        "reading the PR diff…"
+                    } else {
+                        "reading worktree diff…"
+                    });
                     cmds.push(IpcCommand::InspectWorkspaceDiff {
                         workspace_key,
                         target,
                     });
                 } else {
-                    self.flash_hint("this workspace has no worktree to review");
+                    self.flash_hint("this workspace has no PR or worktree to review");
                 }
             }
             Action::NewWorkspace => {
-                let focused = self.sidebar.focused_project_key();
-                // Explicit variant list (no `_` catch-all) so a new
-                // Intent variant is a compile error here — this
-                // consumer must decide what it means instead of
-                // silently swallowing it.
-                use crate::intent::Intent;
-                match crate::intent::resolve_new_workspace(focused) {
-                    Intent::MountNewWorkspaceInput { project_key } => {
-                        self.mount_new_workspace_input(project_key);
+                // Repo-scoped again (#1863). `x n` creates a named workspace
+                // under the cursor's project — the way every long-running
+                // non-PR line of work gets a home in a repo (a `Cleanup`
+                // workspace per module, each with its own worktree and
+                // agent). It was repointed at the floating input, which left
+                // NO chord able to do this; floating now lives on `x f`.
+                //
+                // #1586 is not in tension with this: the rule forbids a
+                // second workspace BESIDE a tracked item, splitting branch,
+                // activity and cost across two rows. A named workspace under
+                // a project with no record for this work yet is the only row
+                // that work has, and it becomes the PR row via the normal
+                // rebadge once a PR opens.
+                match self.sidebar.focused_project_key() {
+                    Some(project_key) => self.mount_new_workspace_input(project_key),
+                    // No project under the cursor — the `(no repo)` bucket, a
+                    // Space header, an empty inbox. Offer the floating input
+                    // rather than failing silently, and say why, so the key
+                    // still does something explicable.
+                    None => {
+                        self.flash_info(
+                            "no project under the cursor — creating a floating workspace (x f)",
+                        );
+                        self.mount_floating_workspace_input(
+                            lazybox_core::FloatingWorkspaceKind::Thinking,
+                        );
                     }
-                    Intent::Notice(msg) => {
-                        self.flash_info(msg);
-                    }
-                    // The resolver only produces the two arms above;
-                    // the rest are unreachable from this call.
-                    Intent::NoOp
-                    | Intent::SpawnAgent { .. }
-                    | Intent::SpawnRoleAgent { .. }
-                    | Intent::SpawnShell { .. }
-                    | Intent::MountReply { .. }
-                    | Intent::MountAdoptPicker { .. }
-                    | Intent::OpenEditor
-                    | Intent::MergePr { .. }
-                    | Intent::UpdateBranch { .. }
-                    | Intent::SetAutoMergeOnGreen { .. }
-                    | Intent::SetTrackMain { .. }
-                    | Intent::SetMetered { .. }
-                    | Intent::SetContextCompaction { .. }
-                    | Intent::KillWorkspace { .. }
-                    | Intent::Snooze { .. }
-                    | Intent::Unsnooze { .. }
-                    | Intent::MarkAllRead { .. }
-                    | Intent::MarkActivitiesRead { .. }
-                    | Intent::CollapseIntoPr { .. }
-                    | Intent::MountHandoffPicker { .. } => {}
                 }
+            }
+            Action::FloatingWorkspace => {
+                self.mount_floating_workspace_input(lazybox_core::FloatingWorkspaceKind::Thinking);
+            }
+            Action::NewCoordinationWorkspace => {
+                self.mount_floating_workspace_input(
+                    lazybox_core::FloatingWorkspaceKind::Coordination,
+                );
             }
             Action::RenameWorkspace => {
                 // A cursor parked on a Space header renames the Space
@@ -1782,10 +1803,16 @@ impl<T: TerminalAdapter> Model<T> {
                 // already ensures one of the two has a target.
                 if let Some(sk) = session_key {
                     self.optimistic_remove_workspace(&sk);
-                    cmds.push(IpcCommand::Kill { session_key: sk });
+                    cmds.push(IpcCommand::Kill {
+                        session_key: sk,
+                        force: true,
+                    });
                 } else if let Some(project_key) = self.sidebar.focused_project_key() {
                     self.optimistic_remove_project(&project_key);
-                    cmds.push(IpcCommand::DeleteProject { project_key });
+                    cmds.push(IpcCommand::DeleteProject {
+                        project_key,
+                        force: true,
+                    });
                 }
             }
             Action::AdoptSessions => {
@@ -2343,6 +2370,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenMessages => {
                 self.mount_messages();
             }
+            Action::OpenArchive => {
+                self.mount_archive_browser();
+            }
             Action::OpenErrorInbox => {
                 self.mount_error_inbox();
             }
@@ -2392,6 +2422,14 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                 } else {
                     self.flash_hint("nothing unread");
+                }
+            }
+            Action::JumpToReviewPending => {
+                if self.sidebar.focus_next_review_pending_workspace() {
+                    self.set_focus(PaneFocus::Sidebar);
+                    self.redraw = true;
+                } else {
+                    self.flash_hint("no reviews pending");
                 }
             }
             Action::JumpToBlocked => {
@@ -2588,6 +2626,9 @@ impl<T: TerminalAdapter> Model<T> {
                     let session_key: lazybox_core::SessionKey = (&ws.key).into();
                     self.mount_notes(session_key);
                 }
+            }
+            Action::OpenArtifacts => {
+                self.open_workspace_artifacts();
             }
             Action::RequestReviewers => {
                 if let Some(cmd) = self.begin_request_reviewers() {

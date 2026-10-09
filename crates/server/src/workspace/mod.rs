@@ -1,6 +1,7 @@
 //! Workspace and project lifecycle operations owned by the daemon.
 
 pub mod attach;
+pub mod floating;
 
 use crate::ServerConfig;
 use crate::polling::{
@@ -18,6 +19,8 @@ use std::collections::{HashMap, HashSet};
 /// for a row that may never have reached the store.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateWorkspaceError {
+    #[error("create floating workspace directory: {0}")]
+    Directory(#[from] std::io::Error),
     #[error("allocate a collision-free workspace key: {0}")]
     Allocate(#[source] StoreError),
     #[error("persist workspace: {0}")]
@@ -210,6 +213,176 @@ mod hopper_tests {
                 .expect("hopper workspace json"),
         )
         .expect("decode hopper workspace")
+    }
+
+    fn item(
+        id: &str,
+        parent: Option<&str>,
+        link: Option<lazybox_core::TodoLink>,
+    ) -> lazybox_core::TodoItem {
+        lazybox_core::TodoItem {
+            id: id.into(),
+            parent: parent.map(Into::into),
+            text: format!("item {id}"),
+            done_at: None,
+            canceled_at: None,
+            link,
+            auto_checked: false,
+        }
+    }
+
+    fn one_todo(config: &ServerConfig, name: &str) -> WorkspaceKey {
+        save_hopper(
+            config,
+            vec![HopperEntryDraft {
+                workspace_key: None,
+                name: name.into(),
+            }],
+        )
+        .expect("create todo")
+        .remove(0)
+    }
+
+    /// A whole new subtree — parent and child, both new — saves in ONE call,
+    /// keeping its order and nesting, and the TODO gains no workspace per item.
+    /// Server-side minting could not express this: the child had no id to name
+    /// as its `parent` at send time.
+    #[tokio::test]
+    async fn save_todo_items_persists_a_new_subtree_in_one_call() {
+        let config = ServerConfig::in_memory();
+        let todo = one_todo(&config, "Ship 0.1.18");
+        let parent = lazybox_core::TodoItem::new_id();
+        save_todo_items(
+            &config,
+            &todo,
+            vec![
+                item(&parent, None, None),
+                item("child", Some(&parent), None),
+            ],
+        )
+        .await
+        .expect("saved");
+        let saved = load(&config, &todo).todo_items;
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].id, parent, "the client's id is kept verbatim");
+        assert_eq!(
+            saved[1].parent.as_deref(),
+            Some(parent.as_str()),
+            "a new child nests under its new parent"
+        );
+        assert_eq!(
+            config.store.list_workspaces().unwrap().len(),
+            1,
+            "items are not workspaces"
+        );
+    }
+
+    /// An id-less or duplicated item is refused, and the refusal writes
+    /// nothing: the map the parent walk uses is keyed by id, so a duplicate
+    /// would persist two rows sharing one id.
+    #[tokio::test]
+    async fn save_todo_items_refuses_missing_and_duplicate_ids() {
+        let config = ServerConfig::in_memory();
+        let todo = one_todo(&config, "Plan");
+        assert_eq!(
+            save_todo_items(&config, &todo, vec![item("", None, None)]).await,
+            Err(SaveTodoItemsError::MissingId),
+        );
+        assert_eq!(
+            save_todo_items(
+                &config,
+                &todo,
+                vec![item("dup", None, None), item("dup", None, None)]
+            )
+            .await,
+            Err(SaveTodoItemsError::DuplicateId("dup".into())),
+        );
+        assert!(
+            load(&config, &todo).todo_items.is_empty(),
+            "a refused save writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_todo_items_rejects_bad_trees_and_non_todo_rows() {
+        let config = ServerConfig::in_memory();
+        let todo = one_todo(&config, "Plan");
+        assert!(matches!(
+            save_todo_items(&config, &todo, vec![item("a", Some("ghost"), None)]).await,
+            Err(SaveTodoItemsError::UnknownParent { .. })
+        ));
+        assert!(matches!(
+            save_todo_items(
+                &config,
+                &todo,
+                vec![item("a", Some("b"), None), item("b", Some("a"), None)]
+            )
+            .await,
+            Err(SaveTodoItemsError::Cycle(_))
+        ));
+        let plain = WorkspaceKey::new("not-a-todo");
+        let ws = Workspace::empty(plain.clone(), "main", Utc::now());
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: plain.as_str().into(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+        assert_eq!(
+            save_todo_items(&config, &plain, vec![item("a", None, None)]).await,
+            Err(SaveTodoItemsError::NotTodo("not-a-todo".into()))
+        );
+    }
+
+    /// A task landing ticks off the open items linked to it in every TODO,
+    /// and nothing else.
+    #[tokio::test]
+    async fn a_landed_task_checks_off_linked_items_across_todos() {
+        let config = ServerConfig::in_memory();
+        let merged = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "o/r#1890".into(),
+        };
+        let other = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "o/r#7".into(),
+        };
+        let first = one_todo(&config, "Release");
+        let second = one_todo(&config, "Coordination");
+        save_todo_items(
+            &config,
+            &first,
+            vec![
+                item(
+                    "a",
+                    None,
+                    Some(lazybox_core::TodoLink::Task(merged.clone())),
+                ),
+                item("b", None, Some(lazybox_core::TodoLink::Task(other))),
+            ],
+        )
+        .await
+        .unwrap();
+        save_todo_items(
+            &config,
+            &second,
+            vec![item(
+                "c",
+                None,
+                Some(lazybox_core::TodoLink::Task(merged.clone())),
+            )],
+        )
+        .await
+        .unwrap();
+
+        check_todo_items_linked_to(&config, &merged).await;
+
+        let first_items = load(&config, &first).todo_items;
+        assert!(first_items[0].is_done() && first_items[0].auto_checked);
+        assert!(!first_items[1].is_done());
+        assert!(load(&config, &second).todo_items[0].is_done());
     }
 
     #[test]
@@ -611,6 +784,7 @@ pub fn create_local_project(config: &ServerConfig, name: &str) -> lazybox_core::
 /// Called once at daemon startup from both `run_embedded_realm` and
 /// `server_start` so each lazybox launch self-heals legacy state.
 pub fn migrate_legacy_sandbox(config: &ServerConfig) {
+    floating::migrate_legacy(config);
     let key = WorkspaceKey::new("sandbox".to_string());
     let Some(record) = config.store.get_workspace(&key).ok().flatten() else {
         return;
@@ -767,6 +941,171 @@ pub async fn set_hopper_canceled(config: &ServerConfig, key: &WorkspaceKey, canc
     }
     workspace.hopper = Some(hopper);
     commit_upsert_offloaded_reported(config, key, workspace, "set hopper cancellation").await;
+}
+
+/// Why a TODO checklist was not saved.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SaveTodoItemsError {
+    #[error("no workspace {0}")]
+    Missing(String),
+    #[error("{0} is not a TODO")]
+    NotTodo(String),
+    #[error("item {item} nests under {parent}, which is not in the list")]
+    UnknownParent { item: String, parent: String },
+    #[error("item {0} nests under itself")]
+    Cycle(String),
+    #[error("an item arrived with no id — clients mint ids with TodoItem::new_id")]
+    MissingId,
+    #[error("item id {0} appears twice")]
+    DuplicateId(String),
+}
+
+/// Replace a TODO's checklist with `items`, in their order. The client
+/// sends the whole list — one write, one `WorkspaceUpserted`, no partial
+/// state. Every item carries an id its client minted
+/// ([`lazybox_core::TodoItem::new_id`]), unique within the list, and every
+/// `parent` must name an item in the list, without cycles.
+///
+/// Ids are the client's because the daemon cannot mint them without breaking
+/// nesting: an item whose id the daemon invents cannot be named as a `parent`
+/// by a sibling in the SAME request, since the client had no id to write
+/// there. Minting server-side made a new subtree unexpressible in one save.
+pub async fn save_todo_items(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    items: Vec<lazybox_core::TodoItem>,
+) -> Result<(), SaveTodoItemsError> {
+    validate_todo_tree(&items)?;
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return Err(SaveTodoItemsError::Missing(key.as_str().into()));
+    };
+    if workspace.hopper.is_none() {
+        return Err(SaveTodoItemsError::NotTodo(key.as_str().into()));
+    }
+    workspace.todo_items = items;
+    commit_upsert_offloaded_reported(config, key, workspace, "save todo items").await;
+    Ok(())
+}
+
+/// Every parent is in the list, and following parents never loops.
+fn validate_todo_tree(items: &[lazybox_core::TodoItem]) -> Result<(), SaveTodoItemsError> {
+    // Ids first, because the `parents` map below is KEYED by id: two items
+    // sharing one collapse into a single entry, the walk still passes, and both
+    // rows persist with the same id — whereupon a `parent` naming it resolves to
+    // whichever the map kept, and every id-keyed check, edit and delete hits the
+    // wrong row. `TodoItem::id` promises it is minted once and never reused, and
+    // this is the only structural guard on a client-supplied whole-list replace.
+    let mut ids = std::collections::HashSet::with_capacity(items.len());
+    for item in items {
+        if item.id.is_empty() {
+            return Err(SaveTodoItemsError::MissingId);
+        }
+        if !ids.insert(item.id.as_str()) {
+            return Err(SaveTodoItemsError::DuplicateId(item.id.clone()));
+        }
+    }
+    let parents: std::collections::HashMap<&str, Option<&str>> = items
+        .iter()
+        .map(|i| (i.id.as_str(), i.parent.as_deref()))
+        .collect();
+    for item in items {
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = item.parent.as_deref();
+        while let Some(parent) = cursor {
+            if !seen.insert(parent) || parent == item.id {
+                return Err(SaveTodoItemsError::Cycle(item.id.clone()));
+            }
+            let Some(next) = parents.get(parent) else {
+                return Err(SaveTodoItemsError::UnknownParent {
+                    item: item.id.clone(),
+                    parent: parent.into(),
+                });
+            };
+            cursor = *next;
+        }
+    }
+    Ok(())
+}
+
+/// Tick off every open TODO item linked to `task`, which just merged (a
+/// PR) or closed (an issue). Scans the TODO rows once, then re-reads and
+/// commits each one that has something to check under its own lock, so a
+/// concurrent edit of the checklist is never overwritten with a stale copy.
+pub async fn check_todo_items_linked_to(config: &ServerConfig, task: &lazybox_core::TaskId) {
+    let store = config.store.clone();
+    let wanted = task.clone();
+    let keys = tokio::task::spawn_blocking(move || {
+        store
+            .list_workspaces()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|record| {
+                let ws = Workspace::decode_persisted(record.workspace_json.as_deref()?).ok()?;
+                let open_link = ws.todo_items.iter().any(|item| {
+                    !item.is_done()
+                        && !item.is_canceled()
+                        && matches!(&item.link, Some(lazybox_core::TodoLink::Task(id)) if *id == wanted)
+                });
+                open_link.then_some(ws.key)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    for key in keys {
+        let _ws_guard = config.lock_workspace(key.as_str()).await;
+        let Some(mut workspace) = load_workspace_offloaded(config, &key).await else {
+            continue;
+        };
+        if workspace.check_items_linked_to(task, Utc::now()) > 0 {
+            tracing::info!(
+                workspace_key = %key.as_str(),
+                task = %task.key,
+                "todo: checked off the items linked to a task that landed"
+            );
+            commit_upsert_offloaded_reported(config, &key, workspace, "auto-check todo items")
+                .await;
+        }
+    }
+    check_work_linked_to(config, task).await;
+}
+
+/// The same auto-check over the task/plan store's rows (#1908): a unit of work
+/// whose tracker link just landed is completed, with `lazybox` as the party
+/// that moved it.
+///
+/// It rides the one call site above rather than a second seam of its own, so
+/// the two checklists can never disagree about whether a task landed —
+/// `Workspace::todo_items` is the per-workspace checklist #1898 shipped and
+/// these are the plan rows phases 3–5 subscribe to, and until the fold that
+/// merges them both must tick on the same event.
+async fn check_work_linked_to(config: &ServerConfig, task: &lazybox_core::TaskId) {
+    let store = config.store.clone();
+    let link = lazybox_core::work::Link::Tracker(task.clone());
+    let now = Utc::now();
+    let moved = tokio::task::spawn_blocking(move || {
+        crate::work_store::complete_linked_to(
+            &*store,
+            &link,
+            lazybox_core::work::Party::Lazybox,
+            now,
+        )
+    })
+    .await;
+    match moved {
+        Ok(Ok(moved)) if !moved.is_empty() => tracing::info!(
+            task = %task.key,
+            moved = moved.len(),
+            "work: completed the units of work linked to a task that landed"
+        ),
+        // Nothing linked, or a store that cannot batch. Neither is worth a
+        // warning on every landed task; the rows stay open and the next
+        // observation retries, exactly like the checklist above.
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => tracing::debug!(task = %task.key, %error, "work: auto-check skipped"),
+        Err(error) => tracing::warn!(task = %task.key, %error, "work: auto-check panicked"),
+    }
 }
 
 /// Record a snippet delivery against a workspace (issue #463): the
@@ -1241,6 +1580,94 @@ fn archived_row_key(key: &str) -> String {
     format!("{}{}", lazybox_core::KV_PREFIX_ARCHIVED, key)
 }
 
+/// The value an archived-key row held before it carried a record, and
+/// still holds whenever the archived row absorbed nothing.
+const ARCHIVED_FLAG: &str = "1";
+
+/// The value stored in an archived-key row.
+///
+/// A row is a *record*, not a flag, because a PR workspace absorbs the
+/// issues it closes (`closingIssuesReferences`) and archiving one row has
+/// to tombstone every key it was standing in for. Storing which keys were
+/// folded in is what keeps that reversible: by unarchive time the row is
+/// deleted, so the record is the only surviving list of the issue keys the
+/// user archived along with the PR.
+///
+/// Rows written before this was a record — and rows for a workspace that
+/// folded nothing in — hold the plain flag `"1"`, which parses as the
+/// default.
+#[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ArchiveRecord {
+    /// Keys this row was standing in for: the standalone workspace key
+    /// each absorbed task would get back if it were polled on its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    absorbed: Vec<String>,
+    /// The row that absorbed this key. Written on the absorbed keys' own
+    /// rows so an unarchive removes exactly the tombstones its archive
+    /// wrote, never one the user raised separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    absorbed_by: Option<String>,
+}
+
+/// Read `key`'s archive record. A missing row and the legacy flag
+/// [`ARCHIVED_FLAG`] both read as the default record; `Err` means the row
+/// exists but could not be read or parsed, which a write path must not
+/// treat as "nothing folded in".
+///
+/// The legacy flag is matched exactly rather than by "whatever fails to
+/// parse", because those two cases need opposite handling. A row holding
+/// a truncated or otherwise corrupt record still OWNS absorbed rows that
+/// name it in `absorbed_by`; reading it as the empty record would make
+/// [`unarchive_workspace_key`] drop the owner alone and strand every
+/// tombstone it wrote, permanently and invisibly — nothing else ever
+/// revisits an absorbed row. Failing loudly keeps the set recoverable.
+fn read_archive_record(config: &ServerConfig, key: &str) -> Result<ArchiveRecord, String> {
+    let Some(raw) = config
+        .store
+        .get_kv(&archived_row_key(key))
+        .map_err(|e| format!("read failed: {e}"))?
+    else {
+        return Ok(ArchiveRecord::default());
+    };
+    if raw == ARCHIVED_FLAG {
+        return Ok(ArchiveRecord::default());
+    }
+    serde_json::from_str(&raw).map_err(|e| format!("parse failed: {e}"))
+}
+
+/// The standalone workspace keys `workspace` is standing in for: one per
+/// attached task other than the row's own. A PR row that collapsed
+/// `Closes #40` into itself yields issue #40's key, which is the key a
+/// later poll of that issue would build a fresh row under.
+///
+/// Restricted to tasks from the row's OWN provider. A same-provider link
+/// is declared by the record — GitHub's `closingIssuesReferences`, or a
+/// closing keyword in the PR's own title — and names the issue outright,
+/// including cross-repo (`owner/repo#N`). A CROSS-provider link never is:
+/// a Linear ticket joins a GitHub PR's row only because
+/// `extract_linear_refs` matched `<TEAM>-<number>` against the PR's
+/// branch name or title, so lazybox's own `issue-1816-…` branches mint
+/// `ISSUE-1816` on sight. Letting that inference write a permanent
+/// tombstone in another provider's namespace means deleting one GitHub
+/// project (`WorkspaceRemovalReason::ProjectCascade`) can silently
+/// retire a Linear ticket the project never owned. The ticket loses its
+/// fold and returns to the inbox as its own row, which is the recoverable
+/// failure; a tombstone is not.
+fn absorbed_archive_keys(workspace: &Workspace, key: &str) -> Vec<String> {
+    let Some(source) = workspace.primary_task().map(|task| task.id.source.clone()) else {
+        return Vec::new();
+    };
+    workspace
+        .linked_task_ids()
+        .iter()
+        .filter(|id| id.source == source)
+        .map(lazybox_core::workspace_key_for_id)
+        .filter(|absorbed| absorbed != key)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Parse the legacy single-blob archived set (`KV_KEY_ARCHIVED`).
 /// `Ok(None)` = no blob stored; `Ok(Some(set))` = a blob was present
 /// and parsed; `Err` = the row exists but could not be read/parsed.
@@ -1306,13 +1733,80 @@ pub fn load_archived_set(config: &ServerConfig) -> std::collections::HashSet<Str
 /// former whole-set read-modify-write, it cannot lose a concurrent
 /// neighbour's tombstone when an overlapping daemon (e.g. during a
 /// restart) writes a different key between our load and our store.
+///
+/// Use [`archive_workspace_key_with_absorbed`] whenever the row being
+/// archived stands in for other keys; this one archives `key` alone.
 #[must_use]
 pub fn archive_workspace_key(config: &ServerConfig, key: &str) -> bool {
-    if let Err(e) = config.store.set_kv(&archived_row_key(key), "1") {
-        tracing::warn!("archive_workspace_key: set_kv failed: {e}");
+    archive_workspace_key_with_absorbed(config, key, &[])
+}
+
+/// [`archive_workspace_key`], also tombstoning the keys the row was
+/// standing in for (`absorbed`: the standalone workspace key of every
+/// task the row had folded in).
+///
+/// A PR row that collapsed `Closes #40` into itself presents as one item,
+/// so archiving it means "and the issue too" — otherwise the issue returns
+/// as a row of its own the moment the PR stops appearing in a tick (merged
+/// past the recently-merged sweep, closed, or filtered out) and the
+/// per-tick closes-index that had been routing it into the archived PR key
+/// misses (#1816).
+///
+/// The whole set lands as one atomic batch, and each absorbed row records
+/// the owner that wrote it, so [`unarchive_workspace_key`] on the PR key
+/// takes the issues back out with it.
+#[must_use]
+pub fn archive_workspace_key_with_absorbed(
+    config: &ServerConfig,
+    key: &str,
+    absorbed: &[String],
+) -> bool {
+    if absorbed.is_empty() {
+        if let Err(e) = config.store.set_kv(&archived_row_key(key), ARCHIVED_FLAG) {
+            tracing::warn!("archive_workspace_key: set_kv failed: {e}");
+            return false;
+        }
+        tracing::info!(workspace_key = %key, "archived workspace key (tombstone written)");
+        return true;
+    }
+
+    let mut batch = Vec::with_capacity(absorbed.len() + 1);
+    let owner = ArchiveRecord {
+        absorbed: absorbed.to_vec(),
+        absorbed_by: None,
+    };
+    let records = std::iter::once((key, owner)).chain(absorbed.iter().map(|folded| {
+        (
+            folded.as_str(),
+            ArchiveRecord {
+                absorbed: Vec::new(),
+                absorbed_by: Some(key.to_string()),
+            },
+        )
+    }));
+    for (row, record) in records {
+        match serde_json::to_string(&record) {
+            Ok(value) => batch.push(StoreMutation::SetKv {
+                key: archived_row_key(row),
+                value,
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    "archive_workspace_key: encoding {row}'s archive record failed: {e}"
+                );
+                return false;
+            }
+        }
+    }
+    if let Err(e) = config.store.apply_batch(&batch) {
+        tracing::warn!("archive_workspace_key: apply_batch failed: {e}");
         return false;
     }
-    tracing::info!(workspace_key = %key, "archived workspace key (tombstone written)");
+    tracing::info!(
+        workspace_key = %key,
+        absorbed = absorbed.len(),
+        "archived workspace key with its absorbed keys (tombstones written)",
+    );
     true
 }
 
@@ -1341,7 +1835,7 @@ pub(crate) fn migrate_legacy_archived_set(config: &ServerConfig) {
         .iter()
         .map(|k| StoreMutation::SetKv {
             key: archived_row_key(k),
-            value: "1".to_string(),
+            value: ARCHIVED_FLAG.to_string(),
         })
         .collect();
     batch.push(StoreMutation::DeleteKv {
@@ -1362,19 +1856,164 @@ pub(crate) fn migrate_legacy_archived_set(config: &ServerConfig) {
 /// only after persistence succeeds; otherwise an unarchived-but-still-deleted
 /// workspace could race back into existence during this daemon run.
 ///
-/// A single atomic per-key `delete_kv` — no read-modify-write, so it
-/// can't race a concurrent migration or archive. Legacy-blob keys are
-/// converted to per-key rows by `migrate_legacy_archived_set` at
-/// startup, before any unarchive can run, so this delete always sees a
-/// real row to remove.
+/// Takes the keys `key` absorbed out of the set with it, so the issues a
+/// PR row was standing in for return to the inbox alongside it (#1816) —
+/// each absorbed row names its owner, so a tombstone the user raised
+/// separately since the fold is left alone. No read-modify-write of a
+/// shared blob, so this can't race a concurrent migration or archive.
+/// Legacy-blob keys are converted to per-key rows by
+/// `migrate_legacy_archived_set` at startup, before any unarchive can
+/// run, so this delete always sees a real row to remove.
 #[must_use]
 pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
-    if let Err(e) = config.store.delete_kv(&archived_row_key(key)) {
-        tracing::warn!("unarchive_workspace_key: delete_kv failed: {e}");
-        return false;
+    // Reading the owner record, then each absorbed row, then deleting the
+    // lot is a read-modify-write ACROSS KEYS — the precise cycle
+    // `archive_updates` exists to serialize. #1496 made a single archive
+    // one atomic row write and left only the migrations holding this lock;
+    // absorbed keys put a multi-key cycle back. Without it, an archive of
+    // another row that absorbs one of our keys can land between our read
+    // and our batch, and we delete the tombstone it just wrote — the very
+    // resurrection this function's own feature prevents.
+    let _update_guard = config.archive_updates.lock();
+    let record = match read_archive_record(config, key) {
+        Ok(record) => record,
+        Err(e) => {
+            tracing::warn!("unarchive_workspace_key: reading {key}'s archive record failed: {e}");
+            return false;
+        }
+    };
+    let mut also_drop = Vec::new();
+    for folded in &record.absorbed {
+        // Only the tombstones this key's own archive wrote come back out.
+        // A folded key normally has no row of its own to archive, so this
+        // looks unreachable — but `load_archived_set` degrades to EMPTY on
+        // a read error, which lets a tombstoned issue upsert a standalone
+        // row that the user can then archive in its own right. That
+        // archive is theirs; ours must not undo it.
+        match read_archive_record(config, folded) {
+            Ok(folded_record) if folded_record.absorbed_by.as_deref() == Some(key) => {
+                also_drop.push(archived_row_key(folded));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "unarchive_workspace_key: reading {folded}'s archive record failed: {e}"
+                );
+                return false;
+            }
+        }
+    }
+
+    if also_drop.is_empty() {
+        if let Err(e) = config.store.delete_kv(&archived_row_key(key)) {
+            tracing::warn!("unarchive_workspace_key: delete_kv failed: {e}");
+            return false;
+        }
+    } else {
+        let batch: Vec<StoreMutation> = std::iter::once(archived_row_key(key))
+            .chain(also_drop)
+            .map(|key| StoreMutation::DeleteKv { key })
+            .collect();
+        if let Err(e) = config.store.apply_batch(&batch) {
+            tracing::warn!("unarchive_workspace_key: apply_batch failed: {e}");
+            return false;
+        }
     }
     config.deleted_workspaces.lock().remove(key);
     true
+}
+
+/// The archived keys a restore surface can act on (#1824): one entry per
+/// row the user archived, carrying the keys that row absorbed.
+///
+/// An absorbed key is folded into its owner's entry rather than listed on
+/// its own, because it has no separate existence — [`unarchive_workspace_key`]
+/// takes it out with the row that wrote it, and nothing else ever removes it.
+///
+/// A row whose record cannot be parsed is still listed, with no absorbed
+/// keys: it is a tombstone the user needs to see. The unarchive of that key
+/// refuses on the same read, which is the honest outcome — a corrupt owner
+/// record still owns absorbed rows, and dropping it alone would strand them.
+pub fn archived_records(
+    config: &ServerConfig,
+) -> Result<Vec<lazybox_ipc::ArchivedWorkspaceRecord>, String> {
+    let keys = load_archived_set_strict(config)?;
+    let mut records: Vec<lazybox_ipc::ArchivedWorkspaceRecord> = keys
+        .iter()
+        .filter_map(|key| {
+            let record = read_archive_record(config, key).unwrap_or_default();
+            record
+                .absorbed_by
+                .is_none()
+                .then(|| lazybox_ipc::ArchivedWorkspaceRecord {
+                    key: key.clone(),
+                    absorbed: record.absorbed,
+                })
+        })
+        .collect();
+    records.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(records)
+}
+
+/// Reply to `Command::ListArchivedWorkspaces` — and refresh an open archive
+/// browser after an unarchive — by broadcasting the current set.
+pub fn broadcast_archived(config: &ServerConfig) {
+    match archived_records(config) {
+        Ok(records) => {
+            let _ = config
+                .bus
+                .send(lazybox_ipc::Event::ArchivedWorkspaces { records });
+        }
+        Err(e) => tracing::warn!("broadcast_archived: reading the archived set failed: {e}"),
+    }
+}
+
+/// Handle `Command::UnarchiveWorkspace`: drop the key's tombstone (and the
+/// tombstones it absorbed), then wake the poll so the record's row returns
+/// without waiting out the tick.
+///
+/// A record the providers no longer return — a PR merged long before the
+/// recently-merged window — gets no row back from the poll; removing the
+/// tombstone is what lets `workspace create --issue` materialize it, which
+/// an archived record refuses outright.
+///
+/// `key` arrives from a CLI argument or a browser row, so membership is
+/// checked before the delete: deleting an absent row succeeds at every
+/// backend, and a caller told "restored" about a key that was never archived
+/// would go looking for a row that is never coming.
+pub fn handle_unarchive(config: &ServerConfig, key: &str, client_request_id: Option<String>) {
+    let outcome = match load_archived_set_strict(config) {
+        Ok(archived) if !archived.contains(key) => Err(format!(
+            "{key} is not archived — `lazybox workspace archived` lists the keys that are"
+        )),
+        Ok(_) if unarchive_workspace_key(config, key) => Ok(()),
+        Ok(_) => Err(format!(
+            "could not restore {key}: its archive record could not be read, and dropping it \
+             alone would strand the tombstones it wrote (see the daemon log)"
+        )),
+        Err(e) => Err(format!("could not read the archived set: {e}")),
+    };
+    match outcome {
+        Ok(()) => {
+            tracing::info!(workspace_key = %key, "unarchived workspace key (tombstone removed)");
+            config.poll.wake(true);
+            if let Some(client_request_id) = client_request_id {
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::CommandCompleted { client_request_id });
+            }
+        }
+        Err(message) => {
+            tracing::warn!(workspace_key = %key, "unarchive refused: {message}");
+            if let Some(client_request_id) = client_request_id {
+                let _ = config.bus.send(lazybox_ipc::Event::CommandFailed {
+                    client_request_id,
+                    message,
+                });
+            }
+        }
+    }
+    broadcast_archived(config);
 }
 
 /// Compose the per-key kv row name for a session-tombstone key.
@@ -1575,9 +2214,20 @@ pub(crate) struct WorkspaceRemovalRisk {
 }
 
 impl WorkspaceRemovalRisk {
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         format!("{} ({})", self.path.display(), self.reasons.join(", "))
     }
+}
+
+/// Render a whole risk set the way every refusal names it, so the
+/// prompt path that *predicts* a refusal and the gate that *emits* one
+/// are describing the same thing in the same words.
+pub(crate) fn describe_removal_risks(risks: &[WorkspaceRemovalRisk]) -> String {
+    risks
+        .iter()
+        .map(WorkspaceRemovalRisk::describe)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The recovery verb a refused removal leads with. The footer elides a
@@ -1608,7 +2258,22 @@ fn lifecycle_worktree_paths(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Vec<std::path::PathBuf> {
-    let mgr = config.worktree_manager();
+    lifecycle_worktree_paths_with(config, &config.worktree_manager(), workspace)
+}
+
+/// [`lifecycle_worktree_paths`] with the manager supplied, so a test
+/// can root the managed-namespace check at its fixture.
+fn lifecycle_worktree_paths_with(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    workspace: &Workspace,
+) -> Vec<std::path::PathBuf> {
+    // Repo-free folders contain user notes, not disposable git worktrees.
+    // Archive only the row and sessions; preserve the directory even when
+    // the configured worktree root happens to contain the sandbox root.
+    if workspace.floating.is_some() {
+        return Vec::new();
+    }
     let shared_main =
         crate::spawn_handler::main_worktree_path_under(workspace, config.worktree_root_path())
             .map(|path| canonical_or_self(&path));
@@ -1696,7 +2361,7 @@ pub(crate) async fn inspect_workspace_removal_risks(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Result<Vec<WorkspaceRemovalRisk>, String> {
-    inspect_workspace_risks(config, workspace, true).await
+    inspect_workspace_risks(config, &config.worktree_manager(), workspace, true).await
 }
 
 /// Preflight variant used before a project cascade stops any terminals. It
@@ -1707,22 +2372,109 @@ pub(crate) async fn inspect_workspace_local_risks(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Result<Vec<WorkspaceRemovalRisk>, String> {
-    inspect_workspace_risks(config, workspace, false).await
+    inspect_workspace_local_risks_with(config, &config.worktree_manager(), workspace).await
+}
+
+/// [`inspect_workspace_local_risks`] with the manager supplied — the
+/// daemon always passes `config.worktree_manager()`; tests root one at a
+/// tempdir without mutating `LAZYBOX_HOME`.
+pub(crate) async fn inspect_workspace_local_risks_with(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    workspace: &Workspace,
+) -> Result<Vec<WorkspaceRemovalRisk>, String> {
+    inspect_workspace_risks(config, mgr, workspace, false).await
+}
+
+/// What a removal of `workspace` would do right now, answered once from
+/// one inspection: whether the gate would refuse it, and whether it
+/// would destroy work either way.
+///
+/// The two are NOT the same question and must not be collapsed. A
+/// squash-merged PR's unpushed tip does not block removal (the gate
+/// relaxes it — the work is upstream under a different SHA) but the
+/// commits are still local-only, so the confirm modal must still warn
+/// before destroying them. Deriving either half separately is how the
+/// prompt came to offer a cleanup the gate then refused.
+#[derive(Debug, Default)]
+pub(crate) struct RemovalOutlook {
+    /// Why the gate would refuse, in its own words. Empty means the
+    /// removal is expected to be allowed. Evaluated with
+    /// `require_stopped = false`: a live terminal is not a blocker here
+    /// because the removal stops it before re-inspecting.
+    pub(crate) blockers: Vec<WorkspaceRemovalRisk>,
+    /// What the removal would destroy, per checkout, in the same words
+    /// the blockers use. Named with NO relaxation applied: the
+    /// merged-PR one un-blocks an unpushed tip, it does not make those
+    /// commits exist anywhere else, and a confirm that omitted them
+    /// would be the false assurance this type exists to prevent.
+    ///
+    /// The per-path list, not a bool, because an explicit delete's one
+    /// confirm renders it: "which checkout, and what kind of work" is
+    /// the whole content of that prompt.
+    pub(crate) destroyed: Vec<WorkspaceRemovalRisk>,
+}
+
+impl RemovalOutlook {
+    /// The gate would refuse this removal as it stands.
+    pub(crate) fn is_blocked(&self) -> bool {
+        !self.blockers.is_empty()
+    }
+
+    /// Any reclaimed checkout holds uncommitted, untracked or unpushed
+    /// work — what the confirm modal warns about before a delete. Read
+    /// off [`Self::destroyed`] rather than derived beside it: two
+    /// derivations of "would this destroy anything?" drift, and the
+    /// drift is a prompt that says nothing while work disappears.
+    pub(crate) fn destroys_work(&self) -> bool {
+        !self.destroyed.is_empty()
+    }
+
+    /// The blocking state in the refusal's own words — the string the
+    /// prompt path both shows the user and keys its suppression on, so
+    /// the suppression lifts exactly when the checkout changes.
+    pub(crate) fn blocked_detail(&self) -> String {
+        describe_removal_risks(&self.blockers)
+    }
+}
+
+/// Preflight [`RemovalOutlook`] for `workspace`. `Err` is reserved for
+/// an inspection that could not be *performed*: callers must treat it
+/// as unsafe, never as a clean bill of health.
+pub(crate) async fn removal_outlook_with(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    workspace: &Workspace,
+) -> Result<RemovalOutlook, String> {
+    inspect_workspace_outlook(config, mgr, workspace, false).await
 }
 
 async fn inspect_workspace_risks(
     config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
     workspace: &Workspace,
     require_stopped: bool,
 ) -> Result<Vec<WorkspaceRemovalRisk>, String> {
-    let paths = lifecycle_worktree_paths(config, workspace);
+    Ok(
+        inspect_workspace_outlook(config, mgr, workspace, require_stopped)
+            .await?
+            .blockers,
+    )
+}
+
+async fn inspect_workspace_outlook(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    workspace: &Workspace,
+    require_stopped: bool,
+) -> Result<RemovalOutlook, String> {
+    let paths = lifecycle_worktree_paths_with(config, mgr, workspace);
     if paths.is_empty() {
-        return Ok(Vec::new());
+        return Ok(RemovalOutlook::default());
     }
 
     let tracked = collect_tracked_sessions(config).await?;
-    let inspections = config
-        .worktree_manager()
+    let inspections = mgr
         .inspect_paths(&paths, &tracked)
         .await
         .map_err(|error| format!("could not inspect worktrees safely: {error}"))?;
@@ -1742,29 +2494,46 @@ async fn inspect_workspace_risks(
         .as_ref()
         .is_some_and(|pr| pr.state == lazybox_core::TaskState::Merged);
 
-    let mut risks = Vec::new();
+    let mut outlook = RemovalOutlook::default();
     for path in paths {
         let Some(row) = by_path.get(&canonical_or_self(&path)) else {
-            risks.push(WorkspaceRemovalRisk {
+            // Unaccounted for: a warning, never a clean bill of health.
+            let risk = WorkspaceRemovalRisk {
                 path,
                 reasons: vec!["checkout could not be verified by the worktree inspector".into()],
                 preserves_work: false,
-            });
+            };
+            outlook.destroyed.push(risk.clone());
+            outlook.blockers.push(risk);
             continue;
         };
+        // What a removal would destroy is asked of the row directly,
+        // independently of what BLOCKS the removal: the merged-PR
+        // relaxation below un-blocks an unpushed tip, it does not make
+        // those commits exist anywhere else. Same naming function, so
+        // the confirm and the refusal can never describe one checkout
+        // two different ways — only the relaxations differ.
+        let destroyed = workspace_removal_reasons(row, false, false);
+        if !destroyed.reasons.is_empty() {
+            outlook.destroyed.push(WorkspaceRemovalRisk {
+                path: path.clone(),
+                reasons: destroyed.reasons,
+                preserves_work: destroyed.preserves_work,
+            });
+        }
         if row.is_safe_to_delete {
             continue;
         }
         let found = workspace_removal_reasons(row, require_stopped, pr_merged);
         if !found.reasons.is_empty() {
-            risks.push(WorkspaceRemovalRisk {
+            outlook.blockers.push(WorkspaceRemovalRisk {
                 path,
                 reasons: found.reasons,
                 preserves_work: found.preserves_work,
             });
         }
     }
-    Ok(risks)
+    Ok(outlook)
 }
 
 /// Why one checkout blocks removal: the reasons to show, plus whether
@@ -1781,6 +2550,34 @@ pub(crate) struct RemovalReasons {
     pub preserves_work: bool,
 }
 
+/// [`lazybox_git_ops::WorktreeInspection::is_safe_to_delete`] recomputed with the two
+/// relaxations this gate owns, and only this gate.
+///
+/// 1. A **merged PR**'s squash-merged branch reads as ahead of its
+///    (now-gone) remote ref, so the unpushed flag is suppressed above and
+///    must not re-block here.
+/// 2. **Regenerable build output.** `is_safe_to_delete` demands a
+///    byte-empty `git status`, which an untracked `target/` never is — so
+///    without this, suppressing the reason above only moved the refusal
+///    to the "checkout is still active" fallback, and the workspace stayed
+///    undeletable with even less explanation (#1866).
+///
+/// Everything else the flag requires is re-asserted unchanged: the status
+/// probe must have RUN, the checkout must be unlocked, and it must carry a
+/// reapable reason.
+fn removal_safe_to_delete(row: &lazybox_git_ops::WorktreeInspection, pr_merged: bool) -> bool {
+    if row.is_safe_to_delete {
+        return true;
+    }
+    let holds_no_work = !row.has_tracked_modifications && !row.has_untracked_work;
+    let pushed_enough = !row.has_unpushed_commits || pr_merged;
+    row.status_verified
+        && holds_no_work
+        && pushed_enough
+        && !row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
+        && row.has_reapable_reason()
+}
+
 fn workspace_removal_reasons(
     row: &lazybox_git_ops::WorktreeInspection,
     require_stopped: bool,
@@ -1794,26 +2591,24 @@ fn workspace_removal_reasons(
     if !row.status_verified {
         reasons.push("cleanliness could not be proven".into());
     }
-    if row.has_uncommitted_changes {
-        reasons.push("uncommitted changes".into());
+    // Named by kind, because the instruction the refusal leads with is
+    // "commit, stash or push" — advice that has to be about something the
+    // user can actually commit, stash or push (#1866). An untracked
+    // `target/` is neither: it is not listed at all, and it does not set
+    // `preserves_work`.
+    if row.has_tracked_modifications {
+        reasons.push("uncommitted changes to tracked files".into());
+        preserves_work = true;
+    }
+    if row.has_untracked_work {
+        reasons.push("new untracked files".into());
         preserves_work = true;
     }
     if row.has_unpushed_commits && !pr_merged {
         reasons.push("unpushed commits".into());
         preserves_work = true;
     }
-    // The "still active" fallback keys off `is_safe_to_delete`, which folds
-    // in the unpushed flag. When the merged PR suppressed that flag above, a
-    // clean, unlocked, reapable checkout must not be re-blocked here purely
-    // because it was ahead of the (now-gone) remote branch.
-    let safe_to_delete = row.is_safe_to_delete
-        || (pr_merged
-            && row.has_unpushed_commits
-            && row.status_verified
-            && !row.has_uncommitted_changes
-            && !row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
-            && row.has_reapable_reason());
-    if reasons.is_empty() && require_stopped && !safe_to_delete {
+    if reasons.is_empty() && require_stopped && !removal_safe_to_delete(row, pr_merged) {
         reasons.push("checkout is still active".into());
     }
     RemovalReasons {
@@ -1828,7 +2623,7 @@ mod removal_classification_tests {
     use lazybox_store::{MemoryStore, Store, StoreError, StoreMutation, WorkspaceRecord};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct FailingWorkspaceListStore;
+    pub(super) struct FailingWorkspaceListStore;
 
     impl lazybox_store::Store for FailingWorkspaceListStore {
         fn list_workspaces(
@@ -1937,6 +2732,9 @@ mod removal_classification_tests {
             build_bytes: 0,
             last_modified: None,
             has_uncommitted_changes: false,
+            has_tracked_modifications: false,
+            has_untracked_work: false,
+            has_untracked_build_output: false,
             status_verified: true,
             has_unpushed_commits: false,
             // An active tracked session is not deletable yet, even when its
@@ -1973,6 +2771,9 @@ mod removal_classification_tests {
             build_bytes: 0,
             last_modified: None,
             has_uncommitted_changes: false,
+            has_tracked_modifications: false,
+            has_untracked_work: false,
+            has_untracked_build_output: false,
             status_verified: true,
             has_unpushed_commits: true,
             is_safe_to_delete: false,
@@ -1993,11 +2794,102 @@ mod removal_classification_tests {
 
         // Genuine on-disk work is still protected regardless of merge state.
         row.has_uncommitted_changes = true;
+        row.has_tracked_modifications = true;
         let found = workspace_removal_reasons(&row, true, true);
-        assert_eq!(found.reasons, vec!["uncommitted changes"]);
+        assert_eq!(found.reasons, vec!["uncommitted changes to tracked files"]);
         assert!(
             found.preserves_work,
             "the flag must be set beside the reason, not re-derived",
+        );
+    }
+
+    /// The reported bug (#1866): the checkout's whole dirty state was an
+    /// untracked `target/`. "commit, stash or push" named nothing that
+    /// existed, so the workspace could never be deleted.
+    #[test]
+    fn regenerable_build_output_alone_does_not_refuse_a_removal() {
+        let mut row = lazybox_git_ops::WorktreeInspection {
+            path: "/tmp/lazybox-build-output".into(),
+            bare_path: Some("/tmp/lazybox-build-output.git".into()),
+            branch: Some("feat".into()),
+            session_id: Some("session".into()),
+            reasons: vec![lazybox_git_ops::OrphanReason::SessionStopped],
+            size_bytes: 1_100_000,
+            build_bytes: 1_100_000,
+            last_modified: None,
+            // git reports the checkout dirty — an unignored `target/` is
+            // `?? target/` — but nothing in it is work.
+            has_uncommitted_changes: true,
+            has_tracked_modifications: false,
+            has_untracked_work: false,
+            has_untracked_build_output: true,
+            status_verified: true,
+            has_unpushed_commits: false,
+            // `is_safe_to_delete` still demands a byte-empty status, so the
+            // relaxation has to survive the "still active" fallback too.
+            is_safe_to_delete: false,
+        };
+        let found = workspace_removal_reasons(&row, true, false);
+        assert!(
+            found.reasons.is_empty(),
+            "build output is not a reason to refuse: {:?}",
+            found.reasons
+        );
+        assert!(!found.preserves_work);
+
+        // An untracked file that is NOT build output is work, and blocks —
+        // with advice that names what it is.
+        row.has_untracked_work = true;
+        let found = workspace_removal_reasons(&row, true, false);
+        assert_eq!(found.reasons, vec!["new untracked files"]);
+        assert!(found.preserves_work);
+
+        // So does a modified tracked file.
+        row.has_untracked_work = false;
+        row.has_tracked_modifications = true;
+        let found = workspace_removal_reasons(&row, true, false);
+        assert_eq!(found.reasons, vec!["uncommitted changes to tracked files"]);
+        assert!(found.preserves_work);
+
+        // And so do unpushed commits, on an otherwise output-only tree.
+        row.has_tracked_modifications = false;
+        row.has_unpushed_commits = true;
+        let found = workspace_removal_reasons(&row, true, false);
+        assert_eq!(found.reasons, vec!["unpushed commits"]);
+        assert!(found.preserves_work);
+    }
+
+    /// The relaxation never reaches a checkout whose status could not be
+    /// read, and never unlocks a locked one.
+    #[test]
+    fn build_output_relaxation_still_requires_a_verified_unlocked_checkout() {
+        let mut row = lazybox_git_ops::WorktreeInspection {
+            path: "/tmp/lazybox-build-output-guards".into(),
+            bare_path: Some("/tmp/lazybox-build-output-guards.git".into()),
+            branch: Some("feat".into()),
+            session_id: Some("session".into()),
+            reasons: vec![lazybox_git_ops::OrphanReason::SessionStopped],
+            size_bytes: 0,
+            build_bytes: 0,
+            last_modified: None,
+            has_uncommitted_changes: true,
+            has_tracked_modifications: false,
+            has_untracked_work: false,
+            has_untracked_build_output: true,
+            status_verified: false,
+            has_unpushed_commits: false,
+            is_safe_to_delete: false,
+        };
+        assert_eq!(
+            workspace_removal_reasons(&row, true, false).reasons,
+            vec!["cleanliness could not be proven"],
+        );
+
+        row.status_verified = true;
+        row.reasons.push(lazybox_git_ops::OrphanReason::Locked);
+        assert_eq!(
+            workspace_removal_reasons(&row, true, false).reasons,
+            vec!["locked"],
         );
     }
 }
@@ -2047,6 +2939,7 @@ async fn reclaim_workspace_worktrees(
     config: &ServerConfig,
     workspace: &Workspace,
     keep_cost: bool,
+    force: RemovalForce,
 ) -> (Reclaimed, Option<tokio::task::JoinHandle<()>>) {
     // Measure the reclaim synchronously (a stat-only walk) so the
     // returned total — and the "reclaimed N GB" notice — is accurate
@@ -2074,8 +2967,8 @@ async fn reclaim_workspace_worktrees(
         crate::client_kv::clear_session_cost(&*config.store, workspace.key.as_str());
     }
 
-    let cleanup =
-        (!paths.is_empty()).then(|| spawn_worktree_removal(config, workspace.key.clone(), paths));
+    let cleanup = (!paths.is_empty())
+        .then(|| spawn_worktree_removal(config, workspace.key.clone(), paths, force));
     (reclaimed, cleanup)
 }
 
@@ -2093,12 +2986,42 @@ async fn reclaim_workspace_worktrees(
 /// provision or a re-created session now owns. It also re-runs the worktree
 /// inspector and the delete boundary re-probes locked/dirty/unpushed state
 /// under the repo lock. Missing or unverifiable inspection rows are preserved.
+///
+/// [`RemovalForce::Explicit`] suppresses only the cleanliness half of
+/// that boundary. It has to: the row is already gone by this point, so an
+/// explicit removal that still preserved the checkout would leave a dirty
+/// directory nothing in the UI points at — the dead end moved onto disk
+/// rather than ended. The re-provision guard is NOT suppressed; that one
+/// protects a checkout someone else now owns, which no confirmation of
+/// this removal covers.
+///
+/// An **uninspectable** checkout is the case that used to survive every
+/// override. It has two shapes, and one of them had no way out at all:
+///
+/// - The inspector produced a row but could not vet the contents (no
+///   bare clone lists the directory, a severed `.git`). The deletion
+///   boundary takes `force` here, so this already worked.
+/// - The inspection could not be built *at all* — the tracked-session
+///   scan or the probe itself failed. There is then no row for any
+///   path, the workspace row is already gone, and #1865's force never
+///   reached the boundary: every checkout was stranded with nothing in
+///   the UI pointing at it. On the explicit path those are removed by
+///   [`force_remove_unverifiable`].
+///
+/// That is an `rm` no inspection authorized, so state its bounds: the
+/// paths came from [`lifecycle_worktree_paths`], which required each to
+/// exist, to sit inside the daemon-owned `<root>/<scope>/<slug>`
+/// namespace, and not to be the repo's shared main checkout; the
+/// namespace check is re-asserted at the `rm` rather than assumed; and
+/// the re-provision guard still runs under the ownership lock. A
+/// *gated* removal preserves both shapes, named in the log.
 /// Returns the task handle for tests to await; the deletion path
 /// fire-and-forgets it.
 fn spawn_worktree_removal(
     config: &ServerConfig,
     key: WorkspaceKey,
     paths: Vec<std::path::PathBuf>,
+    force: RemovalForce,
 ) -> tokio::task::JoinHandle<()> {
     let mgr = config.worktree_manager();
     // Completion latch so the shutdown drain can wait for this task
@@ -2127,25 +3050,37 @@ fn spawn_worktree_removal(
         let by_path: std::collections::HashMap<_, _>;
         {
             let _ownership_guard = config.worktree_ownership_lock.lock().await;
-            tracked = match collect_tracked_sessions(&config).await {
-                Ok(tracked) => tracked,
-                Err(error) => {
-                    tracing::warn!(
-                        workspace = %key,
-                        %error,
-                        "delete_workspace: could not classify tracked worktrees — preserving them",
-                    );
+            // An inspection failure is reported out of the guarded scope,
+            // never handled inside it: the explicit-delete response is
+            // `force_remove_unverifiable`, which takes this very same
+            // (non-reentrant) ownership lock to re-run the re-provision
+            // check. Acting on the failure here would deadlock the
+            // maintenance task against itself, and the shutdown drain
+            // waits on its latch.
+            let scanned = match collect_tracked_sessions(&config).await {
+                Ok(tracked) => Ok(tracked),
+                Err(error) => Err((error, "could not classify tracked worktrees")),
+            };
+            match scanned {
+                Ok(rows) => tracked = rows,
+                Err(failure) => {
+                    drop(_ownership_guard);
+                    preserve_or_remove_uninspectable(&config, &key, &paths, force, failure).await;
                     return;
                 }
-            };
+            }
             let inspections = match mgr.inspect_paths(&paths, &tracked).await {
                 Ok(inspections) => inspections,
                 Err(error) => {
-                    tracing::warn!(
-                        workspace = %key,
-                        %error,
-                        "delete_workspace: deferred safety inspection failed — preserving worktrees",
-                    );
+                    drop(_ownership_guard);
+                    preserve_or_remove_uninspectable(
+                        &config,
+                        &key,
+                        &paths,
+                        force,
+                        (error.to_string(), "deferred safety inspection failed"),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -2158,18 +3093,37 @@ fn spawn_worktree_removal(
 
         for path in paths {
             let Some(row) = by_path.get(&canonical_or_self(&path)) else {
-                tracing::warn!(
-                    workspace = %key,
-                    worktree = %path.display(),
-                    "delete_workspace: worktree is not inspectable — preserving it",
-                );
+                // Narrow, but the row is already gone by now, so it
+                // cannot be a preserve: `lifecycle_worktree_paths`
+                // required the path to exist and `inspect_paths` builds
+                // a row for every directory, so reaching here means the
+                // path stopped being a directory between the two. The
+                // reachable shape of "no inspection at all" is the
+                // whole-scan failure handled above; this arm is its
+                // per-path fail-safe, and it must not strand a
+                // directory the user explicitly asked to delete.
+                if force.is_explicit() {
+                    tracing::warn!(
+                        workspace = %key,
+                        worktree = %path.display(),
+                        "delete_workspace: worktree is not inspectable — removing it anyway \
+                         on an explicit delete",
+                    );
+                    force_remove_unverifiable(&config, &key, &path).await;
+                } else {
+                    tracing::warn!(
+                        workspace = %key,
+                        worktree = %path.display(),
+                        "delete_workspace: worktree is not inspectable — preserving it",
+                    );
+                }
                 continue;
             };
             let guard_config = config.clone();
             let guard_key = key.clone();
             let guard_path = path.clone();
             match mgr
-                .delete_inspected_if(row, /*force=*/ false, move || {
+                .delete_inspected_if(row, force.is_explicit(), move || {
                     !worktree_path_is_reclaimed(&guard_config, &guard_key, &guard_path)
                 })
                 .await
@@ -2225,6 +3179,115 @@ fn spawn_worktree_removal(
     })
 }
 
+/// Remove a worktree directory the inspector could not vet, on an
+/// explicit delete only.
+///
+/// This is the one `rm` in the teardown that no inspection row
+/// authorizes, so state what does bound it. The path is not arbitrary:
+/// it came from [`lifecycle_worktree_paths`], which already required it
+/// to exist, to sit inside the daemon-owned
+/// `<root>/<scope>/<slug>` namespace (`is_managed_worktree_path`), and
+/// not to be the repo's shared `_main` checkout — an imported or
+/// on-main checkout in the user's own clone can never reach here. The
+/// namespace check is re-asserted below rather than assumed, because
+/// this function is the only caller that deletes without an inspection,
+/// and the re-provision guard is re-run under the ownership lock so a
+/// freshly provisioned session at the same deterministic slug is never
+/// deleted underneath its owner.
+///
+/// What it does NOT prove is that the directory is disposable — that is
+/// exactly what the missing inspection row means. The user asked for
+/// this workspace to be deleted and confirmed it; the contents are
+/// named in the log, which is the only record left of them.
+async fn force_remove_unverifiable(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    path: &std::path::Path,
+) {
+    if !config.worktree_manager().is_managed_worktree_path(path) {
+        tracing::warn!(
+            workspace = %key,
+            worktree = %path.display(),
+            "delete_workspace: refusing to force-remove a path outside the managed \
+             worktree namespace",
+        );
+        return;
+    }
+    let _ownership_guard = config.worktree_ownership_lock.lock().await;
+    if worktree_path_is_reclaimed(config, key, path) {
+        tracing::info!(
+            workspace = %key,
+            worktree = %path.display(),
+            "delete_workspace: uninspectable worktree was re-provisioned before removal — \
+             left in place",
+        );
+        return;
+    }
+    if !path.exists() {
+        return;
+    }
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => tracing::warn!(
+            workspace = %key,
+            worktree = %path.display(),
+            "delete_workspace: removed an uninspectable checkout on an explicit delete — \
+             its contents could not be classified and are gone",
+        ),
+        Err(error) => tracing::error!(
+            workspace = %key,
+            worktree = %path.display(),
+            %error,
+            "delete_workspace: could not remove the uninspectable checkout",
+        ),
+    }
+}
+
+/// [`force_remove_unverifiable`] over every path of a removal whose
+/// inspection could not be built at all (the scan or the probe failed),
+/// rather than per-path.
+async fn force_remove_unverifiable_all(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    paths: &[std::path::PathBuf],
+) {
+    for path in paths {
+        force_remove_unverifiable(config, key, path).await;
+    }
+}
+
+/// What a removal does when it could not build an inspection at all:
+/// preserve every path (gated) or remove them (explicit), with one log
+/// line naming the failure either way.
+///
+/// Must be called with the worktree ownership lock RELEASED —
+/// [`force_remove_unverifiable`] retakes it.
+async fn preserve_or_remove_uninspectable(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    paths: &[std::path::PathBuf],
+    force: RemovalForce,
+    (error, what_failed): (String, &'static str),
+) {
+    if force.is_explicit() {
+        // A gated removal fails closed. An explicit one cannot: the row
+        // is already gone, and "I could not classify it" is not a reason
+        // to leave behind the directory the user just asked to delete.
+        tracing::warn!(
+            workspace = %key,
+            %error,
+            "delete_workspace: {what_failed} — removing the checkouts anyway on an \
+             explicit delete",
+        );
+        force_remove_unverifiable_all(config, key, paths).await;
+    } else {
+        tracing::warn!(
+            workspace = %key,
+            %error,
+            "delete_workspace: {what_failed} — preserving the checkouts",
+        );
+    }
+}
+
 /// True when a torn-down workspace's worktree `path` has been re-claimed
 /// by a live or in-flight session — either an in-flight provision holds a
 /// claim on it, or the workspace came back into scope and a committed
@@ -2274,6 +3337,17 @@ mod reclaim_worktree_tests {
             cwd.display(),
             String::from_utf8_lossy(&output.stderr),
         );
+    }
+
+    async fn run_git_capture(cwd: &std::path::Path, args: &[&str]) -> String {
+        let output = tokio::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .await
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
     async fn managed_checkout_fixture(
@@ -2378,6 +3452,124 @@ mod reclaim_worktree_tests {
         std::fs::write(dir.join("payload"), vec![0u8; bytes]).expect("write payload");
     }
 
+    /// The inspection-failure branch of the explicit path. When the
+    /// tracked-session scan itself fails there is no inspection row for
+    /// ANY path, and #1865's force never reached the deletion boundary
+    /// — the row was already gone, so the checkouts were stranded with
+    /// nothing in the UI pointing at them. An explicit delete removes
+    /// them; the `rm` is bounded by the managed namespace, asserted
+    /// separately in `force_remove_unverifiable_refuses_an_unmanaged_path`.
+    #[tokio::test]
+    async fn explicit_removal_reclaims_worktrees_it_could_not_classify() {
+        let root = tempfile::tempdir().expect("worktree root");
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(super::removal_classification_tests::FailingWorkspaceListStore),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let wt = root.path().join("o-r").join("pr-1");
+        seed_worktree(&wt, 2048);
+
+        // Bounded on purpose. The first cut of this path called
+        // `force_remove_unverifiable` — which retakes the worktree
+        // ownership lock — from inside the scope that already held it,
+        // and the task deadlocked against itself with no output at all.
+        // A hang is the worst failure mode to debug, so assert the
+        // removal *finishes*, not merely that it eventually would.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            spawn_worktree_removal(
+                &config,
+                WorkspaceKey::new("github:o/r#1"),
+                vec![wt.clone()],
+                RemovalForce::Explicit,
+            ),
+        )
+        .await
+        .expect("the removal task must not deadlock on the ownership lock")
+        .expect("removal task");
+
+        assert!(
+            !wt.exists(),
+            "an explicit delete must not strand a checkout it could not classify",
+        );
+    }
+
+    /// The same failure, unattended: preserved, every byte.
+    #[tokio::test]
+    async fn gated_removal_preserves_worktrees_it_could_not_classify() {
+        let root = tempfile::tempdir().expect("worktree root");
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(super::removal_classification_tests::FailingWorkspaceListStore),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let wt = root.path().join("o-r").join("pr-1");
+        seed_worktree(&wt, 2048);
+
+        spawn_worktree_removal(
+            &config,
+            WorkspaceKey::new("github:o/r#1"),
+            vec![wt.clone()],
+            RemovalForce::Gated,
+        )
+        .await
+        .expect("removal task");
+
+        assert!(wt.exists(), "a gated removal fails closed");
+    }
+
+    /// A managed directory git cannot account for at all — no bare
+    /// clone lists it, so there is nothing to verify the contents
+    /// against. That is the "cleanliness could not be proven" shape a
+    /// user meets as a checkout they cannot get rid of. An explicit
+    /// delete removes it; the namespace bound is what keeps this from
+    /// being an unbounded `rm`.
+    #[tokio::test]
+    async fn explicit_removal_reclaims_a_managed_unaccountable_checkout() {
+        let config = ServerConfig::in_memory();
+        let wt = config.worktree_root_path().join("o-r").join("pr-9");
+        seed_worktree(&wt, 2048);
+
+        spawn_worktree_removal(
+            &config,
+            WorkspaceKey::new("github:o/r#9"),
+            vec![wt.clone()],
+            RemovalForce::Explicit,
+        )
+        .await
+        .expect("removal task");
+
+        assert!(
+            !wt.exists(),
+            "an explicit delete must not strand a managed checkout it could not classify",
+        );
+    }
+
+    /// Same directory, unattended: preserved. Paired with the test
+    /// above so "explicit removes it" can never be satisfied by a gate
+    /// that stopped protecting anything.
+    #[tokio::test]
+    async fn gated_removal_preserves_a_managed_unaccountable_checkout() {
+        let config = ServerConfig::in_memory();
+        let wt = config.worktree_root_path().join("o-r").join("pr-9");
+        seed_worktree(&wt, 2048);
+
+        spawn_worktree_removal(
+            &config,
+            WorkspaceKey::new("github:o/r#9"),
+            vec![wt.clone()],
+            RemovalForce::Gated,
+        )
+        .await
+        .expect("removal task");
+
+        assert!(
+            wt.exists(),
+            "nothing unattended removes what it cannot read"
+        );
+    }
+
     #[tokio::test]
     async fn spawn_worktree_removal_preserves_unverifiable_dirs() {
         let config = ServerConfig::in_memory();
@@ -2389,6 +3581,7 @@ mod reclaim_worktree_tests {
             &config,
             WorkspaceKey::new("local:scratch"),
             vec![wt.clone()],
+            RemovalForce::Gated,
         );
         handle.await.expect("removal task");
 
@@ -2426,7 +3619,7 @@ mod reclaim_worktree_tests {
             "a committed session at the path reads as reclaimed",
         );
 
-        spawn_worktree_removal(&config, key, vec![wt.clone()])
+        spawn_worktree_removal(&config, key, vec![wt.clone()], RemovalForce::Gated)
             .await
             .expect("removal task");
 
@@ -2468,7 +3661,8 @@ mod reclaim_worktree_tests {
             Utc::now(),
         ));
 
-        let (reclaimed, cleanup) = reclaim_workspace_worktrees(&config, &workspace, true).await;
+        let (reclaimed, cleanup) =
+            reclaim_workspace_worktrees(&config, &workspace, true, RemovalForce::Gated).await;
 
         // Byte accounting is synchronous, so the notice is accurate the
         // instant the poll path returns — before the slow `rm` runs.
@@ -2500,7 +3694,8 @@ mod reclaim_worktree_tests {
             Utc::now(),
         ));
 
-        let (reclaimed, cleanup) = reclaim_workspace_worktrees(&config, &workspace, true).await;
+        let (reclaimed, cleanup) =
+            reclaim_workspace_worktrees(&config, &workspace, true, RemovalForce::Gated).await;
 
         assert_eq!(reclaimed.worktrees, 0);
         assert_eq!(reclaimed.bytes, 0);
@@ -2519,7 +3714,7 @@ mod reclaim_worktree_tests {
         let workspace = Workspace::empty(key.clone(), "gone", Utc::now());
         crate::client_kv::add_session_cost(&config, key.as_str().to_string(), 1_500_000).await;
 
-        let _ = reclaim_workspace_worktrees(&config, &workspace, true).await;
+        let _ = reclaim_workspace_worktrees(&config, &workspace, true, RemovalForce::Gated).await;
 
         assert_eq!(
             crate::client_kv::session_costs(&*config.store),
@@ -2540,7 +3735,7 @@ mod reclaim_worktree_tests {
         let workspace = Workspace::empty(key.clone(), "gone", Utc::now());
         crate::client_kv::add_session_cost(&config, key.as_str().to_string(), 1_500_000).await;
 
-        let _ = reclaim_workspace_worktrees(&config, &workspace, false).await;
+        let _ = reclaim_workspace_worktrees(&config, &workspace, false, RemovalForce::Gated).await;
 
         assert!(
             crate::client_kv::session_costs(&*config.store).is_empty(),
@@ -2554,7 +3749,9 @@ mod reclaim_worktree_tests {
         let mut events = config.bus.subscribe();
 
         assert_eq!(
-            delete_workspace(&config, &key).await.map(|_| ()),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .map(|_| ()),
             None,
             "x x must fail closed when the branch is ahead"
         );
@@ -2603,6 +3800,272 @@ mod reclaim_worktree_tests {
         );
     }
 
+    /// The escape hatch from the refusal above. The gate is right to
+    /// refuse by default, but "commit, stash or push, then retry" is a
+    /// dead end for a user who wants the work gone: the row came back
+    /// every time and there was no override at all.
+    /// [`RemovalForce::Explicit`] is what an explicit delete now carries
+    /// — it must actually remove the row and the checkout the gate was
+    /// protecting.
+    #[tokio::test]
+    async fn forced_workspace_delete_overrides_the_local_work_gate() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(true).await;
+        let mut events = config.bus.subscribe();
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Explicit)
+                .await
+                .is_some(),
+            "the user asked for the wipe after being shown the risk",
+        );
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "the row the refusal kept resurrecting is gone",
+        );
+        assert!(!worktree.exists(), "the unpushed checkout is reclaimed");
+
+        while let Ok(event) = events.try_recv() {
+            if let Event::ProviderError { ref source, .. } = event {
+                assert_ne!(
+                    source, "store:local-work",
+                    "a forced wipe must not re-refuse — that is the dead end it exists to end",
+                );
+            }
+        }
+    }
+
+    /// The same override, un-asked-for, must change nothing: the gate is
+    /// the default and a plain delete still fails closed. Paired with the
+    /// test above so "force works" can never be satisfied by a gate that
+    /// stopped refusing.
+    #[tokio::test]
+    async fn unforced_workspace_delete_still_refuses_local_work() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(true).await;
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_none(),
+            "the gate is the default",
+        );
+        assert!(load_workspace(&config, &key).is_some(), "row survives");
+        assert!(worktree.exists(), "checkout survives");
+    }
+
+    /// End to end for the reported bug (#1866): a stopped, clean, fully
+    /// pushed checkout whose only dirty entry is an unignored `target/`
+    /// deletes on the ordinary gated path — no force, no "commit, stash
+    /// or push" for something that does not exist — and the directory,
+    /// build output and all, goes with it.
+    #[tokio::test]
+    async fn gated_delete_reclaims_a_checkout_dirty_only_with_build_output() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
+        let build = worktree.join("target").join("debug");
+        std::fs::create_dir_all(&build).expect("build dir");
+        std::fs::write(build.join("artifact.bin"), vec![0u8; 4096]).expect("artifact");
+        // The premise: the repo does NOT ignore `target/`, so git reports it.
+        let status = run_git_capture(&worktree, &["status", "--porcelain"]).await;
+        assert_eq!(
+            status, "?? target/\n",
+            "fixture must reproduce `?? target/`"
+        );
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
+            "build output is not work the user can rescue",
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        assert!(
+            !worktree.exists(),
+            "checkout reclaimed, not stranded on disk"
+        );
+    }
+
+    /// The user requirement, at the seam that used to deny it: "when I
+    /// say I want to delete a workspace I want to delete a workspace."
+    ///
+    /// A checkout with **modified tracked files** was the second of the
+    /// four causes that all surfaced as "commit, stash or push, then
+    /// retry". On the explicit path the confirm the user already
+    /// answered is the whole ceremony — the row and the checkout go.
+    #[tokio::test]
+    async fn explicit_delete_destroys_modified_tracked_files() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
+        std::fs::write(worktree.join("README.md"), "edited, never committed\n")
+            .expect("modify a tracked file");
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Explicit)
+                .await
+                .is_some(),
+            "an explicit delete deletes — modified tracked files are not a veto",
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        assert!(!worktree.exists(), "and the checkout with it");
+    }
+
+    /// The **unpushed commits** half of the same requirement, on the
+    /// ordinary explicit path rather than through an escape hatch.
+    #[tokio::test]
+    async fn explicit_delete_destroys_unpushed_commits() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(true).await;
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Explicit)
+                .await
+                .is_some(),
+            "an explicit delete deletes — unpushed commits are not a veto",
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        assert!(!worktree.exists(), "and the checkout with it");
+    }
+
+    /// The unattended pair of the test above: the same modified tracked
+    /// file refuses a removal nobody asked for, and the edit survives.
+    #[tokio::test]
+    async fn gated_delete_still_refuses_modified_tracked_files() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
+        std::fs::write(worktree.join("README.md"), "edited, never committed\n")
+            .expect("modify a tracked file");
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_none(),
+            "nothing unattended may destroy an uncommitted edit",
+        );
+        assert!(load_workspace(&config, &key).is_some(), "row survives");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("README.md")).expect("readme"),
+            "edited, never committed\n",
+            "and the edit survives byte for byte",
+        );
+    }
+
+    /// The case #1865 deliberately left behind: a worktree whose `.git`
+    /// points at an admin directory that no longer exists. Nothing can
+    /// classify it ("cleanliness could not be proven"), so the deletion
+    /// boundary had nothing to authorize and the directory the user
+    /// explicitly asked to remove stayed on disk forever — the dead end
+    /// moved from the inbox onto the filesystem.
+    #[tokio::test]
+    async fn explicit_delete_removes_an_uninspectable_checkout() {
+        let (root, config, key, worktree) = managed_checkout_fixture(false).await;
+        std::fs::write(worktree.join("unsaved.txt"), "content nobody vetted").expect("content");
+        // Sever the checkout: `.git` still names a gitdir, the gitdir is
+        // gone. Every probe that would run git *inside* this tree fails.
+        std::fs::remove_dir_all(root.path().join("repos/o/r.git/worktrees"))
+            .expect("remove the worktree admin dir");
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Explicit)
+                .await
+                .is_some(),
+            "a checkout nobody can read is still a checkout the user asked to delete",
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        // The deferred reclaim is a detached task; wait for the
+        // maintenance latch rather than racing it.
+        config.drain_maintenance_tasks().await;
+        assert!(
+            !worktree.exists(),
+            "the unverifiable directory must not be stranded on disk",
+        );
+    }
+
+    /// The other half of the contract, and the one that must not move:
+    /// with no human in the loop the gate still refuses an unverifiable
+    /// checkout and leaves every byte of it in place.
+    #[tokio::test]
+    async fn a_gated_delete_still_preserves_an_uninspectable_checkout() {
+        let (root, config, key, worktree) = managed_checkout_fixture(false).await;
+        std::fs::write(worktree.join("unsaved.txt"), "content nobody vetted").expect("content");
+        std::fs::remove_dir_all(root.path().join("repos/o/r.git/worktrees"))
+            .expect("remove the worktree admin dir");
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_none(),
+            "nothing unattended may destroy what it could not classify",
+        );
+        assert!(load_workspace(&config, &key).is_some(), "row survives");
+        config.drain_maintenance_tasks().await;
+        assert!(
+            worktree.join("unsaved.txt").exists(),
+            "and the content survives",
+        );
+    }
+
+    /// `force_remove_unverifiable` is the one `rm` no inspection
+    /// authorizes, so its namespace bound is asserted directly: a path
+    /// outside the daemon-owned worktree root is refused even on the
+    /// explicit path.
+    #[tokio::test]
+    async fn force_remove_unverifiable_refuses_an_unmanaged_path() {
+        let config = ServerConfig::in_memory();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside = tmp.path().join("someones-own-clone");
+        seed_worktree(&outside, 2048);
+
+        force_remove_unverifiable(&config, &WorkspaceKey::new("local:scratch"), &outside).await;
+
+        assert!(
+            outside.exists(),
+            "an explicit delete still never reaches outside the managed namespace",
+        );
+    }
+
+    /// The same shape plus one uncommitted file an agent wrote: still
+    /// refused, and nothing on disk is touched.
+    #[tokio::test]
+    async fn gated_delete_still_refuses_a_new_file_beside_build_output() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
+        std::fs::create_dir_all(worktree.join("target")).expect("build dir");
+        std::fs::write(worktree.join("target/artifact.bin"), b"junk").expect("artifact");
+        std::fs::write(worktree.join("notes.md"), "work nobody else has").expect("notes");
+
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_none(),
+            "an uncommitted new file is still work",
+        );
+        assert!(load_workspace(&config, &key).is_some(), "row survives");
+        assert!(worktree.join("notes.md").exists(), "and so does the file");
+    }
+
+    /// The project cascade has its own local-work preflight — a second
+    /// refusal site. A force that honoured only the per-workspace gate
+    /// would still dead-end here, one dirty child refusing the whole
+    /// project, so the override has to reach both.
+    #[tokio::test]
+    async fn forced_project_delete_overrides_the_cascade_preflight() {
+        let project_key = lazybox_core::ProjectKey::github("o", "r");
+        let (_root, config, key, worktree) = managed_checkout_fixture_at(
+            true,
+            "github-o-r/release-guard",
+            Some(project_key.clone()),
+        )
+        .await;
+
+        delete_project(&config, &project_key, RemovalForce::Gated).await;
+        assert!(
+            load_workspace(&config, &key).is_some(),
+            "the preflight refuses a cascade over a dirty child",
+        );
+        assert!(worktree.exists(), "and preserves its checkout");
+
+        delete_project(&config, &project_key, RemovalForce::Explicit).await;
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "the forced cascade removes the child the preflight refused",
+        );
+        assert!(!worktree.exists(), "and reclaims its checkout");
+    }
+
     /// The verb has to match the risk. "commit, stash or push" is the
     /// wrong advice for a checkout whose only problem is that something
     /// is still running in it — and that advice is now the part of the
@@ -2640,7 +4103,9 @@ mod reclaim_worktree_tests {
         let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
 
         assert!(
-            delete_workspace(&config, &key).await.is_some(),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
             "clean stopped work remains deletable"
         );
         assert!(
@@ -2670,7 +4135,9 @@ mod reclaim_worktree_tests {
         commit_upsert(&config, &key, workspace).expect("persist active session");
 
         assert!(
-            delete_workspace(&config, &key).await.is_some(),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
             "no live terminal means the checkout is not active"
         );
         assert!(!worktree.exists(), "managed worktree reclaimed");
@@ -2689,7 +4156,9 @@ mod reclaim_worktree_tests {
         .await;
 
         assert!(
-            delete_workspace(&config, &key).await.is_some(),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
             "clean stopped work remains deletable"
         );
         assert!(!worktree.exists(), "managed worktree reclaimed");
@@ -2707,7 +4176,11 @@ mod reclaim_worktree_tests {
         )
         .await;
 
-        assert!(delete_workspace(&config, &key).await.is_some());
+        assert!(
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some()
+        );
         assert!(
             load_workspace(&config, &key).is_none(),
             "workspace row removed"
@@ -2738,7 +4211,9 @@ mod reclaim_worktree_tests {
         commit_upsert(&config, &key, workspace).expect("persist merged pr");
 
         assert!(
-            delete_workspace(&config, &key).await.is_some(),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
             "a merged PR's unpushed-looking tip does not block the archive"
         );
         assert!(
@@ -2766,7 +4241,9 @@ mod reclaim_worktree_tests {
         std::fs::write(worktree.join("target/debug/blob"), vec![0u8; 8192]).expect("blob");
 
         assert_eq!(
-            delete_workspace(&config, &key).await.map(|_| ()),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .map(|_| ()),
             None,
             "x x fails closed on uncommitted work"
         );
@@ -2992,12 +4469,136 @@ fn io_lock_holder_fields(config: &ServerConfig, backend_key: &str) -> (String, u
     }
 }
 
+/// Who asked for this removal — which is what decides whether the
+/// fresh worktree safety gate may refuse it.
+///
+/// The line is drawn at the *caller*, not at what the checkout
+/// contains. An explicit delete is an instruction; refusing it and
+/// telling the user to "commit, stash or push, then retry" overrides
+/// them with advice they may have no way to act on, and the row then
+/// cannot be deleted at all. An unattended removal has nobody to ask,
+/// so it keeps failing closed.
+///
+/// A named type, not a bare `bool`, for the same reason
+/// `WorkspaceRemovalReason` is one: this decides whether work no
+/// remote has survives the next keypress, and an unlabelled `true` at a
+/// destructive call site says nothing about which way is safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalForce {
+    /// No human is in the loop — the merged-PR terminal-state sweep,
+    /// the closed-issue auto-reap, rescope, background GC. A checkout
+    /// with uncommitted changes or unpushed commits refuses the
+    /// removal and the row stays in the inbox. Nothing unattended may
+    /// destroy work no remote has.
+    Gated,
+    /// A human pressed a key and confirmed: `x x`, the project delete,
+    /// a Yes on a removal prompt. The delete happens — the cleanliness
+    /// gate is *inspected* but never refuses, so the confirm the user
+    /// already answered is the whole ceremony. Terminal teardown,
+    /// archive policy and worktree reclaim are unchanged; the
+    /// overridden risks are logged at `warn`, which is the only record
+    /// left of the destroyed work.
+    Explicit,
+}
+
+impl RemovalForce {
+    /// Built from the wire's `force` bool (`Command::Kill`,
+    /// `Command::DeleteProject`). One conversion point so a new caller
+    /// cannot invent a third meaning for the flag.
+    #[must_use]
+    pub fn from_wire(force: bool) -> Self {
+        if force { Self::Explicit } else { Self::Gated }
+    }
+
+    /// Whether the cleanliness gate must yield to the caller.
+    fn is_explicit(self) -> bool {
+        matches!(self, Self::Explicit)
+    }
+}
+
+/// Handle [`lazybox_ipc::Command::InspectRemovalRisks`]: freshly
+/// classify what deleting `target` would destroy and broadcast
+/// [`Event::RemovalRisksInspected`].
+///
+/// Read-only, and deliberately the `require_stopped = false` variant of
+/// the gate: this runs while the user's sessions are still live, so
+/// "the checkout is still active" is not a risk to report — it is the
+/// normal state of a workspace someone is about to archive. Only local
+/// work and an unprovable checkout are.
+///
+/// It is a *preflight for a prompt*, never an authority: the removal
+/// re-inspects after stopping the terminals, which is the answer that
+/// counts. A failed inspection is reported as an error, because an
+/// empty risk list means "nothing found", and a confirm that renders
+/// "nothing will be lost" over a checkout nobody could read is the
+/// exact false assurance this whole path exists to stop giving.
+pub async fn inspect_removal_risks(config: &ServerConfig, target: lazybox_ipc::RemovalTarget) {
+    let keys: Vec<WorkspaceKey> = match &target {
+        lazybox_ipc::RemovalTarget::Workspace(session_key) => {
+            vec![WorkspaceKey::new(session_key.as_str().to_string())]
+        }
+        lazybox_ipc::RemovalTarget::Project(project_key) => match config.store.list_workspaces() {
+            Ok(records) => records
+                .into_iter()
+                .filter_map(|record| record.workspace_json)
+                .filter_map(|json| serde_json::from_str::<Workspace>(&json).ok())
+                .filter(|workspace| workspace.project_key.as_ref() == Some(project_key))
+                .map(|workspace| workspace.key)
+                .collect(),
+            Err(error) => {
+                let _ = config.bus.send(Event::RemovalRisksInspected {
+                    target,
+                    risks: Vec::new(),
+                    error: Some(format!("could not list the project's workspaces: {error}")),
+                });
+                return;
+            }
+        },
+    };
+
+    let mut risks = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for key in keys {
+        let Some(workspace) = load_workspace(config, &key) else {
+            continue;
+        };
+        // `destroyed`, not `blockers`: on the explicit path nothing
+        // blocks, so the only useful thing to tell the user is what
+        // stops existing — including an unpushed tip the gate relaxes
+        // for a merged PR, which is upstream under a different SHA and
+        // therefore gone from here for good.
+        match removal_outlook_with(config, &config.worktree_manager(), &workspace).await {
+            Ok(outlook) => risks.extend(outlook.destroyed.into_iter().map(|risk| {
+                lazybox_ipc::RemovalRiskDto {
+                    path: risk.path,
+                    reasons: risk.reasons,
+                }
+            })),
+            Err(error) => errors.push(format!("{key}: {error}")),
+        }
+    }
+    let _ = config.bus.send(Event::RemovalRisksInspected {
+        target,
+        risks,
+        error: (!errors.is_empty()).then(|| errors.join("; ")),
+    });
+}
+
 /// Delete a workspace, returning the worktree space reclaimed on success
 /// or `None` when the row was preserved (a prerequisite failed). The
 /// caller surfaces the reclaimed total via `notify_reclaimed`.
+///
+/// `force` is the user's explicit override of the local-work gate; every
+/// caller states it, and [`RemovalForce::Gated`] is what "delete"
+/// normally means.
 #[must_use]
-pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Option<Reclaimed> {
+pub async fn delete_workspace(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    force: RemovalForce,
+) -> Option<Reclaimed> {
     WorkspaceLifecycle::new(config)
+        .forcing(force)
         .remove(key, WorkspaceRemovalReason::UserArchive)
         .await
 }
@@ -3031,11 +4632,26 @@ impl WorkspaceRemovalReason {
 /// sequence.
 pub(crate) struct WorkspaceLifecycle<'a> {
     config: &'a ServerConfig,
+    /// Whether this removal overrides the fresh local-work gate.
+    /// Defaults to [`RemovalForce::Gated`] so every existing caller
+    /// keeps the safe behaviour without restating it; only a removal the
+    /// user explicitly wiped opts in via [`Self::forcing`].
+    force: RemovalForce,
 }
 
 impl<'a> WorkspaceLifecycle<'a> {
     pub(crate) fn new(config: &'a ServerConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            force: RemovalForce::Gated,
+        }
+    }
+
+    /// Carry who asked for this removal into it. Only an explicit,
+    /// user-confirmed delete passes [`RemovalForce::Explicit`].
+    pub(crate) fn forcing(mut self, force: RemovalForce) -> Self {
+        self.force = force;
+        self
     }
 
     #[must_use]
@@ -3404,17 +5020,28 @@ impl<'a> WorkspaceLifecycle<'a> {
         // capability: the checkout may have changed while the modal was open,
         // and a just-finished agent commonly leaves committed-but-unpushed work.
         // Every destructive entry point funnels through this exact gate before
-        // archive/store mutation. There is currently no force override; unsafe
-        // work stays tracked and visible until the user pushes/stashes it.
+        // archive/store mutation. `RemovalForce::Explicit` is the ONLY way
+        // past it: a human asked for this removal and confirmed a prompt that
+        // named the very risks below. It skips the refusal, not the
+        // inspection — the destroyed work is logged with full detail to
+        // /tmp/lazybox.log, which is the only record left of it.
         if let Some(workspace) = workspace_snapshot.as_ref() {
             match inspect_workspace_removal_risks(config, workspace).await {
                 Ok(risks) if risks.is_empty() => {}
+                Ok(risks) if self.force.is_explicit() => {
+                    let detail = describe_removal_risks(&risks);
+                    tracing::warn!(
+                        workspace = %key,
+                        ?reason,
+                        risk_count = risks.len(),
+                        %detail,
+                        "EXPLICIT workspace removal — the worktree safety gate found local \
+                         work and does not refuse a delete the user asked for; uncommitted \
+                         changes and unpushed commits in the paths above are being destroyed",
+                    );
+                }
                 Ok(risks) => {
-                    let detail = risks
-                        .iter()
-                        .map(WorkspaceRemovalRisk::describe)
-                        .collect::<Vec<_>>()
-                        .join("; ");
+                    let detail = describe_removal_risks(&risks);
                     tracing::warn!(
                         workspace = %key,
                         risk_count = risks.len(),
@@ -3448,6 +5075,20 @@ impl<'a> WorkspaceLifecycle<'a> {
                     config.deleted_workspaces.lock().remove(key_str);
                     return None;
                 }
+                Err(error) if self.force.is_explicit() => {
+                    // Fail-closed is the gate's rule, and it is the right
+                    // rule for an unattended sweep. But refusing an explicit
+                    // delete because we could not enumerate what it destroys
+                    // re-creates the exact dead end this path exists to end:
+                    // the user is told to act on something nobody can name.
+                    tracing::warn!(
+                        workspace = %key,
+                        ?reason,
+                        %error,
+                        "EXPLICIT workspace removal — worktrees could not be inspected; \
+                         deleting without knowing what is being destroyed",
+                    );
+                }
                 Err(error) => {
                     tracing::warn!(workspace = %key, "workspace removal inspection failed: {error}");
                     let _ = config.bus.send(Event::provider_error_permanent(
@@ -3471,7 +5112,16 @@ impl<'a> WorkspaceLifecycle<'a> {
         // and blocks the next poll from repairing/re-presenting it. Only the
         // archiving reasons suppress re-polling; the session tombstone below is
         // written for every reason.
-        if archive && !archive_workspace_key(config, key_str) {
+        // The row presents as one item — a PR and the issues it closes —
+        // so archiving it has to tombstone every key it stands in for, or
+        // a later poll of an absorbed issue builds a standalone row under
+        // a key the user never archived (#1816).
+        let absorbed = workspace_snapshot
+            .as_ref()
+            .filter(|_| archive)
+            .map(|workspace| absorbed_archive_keys(workspace, key_str))
+            .unwrap_or_default();
+        if archive && !archive_workspace_key_with_absorbed(config, key_str, &absorbed) {
             let _ = config.bus.send(Event::provider_error_retryable(
                 "store",
                 format!("could not archive workspace {key}; it was not deleted"),
@@ -3574,7 +5224,8 @@ impl<'a> WorkspaceLifecycle<'a> {
         // `keep_cost = archive`: an archive keeps the durable meter-cost row
         // (the finished PR's price), a genuine delete drops it so no dead row
         // lingers under a key that can never render again.
-        let (reclaimed, cleanup) = reclaim_workspace_worktrees(config, &workspace, archive).await;
+        let (reclaimed, cleanup) =
+            reclaim_workspace_worktrees(config, &workspace, archive, self.force).await;
         #[cfg(test)]
         if let Some(handle) = cleanup {
             let _ = handle.await;
@@ -3661,8 +5312,12 @@ async fn kill_orphan_backend_sessions(
 /// updated — without that step, the next poll would re-create the
 /// workspaces from upstream tasks and the project would never
 /// stay gone.
-pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::ProjectKey) {
-    tracing::info!(project_key = %project_key, "delete_project: starting cascade");
+pub async fn delete_project(
+    config: &ServerConfig,
+    project_key: &lazybox_core::ProjectKey,
+    force: RemovalForce,
+) {
+    tracing::info!(project_key = %project_key, ?force, "delete_project: starting cascade");
 
     // Snapshot the workspace list before mutation — `delete_workspace`
     // removes rows from the store, so iterating a live cursor would
@@ -3717,14 +5372,17 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
     // but this first pass prevents a known-dirty later workspace from
     // turning one project action into a silent partial cascade.
     for workspace in &children {
+        // An explicit cascade skips the preflight outright: the user
+        // confirmed a prompt that named what it destroys. Each child's own
+        // gate below is explicit too, or the preflight would just be re-run
+        // per child and refuse there instead.
+        if force.is_explicit() {
+            break;
+        }
         match inspect_workspace_local_risks(config, workspace).await {
             Ok(risks) if risks.is_empty() => {}
             Ok(risks) => {
-                let detail = risks
-                    .iter()
-                    .map(WorkspaceRemovalRisk::describe)
-                    .collect::<Vec<_>>()
-                    .join("; ");
+                let detail = describe_removal_risks(&risks);
                 // Same gate, same refusal, same shape as the
                 // single-workspace path: instruction first so the
                 // footer's elision takes the diagnostic instead of the
@@ -3768,6 +5426,7 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
     let mut reclaimed = Reclaimed::default();
     for key in &child_keys {
         let Some(child) = WorkspaceLifecycle::new(config)
+            .forcing(force)
             .remove(key, WorkspaceRemovalReason::ProjectCascade)
             .await
         else {
@@ -4173,6 +5832,217 @@ mod archived_set_tests {
         let set = crate::workspace::load_archived_set_strict(&config).unwrap();
         assert_eq!(set.len(), 1);
         assert!(set.contains("k2"));
+    }
+
+    #[test]
+    fn absorbed_keys_are_tombstoned_with_their_row_and_come_back_with_it() {
+        // #1816: a PR row standing in for the issues it closes archives
+        // them too — and unarchive has to reverse the whole set, which is
+        // why the row is a record rather than a flag.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let absorbed = ["github-o-r-40".to_string(), "github-o-r-41".to_string()];
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &absorbed,
+        ));
+        assert_eq!(
+            crate::workspace::load_archived_set_strict(&config).unwrap(),
+            ["github-o-r-42", "github-o-r-40", "github-o-r-41"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+
+        assert!(crate::workspace::unarchive_workspace_key(
+            &config,
+            "github-o-r-42"
+        ));
+        assert!(
+            crate::workspace::load_archived_set_strict(&config)
+                .unwrap()
+                .is_empty(),
+            "the absorbed keys must not outlive the row that archived them"
+        );
+    }
+
+    #[test]
+    fn unarchive_leaves_an_independently_archived_absorbed_key_alone() {
+        // The owner's record lists the key, but that key's own row now
+        // names a different owner — a later archive of the issue on its
+        // own. Only the tombstones this archive wrote come back out.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &["github-o-r-40".to_string()],
+        ));
+        assert!(crate::workspace::archive_workspace_key(
+            &config,
+            "github-o-r-40"
+        ));
+
+        assert!(crate::workspace::unarchive_workspace_key(
+            &config,
+            "github-o-r-42"
+        ));
+        assert_eq!(
+            crate::workspace::load_archived_set_strict(&config).unwrap(),
+            ["github-o-r-40"].into_iter().map(String::from).collect(),
+        );
+    }
+
+    #[test]
+    fn a_corrupt_record_fails_the_unarchive_instead_of_stranding_its_tombstones() {
+        // Regression: reading a corrupt owner row as the empty record made
+        // unarchive drop the owner alone and strand every absorbed
+        // tombstone it had written — permanently, and invisibly, since
+        // nothing else ever revisits an absorbed row.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &["github-o-r-40".to_string()],
+        ));
+        store
+            .set_kv(&archived_row_key("github-o-r-42"), r#"{"absorbed":["#)
+            .unwrap();
+
+        assert!(
+            !crate::workspace::unarchive_workspace_key(&config, "github-o-r-42"),
+            "a record that cannot be parsed must fail the unarchive, not read as empty"
+        );
+        assert!(
+            crate::workspace::load_archived_set_strict(&config)
+                .unwrap()
+                .contains("github-o-r-40"),
+            "the absorbed tombstone stays recoverable rather than being stranded"
+        );
+    }
+
+    #[test]
+    fn archived_records_list_owners_with_their_absorbed_keys() {
+        // #1824: the restore surface's list. An absorbed key rides its
+        // owner's entry rather than appearing as one of its own, because
+        // nothing can restore it without the row that absorbed it.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &["github-o-r-40".to_string(), "github-o-r-41".to_string()],
+        ));
+        assert!(crate::workspace::archive_workspace_key(
+            &config,
+            "github-o-r-7"
+        ));
+
+        let records = crate::workspace::archived_records(&config).unwrap();
+        assert_eq!(
+            records,
+            vec![
+                lazybox_ipc::ArchivedWorkspaceRecord {
+                    key: "github-o-r-42".into(),
+                    absorbed: vec!["github-o-r-40".into(), "github-o-r-41".into()],
+                },
+                lazybox_ipc::ArchivedWorkspaceRecord {
+                    key: "github-o-r-7".into(),
+                    absorbed: vec![],
+                },
+            ],
+            "one entry per archived row, sorted by key, absorbed keys folded in"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_record_is_still_listed_so_the_user_can_see_it() {
+        // Hiding it would leave a tombstone nothing can name. The
+        // unarchive of that key refuses on the same read, which is the
+        // honest outcome — the owner still owns absorbed rows.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key(
+            &config,
+            "github-o-r-42"
+        ));
+        store
+            .set_kv(&archived_row_key("github-o-r-42"), r#"{"absorbed":["#)
+            .unwrap();
+
+        let records = crate::workspace::archived_records(&config).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].key, "github-o-r-42");
+        assert!(records[0].absorbed.is_empty());
+    }
+
+    #[test]
+    fn handle_unarchive_broadcasts_the_refreshed_set_and_acks() {
+        // The browser reads the refreshed list as the outcome, and a
+        // correlated caller (the CLI) gets a real verdict rather than a
+        // hopeful "requested".
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key_with_absorbed(
+            &config,
+            "github-o-r-42",
+            &["github-o-r-40".to_string()],
+        ));
+        let mut events = config.bus.subscribe();
+
+        crate::workspace::handle_unarchive(&config, "github-o-r-42", Some("req-1".into()));
+
+        assert!(matches!(
+            events.try_recv(),
+            Ok(lazybox_ipc::Event::CommandCompleted { client_request_id }) if client_request_id == "req-1"
+        ));
+        let Ok(lazybox_ipc::Event::ArchivedWorkspaces { records }) = events.try_recv() else {
+            panic!("the refreshed archived set must follow the ack");
+        };
+        assert!(
+            records.is_empty(),
+            "the row and the key it absorbed both left the set"
+        );
+    }
+
+    #[test]
+    fn handle_unarchive_reports_a_key_that_was_not_archived() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let mut events = config.bus.subscribe();
+
+        crate::workspace::handle_unarchive(&config, "github-o-r-42", Some("req-1".into()));
+
+        let Ok(lazybox_ipc::Event::CommandFailed {
+            client_request_id,
+            message,
+        }) = events.try_recv()
+        else {
+            panic!("an unarchive that removed nothing must fail its caller");
+        };
+        assert_eq!(client_request_id, "req-1");
+        assert!(
+            message.contains("is not archived"),
+            "a key that was never archived must not read as restored: {message}"
+        );
+    }
+
+    #[test]
+    fn a_legacy_flag_row_reads_as_an_empty_record() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key(&config, "k1"));
+        assert_eq!(
+            store.get_kv(&archived_row_key("k1")).unwrap().as_deref(),
+            Some("1"),
+            "a row with nothing folded in stays the plain flag"
+        );
+        assert_eq!(
+            super::read_archive_record(&config, "k1").unwrap(),
+            super::ArchiveRecord::default(),
+        );
     }
 }
 
@@ -4586,7 +6456,9 @@ mod orphan_backend_session_tests {
         );
 
         assert!(
-            delete_workspace(&config, &key).await.is_some(),
+            delete_workspace(&config, &key, RemovalForce::Gated)
+                .await
+                .is_some(),
             "the workspace deletes even though its only session is a registry-less orphan"
         );
 
@@ -4659,7 +6531,7 @@ mod orphan_backend_session_tests {
         let started = tokio::time::Instant::now();
         let removed = tokio::time::timeout(
             2 * DETACH_AFTER_KILL_TIMEOUT + std::time::Duration::from_secs(20),
-            delete_workspace(&config, &key),
+            delete_workspace(&config, &key, RemovalForce::Gated),
         )
         .await
         .expect("the removal must complete within its bound instead of hanging");

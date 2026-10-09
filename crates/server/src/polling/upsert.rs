@@ -242,6 +242,16 @@ pub(super) async fn upsert_with_context(
 /// then persist + broadcast. Split out from `upsert` so the
 /// "route to PR workspace" path can reuse the same write/broadcast
 /// behaviour without duplicating it.
+/// Has this task's work landed? A PR lands by merging; one closed unmerged was
+/// abandoned and lands nothing. An issue lands by closing.
+fn task_landed(task: &Task) -> bool {
+    if task.is_pr() {
+        task.state == lazybox_core::TaskState::Merged
+    } else {
+        task.state == lazybox_core::TaskState::Closed
+    }
+}
+
 pub(super) async fn upsert_into_workspace_key(
     config: &ServerConfig,
     key: &WorkspaceKey,
@@ -268,6 +278,24 @@ pub(super) async fn upsert_into_workspace_key(
     // fetch succeeded, so the row's data is merely deferred one tick, never
     // lost — just without burning the batch's wall-clock on a lock we won't get
     // this instant anyway.
+    // A task observed in a terminal state stands for work that landed, so every
+    // TODO item linked to it is checked off. Driven by the OBSERVED state, not by
+    // the `terminal_cleanup` transition below, and run before the early returns
+    // that follow — because a checklist must still tick when:
+    //   - lazybox holds no workspace for the task, where the merged-PR branch
+    //     below returns `Unchanged` outright. Routine, not exotic: the
+    //     merged-workspace cleanup deletes that row as its default behaviour.
+    //   - this box never saw the open->terminal edge (off, or the poller
+    //     throttled past the window), so `merged_transition_pr_number` declines
+    //     and nothing else would ever look again.
+    // `Workspace::check_items_linked_to` is idempotent and writes nothing when
+    // no linked item is open, so re-observing a landed task costs the candidate
+    // scan and no writes. The poller fetches only CHANGED tasks, so that scan
+    // lands on the transition plus the occasional full sweep, not every tick.
+    if task_landed(&task) {
+        crate::workspace::check_todo_items_linked_to(config, &task.id).await;
+    }
+
     let Some(ws_guards) =
         lock_workspace_with_closing_issues_or_skip(config, key, Some(&task)).await
     else {
@@ -410,6 +438,21 @@ pub(super) async fn upsert_into_workspace_key(
     // reach this commit path.
     if matches!(terminal_cleanup, Some(TerminalCleanup::MergedPr(_))) {
         crate::epics::on_pr_merged(config, key);
+        // Most merges are not lazybox's own (native auto-merge, `gh pr
+        // merge`, the web UI), so their cost has no commit body to ride in.
+        // Record it out of band; a merge lazybox did is a no-op here.
+        //
+        // The intent is written FIRST and synchronously, before step 3 below
+        // can reap or prompt-to-remove this workspace: the recorder's own
+        // settle window is an in-memory sleep, and losing it (a removal
+        // inside the minute, a daemon restart) silently dropped the cost and
+        // left it on the watermark to be misattributed to the next PR here.
+        // The poll tick sweeps anything the sleep did not get to.
+        handlers::note_merge_owes_cost(config, key);
+        tokio::spawn(handlers::record_external_merge_trailers(
+            config.clone(),
+            key.clone(),
+        ));
     }
 
     // 3. TERMINAL: the PR merged or the issue closed → either reap its
@@ -982,6 +1025,10 @@ fn prepare_terminal_rebadges(
 /// cross the transaction boundary with a half-registered terminal. In-memory
 /// routing and bus events change only after the store batch succeeds.
 ///
+/// `extra_mutations` are kv rows keyed by workspace that the move re-keys too
+/// (declared blockers), committed in the same transaction so no crash window
+/// can leave one pointing at a workspace the batch just deleted.
+///
 /// The blocking owner performs the transaction, map update, and entire event
 /// tail. Dropping the async caller detaches that owner instead of cancelling it
 /// between a successful SQLite commit and its in-memory/client projections.
@@ -990,6 +1037,7 @@ pub(super) async fn commit_workspace_move(
     upserts: Vec<(WorkspaceKey, Workspace)>,
     deletes: Vec<WorkspaceKey>,
     terminal_moves: Vec<(lazybox_core::SessionKey, lazybox_core::SessionKey)>,
+    extra_mutations: Vec<StoreMutation>,
     post_commit_events: Vec<Event>,
     workspace_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<CommitOutcome, CommitError> {
@@ -1001,23 +1049,23 @@ pub(super) async fn commit_workspace_move(
     let config_owned = config.clone();
     tokio::task::spawn_blocking(move || {
         let mut terminal_guard = terminal_guard;
-        let (mut terminal_mutations, rebadge_plans) = match terminal_guard.as_ref() {
+        let (mut kv_mutations, rebadge_plans) = match terminal_guard.as_ref() {
             Some(entries) => prepare_terminal_rebadges(entries, terminal_moves)?,
             None => (Vec::new(), Vec::new()),
         };
+        kv_mutations.extend(extra_mutations);
         // History/draft are workspace-scoped (keyed by session_key), so a rebadge
         // must relabel them onto the new workspace in the SAME transaction as the
         // workspace + terminal-meta move — otherwise the `]]h` history / recap /
         // draft would blank the instant the terminal wears the PR badge.
         for plan in &rebadge_plans {
-            terminal_mutations.extend(crate::spawn_handler::rebadge_workspace_history_mutations(
+            kv_mutations.extend(crate::spawn_handler::rebadge_workspace_history_mutations(
                 &*config_owned.store,
                 plan.from.as_str(),
                 plan.to.as_str(),
             ));
         }
-        let committed =
-            persist_workspace_batch(&config_owned, upserts, deletes, terminal_mutations)?;
+        let committed = persist_workspace_batch(&config_owned, upserts, deletes, kv_mutations)?;
         let outcome = committed.outcome;
 
         if let Some(entries) = terminal_guard.as_mut() {
@@ -1036,6 +1084,11 @@ pub(super) async fn commit_workspace_move(
                     config_owned
                         .agent_recovery
                         .rebadge_blocking(&plan.terminal_ids, &plan.to);
+                    crate::mcp::rebadge_session_tokens_blocking(
+                        &config_owned,
+                        &plan.from,
+                        &plan.to,
+                    );
                     let _ = config_owned.bus.send(Event::TerminalsRebadged {
                         from: plan.from,
                         to: plan.to,

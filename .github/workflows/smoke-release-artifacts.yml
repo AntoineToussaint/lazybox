@@ -16,6 +16,9 @@ jobs:
     env:
       PLAN: ${{ inputs.plan }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Check public release identity and install commands
         run: |
           jq -e '
@@ -23,27 +26,8 @@ jobs:
             | select(.app_name == "lazybox-tui-boot")
             | .display_name == "lazybox"
           ' <<< "$PLAN"
-          jq -e '
-            .announcement_changelog
-            | contains("brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox")
-          ' <<< "$PLAN"
-          jq -e '
-            .announcement_changelog
-            | contains("brew install AntoineToussaint/lazybox/lazybox")
-            | not
-          ' <<< "$PLAN"
-          jq -e '
-            .announcement_changelog
-            | contains("lazybox-tui-boot")
-            | not
-          ' <<< "$PLAN"
-          # Install is brew-only: the release notes must NOT advertise the
-          # curl shell installer (the `### Install` block is brew tap + install).
-          jq -e '
-            .announcement_changelog
-            | contains("lazybox-tui-installer.sh")
-            | not
-          ' <<< "$PLAN"
+          jq -r '.announcement_changelog' <<< "$PLAN" \
+            | scripts/check-release-notes.sh
 
   archives:
     name: ${{ matrix.target }}

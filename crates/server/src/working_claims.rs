@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use lazybox_core::{QualifiedWorkingClaim, SessionId, Task, TaskId, Workspace, WorkspaceKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -62,7 +63,28 @@ struct WorkingClaimRecord {
     claim_session: Uuid,
     owner_id: String,
     target: WorkingClaimTarget,
-    label: String,
+    /// A per-claim `lazybox:w:<device>:<session>:<expiry>` label this record
+    /// minted on a build before #1922, still attached upstream. Read from the
+    /// pre-#1922 field name so an in-flight claim survives the upgrade; the
+    /// holder detaches it on its next heartbeat, *after* the stable label is
+    /// in place, and clears this.
+    #[serde(default, alias = "label")]
+    legacy_label: Option<String>,
+    /// When this lease was first taken. `None` on a record written before
+    /// #1922 — the comment then dates the claim from the first heartbeat that
+    /// writes it, which is honest about what this box actually knows.
+    #[serde(default)]
+    started_at: Option<DateTime<Utc>>,
+    /// The sticky claim comment this record is editing. Remembering it makes a
+    /// steady-state heartbeat one request instead of two (no comment search).
+    #[serde(default)]
+    claim_comment_id: Option<u64>,
+    /// Agent id and model label as last observed for this holder, for the
+    /// human sentence in the comment. Observed locally, never fetched.
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
     expires_at: DateTime<Utc>,
     applied: bool,
 }
@@ -78,8 +100,10 @@ impl WorkingClaimRecord {
     ) -> Option<Self> {
         let claim_session = Uuid::new_v4();
         let expires_at = now + ChronoDuration::seconds(lazybox_core::WORKING_CLAIM_TTL_SECS);
-        let label =
-            lazybox_core::qualified_working_claim_label(&owner_id, claim_session, expires_at)?;
+        // Still validated through the identity derivation: a malformed box id
+        // yields no holder pair, and a claim nobody can be identified as is
+        // worse than no claim at all.
+        lazybox_core::working_claim_identity(&owner_id, claim_session)?;
         Some(Self {
             holder,
             workspace_key,
@@ -87,14 +111,35 @@ impl WorkingClaimRecord {
             claim_session,
             owner_id,
             target,
-            label,
+            legacy_label: None,
+            started_at: Some(now),
+            claim_comment_id: None,
+            agent: None,
+            model: None,
             expires_at,
             applied: false,
         })
     }
 
-    fn parsed_label(&self) -> Option<QualifiedWorkingClaim> {
-        QualifiedWorkingClaim::parse(&self.label)
+    /// The `(device, session)` pair naming this lease.
+    fn identity(&self) -> Option<(String, String)> {
+        lazybox_core::working_claim_identity(&self.owner_id, self.claim_session)
+    }
+
+    /// The claim as it should read upstream right now.
+    fn note(&self, now: DateTime<Utc>) -> Option<lazybox_core::WorkingClaimNote> {
+        let (device, session) = self.identity()?;
+        let mut note = lazybox_core::WorkingClaimNote::new(
+            device,
+            session,
+            self.started_at.unwrap_or(now),
+            self.expires_at,
+        );
+        note.heartbeat_at = now;
+        note.workspace = Some(self.workspace_key.as_str().to_string());
+        note.agent = self.agent.clone();
+        note.model = self.model.clone();
+        Some(note)
     }
 
     fn needs_heartbeat(&self, now: DateTime<Utc>) -> bool {
@@ -105,6 +150,10 @@ impl WorkingClaimRecord {
                         lazybox_core::WORKING_CLAIM_TTL_SECS
                             - lazybox_core::WORKING_CLAIM_HEARTBEAT_SECS,
                     )
+            // A record carrying a pre-#1922 label has upstream work to do
+            // regardless of how fresh its lease is: attach the stable label,
+            // then detach the per-claim one.
+            || self.legacy_label.is_some()
     }
 
     fn prepare_heartbeat(&mut self, now: DateTime<Utc>) -> bool {
@@ -115,18 +164,10 @@ impl WorkingClaimRecord {
             + ChronoDuration::seconds(
                 lazybox_core::WORKING_CLAIM_TTL_SECS - lazybox_core::WORKING_CLAIM_HEARTBEAT_SECS,
             );
-        if !self.applied && self.expires_at > refresh_at {
+        if !self.applied && self.expires_at > refresh_at && self.legacy_label.is_none() {
             return true;
         }
         self.expires_at = now + ChronoDuration::seconds(lazybox_core::WORKING_CLAIM_TTL_SECS);
-        let Some(label) = lazybox_core::qualified_working_claim_label(
-            &self.owner_id,
-            self.claim_session,
-            self.expires_at,
-        ) else {
-            return false;
-        };
-        self.label = label;
         self.applied = false;
         true
     }
@@ -324,7 +365,8 @@ async fn release(config: &ServerConfig, holder: &ClaimHolder, mode: ClaimRelease
         );
         return;
     }
-    if sync_remote(config, &record, None, mode).await
+    let mut record = record;
+    if sync_remote(config, &mut record, ClaimIntent::Release(Utc::now()), mode).await
         && let Err(error) = config.store.delete_kv(&key)
     {
         emit_error(config, &record.workspace_key, "forget", &error.to_string());
@@ -347,11 +389,28 @@ async fn heartbeat_record(
     if !record.prepare_heartbeat(now) {
         return;
     }
+    // The agent and model the comment names are read from this box's own
+    // terminal registry — local, free, and the only place that knows. A claim
+    // taken before the terminal registered keeps whatever it last observed
+    // rather than losing it.
+    if let Some((agent, model)) = observe_agent(config, &record.holder).await {
+        record.agent = Some(agent);
+        if model.is_some() {
+            record.model = model;
+        }
+    }
     if let Err(error) = persist_record(config, record) {
         emit_error(config, &record.workspace_key, "persist", &error);
         return;
     }
-    if sync_remote(config, record, Some(&record.label), ClaimRelease::Project).await {
+    if sync_remote(
+        config,
+        record,
+        ClaimIntent::Hold(now),
+        ClaimRelease::Project,
+    )
+    .await
+    {
         record.applied = true;
         if let Err(error) = persist_record(config, record) {
             emit_error(config, &record.workspace_key, "persist", &error);
@@ -359,18 +418,55 @@ async fn heartbeat_record(
     }
 }
 
+/// The agent id and model label running under `holder`, as this box's terminal
+/// registry sees it. `None` for a structured run or a holder with no live
+/// terminal — the claim is still real, it just cannot name an agent yet.
+async fn observe_agent(
+    config: &ServerConfig,
+    holder: &ClaimHolder,
+) -> Option<(String, Option<String>)> {
+    let ClaimHolder::Pty { backend_key } = holder else {
+        return None;
+    };
+    let entries = config.terminal.lock_entries().await;
+    entries.values().find_map(|entry| {
+        if entry.backend_key.as_deref() != Some(backend_key.as_str()) {
+            return None;
+        }
+        let (_, lazybox_ipc::TerminalKind::Agent(agent_id)) = entry.meta.clone()? else {
+            return None;
+        };
+        Some((agent_id, entry.model_label.clone()))
+    })
+}
+
+/// What a sync should make true upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimIntent {
+    /// Renew: the stable label attached, the comment carrying this lease.
+    Hold(DateTime<Utc>),
+    /// Let go: the comment recording the release, the stable label detached —
+    /// unless another live lease has taken the record over.
+    Release(DateTime<Utc>),
+}
+
 async fn sync_remote(
     config: &ServerConfig,
-    record: &WorkingClaimRecord,
-    desired_label: Option<&str>,
+    record: &mut WorkingClaimRecord,
+    intent: ClaimIntent,
     mode: ClaimRelease,
 ) -> bool {
-    let Some(identity) = record.parsed_label() else {
+    let (Some((device, session)), Some(note)) = (
+        record.identity(),
+        record.note(match intent {
+            ClaimIntent::Hold(now) | ClaimIntent::Release(now) => now,
+        }),
+    ) else {
         emit_error(
             config,
             &record.workspace_key,
             "synchronize",
-            "persisted qualified label is malformed",
+            "the persisted claim identity is malformed",
         );
         return false;
     };
@@ -381,42 +477,155 @@ async fn sync_remote(
             return false;
         }
     };
-    let mutation = client.sync_working_claim_target(
-        &record.target.id,
-        &record.target.repo,
-        desired_label,
-        &identity.device,
-        &identity.session,
-    );
-    match tokio::time::timeout(MUTATION_TIMEOUT, mutation).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            emit_transient_error(
-                config,
-                &record.workspace_key,
-                "synchronize",
-                &error.to_string(),
+
+    // What the local row should say once GitHub has accepted the change:
+    // claimed, unclaimed, or — when another box has taken the record over —
+    // left exactly as it is. Projecting "unclaimed" in that last case would
+    // make this box's own row read as free while a label another box is
+    // still renewing stands upstream, and a spawn here would skip the
+    // claimed-task confirmation until the next poll corrected it.
+    let project_as: Option<bool>;
+    let mutation_outcome = match intent {
+        ClaimIntent::Hold(_) => {
+            // The free half of the claim: whether the stable label is already
+            // attached comes from the row the poll already populated, so a
+            // steady-state heartbeat spends no call re-adding it — and a
+            // label a human stripped is noticed here and re-attached, which
+            // is the self-heal the shared label buys.
+            let attach_label = !stable_label_attached(config, record);
+            let mutation = client.apply_working_claim(
+                &record.target.id,
+                &record.target.repo,
+                &note,
+                record.claim_comment_id,
+                attach_label,
             );
-            return false;
+            project_as = Some(true);
+            match timed(mutation).await {
+                Ok(Ok(comment_id)) => {
+                    record.claim_comment_id = Some(comment_id);
+                    Ok(())
+                }
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(reason) => Err(reason),
+            }
         }
-        Err(_) => {
-            // Not necessarily GitHub: this 20s cap (MUTATION_TIMEOUT) is
-            // shorter than the client's own 30s PERMIT_WAIT_TIMEOUT, so a
-            // request throttled behind lazybox's rate-budget pacing is cut
-            // off here before its self-throttle error can surface. Don't
-            // blame GitHub for what may be our own backoff (#1218).
-            emit_transient_error(
-                config,
-                &record.workspace_key,
-                "synchronize",
-                "claim sync timed out after 20s (GitHub slow, or throttled behind lazybox's rate budget)",
+        ClaimIntent::Release(now) => {
+            let mutation = client.release_working_claim(
+                &record.target.id,
+                &record.target.repo,
+                &note,
+                record.claim_comment_id,
+                now,
             );
-            return false;
+            match timed(mutation).await {
+                Ok(Ok(lazybox_gh::WorkingClaimRelease::Released)) => {
+                    project_as = Some(false);
+                    Ok(())
+                }
+                Ok(Ok(lazybox_gh::WorkingClaimRelease::SupersededBy {
+                    device: holder_device,
+                    session: holder_session,
+                })) => {
+                    project_as = None;
+                    // Another box claimed this record after us. Detaching the
+                    // shared `working` label would cancel a claim that is
+                    // still being renewed — the property the per-claim label
+                    // used to give for free. The holder logged here is THAT
+                    // box's, deliberately named apart from our own `device` /
+                    // `session` above.
+                    tracing::info!(
+                        workspace = %record.workspace_key,
+                        device = %holder_device,
+                        session = %holder_session,
+                        "working claim released locally; the stable label is left in place \
+                         because a different live lease now holds the record"
+                    );
+                    Ok(())
+                }
+                Ok(Err(error)) => {
+                    project_as = None;
+                    Err(error.to_string())
+                }
+                Err(reason) => {
+                    project_as = None;
+                    Err(reason)
+                }
+            }
+        }
+    };
+    if let Err(reason) = mutation_outcome {
+        emit_transient_error(config, &record.workspace_key, "synchronize", &reason);
+        return false;
+    }
+
+    // Migration (#1922): the per-claim label this record minted on an older
+    // build comes off only now, once the stable label is attached in its
+    // place — in that order, so the record is never momentarily unclaimed and
+    // nothing in the fleet reads it as free. A failure here is not fatal: the
+    // claim is already correct in the new shape, the stale label is honoured
+    // by every build until its own expiry, and `cleanup_expired` removes it
+    // then.
+    if project_as == Some(true)
+        && let Some(stale) = record.legacy_label.clone()
+    {
+        let removal = client.remove_working_claim_labels_target(
+            &record.target.id,
+            &record.target.repo,
+            std::slice::from_ref(&stale),
+        );
+        match timed(removal).await {
+            Ok(Ok(())) => record.legacy_label = None,
+            Ok(Err(error)) => tracing::warn!(
+                workspace = %record.workspace_key, %stale, %error,
+                "could not retire the pre-#1922 claim label; it will lapse on its own TTL"
+            ),
+            Err(reason) => tracing::warn!(
+                workspace = %record.workspace_key, %stale, %reason,
+                "could not retire the pre-#1922 claim label; it will lapse on its own TTL"
+            ),
         }
     }
 
-    project_synced_claim(config, record, desired_label, &identity, mode).await;
+    if let Some(claimed) = project_as {
+        project_synced_claim(config, record, claimed, &device, &session, mode).await;
+    }
     true
+}
+
+/// Whether the stable `working` label is already on the record, read from the
+/// persisted workspace row — the poll payload, which costs nothing.
+///
+/// A row this box cannot read answers "not attached", so the heartbeat adds
+/// the label: on a shared label `add_labels` is idempotent, so a redundant add
+/// costs one call, while a wrongly-skipped one loses the claim.
+fn stable_label_attached(config: &ServerConfig, record: &WorkingClaimRecord) -> bool {
+    load_workspace(config, &record.workspace_key)
+        .and_then(|workspace| {
+            workspace
+                .task_by_id(&record.target.id)
+                .map(lazybox_core::Task::has_stable_working_claim)
+        })
+        .unwrap_or(false)
+}
+
+/// Bound one claim mutation. `Err` carries the message to report.
+async fn timed<F, T>(mutation: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::time::timeout(MUTATION_TIMEOUT, mutation)
+        .await
+        // Not necessarily GitHub: this 20s cap (MUTATION_TIMEOUT) is shorter
+        // than the client's own 30s PERMIT_WAIT_TIMEOUT, so a request
+        // throttled behind lazybox's rate-budget pacing is cut off here before
+        // its self-throttle error can surface. Don't blame GitHub for what may
+        // be our own backoff (#1218).
+        .map_err(|_| {
+            "claim sync timed out after 20s (GitHub slow, or throttled behind lazybox's rate \
+             budget)"
+                .to_string()
+        })
 }
 
 /// Reflect a claim change GitHub has already accepted into the workspace
@@ -427,30 +636,26 @@ async fn sync_remote(
 async fn project_synced_claim(
     config: &ServerConfig,
     record: &WorkingClaimRecord,
-    desired_label: Option<&str>,
-    identity: &QualifiedWorkingClaim,
+    claimed: bool,
+    device: &str,
+    session: &str,
     mode: ClaimRelease,
 ) -> bool {
     if mode == ClaimRelease::WorkspaceLockHeld {
         tracing::debug!(
             workspace = %record.workspace_key,
-            claimed = desired_label.is_some(),
+            claimed,
             "working claim synchronized; row projection skipped — the caller holds the \
              workspace lock and is removing the row"
         );
         return false;
     }
     let target = record.target.id.clone();
-    let desired = desired_label.map(str::to_string);
-    let identity_for_projection = identity.clone();
+    let legacy = record.legacy_label.clone();
+    let owner = (device.to_string(), session.to_string());
     let commit =
         crate::polling::apply_and_commit(config, &record.workspace_key, move |workspace| {
-            project_identity(
-                workspace,
-                &target,
-                &identity_for_projection,
-                desired.as_deref(),
-            );
+            project_identity(workspace, &target, &owner, legacy.as_deref(), claimed);
         });
     // Backstop the workspace-lock acquisition. A caller that already holds the
     // workspace lock and omits `ClaimRelease::WorkspaceLockHeld` would park
@@ -477,30 +682,52 @@ async fn project_synced_claim(
     if applied {
         tracing::info!(
             workspace = %record.workspace_key,
-            claimed = desired_label.is_some(),
-            device = %identity.device,
-            session = %identity.session,
-            "synchronized owner-qualified working claim"
+            claimed,
+            %device,
+            %session,
+            "synchronized working claim"
         );
     }
     applied
 }
 
+/// Mirror the claim upstream accepted into the local row, so the UI and the
+/// `Claimed` filter reflect it before the next poll rather than a tick later.
+///
+/// On a hold: the stable label is present exactly once. On a release: it is
+/// gone. Either way this box's own pre-#1922 qualified label is dropped —
+/// `legacy` names only ours, so a racing box's label is never touched.
 fn project_identity(
     workspace: &mut Workspace,
     target: &TaskId,
-    identity: &QualifiedWorkingClaim,
-    desired_label: Option<&str>,
+    owner: &(String, String),
+    legacy: Option<&str>,
+    claimed: bool,
 ) {
     let Some(task) = workspace.task_by_id_mut(target) else {
         return;
     };
+    let (device, session) = owner;
     task.labels.retain(|label| {
-        QualifiedWorkingClaim::parse(&label.name).is_none_or(|claim| !claim.same_owner(identity))
+        if label
+            .name
+            .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
+        {
+            // Dropped unconditionally and re-pushed below when held, so a row
+            // that already carried it does not end up with two.
+            return false;
+        }
+        if legacy.is_some_and(|stale| stale == label.name) {
+            return false;
+        }
+        QualifiedWorkingClaim::parse(&label.name)
+            .is_none_or(|claim| &claim.device != device || &claim.session != session)
     });
-    if let Some(label) = desired_label {
-        task.labels
-            .push(lazybox_core::Label::with_color(label, "fbca04"));
+    if claimed {
+        task.labels.push(lazybox_core::Label::with_color(
+            lazybox_core::WORKING_LABEL_NAME,
+            "fbca04",
+        ));
     }
 }
 
@@ -522,13 +749,17 @@ async fn maintain_once(config: &ServerConfig, now: DateTime<Utc>) {
     if !config.working_claims_enabled {
         return;
     }
-    let records = match list_records(config) {
+    let mut records = match list_records(config) {
         Ok(records) => records,
         Err(error) => {
             tracing::warn!(%error, "working claim maintenance could not enumerate provenance");
             return;
         }
     };
+    rotate_for_fairness(
+        &mut records,
+        MAINTENANCE_CYCLE.fetch_add(1, Ordering::Relaxed),
+    );
     let backend_keys = config.backend.list().await;
     let live_structured = config
         .agent_runs
@@ -570,7 +801,24 @@ async fn maintain_once(config: &ServerConfig, now: DateTime<Utc>) {
         }
     }
     cleanup_expired(config, now).await;
+    retire_lapsed_stable_claims(config, now).await;
     prune_idle_locks(config);
+}
+
+/// Maintenance passes started by this process, for [`rotate_for_fairness`].
+static MAINTENANCE_CYCLE: AtomicUsize = AtomicUsize::new(0);
+
+/// Start each maintenance pass one record further along. Every label call
+/// in a pass shares the daemon's paced GitHub budget with the poller, so
+/// whatever sits at the END of the list waits longest — in a fixed order
+/// that was the same claims every cycle, which failed ~100 cycles in a row
+/// while a handful at the front renewed 58 times (2026-09-23). Rotating
+/// spreads the wait so no live claim is starved past its TTL.
+fn rotate_for_fairness<T>(records: &mut [T], cycle: usize) {
+    if !records.is_empty() {
+        let start = cycle % records.len();
+        records.rotate_left(start);
+    }
 }
 
 /// Drop per-holder lock entries that are neither currently held nor backed by
@@ -686,6 +934,123 @@ async fn cleanup_expired(config: &ServerConfig, now: DateTime<Utc>) {
     }
 }
 
+/// Retire stable `working` labels whose own claim comment says the lease is
+/// over (#1922).
+///
+/// The expiry no longer rides in the label name, so a lapsed claim is not
+/// free to spot: this is where it gets spotted, on the 15-minute maintenance
+/// tick, and only for a record whose label no live local claim accounts for.
+/// One comment read per such record, on the `Cold` tier — never on a poll
+/// tick, where presence stays a label read and costs nothing.
+///
+/// A label with **no** comment of ours behind it is left strictly alone.
+/// `working` is an ordinary word and a legitimate workflow label a human or
+/// another tool may own; lazybox detaching one it cannot prove it wrote would
+/// destroy somebody else's state. Such a label keeps reading as a claim, which
+/// is the conservative direction — it over-blocks a spawn rather than letting
+/// the fleet double-spawn — and a decision-point read reports it honestly as
+/// unbacked.
+async fn retire_lapsed_stable_claims(config: &ServerConfig, now: DateTime<Utc>) {
+    let held_here = locally_held_claims(config);
+    // Workspaces this daemon holds a claim record for are converged by the
+    // heartbeat path above and are skipped WITHOUT a read. Without this gate
+    // the sweep would re-read the claim comment of every task this box is
+    // itself working on, every 15 minutes, only to discard the result — one
+    // wasted request per live agent per tick.
+    let accounted: HashSet<WorkspaceKey> = list_records(config)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|record| record.workspace_key)
+        .collect();
+    let records = match crate::store_blocking(&config.store, |store| store.list_workspaces()).await
+    {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(%error, "stable claim sweep could not list workspaces");
+            return;
+        }
+    };
+    for stored in records {
+        let Some(json) = stored.workspace_json else {
+            continue;
+        };
+        let Ok(workspace) = Workspace::decode_persisted(&json) else {
+            continue;
+        };
+        if accounted.contains(&workspace.key) {
+            continue;
+        }
+        for task in workspace.pr.iter().chain(workspace.gh_issues.iter()) {
+            if !task.has_stable_working_claim() {
+                continue;
+            }
+            let Some(repo) = task.repo.as_deref() else {
+                continue;
+            };
+            let client = match crate::polling::resolve_gh_client_result(config).await {
+                Ok(client) => client,
+                Err(error) => {
+                    emit_transient_error(config, &workspace.key, "expire", &error);
+                    return;
+                }
+            };
+            let note = match timed(client.read_working_claim_note(&task.id, repo)).await {
+                Ok(Ok(note)) => note,
+                // Unreadable is not "absent": a refused or failed read must
+                // never be the evidence for detaching a claim.
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        workspace = %workspace.key, %error,
+                        "stable claim sweep could not read the claim comment; leaving the label"
+                    );
+                    continue;
+                }
+                Err(reason) => {
+                    tracing::debug!(
+                        workspace = %workspace.key, %reason,
+                        "stable claim sweep timed out reading the claim comment"
+                    );
+                    continue;
+                }
+            };
+            let Some(note) = note else { continue };
+            if note.is_active_at(now) {
+                continue;
+            }
+            // Our own live lease can read as lapsed upstream when a renewal
+            // landed locally but was refused upstream under budget pressure —
+            // the #1870 shape. The local record is the better evidence.
+            if held_here.contains(&(note.device.clone(), note.session.clone())) {
+                continue;
+            }
+            if !matches!(
+                timed(client.remove_working_label_target(&task.id, repo)).await,
+                Ok(Ok(()))
+            ) {
+                continue;
+            }
+            let target = task.id.clone();
+            let _ = crate::polling::apply_and_commit(config, &workspace.key, move |fresh| {
+                if let Some(task) = fresh.task_by_id_mut(&target) {
+                    task.labels.retain(|label| {
+                        !label
+                            .name
+                            .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
+                    });
+                }
+            })
+            .await;
+            config.poll.wake(true);
+            tracing::info!(
+                workspace = %workspace.key,
+                device = %note.device,
+                session = %note.session,
+                "retired a lapsed stable working claim"
+            );
+        }
+    }
+}
+
 fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Option<Workspace> {
     let record = config.store.get_workspace(key).ok()??;
     Workspace::decode_persisted(record.workspace_json.as_deref()?).ok()
@@ -708,27 +1073,49 @@ fn load_record(config: &ServerConfig, key: &str) -> Result<Option<WorkingClaimRe
         .transpose()
 }
 
+/// Every claim record. A row that no longer decodes is skipped with a
+/// warning rather than failing the whole list: one bad row used to stop
+/// maintenance for EVERY claim, so every live agent's `lazybox:w:` label
+/// lapsed past its TTL and the fleet double-spawned on their tasks. Only
+/// the store itself being unreadable fails the call.
 fn list_records(config: &ServerConfig) -> Result<Vec<WorkingClaimRecord>, String> {
-    config
+    let rows = config
         .store
         .list_kv_prefix(CLAIM_KEY_PREFIX)
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    Ok(rows
         .into_iter()
-        .map(|(_, json)| serde_json::from_str(&json).map_err(|error| error.to_string()))
-        .collect()
+        .filter_map(|(key, json)| match serde_json::from_str(&json) {
+            Ok(record) => Some(record),
+            Err(error) => {
+                tracing::warn!(%key, %error, "skipping an undecodable working claim record");
+                None
+            }
+        })
+        .collect())
 }
 
-/// The claim labels this daemon is currently renewing — the ones whose record
-/// carries our own `owner_id`. A `lazybox:w:` label upstream that is absent
-/// here is held by another box (or by a process that died without releasing
-/// it), which is what lets a status lookup say "claimed elsewhere" instead of
-/// implying a local worker (#1785).
-pub(crate) fn locally_held_labels(config: &ServerConfig) -> std::collections::HashSet<String> {
+/// The claims this daemon is currently renewing, as `(device, session)` — the
+/// ones whose record carries our own `owner_id`. A claim upstream whose holder
+/// is absent here is held by another box (or by a process that died without
+/// releasing it), which is what lets a status lookup say "claimed elsewhere"
+/// instead of implying a local worker (#1785).
+///
+/// Keyed by HOLDER, never by the upstream text: the claim carries its lease
+/// expiry, so a renewal that lands locally but is refused upstream — the
+/// ordinary shape under rate-budget pressure, since claim traffic is the
+/// lowest-priority tier — leaves the two sides one expiry apart. Comparing the
+/// whole thing then reported this box's own running agent as an unverifiable
+/// foreign claim (#1870). `claim_session` is stable across renewals, so the
+/// holder pair identifies the lease no matter which expiry is live.
+pub(crate) fn locally_held_claims(
+    config: &ServerConfig,
+) -> std::collections::HashSet<(String, String)> {
     list_records(config)
         .unwrap_or_default()
         .into_iter()
         .filter(|record| record.owner_id == config.working_claim_owner_id)
-        .map(|record| record.label)
+        .filter_map(|record| record.identity())
         .collect()
 }
 
@@ -789,6 +1176,41 @@ async fn lock_holder(config: &ServerConfig, key: &str) -> tokio::sync::OwnedMute
 
 #[cfg(test)]
 mod tests {
+
+    /// One corrupt row must not hide the healthy ones from maintenance —
+    /// that stopped every renewal at once.
+    #[test]
+    fn an_undecodable_claim_row_does_not_hide_the_healthy_ones() {
+        let config = ServerConfig::in_memory();
+        let healthy = record(Utc::now());
+        persist_record(&config, &healthy).expect("seed a healthy row");
+        config
+            .store
+            .set_kv(&format!("{CLAIM_KEY_PREFIX}zz-corrupt"), "{not json")
+            .expect("seed a corrupt row");
+        assert_eq!(
+            list_records(&config).expect("store is readable"),
+            vec![healthy],
+        );
+    }
+
+    /// Each pass starts one record later, so across `n` passes every record
+    /// is first once — no claim is permanently at the back of the budget
+    /// queue.
+    #[test]
+    fn maintenance_order_rotates_so_no_claim_is_always_last() {
+        let base = vec!["a", "b", "c"];
+        let mut lasts = Vec::new();
+        for cycle in 0..3 {
+            let mut records = base.clone();
+            super::rotate_for_fairness(&mut records, cycle);
+            lasts.push(*records.last().unwrap());
+        }
+        lasts.sort_unstable();
+        assert_eq!(lasts, vec!["a", "b", "c"]);
+        let mut empty: Vec<&str> = Vec::new();
+        super::rotate_for_fairness(&mut empty, 7);
+    }
     use super::*;
     use chrono::TimeZone;
 
@@ -817,14 +1239,14 @@ mod tests {
     }
 
     #[test]
-    fn durable_intent_replays_the_same_label_after_a_crash() {
+    fn durable_intent_replays_the_same_lease_after_a_crash() {
         let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
         let pending = record(now);
         let json = serde_json::to_string(&pending).unwrap();
         let recovered: WorkingClaimRecord = serde_json::from_str(&json).unwrap();
 
         assert!(!recovered.applied);
-        assert_eq!(recovered.label, pending.label);
+        assert_eq!(recovered.identity(), pending.identity());
         assert!(recovered.needs_heartbeat(now));
     }
 
@@ -832,17 +1254,253 @@ mod tests {
     fn stale_pending_intent_renews_the_same_owner_after_a_long_crash() {
         let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
         let mut pending = record(now);
-        let previous = pending.parsed_label().unwrap();
+        let previous = pending.identity().unwrap();
 
         assert!(pending.prepare_heartbeat(now + ChronoDuration::hours(2)));
 
-        let renewed = pending.parsed_label().unwrap();
-        assert!(previous.same_owner(&renewed));
+        assert_eq!(
+            pending.identity().unwrap(),
+            previous,
+            "a renewal keeps the lease it is renewing"
+        );
         assert_eq!(
             pending.expires_at,
             now + ChronoDuration::hours(3),
-            "a recovered pending mutation must not republish an expired label"
+            "a recovered pending mutation must not republish an expired lease"
         );
+    }
+
+    /// Migration (#1922). A claim row written before this change carries its
+    /// per-claim label under the old `label` field name. It must survive the
+    /// upgrade — a row that fails to decode stops being heartbeaten, so the
+    /// claim lapses and the fleet double-spawns on a task an agent is holding
+    /// right now.
+    #[test]
+    fn a_pre_1922_claim_row_decodes_and_keeps_its_legacy_label() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let fresh = record(now);
+        let legacy_label = lazybox_core::qualified_working_claim_label(
+            &fresh.owner_id,
+            fresh.claim_session,
+            fresh.expires_at,
+        )
+        .expect("the fixture box id is well formed");
+        // Exactly the shape the old `WorkingClaimRecord` serialized.
+        let json = serde_json::json!({
+            "holder": { "kind": "pty", "backend_key": "pty-1" },
+            "workspace_key": fresh.workspace_key,
+            "session_id": null,
+            "claim_session": fresh.claim_session,
+            "owner_id": fresh.owner_id,
+            "target": { "id": target().id, "repo": target().repo },
+            "label": legacy_label,
+            "expires_at": fresh.expires_at,
+            "applied": true,
+        })
+        .to_string();
+
+        let recovered: WorkingClaimRecord =
+            serde_json::from_str(&json).expect("a pre-#1922 row must still decode");
+        assert_eq!(
+            recovered.legacy_label.as_deref(),
+            Some(legacy_label.as_str())
+        );
+        assert_eq!(recovered.identity(), fresh.identity());
+        assert_eq!(recovered.claim_comment_id, None);
+        assert_eq!(recovered.started_at, None);
+        // Fresh lease, already applied — yet it still has upstream work to do:
+        // attach the stable label and retire the per-claim one.
+        assert!(
+            recovered.needs_heartbeat(now),
+            "a row carrying a pre-#1922 label must heartbeat regardless of its expiry"
+        );
+    }
+
+    /// The comment is what a human reads, so it must name the lease, the
+    /// workspace, and the agent — and date the claim from when it started, not
+    /// from the heartbeat that happens to be writing it.
+    #[test]
+    fn the_note_carries_the_lease_the_workspace_and_the_agent() {
+        let started = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let mut claim = record(started);
+        claim.agent = Some("claude".into());
+        claim.model = Some("Opus 5".into());
+
+        let beat = started + ChronoDuration::minutes(45);
+        let note = claim
+            .note(beat)
+            .expect("a well-formed record yields a note");
+
+        let (device, session) = claim.identity().unwrap();
+        assert_eq!(note.device, device);
+        assert_eq!(note.session, session);
+        assert_eq!(note.started_at, started, "the START, not this heartbeat");
+        assert_eq!(note.heartbeat_at, beat);
+        assert_eq!(note.expires_at, claim.expires_at);
+        assert_eq!(note.workspace.as_deref(), Some("github-owner-repo-42"));
+        assert_eq!(note.agent.as_deref(), Some("claude"));
+        assert_eq!(note.model.as_deref(), Some("Opus 5"));
+        assert!(note.is_active_at(beat));
+    }
+
+    /// A malformed box identity yields no lease, and a claim nobody can be
+    /// identified as is worse than no claim at all — so the record is never
+    /// created. (The previous shape rejected it while minting the label; the
+    /// check had to move with the label.)
+    #[test]
+    fn a_malformed_box_identity_never_produces_a_claim() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        assert!(
+            WorkingClaimRecord::new(
+                ClaimHolder::Pty {
+                    backend_key: "pty-1".into(),
+                },
+                WorkspaceKey::new("github-owner-repo-42"),
+                None,
+                "NOT-HEX".into(),
+                target(),
+                now,
+            )
+            .is_none()
+        );
+    }
+
+    /// The free presence read (#1922): whether to spend a REST call attaching
+    /// the label is answered from the persisted row the poll already
+    /// populated, never from GitHub.
+    #[test]
+    fn the_stable_label_check_reads_the_row_not_github() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let config = crate::ServerConfig::in_memory();
+        let claim = record(now);
+
+        // No row at all: answer "not attached", so the heartbeat adds it.
+        // Skipping a needed add loses the claim; a redundant add costs one
+        // call — the asymmetry decides the default.
+        assert!(!stable_label_attached(&config, &claim));
+
+        let mut task = seed_task();
+        store_workspace(&config, &claim.workspace_key, &[task.clone()]);
+        assert!(
+            !stable_label_attached(&config, &claim),
+            "an unlabelled row is not claimed"
+        );
+
+        task.labels
+            .push(lazybox_core::Label::new(lazybox_core::WORKING_LABEL_NAME));
+        store_workspace(&config, &claim.workspace_key, &[task]);
+        assert!(stable_label_attached(&config, &claim));
+    }
+
+    /// The row projection keeps the UI honest between polls, and must leave a
+    /// racing box's own claim alone: `legacy` names only ours.
+    #[test]
+    fn the_projection_adds_one_stable_label_and_drops_only_our_legacy_one() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let claim = record(now);
+        let (device, session) = claim.identity().unwrap();
+        let ours = lazybox_core::qualified_working_claim_label(
+            &claim.owner_id,
+            claim.claim_session,
+            claim.expires_at,
+        )
+        .unwrap();
+        const RACING: &str = "lazybox:w:fedcba9876543210fedc:aaaaaaaaaa:ffffffff";
+
+        let mut task = seed_task();
+        task.labels = vec![
+            lazybox_core::Label::new(lazybox_core::WORKING_LABEL_NAME),
+            lazybox_core::Label::new(&ours),
+            lazybox_core::Label::new(RACING),
+            lazybox_core::Label::new("model:best"),
+        ];
+        let mut workspace = Workspace::from_task(task, now);
+
+        project_identity(
+            &mut workspace,
+            &target().id,
+            &(device.clone(), session.clone()),
+            Some(&ours),
+            true,
+        );
+        // Sorted, not in source order: `Workspace::from_task` does not promise
+        // to preserve the order labels arrived in, and this test is about
+        // WHICH labels survive. Compared as a sorted Vec rather than a set so
+        // a duplicate `working` — the thing the unconditional drop-then-push
+        // in `project_identity` exists to prevent — still fails it.
+        let names = |workspace: &Workspace| {
+            let mut names = workspace.gh_issues[0]
+                .labels
+                .iter()
+                .map(|label| label.name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let mut expected = vec![
+            "model:best".to_string(),
+            RACING.to_string(),
+            lazybox_core::WORKING_LABEL_NAME.to_string(),
+        ];
+        expected.sort();
+        assert_eq!(
+            names(&workspace),
+            expected,
+            "one stable label, our legacy one retired, the racing box untouched"
+        );
+
+        project_identity(
+            &mut workspace,
+            &target().id,
+            &(device, session),
+            Some(&ours),
+            false,
+        );
+        let mut expected = vec!["model:best".to_string(), RACING.to_string()];
+        expected.sort();
+        assert_eq!(
+            names(&workspace),
+            expected,
+            "a release takes the stable label off and still leaves the racing box alone"
+        );
+    }
+
+    fn seed_task() -> Task {
+        serde_json::from_value(serde_json::json!({
+            "id": target().id,
+            "title": "claimed task",
+            "body": null,
+            "state": "Open",
+            "role": "Author",
+            "ci": "None",
+            "review": "None",
+            "checks": [],
+            "unread_count": 0,
+            "url": "https://github.com/owner/repo/issues/42",
+            "repo": "owner/repo",
+            "kind": "Issue",
+            "needs_reply": false,
+            "last_commenter": null,
+            "updated_at": Utc::now(),
+        }))
+        .expect("fixture task")
+    }
+
+    fn store_workspace(config: &crate::ServerConfig, key: &WorkspaceKey, tasks: &[Task]) {
+        let mut workspace = Workspace::from_task(
+            tasks.first().cloned().expect("at least one task"),
+            Utc::now(),
+        );
+        workspace.key = key.clone();
+        workspace.gh_issues = tasks.to_vec();
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: Utc::now(),
+                workspace_json: Some(serde_json::to_string(&workspace).expect("encode")),
+            })
+            .expect("seed a workspace row");
     }
 
     #[test]
@@ -869,7 +1527,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
         let config = crate::ServerConfig::in_memory();
         let claim = record(now);
-        let identity = claim.parsed_label().expect("well-formed label");
+        let (device, session) = claim.identity().expect("well-formed lease");
         // The removal's hold.
         let _removal_holds_it = config.lock_workspace(claim.workspace_key.as_str()).await;
 
@@ -879,8 +1537,9 @@ mod tests {
             project_synced_claim(
                 &config,
                 &claim,
-                None,
-                &identity,
+                false,
+                &device,
+                &session,
                 ClaimRelease::WorkspaceLockHeld,
             ),
         )
@@ -893,7 +1552,14 @@ mod tests {
         // removal's hold).
         let parked = tokio::time::timeout(
             Duration::from_millis(200),
-            project_synced_claim(&config, &claim, None, &identity, ClaimRelease::Project),
+            project_synced_claim(
+                &config,
+                &claim,
+                false,
+                &device,
+                &session,
+                ClaimRelease::Project,
+            ),
         )
         .await;
         assert!(
@@ -914,13 +1580,20 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
         let config = crate::ServerConfig::in_memory();
         let claim = record(now);
-        let identity = claim.parsed_label().expect("well-formed label");
+        let (device, session) = claim.identity().expect("well-formed lease");
         // A caller holds the lock and never releases it (the deadlock shape).
         let _held = config.lock_workspace(claim.workspace_key.as_str()).await;
 
         let started = tokio::time::Instant::now();
-        let projected =
-            project_synced_claim(&config, &claim, None, &identity, ClaimRelease::Project).await;
+        let projected = project_synced_claim(
+            &config,
+            &claim,
+            false,
+            &device,
+            &session,
+            ClaimRelease::Project,
+        )
+        .await;
 
         assert!(
             !projected,
@@ -982,12 +1655,17 @@ mod tests {
         claim.applied = true;
         assert!(!claim.prepare_heartbeat(now + ChronoDuration::minutes(14)));
 
-        let previous = claim.label.clone();
+        let previous_expiry = claim.expires_at;
         let beat = now + ChronoDuration::minutes(15);
         assert!(claim.prepare_heartbeat(beat));
-        assert_ne!(claim.label, previous);
+        assert_ne!(claim.expires_at, previous_expiry);
         assert_eq!(claim.expires_at, beat + ChronoDuration::hours(1));
         assert!(!claim.applied);
+        assert_eq!(
+            claim.note(beat).unwrap().expires_at,
+            claim.expires_at,
+            "the comment the heartbeat writes must carry the renewed expiry"
+        );
     }
 
     #[test]
@@ -1000,9 +1678,11 @@ mod tests {
         second.applied = true;
         assert!(second.prepare_heartbeat(now + ChronoDuration::minutes(15)));
 
-        let first = first.parsed_label().unwrap();
-        let second = second.parsed_label().unwrap();
-        assert!(!first.same_owner(&second));
+        assert_ne!(
+            first.identity().unwrap(),
+            second.identity().unwrap(),
+            "two boxes must never resolve to one lease"
+        );
     }
 
     // ── Crash-journey coverage: maintenance against a canned GitHub ──
@@ -1053,6 +1733,47 @@ mod tests {
         format!(
             r#"{{"id":1,"node_id":"LA_1","url":"https://api.github.test/repos/owner/repo/labels/x","name":"{name}","description":null,"color":"fbca04","default":false}}"#
         )
+    }
+
+    /// One issue comment as GitHub's REST API returns it, authored by the
+    /// login `GhClient::stub_with_base_uri_for_tests` authenticates as — so
+    /// the sticky reader's author check accepts it.
+    fn claim_comment_json(id: u64, body: &str) -> String {
+        serde_json::json!({
+            "id": id,
+            "node_id": "IC_1",
+            "url": "https://api.github.test/c",
+            "html_url": "https://api.github.test/c",
+            "body": body,
+            "user": {
+                "login": lazybox_gh::GhClient::stub_login_for_tests(),
+                "id": 1,
+                "node_id": "U_1",
+                "avatar_url": "https://example.invalid/a",
+                "gravatar_id": "",
+                "url": "https://example.invalid/u",
+                "html_url": "https://example.invalid/u",
+                "followers_url": "https://example.invalid/u",
+                "following_url": "https://example.invalid/u",
+                "gists_url": "https://example.invalid/u",
+                "starred_url": "https://example.invalid/u",
+                "subscriptions_url": "https://example.invalid/u",
+                "organizations_url": "https://example.invalid/u",
+                "repos_url": "https://example.invalid/u",
+                "events_url": "https://example.invalid/u",
+                "received_events_url": "https://example.invalid/u",
+                "type": "User",
+                "site_admin": false,
+                "name": null,
+                "patch_url": null,
+            },
+            "created_at": "2026-08-18T12:00:00Z",
+        })
+        .to_string()
+    }
+
+    fn leak(value: String) -> &'static str {
+        Box::leak(value.into_boxed_str())
     }
 
     /// A full GitHub PR task for seeding stored workspaces.
@@ -1146,28 +1867,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maintenance_releases_a_dead_holders_claim_and_its_label_definition() {
+    async fn maintenance_releases_a_dead_holders_claim_and_detaches_the_label() {
         let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
-        // Leak the responses vec builder into 'static via Box::leak-free
-        // approach: build after the record exists so the list response can
-        // carry the exact persisted label.
         let mut config = crate::ServerConfig::in_memory();
         config.working_claims_enabled = true;
         let claim = owned_record(&config, "pty-dead", now);
         let key = claim.holder.storage_key();
         persist_record(&config, &claim).unwrap();
 
-        let attached: &'static str =
-            Box::leak(format!("[{}]", label_json(&claim.label)).into_boxed_str());
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let base_uri = spawn_recording_gh_server(vec![attached, "{}"], requests.clone()).await;
+        // Search, find the claim comment this holder posted, record the
+        // release in it, detach the label.
+        let standing = leak(format!(
+            "[{}]",
+            claim_comment_json(
+                31,
+                &claim.note(now).expect("the record yields a note").render()
+            )
+        ));
+        let updated = leak(claim_comment_json(31, "released"));
+        let base_uri =
+            spawn_recording_gh_server(vec![standing, updated, "[]"], requests.clone()).await;
         config.poll.cache_gh_client(
             lazybox_gh::GhClient::stub_with_base_uri_for_tests(&base_uri).unwrap(),
         );
 
         // No live PTY backend session and no structured run owns the holder,
-        // so maintenance must release: clear the upstream label *definition*
-        // and forget the durable intent.
+        // so maintenance must release and forget the durable intent.
         maintain_once(&config, now).await;
 
         assert_eq!(
@@ -1176,13 +1902,203 @@ mod tests {
             "a dead holder's durable claim must be forgotten after release"
         );
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2, "one list plus one delete: {requests:?}");
+        assert_eq!(
+            requests.len(),
+            3,
+            "search, record the release, detach: {requests:?}"
+        );
         assert!(requests[0].starts_with("GET "), "{}", requests[0]);
-        // Repo-level definition delete, not an issue-scoped detach — the
-        // detach-only variant leaks one dead label per agent spawn into the
-        // repo's label picker.
-        assert!(requests[1].starts_with("DELETE "), "{}", requests[1]);
-        assert!(!requests[1].contains("/issues/"), "{}", requests[1]);
+        assert!(
+            requests[1].contains("Lazybox-Claim-Released"),
+            "the comment must record that the work is over: {}",
+            requests[1]
+        );
+        // Issue-scoped detach, NOT a repo-level definition delete: `working`
+        // is one fixed name shared by every claim in the repository, so
+        // deleting its definition would unclaim every other claimed task.
+        assert!(requests[2].starts_with("DELETE "), "{}", requests[2]);
+        assert!(
+            requests[2].contains("/issues/42/labels/working"),
+            "{}",
+            requests[2]
+        );
+    }
+
+    /// Seed a workspace row whose GitHub task carries the stable `working`
+    /// label, with `bodies` standing in for GitHub's replies.
+    async fn claimed_row_with_github(
+        bodies: Vec<&'static str>,
+    ) -> (
+        crate::ServerConfig,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        WorkspaceKey,
+    ) {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let mut task = github_task("owner/repo#42");
+        task.labels = vec![lazybox_core::Label::new(lazybox_core::WORKING_LABEL_NAME)];
+        let workspace = Workspace::from_task(task, now);
+        let key = workspace.key.clone();
+        let (config, requests) = config_with_recorded_github(bodies).await;
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: now,
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+        (config, requests, key)
+    }
+
+    fn note_for(expires_at: DateTime<Utc>) -> lazybox_core::WorkingClaimNote {
+        lazybox_core::WorkingClaimNote::new(
+            "fedcba9876543210fedc",
+            "aaaaaaaaaa",
+            expires_at - ChronoDuration::hours(1),
+            expires_at,
+        )
+    }
+
+    /// The expiry no longer rides in the label name, so this sweep is the only
+    /// thing that can notice a lapsed claim. It must retire one — and leave a
+    /// live one alone.
+    #[tokio::test]
+    async fn the_sweep_retires_a_lapsed_claim_and_leaves_a_live_one() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+
+        let lapsed = leak(format!(
+            "[{}]",
+            claim_comment_json(31, &note_for(now - ChronoDuration::minutes(1)).render())
+        ));
+        let (config, requests, key) = claimed_row_with_github(vec![lapsed, "[]"]).await;
+        retire_lapsed_stable_claims(&config, now).await;
+        {
+            let sent = requests.lock().unwrap();
+            assert_eq!(
+                sent.len(),
+                2,
+                "read the comment, detach the label: {sent:?}"
+            );
+            assert!(sent[0].starts_with("GET "), "{}", sent[0]);
+            assert!(
+                sent[1].starts_with("DELETE ") && sent[1].contains("/issues/42/labels/working"),
+                "{}",
+                sent[1]
+            );
+        }
+        let row = load_workspace(&config, &key).expect("the row survives");
+        assert!(
+            !row.is_claimed(),
+            "the local row must stop reading as claimed without waiting for a poll"
+        );
+
+        let live = leak(format!(
+            "[{}]",
+            claim_comment_json(31, &note_for(now + ChronoDuration::minutes(30)).render())
+        ));
+        let (config, requests, key) = claimed_row_with_github(vec![live]).await;
+        retire_lapsed_stable_claims(&config, now).await;
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "a live claim costs the read and nothing more"
+        );
+        assert!(
+            load_workspace(&config, &key)
+                .expect("the row survives")
+                .is_claimed()
+        );
+    }
+
+    /// A `working` label with no lazybox-authored comment behind it is left
+    /// strictly alone: `working` is an ordinary word a human or another tool
+    /// may own, and detaching one lazybox cannot prove it wrote would destroy
+    /// somebody else's state.
+    #[tokio::test]
+    async fn the_sweep_never_touches_a_label_no_claim_comment_of_ours_backs() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let forged =
+            leak(
+                serde_json::json!([serde_json::from_str::<serde_json::Value>(
+                    &claim_comment_json(31, &note_for(now - ChronoDuration::hours(2)).render())
+                )
+                .expect("fixture json")])
+                .to_string()
+                .replace(lazybox_gh::GhClient::stub_login_for_tests(), "someone-else"),
+            );
+        let (config, requests, key) = claimed_row_with_github(vec![forged]).await;
+
+        retire_lapsed_stable_claims(&config, now).await;
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 1, "the read, and then nothing: {sent:?}");
+        assert!(
+            !sent.iter().any(|r| r.starts_with("DELETE ")),
+            "a lapsed-looking claim from a FOREIGN author is not evidence: {sent:?}"
+        );
+        assert!(
+            load_workspace(&config, &key)
+                .expect("the row survives")
+                .is_claimed(),
+            "and the row keeps reading as claimed — the conservative direction"
+        );
+    }
+
+    /// The gate that keeps the sweep off this box's own live work: a workspace
+    /// with a claim record of ours is converged by the heartbeat, so the sweep
+    /// must skip it WITHOUT a read. Without this, every live agent costs one
+    /// wasted request every 15 minutes.
+    #[tokio::test]
+    async fn the_sweep_skips_a_workspace_this_box_already_holds_a_record_for() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let (config, requests, key) = claimed_row_with_github(vec!["[]"]).await;
+        let mut record = owned_record(&config, "pty-live", now);
+        record.workspace_key = key;
+        persist_record(&config, &record).unwrap();
+
+        retire_lapsed_stable_claims(&config, now).await;
+
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "an accounted workspace must cost no GitHub request: {:?}",
+            requests.lock().unwrap()
+        );
+    }
+
+    /// A claim whose first sync never landed has no comment upstream. Its
+    /// release must still detach the label, but must NOT post a fresh
+    /// "lazybox has finished working on this" — the thread has no record of
+    /// lazybox starting, so announcing the end is pure noise.
+    #[tokio::test]
+    async fn releasing_a_claim_that_was_never_announced_posts_no_comment() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let mut config = crate::ServerConfig::in_memory();
+        config.working_claims_enabled = true;
+        let claim = owned_record(&config, "pty-dead", now);
+        persist_record(&config, &claim).unwrap();
+
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri = spawn_recording_gh_server(vec!["[]", "[]"], requests.clone()).await;
+        config.poll.cache_gh_client(
+            lazybox_gh::GhClient::stub_with_base_uri_for_tests(&base_uri).unwrap(),
+        );
+
+        maintain_once(&config, now).await;
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "search then detach: {requests:?}");
+        assert!(requests[0].starts_with("GET "), "{}", requests[0]);
+        assert!(
+            requests[1].starts_with("DELETE ") && requests[1].contains("/labels/working"),
+            "{}",
+            requests[1]
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.contains("Lazybox-Claim-Released")),
+            "no release record where there was never a claim record: {requests:?}"
+        );
     }
 
     #[tokio::test]
@@ -1199,22 +2115,37 @@ mod tests {
         let mut claim = owned_record(&config, &backend_key, now);
         claim.applied = true;
         let key = claim.holder.storage_key();
-        let old_label = claim.label.clone();
         persist_record(&config, &claim).unwrap();
 
-        let attached: &'static str =
-            Box::leak(format!("[{}]", label_json(&old_label)).into_boxed_str());
-        let renamed: &'static str = Box::leak(label_json("renamed").into_boxed_str());
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        // list → rename (update_label) → attach (add_labels) → delete stale.
+        // attach the stable label → search for our comment (none) → post it.
+        let attached: &'static str = leak(format!("[{}]", label_json("working")));
+        let posted = leak(claim_comment_json(31, "claimed"));
         let base_uri =
-            spawn_recording_gh_server(vec![attached, renamed, "[]", "{}"], requests.clone()).await;
+            spawn_recording_gh_server(vec![attached, "[]", posted], requests.clone()).await;
         config.poll.cache_gh_client(
             lazybox_gh::GhClient::stub_with_base_uri_for_tests(&base_uri).unwrap(),
         );
 
         let beat = now + ChronoDuration::minutes(20);
         maintain_once(&config, beat).await;
+
+        {
+            let sent = requests.lock().unwrap();
+            assert_eq!(sent.len(), 3, "label, search, post: {sent:?}");
+            assert!(
+                sent[0].starts_with("POST /repos/owner/repo/issues/42/labels")
+                    && sent[0].contains("\"working\"")
+                    && !sent[0].contains("lazybox:w:"),
+                "one stable label, never a minted one: {}",
+                sent[0]
+            );
+            assert!(
+                sent[2].contains("lazybox:claim") && sent[2].contains("Lazybox-Claim-Heartbeat"),
+                "the comment carries the marker and the renewed lease: {}",
+                sent[2]
+            );
+        }
 
         let renewed = load_record(&config, &key)
             .unwrap()
@@ -1225,16 +2156,84 @@ mod tests {
             beat + ChronoDuration::seconds(lazybox_core::WORKING_CLAIM_TTL_SECS),
             "the heartbeat must extend the lease from the beat time"
         );
-        assert_ne!(
-            renewed.label, old_label,
-            "the label must carry the new expiry"
-        );
-        assert!(
-            claim
-                .parsed_label()
-                .unwrap()
-                .same_owner(&renewed.parsed_label().unwrap()),
+        assert_eq!(
+            claim.identity().unwrap(),
+            renewed.identity().unwrap(),
             "a heartbeat must never change the claim's owner identity"
+        );
+        assert_eq!(
+            renewed.claim_comment_id,
+            Some(31),
+            "the comment id must be remembered, or every heartbeat searches again"
+        );
+    }
+
+    /// Migration (#1922), end to end. A claim taken on the previous build
+    /// carries a per-claim `lazybox:w:…` label upstream. The first heartbeat
+    /// after the upgrade must attach the stable label **before** retiring
+    /// that one: in the other order the record is momentarily unclaimed, and
+    /// any box polling in that window reads it as free and double-spawns.
+    #[tokio::test]
+    async fn the_first_heartbeat_after_the_upgrade_attaches_before_retiring_the_legacy_label() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let mut config = crate::ServerConfig::in_memory();
+        config.working_claims_enabled = true;
+        let backend_key = config
+            .backend
+            .spawn(&["sh".into()], None, &[], "claim-test")
+            .await
+            .unwrap();
+        let mut claim = owned_record(&config, &backend_key, now);
+        claim.applied = true;
+        let legacy = lazybox_core::qualified_working_claim_label(
+            &claim.owner_id,
+            claim.claim_session,
+            claim.expires_at,
+        )
+        .expect("the previous build minted one");
+        claim.legacy_label = Some(legacy.clone());
+        let key = claim.holder.storage_key();
+        persist_record(&config, &claim).unwrap();
+
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let attached: &'static str = leak(format!("[{}]", label_json("working")));
+        let posted = leak(claim_comment_json(31, "claimed"));
+        let base_uri =
+            spawn_recording_gh_server(vec![attached, "[]", posted, "{}"], requests.clone()).await;
+        config.poll.cache_gh_client(
+            lazybox_gh::GhClient::stub_with_base_uri_for_tests(&base_uri).unwrap(),
+        );
+
+        // Fresh lease, already applied — the legacy label alone is what makes
+        // this heartbeat due.
+        maintain_once(&config, now + ChronoDuration::minutes(1)).await;
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 4, "label, search, post, retire: {sent:?}");
+        let attach_at = sent
+            .iter()
+            .position(|r| r.starts_with("POST /repos/owner/repo/issues/42/labels"))
+            .expect("the stable label must be attached");
+        let retire_at = sent
+            .iter()
+            .position(|r| r.starts_with("DELETE ") && r.contains(&legacy.replace(':', "%3A")))
+            .or_else(|| {
+                sent.iter()
+                    .position(|r| r.starts_with("DELETE ") && r.contains("lazybox"))
+            })
+            .unwrap_or_else(|| panic!("the legacy label must be retired: {sent:?}"));
+        assert!(
+            attach_at < retire_at,
+            "the stable label must land BEFORE the legacy one goes, or the record \
+             reads as free in between: {sent:?}"
+        );
+
+        let renewed = load_record(&config, &key)
+            .unwrap()
+            .expect("the claim survives the migration");
+        assert_eq!(
+            renewed.legacy_label, None,
+            "a retired legacy label must not be retried every heartbeat forever"
         );
     }
 
@@ -1262,7 +2261,11 @@ mod tests {
         let workspace = Workspace::from_task(task, now);
         let workspace_key = workspace.key.clone();
 
-        let (config, requests) = config_with_recorded_github(vec!["{}"]).await;
+        // Request 1 is the expired-label delete. Request 2 is the stable-claim
+        // sweep reading the claim comment behind the `working` label this row
+        // also carries (#1922) — served an empty list, so there is no
+        // lazybox-authored note and the label is left strictly alone.
+        let (config, requests) = config_with_recorded_github(vec!["{}", "[]"]).await;
         config
             .store
             .save_workspace(&lazybox_store::WorkspaceRecord {
@@ -1277,10 +2280,21 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(
             requests.len(),
-            1,
-            "exactly the expired label is cleaned: {requests:?}"
+            2,
+            "the expired label is cleaned, then the stable label's comment is \
+             read: {requests:?}"
         );
         assert!(requests[0].starts_with("DELETE "), "{}", requests[0]);
+        assert!(
+            requests[1].starts_with("GET "),
+            "the sweep only READS: {}",
+            requests[1]
+        );
+        assert!(
+            !requests.iter().any(|r| r.contains("/labels/working")),
+            "a `working` label with no claim comment of ours behind it must not be \
+             touched — it may be a human's own workflow label: {requests:?}"
+        );
         assert!(!requests[0].contains("/issues/"), "{}", requests[0]);
         assert!(
             requests[0].contains("fedcba9876543210fedc"),
@@ -1389,6 +2403,48 @@ mod tests {
         assert!(
             events.try_recv().is_err(),
             "the second failure within the debounce window must stay quiet"
+        );
+    }
+
+    /// #1870: a renewal is stamped locally BEFORE it is pushed upstream, and
+    /// the label carries the lease expiry — so a sync the rate budget refused
+    /// (the ordinary shape under pressure: claim labels are the lowest tier)
+    /// leaves the two sides one expiry apart. Matching whole label strings
+    /// then reported this box's own running agent as a claim it could not
+    /// verify, i.e. as another box's.
+    #[tokio::test]
+    async fn a_renewal_refused_upstream_still_reads_as_locally_held() {
+        let config = crate::ServerConfig::in_memory();
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let mut record = WorkingClaimRecord::new(
+            ClaimHolder::Pty {
+                backend_key: "pty-1".into(),
+            },
+            WorkspaceKey::new("github-owner-repo-42"),
+            None,
+            config.working_claim_owner_id.clone(),
+            target(),
+            now,
+        )
+        .expect("a well-formed owner id yields a lease");
+        let upstream_expiry = record.expires_at;
+        let lease = record.identity().expect("the lease is identifiable");
+        persist_record(&config, &record).expect("persist");
+
+        // The heartbeat re-stamps locally; the push that would carry it
+        // upstream is refused, so GitHub's claim comment still holds the
+        // previous expiry.
+        assert!(record.prepare_heartbeat(now + ChronoDuration::minutes(46)));
+        assert_ne!(
+            record.expires_at, upstream_expiry,
+            "the renewal moved the expiry"
+        );
+        persist_record(&config, &record).expect("persist the renewed intent");
+
+        let held = locally_held_claims(&config);
+        assert!(
+            held.contains(&lease),
+            "the claim still live on GitHub belongs to this box: {held:?}"
         );
     }
 }

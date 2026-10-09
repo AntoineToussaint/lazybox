@@ -291,24 +291,113 @@ The agent-facing surface over the running daemon: lets a spawned agent (or a
 script) create a workspace in lazybox itself, not just act on the repo.
 
 ```bash
-lazybox workspace create --name "spike auth" --repo owner/repo --agent claude
+lazybox workspace create --issue owner/repo#7 --agent claude
+lazybox workspace create --name "spike auth" --scratch --repo owner/repo
 ```
 
 | Command / option | Effect |
 | --- | --- |
-| `workspace create` | Create a taskless pre-PR workspace by sending `CreateWorkspace` to the daemon |
-| `--name <name>` | Workspace display name. Required (non-empty). |
+| `workspace create` | Attach to a tracker record's workspace — or create a scratch one — by sending `CreateWorkspace` to the daemon |
+| `--issue` / `--pr` / `--ticket <ref>` | The record to attach to: `owner/repo#N`, a GitHub issue/PR URL, `#N` beside `--repo`, or a Linear key like `ENG-45`. Three names for one flag, each reading better at its call site |
+| `--name <name>` | Workspace display name, for repo-less scratch work. Not combinable with a record |
+| `--scratch` | Allow a bare `--name` under a tracker-backed project — it says this really is scratch work with no record behind it |
 | `--project <key>` | Target an existing project by key |
 | `--repo <owner/repo>` | Target a repo (an alternative to `--project`) |
-| `--agent <id>` | Spawn this agent into the fresh workspace so a live session lands in it |
+| `--agent <id>` | Spawn this agent into the resolved workspace so a live session lands in it |
 | `--cwd <path>` | Directory used to infer the project when neither `--project` nor `--repo` is given (default: the process cwd) |
 | `--socket <path>` | Daemon socket to send to (defaults to the standard socket) |
 
 The project resolves from `--project` / `--repo`, else it is inferred from the
-checkout at `--cwd` — so an agent running inside a worktree needs only `--name`.
-Unlike fire-and-forget hooks, a failure exits non-zero: the caller asked for a
-workspace and is told if the daemon was unreachable or the project couldn't be
-resolved.
+checkout at `--cwd` — so an agent running inside a worktree needs only the
+record. Unlike fire-and-forget hooks, a failure exits non-zero: the caller
+asked for a workspace and is told if the daemon was unreachable or the project
+couldn't be resolved. The message goes to **stdout**, because `lazybox`
+redirects its own stderr into the log file.
+
+**This verb refuses an argument it does not know**, rather than ignoring it —
+including a flag that is given with no value, and the launch flags (`--fresh`,
+`--test`, `--demo`, `--workspace`, `--session`) that belong to `lazybox`
+itself. A dropped flag is indistinguishable from an honored one: `--tier
+xhigh` used to report success and start the agent on its default model. There
+is no tier flag — put a `model:<token>` label on the record instead.
+
+`x x` archives a workspace: the row is deleted and the key tombstoned, so the
+next poll skips it and the record appears in no mailbox. These two verbs are
+what reverse it (the TUI's archive browser, `x U`, is the same surface).
+
+```bash
+lazybox workspace archived
+lazybox workspace unarchive owner/repo#40
+```
+
+| Command / option | Effect |
+| --- | --- |
+| `workspace archived` | List the archived keys, each followed by the keys its row absorbed |
+| `workspace unarchive <ref>` | Drop that record's tombstone: `owner/repo#N`, a GitHub URL, `#N` beside `--repo`, or a Linear key |
+| `--key <workspace-key>` | Name a raw workspace key instead, as `workspace archived` prints it |
+| `--repo <owner/repo>` | Repo used to resolve the bare `#N` / `N` forms |
+| `--socket <path>` | Daemon socket to send to (defaults to the standard socket) |
+
+A PR row stands in for the issues it closes, so archiving it tombstones them
+too; restoring the PR key takes that whole set back out. The row itself returns
+on the next poll — or immediately from a following `workspace create --issue
+<ref>`, which an archived record refuses outright.
+
+## `lazybox work`
+
+The task/plan store from a shell — **the supported surface for an agent that
+cannot receive MCP tools** (Codex, Cursor, `--strict-mcp-config`). Every
+subcommand reaches the same daemon code as the `create_work` / `my_work` /
+`update_work` / `work_status` MCP tools, so a shell and an agent are never told
+different things about the same row.
+
+```bash
+lazybox work mine                                  # what you own, are owed, have queued
+lazybox work new "Fix the flaky clone test" \
+  --brief "Objective: ... Done when: ..." --to github:acme/widget#42
+lazybox work set <id> underway
+lazybox work set <id> held --detail "waiting on a base-branch decision"
+lazybox work done <id> --summary "Landed in #1931" --artifact findings.md
+lazybox work status --json
+```
+
+| Command / option | Effect |
+| --- | --- |
+| `work mine [--all]` | Three lists: work you own, work a sibling owes you, work you filed that nobody owns. `--all` includes finished work |
+| `work new <title>` | Mint a unit of work and print its id |
+| `--brief <text>` | Objective, done-criteria, boundaries, output shape. Delivered to the owner's session |
+| `--to <workspace>` | Assign it, and hand the brief over now |
+| `--no-deliver` | Record the assignment without poking the owner (needs `--to`) |
+| `--plan <id>` / `--parent <id>` | Put it on a plan, or nest it under another unit of work |
+| `--link <ref>` | Repeatable. `owner/repo#N` or an issue URL for a tracker record, `ws:<key>` for a workspace, or an http(s) URL |
+| `work set <id> <lifecycle>` | `underway`, `awaiting-answer`, `held`, `failed` or `canceled` |
+| `--detail <text>` | The question for `awaiting-answer`, the blocker for `held`, the cause for `failed`. Required for the first two |
+| `work done <id> --summary <text>` | Complete it. The summary is required: it is what the requester reads instead of your scrollback |
+| `--artifact <name>` | Repeatable. A file you wrote into `.lazybox/artifacts/`, carried by reference |
+| `work status [--plan <id>]` | A plan's `done/total` roll-up, the workspaces it spans, and the open work on no plan |
+| `--workspace <key>` | Act as this workspace instead of the current session |
+| `--json` / `--socket <path>` | Structured output; daemon socket to use |
+
+The workspace comes from `LAZYBOX_SESSION_KEY`, which lazybox injects into
+every session's PTY at spawn, so inside a session these commands need no
+arguments. Pass `--workspace` to act on another row.
+
+A **unit of work is not a tracker record**. It carries an immutable id for its
+whole life and points at issues, PRs and workspaces through `--link`, so an
+issue→PR fold rewrites a link and never an id. Assigning work also links its
+owner's workspace, which is what gives a plan spanning several repos its member
+list.
+
+Two behaviours worth knowing before scripting this. A **terminal state refuses
+every further move** — a completed, failed or canceled unit of work cannot be
+reopened or re-completed, so a replaced session reporting late cannot overwrite
+a result that already landed; the attempt exits `2`. And a **refused delivery is
+not a refused assignment**: handing work to a workspace with no running agent
+still records it, and the owner finds it in `lazybox work mine` when it starts.
+
+Exit codes: `0` on success, `2` when the call was wrong (a bad id, a missing
+`--summary`, a terminal row), `1` when the daemon could not read the store —
+so a script can tell a mistake that will never work from one worth retrying.
 
 ## `lazybox task status`
 
@@ -336,10 +425,21 @@ over the row, and every matching workspace is reported rather than an arbitrary
 first one.
 
 The report keeps apart facts that are easy to conflate. A finished agent turn is
-**not** task completion; an unexpired `lazybox:w:` claim is **not** proof of a
+**not** task completion; an unexpired working claim is **not** proof of a
 running process (it has a one-hour TTL a crashed worker stops renewing); a
 retained session worktree is **not** an agent turn. Where the evidence is
 missing or contradictory the verdict is `unknown` rather than a guess.
+
+Resolving a claim's *holder* is the one part of this report that may reach
+GitHub. Presence is the `working` label, which the daemon already has; the
+holder, agent, model and expiry live in lazybox's own claim comment. So a
+record carrying that label — and no lease this box is itself renewing — costs
+one comment read, on the lowest-priority tier. A `working` label with no
+lazybox-authored comment behind it is reported as exactly that (no holder, no
+expiry) rather than resolved into one: the label may be a human's own workflow
+label, its comment may have been deleted, or the read may simply have been
+refused, and guessing between those is how a caller either double-spawns or
+blocks forever.
 
 Exit codes: `0` when status was established (including "nobody is working on
 it", which is a real answer), `2` for a reference that cannot be resolved, `1`

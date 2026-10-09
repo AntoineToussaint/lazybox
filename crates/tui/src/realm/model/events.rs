@@ -519,6 +519,17 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::AgentSearchText { entries } => {
                 self.sidebar.ingest_durable_agent_text(entries.clone());
             }
+            // The daemon's terminal-OUTPUT scan (#1780): what the agent
+            // SAID, which lives only in its replay rings. Unlike the two
+            // corpora above this is a REPLY, scoped to the query that asked
+            // for it, so the model drops one whose request the user has
+            // typed past rather than merging it.
+            IpcEvent::AgentOutputMatches {
+                request_id,
+                entries,
+            } => {
+                self.apply_agent_output_matches(*request_id, entries.clone());
+            }
             // Durable per-action usage counts replayed on connect (#1502):
             // seed the local mastery ledger so onboarding chrome reflects
             // what the user has already learned instead of resetting.
@@ -1060,16 +1071,50 @@ impl<T: TerminalAdapter> Model<T> {
         // Open agent-to-agent requests (#1653): the daemon owns the count
         // and pushes it here (seeded on connect, refreshed on every ask,
         // reply, and turn-end capture). The sidebar keeps it for the row's
-        // `?N` badge.
+        // `⟲N` badge, and the right pane lists who asked what.
         if let IpcEvent::AgentRequestsOpen {
             workspace_key,
             open,
+            requests,
         } = &event
         {
-            self.sidebar.set_open_requests(
+            let key = lazybox_core::SessionKey::from(workspace_key.as_str());
+            self.sidebar.set_open_requests(key.clone(), *open);
+            self.sidebar
+                .set_open_request_rows(key.clone(), requests.clone());
+            // Only the SELECTED workspace's rows are on screen, and
+            // `sync_panes` is a full rebuild (it walks every blocker and
+            // resolves each against every tracked workspace). The daemon
+            // broadcasts this event on every ask, reply and turn-end capture
+            // across the fleet, and replays one per workspace carrying an
+            // open request on connect — resyncing the panes for workspace Y
+            // because workspace X was asked something is work proportional
+            // to fleet chatter rather than to what changed.
+            if self.sidebar.selected_workspace_key() == Some(&key) {
+                self.sync_panes();
+            }
+            self.redraw = true;
+        }
+        // Spooled agent artifacts (#1822): the daemon owns the spool and
+        // pushes the set here (seeded on connect, refreshed whenever a file
+        // appears or goes). The model keeps the documents for the `a A`
+        // reader; the sidebar keeps the count for the row's `▤N` badge.
+        if let IpcEvent::WorkspaceArtifacts {
+            workspace_key,
+            artifacts,
+            hidden,
+        } = &event
+        {
+            self.sidebar.set_artifact_count(
                 lazybox_core::SessionKey::from(workspace_key.as_str()),
-                *open,
+                artifacts.len(),
             );
+            if artifacts.is_empty() {
+                self.artifacts.remove(workspace_key);
+            } else {
+                self.artifacts
+                    .insert(workspace_key.clone(), (artifacts.clone(), *hidden));
+            }
             self.redraw = true;
         }
         if let IpcEvent::EpicGone { key } = &event {
@@ -1192,17 +1237,34 @@ impl<T: TerminalAdapter> Model<T> {
                 client_request_id,
                 workspace_key,
             } => {
-                if let Some(pending) = self.pending_workspace_creates.get_mut(client_request_id) {
+                if let Some(pending) = self.pending_workspace_creates.get_mut(client_request_id)
+                    && pending.workspace_key.is_none()
+                {
                     let session_key: lazybox_core::SessionKey = workspace_key.into();
                     pending.workspace_key = Some(session_key.clone());
-                    let spawn_agent = pending.spawn_agent;
+                    let shell = pending.runner == super::SessionRunner::Shell;
                     let name = pending.name.clone();
                     self.sidebar.focus_workspace_key(&session_key);
-                    if spawn_agent {
-                        self.spawn_follow_to = Some(session_key);
-                        self.flash_info(format!("created {name} — starting agent…"));
-                    } else {
-                        self.flash_info(format!("created {name}"));
+                    self.spawn_follow_to = Some(session_key.clone());
+                    let runner = if shell { "shell" } else { "agent" };
+                    self.flash_info(format!("created {name} — starting {runner}…"));
+                    if shell {
+                        // CreateWorkspace can start an agent atomically, but a shell
+                        // uses the ordinary Spawn command after durable creation.
+                        // Move tracking to a fresh request ID: the create's completion
+                        // must not report success before the shell has started, nor
+                        // may a repeated creation acknowledgement spawn another shell.
+                        if let Some(pending) =
+                            self.pending_workspace_creates.remove(client_request_id)
+                        {
+                            let spawn_id = uuid::Uuid::new_v4().hyphenated().to_string();
+                            self.pending_workspace_creates
+                                .insert(spawn_id.clone(), pending);
+                            let cmds =
+                                vec![Self::shell_spawn_cmd(session_key, None, Some(spawn_id))];
+                            self.note_spawn_feedback(&cmds);
+                            self.dispatch_cmds(cmds);
+                        }
                     }
                     self.needs_pane_sync = true;
                     self.redraw = true;
@@ -1210,12 +1272,14 @@ impl<T: TerminalAdapter> Model<T> {
             }
             IpcEvent::CommandCompleted { client_request_id } => {
                 if let Some(pending) = self.pending_workspace_creates.remove(client_request_id) {
-                    let message = if pending.spawn_agent {
-                        format!("workspace {} ready", pending.name)
-                    } else {
-                        format!("workspace {} created", pending.name)
-                    };
-                    self.flash_info(message);
+                    // One message on purpose. This used to pick between
+                    // "ready" and "created" on `spawn_agent: bool`, where
+                    // false meant "nothing was started". Under `SessionRunner`
+                    // every create starts something — an agent or a shell — so
+                    // the "created" case no longer exists rather than having
+                    // been folded away; `CommandFailed` still names which
+                    // runner it was that failed.
+                    self.flash_info(format!("workspace {} ready", pending.name));
                 }
             }
             IpcEvent::CommandFailed {
@@ -1226,9 +1290,14 @@ impl<T: TerminalAdapter> Model<T> {
                     if pending.workspace_key.as_ref() == self.spawn_follow_to.as_ref() {
                         self.spawn_follow_to = None;
                     }
+                    let runner = if pending.runner == super::SessionRunner::Shell {
+                        "shell"
+                    } else {
+                        "agent"
+                    };
                     let failure = if pending.workspace_key.is_some() {
                         format!(
-                            "✗ workspace {} was created, but its agent failed to start — {message}",
+                            "✗ workspace {} was created, but its {runner} failed to start — {message}",
                             pending.name
                         )
                     } else {
@@ -1327,6 +1396,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
                 | IpcEvent::WorkspaceDiffInspected { .. }
+                | IpcEvent::RemovalRisksInspected { .. }
+                | IpcEvent::PullRequestReviewSubmitted { .. }
                 | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
@@ -1365,12 +1436,14 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::ArchivedWorkspaces { .. }
                 | IpcEvent::Stats { .. }
                 | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::GithubDiscoveryBehind { .. }
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::AgentSearchText { .. }
+                | IpcEvent::AgentOutputMatches { .. }
                 | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::MasteryLedger { .. }
@@ -1393,12 +1466,17 @@ impl<T: TerminalAdapter> Model<T> {
                 // consumed earlier in this function.
                 | IpcEvent::AgentRequestReplied { .. }
                 | IpcEvent::AgentRequestsOpen { .. }
+                // Spooled artifacts (#1822) are read off the worktree, not a
+                // provider poll, and are consumed earlier in this function.
+                | IpcEvent::WorkspaceArtifacts { .. }
                 // `task_status` (#1785) is request/response: the daemon answers
                 // on the asking connection, so this never reaches a TUI client.
                 // The arm exists because `Event` is one shared exhaustive enum.
                 | IpcEvent::TaskStatus { .. }
-                // Same for the `gh` shim's admission/ack replies (#1801).
+                // Same for the `gh` shim's admission/ack replies (#1801) and
+                // the work store's (#1935).
                 | IpcEvent::GhShimReply { .. }
+                | IpcEvent::WorkReport { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -1552,7 +1630,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // state cleared solely here, so a `CreateProject
                 // { scratch }` whose store write fails (no
                 // `ProjectUpserted` emitted — see `create_local_project`)
-                // would otherwise leave the flag stuck `true` and let it
+                // would otherwise leave the continuation pending and let it
                 // ride the NEXT `x p` upsert, silently spawning a chat
                 // workspace in the wrong project instead of the name
                 // input. Gating the take on the scratch key means a
@@ -1560,12 +1638,12 @@ impl<T: TerminalAdapter> Model<T> {
                 // which is exactly the chat flow (#1502).
                 let is_scratch =
                     project_key == lazybox_core::ProjectKey::local(Self::SCRATCH_PROJECT);
-                if is_scratch && std::mem::take(&mut self.deferred_chat) {
+                if is_scratch && let Some(runner) = self.deferred_chat.take() {
                     // Start sheet → Chat (#1502): the scratch project
                     // just landed; create the chat workspace straight
                     // away, no name to type.
                     let name = self.next_chat_name(&project_key);
-                    let cmds = self.create_workspace_cmds(project_key, name);
+                    let cmds = self.create_workspace_with_runner_cmds(project_key, name, runner);
                     self.dispatch_cmds(cmds);
                 } else if self.sidebar.focus_project_header(&project_key) {
                     self.mount_new_workspace_input(project_key);
@@ -1587,6 +1665,13 @@ impl<T: TerminalAdapter> Model<T> {
         // Push to the sidebar AFTER the snapshot's WorkspaceUpserted-
         // equivalent rows are processed below, so the first render
         // already has both layers.
+        if let IpcEvent::Snapshot { .. } = &event {
+            // A Snapshot is the reconnect signal: any output scan this
+            // client had in flight died with the previous connection, so its
+            // latch is released here rather than waiting for a reply the
+            // daemon can no longer send (#1780).
+            self.release_agent_output_scan_on_reconnect();
+        }
         if let IpcEvent::Snapshot { projects, .. } = &event {
             // The snapshot is authoritative for daemon-known projects, so
             // drop any that vanished while the client was disconnected
@@ -2187,6 +2272,14 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // Archived-set snapshot (#1824) — repaint the open archive browser,
+        // which is also how a restore reports itself: the restored row is
+        // gone from the refreshed list. Dropped when the browser is closed.
+        if let IpcEvent::ArchivedWorkspaces { records } = &event {
+            self.update_archive_browser(records.clone());
+            self.redraw = true;
+            return;
+        }
         // Merge-history reply (#1432) — repaint the open modal with the
         // fetched merged PRs (or the error). A reply that lands while the
         // modal is closed, or names a different repo than the open one, is
@@ -2307,7 +2400,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // exactly the way a rate-limited one is: the process read its
                 // credential at startup and never re-reads it, so only a
                 // stop-respawn-continue frees it.
-                self.auth_failed_terminals.insert(*terminal_id);
+                self.auth_failed_terminals.insert(
+                    *terminal_id,
+                    super::AuthFailedPane {
+                        display_name: display_name.clone(),
+                        other_session_count: *other_session_count,
+                    },
+                );
                 self.queue_agent_auth_prompt(super::AgentAuthPrompt {
                     terminal_id: *terminal_id,
                     display_name: display_name.clone(),
@@ -2446,6 +2545,7 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::Snapshot { .. }
             | IpcEvent::SessionCosts { .. }
             | IpcEvent::AgentSearchText { .. }
+            | IpcEvent::AgentOutputMatches { .. }
             | IpcEvent::ViewerIdentities { .. }
             | IpcEvent::AutoFixPolicyConfig { .. }
             | IpcEvent::ShellCommandConfig { .. }
@@ -2499,6 +2599,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::CleanWorktreesCompleted { .. }
             | IpcEvent::WorktreesInspected { .. }
             | IpcEvent::WorkspaceDiffInspected { .. }
+            | IpcEvent::RemovalRisksInspected { .. }
+            | IpcEvent::PullRequestReviewSubmitted { .. }
             | IpcEvent::CheckoutsDiscovered { .. }
             | IpcEvent::OrphanedWorktreeDeleted { .. }
             | IpcEvent::AgentRunStarted { .. }
@@ -2537,6 +2639,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentCreditExhausted { .. }
             | IpcEvent::WorkspaceCreated { .. }
             | IpcEvent::ErrorInbox { .. }
+            | IpcEvent::ArchivedWorkspaces { .. }
             | IpcEvent::Stats { .. }
             | IpcEvent::AgentSessionStarted { .. }
             | IpcEvent::SnippetKeepMine { .. }
@@ -2560,12 +2663,17 @@ impl<T: TerminalAdapter> Model<T> {
             // the coordination bus, not a provider poll.
             | IpcEvent::AgentRequestReplied { .. }
             | IpcEvent::AgentRequestsOpen { .. }
+            // Spooled artifacts (#1822) are read off the worktree, not a
+            // provider poll, and are consumed earlier in this function.
+            | IpcEvent::WorkspaceArtifacts { .. }
             // `task_status` (#1785) is request/response: the daemon answers
             // on the asking connection, so this never reaches a TUI client.
             // The arm exists because `Event` is one shared exhaustive enum.
             | IpcEvent::TaskStatus { .. }
-            // Same for the `gh` shim's admission/ack replies (#1801).
+            // Same for the `gh` shim's admission/ack replies (#1801) and
+            // the work store's (#1935).
             | IpcEvent::GhShimReply { .. }
+            | IpcEvent::WorkReport { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -2722,7 +2830,8 @@ impl<T: TerminalAdapter> Model<T> {
                         // and surface why (#476). Delete failures arrive
                         // as `store` (archive/db), `store:<why>` (a refusal
                         // the daemon classified — today the worktree safety
-                        // gate) or `terminal` (a backing agent that couldn't
+                        // gate, which only an UNATTENDED removal can now
+                        // hit) or `terminal` (a backing agent that couldn't
                         // be stopped) errors naming the key; one naming no
                         // pending removal keeps its quiet sync-log-only
                         // handling.
@@ -2795,13 +2904,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // new issues), so it can't register a phantom failing provider.
                 IpcEvent::GithubDiscoveryBehind {
                     behind,
-                    watched_repos,
+                    deferred_secs,
                     required_points,
                     allowance,
                 } => {
                     if *behind {
                         let state = crate::realm::status_ctx::DiscoveryBehind {
-                            watched_repos: *watched_repos,
+                            deferred_secs: *deferred_secs,
                             required_points: *required_points,
                             allowance: *allowance,
                         };
@@ -2876,6 +2985,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::CleanWorktreesCompleted { .. }
                 | IpcEvent::WorktreesInspected { .. }
                 | IpcEvent::WorkspaceDiffInspected { .. }
+                | IpcEvent::RemovalRisksInspected { .. }
+                | IpcEvent::PullRequestReviewSubmitted { .. }
                 | IpcEvent::CheckoutsDiscovered { .. }
                 | IpcEvent::OrphanedWorktreeDeleted { .. }
                 | IpcEvent::AgentRunStarted { .. }
@@ -2914,11 +3025,13 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::ArchivedWorkspaces { .. }
                 | IpcEvent::Stats { .. }
                 | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::AgentSearchText { .. }
+                | IpcEvent::AgentOutputMatches { .. }
                 | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::MasteryLedger { .. }
@@ -2935,12 +3048,17 @@ impl<T: TerminalAdapter> Model<T> {
                 // poll-indicator / mutation-failure semantics either.
                 | IpcEvent::AgentRequestReplied { .. }
                 | IpcEvent::AgentRequestsOpen { .. }
+                // Spooled artifacts (#1822) are read off the worktree, not a
+                // provider poll, and are consumed earlier in this function.
+                | IpcEvent::WorkspaceArtifacts { .. }
                 // `task_status` (#1785) is request/response: the daemon answers
                 // on the asking connection, so this never reaches a TUI client.
                 // The arm exists because `Event` is one shared exhaustive enum.
                 | IpcEvent::TaskStatus { .. }
-                // Same for the `gh` shim's admission/ack replies (#1801).
+                // Same for the `gh` shim's admission/ack replies (#1801) and
+                // the work store's (#1935).
                 | IpcEvent::GhShimReply { .. }
+                | IpcEvent::WorkReport { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -3053,6 +3171,16 @@ impl<T: TerminalAdapter> Model<T> {
                 self.flash_error(format!("✗ {display_name} update failed — {message}"));
             }
         }
+        // The delete confirm's preflight came back: repaint the open
+        // prompt with the checkouts this delete would destroy.
+        if let IpcEvent::RemovalRisksInspected {
+            target,
+            risks,
+            error,
+        } = &event
+        {
+            self.apply_removal_risks(target, risks, error.as_deref());
+        }
         // Worktree inspector replied. Swap the placeholder for the
         // real list. `mount_inspect_list` is idempotent — calling it
         // again after a delete re-renders the now-shorter list, so
@@ -3090,8 +3218,16 @@ impl<T: TerminalAdapter> Model<T> {
             && self.pending_diff_session.as_ref() == Some(&(workspace_key.clone(), target.clone()))
         {
             self.pending_diff_session = None;
+            // A source switch (`p`) is a fresh read for a viewer that
+            // is already open, so the review modal is a mount site as
+            // much as an empty stack is — anything else on top still
+            // owns the screen.
+            let reviewing = self.modal_stack.last() == Some(&Id::DiffReview);
             match (diff, error) {
-                (Some(diff), _) if self.modal_stack.is_empty() => {
+                (Some(diff), _) if reviewing || self.modal_stack.is_empty() => {
+                    if reviewing {
+                        self.pop_modal();
+                    }
                     self.mount_modal(
                         Id::DiffReview,
                         crate::realm::components::diff_review::DiffReview::new(
@@ -3105,8 +3241,61 @@ impl<T: TerminalAdapter> Model<T> {
                 (Some(_), _) => {
                     self.flash_hint("diff is ready — close the current modal and reopen review");
                 }
-                (None, Some(error)) => self.flash_error(format!("couldn't read diff: {error}")),
-                (None, None) => self.flash_error("couldn't read diff"),
+                (None, error) => {
+                    // A PR diff that will not load (offline, no
+                    // credential, a repo the token cannot see) must not
+                    // leave the reviewer with nothing: fall back to the
+                    // checkout, which is at least a diff, and say what
+                    // happened so the substitution is never silent.
+                    let fell_back = matches!(target, lazybox_ipc::WorkspaceDiffTarget::PullRequest)
+                        && self.fall_back_to_local_diff(workspace_key.clone());
+                    let reason = error
+                        .as_ref()
+                        .map(|error| format!(" ({error})"))
+                        .unwrap_or_default();
+                    if fell_back {
+                        self.flash_error(format!(
+                            "couldn't read the PR diff{reason} — showing the checkout"
+                        ));
+                    } else {
+                        self.flash_error(format!("couldn't read diff{reason}"));
+                    }
+                }
+            }
+        }
+        // The GitHub review landed, or GitHub refused it. Success closes
+        // the viewer; a refusal releases it with every drafted comment
+        // still in place, because the viewer is the only place they
+        // exist and the reviewer's next move is to fix one and retry.
+        //
+        // `error` is the discriminator, never `url`: a post that
+        // succeeds without a parseable URL is still a post, and reading
+        // success off `url` reported it as a failure.
+        if let IpcEvent::PullRequestReviewSubmitted {
+            comments,
+            url,
+            error,
+            ..
+        } = &event
+        {
+            match error {
+                Some(error) => {
+                    self.release_diff_review();
+                    self.flash_error(format!("review not posted: {error}"));
+                }
+                None => {
+                    if self.modal_stack.last() == Some(&Id::DiffReview) {
+                        self.pop_modal();
+                    }
+                    let posted = format!(
+                        "posted {comments} comment{} as one review",
+                        if *comments == 1 { "" } else { "s" }
+                    );
+                    self.flash_info(match url {
+                        Some(url) => format!("{posted} — {url}"),
+                        None => posted,
+                    });
+                }
             }
         }
         // Dev-folder scan replied. Swap the loading placeholder for the
@@ -3181,23 +3370,9 @@ impl<T: TerminalAdapter> Model<T> {
             // provisioning checklist is exempt from the modal guard:
             // it's a progress overlay for this very spawn, and the
             // whole point of `w` is landing in the agent behind it.
-            let requested_here = spawned.as_ref().is_some_and(|(sk, _)| {
-                self.status
-                    .spawning
-                    .as_ref()
-                    .is_some_and(|sp| &sp.session_key == sk)
-                    || self.spawn_follow_to.as_ref() == Some(sk)
-                    || self
-                        .setup
-                        .pending_editor_launch
-                        .as_ref()
-                        .is_some_and(|(k, _)| k == sk)
-                    || self
-                        .setup
-                        .pending_open_with_launch
-                        .as_ref()
-                        .is_some_and(|(k, _)| k == sk)
-            });
+            let requested_here = spawned
+                .as_ref()
+                .is_some_and(|(sk, _)| self.spawn_requested_here(sk));
             let interactive_modal_up = self
                 .modal_stack
                 .iter()
@@ -3759,6 +3934,36 @@ impl<T: TerminalAdapter> Model<T> {
             .and_then(|k| self.sidebar.stack_info(k))
             .cloned();
         self.right.set_stack(stack);
+        let blocker_states = workspace
+            .as_ref()
+            .map(|w| {
+                w.hierarchy_blocked_by()
+                    .filter_map(|id| Some((id.clone(), self.sidebar.task_state_for(id)?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.right.set_blocker_states(blocker_states);
+        let inbound = session_key
+            .as_ref()
+            .map(|key| {
+                self.sidebar
+                    .open_request_rows(key)
+                    .iter()
+                    .map(|r| {
+                        let asker = lazybox_core::SessionKey::from(r.asker.as_str());
+                        crate::components::right_pane::InboundRequest {
+                            asker_label: self
+                                .sidebar
+                                .workspace_reference_label(&asker)
+                                .unwrap_or_else(|| r.asker.as_str().to_string()),
+                            asker,
+                            question: r.question.clone(),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.right.set_inbound_requests(inbound);
         // On a group-header row there's no workspace to show; feed the
         // pane a repo / Space overview instead so it isn't a dead panel
         // (#1442). Cheap: built from already-tracked workspaces.

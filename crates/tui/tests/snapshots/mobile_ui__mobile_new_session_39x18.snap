@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: screen(&mut m)
+---
+╭ New session · area ─────────────────╮
+│Choose an area · repository optional │
+│                                     │
+│▸     No repository                  │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│j/k move  Enter pick                 │
+│h info  Esc back                     │
+╰─────────────────────────────────────╯

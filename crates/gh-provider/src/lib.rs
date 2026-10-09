@@ -15,8 +15,10 @@ pub use app_auth::{
     AppCredentials, InstallationCoverage, InstallationTokenProvider, is_installation_source,
 };
 pub use client::{
-    BackgroundSweepForecast, BranchMergeGate, GateShortfall, GhClient, GhError, HotFetch,
-    RepoSweepOutcome, RepoSweepSpec, SelectedFetchOutcome, credential_fingerprint,
+    BackgroundSweepForecast, BranchMergeGate, DiffSide, GateShortfall, GhClient, GhError, HotFetch,
+    PullRequestDiff, PullRequestDiffFile, PullRequestFileChange, PullRequestReview,
+    RepoSweepOutcome, RepoSweepSpec, ReviewComment, ReviewVerdict, SelectedFetchOutcome,
+    WorkingClaimRelease, credential_fingerprint,
 };
 pub use graphql::{
     CiFailureRecheck, PrDetails, RoleQualifier, repo_sweep_issue_query, repo_sweep_pr_query,
@@ -134,16 +136,64 @@ pub fn credential_scope(host: Option<&str>) -> String {
 /// render its picker against any provider via `dyn ScopeSource`
 /// without leaking GitHub-specific types.
 ///
-/// Constructed by the daemon at setup time from an authenticated
-/// `GhClient`; tests use `lazybox_core::MockScopeSource` instead so
-/// no real token is needed.
+/// The client is resolved on first use, not when the adapter is
+/// built: the TUI builds its scope sources once at launch, and a
+/// launch that lands in a bad minute — GitHub slow, `/user` timing
+/// out, `gh auth token` failing — used to leave the whole session with
+/// no GitHub source at all, so Settings → "Add / remove repos" read an
+/// empty org list and closed without a word. A failed resolution is
+/// returned to the caller (the picker shows it) and genuinely re-attempted
+/// on the next call — see `client` below for the credential-cache purge
+/// that has to happen for "retry" to mean anything. A successful one is
+/// kept for the session.
+///
+/// Tests use `lazybox_core::MockScopeSource` instead so no real token
+/// is needed.
 pub struct GhScopes {
-    client: Arc<GhClient>,
+    client: tokio::sync::OnceCell<Arc<GhClient>>,
+    host: Option<String>,
 }
 
 impl GhScopes {
-    pub fn new(client: Arc<GhClient>) -> Self {
-        Self { client }
+    /// Resolve the credential and build the client on first use,
+    /// against `host` (`None` = github.com).
+    pub fn lazy(host: Option<String>) -> Self {
+        Self {
+            client: tokio::sync::OnceCell::new(),
+            host,
+        }
+    }
+
+    /// The session's client, built on first call and kept afterwards.
+    ///
+    /// Every call that gets here is the user asking for an org or repo
+    /// list — the cell short-circuits once a client exists, so this body
+    /// runs only on the first attempt or after one that failed. Both are
+    /// user-initiated retries, which is why they clear cached credential
+    /// *failures* first ([`lazybox_auth::invalidate_failed_credentials`]).
+    /// Without that, `CredentialChain`'s own 5-minute failure cache — very
+    /// likely already populated by boot-time provider detection resolving
+    /// this exact scope key seconds earlier — answers the retry from cache
+    /// with no provider run at all. A user who fixed their token would
+    /// keep getting the launch-time error for five minutes, which looks
+    /// exactly like the silent-close bug this adapter exists to fix.
+    /// Cached successes are untouched, so a healthy session pays nothing.
+    async fn client(&self) -> Result<&Arc<GhClient>, ProviderError> {
+        self.client
+            .get_or_try_init(|| async {
+                lazybox_auth::invalidate_failed_credentials();
+                let host = self.host.as_deref();
+                let cred = credential_chain(host)
+                    .resolve(&credential_scope(host))
+                    .await
+                    .map_err(|e| ProviderError::Auth {
+                        source: SOURCE.to_string(),
+                        detail: e.to_string(),
+                    })?;
+                let client = GhClient::from_credential_with_host(cred, host).await?;
+                Ok(Arc::new(client))
+            })
+            .await
     }
 }
 
@@ -155,7 +205,10 @@ impl ScopeSource for GhScopes {
     fn list_scopes<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Scope>, ProviderError>> + Send + 'a>> {
-        Box::pin(async move { self.client.list_scopes().await.map_err(Into::into) })
+        Box::pin(async move {
+            let client = self.client().await?;
+            client.list_scopes().await.map_err(Into::into)
+        })
     }
 
     fn list_children<'a>(
@@ -163,7 +216,8 @@ impl ScopeSource for GhScopes {
         parent_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Scope>, ProviderError>> + Send + 'a>> {
         Box::pin(async move {
-            self.client
+            let client = self.client().await?;
+            client
                 .list_repos_in_org(parent_id)
                 .await
                 .map_err(Into::into)
@@ -381,6 +435,102 @@ mod tests {
             .block_on(credential_chain(None).resolve(&credential_scope(None)))
             .expect("fake gh resolves a credential");
         assert_eq!(credential.token(), "auth token");
+    }
+
+    /// The bug `GhScopes::lazy` exists to close, from the adapter's own
+    /// side: a GitHub source that cannot authenticate must report that as
+    /// an error, never as an empty org list. `Ok(vec![])` is what the
+    /// setup runner reads as "no orgs to pick", so it finished the flow
+    /// and re-saved the unchanged config — Settings → "Add / remove
+    /// repos" vanishing without a word.
+    ///
+    /// Needs no token and touches no network: with every credential
+    /// source removed the chain is exhausted before a client is ever
+    /// built, which is exactly the launch-time failure the old eager
+    /// `build_scope_sources` swallowed. Both listing calls are checked —
+    /// `list_children` had the same `Ok(vec![])` hole — and the second
+    /// call proves a failed resolution leaves the `OnceCell` usable
+    /// rather than poisoned.
+    ///
+    /// Isolated in a child process for the same two reasons as the
+    /// credential tests above: `CredentialChain` and `CommandProvider`
+    /// cache process-globally, and the child has to be cut off from the
+    /// developer's real credentials on every path the chain can take.
+    #[cfg(unix)]
+    #[test]
+    fn a_github_source_that_cannot_authenticate_errors_instead_of_listing_nothing() {
+        const CHILD: &str = "LAZYBOX_GH_SCOPES_NO_CREDENTIAL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let dir =
+                std::env::temp_dir().join(format!("lazybox-gh-scopes-test-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create isolation dir");
+            // PATH is the empty isolation dir ALONE, so `gh` cannot be
+            // found and `CommandProvider` fails to spawn deterministically
+            // instead of asking the developer's real `gh` for a token.
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "--exact",
+                "tests::a_github_source_that_cannot_authenticate_errors_instead_of_listing_nothing",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("PATH", &dir)
+            .env("GH_CONFIG_DIR", &dir)
+            .env("LAZYBOX_HOME", &dir)
+            .env_remove("LAZYBOX_GITHUB_TOKEN")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .status()
+            .expect("spawn isolated no-credential test");
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(status.success(), "isolated no-credential test failed");
+            return;
+        }
+
+        // Refuse to go on if `gh` is somehow still reachable: a real `gh`
+        // here would resolve a real token and turn the assertions below
+        // into a probe of the developer's machine.
+        let reachable = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .map(|entry| entry.join("gh"))
+            .find(|candidate| candidate.is_file());
+        assert_eq!(
+            reachable, None,
+            "`gh` must not be reachable in the isolated child"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let scopes = GhScopes::lazy(None);
+
+        let first = runtime.block_on(scopes.list_scopes());
+        assert!(
+            matches!(first, Err(ProviderError::Auth { .. })),
+            "an unauthenticated GitHub source must surface an auth error, \
+             never Ok([]) — got {first:?}"
+        );
+
+        let children = runtime.block_on(scopes.list_children("github:acme"));
+        assert!(
+            matches!(children, Err(ProviderError::Auth { .. })),
+            "list_children must surface the same auth error, not Ok([]) — \
+             got {children:?}"
+        );
+
+        // A failed resolution must leave the cell initialisable, not
+        // wedged: the picker calls straight back in on the user's retry.
+        let second = runtime.block_on(scopes.list_scopes());
+        assert!(
+            matches!(second, Err(ProviderError::Auth { .. })),
+            "a retry after a failed resolution must resolve again, not \
+             panic or serve a poisoned cell — got {second:?}"
+        );
     }
 
     /// The scope is a cache key, so two hosts must never collapse onto

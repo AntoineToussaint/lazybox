@@ -165,6 +165,7 @@ mod config_sandbox {
 }
 
 mod agent_auth;
+pub mod agent_output_search;
 pub mod agent_runs;
 pub mod agent_stream;
 pub mod agent_updates;
@@ -180,6 +181,7 @@ pub mod codex_home_migration;
 pub mod codex_quota;
 pub mod condense;
 pub mod context_tag;
+pub mod delivery;
 pub mod epics;
 pub mod error_inbox;
 pub mod event_forward;
@@ -205,6 +207,7 @@ pub(crate) async fn store_blocking<T: Send + 'static>(
     }
 }
 
+pub mod artifacts;
 pub mod metrics;
 pub mod polling;
 pub mod pr_trailers;
@@ -213,6 +216,8 @@ pub mod pty;
 pub mod read_intercept;
 pub mod registries;
 mod resource_limits;
+pub mod review_store;
+pub mod session_briefing;
 pub mod session_cost;
 pub mod session_reaper;
 pub mod slack;
@@ -226,6 +231,8 @@ mod terminal_commands;
 mod terminal_io;
 #[cfg(test)]
 mod test_env;
+pub mod work_calls;
+pub mod work_store;
 mod working_claims;
 mod working_watchdog;
 pub mod workspace;
@@ -524,6 +531,16 @@ pub struct ServerConfig {
     pub device_registry: Arc<lazybox_identity::DeviceRegistry>,
     /// Cross-tick provider state, caches, and wake coordination.
     pub poll: PollState,
+    /// Markdown artifacts agents spooled into their worktrees (#1822): the
+    /// watch set the sweep reads and the attached set it broadcasts. Not
+    /// persisted — the spool files themselves are the durable copy, so a
+    /// restart re-derives this from disk.
+    pub artifacts: artifacts::ArtifactSpool,
+    /// The keep-awake watcher's last decision — holding or not — or `None`
+    /// before its first pass. A connecting client is primed from this, not
+    /// from re-deriving the mode over the live agents, which knows nothing
+    /// of the linger and would report "not holding" while the daemon holds.
+    pub keep_awake_active: Arc<parking_lot::Mutex<Option<bool>>>,
     /// Enable GitHub fleet-claim mutations. Production configs turn this on;
     /// in-memory/test configs leave it off so a unit-test agent spawn can
     /// never reach the developer's real GitHub account.
@@ -543,6 +560,11 @@ pub struct ServerConfig {
     /// would re-broadcast an identical retryable error 4×/hour per claim.
     pub(crate) working_claim_error_reports:
         Arc<parking_lot::Mutex<HashMap<String, std::time::Instant>>>,
+    /// Latch for the live-agent population advisory: set while the fleet sits
+    /// at or above `agent.max_live_agents`, cleared when it drops back under.
+    /// See `spawn_handler::should_advise_live_agents` for why the advisory is
+    /// once-per-excursion rather than once-per-spawn.
+    pub(crate) live_agent_advisory: Arc<std::sync::atomic::AtomicBool>,
     /// Workspace keys whose deletion began in this process (single delete,
     /// merged cleanup, or project cascade). Consulted both when a workspace
     /// row is missing and immediately after `backend.spawn`, so a provision
@@ -772,10 +794,13 @@ impl ServerConfig {
             default_principal_id: lazybox_ipc::PrincipalId::local(),
             device_registry: Arc::new(lazybox_identity::DeviceRegistry::ephemeral()),
             poll: PollState::default(),
+            artifacts: artifacts::ArtifactSpool::default(),
+            keep_awake_active: Arc::default(),
             working_claims_enabled: false,
             working_claim_owner_id: "00000000000000000000000000000000".into(),
             working_claim_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             working_claim_error_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            live_agent_advisory: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
             session_cost_lock: Arc::new(parking_lot::Mutex::new(())),
@@ -1347,17 +1372,24 @@ impl Server {
                         lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::SetTrackMain { .. } => "SetTrackMain",
                         lazybox_ipc::Command::QueryTaskStatus { .. } => "QueryTaskStatus",
+                        lazybox_ipc::Command::WorkCall { .. } => "WorkCall",
                         lazybox_ipc::Command::GhAdmit { .. } => "GhAdmit",
                         lazybox_ipc::Command::GhCompleted { .. } => "GhCompleted",
+                        lazybox_ipc::Command::SearchAgentOutput { .. } => "SearchAgentOutput",
+                        lazybox_ipc::Command::ListArchivedWorkspaces => "ListArchivedWorkspaces",
+                        lazybox_ipc::Command::UnarchiveWorkspace { .. } => "UnarchiveWorkspace",
+                        lazybox_ipc::Command::SaveTodoItems { .. } => "SaveTodoItems",
                         lazybox_ipc::Command::SetMetered { .. } => "SetMetered",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
                         lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
                         lazybox_ipc::Command::Kill { .. } => "Kill",
+                        lazybox_ipc::Command::InspectRemovalRisks { .. } => "InspectRemovalRisks",
                         lazybox_ipc::Command::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
                         lazybox_ipc::Command::KeepMergedWorkspace { .. } => "KeepMergedWorkspace",
                         lazybox_ipc::Command::DeleteProject { .. } => "DeleteProject",
                         lazybox_ipc::Command::CollapseIntoPr { .. } => "CollapseIntoPr",
                         lazybox_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
+                        lazybox_ipc::Command::CreateFloatingWorkspace { .. } => "CreateFloatingWorkspace",
                         lazybox_ipc::Command::CreateProject { .. } => "CreateProject",
                         lazybox_ipc::Command::AdoptSessions { .. } => "AdoptSessions",
                         lazybox_ipc::Command::RequestReviewers { .. } => "RequestReviewers",
@@ -1387,6 +1419,9 @@ impl Server {
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
                         lazybox_ipc::Command::InspectWorkspaceDiff { .. } => {
                             "InspectWorkspaceDiff"
+                        }
+                        lazybox_ipc::Command::SubmitPullRequestReview { .. } => {
+                            "SubmitPullRequestReview"
                         }
                         lazybox_ipc::Command::ScanCheckouts { .. } => "ScanCheckouts",
                         lazybox_ipc::Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
@@ -2249,11 +2284,19 @@ pub async fn dispatch_command(
                     // config. Prime `active` from the daemon's mode over the
                     // live agents, and probe the power source (blocking
                     // `pmset`) only when actually holding (#1485).
-                    let active = {
-                        let working = config.terminal.any_agent_working().await;
-                        let asking = matches!(keep_awake_mode, lazybox_config::KeepAwake::Asking)
-                            && config.terminal.any_agent_asking().await;
-                        keep_awake_mode.should_hold(working, asking)
+                    // The watcher's own decision when it has made one (it
+                    // knows the linger); the mode over the live agents only
+                    // before its first pass.
+                    let decided = *config.keep_awake_active.lock();
+                    let active = match decided {
+                        Some(active) => active,
+                        None => {
+                            let working = config.terminal.any_agent_working().await;
+                            let asking =
+                                matches!(keep_awake_mode, lazybox_config::KeepAwake::Asking)
+                                    && config.terminal.any_agent_asking().await;
+                            keep_awake_mode.should_hold(working, asking)
+                        }
                     };
                     let on_battery = active
                         && tokio::task::spawn_blocking(crate::keep_awake::on_battery)
@@ -2312,10 +2355,23 @@ pub async fn dispatch_command(
             // connects mid-conversation sees them without waiting for the
             // next ask or reply. Kept before AutoFixPolicyConfig so that
             // stays the end-of-replay marker.
-            for (workspace_key, open) in crate::mcp::open_request_counts(config).await {
+            for (workspace_key, requests) in crate::mcp::open_requests_by_target(config).await {
                 let _ = tx.send(Event::AgentRequestsOpen {
                     workspace_key,
-                    open,
+                    open: requests.len(),
+                    requests,
+                });
+            }
+            // Spooled agent artifacts (#1822): seed the row badge for every
+            // workspace carrying one, so a client connecting between two
+            // spool changes sees them without waiting for the next. Kept
+            // before AutoFixPolicyConfig so that stays the end-of-replay
+            // marker.
+            for (workspace_key, found) in config.artifacts.snapshot() {
+                let _ = tx.send(Event::WorkspaceArtifacts {
+                    workspace_key,
+                    artifacts: found.artifacts,
+                    hidden: found.hidden,
                 });
             }
             // Keep the auto-fix policy as the last post-subscribe push so
@@ -2467,6 +2523,12 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::FetchScrollback { terminal_id } => {
             spawn_handler::handle_fetch_scrollback(config, tx, terminal_id).await;
+        }
+        lazybox_ipc::Command::SearchAgentOutput {
+            request_id,
+            needles,
+        } => {
+            agent_output_search::handle_search_agent_output(config, tx, request_id, needles).await;
         }
         lazybox_ipc::Command::IngestHook {
             terminal_id,
@@ -2677,6 +2739,53 @@ pub async fn dispatch_command(
                     .send(lazybox_ipc::Event::CommandCompleted { client_request_id });
             }
         }
+        lazybox_ipc::Command::CreateFloatingWorkspace {
+            name,
+            kind,
+            spawn_agent,
+            client_request_id,
+        } => {
+            let key = match workspace::floating::create(config, &name, kind) {
+                Ok(key) => key,
+                Err(error) => {
+                    let event = match client_request_id {
+                        Some(client_request_id) => lazybox_ipc::Event::CommandFailed {
+                            client_request_id,
+                            message: error.to_string(),
+                        },
+                        None => lazybox_ipc::Event::Notification {
+                            title: "Workspace not created".into(),
+                            body: error.to_string(),
+                        },
+                    };
+                    let _ = config.bus.send(event);
+                    return;
+                }
+            };
+            if let Some(client_request_id) = &client_request_id {
+                let _ = config.bus.send(lazybox_ipc::Event::WorkspaceCreated {
+                    client_request_id: client_request_id.clone(),
+                    workspace_key: key.clone(),
+                });
+            }
+            if let Some(agent_id) = spawn_agent {
+                spawn_handler::handle_spawn(
+                    config,
+                    (&key).into(),
+                    None,
+                    lazybox_ipc::TerminalKind::Agent(agent_id),
+                    spawn_handler::SpawnOptions {
+                        client_request_id,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            } else if let Some(client_request_id) = client_request_id {
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::CommandCompleted { client_request_id });
+            }
+        }
         lazybox_ipc::Command::CreateProject { name } => {
             workspace::create_local_project(config, &name);
         }
@@ -2687,7 +2796,7 @@ pub async fn dispatch_command(
                     .bus
                     .send(lazybox_ipc::Event::provider_error_permanent(
                         "hopper",
-                        format!("Hopper was not saved: {error}"),
+                        format!("the TODO list was not saved: {error}"),
                     ));
             }
         }
@@ -2708,6 +2817,20 @@ pub async fn dispatch_command(
             canceled,
         } => {
             workspace::set_hopper_canceled(config, &workspace_key, canceled).await;
+        }
+        lazybox_ipc::Command::SaveTodoItems {
+            workspace_key,
+            items,
+        } => {
+            if let Err(error) = workspace::save_todo_items(config, &workspace_key, items).await {
+                tracing::error!(error = %error, "save todo items failed");
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::provider_error_permanent(
+                        "todo",
+                        format!("the TODO checklist was not saved: {error}"),
+                    ));
+            }
         }
         lazybox_ipc::Command::Snooze {
             session_key,
@@ -2862,6 +2985,19 @@ pub async fn dispatch_command(
                 result,
             });
         }
+        lazybox_ipc::Command::WorkCall {
+            request,
+            client_request_id,
+        } => {
+            let result = work_calls::call(config, request).await;
+            // Same channel choice as the status lookup above, for the same
+            // reasons: request/response on the asking connection, never the
+            // bus a lagging subscriber drops events from.
+            let _ = tx.send(lazybox_ipc::Event::WorkReport {
+                client_request_id,
+                result,
+            });
+        }
         lazybox_ipc::Command::SetMetered {
             session_key,
             enabled,
@@ -2885,11 +3021,15 @@ pub async fn dispatch_command(
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::set_auto_fix_policies(config, &key, ci, conflict).await;
         }
-        lazybox_ipc::Command::Kill { session_key } => {
+        lazybox_ipc::Command::Kill { session_key, force } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            if let Some(reclaimed) = workspace::delete_workspace(config, &key).await {
+            let force = workspace::RemovalForce::from_wire(force);
+            if let Some(reclaimed) = workspace::delete_workspace(config, &key, force).await {
                 workspace::notify_reclaimed(config, "Workspace removed", reclaimed);
             }
+        }
+        lazybox_ipc::Command::InspectRemovalRisks { target } => {
+            workspace::inspect_removal_risks(config, target).await;
         }
         lazybox_ipc::Command::KeepMergedWorkspace { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
@@ -2901,8 +3041,13 @@ pub async fn dispatch_command(
                 workspace::notify_reclaimed(config, "Workspace removed", reclaimed);
             }
         }
-        lazybox_ipc::Command::DeleteProject { project_key } => {
-            workspace::delete_project(config, &project_key).await;
+        lazybox_ipc::Command::DeleteProject { project_key, force } => {
+            workspace::delete_project(
+                config,
+                &project_key,
+                workspace::RemovalForce::from_wire(force),
+            )
+            .await;
         }
         lazybox_ipc::Command::CollapseIntoPr {
             issue_workspace_key,
@@ -2922,10 +3067,15 @@ pub async fn dispatch_command(
             // watched repo) no longer pins it and re-runs the sweep every
             // tick.
             //
-            // An explicit refresh also clears the command-credential
-            // cache: a user who just ran `gh auth login` and hit
-            // refresh must not wait out a failure-backoff window.
-            lazybox_auth::invalidate_command_credential_cache();
+            // An explicit refresh also forgets cached credential failures:
+            // a user who just ran `gh auth login` and hit refresh must not
+            // wait out a failure-backoff window. Both caches have to go,
+            // not just the command provider's — `CredentialChain` memoises
+            // its own copy of that outcome for 5 minutes and is consulted
+            // first, so clearing the command cache alone left the refresh
+            // serving the same stale error without running a thing.
+            // Successes are kept, so a healthy token is not re-resolved.
+            lazybox_auth::invalidate_failed_credentials();
             // Force the sweep on the client that RUNS it: with a GitHub App
             // carrying the sweep, the cached user client is a different
             // client with its own hot-freshness and dependency caches, and
@@ -3053,6 +3203,23 @@ pub async fn dispatch_command(
         } => {
             polling::handle_inspect_workspace_diff(config, workspace_key, target).await;
         }
+        lazybox_ipc::Command::SubmitPullRequestReview {
+            workspace_key,
+            head_sha,
+            summary,
+            verdict,
+            comments,
+        } => {
+            polling::handle_submit_pull_request_review(
+                config,
+                workspace_key,
+                head_sha,
+                summary,
+                verdict,
+                comments,
+            )
+            .await;
+        }
         lazybox_ipc::Command::ScanCheckouts { roots } => {
             polling::handle_scan_checkouts(config, roots).await;
         }
@@ -3078,6 +3245,15 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::UpdateAgentClis => {
             agent_updates::handle_update_all(config);
+        }
+        lazybox_ipc::Command::ListArchivedWorkspaces => {
+            workspace::broadcast_archived(config);
+        }
+        lazybox_ipc::Command::UnarchiveWorkspace {
+            key,
+            client_request_id,
+        } => {
+            workspace::handle_unarchive(config, &key, client_request_id);
         }
         lazybox_ipc::Command::ListErrors => {
             error_inbox::handle_list(config).await;

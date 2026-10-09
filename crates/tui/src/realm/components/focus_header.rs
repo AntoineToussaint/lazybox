@@ -37,12 +37,31 @@ pub fn compose_title(name: &str, repo: Option<&str>, number: Option<usize>) -> S
     }
 }
 
+/// One attention count on the focus-mode strip. A click on it runs the
+/// jump to the next workspace it counts — the counts were the only
+/// chrome focus mode keeps, and none of them could be clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusCount {
+    Asking,
+    CiFailing,
+    Unread,
+    Review,
+}
+
 /// Render the focus-mode header into `area` (a single row).
 /// `title` names the workspace whose terminal is showing; `hint` is
-/// the short keybinding reminder pinned to the right edge.
-pub fn render(frame: &mut Frame, area: Rect, title: &str, summary: AttentionSummary, hint: &str) {
+/// the short keybinding reminder pinned to the right edge. Returns the
+/// screen column range of each attention count drawn.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    summary: AttentionSummary,
+    hint: &str,
+) -> Vec<(std::ops::Range<u16>, FocusCount)> {
+    let mut hits = Vec::new();
     if area.height == 0 || area.width == 0 {
-        return;
+        return hits;
     }
     let theme = crate::theme::current();
     let bg = Style::default().bg(theme.surface);
@@ -68,11 +87,44 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, summary: AttentionSumm
                 .add_modifier(Modifier::BOLD),
         ),
     ];
-    for (count, glyph, label, color, bold) in [
-        (summary.asking, "!", "asking", theme.warn, true),
-        (summary.ci_failing, "✗", "CI", theme.error, true),
-        (summary.unread, "●", "new", theme.accent, false),
-        (summary.review_pending, "⟳", "review", theme.warn, false),
+    let mut col = area.x
+        + left
+            .iter()
+            .map(|s| crate::util::visual_width(s.content.as_ref()) as u16)
+            .sum::<u16>();
+    for (count, glyph, label, color, bold, kind) in [
+        (
+            summary.asking,
+            "!",
+            "asking",
+            theme.warn,
+            true,
+            FocusCount::Asking,
+        ),
+        (
+            summary.ci_failing,
+            "✗",
+            "CI",
+            theme.error,
+            true,
+            FocusCount::CiFailing,
+        ),
+        (
+            summary.unread,
+            "●",
+            "new",
+            theme.accent,
+            false,
+            FocusCount::Unread,
+        ),
+        (
+            summary.review_pending,
+            "⟳",
+            "review",
+            theme.warn,
+            false,
+            FocusCount::Review,
+        ),
     ] {
         if count == 0 {
             continue;
@@ -81,7 +133,11 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, summary: AttentionSumm
         if bold {
             style = style.add_modifier(Modifier::BOLD);
         }
-        left.push(Span::styled(format!("{glyph} {count} {label}  "), style));
+        let text = format!("{glyph} {count} {label}");
+        let width = crate::util::visual_width(&text) as u16;
+        hits.push((col..col + width, kind));
+        col += width + 2;
+        left.push(Span::styled(format!("{text}  "), style));
     }
     // Reserve the hint's columns on the right edge and render the left
     // run (title + attention counts) only into the remaining span, so
@@ -104,6 +160,8 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, summary: AttentionSumm
         ..area
     };
     frame.render_widget(Paragraph::new(Line::from(left)).style(bg), left_area);
+    // A count the hint's reserved columns clipped is not a target.
+    hits.retain(|(range, _)| range.end <= left_area.x + left_area.width);
 
     // ── Right: keybinding hint, right-aligned ───────────────────────
     if hint_fits {
@@ -122,6 +180,7 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, summary: AttentionSumm
             hint_rect,
         );
     }
+    hits
 }
 
 /// Chrome for one focus-mode workspace pane (#1258), precomputed by
@@ -227,12 +286,43 @@ mod tests {
 
     fn render_to_string(title: &str, summary: AttentionSummary, hint: &str) -> String {
         let mut term = Terminal::new(TestBackend::new(70, 1)).unwrap();
-        term.draw(|f| render(f, Rect::new(0, 0, 70, 1), title, summary, hint))
-            .unwrap();
+        term.draw(|f| {
+            render(f, Rect::new(0, 0, 70, 1), title, summary, hint);
+        })
+        .unwrap();
         let buf = term.backend().buffer().clone();
         (0..buf.area.width)
             .map(|x| buf[(x, 0)].symbol())
             .collect::<String>()
+    }
+
+    /// Each drawn count reports the columns it occupies, so a click on
+    /// `! 1 asking` runs the asking jump and not the one beside it.
+    #[test]
+    fn each_count_reports_where_it_was_drawn() {
+        let summary = AttentionSummary {
+            unread: 0,
+            asking: 1,
+            ci_failing: 0,
+            review_pending: 2,
+        };
+        let mut term = Terminal::new(TestBackend::new(70, 1)).unwrap();
+        let mut hits = Vec::new();
+        term.draw(|f| {
+            hits = render(f, Rect::new(0, 0, 70, 1), "ws", summary, "Esc");
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        let text = |range: &std::ops::Range<u16>| {
+            range
+                .clone()
+                .map(|x| buf[(x, 0)].symbol().to_string())
+                .collect::<String>()
+        };
+        let kinds: Vec<FocusCount> = hits.iter().map(|(_, k)| *k).collect();
+        assert_eq!(kinds, [FocusCount::Asking, FocusCount::Review]);
+        assert_eq!(text(&hits[0].0), "! 1 asking");
+        assert_eq!(text(&hits[1].0), "⟳ 2 review");
     }
 
     #[test]

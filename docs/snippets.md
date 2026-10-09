@@ -203,6 +203,81 @@ walk there.
 Three built-in pairs ship chained: `rev` → `fixall`, `deepreview` →
 `fixall`, and `freshen` → `push`.
 
+## Hand findings to a fresh fixer
+
+A chain assumes one conversation. `]]n` sends `fixall` to the agent that
+just produced the review, and that agent remembers what it found.
+
+The moment the fixer is a *different* run — a fresh session, a cheaper
+model, another CLI, tomorrow — that memory is gone, and nothing reports
+the loss: a fixer with no findings still finishes and still says it is
+done. So the findings are persisted instead of remembered.
+
+An `action:` field marks a workflow as a step of that handoff:
+
+```yaml
+snippets:
+  myreview:
+    category: Review
+    action: deep_review
+    body: |
+      …my own review prompt…
+```
+
+The two shipped steps carry that step's **artifact contract** in their
+body — the obligation that makes the handoff durable. Declaring `action:`
+on your own snippet marks it as the same step for anything downstream; it
+does not rewrite your prompt, because a snippet delivery carries only
+what its author wrote (global response rules live in lazybox's
+spawn-time briefing, not in each snippet):
+
+- `deep_review` — with the tools available, the review is not finished
+  until it calls `submit_review` with the readable report, the scope it
+  read (`base_sha` / `head_sha`, plus `dirty_digest` on a dirty tree), and
+  one entry per finding carrying its severity, `file:line` anchors,
+  evidence and suggested remediation. **Zero findings is a complete
+  review**: the empty list is submitted, so a later fixer can tell a clean
+  tree from a review that never ran. A malformed submission is kept as a
+  *draft* that no fixer will bind, and the reply names each defect.
+- `fix_all` — with the tools available, the fixer calls `list_reviews`
+  first and obeys its `selection`: `bound` (read it with `get_review` and
+  work from its findings), `ambiguous` (ask which report), or `missing`
+  (**stop** — a deep review must run first). A bound report whose head has
+  moved still binds, but every finding is revalidated against the code as
+  it is now. The run ends with `submit_review_result`: one outcome per
+  finding — `fixed`, `already_resolved`, `blocked` or `refuted` — with the
+  evidence behind it. The original report is never modified.
+
+### Not every agent has the tools
+
+The artifact channel is the daemon's MCP server, and that reaches only
+agents lazybox can inject an MCP config into — `Agent::supports_mcp_config`,
+which Claude sets and the others do not. A snippet is delivered as text to
+whatever agent is focused, and nothing on that path knows which one it is
+(`lazybox-tui` cannot even depend on `lazybox-agents` to ask), so both
+contracts state the tool calls as a **condition the agent resolves about
+itself** and spell out the other branch.
+
+Without the tools, `deep_review` delivers the review as prose and adds a
+line saying the findings were not persisted; `fix_all` works from the
+review in the same conversation, exactly as it did before artifacts
+existed, and says in its verdict that it did. Neither stops. That matters:
+an unconditional "call `list_reviews` … `missing` — STOP" would have told
+every agent without the tools to abandon work it had previously done from
+conversation memory.
+
+Artifacts live in the daemon's store, not in the worktree, so they
+survive the session ending, the worktree being cleaned up, and a daemon
+restart. They are workspace-scoped: one workspace's findings never reach
+another's fixer.
+
+The two shipped built-ins declare these actions (`deepreview` and
+`fixall`), so the loop works with no configuration — and `]]n` still
+walks it, now without depending on the fixer having been there for the
+review. Nothing is dispatched by snippet *name* or by matching words in a
+body: rename your copy, rewrite the prose, and the `action:` you declared
+is what still decides.
+
 ## Dispatch a native skill
 
 A snippet is a *human-triggered* prompt macro; an agent **skill** (a
@@ -501,60 +576,32 @@ they do too:
   instruction. Long enough to be specific, short enough to read at a
   glance in the preview pane.
 
-Every built-in is **delivered** with the same output contract. It is appended
-by `Snippet::delivery_body()` at the moment the snippet is sent — it is not
-part of the authored `body`, and that distinction is load-bearing rather than
-cosmetic. The contract closes the turn ("nothing after it"), which is only
-true where the snippet *is* the turn: `]]s`, `]]n`, `Shift-B` broadcast, and
-the `send_snippet` MCP tool. Three surfaces embed or display a body where that
-claim would be false, and they carry the authored text alone:
+Every agent session starts with Lazybox's response contract, independent of
+whether its first task came from a built-in snippet, a user prompt, an
+automatic/headless run, or a later snippet. `Snippet::delivery_body()` sends
+only the task-specific instruction; exported skills, role preambles, catalog
+previews, user-defined bodies, and overrides therefore stay exactly as
+authored.
 
-- **An exported `SKILL.md`** (#1672). A skill can be invoked by the model
-  *mid-task* (see [snippets-vs-skills.md](snippets-vs-skills.md)), so a
-  turn-ending trailer would truncate whatever turn it was invoked from.
-- **The Planner role preamble** (#1523), which folds the `carve` and
-  `designissues` briefs in *ahead of* the real work prompt.
-- **The `]` catalog browser and the picker preview**, which render bodies to
-  be read, not sent; repeating one constant 61 times buries what differs.
+The contract governs the handoff, not its visual shape. It asks for the
+concrete outcome first, preserves the evidence and named blockers that support
+it, and names who must do what when action remains. A question that needs a
+human answer is also sent through `report_blocker` when that tool is available.
 
-It constrains only the ending: exploration, tool use, and detailed findings
-before it remain unrestricted. Each `next:` step gets its own ending.
-User-defined bodies and overrides are delivered exactly as authored — the
-contract is lazybox's house style for its own built-ins, not a rewrite
-imposed on your file.
+The contract explicitly forbids a second summary, status banners, glyphs,
+dividers, aligned key/value projection, runtime footers, and arbitrary line
+caps. Those rules were tried and rejected after they turned specific findings
+into generic labels and discarded the evidence a reviewer needed. The agent
+stops when the direct handoff is complete; it does not append a presentation
+template to an answer that already said the useful thing.
 
-The ending takes at most **7 lines**: exactly one `STATUS:` line, a one-sentence
-prose verdict explaining why, and up to five short detail lines only when they
-change what the reader does next. Nothing follows it. Bullets are reserved for
-enumerable findings, not the verdict. The four statuses are:
+Each built-in still states the concrete fact its handoff leads with. For
+example, `push` names the pushed SHA, `ready` names the resulting draft state
+and that it pushed nothing, and `whyci` names the failing checks and that it
+changed nothing. That fact is per snippet, never inferred from its category.
 
-- `DONE`: finished, nothing needed from you.
-- `ACTION NEEDED`: you must act; the ending names the exact action. Known blockers take priority.
-- `NEED CONTEXT`: blocked on information only you have; asks one question. A
-  status line is prose nobody polls, so the contract also asks the agent to
-  call `report_blocker` when it has that tool — that is what surfaces the
-  block on `epic_status` and the `E j` jump instead of leaving it in
-  scrollback.
-- `UNSURE`: finished with low confidence; names what to verify.
-
-For example:
-
-```text
-STATUS: UNSURE
-The fix passes locally, but timing under production load remains unverified.
-Verify latency with the production workload before deploying.
-```
-
-**What the verdict names is per-snippet, not per-category.** Each body ends by
-stating it — `push` names the pushed SHA, `ready` names the resulting draft
-state *and* that it pushed nothing, `whyci` names how many checks fail and that
-it changed nothing, `nit` names the nit count and that a nit is not a blocker.
-An earlier pass keyed these off `category`, which told `ready` to report a
-pushed SHA and `whyci` to report what it created; a category is not a
-description of what a snippet does.
-
-The complete authored built-in `rev` body (the contract is appended at
-delivery, so it is not part of what you would write):
+The complete built-in `rev` body (global response rules are already in the
+session briefing, so they are not part of what you write):
 
 ```yaml
 snippets:
@@ -616,59 +663,14 @@ patterns behind that house style, and
 text lives in one place rather than being split between a snippet and a
 skill.
 
-### Output contract evaluation
+### Rejected status-template experiment
 
-A fixed final-emission replay compared five snippets on Claude Code 2.1.269
-(default model) and Codex CLI 0.154.0 (gpt-6-astra), using built-ins before
-this change (`b9b139e7`) and at revision `1030f948`. Each of the 20 fresh sessions received
-the same synthetic diff, replacing `return a / b` with `return a // b` in
-`divide.py`, plus the same completed-execution evidence for that snippet:
-
-| Snippet | Execution evidence | Expected status |
-| --- | --- | --- |
-| `deepreview` | One confirmed blocker: `divide(3, 2)` returns 1 instead of the documented 1.5; review complete, fix requires user action. | ACTION NEEDED |
-| `fixall` | Restored `/`, regression added, 4 tests and lint pass, committed `abc1234` on `fix/division` and pushed; no remaining findings. | DONE |
-| `bug` | Root cause confirmed; only the user knows whether integer or float behavior is intended; no edits. | NEED CONTEXT |
-| `commit` | Only staged `divide.py` committed as `abc1234` on `fix/division`; clean tree; push was not requested. | DONE |
-| `triage` | Issue #42 reproduced, repair/test plan posted; one issue updated, none created, no unknowns; no coding requested. | DONE |
-
-The replay instruction stated that execution was complete, prohibited more
-tool use, and asked for the closing response using only that evidence and
-the snippet. Claude ran with `-p --tools '' --no-session-persistence`;
-Codex used `exec --ignore-user-config --ephemeral --skip-git-repo-check
---sandbox read-only` in separate temporary directories.
-
-Format scoring counted exactly one literal `STATUS:` line with an allowed
-value and 2–7 lines from there to the end, including blank lines. Status
-semantics were assessed separately against the expected disposition above;
-before the change, this was inferred from prose rather than requiring the
-new vocabulary.
-
-| Agent | Format before → after | Correct disposition before → after | After ending lines (table order) |
-| --- | --- | --- | --- |
-| Claude Code | 0/5 → 5/5 | 5/5 → 5/5 | 5, 2, 6, 4, 5 |
-| Codex | 0/5 → 5/5 | 5/5 → 5/5 | 6, 2, 4, 2, 6 |
-
-Two additional after-change `bug` replays supplied a completed fix and four
-passing tests, but low confidence because production inputs had not been
-validated. Both agents chose `UNSURE` and named production-input verification;
-the endings were four lines for Claude and three for Codex.
-
-This small replay supports improved ending consistency, not better task
-correctness. It does not exercise live tool execution, and it is not a
-statistical benchmark. A verdict fact can still land in a detail line instead
-of the verdict sentence; a prompt contract is not a runtime output validator.
-Full end-to-end before/after agent runs remain unverified.
-
-**The measured revision is not the shipped one.** At `1030f948` the contract
-was appended to bodies that still ended with their own competing "close with
-a human-readable summary: …" — 46 of 61 did. The shipped bodies no longer do,
-and the contract now rides `delivery_body()` rather than `body`. The format
-scoring above counted only the `STATUS:` line and the lines after it, so it
-was blind to the redundant summary a competing instruction produces *above*
-the ending; removing that instruction can only reduce divergence, which makes
-the 10/10 figure a lower bound rather than a result invalidated by the change.
-It has not been re-measured against the shipped bodies.
+An earlier replay measured whether agents obeyed a fixed status/glyph/line-count
+template. It measured format compliance, not usefulness. Real output then showed
+the failure that synthetic scoring missed: the template appended a redundant
+ending and compressed concrete findings into vague labels. The shipped contract
+therefore preserves evidence and forbids that projection rather than optimizing
+for identical-looking tails.
 
 > **Not yet supported:** placeholder / variable interpolation in bodies
 > (e.g. injecting the selected file or a typed argument). Bodies are
@@ -685,6 +687,7 @@ snippets:
     skill: <optional native skill name>
     provider: <optional workspace source scope>
     next: <optional follow-up key, or a list of them>
+    action: <optional workflow step: deep_review | fix_all>
     body: |
       <text sent to the agent>
 ```
@@ -697,6 +700,7 @@ snippets:
 | `skill`       | no       | Name of a native agent skill this snippet dispatches. When set, the delivered instruction tells the agent to invoke that `SKILL.md` skill; `body` becomes the task context. See [Dispatch a native skill](#dispatch-a-native-skill). |
 | `provider`    | no       | Workspace source this snippet is scoped to (`github`, `linear`, matching a task's provider). When set, the picker only shows it on a workspace of that source; when omitted the snippet is generic and shows everywhere. See [Provider-scoped workflows](#provider-scoped-workflows). |
 | `next`        | no       | The workflow(s) `]]n` sends next. A single key or a list; a blank, duplicate, or self-referencing entry is dropped at load. See [Chain a workflow](#chain-a-workflow). |
+| `action`      | no       | Marks this workflow as a step of the persisted review handoff — `deep_review` (produces findings) or `fix_all` (consumes them). Metadata only: it marks the step for anything downstream and never rewrites your body, and the two shipped steps carry their artifact contract in their own body. Omitted for every ordinary snippet. See [Hand findings to a fresh fixer](#hand-findings-to-a-fresh-fixer). |
 | `body`        | yes\*    | Sent to the agent. May span multiple lines. \*Optional when `skill` is set — the skill invocation is then the whole instruction. |
 
 ## Behaviour & gotchas

@@ -304,7 +304,7 @@ storage — `post_note` / `read_notes` with tags, which exist.
 ### 4j. Labels: the visible projection
 
 lazybox already treats GitHub labels as live coordination state (`working`,
-`lazybox:w:*`, `lazybox:<agent>`), which is what makes the fleet legible to
+`lazybox:<agent>`), which is what makes the fleet legible to
 anyone looking at GitHub rather than at lazybox. The epic gets the same
 treatment, so the plan is visible from GitHub, from a Linear/Jira mirror, or
 from any other tool:
@@ -344,6 +344,11 @@ its own wall instead of idling — the session briefing says so); a
 `Blocked on: <text>` body-marker line for humans and planners, parsed by the
 same module as `Blocked by:`; and a `blocked:<kind>` label as the visible
 projection (§4j rules apply).
+
+A declared blocker is a row keyed by workspace, so it travels with the work:
+the issue→PR fold re-keys it onto the PR inside the same transaction that
+retires the issue row (merging reasons when the PR declared one of its own),
+and a row whose workspace no longer exists is collected on the next recompute.
 
 Blockers lead everywhere: first in the epic header line (`⛔ 2 blocked!`
 when the operator owns one), the first section of the overview (sorted by
@@ -487,7 +492,7 @@ framing while the separate command still persists the role for the badge and
 label projection. The MCP `spawn_worker` tool (`server/src/mcp.rs`) is
 Coordinator-only: it creates a workspace, assigns it to the caller's epic as a
 Worker, and spawns an agent on a brief, refusing off-role or past the epic's
-worker cap (`agents.max_epic_workers`, default 6). Labels are written on
+worker cap (`agent.max_epic_workers`, default 6). Labels are written on
 set/clear via `sync_role_label_target` (single `role:*` label converged, never
 wholesale-replaced). Roles are advisory except the `spawn_worker` gate — merge
 gating/ordering is P3 and automatic dispatch is P4. The epic-header

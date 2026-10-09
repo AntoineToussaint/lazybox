@@ -183,6 +183,22 @@ pub fn render_with(
 /// `Loading` modal's own liveness backstop so this graceful path always
 /// wins; the modal timeout only covers a result that is produced but
 /// *lost* (dropped on an overflowed event channel).
+///
+/// Since `GhScopes` authenticates lazily, this budget now covers the
+/// credential resolve and the client build (a `/user` call) as well as the
+/// listing itself, where it used to cover the listing alone. Two
+/// consequences worth knowing before tuning it:
+///
+/// - A *slow* GitHub can spend most of the window on the client build and
+///   leave too little for the listing. That self-corrects on one retry:
+///   the `OnceCell` keeps a client once built, so a second attempt spends
+///   the whole window on the listing exactly as it did before.
+/// - The task spawned below outlives a dismissed modal — nothing holds its
+///   handle — so an in-flight build keeps running after Esc. A user who
+///   Escs and immediately reopens the picker waits behind that build's
+///   remaining time and gets less than the full window for their own
+///   attempt. Both attempts stay individually bounded here, so the worst
+///   case is a retryable error screen, never a hang.
 const EFFECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run an [`Effect`] in the background and deliver its [`LoadResult`]
@@ -289,7 +305,7 @@ async fn list_scopes(
 ) -> Result<Vec<Scope>, lazybox_core::ProviderError> {
     match sources.iter().find(|s| s.provider_id() == provider_id) {
         Some(src) => src.list_scopes().await,
-        None => Ok(Vec::new()),
+        None => Err(no_scope_source(provider_id)),
     }
 }
 
@@ -300,7 +316,18 @@ async fn list_children(
 ) -> Result<Vec<Scope>, lazybox_core::ProviderError> {
     match sources.iter().find(|s| s.provider_id() == provider_id) {
         Some(src) => src.list_children(parent_id).await,
-        None => Ok(Vec::new()),
+        None => Err(no_scope_source(provider_id)),
+    }
+}
+
+/// A provider with no registered [`lazybox_core::ScopeSource`] cannot
+/// list anything. That is an error the picker shows, never an empty
+/// list: the runner reads "no orgs" as "nothing to pick" and finishes,
+/// which closed Settings → "Add / remove repos" without a word.
+fn no_scope_source(provider_id: &str) -> lazybox_core::ProviderError {
+    lazybox_core::ProviderError::Permanent {
+        source: provider_id.to_string(),
+        detail: format!("no scope source is registered for {provider_id}"),
     }
 }
 
@@ -395,6 +422,76 @@ mod tests {
             kind: ScopeKind::Repo,
             private,
         }
+    }
+
+    /// Settings → "Add / remove repos" closed without a word when the
+    /// GitHub source was missing: `list_scopes` answered `Ok(vec![])`,
+    /// the runner read that as "no orgs to pick" and finished. A
+    /// missing source must surface as an error the picker shows.
+    #[tokio::test]
+    async fn a_provider_without_a_scope_source_errors_instead_of_listing_nothing() {
+        let sources: ScopeSources = Arc::new(Vec::new());
+        assert!(list_scopes(&sources, "github").await.is_err());
+        assert!(
+            list_children(&sources, "github", "github:acme")
+                .await
+                .is_err()
+        );
+    }
+
+    /// End to end through the runner: an "Add / remove repos" entry
+    /// whose org listing fails lands on an Info screen — the modal
+    /// stays up and says why — rather than on `Finish`, which unmounts
+    /// it and re-saves the unchanged config.
+    #[tokio::test]
+    async fn edit_scopes_with_no_source_shows_an_error_not_a_silent_finish() {
+        use crate::setup_flow::{PartialEntry, RunnerStep, SetupOutcome, SetupRunner};
+        let sources: ScopeSources = Arc::new(Vec::new());
+        let (mut runner, step) = SetupRunner::at_partial(
+            SetupOutcome::default_enabled(setup::SetupReport { tools: Vec::new() }),
+            ["github".to_string()].into_iter().collect(),
+            PartialEntry::EditScopes("github".into()),
+        );
+        assert!(matches!(
+            step,
+            RunnerStep::Show {
+                effect: Some(_),
+                ..
+            }
+        ));
+        let result = LoadResult::Scopes(list_scopes(&sources, "github").await);
+        match runner.step_loading_resolved(result) {
+            RunnerStep::Show {
+                screen: Screen::Info { .. },
+                ..
+            } => {}
+            RunnerStep::Finish(_) => panic!("an unlistable provider finished the flow silently"),
+            _ => panic!("expected an Info screen"),
+        }
+        // Closing that screen must not Finish either: Finish re-saves the
+        // untouched config and raises the polling modal.
+        assert!(matches!(runner.step_dismissed(), RunnerStep::Cancel));
+    }
+
+    /// An org listing that succeeds but is empty used to Finish at once in
+    /// "Add / remove repos" — the modal vanished and config was re-saved.
+    #[tokio::test]
+    async fn edit_scopes_with_an_empty_org_list_explains_then_cancels() {
+        use crate::setup_flow::{PartialEntry, RunnerStep, SetupOutcome, SetupRunner};
+        let (mut runner, _) = SetupRunner::at_partial(
+            SetupOutcome::default_enabled(setup::SetupReport { tools: Vec::new() }),
+            ["github".to_string()].into_iter().collect(),
+            PartialEntry::EditScopes("github".into()),
+        );
+        match runner.step_loading_resolved(LoadResult::Scopes(Ok(Vec::new()))) {
+            RunnerStep::Show {
+                screen: Screen::Info { .. },
+                ..
+            } => {}
+            RunnerStep::Finish(_) => panic!("an empty org list finished the flow silently"),
+            _ => panic!("expected an Info screen"),
+        }
+        assert!(matches!(runner.step_dismissed(), RunnerStep::Cancel));
     }
 
     #[test]

@@ -65,6 +65,7 @@ impl ClientRuntime {
         tasks.push(crate::polling::spawn(config.clone(), options.poll_interval));
         tasks.push(crate::working_claims::spawn(config.clone()));
         tasks.push(crate::working_watchdog::spawn(&config));
+        tasks.push(crate::artifacts::spawn(&config));
         log_model_pin_warnings();
         // Take the context-hygiene snapshot while the config is known to
         // parse: a file broken later must freeze the dial where the user left
@@ -83,6 +84,9 @@ impl ClientRuntime {
         // #1198: hourly reap of sessions whose PR/issue closed past the
         // grace window (and a startup-restore gate on the same predicate).
         tasks.push(crate::session_reaper::spawn(&config));
+        // #1908: fail work whose agent is gone, so a dead session's task
+        // stops reading as in flight to whoever is waiting on it.
+        tasks.push(crate::work_store::spawn(&config));
         tasks.push(crate::agent_updates::spawn_scheduled(config.clone()));
         if let Some(task) = crate::proxy::spawn(&config).await {
             tasks.push(task);

@@ -68,13 +68,28 @@ one, in the PR body.
 
 **The tracker record is the workspace.** A GitHub issue or PR, a Linear or
 Jira ticket, is worked in the one workspace it already has — an issue and the
-PR that closes it share that row. New work starts by filing the record
+PR that closes it share that row. New work goes in a record of its own
 (`gh issue create --repo <owner/repo>`, under an epic `--parent <url>`), never
-by opening a second workspace beside it. Named workspaces are repo-less
-scratch only.
+in a second workspace beside one. Named workspaces are repo-less scratch only.
 
-**Some GitHub labels are live coordination state**, not metadata: `working` /
-`lazybox:w:…` (a running agent owns this task), `no-auto-fix` /
+**Filing that record needs the user's explicit go-ahead**, and so does a
+Linear ticket. This is a *standing rule*, not a hardcoded string: the rules
+lazybox states in every agent's briefing are named, individually overridable
+policies (`lazybox_core::agent_policy`, `policies:` in
+`~/.lazybox/config.yaml`, `repos.<owner/name>.policies:` per repo). Five ship
+by default — ask before filing a record, prefer one self-contained PR over a
+stack, check for existing or conflicting work before starting, keep the docs
+current in the PR that changes behaviour, and give independent work its own
+workspace rather than a sub-agent. Agent-facing text elsewhere must *defer* to
+them rather than restate them: a second, non-overridable copy of a rule disagrees with the
+first the moment anyone overrides it. An instruction whose own stated
+deliverable is the filed issue — the `carve` snippet, a Planner role spawn —
+is itself the go-ahead.
+
+**Some GitHub labels are live coordination state**, not metadata: `working`
+(a running agent owns this task — one stable label, with the holder, agent,
+model and expiry in lazybox's own sticky claim comment beside it; `lazybox:w:…`
+is the same thing from a box on an older build), `no-auto-fix` /
 `do-not-lazybox` (auto-fix opt-out), and `role:<…>` (orchestration role).
 Stripping one makes the fleet double-spawn or unrole a session.
 

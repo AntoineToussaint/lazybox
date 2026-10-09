@@ -12,6 +12,7 @@ pub(crate) mod claude_env;
 /// don't rebuild the path or re-parse the file themselves.
 pub use claude_env::{ambient_model as claude_ambient_model, user_settings_path};
 pub mod detect;
+pub mod guide;
 pub mod hook;
 pub mod hook_settings;
 pub mod pty;
@@ -30,6 +31,7 @@ pub use pty::{
 };
 pub use session_context::{
     lazybox_mcp_coordination_context, lazybox_session_context, lazybox_session_context_with_mcp,
+    lazybox_session_prompt,
 };
 pub use state_machine::{
     AgentStateMachine, HOOK_STALENESS, HookAuthority, Liveness, Outcome, PtyReading, Reading,

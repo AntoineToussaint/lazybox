@@ -22,6 +22,9 @@ completion. Pick the one that matches what you need to do.
   multi-select, broadcast one instruction to many workspaces, bulk-update
   branches, hand work from one agent to another, and let agents find and
   brief each other over the built-in coordination MCP bus.
+- **[Run a cross-repo epic](/docs/how-to/run-cross-repo-epic/)** — turn a
+  tracker parent and its dependencies into live blocked/ready state, assign
+  roles, dispatch workers, and merge in dependency order.
 - **[Manage automation policies](/docs/how-to/manage-automation-policies/)** —
   inspect and toggle merge-on-green and per-workspace auto-fix behavior from
   the unified `g p` menu.

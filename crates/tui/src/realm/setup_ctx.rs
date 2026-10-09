@@ -93,22 +93,26 @@ pub enum SettingsAction {
     /// Re-run the agents picker.
     EditAgents,
     /// Pick the default agent (`setup.default_agent`) — the one `w`
-    /// "work on this" and new-workspace spawns use — then, when that
-    /// agent declares model tiers, its default tier
-    /// (`agents.<id>.models.default`). Carries the current default id
-    /// (and its default-tier label, if one is set) for the label.
-    EditDefaultAgent {
-        current: String,
-        tier: Option<String>,
-    },
-    /// Pick one agent's default model tier
-    /// (`agents.<id>.models.default`) directly — without routing
-    /// through the default-agent flow. One row per enabled agent that
-    /// declares a tier menu. Carries the current default-tier label
-    /// for the row badge.
-    EditDefaultModel {
+    /// "work on this" and new-workspace spawns use — then that agent's
+    /// own strength. Carries the current default id for the row label.
+    ///
+    /// Deliberately no strength badge: that agent has its own
+    /// [`Self::EditStrength`] row directly below, and printing the same
+    /// `◆ Opus` on both made two adjacent rows look like two views of one
+    /// setting instead of the two separate choices they are.
+    EditDefaultAgent { current: String },
+    /// Pick one agent's strength — the model tier a bare spawn of it
+    /// lands on (`agents.<id>.models.default`) — without routing through
+    /// the default-agent flow. One row per enabled agent, including an
+    /// agent that declares no tier menu: that row says so and opens
+    /// `config.yaml` at the key to add, because silently having no row
+    /// is how an agent ends up running an ambient model nobody chose.
+    /// `strength` is the resolved tier label, `configurable` whether the
+    /// agent declares a menu to pick from.
+    EditStrength {
         agent_id: String,
-        tier: Option<String>,
+        strength: Option<String>,
+        configurable: bool,
     },
     /// Toggle `agent.skip_permissions` — whether interactive Claude
     /// sessions launch with `--dangerously-skip-permissions`. Carries
@@ -170,13 +174,15 @@ impl SettingsAction {
             Self::EditFilters { label, .. } => format!("Edit roles + filters · {label}"),
             Self::EditProviders => "Edit providers (github / linear / …)".into(),
             Self::EditAgents => "Edit agents (claude / codex / cursor / …)".into(),
-            Self::EditDefaultAgent { current, tier } => match tier {
-                Some(tier) => format!("Change default agent · {current} · ◆ {tier}"),
-                None => format!("Change default agent · {current}"),
-            },
-            Self::EditDefaultModel { agent_id, tier } => match tier {
-                Some(tier) => format!("Default model · {agent_id} · ◆ {tier}"),
-                None => format!("Default model · {agent_id}"),
+            Self::EditDefaultAgent { current } => format!("Change default agent · {current}"),
+            Self::EditStrength {
+                agent_id,
+                strength,
+                configurable,
+            } => match (strength, configurable) {
+                (Some(strength), _) => format!("Strength · {agent_id} · ◆ {strength}"),
+                (None, true) => format!("Strength · {agent_id} · agent default"),
+                (None, false) => format!("Strength · {agent_id} · not configured"),
             },
             Self::ToggleSkipPermissions { enabled } => format!(
                 "Skip permission prompts for your sessions · {}",
@@ -222,7 +228,7 @@ impl SettingsAction {
             }
             Self::EditAgents
             | Self::EditDefaultAgent { .. }
-            | Self::EditDefaultModel { .. }
+            | Self::EditStrength { .. }
             | Self::ToggleSkipPermissions { .. }
             | Self::EditLlmGateway { .. }
             | Self::SetUpSandbox { .. }
@@ -237,6 +243,45 @@ impl SettingsAction {
             | Self::UpdateAgentClis => SettingsSection::Maintenance,
         }
     }
+}
+
+/// The per-provider Settings rows for `enabled` providers, in that set's
+/// order.
+///
+/// `scope_capable` is the set of provider ids that actually have a
+/// registered [`ScopeSource`], and only those get an "Add / remove repos"
+/// row. Offering it to a provider that cannot enumerate anything — Linear
+/// ships without a scope-discovery API, so it never has a source — put a
+/// row in the palette whose only possible outcome was a failure modal.
+/// `ProviderError::Unsupported`'s own documentation states the rule this
+/// follows: the surface gates the action, rather than letting the executor
+/// discover it can't be done and reporting that to the user as an error.
+///
+/// Filters are unconditional: every enabled provider has role/type
+/// filters, whether or not its orgs can be listed.
+pub fn provider_setting_rows(
+    enabled: &std::collections::BTreeSet<String>,
+    scope_capable: &std::collections::BTreeSet<String>,
+) -> Vec<SettingsAction> {
+    let mut rows = Vec::with_capacity(enabled.len() * 2);
+    for provider_id in enabled {
+        let label = match provider_id.as_str() {
+            "github" => "GitHub".to_string(),
+            "linear" => "Linear".to_string(),
+            other => other.to_string(),
+        };
+        if scope_capable.contains(provider_id) {
+            rows.push(SettingsAction::EditScopes {
+                provider_id: provider_id.clone(),
+                label: label.clone(),
+            });
+        }
+        rows.push(SettingsAction::EditFilters {
+            provider_id: provider_id.clone(),
+            label,
+        });
+    }
+    rows
 }
 
 pub(crate) struct SetupCtx {
@@ -322,7 +367,7 @@ impl SetupCtx {
 
 #[cfg(test)]
 mod tests {
-    use super::SettingsAction;
+    use super::{SettingsAction, provider_setting_rows};
 
     #[test]
     fn llm_gateway_label_reflects_set_state() {
@@ -338,47 +383,60 @@ mod tests {
         );
     }
 
+    /// The row names the agent and nothing else. It used to repeat that
+    /// agent's strength badge, which the dedicated row below already
+    /// carries — two adjacent rows reading `◆ Opus` for two different
+    /// actions (#1797 review).
     #[test]
-    fn default_agent_label_names_the_current() {
+    fn default_agent_label_names_the_current_agent_only() {
         assert_eq!(
             SettingsAction::EditDefaultAgent {
                 current: "codex".into(),
-                tier: None,
             }
             .label(),
             "Change default agent · codex"
         );
-    }
-
-    #[test]
-    fn default_agent_label_shows_the_default_tier_badge() {
-        assert_eq!(
-            SettingsAction::EditDefaultAgent {
+        assert!(
+            !SettingsAction::EditDefaultAgent {
                 current: "claude".into(),
-                tier: Some("Opus".into()),
             }
-            .label(),
-            "Change default agent · claude · ◆ Opus"
+            .label()
+            .contains('◆'),
+            "the strength badge belongs to the strength row",
         );
     }
 
+    /// The three strength states are distinguishable: pinned, pickable
+    /// but unpinned, and no menu declared at all. A menu-less agent must
+    /// not read as "agent default" — that says a choice was made.
     #[test]
-    fn default_model_label_names_agent_and_tier() {
+    fn strength_label_distinguishes_pinned_unpinned_and_unconfigured() {
         assert_eq!(
-            SettingsAction::EditDefaultModel {
+            SettingsAction::EditStrength {
                 agent_id: "claude".into(),
-                tier: Some("Opus".into()),
+                strength: Some("Opus".into()),
+                configurable: true,
             }
             .label(),
-            "Default model · claude · ◆ Opus"
+            "Strength · claude · ◆ Opus"
         );
         assert_eq!(
-            SettingsAction::EditDefaultModel {
-                agent_id: "codex".into(),
-                tier: None,
+            SettingsAction::EditStrength {
+                agent_id: "claude".into(),
+                strength: None,
+                configurable: true,
             }
             .label(),
-            "Default model · codex"
+            "Strength · claude · agent default"
+        );
+        assert_eq!(
+            SettingsAction::EditStrength {
+                agent_id: "codex".into(),
+                strength: None,
+                configurable: false,
+            }
+            .label(),
+            "Strength · codex · not configured"
         );
     }
 
@@ -423,6 +481,46 @@ mod tests {
             }
             .label(),
             "Shell · /opt/homebrew/bin/fish · configured"
+        );
+    }
+
+    /// Linear ships without a scope-discovery API, so it never has a
+    /// registered `ScopeSource` — and "Add / remove repos · Linear" could
+    /// therefore only ever end in a failure modal. It must not be offered
+    /// at all. Its filters row still must be, since filters need no
+    /// enumeration.
+    #[test]
+    fn only_scope_capable_providers_get_an_add_remove_repos_row() {
+        let enabled: std::collections::BTreeSet<String> =
+            ["github", "linear"].iter().map(|s| s.to_string()).collect();
+        let scope_capable: std::collections::BTreeSet<String> =
+            ["github"].iter().map(|s| s.to_string()).collect();
+        let labels: Vec<String> = provider_setting_rows(&enabled, &scope_capable)
+            .iter()
+            .map(|a| a.label())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Add / remove repos · GitHub".to_string(),
+                "Edit roles + filters · GitHub".to_string(),
+                "Edit roles + filters · Linear".to_string(),
+            ],
+        );
+    }
+
+    /// With no sources registered at all (`--test` / `--connect`, where
+    /// the setup inputs are never cached) no provider can enumerate
+    /// anything, so no scope row is offered — those rows were dead
+    /// already: the dispatcher bails out before building a runner.
+    #[test]
+    fn no_registered_sources_offers_no_scope_rows() {
+        let enabled: std::collections::BTreeSet<String> =
+            ["github"].iter().map(|s| s.to_string()).collect();
+        let rows = provider_setting_rows(&enabled, &std::collections::BTreeSet::new());
+        assert_eq!(
+            rows.iter().map(|a| a.label()).collect::<Vec<_>>(),
+            vec!["Edit roles + filters · GitHub".to_string()],
         );
     }
 

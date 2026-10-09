@@ -2887,7 +2887,7 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
         .await;
 
     assert!(
-        workspace::delete_workspace(&config, &workspace_key)
+        workspace::delete_workspace(&config, &workspace_key, workspace::RemovalForce::Gated)
             .await
             .is_some()
     );
@@ -2989,7 +2989,7 @@ async fn delete_workspace_kills_every_owned_session_and_spares_other_workspaces(
     }
 
     assert!(
-        workspace::delete_workspace(&config, &target_key)
+        workspace::delete_workspace(&config, &target_key, workspace::RemovalForce::Gated)
             .await
             .is_some()
     );
@@ -3053,7 +3053,7 @@ async fn failed_terminal_kill_preserves_workspace_and_retryable_mappings() {
     let mut bus = config.bus.subscribe();
 
     assert!(
-        workspace::delete_workspace(&config, &workspace_key)
+        workspace::delete_workspace(&config, &workspace_key, workspace::RemovalForce::Gated)
             .await
             .is_none()
     );
@@ -3457,6 +3457,104 @@ async fn issue_polled_after_pr_routes_into_pr_workspace() {
     assert_eq!(ws.gh_issues.len(), 1);
     assert_eq!(ws.gh_issues[0].id.key, "o/r#71");
 }
+
+#[tokio::test]
+async fn archiving_a_collapsed_pr_row_keeps_its_absorbed_issue_gone() {
+    // #1816: the collapsed row presents as one item, so `x x` on it
+    // dismisses the issue the PR absorbed as well. The issue's own key was
+    // never archived, and nothing but the per-tick closes-index routes the
+    // issue into the PR's key — so the first tick that does not carry the
+    // PR (merged past the recently-merged sweep, closed, filtered out) used
+    // to rebuild the issue as a standalone row.
+    use lazybox_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#141")));
+    let issue_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_issue_task("o/r#71")));
+
+    assert!(
+        workspace::delete_workspace(&config, &pr_key, workspace::RemovalForce::Gated)
+            .await
+            .is_some()
+    );
+    assert!(
+        workspace::load_archived_set(&config).contains(issue_key.as_str()),
+        "archiving the row must tombstone the issue key it was standing in for",
+    );
+
+    // A tick that carries the issue alone.
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    assert!(
+        config.store.list_workspaces().unwrap().is_empty(),
+        "the absorbed issue must not come back as a row of its own",
+    );
+
+    // Reversible: restoring the PR row restores the issue with it, so the
+    // next poll rebuilds the collapsed workspace exactly as it was.
+    assert!(workspace::unarchive_workspace_key(&config, pr_key.as_str()));
+    assert!(!workspace::load_archived_set(&config).contains(issue_key.as_str()));
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    let records = config.store.list_workspaces().unwrap();
+    assert_eq!(records.len(), 1, "the row returns collapsed, not split");
+    let ws: lazybox_core::Workspace =
+        serde_json::from_str(records[0].workspace_json.clone().unwrap().as_str()).unwrap();
+    assert_eq!(ws.gh_issues.len(), 1);
+    assert_eq!(ws.gh_issues[0].id.key, "o/r#71");
+}
+
+#[tokio::test]
+async fn archiving_a_row_does_not_tombstone_a_cross_provider_ticket_it_absorbed() {
+    // A Linear ticket joins a GitHub PR's row only because a
+    // `<TEAM>-<number>` pattern matched the PR's branch name or title (or
+    // the reverse attachment scan) — never because the record declared it.
+    // Letting that inference write a permanent tombstone in Linear's
+    // namespace means deleting a GitHub project can silently retire a
+    // ticket it never owned, with no user-facing way back. The ticket
+    // loses its fold and returns as its own row instead.
+    use lazybox_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_linear_ticket("ENG-9", &["o/r#5"])).await;
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    polling::upsert(&config, make_pr_closing("o/r#5", &["o/r#71"])).await;
+
+    let ws = sole_workspace(&config);
+    assert!(ws.pr.is_some(), "fixture: the PR row absorbed both");
+    assert_eq!(ws.gh_issues.len(), 1, "fixture: the issue folded in");
+    assert_eq!(ws.linear_issues.len(), 1, "fixture: the ticket folded in");
+
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#5")));
+    let issue_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_issue_task("o/r#71")));
+    let ticket_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_linear_ticket(
+        "ENG-9",
+        &[],
+    )));
+    assert!(
+        workspace::delete_workspace(&config, &pr_key, workspace::RemovalForce::Gated)
+            .await
+            .is_some()
+    );
+
+    let archived = workspace::load_archived_set(&config);
+    assert!(
+        archived.contains(issue_key.as_str()),
+        "the same-provider issue the PR declared it closes is still tombstoned",
+    );
+    assert!(
+        !archived.contains(ticket_key.as_str()),
+        "an inferred cross-provider link must not write a tombstone in the other provider",
+    );
+
+    // The ticket comes back as its own row; the GitHub issue stays gone.
+    polling::upsert(&config, make_linear_ticket("ENG-9", &["o/r#5"])).await;
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    assert_eq!(
+        workspace_keys(&config),
+        vec![ticket_key.as_str().to_string()],
+        "only the Linear ticket returns",
+    );
+}
 /// Seed an issue workspace with a fabricated session and return its
 /// id alongside the workspace key. Used by the merge-prompt + confirm
 /// tests below — both want the same starting state.
@@ -3692,6 +3790,56 @@ async fn gh_client_cache_is_independent_of_poll_state() {
     config.poll.cache_gh_client(client);
     assert!(config.poll.has_cached_gh_client());
     polling::restore_poll_state(&config.poll, state).await;
+}
+
+/// #1793: a blocker declared on the issue row must follow the work into the
+/// PR row the fold collapses it into. It is stored under the workspace key,
+/// and the fold *re-keys* the workspace — before this, `epic_status`,
+/// `task_status` and the `!` alert all went blind the moment the PR absorbed
+/// the issue, and the row itself leaked behind the deleted workspace.
+#[tokio::test]
+async fn merge_carries_the_issue_declared_blocker_onto_the_pr() {
+    use lazybox_core::WorkspaceKey;
+    use lazybox_ipc::{BlockerKind, BlockerOwner};
+    use lazybox_server::epics::{DeclaredBlocker, load_declared};
+
+    let config = ServerConfig::in_memory();
+    let (issue_key, _) = seed_issue_with_session(&config, "o/r#151").await;
+    lazybox_server::epics::persist_declared(
+        &config,
+        &DeclaredBlocker {
+            workspace: issue_key.clone(),
+            reason: "waiting on the API contract".into(),
+            kind: BlockerKind::Contract,
+            owner: BlockerOwner::Operator,
+            since: 1_700_000_000_000,
+        },
+    )
+    .expect("persist declared blocker");
+    polling::upsert(&config, make_pr_closing("o/r#187", &["o/r#151"])).await;
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
+        "o/r#187",
+        &["o/r#151"],
+    )));
+
+    polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), true).await;
+
+    let carried = load_declared(&config, pr_key.as_str())
+        .expect("load")
+        .expect("the blocker must be readable under the PR workspace");
+    assert_eq!(carried.workspace, pr_key);
+    assert_eq!(carried.reason, "waiting on the API contract");
+    assert_eq!(carried.kind, BlockerKind::Contract);
+    assert_eq!(
+        carried.since, 1_700_000_000_000,
+        "the fold must not reset how long the work has been blocked",
+    );
+    assert!(
+        load_declared(&config, issue_key.as_str())
+            .expect("load")
+            .is_none(),
+        "no declared-blocker row may point at the deleted issue workspace",
+    );
 }
 
 #[tokio::test]
@@ -4145,7 +4293,11 @@ async fn user_delete_archives_and_blocks_resurrection() {
     polling::upsert(&config, make_task("o/r#1")).await;
     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#1")));
 
-    assert!(workspace::delete_workspace(&config, &key).await.is_some());
+    assert!(
+        workspace::delete_workspace(&config, &key, workspace::RemovalForce::Gated)
+            .await
+            .is_some()
+    );
     polling::upsert(&config, make_task("o/r#1")).await;
 
     assert!(
@@ -4162,7 +4314,11 @@ async fn unarchive_clears_persisted_and_live_spawn_tombstones() {
     let task = make_task("o/r#restore");
     polling::upsert(&config, task.clone()).await;
     let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
-    assert!(workspace::delete_workspace(&config, &key).await.is_some());
+    assert!(
+        workspace::delete_workspace(&config, &key, workspace::RemovalForce::Gated)
+            .await
+            .is_some()
+    );
     assert!(workspace::load_archived_set(&config).contains(key.as_str()));
     // A settled delete releases its own spawn tombstone (a recreated
     // same-key workspace must not have its spawns silently killed).
@@ -5494,7 +5650,7 @@ async fn delete_project_cascades_through_workspaces() {
         .unwrap();
 
     let mut bus = config.bus.subscribe();
-    workspace::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key, workspace::RemovalForce::Gated).await;
 
     // The two child workspaces are gone, the orphan is not.
     let key_a = WorkspaceKey::new(ws_a.key.as_str());
@@ -5596,7 +5752,7 @@ async fn delete_project_preserves_parent_when_a_child_cannot_stop() {
         .await;
     backend.fail_kill(&backend_key, "tmux timed out").await;
 
-    workspace::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key, workspace::RemovalForce::Gated).await;
 
     assert!(
         config
@@ -5641,7 +5797,7 @@ async fn delete_project_refuses_to_skip_a_corrupt_workspace_record() {
         .unwrap();
     let mut bus = config.bus.subscribe();
 
-    workspace::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key, workspace::RemovalForce::Gated).await;
 
     assert!(
         config
@@ -6336,6 +6492,7 @@ mod live_collapse_e2e {
                         cwd: None,
                         tool_name: None,
                         notification: None,
+                        turn_result: None,
                     },
                     backend_key: Some(live.backend_key.clone()),
                 })
@@ -6706,7 +6863,7 @@ async fn delete_project_with_no_workspaces_still_removes_project() {
         .unwrap();
 
     let mut bus = config.bus.subscribe();
-    workspace::delete_project(&config, &project_key).await;
+    workspace::delete_project(&config, &project_key, workspace::RemovalForce::Gated).await;
 
     assert!(
         !config

@@ -47,11 +47,22 @@ pub struct SpawnOptions {
     /// yet (both commands run as independent detached tasks with no ordering
     /// guarantee). Governs the preamble only — never the persisted role.
     pub role: Option<lazybox_core::Role>,
+    /// Who the initial prompt is from, when that is neither the user nor
+    /// one of lazybox's own triggers — another agent's `start_workspace`.
+    /// Recorded into the new agent's prompt history once it lands, so its
+    /// recap names the sender instead of claiming the user typed it.
+    pub prompt_from: Option<lazybox_ipc::PromptSource>,
 }
 
 #[derive(Debug)]
 pub(crate) struct SpawnPlanInput {
     pub session_key: SessionKey,
+    /// The user's standing rules, already rendered and already resolved
+    /// against this spawn's repo by the caller. Carried on the input rather
+    /// than resolved here so the native-startup-arg channel below and the
+    /// first-prompt channel in `spawn_handler` cannot state different rules
+    /// to the same session. Empty when every rule is turned off.
+    pub standing_rules: String,
     pub kind: TerminalKind,
     pub cwd: PathBuf,
     pub agent_worktree: PathBuf,
@@ -60,6 +71,7 @@ pub(crate) struct SpawnPlanInput {
     pub terminal_id: TerminalId,
     pub hook_settings: Option<PathBuf>,
     pub hook_command: Option<String>,
+    pub coordination_context: Option<String>,
     pub repo_env: Vec<(String, String)>,
     pub declared_model_alias: Option<String>,
     pub autonomous: bool,
@@ -133,6 +145,44 @@ pub(crate) struct SpawnPlan {
 pub(crate) enum SpawnPlanError {
     #[error("no agent registered for id {0}")]
     UnknownAgent(String),
+    #[error(
+        "agent {0} requires an explicit lazybox model, but its selected/default tier has no model flag"
+    )]
+    MissingRequiredModel(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModel {
+    pub alias: Option<String>,
+    pub args: Vec<String>,
+    pub label: Option<String>,
+}
+
+/// Resolve one agent launch's requested/default tier and enforce adapters
+/// that require an explicit Lazybox model pin. Both PTY and structured runs
+/// call this helper so neither path can silently regain provider defaults.
+pub(crate) fn resolve_model_for_agent(
+    cfg: &lazybox_config::Config,
+    agent: &dyn Agent,
+    agent_id: &str,
+    requested_alias: Option<&str>,
+) -> Result<ResolvedModel, SpawnPlanError> {
+    let models = cfg.agent_models(agent_id);
+    let alias = requested_alias
+        .map(str::to_string)
+        .or_else(|| models.default.clone());
+    let tier = alias.as_deref().and_then(|alias| models.tier(alias));
+    let model_id = tier
+        .and_then(lazybox_core::ModelTier::model_id)
+        .filter(|id| !id.trim().is_empty() && !id.starts_with('-'));
+    if agent.requires_explicit_model() && model_id.is_none() {
+        return Err(SpawnPlanError::MissingRequiredModel(agent_id.to_string()));
+    }
+    Ok(ResolvedModel {
+        alias,
+        args: tier.map(|tier| tier.args.clone()).unwrap_or_default(),
+        label: tier.map(|tier| tier.label.clone()),
+    })
 }
 
 pub(crate) fn build_spawn_plan(
@@ -142,6 +192,7 @@ pub(crate) fn build_spawn_plan(
 ) -> Result<SpawnPlan, SpawnPlanError> {
     let SpawnPlanInput {
         session_key,
+        standing_rules,
         kind,
         cwd,
         agent_worktree,
@@ -150,6 +201,7 @@ pub(crate) fn build_spawn_plan(
         terminal_id,
         hook_settings,
         hook_command,
+        coordination_context,
         repo_env,
         declared_model_alias,
         autonomous,
@@ -179,21 +231,19 @@ pub(crate) fn build_spawn_plan(
         ),
         _ => None,
     };
-    let mut resolved_model_alias = model_alias.clone().or_else(|| declared_model_alias.clone());
-    let (model_args, model_label) = match &kind {
-        TerminalKind::Agent(agent_id) => {
-            let models = cfg.agent_models(agent_id);
-            if resolved_model_alias.is_none() {
-                resolved_model_alias = models.default.clone();
-            }
-            let alias = resolved_model_alias.as_deref();
-            let label = alias
-                .or(models.default.as_deref())
-                .and_then(|alias| models.tier(alias))
-                .map(|tier| tier.label.clone());
-            (models.resolve_args(alias), label)
-        }
-        _ => (Vec::new(), None),
+    let requested_model_alias = model_alias.as_deref().or(declared_model_alias.as_deref());
+    let resolved_model = match &kind {
+        TerminalKind::Agent(agent_id) => resolve_model_for_agent(
+            cfg,
+            agent.as_deref().expect("agent resolved"),
+            agent_id,
+            requested_model_alias,
+        )?,
+        _ => ResolvedModel {
+            alias: requested_model_alias.map(str::to_string),
+            args: Vec::new(),
+            label: None,
+        },
     };
     let argv = argv_for(
         agents,
@@ -204,10 +254,12 @@ pub(crate) fn build_spawn_plan(
         cfg.agent.strict_mcp(),
         hook_settings.clone(),
         hook_command.as_deref(),
-        &model_args,
+        coordination_context.as_deref(),
+        &resolved_model.args,
         resume,
         provider_session_id.as_deref(),
         access,
+        &standing_rules,
     )?;
     // Inject the coordination MCP server (#1420) into a supporting agent's
     // argv when the caller provisioned a config. Server-side (not in the
@@ -372,8 +424,8 @@ pub(crate) fn build_spawn_plan(
         initial_prompt,
         terminal_id,
         hook_settings,
-        model_label,
-        model_alias: resolved_model_alias,
+        model_label: resolved_model.label,
+        model_alias: resolved_model.alias,
         provider_session_id,
         replace_terminal_id,
         prompt_history,
@@ -399,10 +451,12 @@ pub(crate) fn argv_for(
     strict_mcp: bool,
     hook_settings_path: Option<PathBuf>,
     hook_command: Option<&str>,
+    coordination_context: Option<&str>,
     model_args: &[String],
     resume: bool,
     provider_session_id: Option<&str>,
     access: AgentRunAccess,
+    standing_rules: &str,
 ) -> Result<Vec<String>, SpawnPlanError> {
     match kind {
         TerminalKind::Agent(agent_id) => {
@@ -425,6 +479,16 @@ pub(crate) fn argv_for(
             } else {
                 agent.spawn(&ctx)
             };
+            if ctx.hook_settings_path.is_none() || ctx.access == AgentRunAccess::ReadOnly {
+                let mut context = lazybox_agents::lazybox_session_context(standing_rules);
+                if let Some(extra) = coordination_context {
+                    context.push_str("\n\n");
+                    context.push_str(extra);
+                }
+                argv.extend(agent.session_context_args(&context));
+            } else if let Some(extra) = coordination_context {
+                argv.extend(agent.session_context_args(extra));
+            }
             if let Some(command) = hook_command {
                 argv.extend(agent.hook_command_args(command));
             }
@@ -592,39 +656,50 @@ pub(crate) fn skip_permissions_for(
     }
 }
 
+/// A minimal, io-free [`SpawnPlanInput`] for one agent/terminal kind —
+/// the fixture every in-crate test that wants a real plan builds from, so
+/// "what a spawn request looks like" has one spelling rather than a copy
+/// per test module.
+#[cfg(test)]
+pub(crate) fn test_input(kind: TerminalKind) -> SpawnPlanInput {
+    SpawnPlanInput {
+        session_key: SessionKey::from("github-acme-widget-657"),
+        standing_rules: lazybox_core::AgentPolicies::builtin().render(),
+        kind,
+        cwd: PathBuf::from("/worktrees/widget-657"),
+        agent_worktree: PathBuf::from("/worktrees/widget-657"),
+        owning_session: Some(SessionId::new()),
+        initial_prompt: Some("extract the spawn plan".into()),
+        terminal_id: TerminalId(42),
+        hook_settings: None,
+        hook_command: None,
+        coordination_context: None,
+        repo_env: Vec::new(),
+        declared_model_alias: None,
+        autonomous: false,
+        autonomous_untrusted: false,
+        landed_on_main: false,
+        model_alias: None,
+        resume: false,
+        provider_session_id: None,
+        no_permission_override: None,
+        replace_terminal_id: None,
+        prompt_history: Vec::new(),
+        composing_buffer: None,
+        access: AgentRunAccess::Default,
+        shell_command: String::new(),
+        meter: false,
+        remote: false,
+        mcp_config_path: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn input(kind: TerminalKind) -> SpawnPlanInput {
-        SpawnPlanInput {
-            session_key: SessionKey::from("github-acme-widget-657"),
-            kind,
-            cwd: PathBuf::from("/worktrees/widget-657"),
-            agent_worktree: PathBuf::from("/worktrees/widget-657"),
-            owning_session: Some(SessionId::new()),
-            initial_prompt: Some("extract the spawn plan".into()),
-            terminal_id: TerminalId(42),
-            hook_settings: None,
-            hook_command: None,
-            repo_env: Vec::new(),
-            declared_model_alias: None,
-            autonomous: false,
-            autonomous_untrusted: false,
-            landed_on_main: false,
-            model_alias: None,
-            resume: false,
-            provider_session_id: None,
-            no_permission_override: None,
-            replace_terminal_id: None,
-            prompt_history: Vec::new(),
-            composing_buffer: None,
-            access: AgentRunAccess::Default,
-            shell_command: String::new(),
-            meter: false,
-            remote: false,
-            mcp_config_path: None,
-        }
+        test_input(kind)
     }
 
     #[test]
@@ -807,6 +882,138 @@ mod tests {
 
         assert_eq!(plan.model_alias.as_deref(), Some("L"));
         assert_eq!(plan.model_label.as_deref(), Some("Opus"));
+    }
+
+    #[test]
+    fn bare_codex_spawn_and_resume_pin_the_lazybox_default_model() {
+        let cfg = lazybox_config::Config::default();
+        for resume in [false, true] {
+            let mut request = input(TerminalKind::Agent("codex".into()));
+            request.resume = resume;
+            request.initial_prompt = None;
+            let plan = build_spawn_plan(request, &cfg, &Registry::default_builtins())
+                .expect("valid Codex plan");
+            assert!(
+                plan.argv
+                    .windows(2)
+                    .any(|args| args == ["--model", "gpt-5.6-sol"]),
+                "Codex launch must carry Lazybox's model pin: {:?}",
+                plan.argv
+            );
+            assert_eq!(plan.model_alias.as_deref(), Some("L"));
+            assert_eq!(plan.model_label.as_deref(), Some("Sol"));
+            let context_arg = plan
+                .argv
+                .iter()
+                .find_map(|arg| arg.strip_prefix("developer_instructions="))
+                .expect("bare Codex spawn and resume carry native startup context");
+            assert_eq!(
+                serde_json::from_str::<String>(context_arg).expect("quoted briefing"),
+                lazybox_agents::lazybox_session_context(
+                    &lazybox_core::AgentPolicies::builtin().render()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn hookless_claude_spawn_and_resume_carry_native_startup_context() {
+        for resume in [false, true] {
+            let mut request = input(TerminalKind::Agent("claude".into()));
+            request.hook_settings = None;
+            request.initial_prompt = None;
+            request.resume = resume;
+            let plan = build_spawn_plan(
+                request,
+                &lazybox_config::Config::default(),
+                &Registry::default_builtins(),
+            )
+            .expect("hookless Claude plan");
+            let expected = lazybox_agents::lazybox_session_context(
+                &lazybox_core::AgentPolicies::builtin().render(),
+            );
+            assert!(
+                plan.argv
+                    .windows(2)
+                    .any(|args| args == ["--append-system-prompt", expected.as_str()])
+            );
+        }
+    }
+
+    #[test]
+    fn coordination_context_is_present_on_bare_starts_and_resumes() {
+        for agent in ["codex", "claude"] {
+            for resume in [false, true] {
+                let mut request = input(TerminalKind::Agent(agent.into()));
+                request.resume = resume;
+                request.initial_prompt = None;
+                request.coordination_context = Some("Coordinate the shared epic.".into());
+                let plan = build_spawn_plan(
+                    request,
+                    &lazybox_config::Config::default(),
+                    &Registry::default_builtins(),
+                )
+                .unwrap();
+                assert!(
+                    plan.argv
+                        .iter()
+                        .any(|arg| arg.contains("Coordinate the shared epic.")
+                            && arg.contains("lazybox log")),
+                    "{agent} resume={resume}"
+                );
+                assert!(
+                    plan.initial_prompt.is_none(),
+                    "native context does not submit an artificial task"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_agent_with_missing_or_unknown_model_is_refused() {
+        let cfg =
+            lazybox_config::Config::parse("agents:\n  codex:\n    models:\n      replace: true\n")
+                .expect("parse model-less Codex config");
+        let error = match build_spawn_plan(
+            input(TerminalKind::Agent("codex".into())),
+            &cfg,
+            &Registry::default_builtins(),
+        ) {
+            Ok(_) => panic!("Codex must not fall through to the provider default"),
+            Err(error) => error,
+        };
+        assert_eq!(error, SpawnPlanError::MissingRequiredModel("codex".into()));
+
+        let cfg = lazybox_config::Config::default();
+        let mut request = input(TerminalKind::Agent("claude".into()));
+        request.model_alias = Some("missing".into());
+        let error = match build_spawn_plan(request, &cfg, &Registry::default_builtins()) {
+            Ok(_) => panic!("unknown explicit tier must not fall through"),
+            Err(error) => error,
+        };
+        assert_eq!(error, SpawnPlanError::MissingRequiredModel("claude".into()));
+    }
+
+    #[test]
+    fn builtin_agent_with_empty_or_missing_model_value_is_refused() {
+        for args in [
+            "['--model=']",
+            "['--model', '']",
+            "['--model']",
+            "['--model', '--verbose']",
+        ] {
+            let cfg = lazybox_config::Config::parse(&format!(
+                "agents:\n  codex:\n    models:\n      tiers:\n        - alias: L\n          label: Invalid\n          args: {args}\n"
+            ))
+            .expect("parse malformed model arguments");
+            let registry = Registry::default_builtins();
+            let agent = registry.get("codex").expect("Codex built-in");
+            assert_eq!(
+                resolve_model_for_agent(&cfg, agent.as_ref(), "codex", None),
+                Err(SpawnPlanError::MissingRequiredModel("codex".into())),
+                "must refuse model args {args}"
+            );
+        }
     }
 
     #[test]

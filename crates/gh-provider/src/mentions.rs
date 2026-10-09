@@ -183,11 +183,12 @@ pub fn parse_lazybox_directive(text: &str) -> (Option<String>, Option<String>) {
 /// survives.
 ///
 /// The `lazybox:w:…` working-claim labels
-/// ([`lazybox_core::WORKING_CLAIM_LABEL_PREFIX`]) and the legacy
-/// `lazybox:working` / `lazybox:working:<owner>` form are our own
-/// fleet-coordination state, not spawn directives — they never yield an agent
-/// (else a per-tick claim renewal re-submits the work prompt into the agent
-/// already holding the claim).
+/// ([`lazybox_core::WORKING_CLAIM_LABEL_PREFIX`], from a box on a build before
+/// #1922) and the `lazybox:working` / `lazybox:working:<owner>` form are our
+/// own fleet-coordination state, not spawn directives — they never yield an
+/// agent (else a per-tick claim renewal re-submits the work prompt into the
+/// agent already holding the claim). The stable `working` label this replaced
+/// them with is not `lazybox:`-prefixed at all, so it never reaches here.
 pub fn parse_label_directive(label: &str) -> Option<(String, Option<String>)> {
     const PREFIX: &[u8] = b"lazybox:";
     let bytes = label.as_bytes();

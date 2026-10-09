@@ -47,6 +47,12 @@ impl Terminals {
         self.inner.apply_ui_defaults(ui);
     }
 
+    pub(crate) fn terminal_summaries(
+        &self,
+    ) -> Vec<crate::components::terminal_stack::TerminalSummary> {
+        self.inner.terminal_summaries()
+    }
+
     /// Current new-terminal layout preference (tab vs split for auto
     /// spawns). Read by the `]]` leader popup to label the `]]t` row.
     pub fn terminal_new_layout(&self) -> lazybox_config::NewTerminalLayout {
@@ -323,6 +329,51 @@ impl Terminals {
         self.inner.split_tile(direction, cmds);
     }
 
+    /// `]]Shift-<arrow>` — move the divider nearest the focused tile
+    /// one `step` in `dir`. Returns the axis label of the divider that
+    /// moved, or `None` when none lies that way (#1920).
+    pub fn resize_focused_divider(
+        &mut self,
+        dir: lazybox_core::TileDirection,
+        step: i16,
+        cmds: &mut Vec<IpcCommand>,
+    ) -> Option<&'static str> {
+        self.inner.resize_focused_divider(dir, step, cmds)
+    }
+
+    /// The tile divider under `(col, row)`, as the last frame drew it.
+    pub fn hit_test_tile_divider(&self, col: u16, row: u16) -> Option<Vec<u8>> {
+        self.inner.hit_test_tile_divider(col, row)
+    }
+
+    /// Mark a tile divider as grabbed, so it paints accented.
+    pub fn begin_divider_drag(&mut self, path: Vec<u8>) {
+        self.inner.begin_divider_drag(path);
+    }
+
+    /// Release a grabbed tile divider. `true` when one was held.
+    pub fn end_divider_drag(&mut self) -> bool {
+        self.inner.end_divider_drag()
+    }
+
+    /// Move a grabbed tile divider to follow the pointer. `true` when
+    /// the ratio changed.
+    pub fn drag_tile_divider(&mut self, path: &[u8], col: u16, row: u16) -> bool {
+        self.inner.drag_tile_divider(path, col, row)
+    }
+
+    /// Push a `Command::SetSessionLayout` for the active session, so a
+    /// divider the user moved survives a restart.
+    pub fn persist_session_layout(&mut self, cmds: &mut Vec<IpcCommand>) {
+        self.inner.persist_session_layout(cmds);
+    }
+
+    /// A refusal the pane needs said out loud — a keystroke dropped
+    /// for a reason the user cannot see (a read-only log window).
+    pub fn take_input_refusal(&mut self) -> Option<String> {
+        self.inner.take_input_refusal()
+    }
+
     /// `]]<arrow>` — move tile focus (or cycle tabs in Tabs mode).
     pub fn move_tile_focus(
         &mut self,
@@ -339,6 +390,14 @@ impl Terminals {
 
     /// `]]x` — close the focused terminal (tile or active tab) and
     /// its PTY.
+    pub(crate) fn close_terminal(
+        &mut self,
+        id: TerminalId,
+        cmds: &mut Vec<IpcCommand>,
+    ) -> crate::components::terminal_stack::CloseOutcome {
+        self.inner.close_terminal(id, cmds)
+    }
+
     pub fn close_focused_tile(&mut self, cmds: &mut Vec<IpcCommand>) {
         self.inner.close_focused_tile(cmds);
     }
@@ -352,6 +411,15 @@ impl Terminals {
 
     /// Whether the active session renders as a tile tree (vs Tabs).
     /// Drives the layout-tailored rows of the `]]` leader popup.
+    /// The ratio of the split at `path`, for tests that assert a divider
+    /// actually moved. `None` for a leaf, a missing path, or Tabs mode.
+    pub fn split_ratio_at(&self, path: &[u8]) -> Option<u8> {
+        match self.inner.layout() {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.ratio_at(path),
+            lazybox_core::SessionLayout::Tabs { .. } => None,
+        }
+    }
+
     pub fn layout_is_splits(&self) -> bool {
         matches!(
             self.inner.layout(),
@@ -407,6 +475,11 @@ impl Terminals {
         delta: isize,
     ) -> crate::components::terminal_stack::ScrollOutcome {
         self.inner.scroll_active(delta)
+    }
+
+    /// Jump the focused terminal to live output and end its scrollback visit.
+    pub fn scroll_to_bottom(&mut self) -> crate::components::terminal_stack::ScrollOutcome {
+        self.inner.scroll_to_bottom()
     }
 
     /// Crossterm `(col, row)` → screen-absolute grid coords
@@ -483,6 +556,25 @@ impl Terminals {
         self.inner.tile_grid_rect(id)
     }
 
+    /// Clipboard candidates in reverse source order, independent of terminal
+    /// focus, capped at [`TerminalStack::COPY_ITEM_LIMIT`]; the second value
+    /// is how many were found before the cap.
+    pub(crate) fn copy_items(
+        &mut self,
+        id: TerminalId,
+    ) -> Option<(Vec<crate::components::copy_text::CopyItem>, usize)> {
+        self.inner.copy_items(id)
+    }
+
+    /// The cap `copy_items` applies, so a caller can say what it is showing.
+    pub(crate) const COPY_ITEM_LIMIT: usize =
+        crate::components::terminal_stack::TerminalStack::COPY_ITEM_LIMIT;
+
+    /// Snapshot logical terminal lines and the current viewport cursor for copying.
+    pub fn copy_lines(&mut self, id: TerminalId) -> Option<(Vec<String>, usize)> {
+        self.inner.copy_lines(id)
+    }
+
     /// Forward `visible_text` — dump a terminal's whole visible grid
     /// as plain text. Seeds the agent-to-agent handoff compose step
     /// (`x s`) with the source agent's on-screen output.
@@ -547,6 +639,10 @@ impl Terminals {
         self.inner.tab_at(col, row)
     }
 
+    pub fn usage_badge_at(&self, col: u16, row: u16) -> bool {
+        self.inner.usage_badge_at(col, row)
+    }
+
     pub fn set_active_tab(&mut self, idx: usize) {
         self.inner.set_active_tab(idx);
     }
@@ -589,6 +685,13 @@ impl Terminals {
 
     pub fn terminal_tracks_mouse(&self, terminal_id: lazybox_ipc::TerminalId) -> bool {
         self.inner.terminal_tracks_mouse(terminal_id)
+    }
+
+    /// Whether `terminal_id`'s inner program enabled bracketed paste.
+    /// A human paste is framed only for programs that asked for the
+    /// framing.
+    pub fn terminal_accepts_bracketed_paste(&self, terminal_id: lazybox_ipc::TerminalId) -> bool {
+        self.inner.terminal_accepts_bracketed_paste(terminal_id)
     }
 
     /// Wire id of the currently focused terminal, if any.

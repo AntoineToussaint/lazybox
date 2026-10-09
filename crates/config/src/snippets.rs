@@ -36,19 +36,15 @@
 //! refactor), and an escape hatch ("if it's clean, say so"). See
 //! `docs/snippets.md` for the full house style.
 //!
-//! **Adding a built-in?** Two invariants hold over *every* entry, and both
-//! are enforced by tests that a new key joins silently — #1759 shipped a
+//! **Adding a built-in?** One invariant holds over *every* entry and is
+//! enforced by tests that a new key joins silently — #1759 shipped a
 //! red `main` because #1749 added `catchup` while #1697 was adding an
 //! all-built-ins invariant in a separate PR, so neither one's CI could see
 //! the other:
 //!
-//! 1. The body must state what its verdict names, in the read-only /
+//! The body must state what its handoff leads with, in the read-only /
 //!    write house form ("… ; this snippet changes nothing") —
-//!    `every_builtin_states_what_its_verdict_names`.
-//! 2. If the body caps its own total answer length, it must also set
-//!    [`Snippet::answer_is_the_ending`], or the appended contract hands
-//!    the agent a licence to ignore that cap —
-//!    `no_builtin_both_caps_its_length_and_licenses_unbounded_output`.
+//!    `every_builtin_states_what_its_handoff_leads_with`.
 //!
 //! At runtime the TUI loads both and feeds the merged set into the
 //! snippet picker mounted by the terminal pane on `]<key>`.
@@ -79,71 +75,6 @@ const BANNED_DISMISSALS: &[&str] = &[
     "as a follow-up",
     "left as an exercise",
 ];
-
-/// The contract's first line — the banner every delivered built-in carries.
-const CONTRACT_HEADER: &str = "OUTPUT CONTRACT (final ending only)";
-
-/// The clause that licenses unbounded output *before* the ending.
-///
-/// It is the half of the contract that assumes the answer has a body at
-/// all: explore, run tools, report at whatever length the work needs, and
-/// only *then* close with the ending. True for every built-in that asks
-/// for work to be done — and false for one whose answer IS the ending.
-///
-/// `catchup` (#1749) is that snippet: its body caps the whole answer at six
-/// lines, so appending this line handed the agent an explicit licence to
-/// ignore that cap ("without a length or format limit") and then add a
-/// seven-line ending on top — thirteen-plus lines from a snippet whose
-/// stated promise is "six lines or fewer" (#1769). The cap and the licence
-/// cannot both be obeyed, so the licence is withheld from a snippet that
-/// declares [`Snippet::answer_is_the_ending`] rather than left to the model
-/// to reconcile.
-const CONTRACT_UNBOUNDED_PREAMBLE: &str = "Explore, use tools, and give full findings before this ending without a length or format limit.";
-
-/// Everything from "Close each snippet…" down — the ending's shape, the
-/// status vocabulary, and the `report_blocker` routing. Always delivered.
-const CONTRACT_ENDING: &str =
-    "Close each snippet, including each step in a next chain, with a ten-second summary:
-exactly one STATUS line, one prose verdict sentence carrying the reason, and at most five
-short detail lines only if they change what the reader does next. Hard cap: 7 lines total.
-Use bullets only for genuinely enumerable findings, never for the verdict. No fences.
-Choose exactly one status; do not manufacture confidence:
-DONE — finished, nothing needed from you.
-ACTION NEEDED — you must do something; name the exact action. Known blockers take priority.
-NEED CONTEXT — blocked on information only you have; ask the one question. A status line is
-prose nobody polls, so if you have the lazybox `report_blocker` tool, call it with that same
-question — that is what puts the block on the epic readouts and the `E j` jump.
-UNSURE — done, but low confidence; name exactly what to verify.
-Example ending:
-STATUS: UNSURE
-The fix passes locally, but timing under production load remains unverified.
-Verify latency with the production workload before deploying.
-Close with exactly this shape, at most 7 lines, and nothing after it:
-STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
-<verdict — one sentence, prose>
-<up to 5 short lines of actionable detail, optional>";
-
-/// The built-in keys whose answer IS the contract's ending (#1769), so
-/// [`CONTRACT_UNBOUNDED_PREAMBLE`] is withheld from them.
-///
-/// A named set rather than an inline literal: it is the list a future
-/// length-capped built-in joins, and
-/// `no_builtin_both_caps_its_length_and_licenses_unbounded_output` fails
-/// the build for a capped body that forgot to.
-const ENDING_ONLY_BUILTINS: &[&str] = &["catchup", "clarify"];
-
-/// The output contract as delivered (#1697).
-///
-/// `answer_is_the_ending` drops [`CONTRACT_UNBOUNDED_PREAMBLE`]; everything
-/// else is byte-identical either way, pinned by
-/// `the_default_contract_is_byte_identical_to_the_shipped_text`.
-fn output_contract(answer_is_the_ending: bool) -> String {
-    if answer_is_the_ending {
-        format!("{CONTRACT_HEADER}\n{CONTRACT_ENDING}")
-    } else {
-        format!("{CONTRACT_HEADER}\n{CONTRACT_UNBOUNDED_PREAMBLE}\n{CONTRACT_ENDING}")
-    }
-}
 
 /// Lock a stable sibling inode, not the YAML inode replaced by rename.
 /// Every application writer holds this across the entire read-modify-write.
@@ -207,6 +138,112 @@ where
         Some(ScalarOrSeq::Many(many)) => many,
     })
 }
+
+/// The stable identity of a snippet that participates in a persisted workflow
+/// (#1732).
+///
+/// Most snippets are text injection and stay that way: a body goes to the
+/// agent, nothing else happens. A *workflow* snippet is different — it is one
+/// step of a handoff that outlives the session, so something has to recognize
+/// it as that step. `action` is that handle, and it is deliberately a declared
+/// field rather than a name match: dispatching on the key `"fixall"` or on
+/// phrases in the body would break the moment a user renames their copy or
+/// rewrites the prose, and would silently mis-fire on an unrelated snippet
+/// that happened to mention a review.
+///
+/// Declaring one is also how a *user's own* review snippet joins the workflow:
+/// the artifact contract ([`Snippet::delivery_body`]) is appended from the
+/// action, not from the built-in key, so `action: deep_review` on a hand-written
+/// body gets the same persistence obligation the shipped one carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetAction {
+    /// Produces a review whose findings must be persisted before the session
+    /// ends.
+    DeepReview,
+    /// Consumes a persisted review: binds one report, fixes its findings, and
+    /// records what happened to each.
+    FixAll,
+}
+
+impl SnippetAction {
+    /// The obligation delivered with a snippet carrying this action — the half
+    /// of the prompt that makes the handoff durable rather than conversational.
+    ///
+    /// Kept out of the bodies for the same reason the output contract is
+    /// (#1697): it names specific tools, and the tools are the daemon's, not
+    /// the prompt's. A body that spelled them out would drift the moment a tool
+    /// gained an argument, in every user's overridden copy at once.
+    pub fn artifact_contract(self) -> &'static str {
+        match self {
+            Self::DeepReview => DEEP_REVIEW_CONTRACT,
+            Self::FixAll => FIX_ALL_CONTRACT,
+        }
+    }
+
+    /// Stable wire name, matching the YAML the user writes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeepReview => "deep_review",
+            Self::FixAll => "fix_all",
+        }
+    }
+}
+
+/// Delivered with every `deep_review` snippet. States the one thing that makes
+/// a review survive its session, and closes the two gaps that read as success:
+/// a clean review skipping the call (indistinguishable, later, from no review)
+/// and a rejected draft being mistaken for an accepted report.
+const DEEP_REVIEW_CONTRACT: &str =
+    "ARTIFACT CONTRACT (persist the findings if you can, and say so if you cannot)
+Your findings must outlive this session: a fixer may be a different agent, at a
+different strength, days later, with none of this conversation. Nothing you leave
+in the terminal reaches it.
+If you have the lazybox MCP tools, call `submit_review` when you are done, with:
+the readable report verbatim; `scope` — a label naming what you reviewed,
+`base_sha` and `head_sha` from `git rev-parse`, and — when the worktree is dirty
+— `dirty_digest`, a digest of the uncommitted diff (`git diff HEAD | shasum`);
+and one `findings` entry per finding carrying its severity, `file:line` anchors, the
+evidence that makes it real, and the remediation you suggest. Write the evidence
+for a reader who never saw this review — it is the reasoning, not a label.
+Zero findings is a complete review: submit the empty findings list rather than
+skipping the call, so a fixer can tell a clean tree from a review that never ran.
+A malformed or incomplete submission is kept as a DRAFT that no fixer will bind;
+the reply names each defect, so fix them and submit again before you finish.
+If you do NOT have those tools, they do not exist for this session: do not fake
+the call and do not stop over it. Deliver the review as prose exactly as you
+otherwise would, and add one line saying the findings were not persisted, so
+nobody assumes a later fixer can pick them up.";
+
+/// Delivered with every `fix_all` snippet. The binding step is first and
+/// explicit because the failure it prevents is silent: a fixer that starts from
+/// an empty memory still finishes, still reports success, and has fixed nothing.
+const FIX_ALL_CONTRACT: &str = "ARTIFACT CONTRACT (work from the review, not from memory of it)
+If you have the lazybox MCP tools, bind a report before you change anything: do
+not work from scrollback or from a review you believe happened. Call
+`list_reviews`, passing the tree as it is now
+(`head_sha`, plus `dirty_digest` when it is dirty). Obey its `selection`:
+- `missing` — STOP. There is nothing to fix from. Say a deep review must run
+  first; never start an empty fixer and never substitute your own reading.
+- `ambiguous` — name the candidate reports and ask which one to use. Do not pick
+  the newest yourself.
+- `bound` — read it in full with `get_review` and work from ITS findings, at the
+  anchors it names. A bound report with zero findings means the tree was clean;
+  that is a result, not an error.
+When the bound report is not current — its head moved, or its worktree changed —
+revalidate each finding against the code as it is now before acting on it, and
+record one that no longer holds as `already_resolved` rather than dropping it.
+When you are done, call `submit_review_result` with the bound report id and one
+outcome per finding — `fixed`, `already_resolved`, `blocked` or `refuted` — each
+with the evidence behind it and the commits and checks that back it. Every
+finding needs one, including the ones you refute: a result that skips a finding
+is kept as a draft naming it. The original report is never modified.
+If you do NOT have those tools, this session has no artifact channel and none of
+the calls above exist for you — so do not stop over it, and do not invent them.
+Work from the review in this conversation exactly as you would have before, and
+say in your verdict that you worked from
+conversation memory rather than a bound report,
+so the difference is visible to whoever reads it.";
 
 /// Single snippet definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -276,25 +313,13 @@ pub struct Snippet {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub next: Vec<String>,
-    /// Whether this snippet's answer *is* the output contract's ending,
-    /// with nothing to report before it (#1769).
-    ///
-    /// The #1697 split assumes body ≠ ending: the snippet body describes
-    /// work of unbounded length, and the appended contract owns a short
-    /// close. `catchup` is the one built-in for which they are the same
-    /// text — it asks for a six-line re-entry summary and nothing else —
-    /// so the contract's "give full findings before this ending without a
-    /// length or format limit" clause directly repealed its own cap. Set
-    /// here, it withholds that one clause; the assembly lives in this
-    /// module's private `output_contract` (not linked: rustdoc runs with
-    /// `-D warnings`, and a public item may not intra-doc-link a private one).
-    ///
-    /// Built-in-only, like [`Snippet::origin`]: the contract is never
-    /// appended to a user snippet ([`Snippet::delivery_body`]), so a
-    /// user-settable key would be a knob that does nothing. Hand-set by
-    /// [`Snippets::builtin`]; serde ignores it in both directions.
-    #[serde(skip)]
-    pub answer_is_the_ending: bool,
+    /// The workflow step this snippet is, when it is one (#1732). `None` —
+    /// the default, and every ordinary snippet — means plain text injection.
+    /// `Some` adds the action's artifact contract to the delivered text, so
+    /// the step's persistence obligation travels with the prompt. See
+    /// [`SnippetAction`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<SnippetAction>,
     /// Provenance — which file the entry came from. Hand-set by the
     /// loader; serde ignores it on the way in / out. Used by the
     /// picker to show "global" vs "repo" hints alongside each row,
@@ -492,13 +517,8 @@ impl Snippet {
     /// flows through the same delivery path as any other body, so Recent,
     /// `]N`, and `Shift-B` broadcast track it unchanged.
     ///
-    /// This is the *authored* text, NOT the bytes an agent receives — see
-    /// [`Snippet::delivery_body`] for those. The two differ by the output
-    /// contract (#1697), and the split is load-bearing: this half is what
-    /// gets embedded in something larger (a `SKILL.md` export, a Planner
-    /// role preamble) or shown as a catalog entry, where a trailer reading
-    /// "close with exactly this shape and nothing after it" would be a
-    /// lie — the snippet is not the whole turn there.
+    /// This is the authored text. Lazybox's global response contract is
+    /// injected once at session start, not appended to individual snippets.
     pub fn dispatch_body(&self) -> String {
         match &self.skill {
             None => self.body.clone(),
@@ -513,32 +533,11 @@ impl Snippet {
         }
     }
 
-    /// The text actually delivered to an agent: [`Snippet::dispatch_body`]
-    /// plus the shared output contract (#1697).
-    ///
-    /// The contract is appended **here, at delivery**, rather than baked
-    /// into `body` by [`Snippets::builtin`]. It closes the turn — "nothing
-    /// after it" — so it is only true where the snippet *is* the turn:
-    /// `]]s`, `]]n`, `Shift-B` broadcast, and the `send_snippet` MCP tool.
-    /// Baking it into `body` leaked it into three places where that claim
-    /// is false and actively harmful: an exported `SKILL.md`, which a model
-    /// can invoke *mid-task* on its own (`docs/snippets-vs-skills.md`), so
-    /// the trailer would truncate the host turn; the Planner role preamble,
-    /// which folds two brief bodies in ahead of the real work prompt and so
-    /// carried two "nothing after it" trailers mid-prompt; and the `]`
-    /// catalog browser, which renders every body and so repeated one
-    /// constant 61 times.
-    ///
-    /// Built-ins only. A user-defined snippet — or a user override of a
-    /// built-in key — is delivered exactly as authored, because rewriting
-    /// someone's prompt is not ours to do.
+    /// The text actually delivered to an agent. Kept as a named boundary for
+    /// dispatch call sites, but it no longer adds global policy: every agent
+    /// receives that policy in lazybox's spawn-time session briefing.
     pub fn delivery_body(&self) -> String {
-        let body = self.dispatch_body();
-        if self.origin != SnippetOrigin::BuiltIn {
-            return body;
-        }
-        let contract = output_contract(self.answer_is_the_ending);
-        format!("{body}\n\n{contract}")
+        self.dispatch_body()
     }
 
     /// Stable content hash of the body, whitespace-normalized so
@@ -668,7 +667,7 @@ impl Snippets {
             skill: None,
             provider: None,
             next: Vec::new(),
-            answer_is_the_ending: false,
+            action: None,
             origin: SnippetOrigin::BuiltIn,
         };
         // Provider-scoped built-in: only surfaces on a workspace whose task
@@ -681,7 +680,7 @@ impl Snippets {
             skill: None,
             provider: Some(provider.to_string()),
             next: Vec::new(),
-            answer_is_the_ending: false,
+            action: None,
             origin: SnippetOrigin::BuiltIn,
         };
         // Scope on the canonical provider ids so config can't drift from
@@ -805,18 +804,51 @@ impl Snippets {
                 ),
             ),
             (
+                "goal".to_string(),
+                entry(
+                    "Review",
+                    "What is this PR for? One or two lines",
+                    "Tell me the goal of this PR in one or two plain sentences: what \
+                     it is for and who notices when it lands. Read the diff and the PR \
+                     or issue text first so the goal is the real one, not a guess from \
+                     the branch name. Brevity is the request here, so this is not \
+                     dropping evidence: no file tour, no how, no caveats unless one \
+                     changes whether I should merge it. If the diff and the text \
+                     disagree about the goal, say that in one sentence instead. This \
+                     snippet changes nothing. The verdict names the goal.",
+                ),
+            ),
+            (
                 "clarify".to_string(),
                 entry(
                     "Review",
                     "Explain this PR in a few lines, no verbiage",
+                    "Explain this PR to me in at most five short lines — I asked for \
+                     the short version, so keeping it short is the job, not a loss of \
+                     evidence. Read the diff first; every claim comes from the real \
+                     tree. Lead with what is true now that was not before, as the user \
+                     sees it. Then, only as far as each earns a line: what was broken, \
+                     the change that fixes it, the proof (the test or number that shows \
+                     it), and any real risk. One concrete anchor per claim — a file, \
+                     symbol, or issue number — and no bulleted tour of changed files, \
+                     no restating my question, no sentence that would fit a different \
+                     PR. If I need more, I will ask for `deepclarify`. This snippet \
+                     changes nothing.",
+                ),
+            ),
+            (
+                "deepclarify".to_string(),
+                entry(
+                    "Review",
+                    "Explain this PR in depth: problem, change, proof, risk",
                     "Explain this PR to me. Your whole answer is the ending — there are \
-                     no findings to report before it, so the verdict and its detail \
-                     lines ARE the explanation, not a summary of one. Read the diff and \
+                     no findings to report before it, so the answer itself is the \
+                     explanation, not a summary of one. Read the diff and \
                      run whatever you need to read it properly; every anchor below comes \
-                     from the real tree, not from memory. The verdict names what is true \
+                     from the real tree, not from memory. Lead with what is true \
                      now that was not true before, in plain words, naming the \
-                     user-visible consequence rather than the code. The detail lines \
-                     carry, in this order and only while each earns its place: the \
+                     user-visible consequence rather than the code. Then give, in this \
+                     order and only while each earns its place: the \
                      problem — what was actually broken and who it hurt, the concrete \
                      failure rather than the category; the change — the one thing that \
                      makes it right, and how small it is, because a one-file fix to a \
@@ -834,8 +866,8 @@ impl Snippets {
                      \"this PR introduces/implements/ensures\", \"comprehensive\", \
                      \"robust\", \"various\", a bulleted tour of changed files, and any \
                      sentence that would still be true of a different PR. If the diff \
-                     alone does not answer it, NEED CONTEXT names the missing piece \
-                     rather than guessing. This snippet changes nothing — no commit, no \
+                     alone does not answer it, ask for the missing piece rather than \
+                     guessing. This snippet changes nothing — no commit, no \
                      push, no edit.",
                 ),
             ),
@@ -921,8 +953,9 @@ impl Snippets {
                 entry(
                     "Review",
                     "Apply the review findings you just produced",
-                    "Take the findings from the review you just produced and \
-                     *implement* them — the deliverable is a clean, tested diff, not a \
+                    "Take the review findings for this workspace — the report you \
+                     bound if there is one, otherwise the review from this \
+                     conversation — and *implement* them — the deliverable is a clean, tested diff, not a \
                      list. \"Here are the changes I would make\" is not an acceptable \
                      output; apply them. Go in severity order, highest first, and for \
                      each finding fix the *real cause* at the `file:line` it names, \
@@ -1635,10 +1668,10 @@ impl Snippets {
                      picture: what you did, what you learned that was surprising, and \
                      what is now different about the plan. Skip the narration of steps \
                      that went as expected; a step that worked is not news. If you are \
-                     blocked or need a decision from me, the STATUS line says so and the \
-                     decision leads the detail, never trails it. STATUS reports this \
-                     catch-up, not the underlying work — DONE means you need nothing \
-                     from me, not that the work is finished. Name files and identifiers \
+                     blocked or need a decision from me, ask it directly and lead with \
+                     the decision, never trail it. Report this catch-up, not the \
+                     underlying work — needing nothing from me does not mean the work is \
+                     finished. Name files and identifiers \
                      concretely rather than describing them. No preamble, no restating \
                      the task back to me, and no offer to continue — I can see the \
                      terminal. The verdict names where things stand in one sentence; \
@@ -1928,22 +1961,30 @@ impl Snippets {
                 snippet.next = vec![next.to_string()];
             }
         }
-        // The built-ins whose answer IS the contract's ending, so the
-        // "give full findings before this ending without a length or
-        // format limit" clause is withheld (#1769). `catchup` asks for a
-        // six-line re-entry summary and nothing else; delivered with that
-        // clause it read as "report at any length, then add a seven-line
-        // ending", which is the opposite of the snippet's whole promise.
-        // Asserted by `an_ending_only_builtin_drops_the_unbounded_clause`,
-        // so renaming the key fails the build rather than silently
-        // restoring the contradiction.
+        // The built-ins that are steps of the persisted review workflow
+        // (#1732). Declared here rather than matched by key at dispatch: a
+        // user who renames or overrides one of these keys keeps whatever
+        // `action` their own entry declares, and nothing downstream has to
+        // recognize a snippet by its name or its prose.
         //
-        // A key that names no built-in is skipped here in silence, so the
-        // same test also proves every listed key resolves — otherwise a
-        // typo leaves the flag unset and quietly restores the clause.
-        for key in ENDING_ONLY_BUILTINS {
-            if let Some(snippet) = by_key.get_mut(*key) {
-                snippet.answer_is_the_ending = true;
+        // A key that names no built-in is skipped in silence, so
+        // `builtin_workflow_steps_declare_their_action` also proves every
+        // listed key resolves.
+        for (key, action) in [
+            ("deepreview", SnippetAction::DeepReview),
+            ("fixall", SnippetAction::FixAll),
+        ] {
+            if let Some(snippet) = by_key.get_mut(key) {
+                snippet.action = Some(action);
+                // The contract goes in the BODY, not onto delivery. #1857
+                // made `delivery_body` a pass-through — global response
+                // rules moved to the spawn-time briefing, and a snippet
+                // carries only its task-specific instruction. An artifact
+                // obligation is exactly that: it binds this step, so it is
+                // part of what this snippet asks for, not policy layered
+                // over it. `snippet_delivery_adds_no_global_response_contract`
+                // holds.
+                snippet.body = format!("{}\n\n{}", snippet.body, action.artifact_contract());
             }
         }
         Self { by_key }
@@ -2322,196 +2363,24 @@ snippets:
         assert_eq!(s.get("bare").unwrap().category, "");
     }
 
-    /// The contract rides *delivery*, never the authored body (#1697).
-    ///
-    /// Baking it into `body` leaked a turn-ending trailer into three
-    /// embed/preview surfaces where the snippet is not the whole turn —
-    /// see [`Snippet::delivery_body`]. Asserting on both halves is the
-    /// point: `body` must stay clean, `delivery_body` must carry it.
+    /// Global response rules belong to the spawn-time lazybox briefing, so a
+    /// snippet delivery contains only its task-specific instruction.
     #[test]
-    fn the_output_contract_rides_delivery_not_the_authored_body() {
+    fn snippet_delivery_adds_no_global_response_contract() {
         for (key, snippet) in Snippets::builtin().all() {
+            assert_eq!(snippet.delivery_body(), snippet.dispatch_body(), "{key}");
             assert!(
-                !snippet.body.contains("OUTPUT CONTRACT"),
-                "built-in `{key}` baked the contract into its authored body — it belongs \
-                 in `delivery_body` so exports and role preambles don't carry it",
-            );
-            assert!(
-                !snippet.dispatch_body().contains("OUTPUT CONTRACT"),
+                !snippet.delivery_body().contains("OUTPUT CONTRACT"),
                 "{key}"
-            );
-            assert!(!snippet.body.contains(['🟢', '🟡', '🔴', '❓']), "{key}");
-
-            let delivered = snippet.delivery_body();
-            assert!(
-                delivered.ends_with(&output_contract(snippet.answer_is_the_ending)),
-                "{key}"
-            );
-            assert_eq!(delivered.matches("OUTPUT CONTRACT").count(), 1, "{key}");
-            assert!(delivered.starts_with(&snippet.dispatch_body()), "{key}");
-            // The ending's shape and the `report_blocker` routing are
-            // unconditional; only the unbounded-output licence is withheld.
-            assert!(delivered.contains(CONTRACT_ENDING), "{key}");
-            assert_eq!(
-                delivered.contains(CONTRACT_UNBOUNDED_PREAMBLE),
-                !snippet.answer_is_the_ending,
-                "{key}"
-            );
-        }
-    }
-
-    /// Splitting `OUTPUT_CONTRACT` into header / preamble / ending (#1769)
-    /// must not have moved a single byte of what the other 60 built-ins
-    /// receive. Pinned against the literal shipped text rather than against
-    /// the constants that build it, so a typo while reassembling them fails
-    /// here instead of silently reflowing every delivered prompt.
-    #[test]
-    fn the_default_contract_is_byte_identical_to_the_shipped_text() {
-        const SHIPPED: &str = "OUTPUT CONTRACT (final ending only)
-Explore, use tools, and give full findings before this ending without a length or format limit.
-Close each snippet, including each step in a next chain, with a ten-second summary:
-exactly one STATUS line, one prose verdict sentence carrying the reason, and at most five
-short detail lines only if they change what the reader does next. Hard cap: 7 lines total.
-Use bullets only for genuinely enumerable findings, never for the verdict. No fences.
-Choose exactly one status; do not manufacture confidence:
-DONE — finished, nothing needed from you.
-ACTION NEEDED — you must do something; name the exact action. Known blockers take priority.
-NEED CONTEXT — blocked on information only you have; ask the one question. A status line is
-prose nobody polls, so if you have the lazybox `report_blocker` tool, call it with that same
-question — that is what puts the block on the epic readouts and the `E j` jump.
-UNSURE — done, but low confidence; name exactly what to verify.
-Example ending:
-STATUS: UNSURE
-The fix passes locally, but timing under production load remains unverified.
-Verify latency with the production workload before deploying.
-Close with exactly this shape, at most 7 lines, and nothing after it:
-STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
-<verdict — one sentence, prose>
-<up to 5 short lines of actionable detail, optional>";
-        assert_eq!(output_contract(false), SHIPPED);
-        // The ending-only variant differs by exactly one line — the
-        // unbounded-output licence — and nothing else.
-        assert_eq!(
-            output_contract(true),
-            SHIPPED.replace(&format!("{CONTRACT_UNBOUNDED_PREAMBLE}\n"), "")
-        );
-        assert_eq!(
-            output_contract(false).lines().count(),
-            output_contract(true).lines().count() + 1
-        );
-    }
-
-    /// `catchup` caps its whole answer at six lines, so the contract's
-    /// "give full findings before this ending **without a length or format
-    /// limit**" clause repealed the cap the snippet exists to impose — the
-    /// delivered prompt licensed unbounded findings plus a seven-line
-    /// ending, 13+ lines from a snippet whose promise is "six lines or
-    /// fewer" (#1769). It is the one built-in whose answer IS the ending,
-    /// so it is the one that drops the clause.
-    #[test]
-    fn an_ending_only_builtin_drops_the_unbounded_clause() {
-        let b = Snippets::builtin();
-        let catchup = b.get("catchup").expect("ships built-in `catchup`");
-        assert!(
-            catchup.answer_is_the_ending,
-            "`catchup`'s answer is its ending — it must not carry the \
-             unbounded-output clause",
-        );
-        let delivered = catchup.delivery_body();
-        assert!(
-            !delivered.contains(CONTRACT_UNBOUNDED_PREAMBLE),
-            "`catchup` still licenses unbounded output before its ending:\n{delivered}",
-        );
-        assert!(!delivered.contains("without a length or format limit"));
-        // The rest of the contract still rides: shape, statuses, routing.
-        assert!(delivered.contains(CONTRACT_HEADER));
-        assert!(delivered.contains("Hard cap: 7 lines total."));
-        assert!(delivered.contains("`report_blocker`"));
-
-        // …and the opt-out is confined to `ENDING_ONLY_BUILTINS`. The rule
-        // is about what the snippet ASKS FOR, not which key it is: a
-        // built-in that asks for work to be done reports findings of
-        // unknown length, so withholding the clause there would cap real
-        // output. `catchup` and `clarify` ask for no work — they explain
-        // something that already happened, so their whole answer IS the
-        // ending and the unbounded preamble contradicts their own cap.
-        //
-        // Quantified over the list rather than a hardcoded key so adding a
-        // second ending-only built-in updates one place; asserting the list
-        // is non-empty keeps an emptied list from vacuously passing.
-        assert!(!ENDING_ONLY_BUILTINS.is_empty());
-        // Every listed key must name a real built-in. `builtin()` sets the
-        // flag through `if let Some(..) = by_key.get_mut(key)`, which skips
-        // a typo in silence, and the loop below only visits keys that
-        // exist — so without this, `"clarrify"` would leave `clarify`
-        // delivered with the unbounded clause and nothing would fail. The
-        // hardcoded `get("catchup").expect(..)` above used to be that
-        // proof; generalizing to a list dropped it for every other entry.
-        for key in ENDING_ONLY_BUILTINS {
-            let snippet = b.get(key).unwrap_or_else(|| {
-                panic!(
-                    "`ENDING_ONLY_BUILTINS` lists `{key}`, which ships no built-in — the \
-                     flag is never set and the unbounded-output clause silently returns"
-                )
-            });
-            // …and the body must say so, so the reader of the delivered
-            // prompt learns it from the snippet rather than inferring it
-            // from a clause that is missing. `catchup` states it outright;
-            // `clarify` gained the same sentence in #1796 when its
-            // self-imposed "AT MOST 8 lines" cap — which had been the only
-            // thing marking it short — was removed for conflicting with
-            // the contract's own seven.
-            assert!(
-                snippet.body.contains("Your whole answer is the ending"),
-                "`{key}` drops the unbounded-output clause but never tells the agent \
-                 its whole answer is the ending",
-            );
-        }
-        for (key, snippet) in b.all() {
-            if ENDING_ONLY_BUILTINS.contains(&key) {
-                assert!(
-                    snippet.answer_is_the_ending,
-                    "built-in `{key}` is listed ending-only but did not get the flag",
-                );
-                continue;
-            }
-            assert!(
-                !snippet.answer_is_the_ending,
-                "built-in `{key}` opted out of the unbounded-output clause — that \
-                 caps the findings it is supposed to report",
-            );
-        }
-    }
-
-    /// A built-in that caps its own total length must not also be handed a
-    /// licence to ignore that cap. The two cannot both be obeyed, and the
-    /// model resolving it either way makes the snippet non-deterministic.
-    #[test]
-    fn no_builtin_both_caps_its_length_and_licenses_unbounded_output() {
-        for (key, snippet) in Snippets::builtin().all() {
-            // "at most N lines" in any casing — the shape a body uses to
-            // cap its own total answer, whatever number it picks.
-            let lower = snippet.body.to_lowercase();
-            let caps_itself = lower.contains("at most") && lower.contains("lines");
-            if !caps_itself {
-                continue;
-            }
-            assert!(
-                !snippet
-                    .delivery_body()
-                    .contains(CONTRACT_UNBOUNDED_PREAMBLE),
-                "built-in `{key}` caps its own answer length but is delivered with \
-                 the unbounded-output clause — set `answer_is_the_ending`",
             );
         }
     }
 
     /// `catchup`'s verdict fact must not re-home the decision (#1767 review).
     ///
-    /// The body pins a needed decision to the STATUS line and the first
-    /// detail line; the contract pins the verdict to the close, "nothing
-    /// after it". A verdict that also claimed to name the decision asked
-    /// for it in both places at once, inside a six-line budget. The
+    /// The body pins a needed decision to the direct handoff. A verdict that
+    /// also claimed to name the decision asked for it in both places at once.
+    /// The
     /// read-only fact must also name *the snippet* as its subject — "and
     /// changes nothing" parses as a claim about the verdict, which is
     /// vacuous and states none of the invariant.
@@ -2528,16 +2397,16 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
         assert!(body.contains("so say so rather than reporting work"));
 
         // The verdict names where things stand — and NOT the decision,
-        // which the body routes to the STATUS line instead.
+        // which the body routes to the direct question instead.
         assert!(body.contains("The verdict names where things stand"));
         assert!(
             !body.contains("the decision you need from me, and changes nothing"),
-            "the verdict must not also claim the decision the STATUS line carries",
+            "the verdict must not also claim the decision the direct question carries",
         );
-        assert!(body.contains("the STATUS line says so"));
+        assert!(body.contains("ask it directly"));
 
-        // `DONE` on a mid-flight session must not read as "work finished".
-        assert!(body.contains("STATUS reports this catch-up, not the underlying work"));
+        // A no-action handoff on a mid-flight session must not read as "work finished".
+        assert!(body.contains("Report this catch-up, not the underlying work"));
 
         // The lead is not stated twice: with no body before the ending,
         // "Lead with …" and "The verdict names …" were the same line.
@@ -2548,48 +2417,9 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
         assert_eq!(body.matches("where things stand").count(), 1);
     }
 
-    /// …and the same rule holds for every ending-only built-in, not just
-    /// `catchup` (#1796). The hardcoded `where things stand` count above is
-    /// what #1767 left behind; `clarify` then shipped the identical defect
-    /// one key over — "First line: what is TRUE NOW that was not true
-    /// before" *and* "The verdict names what is true now that was not true
-    /// before", i.e. the same sentence demanded at the top and at the
-    /// bottom of an answer the contract caps at seven lines, burning two of
-    /// them on one claim.
-    ///
-    /// The fact an ending-only body assigns to its verdict is stated once,
-    /// in the verdict, because there is no body before the ending to state
-    /// it in.
-    #[test]
-    fn an_ending_only_body_states_its_verdict_fact_once() {
-        let b = Snippets::builtin();
-        for key in ENDING_ONLY_BUILTINS {
-            let lower = b.get(key).expect("ships built-in").body.to_lowercase();
-            // The clause the body assigns to its verdict: everything from
-            // "the verdict names " to the end of that clause.
-            let at = lower
-                .find("the verdict names ")
-                .expect("every built-in says what its verdict names");
-            let rest = &lower[at + "the verdict names ".len()..];
-            let clause = rest[..rest.find([',', ';', '.']).unwrap_or(rest.len())].trim();
-            assert!(
-                !clause.is_empty(),
-                "`{key}` names an empty verdict clause — the parser found nothing to check",
-            );
-            assert_eq!(
-                lower.matches(clause).count(),
-                1,
-                "`{key}` states its verdict's fact ({clause:?}) more than once — inside \
-                 the contract's seven-line cap that spends two lines on one claim",
-            );
-        }
-    }
-
-    /// The regression that shipped: 46 of 61 bodies still ended with their
-    /// own "close with a human-readable summary: …" while the appended
-    /// contract said "nothing after it". Two terminal instructions in one
-    /// prompt is exactly the cross-agent divergence #1697 exists to remove,
-    /// so no built-in may carry a second one.
+    /// A built-in must state the handoff content without adding another
+    /// generic closing instruction. Competing terminal instructions make
+    /// agents repeat the answer instead of preserving it once.
     #[test]
     fn no_builtin_body_competes_with_the_output_contract() {
         for (key, snippet) in Snippets::builtin().all() {
@@ -2615,17 +2445,10 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
         }
     }
 
-    /// The contract owns the answer's *shape*, so no body may prescribe a
-    /// rival one (#1796). `clarify` shipped "Use exactly this shape, one
-    /// line each" over a five-label layout while the appended contract said
-    /// "Close with exactly this shape … and nothing after it" over a
-    /// STATUS/verdict/details layout: two "exactly this shape" instructions
-    /// in one delivered prompt, naming different shapes, with nothing to
-    /// arbitrate. Which one the model obeys then varies per turn and per
-    /// agent — the cross-agent divergence #1697 exists to remove.
-    ///
-    /// A body says what its lines must *carry*; the contract says where
-    /// they go.
+    /// No built-in may force a fixed answer schema (#1796). `clarify`
+    /// shipped a five-label layout; the shared status projection added a
+    /// second schema. Both made the model optimize formatting by dropping
+    /// evidence. Bodies state what matters, not where each fact must go.
     #[test]
     fn no_builtin_body_prescribes_a_rival_answer_shape() {
         for (key, snippet) in Snippets::builtin().all() {
@@ -2664,66 +2487,6 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
         }
     }
 
-    /// A body may not promise a longer answer than the contract allows
-    /// (#1796). `clarify` shipped "AT MOST 8 lines total" under a contract
-    /// whose own words are "Hard cap: 7 lines total … and nothing after
-    /// it"; for an ending-only snippet the whole answer *is* that ending,
-    /// so the eighth line the body explicitly invited ("CI that is not
-    /// green yet") is a line the contract forbids. On any red-CI PR the two
-    /// instructions could not both be obeyed.
-    ///
-    /// Quantified over every built-in, not just the ending-only ones: a
-    /// body that caps itself at all must be ending-only
-    /// (`no_builtin_both_caps_its_length_and_licenses_unbounded_output`),
-    /// so together the two guards mean no built-in may declare a budget
-    /// above the contract's.
-    #[test]
-    fn no_builtin_declares_a_line_budget_above_the_contracts_own() {
-        /// The `N` in "at most N lines", in any casing, or `None` when the
-        /// body states no such budget. "at most three or four issues"
-        /// (`carve`) is not one: the count must be digits and `line` must
-        /// follow it closely.
-        fn declared_line_budget(body: &str) -> Option<usize> {
-            let lower = body.to_lowercase();
-            for (idx, _) in lower.match_indices("at most ") {
-                let mut words = lower[idx + "at most ".len()..].split_whitespace();
-                let Some(n) = words.next().and_then(|w| w.parse::<usize>().ok()) else {
-                    continue;
-                };
-                if words.take(2).any(|w| w.starts_with("line")) {
-                    return Some(n);
-                }
-            }
-            None
-        }
-
-        // The contract's own cap, read off the shipped text rather than
-        // typed again, so re-tuning the contract re-tunes this guard.
-        assert!(CONTRACT_ENDING.contains("Hard cap: 7 lines total."));
-        const CONTRACT_CAP: usize = 7;
-
-        for (key, snippet) in Snippets::builtin().all() {
-            let Some(budget) = declared_line_budget(&snippet.body) else {
-                continue;
-            };
-            assert!(
-                budget <= CONTRACT_CAP,
-                "built-in `{key}` promises at most {budget} lines, but the delivered \
-                 contract caps the whole answer at {CONTRACT_CAP} — both cannot be obeyed",
-            );
-        }
-        // The parser earns its keep only if it actually reads the one
-        // budget that ships; a silently-`None` parser would pass vacuously.
-        assert_eq!(
-            declared_line_budget(&Snippets::builtin().get("catchup").expect("catchup").body),
-            Some(6),
-        );
-        assert_eq!(
-            declared_line_budget("aim for at most three or four issues"),
-            None
-        );
-    }
-
     /// A verdict fact must describe what *this* snippet produces. Keying
     /// them off `category` told `ready` (which never pushes) to name a
     /// pushed SHA and `whyci` (a read-only diagnosis) to name what it
@@ -2735,11 +2498,11 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
     /// requirement is restated in this module's header so the next author
     /// meets it while writing the entry, not after landing it.
     #[test]
-    fn every_builtin_states_what_its_verdict_names() {
+    fn every_builtin_states_what_its_handoff_leads_with() {
         for (key, snippet) in Snippets::builtin().all() {
             assert!(
-                snippet.body.contains("The verdict names"),
-                "built-in `{key}` never says what its verdict names",
+                snippet.body.contains("The verdict names") || snippet.body.contains("Lead with"),
+                "built-in `{key}` never says what its direct handoff leads with",
             );
         }
         let b = Snippets::builtin();
@@ -2757,17 +2520,6 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
         // Snippets that really do push say so.
         assert!(fact("push").contains("the pushed SHA"));
         assert!(fact("commit").contains("whether it was pushed"));
-    }
-
-    /// `NEED CONTEXT` is prose nobody polls. lazybox already owns a
-    /// machine channel for "a human must unblock this" — `report_blocker`,
-    /// which feeds `epic_status` and the `E j` jump — so the contract
-    /// routes the status into it rather than adding a fourth dead one.
-    #[test]
-    fn need_context_routes_into_report_blocker() {
-        assert!(CONTRACT_ENDING.contains("report_blocker"));
-        let contract = Snippets::builtin().get("rev").expect("rev").delivery_body();
-        assert!(contract.contains("`report_blocker`"));
     }
 
     /// #1697 named `ready` / `doc` / `bench` as under-specified — each
@@ -2793,10 +2545,195 @@ STATUS: <DONE | ACTION NEEDED | NEED CONTEXT | UNSURE>
         }
     }
 
-    /// A user's own prompt is delivered as authored. The contract is
-    /// lazybox's house style for *its* built-ins, not a rewrite we impose
-    /// on someone's file — and an override shadows the built-in origin, so
-    /// it opts out with it.
+    /// The two workflow steps declare their action, so nothing downstream has
+    /// to recognize them by key or by prose (#1732). A renamed built-in fails
+    /// here rather than silently leaving the workflow unwired.
+    #[test]
+    fn builtin_workflow_steps_declare_their_action() {
+        let b = Snippets::builtin();
+        assert_eq!(
+            b.get("deepreview").expect("deepreview").action,
+            Some(SnippetAction::DeepReview)
+        );
+        assert_eq!(
+            b.get("fixall").expect("fixall").action,
+            Some(SnippetAction::FixAll)
+        );
+        // Every other built-in stays plain text injection.
+        for (key, snippet) in b.all() {
+            if key == "deepreview" || key == "fixall" {
+                continue;
+            }
+            assert_eq!(snippet.action, None, "{key} declares an unexpected action");
+        }
+    }
+
+    /// The review half names the tool that persists it, and says the two
+    /// things that otherwise read as success: a skipped call on a clean tree,
+    /// and a rejected draft mistaken for an accepted report.
+    #[test]
+    fn the_deep_review_contract_demands_ingestion() {
+        let delivered = Snippets::builtin()
+            .get("deepreview")
+            .expect("deepreview")
+            .delivery_body();
+        for needle in [
+            "submit_review",
+            "head_sha",
+            "dirty_digest",
+            "Zero findings is a complete review",
+            "DRAFT",
+        ] {
+            assert!(delivered.contains(needle), "deepreview contract: {needle}");
+        }
+    }
+
+    /// FIXALL binds before it fixes, and each selection outcome has exactly
+    /// one stated move — `missing` in particular must stop the run, since an
+    /// empty fixer finishes green having done nothing.
+    #[test]
+    fn the_fix_all_contract_binds_a_report_before_fixing() {
+        let delivered = Snippets::builtin()
+            .get("fixall")
+            .expect("fixall")
+            .delivery_body();
+        for needle in [
+            "list_reviews",
+            "get_review",
+            "submit_review_result",
+            "`missing` — STOP",
+            "ambiguous",
+            "revalidate each finding",
+            "conversation memory rather than a bound report",
+        ] {
+            assert!(delivered.contains(needle), "fixall contract: {needle}");
+        }
+    }
+
+    /// The #1732 premise: FIXALL may run in a session that never saw the
+    /// review, so its body must not claim otherwise — and, symmetrically, it
+    /// must not claim a bound report is the ONLY source, because the artifact
+    /// channel does not reach every agent.
+    #[test]
+    fn fixall_names_both_a_bound_report_and_this_conversation() {
+        let builtins = Snippets::builtin();
+        let body = &builtins.get("fixall").expect("fixall").body;
+        assert!(
+            !body.contains("you just produced"),
+            "fixall must not assume same-conversation memory is the only source"
+        );
+        assert!(body.contains("bound"), "fixall must name the bound report");
+        assert!(
+            body.contains("conversation"),
+            "fixall must still work for an agent with no artifact channel"
+        );
+    }
+
+    /// The regression this pair exists to prevent (#1831 review).
+    ///
+    /// `delivery_body` appends the artifact contract from the declared
+    /// `action` alone, and nothing on the delivery path knows whether the
+    /// receiving agent can call an MCP tool — `Agent::supports_mcp_config`
+    /// defaults to false and only Claude overrides it, and `lazybox-tui`
+    /// cannot depend on `lazybox-agents` to ask. So the contract reaches
+    /// agents that have no such tools, and an unconditional "call
+    /// `list_reviews` … `missing` — STOP" told those agents to stop doing
+    /// work they previously did from conversation memory.
+    ///
+    /// The capability is therefore stated as a condition the agent resolves
+    /// about itself, and both branches are mandatory text.
+    #[test]
+    fn artifact_contracts_carry_a_branch_for_an_agent_without_the_tools() {
+        for action in [SnippetAction::DeepReview, SnippetAction::FixAll] {
+            let contract = action.artifact_contract();
+            assert!(
+                contract.contains("If you have the lazybox MCP tools"),
+                "{} must gate its tool calls on having them",
+                action.as_str()
+            );
+            assert!(
+                contract.contains("do NOT have those tools"),
+                "{} must say what to do without them",
+                action.as_str()
+            );
+            assert!(
+                contract.contains("do not stop"),
+                "{} must not leave a toolless agent stopping",
+                action.as_str()
+            );
+        }
+        // The STOP that remains is scoped to a real `missing` selection, which
+        // only an agent that actually called `list_reviews` can receive.
+        let fixall = SnippetAction::FixAll.artifact_contract();
+        let stop = fixall.find("`missing` — STOP").expect("missing branch");
+        let gate = fixall
+            .find("If you have the lazybox MCP tools")
+            .expect("capability gate");
+        assert!(
+            gate < stop,
+            "the STOP must sit inside the tools-available branch"
+        );
+    }
+
+    /// A user's own snippet may declare an action, and is still delivered
+    /// exactly as authored.
+    ///
+    /// The declaration is metadata — it is what lets anything downstream
+    /// recognize the step without matching a key or a phrase. It is NOT a
+    /// licence to append lazybox's text to someone's prompt: #1857 moved
+    /// global policy to the spawn-time briefing precisely so a delivery
+    /// carries only its author's task-specific instruction.
+    #[test]
+    fn a_user_snippet_may_declare_an_action_and_is_delivered_as_authored() {
+        let path = write_tmp(
+            "action-parse",
+            "snippets:\n  \
+             myreview:\n    action: deep_review\n    body: my own review prompt\n  \
+             plain:\n    body: just text\n",
+        );
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("loads");
+        let mine = loaded.get("myreview").expect("myreview");
+        assert_eq!(mine.action, Some(SnippetAction::DeepReview));
+        assert_eq!(mine.delivery_body(), "my own review prompt");
+
+        let plain = loaded.get("plain").expect("plain");
+        assert_eq!(plain.action, None);
+        assert_eq!(plain.delivery_body(), "just text");
+    }
+
+    /// An unknown `action:` is a parse error rather than a silently ignored
+    /// field: a user who meant to join the workflow and mistyped it would
+    /// otherwise get a snippet that looks wired and persists nothing.
+    #[test]
+    fn an_unknown_action_is_refused() {
+        let path = write_tmp(
+            "action-unknown",
+            "snippets:\n  bad:\n    action: fixall\n    body: text\n",
+        );
+        assert!(Snippets::load_from(&path, SnippetOrigin::Global).is_err());
+    }
+
+    /// The action round-trips through the YAML a save writes.
+    #[test]
+    fn action_round_trips_through_yaml() {
+        let mut snippet = Snippets::builtin().get("fixall").expect("fixall").clone();
+        snippet.origin = SnippetOrigin::Unknown;
+        let yaml = serde_yaml::to_string(&snippet).expect("encode");
+        assert!(yaml.contains("action: fix_all"), "{yaml}");
+        let back: Snippet = serde_yaml::from_str(&yaml).expect("decode");
+        assert_eq!(back.action, Some(SnippetAction::FixAll));
+        // `as_str` is the same name the serde rename writes, so a future
+        // rename cannot leave the two disagreeing.
+        for action in [SnippetAction::DeepReview, SnippetAction::FixAll] {
+            assert!(
+                serde_yaml::to_string(&action)
+                    .expect("encode")
+                    .contains(action.as_str())
+            );
+        }
+    }
+
+    /// A user's own prompt and an override are delivered as authored.
     #[test]
     fn user_bodies_and_overrides_are_delivered_as_authored() {
         let yaml = "snippets:\n  rev:\n    body: My review\n  custom:\n    body: My task\n";
@@ -3372,7 +3309,7 @@ snippets:
             skill: None,
             provider: None,
             next: Vec::new(),
-            answer_is_the_ending: false,
+            action: None,
             origin: SnippetOrigin::Unknown,
         }
     }

@@ -274,6 +274,19 @@ pub struct Sidebar {
     /// reply / capture). Drives the row's `?N` badge; a workspace with none
     /// carries no entry.
     open_requests: HashMap<SessionKey, usize>,
+    /// The open inbound requests themselves — who asked what — so the
+    /// right pane can list what is behind the `⟲N` badge.
+    open_request_rows: HashMap<SessionKey, Vec<lazybox_ipc::OpenAgentRequest>>,
+    /// Rows the user asked to remove, hidden from the list since the given
+    /// instant while the daemon tears them down. The daemon's
+    /// `WorkspaceRemoved` clears the entry; one that never arrives restores
+    /// the row ([`Self::expire_pending_removals`]).
+    pending_removals: HashMap<SessionKey, std::time::Instant>,
+    /// Markdown artifacts spooled per workspace (#1822), fed by
+    /// `Event::WorkspaceArtifacts` (seeded on connect, refreshed on every
+    /// spool change). Drives the row's `▤N` badge; a workspace with none
+    /// carries no entry.
+    artifact_counts: HashMap<SessionKey, usize>,
     /// Batched-recompute state for a daemon-event drain (#1030). While
     /// `defer_recompute` is set — the model brackets a whole drain batch
     /// with `begin_recompute_batch` / `flush_recompute` — the O(N log N)
@@ -386,11 +399,18 @@ pub struct Sidebar {
     /// so two agents sharing a tier label keep distinct shorts. Refreshed
     /// whenever the model menus reload (`set_model_shorts`).
     model_shorts: HashMap<(char, String), String>,
-    /// `badge_letter → label` of each agent's DEFAULT model tier
-    /// (`agents.<id>.models.default`, else the built-in default). A row
-    /// whose single agent runs its default tier shows no `◆` badge — the
-    /// badge marks a deliberate deviation, so `◆Op` on thirty rows stops
-    /// being wallpaper (#1502). Fed by `set_default_model_labels`.
+    /// `badge_letter → label` of the strength each agent runs at — the
+    /// tier `agents.<id>.models.default` names, resolved in that agent's
+    /// own menu and nowhere else. A row whose single agent runs that
+    /// strength shows no `◆` badge — the badge marks a deliberate
+    /// deviation, so `◆Op` on thirty rows stops being wallpaper (#1502).
+    /// Fed by `set_default_model_labels`.
+    ///
+    /// An agent whose strength doesn't resolve is absent, so its runs
+    /// always badge. Deliberately no fall back to the built-in menu:
+    /// `Config::agent_models` has already folded that in, so a second
+    /// fallback could only fire for a `replace: true` menu — labelling a
+    /// Sonnet-only menu "Opus", the tier it dropped on purpose (#1797).
     default_model_labels: HashMap<char, String>,
     /// Built-in agent registry, consulted so an agent's display badge
     /// (`C` / `X` / `U`) comes from the agent itself rather than a
@@ -515,6 +535,9 @@ pub struct Sidebar {
     /// sitting to the right of the sort chip. Click opens the global
     /// search (`open_global_search`).
     search_chip_rect: Option<Rect>,
+    /// The usage row and the today-spend strip as last drawn. A click on
+    /// either opens the Stats view; they were numbers with no way in.
+    stats_rects: Vec<Rect>,
     /// Screen rect of the bottom `/` search input bar, stashed by
     /// `render` while a search is open. A click anywhere off this bar
     /// (and off the header search chip) dismisses the search instead of
@@ -553,6 +576,24 @@ pub struct Sidebar {
     /// because it additionally holds prompts submitted since the snapshot —
     /// the daemon's copy is only re-read on connect.
     agent_text_live: HashMap<SessionKey, String>,
+    /// Matching lines of terminal OUTPUT the daemon's scan returned for the
+    /// live query (#1780) — what the agent *said back*, which lives only in
+    /// the daemon's replay rings. APPENDED to the two prompt corpora rather
+    /// than overriding them: a workspace can match on what it was asked, on
+    /// what it answered, or on both, and shadowing either half would make a
+    /// query's result depend on which half the daemon happened to reach.
+    ///
+    /// Scoped to one query. It is replaced wholesale by each reply and
+    /// cleared when the agent terms change, because text scanned for a
+    /// different needle answers a different question. It is NOT refreshed
+    /// while a query stands: a scan is a point-in-time answer, and
+    /// re-running it on a timer would put the fleet-wide cost on a clock
+    /// rather than on something the user did.
+    agent_text_output: HashMap<SessionKey, String>,
+    /// A daemon output scan is in flight for the live query (#1780). The
+    /// search bar says so: the rows on screen are the answer from the two
+    /// client-side corpora alone, and more may still arrive.
+    agent_output_scanning: bool,
     /// Excerpt of the agent text that matched, for rows an `agent:` term
     /// selected — the row's "why did this match" cue, since the hit isn't
     /// in the title the underline marks. Rebuilt by every recompute from
@@ -728,6 +769,9 @@ impl Sidebar {
             repo_summaries: BTreeMap::new(),
             stacks: HashMap::new(),
             open_requests: HashMap::new(),
+            open_request_rows: HashMap::new(),
+            pending_removals: HashMap::new(),
+            artifact_counts: HashMap::new(),
             defer_recompute: false,
             recompute_pending: false,
             #[cfg(test)]
@@ -770,6 +814,7 @@ impl Sidebar {
             filter_chip_rect: None,
             sort_chip_rect: None,
             search_chip_rect: None,
+            stats_rects: Vec::new(),
             search_bar_rect: None,
             now_override: None,
             search: None,
@@ -777,6 +822,8 @@ impl Sidebar {
             agent_text: HashMap::new(),
             agent_text_durable: HashMap::new(),
             agent_text_live: HashMap::new(),
+            agent_text_output: HashMap::new(),
+            agent_output_scanning: false,
             agent_excerpts: HashMap::new(),
             agent_text_rev: 0,
             broadcast_selected: std::collections::HashSet::new(),
@@ -856,6 +903,12 @@ impl Sidebar {
     /// model badge on rows running their agent's default tier (#1502).
     pub fn set_default_model_labels(&mut self, defaults: HashMap<char, String>) {
         self.default_model_labels = defaults;
+    }
+
+    /// Test-facing read of the badge's default-tier comparison values.
+    #[cfg(test)]
+    pub(crate) fn default_model_label(&self, letter: char) -> Option<&str> {
+        self.default_model_labels.get(&letter).map(String::as_str)
     }
 
     /// Whether `model` is `letter`'s default tier — the badge is for
@@ -1928,6 +1981,15 @@ impl Sidebar {
         row == rect.y && col >= rect.x && col < rect.x + rect.width
     }
 
+    /// True when `(col, row)` falls on the usage row or the today-spend
+    /// strip — a hit opens the Stats view. Pure hit test: the model owns
+    /// the modal stack.
+    pub fn stats_hit(&self, col: u16, row: u16) -> bool {
+        self.stats_rects
+            .iter()
+            .any(|rect| row == rect.y && col >= rect.x && col < rect.x + rect.width)
+    }
+
     /// Click on the sort chip cycles it — same effect as `o`.
     pub fn click_to_cycle_sort(&mut self, col: u16, row: u16) -> bool {
         let Some(rect) = self.sort_chip_rect else {
@@ -2127,6 +2189,36 @@ impl Sidebar {
 
     /// Move the cursor onto the workspace row matching `key`. Returns
     /// true on a hit. Used by `--workspace` preselect on startup.
+    /// The workspace carrying `task` — as its PR or one of its linked
+    /// issues — if this client knows one. What a click on a blocker jumps to.
+    pub fn workspace_key_for_task(&self, task: &lazybox_core::TaskId) -> Option<SessionKey> {
+        self.workspaces
+            .iter()
+            .find(|(_, workspace)| {
+                workspace
+                    .pr
+                    .iter()
+                    .chain(workspace.gh_issues.iter())
+                    .chain(workspace.linear_issues.iter())
+                    .any(|t| &t.id == task)
+            })
+            .map(|(key, _)| key.clone())
+    }
+
+    /// The state of `task` as this client last saw it, from whichever
+    /// workspace carries it. `None` when no tracked workspace does.
+    pub fn task_state_for(&self, task: &lazybox_core::TaskId) -> Option<lazybox_core::TaskState> {
+        self.workspaces.values().find_map(|workspace| {
+            workspace
+                .pr
+                .iter()
+                .chain(workspace.gh_issues.iter())
+                .chain(workspace.linear_issues.iter())
+                .find(|t| &t.id == task)
+                .map(|t| t.state)
+        })
+    }
+
     pub fn focus_workspace_key(&mut self, key: &SessionKey) -> bool {
         self.ensure_visible_fresh();
         for (i, row) in self.visible.iter().enumerate() {
@@ -2248,6 +2340,34 @@ impl Sidebar {
     /// Move the cursor onto the next workspace with unread activity,
     /// starting AFTER the current row and wrapping (`Shift-N`, #1502) —
     /// the unread analog of [`Self::focus_next_asking_workspace`].
+    /// Move the cursor to the next visible workspace with a reviewer
+    /// requested or a review pending, wrapping around — the same signal as
+    /// the `⟳N review` count. Returns `false` when there is none.
+    pub fn focus_next_review_pending_workspace(&mut self) -> bool {
+        let keys_order = self.visible_workspace_keys();
+        if keys_order.is_empty() {
+            return false;
+        }
+        let start = self
+            .selected_session_key()
+            .and_then(|cur| keys_order.iter().position(|k| k == cur))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let target = (0..keys_order.len())
+            .map(|i| &keys_order[(start + i) % keys_order.len()])
+            .find(|k| {
+                self.workspaces.get(*k).is_some_and(|w| {
+                    workspace_attention_signals(w, &self.agents)
+                        .contains(&AttentionSignal::ReviewPending)
+                })
+            })
+            .cloned();
+        match target {
+            Some(key) => self.focus_workspace_key(&key),
+            None => false,
+        }
+    }
+
     pub fn focus_next_unread_workspace(&mut self) -> bool {
         let keys_order = self.visible_workspace_keys();
         if keys_order.is_empty() {
@@ -3948,9 +4068,108 @@ impl Sidebar {
         }
     }
 
+    /// Take `key` out of the list now: its removal was just requested. The
+    /// daemon's teardown (terminal kills, the local-work check) takes
+    /// seconds — up to half a minute when a kill hits its bound — and the
+    /// row used to sit there the whole time.
+    pub fn hide_pending_removal(&mut self, key: SessionKey) {
+        self.pending_removals.insert(key, std::time::Instant::now());
+        self.recompute_visible();
+    }
+
+    /// Whether `key` is hidden while its removal completes.
+    pub fn is_pending_removal(&self, key: &SessionKey) -> bool {
+        self.pending_removals.contains_key(key)
+    }
+
+    /// Bring back every hidden row whose removal has not completed within
+    /// `limit` of the request — the daemon refused it or it never finished —
+    /// and return their names so the user is told. A row must never vanish
+    /// on the strength of a request alone.
+    pub fn expire_pending_removals(
+        &mut self,
+        now: std::time::Instant,
+        limit: std::time::Duration,
+    ) -> Vec<String> {
+        let expired: Vec<SessionKey> = self
+            .pending_removals
+            .iter()
+            .filter(|(_, at)| now.duration_since(**at) >= limit)
+            .map(|(key, _)| key.clone())
+            .collect();
+        if expired.is_empty() {
+            return Vec::new();
+        }
+        let names = expired
+            .iter()
+            .map(|key| {
+                self.pending_removals.remove(key);
+                self.workspaces
+                    .get(key)
+                    .map(|w| w.name.clone())
+                    .unwrap_or_else(|| key.as_str().to_string())
+            })
+            .collect();
+        self.recompute_visible();
+        names
+    }
+
     /// Open inbound requests for one workspace; `0` when it owes none.
     pub fn open_requests(&self, key: &SessionKey) -> usize {
         self.open_requests.get(key).copied().unwrap_or(0)
+    }
+
+    /// Record who asked `key` what. An empty set forgets the row, like
+    /// [`Self::set_open_requests`].
+    pub fn set_open_request_rows(
+        &mut self,
+        key: SessionKey,
+        rows: Vec<lazybox_ipc::OpenAgentRequest>,
+    ) {
+        if rows.is_empty() {
+            self.open_request_rows.remove(&key);
+        } else {
+            self.open_request_rows.insert(key, rows);
+        }
+    }
+
+    /// The open requests against `key`, oldest first.
+    pub fn open_request_rows(&self, key: &SessionKey) -> &[lazybox_ipc::OpenAgentRequest] {
+        self.open_request_rows
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// How a workspace is named when another one refers to it: `#N title`
+    /// for a tracked task, otherwise the workspace name. `None` when this
+    /// client does not track it.
+    pub fn workspace_reference_label(&self, key: &SessionKey) -> Option<String> {
+        let workspace = self.workspaces.get(key)?;
+        Some(match workspace.primary_task() {
+            Some(task) => match task.id.number() {
+                Some(n) => format!("#{n} {}", task.title),
+                None => task.title.clone(),
+            },
+            None => workspace.name.clone(),
+        })
+    }
+
+    /// Record how many artifacts a workspace's agents have spooled (#1822).
+    /// Zero forgets the row, like [`Self::set_open_requests`]: the badge is
+    /// absence-by-default, and a cleared spool must not keep a vanished
+    /// workspace alive in the map.
+    pub fn set_artifact_count(&mut self, key: SessionKey, count: usize) {
+        if count == 0 {
+            self.artifact_counts.remove(&key);
+        } else {
+            self.artifact_counts.insert(key, count);
+        }
+    }
+
+    /// Spooled artifacts for one workspace; `0` when it has none.
+    pub fn artifact_count(&self, key: &SessionKey) -> usize {
+        self.artifact_counts.get(key).copied().unwrap_or(0)
     }
 
     /// Drop an epic that stopped being live, re-projecting so its members
@@ -4644,6 +4863,7 @@ impl Sidebar {
         let outcome = crate::components::visible_rows::compute_visible(
             crate::components::visible_rows::ComputeInputs {
                 workspaces: &self.workspaces,
+                hidden: &self.pending_removals.keys().cloned().collect(),
                 mailbox: self.mailbox,
                 filters: &self.filters,
                 sort_mode: self.sort_mode,
@@ -4795,9 +5015,46 @@ impl Sidebar {
         self.rebuild_agent_text();
     }
 
-    /// Re-merge the two corpora and re-run a live search against the result.
-    /// The live half wins per key: it is the durable half plus whatever has
-    /// been submitted since the snapshot.
+    /// Replace the terminal-OUTPUT half of the corpus with one daemon scan's
+    /// answer (#1780) and re-filter. Wholesale, not merged: the reply is the
+    /// complete answer for its query, and an empty one is what clears the
+    /// previous query's rows.
+    pub fn set_agent_output_text(&mut self, entries: Vec<(String, String)>) {
+        self.agent_output_scanning = false;
+        // Clearing an already-empty corpus changes nothing, and the model
+        // clears on every needle change — which is every keystroke of an
+        // `agent:` query, each of which has already re-filtered once.
+        if self.agent_text_output.is_empty() && entries.is_empty() {
+            return;
+        }
+        self.agent_text_output = entries
+            .into_iter()
+            .map(|(key, text)| (SessionKey::new(key), text))
+            .collect();
+        self.rebuild_agent_text();
+    }
+
+    /// Note that a daemon output scan is in flight (or has finished without
+    /// a reply this client will use). Only the search bar reads it, so this
+    /// never re-filters.
+    pub fn set_agent_output_scanning(&mut self, scanning: bool) {
+        self.agent_output_scanning = scanning;
+    }
+
+    /// The needles an output scan for the live query would search for —
+    /// empty when there is no query or it carries no `agent:` / `said:`
+    /// term, which is the signal that no scan is owed.
+    pub fn agent_qualifier_needles(&self) -> Vec<String> {
+        self.search.as_ref().map_or_else(Vec::new, |s| {
+            lazybox_tui_core::inbox::agent_qualifier_needles(&s.query)
+        })
+    }
+
+    /// Re-merge the three corpora and re-run a live search against the
+    /// result. The live prompt half wins over the durable one per key: it is
+    /// the durable half plus whatever has been submitted since the snapshot.
+    /// Scanned output is appended to whichever prompt text a key has, so a
+    /// workspace stays matchable on both what it was asked and what it said.
     fn rebuild_agent_text(&mut self) {
         let mut merged = self.agent_text_durable.clone();
         merged.extend(
@@ -4805,6 +5062,13 @@ impl Sidebar {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone())),
         );
+        for (key, output) in &self.agent_text_output {
+            let corpus = merged.entry(key.clone()).or_default();
+            if !corpus.is_empty() && !corpus.ends_with('\n') {
+                corpus.push('\n');
+            }
+            corpus.push_str(output);
+        }
         self.agent_text = merged;
         self.agent_text_rev = self.agent_text_rev.wrapping_add(1);
         if self.search.as_ref().is_some_and(|s| {

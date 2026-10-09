@@ -25,7 +25,8 @@ pub use attention::{
     workspace_attention_signals, workspace_needs_attention,
 };
 pub use filter::{
-    Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet, task_involves,
+    Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet, search_key,
+    task_involves,
 };
 pub use model::{
     Mailbox, RepoSummary, SearchState, SortMode, TicketTreeMeta, VisibleRow, WorkspaceKind,
@@ -64,6 +65,10 @@ pub struct ComputeOutcome {
 /// back a [`ComputeOutcome`].
 pub struct ComputeInputs<'a> {
     pub workspaces: &'a HashMap<SessionKey, Workspace>,
+    /// Rows the user just removed. They leave the list at once while the
+    /// daemon's teardown (terminal kills, the local-work check) finishes;
+    /// the row comes back only if the removal does not complete.
+    pub hidden: &'a HashSet<SessionKey>,
     pub mailbox: Mailbox,
     /// Composable predicate filter layered on top of the mailbox. An
     /// empty set is the no-op identity. See [`FilterSet::accepts`].
@@ -359,6 +364,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     let mailbox_rows: Vec<(&SessionKey, &Workspace)> = input
         .workspaces
         .iter()
+        .filter(|(key, _)| !input.hidden.contains(*key))
         .filter(|(_, w)| {
             mailbox_membership(w, input.mailbox, input.now, input.show_inactive_in_inbox)
                 || (snoozed_lens && w.is_snoozed(input.now))
@@ -1412,6 +1418,37 @@ fn agent_qualifier_value(term: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+/// Every needle an `agent:` / `said:` term in `query` searches for, in
+/// query order and deduplicated (#1780).
+///
+/// This is what a client hands the daemon to scan terminal output with —
+/// derived from the SAME tokenizer and normalization [`search_evaluate`]
+/// applies, so the scan can never look for a different string than the
+/// filter will then test for. A query with no agent term yields an empty
+/// vec, which is the signal that no scan is owed: the qualifier's cost
+/// stays opt-in, exactly as stage 1 (#1774) established.
+///
+/// Negated terms (`-said:panic`) are included. A negation asks whether the
+/// corpus contains the needle, so the scan has to look for it too —
+/// omitting it would leave every workspace passing a `-said:` term by
+/// default.
+pub fn agent_qualifier_needles(query: &str) -> Vec<String> {
+    let raw = normalized_query(query).to_lowercase();
+    let mut needles: Vec<String> = Vec::new();
+    for term in search_terms(&raw) {
+        let term = term
+            .strip_prefix('-')
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(term);
+        if let Some(value) = agent_qualifier_value(term)
+            && !needles.iter().any(|kept| kept == value)
+        {
+            needles.push(value.to_string());
+        }
+    }
+    needles
+}
+
 /// Drop one pair of surrounding double quotes, if present.
 fn unquote(value: &str) -> &str {
     value
@@ -1748,8 +1785,11 @@ mod tests {
         static NO_COLLAPSED_EPICS: BTreeSet<String> = BTreeSet::new();
         static NO_AGENT_TEXT: std::sync::LazyLock<HashMap<SessionKey, String>> =
             std::sync::LazyLock::new(HashMap::new);
+        static NO_HIDDEN: std::sync::LazyLock<HashSet<SessionKey>> =
+            std::sync::LazyLock::new(HashSet::new);
         ComputeInputs {
             workspaces,
+            hidden: &NO_HIDDEN,
             mailbox: Mailbox::Inbox,
             filters: &NO_FILTERS,
             sort_mode: SortMode::Recent,
@@ -1784,6 +1824,35 @@ mod tests {
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert!(out.visible.is_empty());
         assert!(out.summaries.is_empty());
+    }
+
+    /// A row whose removal was just requested leaves the list at once;
+    /// its neighbours stay.
+    #[test]
+    fn a_hidden_row_is_left_out_of_the_list() {
+        let mut ws = HashMap::new();
+        for key in ["gone", "kept"] {
+            let w = workspace_with_task(key, Some("owner/r"), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let gone = ws
+            .keys()
+            .find(|k| k.as_str().contains("gone"))
+            .cloned()
+            .unwrap();
+        let hidden = HashSet::from([gone]);
+        let out = compute_visible(ComputeInputs {
+            hidden: &hidden,
+            ..inputs(&ws, &sub, &col, &att, &asking, &projects)
+        });
+        let keys = visible_workspace_keys(&out);
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].contains("kept"), "{keys:?}");
     }
 
     /// One workspace under one repo: header + workspace row.
@@ -3712,6 +3781,46 @@ mod tests {
 
         // Case-insensitive, both directions.
         assert!(search_evaluate("agent:PARSER", &ws, Some("The Parser broke")).matched);
+    }
+
+    /// The needles a client hands the daemon's output scan (#1780) must be
+    /// exactly what [`search_evaluate`] will then look for. Anything else
+    /// is a silent miss: the scan returns text, the filter tests for a
+    /// different string, and the row the user is hunting never appears.
+    #[test]
+    fn agent_needles_match_what_the_filter_will_look_for() {
+        assert!(agent_qualifier_needles("").is_empty());
+        assert!(
+            agent_qualifier_needles("acme login is:pr").is_empty(),
+            "a query with no agent term owes no scan — the cost stays opt-in"
+        );
+
+        // Same normalization the evaluator applies: leading `#` stripped,
+        // case folded, quoted values unquoted into ONE needle.
+        assert_eq!(
+            agent_qualifier_needles("#said:\"Cannot Borrow\" is:pr agent:E0502"),
+            vec!["cannot borrow".to_string(), "e0502".to_string()],
+        );
+
+        // A negated term still has to be scanned for: the filter asks
+        // whether the corpus CONTAINS it, so an unscanned needle would let
+        // every workspace pass `-said:panic` by default.
+        assert_eq!(agent_qualifier_needles("-said:panic"), vec!["panic"]);
+
+        // Both spellings share one corpus, so the same value asked twice is
+        // one scan.
+        assert_eq!(
+            agent_qualifier_needles("agent:parser said:parser"),
+            vec!["parser"]
+        );
+
+        // Every needle the derivation yields is one the evaluator accepts
+        // against a corpus containing it — the two halves cannot drift.
+        let mut ws = workspace_with_task("a", Some("acme/api"), 5);
+        ws.gh_issues.first_mut().expect("task").title = "Fix login flow".into();
+        let query = "said:\"cannot borrow\" agent:e0502";
+        let corpus = agent_qualifier_needles(query).join("\n");
+        assert!(search_evaluate(query, &ws, Some(&corpus)).matched);
     }
 
     /// A workspace that has never run an agent has no corpus. An

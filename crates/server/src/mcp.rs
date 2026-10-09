@@ -37,6 +37,19 @@
 //! newest comment), and `list_issues` returns summaries so a survey cannot
 //! blow the context it exists to protect. See [`crate::task_cache`].
 //!
+//! #1732 adds **review artifacts** — the durable handoff from a review to a
+//! fixer, which until then was the reviewing agent's own conversation:
+//!
+//! - `submit_review` — persist a review's findings, evidence and scope.
+//! - `list_reviews` — what this workspace holds, plus the one binding
+//!   decision a fixer should obey (bound / ambiguous / missing).
+//! - `get_review` — one report in full.
+//! - `submit_review_result` — per-finding outcomes, bound to that report.
+//!
+//! The artifacts live in the daemon's store (see [`crate::review_store`]), so
+//! they outlive the session, the worktree and a daemon restart; the domain —
+//! validation, freshness, selection — is `lazybox_core::review`.
+//!
 //! Phase 2 (#1420) adds the **push** side, closing the two-way bus:
 //!
 //! - `notify_session` — actively poke another session, delivering text through
@@ -64,7 +77,9 @@ use lazybox_store::StoreMutation;
 use parking_lot::RwLock;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig as McpServerInfo,
+};
 use rmcp::service::RequestContext;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router,
@@ -72,6 +87,7 @@ use rmcp::{
 
 use crate::ServerConfig;
 use crate::api_gateway;
+use crate::review_store;
 
 /// Maps a per-session bearer token to the [`SessionKey`] of the agent that
 /// owns it. A token is registered when a session spawns and forgotten when it
@@ -98,6 +114,24 @@ impl TokenRegistry {
     /// for a respawn so a session never accumulates stale tokens.
     pub fn forget_session(&self, key: &SessionKey) {
         self.inner.write().retain(|_, bound| bound != key);
+    }
+
+    /// Move every token bound to `from` onto `to`, returning whether any
+    /// moved. The issue→PR fold re-keys a live agent's workspace; its bearer
+    /// was minted for the issue key, so without this every MCP call it made
+    /// after the fold resolved to a row that no longer exists (`whoami`
+    /// empty, `report_blocker` written under a dead key and pruned) — and
+    /// after a restart the token was dropped outright, because no terminal
+    /// wore the issue key any more (#1837).
+    pub fn rebadge(&self, from: &SessionKey, to: &SessionKey) -> bool {
+        let mut moved = false;
+        for bound in self.inner.write().values_mut() {
+            if bound == from {
+                *bound = to.clone();
+                moved = true;
+            }
+        }
+        moved
     }
 
     /// Resolve a token to its session, if still registered.
@@ -162,9 +196,61 @@ pub struct McpRuntime {
     /// is a compare-and-set against the row as it stands *now* rather than as
     /// the caller last saw it.
     requests_write: tokio::sync::Mutex<()>,
+    /// Serializes review-artifact id allocation, for the same reason
+    /// [`McpRuntime::notes_write`] exists: two concurrent submissions that
+    /// both read the highest sequence in use would compute the same id, and
+    /// the second insert would silently replace the first report.
+    reviews_write: tokio::sync::Mutex<()>,
     /// In-flight `ask_session` waiters (#1653), so `reply_request` wakes the
     /// asker directly instead of having it poll the store.
     requests: RequestRegistry,
+    /// Each session's most recent turn result — the agent's own final
+    /// message, delivered by its `Stop` hook — waiting for the turn-end
+    /// capture that the same `Stop` triggers. Consumed by that capture.
+    turn_results: parking_lot::Mutex<HashMap<SessionKey, String>>,
+    /// How many turns each session has ENDED. Incremented by the same `Stop`
+    /// that records the turn result, BEFORE the `Done` state is broadcast,
+    /// so a question released by that broadcast is stamped with the count
+    /// including this turn and can never be captured by it.
+    turns_ended: parking_lot::Mutex<HashMap<SessionKey, u64>>,
+    /// The workspaces each session started with `start_workspace`, so the
+    /// per-session fan-out cap counts the ones still running an agent.
+    started_by: parking_lot::Mutex<HashMap<SessionKey, Vec<lazybox_core::WorkspaceKey>>>,
+    /// How deep in a `start_workspace` chain each workspace sits — a
+    /// workspace an agent started carries its starter's depth plus one, and
+    /// a session nobody started is depth 0. Bounds recursion the way
+    /// [`MAX_ASK_DEPTH`] bounds nested asks: the per-caller cap alone lets
+    /// A start B, B start C, C start D … forever, because each generation is
+    /// under its own bound and a finished start frees the slot that would
+    /// have stopped it.
+    start_depth: parking_lot::Mutex<HashMap<SessionKey, u32>>,
+    /// Workspaces with a `start_workspace` spawn in flight. The
+    /// "already has a running agent" check and the spawn itself are several
+    /// awaits apart, so without this two siblings starting the same record
+    /// both saw it free and both spawned — the double-spawn the `working` /
+    /// `working` claim exists to prevent.
+    starting: parking_lot::Mutex<std::collections::HashSet<lazybox_core::WorkspaceKey>>,
+}
+
+/// Holds a workspace's in-flight `start_workspace` claim. Released in `Drop`,
+/// so every exit — refusal, spawn failure, panic — frees it.
+pub(crate) struct StartClaim {
+    key: lazybox_core::WorkspaceKey,
+    starting: std::sync::Arc<McpRuntime>,
+}
+
+impl std::fmt::Debug for StartClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartClaim")
+            .field("key", &self.key)
+            .finish()
+    }
+}
+
+impl Drop for StartClaim {
+    fn drop(&mut self) {
+        self.starting.starting.lock().remove(&self.key);
+    }
 }
 
 impl McpRuntime {
@@ -183,10 +269,106 @@ impl McpRuntime {
         &self.requests_write
     }
 
+    /// The lock guarding review-artifact id allocation (see the field docs).
+    fn reviews_write(&self) -> &tokio::sync::Mutex<()> {
+        &self.reviews_write
+    }
+
     /// The in-flight request waiters shared by `ask_session` and
     /// `reply_request`.
     pub fn requests(&self) -> &RequestRegistry {
         &self.requests
+    }
+
+    /// Record `session_key`'s latest turn result (from its `Stop` hook).
+    pub fn record_turn_result(&self, session_key: SessionKey, text: String) {
+        self.turn_results.lock().insert(session_key, text);
+    }
+
+    /// Count one ended turn for `session_key` and return the new total.
+    /// Called on every `Stop`, result or not, so the count tracks turns
+    /// rather than turns that happened to report something.
+    pub fn end_turn(&self, session_key: &SessionKey) -> u64 {
+        let mut turns = self.turns_ended.lock();
+        let counter = turns.entry(session_key.clone()).or_insert(0);
+        *counter = counter.saturating_add(1);
+        *counter
+    }
+
+    /// How many turns `session_key` has ended.
+    pub(crate) fn turns_ended(&self, session_key: &SessionKey) -> u64 {
+        self.turns_ended
+            .lock()
+            .get(session_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Take `session_key`'s latest turn result, if one is waiting.
+    fn take_turn_result(&self, session_key: &SessionKey) -> Option<String> {
+        self.turn_results.lock().remove(session_key)
+    }
+
+    /// Drop an unconsumed turn result (a new turn started).
+    pub fn clear_turn_result(&self, session_key: &SessionKey) {
+        self.turn_results.lock().remove(session_key);
+    }
+
+    /// Record that `caller` started an agent in `key`, one link deeper in
+    /// the chain than `caller` itself sits.
+    fn record_started(&self, caller: &SessionKey, key: lazybox_core::WorkspaceKey) {
+        let depth = self.start_depth(caller).saturating_add(1);
+        self.start_depth
+            .lock()
+            .insert(SessionKey::from(&key), depth);
+        let mut started = self.started_by.lock();
+        let keys = started.entry(caller.clone()).or_default();
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+
+    /// How deep in a `start_workspace` chain `key` sits. A session nobody
+    /// started — the user's own — is 0.
+    fn start_depth(&self, key: &SessionKey) -> u32 {
+        self.start_depth.lock().get(key).copied().unwrap_or(0)
+    }
+
+    /// Claim `key` for an in-flight start. `None` when another caller is
+    /// already spawning into it.
+    fn claim_start(
+        self: &std::sync::Arc<Self>,
+        key: &lazybox_core::WorkspaceKey,
+    ) -> Option<StartClaim> {
+        self.starting
+            .lock()
+            .insert(key.clone())
+            .then(|| StartClaim {
+                key: key.clone(),
+                starting: self.clone(),
+            })
+    }
+
+    /// Every workspace any session started, across all callers. The
+    /// per-caller ledger cannot see a fleet that grew by recursion.
+    fn all_started(&self) -> Vec<lazybox_core::WorkspaceKey> {
+        self.started_by
+            .lock()
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// The workspaces `caller` has started, oldest first.
+    fn started_by(&self, caller: &SessionKey) -> Vec<lazybox_core::WorkspaceKey> {
+        self.started_by
+            .lock()
+            .get(caller)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Record the bound endpoint URL (called once by [`start`]).
@@ -276,6 +458,165 @@ struct NotifySessionArgs {
     /// the target's composer for its operator to review and send (`false`).
     #[serde(default = "default_notify_submit")]
     submit: bool,
+}
+
+/// A `create_work` request: mint a unit of work, optionally assign it to a
+/// sibling and deliver its brief in the same call.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CreateWorkArgs {
+    /// One line naming the work.
+    title: String,
+    /// Objective · done-criteria · boundaries · output shape. This is what
+    /// gets delivered when `owner` is a sibling workspace.
+    #[serde(default)]
+    brief: String,
+    /// Workspace key of the agent that will do it (from `list_sessions`).
+    /// Omit to leave it unassigned — unassigned is the absence of an owner,
+    /// not a party of its own.
+    #[serde(default)]
+    owner: Option<String>,
+    /// Deliver the brief into the owner's session now (the default when an
+    /// `owner` is given). `false` records the assignment without poking it,
+    /// for work queued behind something else.
+    #[serde(default)]
+    deliver: Option<bool>,
+    /// The plan (TODO tree) this belongs to, as returned by `work_status`.
+    #[serde(default)]
+    plan: Option<String>,
+    /// The work id this nests under — a sub-TODO.
+    #[serde(default)]
+    parent: Option<String>,
+    /// Records this work points at: `owner/repo#N`, a URL, or a workspace
+    /// key. Tracker records are LINKS, never the work's identity, so an
+    /// issue→PR fold rewrites a link and the id is untouched.
+    #[serde(default)]
+    links: Vec<String>,
+}
+
+/// An `update_work` request: move a unit of work, and report its result when
+/// the move is to `completed`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct UpdateWorkArgs {
+    /// The work id (a uuid, from `create_work` / `my_work`).
+    id: String,
+    /// `underway`, `awaiting-answer`, `held`, `completed`, `failed` or
+    /// `canceled`. A task already in a terminal state refuses every further
+    /// move, and the refusal says so rather than being dropped.
+    lifecycle: String,
+    /// The question, for `awaiting-answer`; the blocker, for `held`; the
+    /// cause, for `failed`.
+    #[serde(default)]
+    detail: Option<String>,
+    /// Required for `completed`: what was done, for the requester to read
+    /// instead of scraping your scrollback.
+    #[serde(default)]
+    summary: Option<String>,
+    /// Artifacts you wrote into `.lazybox/artifacts/`, by file name. Carried
+    /// by reference, so a result costs the requester bytes, not a transcript.
+    #[serde(default)]
+    artifacts: Vec<String>,
+}
+
+/// A `my_work` request.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct MyWorkArgs {
+    /// Include work already finished (default false — the open list is what
+    /// you act on).
+    #[serde(default)]
+    include_done: bool,
+}
+
+/// A `lazybox_guide` request.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct LazyboxGuideArgs {
+    /// The topic to read. Omit for the index.
+    #[serde(default)]
+    topic: Option<String>,
+}
+
+/// A `work_status` request.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct WorkStatusArgs {
+    /// A plan id. Omit for every plan, each with its roll-up.
+    #[serde(default)]
+    plan: Option<String>,
+}
+
+/// An `answer_session` request: keystrokes into a sibling that is waiting
+/// on a question.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AnswerSessionArgs {
+    /// Workspace key of the waiting session (from `list_sessions`).
+    workspace: String,
+    /// Keys to press, in order: `1`–`9`, `enter`, `esc`, `up`, `down`,
+    /// `left`, `right`, `tab`, `space`, `y`, `n`. Pick option 2 of a
+    /// numbered question with `["2"]`; move and confirm with
+    /// `["down", "enter"]`.
+    #[serde(default)]
+    keys: Vec<String>,
+    /// Text typed before the keys — for a free-text answer or a "type
+    /// something" option. Follow it with `enter` in `keys` to submit.
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// How long `answer_session` lets the target redraw before reading its
+/// screen back.
+const ANSWER_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Most keys one `answer_session` call may press: enough to walk any
+/// chooser, too few to drive an agent through a session.
+const MAX_ANSWER_KEYS: usize = 16;
+/// Largest free-text answer, in bytes.
+const MAX_ANSWER_TEXT_BYTES: usize = 2000;
+
+/// The bytes one named key sends — the same encoding the TUI uses for the
+/// physical key, so the target cannot tell the two apart.
+fn answer_key_bytes(key: &str) -> Option<&'static [u8]> {
+    Some(match key.trim().to_ascii_lowercase().as_str() {
+        "1" => b"1",
+        "2" => b"2",
+        "3" => b"3",
+        "4" => b"4",
+        "5" => b"5",
+        "6" => b"6",
+        "7" => b"7",
+        "8" => b"8",
+        "9" => b"9",
+        "y" => b"y",
+        "n" => b"n",
+        "enter" | "return" => b"\r",
+        "esc" | "escape" => b"\x1b",
+        "tab" => b"\t",
+        "space" => b" ",
+        "up" => b"\x1b[A",
+        "down" => b"\x1b[B",
+        "right" => b"\x1b[C",
+        "left" => b"\x1b[D",
+        _ => return None,
+    })
+}
+
+/// Why an `answer_session` must not press anything, or `None` when it may:
+/// the target has to be waiting on input, and on a question rather than a
+/// permission prompt (see `lazybox_agents::detect::shows_claude_permission_prompt`).
+fn answer_refusal(state: Option<lazybox_ipc::AgentState>, screen: &str) -> Option<String> {
+    if state != Some(lazybox_ipc::AgentState::InputNeeded) {
+        return Some(format!(
+            "that agent is not waiting on input (state {state:?}) — to hand it work or a \
+             message use notify_session / ask_session; answer_session only answers a question \
+             it is showing"
+        ));
+    }
+    if lazybox_agents::detect::shows_claude_permission_prompt(screen) {
+        return Some(
+            "that agent is on a PERMISSION prompt (it is asking to run, edit or delete \
+             something). Those are the human's to answer — tell the user which session is \
+             waiting and what it asks; do not approve a sibling's action yourself."
+                .into(),
+        );
+    }
+    None
 }
 
 fn default_notify_submit() -> bool {
@@ -410,10 +751,46 @@ struct SpawnWorkerArgs {
     /// default agent.
     #[serde(default)]
     agent: Option<String>,
+    /// Model tier to run the worker at, from **that agent's own** menu —
+    /// a tier alias (`S` / `M` / `L` / `XL` …), the model's name or id, or
+    /// a capability word (`best` / `high` / `medium` / `low`) that each
+    /// agent maps to its own ladder. The ladders differ per agent, so
+    /// `XL` is not the same model on `claude` and on `codex`; a word is
+    /// the portable spelling. An alias this agent's menu does not define
+    /// is REFUSED with the valid ones listed — never quietly run at the
+    /// default. Omit to use the agent's configured default tier.
+    #[serde(default)]
+    model: Option<String>,
     /// Rejected (#1586). A worker never gets a named workspace beside the
     /// record it works on; pass `task` or `create_issue` instead.
     #[serde(default)]
     workspace_name: Option<String>,
+}
+
+/// A `start_workspace` request: hand independent work on an existing
+/// tracker record to an agent in that record's own workspace.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct StartWorkspaceArgs {
+    /// The tracker record the work belongs to: `owner/repo#N`, a GitHub
+    /// issue / PR URL, or a Linear identifier (`ENG-45`). It must already
+    /// exist — this tool never files one.
+    task: String,
+    /// The task handed to the new agent as its opening prompt.
+    brief: String,
+    /// Agent id to spawn (`claude`, `codex`, …). Omit to use the configured
+    /// default agent.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Model tier to run the new agent at, from **that agent's own** menu —
+    /// a tier alias (`S` / `M` / `L` / `XL` …), the model's name or id, or
+    /// a capability word (`best` / `high` / `medium` / `low`) that each
+    /// agent maps to its own ladder. The ladders differ per agent, so
+    /// `XL` is not the same model on `claude` and on `codex`; a word is
+    /// the portable spelling. An alias this agent's menu does not define
+    /// is REFUSED with the valid ones listed — never quietly run at the
+    /// default. Omit to use the agent's configured default tier.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// The issue `spawn_worker` files when the work has no ticket yet.
@@ -446,6 +823,12 @@ struct PreparedWorker {
     /// Coordinator can see *which* row it landed on rather than inferring it.
     anchor: lazybox_core::TaskId,
     agent_id: String,
+    /// The tier alias the request's `model` token resolved to on
+    /// `agent_id`'s own menu, canonicalised here so the spawn carries the
+    /// menu's own alias rather than whatever spelling the caller used
+    /// (#1911). `None` when the caller named no tier — the spawn then
+    /// takes the agent's configured default.
+    model_alias: Option<String>,
     epic_key: String,
 }
 
@@ -458,6 +841,202 @@ struct ReportBlockerArgs {
     /// review, merge-order, contract, cycle, other. Defaults to `decision`.
     #[serde(default)]
     kind: Option<String>,
+}
+
+// ── review artifacts (#1732) ────────────────────────────────────────────
+//
+// The wire shapes below mirror `lazybox_core::review`'s submission types
+// rather than reusing them: `schemars::JsonSchema` is what publishes a tool's
+// argument schema to the agent, and that is an MCP-transport concern, not one
+// the domain crate should take a dependency for.
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+struct ReviewScopeArgs {
+    /// What was reviewed, in words — "diff vs main", "PR #1732 head". Two
+    /// reports whose labels differ describe different work, which is what
+    /// makes a later selection ambiguous rather than a guess.
+    #[serde(default)]
+    label: String,
+    /// The base commit the diff was taken against.
+    #[serde(default)]
+    base_sha: Option<String>,
+    /// `git rev-parse HEAD` at review time. Required for a submitted review:
+    /// without it nothing can tell whether the findings still describe the
+    /// tree.
+    #[serde(default)]
+    head_sha: Option<String>,
+    /// A digest of the uncommitted diff (e.g. `git diff HEAD | shasum`) when
+    /// the worktree is dirty, so a review of code that exists in no commit is
+    /// not silently re-bound to a different dirty tree. Omit on a clean tree.
+    #[serde(default)]
+    dirty_digest: Option<String>,
+}
+
+impl From<ReviewScopeArgs> for lazybox_core::ReviewScope {
+    fn from(args: ReviewScopeArgs) -> Self {
+        Self {
+            label: args.label,
+            base_sha: args.base_sha,
+            head_sha: args.head_sha,
+            dirty_digest: args.dirty_digest,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct FindingArgs {
+    /// Your own stable id for this finding. Omit and it is numbered `f1`, `f2`
+    /// … in submission order; whatever it ends up as is the handle a result
+    /// refers back to.
+    #[serde(default)]
+    id: Option<String>,
+    /// One line naming the defect.
+    title: String,
+    /// `blocker`, `major` or `minor`. Anything else is a defect, never a
+    /// silent downgrade to a nit.
+    severity: String,
+    /// `file:line` anchors, at least one — a finding a fixer cannot locate is
+    /// not actionable.
+    #[serde(default)]
+    anchors: Vec<String>,
+    /// Why this is real: the concrete input or state that produces the wrong
+    /// result. This is the reasoning that would otherwise die with your
+    /// session, so write it for a reader who never saw the review.
+    evidence: String,
+    /// What you suggest doing about it. Advisory — the fixer owns the real
+    /// cause.
+    #[serde(default)]
+    remediation: String,
+    /// What should pass once it is fixed (a test name, a command).
+    #[serde(default)]
+    checks: Vec<String>,
+}
+
+impl From<FindingArgs> for lazybox_core::FindingInput {
+    fn from(args: FindingArgs) -> Self {
+        Self {
+            id: args.id,
+            title: args.title,
+            severity: args.severity,
+            anchors: args.anchors,
+            evidence: args.evidence,
+            remediation: args.remediation,
+            checks: args.checks,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SubmitReviewArgs {
+    /// The readable review, verbatim. Kept alongside the structured findings,
+    /// never in place of them: a summary that loses your argument is the
+    /// failure this tool exists to prevent.
+    report: String,
+    /// One entry per finding. An empty list is a complete, clean review.
+    #[serde(default)]
+    findings: Vec<FindingArgs>,
+    /// The tree you reviewed.
+    #[serde(default)]
+    scope: Option<ReviewScopeArgs>,
+    /// Validation the review expects to pass once its findings are addressed.
+    #[serde(default)]
+    checks: Vec<String>,
+    /// What you could not settle, for whoever picks this up.
+    #[serde(default)]
+    open_questions: Vec<String>,
+    /// True when you are capturing findings from an earlier in-conversation
+    /// review rather than reporting one you just performed. An import needs no
+    /// `head_sha` and always binds as needing revalidation.
+    #[serde(default)]
+    imported: bool,
+}
+
+impl SubmitReviewArgs {
+    /// Total free-text bytes this submission would persist. Sums every string
+    /// that reaches the stored row, because the row is what the cap protects
+    /// and `report` is only its largest single field.
+    fn submission_bytes(&self) -> usize {
+        let strings = |v: &[String]| v.iter().map(String::len).sum::<usize>();
+        self.report.len()
+            + strings(&self.checks)
+            + strings(&self.open_questions)
+            + self
+                .findings
+                .iter()
+                .map(|f| {
+                    f.id.as_deref().map_or(0, str::len)
+                        + f.title.len()
+                        + f.severity.len()
+                        + f.evidence.len()
+                        + f.remediation.len()
+                        + strings(&f.anchors)
+                        + strings(&f.checks)
+                })
+                .sum::<usize>()
+            + self.scope.as_ref().map_or(0, |s| {
+                s.label.len()
+                    + s.base_sha.as_deref().map_or(0, str::len)
+                    + s.head_sha.as_deref().map_or(0, str::len)
+                    + s.dirty_digest.as_deref().map_or(0, str::len)
+            })
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+struct ListReviewsArgs {
+    /// The tree as it is NOW (`head_sha`, plus `dirty_digest` when dirty), so
+    /// each report's freshness is answerable. Omit it and every report reads
+    /// as unknown freshness, which is treated as needing revalidation.
+    #[serde(default)]
+    scope: Option<ReviewScopeArgs>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetReviewArgs {
+    /// The report id `list_reviews` bound (`r3`).
+    report_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct OutcomeArgs {
+    /// The finding's id, as `get_review` gave it.
+    finding_id: String,
+    /// `fixed`, `already_resolved`, `blocked` or `refuted`.
+    disposition: String,
+    /// What backs the claim: the change you made, or the concrete, falsifiable
+    /// reason the finding does not hold.
+    evidence: String,
+    #[serde(default)]
+    commits: Vec<String>,
+    #[serde(default)]
+    checks: Vec<String>,
+}
+
+impl From<OutcomeArgs> for lazybox_core::OutcomeInput {
+    fn from(args: OutcomeArgs) -> Self {
+        Self {
+            finding_id: args.finding_id,
+            disposition: args.disposition,
+            evidence: args.evidence,
+            commits: args.commits,
+            checks: args.checks,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SubmitReviewResultArgs {
+    /// The report you bound and worked from.
+    report_id: String,
+    /// One per finding in that report.
+    #[serde(default)]
+    outcomes: Vec<OutcomeArgs>,
+    /// The checks you ran over the whole run (`make test`, a CI run).
+    #[serde(default)]
+    checks: Vec<String>,
+    /// Anything the report missed that you noticed.
+    #[serde(default)]
+    notes: String,
 }
 
 // ── agent-to-agent request/response (#1653) ─────────────────────────────
@@ -488,6 +1067,9 @@ pub(crate) enum RequestStatus {
 pub(crate) enum AnswerSource {
     ReplyRequest,
     TurnEndCapture,
+    /// The agent's own final message for the turn, from its `Stop` hook —
+    /// what it actually said, not a scrape of its terminal.
+    TurnResult,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -520,6 +1102,26 @@ pub(crate) struct AgentRequest {
     /// what the asker may already have read.
     #[serde(default)]
     pub(crate) answers: Vec<RequestAnswer>,
+    /// The question is still queued behind a busy target and has not landed
+    /// in its input yet. The turn-end capture must not answer it: a turn
+    /// that was already running when the question was asked would
+    /// otherwise "answer" it with unrelated output. Defaults to false so a
+    /// row written before this field existed stays answerable.
+    #[serde(default)]
+    pub(crate) awaiting_delivery: bool,
+    /// How many turns the target had ENDED when this question landed in its
+    /// input. The turn-end capture for turn N only answers questions that
+    /// landed before turn N ended, which is what makes "this turn never saw
+    /// the question" a structural fact rather than a race the capture
+    /// happens to win.
+    ///
+    /// An idle-gated question asked at a busy target is released ON the
+    /// target's `Done` transition — the same event that spawns the capture —
+    /// so the two rendezvous by design and `awaiting_delivery` alone is
+    /// decided by whichever task gets there first. Defaults to 0 so a row
+    /// written before this field existed stays answerable.
+    #[serde(default)]
+    pub(crate) delivered_after_turns: u64,
 }
 
 impl AgentRequest {
@@ -809,17 +1411,25 @@ impl LazyboxMcp {
         // concurrent posts to this scope can't both claim the same seq and
         // have the second silently overwrite the first.
         let _seq_guard = self.config.mcp.notes_write().lock().await;
-        let existing: Vec<String> = self
-            .list_scope_notes(&prefix)
-            .await?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect();
-        let seq = existing
+        let under_prefix = self.list_scope_notes(&prefix).await?;
+        // The sequence is allocated across everything under the prefix, so a
+        // key is unique even when two scopes sanitize to the same prefix.
+        let seq = under_prefix
             .iter()
-            .filter_map(|key| note_seq(key))
+            .filter_map(|(key, _)| note_seq(key))
             .max()
             .map_or(0, |max| max + 1);
+        // But retention counts and prunes THIS scope's notes only (#1836):
+        // `sanitize_key` is lossy (`a/b` and `a:b` share a prefix), and
+        // pruning by prefix let one scope's posts evict another scope's
+        // notes — on the blackboard, the fleet's coordination medium.
+        let existing: Vec<String> = under_prefix
+            .into_iter()
+            .filter(|(_, value)| {
+                serde_json::from_str::<Note>(value).is_ok_and(|note| note.scope == scope)
+            })
+            .map(|(key, _)| key)
+            .collect();
         let note = Note {
             author: author.as_str().to_string(),
             scope: scope.clone(),
@@ -996,27 +1606,155 @@ impl LazyboxMcp {
             submit,
             "mcp notify_session: delivering prompt to a sibling agent"
         );
-        // Bound the settle-gated inject the way the gateway does: it returns
-        // once the injection is *registered*, but registration waits on the
-        // per-terminal interaction lock a concurrent write can hold. A wedged
-        // lock must not pin the tool call open forever.
-        let injected = crate::spawn_handler::handle_inject_prompt(
+        // Idle-gated like `ask_session`: a message from another agent lands
+        // between turns, never interleaved with one. The receipt says what
+        // happened; a message still queued behind a busy target is reported
+        // as queued, and lands (or is refused) when the turn ends.
+        let mut pending = crate::delivery::deliver(
             &self.config,
-            terminal_id,
-            text,
-            None,
-            submit,
-        );
-        match tokio::time::timeout(NOTIFY_TIMEOUT, injected).await {
-            Ok(()) => Ok(json_result(notify_handoff_payload(workspace, submit))),
-            Err(_) => Ok(CallToolResult::error(vec![ContentBlock::text(
-                "notify timed out acquiring the target agent terminal".to_string(),
-            )])),
+            crate::delivery::DeliveryRequest {
+                terminal_id,
+                body: text.to_string(),
+                submit,
+                gate: crate::delivery::Gate::Idle,
+                from: crate::delivery::Party::Agent(caller.clone()),
+                wait_limit: Some(ASK_DELIVERY_WAIT),
+            },
+        )
+        .await;
+        let early = pending.landed_within(DELIVERY_RECEIPT_WAIT).await;
+        {
+            // Keep the handle alive so the final outcome (confirmed, or
+            // refused after queueing) is still logged once this call returns.
+            let workspace = workspace.to_string();
+            tokio::spawn(async move {
+                let outcome = pending.receipt().await;
+                tracing::info!(to = %workspace, ?outcome, "mcp notify_session: delivery resolved");
+            });
         }
+        Ok(notify_receipt_result(workspace, submit, early))
+    }
+
+    /// Validate and press an `answer_session`'s keys, then return the
+    /// target's screen so the caller can see whether the answer took.
+    async fn answer_session_payload(
+        &self,
+        caller: &SessionKey,
+        args: &AnswerSessionArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let target = SessionKey::from(args.workspace.as_str());
+        if &target == caller {
+            return Err(McpError::invalid_request(
+                "cannot answer your own session — pass a sibling workspace from list_sessions",
+                None,
+            ));
+        }
+        let text = args.text.as_deref().unwrap_or("");
+        if args.keys.is_empty() && text.is_empty() {
+            return Err(McpError::invalid_request(
+                "nothing to press — pass `keys` (e.g. [\"2\"] or [\"down\", \"enter\"]) and/or `text`",
+                None,
+            ));
+        }
+        if args.keys.len() > MAX_ANSWER_KEYS {
+            return Err(McpError::invalid_request(
+                format!("at most {MAX_ANSWER_KEYS} keys per answer"),
+                None,
+            ));
+        }
+        if text.len() > MAX_ANSWER_TEXT_BYTES {
+            return Err(McpError::invalid_request(
+                format!("answer text exceeds {MAX_ANSWER_TEXT_BYTES} bytes"),
+                None,
+            ));
+        }
+        let mut writes: Vec<Vec<u8>> = Vec::new();
+        if !text.is_empty() {
+            writes.push(text.as_bytes().to_vec());
+        }
+        for key in &args.keys {
+            let Some(bytes) = answer_key_bytes(key) else {
+                return Err(McpError::invalid_request(
+                    format!(
+                        "unknown key {key:?} — use 1-9, enter, esc, up, down, left, right, tab, \
+                         space, y or n"
+                    ),
+                    None,
+                ));
+            };
+            writes.push(bytes.to_vec());
+        }
+        let Some(terminal_id) = self.config.terminal.running_agent_terminal(&target).await else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "no running agent in workspace {}",
+                args.workspace
+            ))]));
+        };
+        let state = self.config.terminal.agent_state_for(terminal_id).await;
+        let screen = self
+            .read_session_text(&args.workspace, Some(40))
+            .await
+            .unwrap_or_default();
+        if let Some(reason) = answer_refusal(state, &screen) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(reason)]));
+        }
+        tracing::info!(
+            from = %caller.as_str(),
+            to = %args.workspace,
+            keys = ?args.keys,
+            text_chars = text.chars().count(),
+            "mcp answer_session: an agent answering a sibling's question"
+        );
+        // Key by key through the keyboard's own write path: a lone digit is
+        // what flips an answered chooser to Working, exactly as it does
+        // when the user presses it.
+        for bytes in writes {
+            let intent = if bytes == b"\r" {
+                lazybox_ipc::TerminalInputIntent::Submit
+            } else {
+                lazybox_ipc::TerminalInputIntent::Compose
+            };
+            if !crate::spawn_handler::handle_write_batch(
+                &self.config,
+                terminal_id,
+                &[bytes],
+                intent,
+            )
+            .await
+            {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "the keys could not be written — the agent's terminal is gone or refused input",
+                )]));
+            }
+        }
+        // Give the agent a moment to redraw, then show what it shows now.
+        tokio::time::sleep(ANSWER_SETTLE).await;
+        let after = self
+            .read_session_text(&args.workspace, Some(20))
+            .await
+            .unwrap_or_default();
+        Ok(json_result(serde_json::json!({
+            "answered": true,
+            "workspace": args.workspace,
+            "screen_after": after,
+            "note": "Check screen_after: if the question is still there, the keys did not select what you meant.",
+        })))
     }
 
     #[tool(
-        description = "Actively push an instruction into another agent's session by its workspace key (from list_sessions) — a direct poke, not the pull-based blackboard. Delivers through the same settle-gated inject the TUI uses, so it never lands in a permission/chooser prompt. submit=true (default) pastes and runs it; submit=false leaves it in the target's composer for its operator to review first. Returns once the message is handed off, which is NOT a confirmation the target read or ran it — a target parked at a permission prompt drops it silently. Verify with read_session when delivery matters."
+        description = "Answer a question another agent is waiting on, by pressing keys in its session — the way the user would. Use it when a sibling is stuck on a chooser (\"1. Stack on … 2. Hold until …\"), a numbered question or a free-text prompt, and you know the answer: `keys` [\"2\"] picks option 2, [\"down\", \"enter\"] moves and confirms, `text` types a free-text answer (follow with \"enter\"). Read the session first (read_session) so you know what it asks. Refuses when the agent is not waiting on input (use notify_session / ask_session to hand it work) and when it is on a PERMISSION prompt (run / edit / delete approval) — those are the user's, so tell the user instead. Returns the target's screen after the keys so you can confirm the answer took."
+    )]
+    async fn answer_session(
+        &self,
+        Parameters(args): Parameters<AnswerSessionArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        self.answer_session_payload(&caller, &args).await
+    }
+
+    #[tool(
+        description = "Actively push an instruction into another agent's session by its workspace key (from list_sessions) — a direct poke, not the pull-based blackboard. It lands between the target's turns (never mid-turn, never into a permission prompt). submit=true (default) pastes and runs it; submit=false leaves it in the target's composer for its operator to review. Returns a receipt: `delivered` (it is in the target's input), `queued` (the target is busy; it lands when the current turn ends), or an error naming why it was refused."
     )]
     async fn notify_session(
         &self,
@@ -1080,14 +1818,21 @@ impl LazyboxMcp {
             .collect()
     }
 
-    /// Announce how many requests are still open against `target` so the
-    /// sidebar's `?N` badge tracks the truth. Sent on every change — an ask,
-    /// a reply, a capture — and `0` clears the badge.
+    /// Announce the requests still open against `target` so the sidebar's
+    /// `⟲N` badge tracks the truth and a client can show who asked what.
+    /// Sent on every change — an ask, a reply, a capture — and an empty set
+    /// clears the badge.
     async fn announce_open_requests(&self, target: &str) {
-        let open = self.open_requests_for(target).await.len();
+        let requests: Vec<lazybox_ipc::OpenAgentRequest> = self
+            .open_requests_for(target)
+            .await
+            .iter()
+            .map(open_request_summary)
+            .collect();
         let _ = self.config.bus.send(lazybox_ipc::Event::AgentRequestsOpen {
             workspace_key: lazybox_core::WorkspaceKey::new(target),
-            open,
+            open: requests.len(),
+            requests,
         });
     }
 
@@ -1352,6 +2097,9 @@ impl LazyboxMcp {
             depth,
             status: RequestStatus::Pending,
             answers: Vec::new(),
+            awaiting_delivery: true,
+            // Stamped for real when it lands (`mark_request_delivered`).
+            delivered_after_turns: 0,
         };
         // Subscribe before the row is even visible: the moment it lands, a
         // target reading it can answer, and a reply that arrives before the
@@ -1371,21 +2119,65 @@ impl LazyboxMcp {
             "mcp ask_session: asking a sibling agent"
         );
         let envelope = request_envelope(&request.id, &self.workspace_label(caller), &question);
-        let injected = crate::spawn_handler::handle_inject_prompt(
+        // Idle-gated: the question lands only once the target is not
+        // mid-turn, so the end of an unrelated turn can never be captured
+        // as its answer.
+        let mut pending = crate::delivery::deliver(
             &self.config,
-            terminal_id,
-            &envelope,
-            None,
-            true,
-        );
-        if tokio::time::timeout_at(deadline, injected).await.is_err() {
-            // Never delivered, so the request is not open — drop it rather
-            // than leave the target badged with a question it never saw.
-            self.delete_request(&request.id).await;
-            self.config.mcp.requests().forget(&request.id);
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "ask timed out acquiring the target agent terminal".to_string(),
-            )]));
+            crate::delivery::DeliveryRequest {
+                terminal_id,
+                body: envelope,
+                submit: true,
+                gate: crate::delivery::Gate::Idle,
+                from: crate::delivery::Party::Agent(caller.clone()),
+                wait_limit: Some(ASK_DELIVERY_WAIT),
+            },
+        )
+        .await;
+        // An `async` asker returns at once, so only wait long enough to catch
+        // an immediate refusal (a dead terminal); a waiting asker gives the
+        // delivery up to its own deadline.
+        let landing_wait = if wait {
+            DELIVERY_RECEIPT_WAIT
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        } else {
+            ASYNC_ASK_LANDING_WAIT
+        };
+        match pending.landed_within(landing_wait).await {
+            Some(crate::delivery::EarlyOutcome::Landed) => {
+                self.mark_request_delivered(&request.id).await;
+            }
+            Some(crate::delivery::EarlyOutcome::Refused { reason }) => {
+                // Never delivered, so the request is not open — drop it
+                // rather than leave the target badged with a question it
+                // never saw, and tell the asker why.
+                self.delete_request(&request.id).await;
+                self.config.mcp.requests().forget(&request.id);
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "the question was not delivered: {reason}"
+                ))]));
+            }
+            None => {
+                // Queued behind a busy target: finish the bookkeeping when it
+                // lands (or is refused), without holding this call open.
+                let handler = self.clone();
+                let id = request.id.clone();
+                tokio::spawn(async move {
+                    match pending.landed_within(ASK_DELIVERY_WAIT).await {
+                        Some(crate::delivery::EarlyOutcome::Landed) => {
+                            handler.mark_request_delivered(&id).await;
+                        }
+                        Some(crate::delivery::EarlyOutcome::Refused { reason }) => {
+                            handler.abandon_undelivered_request(&id, &reason).await;
+                        }
+                        None => {
+                            handler
+                                .abandon_undelivered_request(&id, "it waited too long to land")
+                                .await;
+                        }
+                    }
+                });
+            }
         }
         self.push_status_row(
             target.as_str(),
@@ -1556,6 +2348,44 @@ impl LazyboxMcp {
         }))
     }
 
+    /// The question landed in the target's input: from here on the turn it
+    /// starts may answer it, including by the turn-end capture.
+    ///
+    /// Stamps the target's ended-turn count as it is RIGHT NOW. An
+    /// idle-gated question is released on the target's `Done` transition,
+    /// and the `Stop` behind that transition has already counted its turn,
+    /// so the stamp includes the turn that just ended and the capture for
+    /// that turn skips it structurally.
+    async fn mark_request_delivered(&self, id: &str) {
+        let _write_guard = self.config.mcp.requests_write().lock().await;
+        if let Some(mut request) = self.load_request(id).await
+            && request.awaiting_delivery
+        {
+            request.awaiting_delivery = false;
+            request.delivered_after_turns = self
+                .config
+                .mcp
+                .turns_ended(&SessionKey::from(request.target.as_str()));
+            let _ = self.save_request(&request).await;
+        }
+    }
+
+    /// A question that stayed queued and was then refused: close it as
+    /// abandoned (so it stops badging its target) and wake a waiting asker
+    /// with nothing, rather than leave it pending until its TTL.
+    async fn abandon_undelivered_request(&self, id: &str, reason: &str) {
+        let _write_guard = self.config.mcp.requests_write().lock().await;
+        if let Some(mut request) = self.load_request(id).await
+            && request.status == RequestStatus::Pending
+        {
+            tracing::info!(request = %id, %reason, "mcp ask_session: queued question was never delivered");
+            request.status = RequestStatus::Abandoned;
+            request.awaiting_delivery = false;
+            let _ = self.save_request(&request).await;
+        }
+        self.config.mcp.requests().forget(id);
+    }
+
     async fn delete_request(&self, id: &str) {
         let key = request_key(id);
         let _ = crate::store_blocking(&self.config.store, move |store| store.delete_kv(&key)).await;
@@ -1703,6 +2533,145 @@ impl LazyboxMcp {
         Ok(json_result(
             self.poll_request_payload(&caller, &args.request_id, now_ms)
                 .await?,
+        ))
+    }
+
+    #[tool(
+        description = "How any part of lazybox works, on demand — call this instead of guessing, and instead of carrying it all in every session's opening context. `topic` is one of: `coordination` (notes, notify, ask, answer between sibling sessions), `work` (handing work over with a lifecycle and getting a result back), `epics` (cross-repo status, the ready queue, blockers), `records` (reading issues and PRs without spending the shared GitHub budget), `labels` (the GitHub labels that are live coordination state and must never be stripped), `artifacts` (writing a document lazybox renders in its own reader), `spawning` (handing work to a new agent and picking its model tier). Omit `topic`, or pass one that is not listed, and you get the index — so one call always lands somewhere."
+    )]
+    async fn lazybox_guide(
+        &self,
+        Parameters(args): Parameters<LazyboxGuideArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        // An unknown topic returns the index rather than an error: the caller
+        // asked a reasonable question with the wrong word, and an error would
+        // cost it a turn to learn what the words are.
+        let text = match args
+            .topic
+            .as_deref()
+            .and_then(lazybox_agents::guide::Topic::parse)
+        {
+            Some(topic) => format!("{}\n", topic.body()),
+            None => lazybox_agents::guide::index(),
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    }
+
+    /// The four work verbs all route through `crate::work_calls`, which the
+    /// `lazybox work …` CLI also calls over `Command::WorkCall`. A tool here
+    /// is an adapter: resolve the caller from its bearer, hand the typed
+    /// request over, and render the typed report as JSON. Nothing about a work
+    /// row is shaped in this file, so the two surfaces cannot drift.
+    async fn work_call(
+        &self,
+        request: lazybox_ipc::work::WorkRequest,
+    ) -> Result<serde_json::Value, McpError> {
+        let report = crate::work_calls::call(&self.config, request)
+            .await
+            .map_err(|error| match error {
+                lazybox_ipc::work::WorkError::BadRequest(message) => {
+                    McpError::invalid_request(message, None)
+                }
+                lazybox_ipc::work::WorkError::Unavailable(message) => {
+                    McpError::internal_error(format!("work store: {message}"), None)
+                }
+            })?;
+        serde_json::to_value(&report)
+            .map_err(|error| McpError::internal_error(format!("encode report: {error}"), None))
+    }
+
+    #[tool(
+        description = "Mint a unit of work with an immutable id — and, with an `owner`, hand it to that sibling in the same call. This is the tracked form of a handoff: `notify_session` pokes a session and reports only that the text landed, while work created here has a lifecycle, a requester, a result and a provenance history, so \"what did I ask for and what came back\" is answerable after the session that asked is gone. Tracker records go in `links` (`owner/repo#N`), never in the id, so an issue→PR fold rewrites a link and the id is untouched. Returns the work row plus a delivery receipt (`delivered` / `queued` / `refused`); a refused delivery still leaves the work assigned and visible in the owner's `my_work`."
+    )]
+    async fn create_work(
+        &self,
+        Parameters(args): Parameters<CreateWorkArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Create {
+                requester: caller,
+                title: args.title.clone(),
+                brief: args.brief.clone(),
+                owner: args
+                    .owner
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(SessionKey::from),
+                // Delivering is the default when the work is assigned: an
+                // agent that hands work over and has to remember a second flag
+                // to actually send it has handed over nothing.
+                deliver: args.deliver.unwrap_or_else(|| {
+                    args.owner
+                        .as_deref()
+                        .is_some_and(|key| !key.trim().is_empty())
+                }),
+                plan: args.plan.clone(),
+                parent: args.parent.clone(),
+                links: args.links.clone(),
+            })
+            .await?,
+        ))
+    }
+
+    #[tool(
+        description = "The work this session owns, the work it asked of others, and the work it filed that nobody owns yet — \"what is on my plate\", \"what am I still waiting on\" and \"what have I queued\" as three separate lists, because conflating them misreports who is on the hook. Open work only unless `include_done` is true. Ownership is matched on the WORKSPACE, so your work survives a respawn (Shift-K, auto-fix and credit recovery all mint a new session id). Read this before starting something: a task already `underway` under your workspace is work someone handed you."
+    )]
+    async fn my_work(
+        &self,
+        Parameters(args): Parameters<MyWorkArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Mine {
+                workspace: caller,
+                include_done: args.include_done,
+            })
+            .await?,
+        ))
+    }
+
+    #[tool(
+        description = "Move a unit of work, and report its result. `lifecycle`: `underway` when you start, `awaiting-answer` or `held` with `detail` when you cannot proceed, `completed` with a `summary` (and any `artifacts` you wrote into .lazybox/artifacts/) when it is done, or `failed` / `canceled`. A terminal state refuses every further move and the refusal is returned as an error, so a late report from a replaced session cannot overwrite a finished result. Completing work someone else requested delivers a short notice to them — the requester does not poll."
+    )]
+    async fn update_work(
+        &self,
+        Parameters(args): Parameters<UpdateWorkArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Update {
+                by: caller,
+                id: args.id.clone(),
+                lifecycle: args.lifecycle.clone(),
+                detail: args.detail.clone(),
+                summary: args.summary.clone(),
+                artifacts: args.artifacts.clone(),
+            })
+            .await?,
+        ))
+    }
+
+    #[tool(
+        description = "A plan's rolled-up progress (done/total over the whole tree, canceled items excluded), the workspaces its tasks point at, and its tasks. Omit `plan` for every plan plus the open work on none. A plan whose tasks span repos is the member list a local epic projects onto, so this answers \"where does this stand\" without re-deriving it from the individual PRs."
+    )]
+    async fn work_status(
+        &self,
+        Parameters(args): Parameters<WorkStatusArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Status {
+                plan: args.plan.clone(),
+            })
+            .await?,
         ))
     }
 
@@ -1882,6 +2851,18 @@ impl LazyboxMcp {
             lazybox_ipc::BlockerKind::parse,
         );
         let workspace = lazybox_core::WorkspaceKey::new(caller.as_str());
+        // A blocker on a row that doesn't exist is recorded, then pruned by the
+        // next recompute — while the tool told the agent it was reported
+        // (#1793). Refuse instead, and say why.
+        if self.load_workspace(&workspace).is_none() {
+            return Err(McpError::invalid_request(
+                format!(
+                    "no workspace row for {} — the blocker would be dropped, so it was not recorded",
+                    caller.as_str()
+                ),
+                None,
+            ));
+        }
         crate::epics::report_blocker(
             &self.config,
             workspace,
@@ -1889,7 +2870,8 @@ impl LazyboxMcp {
             kind,
             lazybox_ipc::BlockerOwner::Operator,
         )
-        .await;
+        .await
+        .map_err(|error| McpError::internal_error(format!("record blocker: {error}"), None))?;
         Ok(serde_json::json!({
             "reported": true,
             "workspace": caller.as_str(),
@@ -1899,9 +2881,14 @@ impl LazyboxMcp {
     }
 
     /// Clear the caller's own declared blocker (a no-op if none is set).
-    async fn clear_blocker_payload(&self, caller: &SessionKey) -> serde_json::Value {
-        crate::epics::clear_blocker(&self.config, caller.as_str()).await;
-        serde_json::json!({ "cleared": true, "workspace": caller.as_str() })
+    async fn clear_blocker_payload(
+        &self,
+        caller: &SessionKey,
+    ) -> Result<serde_json::Value, McpError> {
+        crate::epics::clear_blocker(&self.config, caller.as_str())
+            .await
+            .map_err(|error| McpError::internal_error(format!("clear blocker: {error}"), None))?;
+        Ok(serde_json::json!({ "cleared": true, "workspace": caller.as_str() }))
     }
 
     /// Load a workspace from the store, strict-decoding its persisted JSON.
@@ -1912,6 +2899,59 @@ impl LazyboxMcp {
         let record = self.config.store.get_workspace(key).ok().flatten()?;
         let json = record.workspace_json?;
         lazybox_core::Workspace::decode_persisted(&json).ok()
+    }
+
+    /// The tier alias a spawn tool's `model` token names on `agent_id`'s own
+    /// menu, or a refusal that lists the menu.
+    ///
+    /// Refusing is the whole point. Below this boundary
+    /// [`crate::spawn_plan::resolve_model_for_agent`] falls back to the
+    /// agent's default tier for an alias it cannot resolve — deliberately,
+    /// because the interactive `w S` chord fires one alias at whichever agent
+    /// a row happens to run and must degrade rather than refuse. For a tool
+    /// call that same fallback is the bug this exists to close (#1911): an
+    /// agent told to "spawn at the best model" would be handed a successful
+    /// hand-off that silently ran the default, with the request unexpressible
+    /// and the miss invisible. So the check lives at the boundary where there
+    /// is a caller to read the error, and the resolved alias is what travels
+    /// on — canonical, so the plan one layer down needs no second lookup.
+    ///
+    /// Validated before any side effect (the issue `create_issue` would file,
+    /// the epic assignment, the claim), same as the agent id above it: a bad
+    /// tier must not leave a filed record behind.
+    fn resolve_requested_model(
+        cfg: &lazybox_config::Config,
+        agent_id: &str,
+        requested: Option<&str>,
+    ) -> Result<Option<String>, McpError> {
+        let Some(token) = requested.map(str::trim).filter(|t| !t.is_empty()) else {
+            return Ok(None);
+        };
+        let models = cfg.agent_models(agent_id);
+        match models.alias_for_requested_token(token) {
+            Some(alias) => Ok(Some(alias.to_string())),
+            None => {
+                let menu = models.requestable_tokens();
+                let menu = if menu.is_empty() {
+                    format!(
+                        "{agent_id} declares no model tiers at all, so it can only run at its \
+                         own default — omit `model`"
+                    )
+                } else {
+                    format!("{agent_id} accepts: {}", menu.join(", "))
+                };
+                Err(McpError::invalid_request(
+                    format!(
+                        "unknown model tier {token:?} for agent {agent_id:?} — {menu}. Model \
+                         ladders are per-agent, so a capability word (best / high / medium / \
+                         low) is the portable way to ask for a strength. Nothing was spawned: \
+                         running the default instead would make \"spawn at {token}\" look like \
+                         it worked."
+                    ),
+                    None,
+                ))
+            }
+        }
     }
 
     /// Resolve + validate a `spawn_worker` request and, on success, attach to
@@ -1928,6 +2968,7 @@ impl LazyboxMcp {
         args: &SpawnWorkerArgs,
         max_workers: usize,
         default_agent: &str,
+        cfg: &lazybox_config::Config,
     ) -> Result<PreparedWorker, McpError> {
         // Gate 1 — the caller must be a Coordinator. This is the ONE role
         // `spawn_worker` enforces (every other role behavior is advisory).
@@ -2001,6 +3042,9 @@ impl LazyboxMcp {
             ));
         }
         let agent_id = agent_id.to_string();
+        // Same reason, one field over: the tier is resolved against this
+        // agent's own menu before anything is filed or assigned.
+        let model_alias = Self::resolve_requested_model(cfg, &agent_id, args.model.as_deref())?;
 
         // Gate 4 — the target is a tracker record, never a name (#1586). A
         // named workspace beside an issue splits the branch, activity, cost
@@ -2070,6 +3114,7 @@ impl LazyboxMcp {
             key,
             anchor,
             agent_id,
+            model_alias,
             epic_key,
         })
     }
@@ -2174,6 +3219,7 @@ impl LazyboxMcp {
         args: SpawnWorkerArgs,
         max_workers: usize,
         default_agent: &str,
+        cfg: &lazybox_config::Config,
     ) -> Result<serde_json::Value, McpError> {
         let brief = args.brief.trim();
         if brief.is_empty() {
@@ -2193,9 +3239,10 @@ impl LazyboxMcp {
             key,
             anchor,
             agent_id,
+            model_alias,
             epic_key,
         } = self
-            .spawn_worker_prepare(caller, &args, max_workers, default_agent)
+            .spawn_worker_prepare(caller, &args, max_workers, default_agent, cfg)
             .await?;
 
         let session_key: SessionKey = (&key).into();
@@ -2204,6 +3251,7 @@ impl LazyboxMcp {
             worker = %key.as_str(),
             epic = %epic_key,
             agent = %agent_id,
+            model = ?model_alias,
             "mcp spawn_worker: coordinator spawning a worker into its epic"
         );
         crate::spawn_handler::handle_spawn(
@@ -2214,6 +3262,20 @@ impl LazyboxMcp {
             crate::spawn_handler::SpawnOptions {
                 initial_prompt: Some(brief),
                 autonomous: true,
+                // The tier the Coordinator asked for, already resolved against
+                // this agent's menu. Set explicitly so it wins over whatever
+                // the record's own labels declare — the caller named a model.
+                model_alias: model_alias.clone(),
+                // A Coordinator agent dispatched this worker into its
+                // epic — no human pressed anything. `SpawnOptions`
+                // defaults `origin` to `Interactive`, which would claim
+                // the local user asked and mount the provisioning
+                // checklist modal over them; this is the same epic
+                // worker dispatch the `AUTO` latch performs, so it
+                // announces as that one-line footer notice instead.
+                origin: lazybox_ipc::SpawnOrigin::Autonomous(
+                    lazybox_ipc::AutonomousTrigger::EpicAuto,
+                ),
                 ..Default::default()
             },
         )
@@ -2224,10 +3286,290 @@ impl LazyboxMcp {
             "task": anchor.to_string(),
             "epic": epic_key,
             "agent": agent_id,
+            "model": model_alias,
             "role": lazybox_core::Role::Worker.project_label(),
             "handed_off": true,
             "delivery_confirmed": false,
             "note": "Attached to the record's own workspace (not a new one), assigned to the epic, role-stamped, and spawned with the brief (framed by the Worker role preamble). Not a confirmation the agent has started — verify with list_sessions / read_session.",
+        }))
+    }
+
+    /// Validate a `start_workspace` request and attach to the record's own
+    /// workspace — everything up to the spawn. The gates are
+    /// `spawn_worker`'s minus its epic and role: an existing record (never a
+    /// name, never filed here — filing is the standing rule's to allow), not
+    /// the caller's own row, no agent already running there, and a bound on
+    /// how many agents one session keeps running this way.
+    async fn start_workspace_prepare(
+        &self,
+        caller: &SessionKey,
+        args: &StartWorkspaceArgs,
+        max_started: usize,
+        default_agent: &str,
+        cfg: &lazybox_config::Config,
+    ) -> Result<
+        (
+            lazybox_core::WorkspaceKey,
+            lazybox_core::TaskId,
+            String,
+            Option<String>,
+            StartClaim,
+        ),
+        McpError,
+    > {
+        let agent_id = args
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_agent);
+        if self.config.agents.get(agent_id).is_none() {
+            return Err(McpError::invalid_request(
+                format!("unknown agent {agent_id:?} — enable it or pass a configured agent id"),
+                None,
+            ));
+        }
+        // Resolved up front, next to the agent id, so a tier this agent has no
+        // name for fails before the attach and the claim rather than after.
+        let model_alias = Self::resolve_requested_model(cfg, agent_id, args.model.as_deref())?;
+        let task = args.task.trim();
+        let anchor = lazybox_core::task_ref::parse_task_ref(task, None).ok_or_else(|| {
+            McpError::invalid_request(
+                format!(
+                    "could not read {task:?} as a tracker record — pass `owner/repo#N`, a GitHub \
+                     issue/PR URL, or a Linear identifier like `ENG-45`. The record must \
+                     already exist: propose one to the user first if it does not."
+                ),
+                None,
+            )
+        })?;
+
+        // The fan-out bound: count this session's starts that still run an
+        // agent. A session handing out work unattended is the runaway the
+        // bound exists for; one whose starts have finished may start more.
+        if max_started == 0 {
+            return Err(McpError::invalid_request(
+                "starting workspaces is disabled (agent.max_epic_workers = 0)",
+                None,
+            ));
+        }
+        // Depth: the chain has to terminate. The per-caller cap below bounds
+        // one session's fan-out and nothing else — every agent this starts is
+        // itself a starter, so without a depth bound A starts B, B starts C,
+        // C starts D, indefinitely, with each generation comfortably under
+        // its own cap.
+        let depth = self.config.mcp.start_depth(caller).saturating_add(1);
+        if depth > MAX_START_DEPTH {
+            return Err(McpError::invalid_request(
+                format!(
+                    "start depth {depth} exceeds the limit of {MAX_START_DEPTH} — you are \
+                     already work that another agent handed off. Do this work here, or hand it \
+                     back to whoever started you rather than starting another agent."
+                ),
+                None,
+            ));
+        }
+
+        let mut running = 0;
+        for key in self.config.mcp.started_by(caller) {
+            if self
+                .config
+                .terminal
+                .running_agent_terminal(&SessionKey::from(&key))
+                .await
+                .is_some()
+            {
+                running += 1;
+            }
+        }
+        if running >= max_started {
+            return Err(McpError::invalid_request(
+                format!(
+                    "you already have {running} workspaces running agents you started (cap \
+                     {max_started}, agent.max_epic_workers) — wait for one to finish"
+                ),
+                None,
+            ));
+        }
+
+        // Fleet: the per-caller cap is blind to a fleet that grew by
+        // recursion — six sessions each under their own cap is 36 agents
+        // nobody asked for. `agent.max_live_agents` is the fleet's own
+        // ceiling; it stays ADVISORY for a human's spawn ("lazybox advises,
+        // it does not forbid") but is a hard refusal for unattended agent
+        // fan-out, the same distinction `spawn_worker`'s cap already makes.
+        if let Some(fleet_cap) = cfg.agent.live_agent_cap() {
+            let mut fleet = 0;
+            for key in self.config.mcp.all_started() {
+                if self
+                    .config
+                    .terminal
+                    .running_agent_terminal(&SessionKey::from(&key))
+                    .await
+                    .is_some()
+                {
+                    fleet += 1;
+                }
+            }
+            if fleet >= fleet_cap {
+                return Err(McpError::invalid_request(
+                    format!(
+                        "{fleet} agent-started workspaces are already running across the fleet \
+                         (cap {fleet_cap}, agent.max_live_agents) — wait for one to finish, or \
+                         raise the cap"
+                    ),
+                    None,
+                ));
+            }
+        }
+
+        let key = crate::workspace::attach::attach_to_record(&self.config, &anchor)
+            .await
+            .map_err(|e| McpError::invalid_request(format!("attach to {anchor}: {e}"), None))?;
+        if key.as_str() == caller.as_str() {
+            return Err(McpError::invalid_request(
+                format!(
+                    "{anchor} is your own workspace — do the work here, or name another record"
+                ),
+                None,
+            ));
+        }
+        // Claim BEFORE the liveness check and hold it through the spawn:
+        // the check and `handle_spawn` are several awaits apart, so two
+        // siblings starting the same record both read it free and both
+        // spawned into it.
+        let Some(claim) = self.config.mcp.claim_start(&key) else {
+            return Err(McpError::invalid_request(
+                format!(
+                    "another agent is already starting work in {anchor} — check \
+                     `task_status` before starting another"
+                ),
+                None,
+            ));
+        };
+        if let Some(terminal_id) = self
+            .config
+            .terminal
+            .running_agent_terminal(&SessionKey::from(&key))
+            .await
+        {
+            return Err(McpError::invalid_request(
+                format!(
+                    "{anchor} already has a running agent (terminal {terminal_id:?}) — someone \
+                     is on it. Use `ask_session`/`notify_session` on `{}` to reach them.",
+                    key.as_str()
+                ),
+                None,
+            ));
+        }
+        Ok((key, anchor, agent_id.to_string(), model_alias, claim))
+    }
+
+    /// Full `start_workspace` flow: [`Self::start_workspace_prepare`], then
+    /// the spawn, with the brief recorded as the calling agent's.
+    async fn start_workspace_payload(
+        &self,
+        caller: &SessionKey,
+        args: StartWorkspaceArgs,
+        max_started: usize,
+        default_agent: &str,
+        cfg: &lazybox_config::Config,
+    ) -> Result<serde_json::Value, McpError> {
+        let brief = args.brief.trim().to_string();
+        if brief.is_empty() {
+            return Err(McpError::invalid_request(
+                "brief is empty — hand the new agent a task",
+                None,
+            ));
+        }
+        if brief.len() > MAX_NOTE_BYTES {
+            return Err(McpError::invalid_request(
+                format!("brief exceeds {MAX_NOTE_BYTES} bytes (hand a distilled task, not a dump)"),
+                None,
+            ));
+        }
+        let (key, anchor, agent_id, model_alias, claim) = self
+            .start_workspace_prepare(caller, &args, max_started, default_agent, cfg)
+            .await?;
+        self.config.mcp.record_started(caller, key.clone());
+        tracing::info!(
+            caller = %caller.as_str(),
+            workspace = %key.as_str(),
+            agent = %agent_id,
+            model = ?model_alias,
+            "mcp start_workspace: agent handing independent work to a workspace of its own"
+        );
+        crate::spawn_handler::handle_spawn(
+            &self.config,
+            (&key).into(),
+            None,
+            lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
+            crate::spawn_handler::SpawnOptions {
+                initial_prompt: Some(brief),
+                autonomous: true,
+                // The tier the caller asked for, already resolved against this
+                // agent's menu. Set explicitly so it wins over whatever the
+                // record's own labels declare — the caller named a model.
+                model_alias: model_alias.clone(),
+                origin: lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Agent),
+                prompt_from: Some(lazybox_ipc::PromptSource::Agent {
+                    from: caller.as_str().to_string(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await;
+        // A real receipt, not a claim. `handle_spawn` returns `()`, so this
+        // used to report `handed_off: true` for a spawn that failed — no
+        // worktree, a clone failure, a misconfigured agent binary — and the
+        // caller went on believing work had started. Wait briefly for the
+        // agent terminal to appear; that is the one observable that says the
+        // spawn actually took.
+        let started_at = tokio::time::Instant::now();
+        let terminal = loop {
+            if let Some(terminal_id) = self
+                .config
+                .terminal
+                .running_agent_terminal(&SessionKey::from(&key))
+                .await
+            {
+                break Some(terminal_id);
+            }
+            if started_at.elapsed() >= START_WORKSPACE_SPAWN_WAIT {
+                break None;
+            }
+            tokio::time::sleep(START_WORKSPACE_SPAWN_POLL).await;
+        };
+        // Held until the spawn is observable, so a sibling cannot slip into
+        // the window between `handle_spawn` returning and the terminal
+        // registering.
+        drop(claim);
+        let Some(terminal_id) = terminal else {
+            tracing::warn!(
+                workspace = %key.as_str(),
+                agent = %agent_id,
+                "mcp start_workspace: no agent terminal appeared after the spawn"
+            );
+            return Err(McpError::internal_error(
+                format!(
+                    "the spawn into {} did not bring up a {agent_id} agent within {:?} — check \
+                     the workspace in lazybox (its worktree may have failed to materialise); \
+                     nothing is running there",
+                    key.as_str(),
+                    START_WORKSPACE_SPAWN_WAIT
+                ),
+                None,
+            ));
+        };
+        Ok(serde_json::json!({
+            "workspace_key": key.as_str(),
+            "task": anchor.key,
+            "agent": agent_id,
+            "model": model_alias,
+            "handed_off": true,
+            "terminal_id": terminal_id.0,
+            "delivery_confirmed": false,
+            "note": "Started in the record's own workspace and its agent terminal is up; the brief is recorded as yours. Not a confirmation the agent has read the brief — verify with list_sessions / read_session, and get its answer back with ask_session.",
         }))
     }
 
@@ -2370,11 +3712,11 @@ impl LazyboxMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let caller = self.caller(&ctx)?;
-        Ok(json_result(self.clear_blocker_payload(&caller).await))
+        Ok(json_result(self.clear_blocker_payload(&caller).await?))
     }
 
     #[tool(
-        description = "Coordinator-only: spawn a Worker **on an issue** into the epic you own. Pass `task` — the record the worker owns (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier) — or `create_issue` to file it as a sub-issue of your epic first. The worker runs in THAT record's own workspace: a tracked item never gets a second workspace beside it, so there is no `workspace_name`. The workspace is assigned to your epic, stamped with the Worker role, and the agent starts with `brief` as its opening prompt — automatically framed with the Worker role preamble (who you are / your epic / your resolved blockers), so `brief` is the task itself, not the role. Refuses if you are not a Coordinator, own no epic, the epic is at its worker cap (agent.max_epic_workers, default 6), or the record cannot be resolved. Returns once the worker is handed off — NOT a confirmation the agent has started; verify with list_sessions / read_session."
+        description = "Coordinator-only: spawn a Worker **on an issue** into the epic you own. Pass `task` — the record the worker owns (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier) — or `create_issue` to file it as a sub-issue of your epic first. The worker runs in THAT record's own workspace: a tracked item never gets a second workspace beside it, so there is no `workspace_name`. The workspace is assigned to your epic, stamped with the Worker role, and the agent starts with `brief` as its opening prompt — automatically framed with the Worker role preamble (who you are / your epic / your resolved blockers), so `brief` is the task itself, not the role. `model` picks the tier it runs at from THAT AGENT'S OWN menu — a tier alias (`S`/`M`/`L`/`XL`…), the model's name or id, or a capability word (`best`/`high`/`medium`/`low`) each agent maps to its own ladder; the ladders differ per agent, so `XL` means different models for `claude` and `codex` and a word is the portable spelling. A tier the agent's menu does not define is refused with the valid ones listed, never run at the default. Refuses if you are not a Coordinator, own no epic, the epic is at its worker cap (agent.max_epic_workers, default 6), or the record cannot be resolved. Returns once the worker is handed off — NOT a confirmation the agent has started; verify with list_sessions / read_session."
     )]
     async fn spawn_worker(
         &self,
@@ -2391,9 +3733,355 @@ impl LazyboxMcp {
             .unwrap_or(lazybox_config::DEFAULT_MAX_EPIC_WORKERS);
         let default_agent = cfg.setup.default_agent.as_deref().unwrap_or("claude");
         Ok(json_result(
-            self.spawn_worker_payload(&caller, args, max_workers, default_agent)
+            self.spawn_worker_payload(&caller, args, max_workers, default_agent, &cfg)
                 .await?,
         ))
+    }
+
+    #[tool(
+        description = "Hand independent work to an agent in a workspace of its own — any role may call this. Pass `task`, an EXISTING tracker record (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier); the agent runs in that record's own workspace, where its work stays visible in the inbox, resumable and costed, and the `brief` is recorded as sent by you. `model` picks the tier it runs at from THAT AGENT'S OWN menu — a tier alias (`S`/`M`/`L`/`XL`…), the model's name or id, or a capability word (`best`/`high`/`medium`/`low`) each agent maps to its own ladder; the ladders differ per agent, so `XL` means different models for `claude` and `codex` and a word is the portable spelling. A tier the agent's menu does not define is refused with the valid ones listed, never run at the default. Prefer this to a sub-agent for work that stands on its own; keep sub-agents for research that feeds your own task. It never files a record: if the work has none, propose one to the user first. Refuses your own workspace, a record whose workspace already runs an agent (reach it with ask_session instead), more than agent.max_epic_workers (default 6) running agents you started, a chain more than 2 hand-offs deep (work handed to you is not work to hand on again), and a fleet already at agent.max_live_agents agent-started workspaces. Returns only once the new agent's terminal is actually up (or an error saying the spawn did not take, so a failed worktree never reads as work started); that is not a confirmation it has read the brief — verify with list_sessions / read_session."
+    )]
+    async fn start_workspace(
+        &self,
+        Parameters(args): Parameters<StartWorkspaceArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        let max_started = cfg
+            .agent
+            .max_epic_workers
+            .unwrap_or(lazybox_config::DEFAULT_MAX_EPIC_WORKERS);
+        let default_agent = cfg.setup.default_agent.as_deref().unwrap_or("claude");
+        Ok(json_result(
+            self.start_workspace_payload(&caller, args, max_started, default_agent, &cfg)
+                .await?,
+        ))
+    }
+
+    /// The repo and agent the daemon knows for `key`, from the live agent
+    /// snapshot. Never taken from the submission: a review is stamped with the
+    /// identity the daemon observed, not the one the agent claims.
+    async fn caller_identity(&self, key: &SessionKey) -> (Option<String>, Option<String>) {
+        let Ok(resp) = api_gateway::agents_response(&self.config).await else {
+            return (None, None);
+        };
+        resp.agents
+            .into_iter()
+            .find(|agent| agent.workspace_key == key.as_str())
+            .map_or((None, None), |agent| (agent.repo, Some(agent.agent)))
+    }
+
+    /// The run that is submitting — the caller's live agent terminal, so a
+    /// report traces back to the session that produced it.
+    async fn caller_run_id(&self, key: &SessionKey) -> String {
+        match self.config.terminal.running_agent_terminal(key).await {
+            Some(id) => format!("terminal:{}", id.0),
+            None => String::new(),
+        }
+    }
+
+    /// Ingest a review submission, persist it, and report what it became.
+    ///
+    /// Always persists: an invalid submission becomes a draft carrying its
+    /// defects, so the agent is told exactly what to fix and the prose it
+    /// already wrote is not lost. The caller learns `bindable` — the only
+    /// thing a fixer acts on.
+    async fn submit_review_payload(
+        &self,
+        caller: &SessionKey,
+        args: SubmitReviewArgs,
+        now_ms: i64,
+    ) -> Result<serde_json::Value, McpError> {
+        if args.findings.len() > review_store::MAX_FINDINGS {
+            return Err(McpError::invalid_request(
+                format!("more than {} findings", review_store::MAX_FINDINGS),
+                None,
+            ));
+        }
+        // Every free-text field, not just `report`: the findings carry the
+        // bulk of a large submission and all of them land in one kv row.
+        let submitted_bytes = args.submission_bytes();
+        if submitted_bytes > review_store::MAX_SUBMISSION_BYTES {
+            return Err(McpError::invalid_request(
+                format!(
+                    "submission is {submitted_bytes} bytes across report and findings, over the {} byte limit — submit the review, not the transcript",
+                    review_store::MAX_SUBMISSION_BYTES
+                ),
+                None,
+            ));
+        }
+        let (repo, agent) = self.caller_identity(caller).await;
+        let run_id = self.caller_run_id(caller).await;
+        let workspace = caller.as_str().to_string();
+        let submission = lazybox_core::ReviewSubmission {
+            report: args.report,
+            findings: args.findings.into_iter().map(Into::into).collect(),
+            scope: args.scope.map(Into::into).unwrap_or_default(),
+            checks: args.checks,
+            open_questions: args.open_questions,
+        };
+        let origin = if args.imported {
+            lazybox_core::ReviewOrigin::Imported
+        } else {
+            lazybox_core::ReviewOrigin::Submitted
+        };
+        // Serialize id allocation against the read-then-write, for the reason
+        // `notes_write` exists: two concurrent submissions must not both read
+        // the same highest sequence and have the second overwrite the first.
+        let _guard = self.config.mcp.reviews_write().lock().await;
+        let ws = workspace.clone();
+        let id = crate::store_blocking(&self.config.store, move |store| {
+            review_store::next_report_id(store, &ws)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("allocate review id: {error}"), None))?;
+        let artifact = submission.into_artifact(lazybox_core::ReviewIngest {
+            id,
+            workspace,
+            repo,
+            run_id,
+            agent,
+            origin,
+            created_at_ms: now_ms,
+        });
+        let to_save = artifact.clone();
+        crate::store_blocking(&self.config.store, move |store| {
+            review_store::save_report(store, &to_save)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("persist review: {error}"), None))?;
+        tracing::info!(
+            workspace = %artifact.workspace,
+            report = %artifact.id,
+            findings = artifact.findings.len(),
+            bindable = artifact.is_bindable(),
+            "mcp: ingested a review artifact"
+        );
+        Ok(serde_json::json!({
+            "report_id": artifact.id,
+            "status": if artifact.is_bindable() { "completed" } else { "draft" },
+            "bindable": artifact.is_bindable(),
+            "findings": artifact.findings.len(),
+            "defects": artifact.defects,
+            "note": if artifact.is_bindable() {
+                "Ingested. A fixer can now bind this report by id."
+            } else {
+                "Kept as a DRAFT — not usable by a fixer. Fix the defects above and submit again; the review is not complete until it ingests cleanly."
+            },
+        }))
+    }
+
+    /// Every report this workspace holds, plus the binding decision a fixer
+    /// should obey.
+    ///
+    /// The decision is computed here, once, rather than left to the caller to
+    /// re-derive: a fixer that picks "latest" for itself is exactly how a PR
+    /// review gets applied to an unrelated branch.
+    async fn list_reviews_payload(
+        &self,
+        caller: &SessionKey,
+        args: ListReviewsArgs,
+    ) -> Result<serde_json::Value, McpError> {
+        let workspace = caller.as_str().to_string();
+        let ws = workspace.clone();
+        let reports = crate::store_blocking(&self.config.store, move |store| {
+            review_store::list_reports(store, &ws)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("read reviews: {error}"), None))?;
+        let current: lazybox_core::ReviewScope = args.scope.map(Into::into).unwrap_or_default();
+        let selection = lazybox_core::select_report(&reports, &current);
+        let summaries: Vec<serde_json::Value> =
+            reports.iter().map(review_store::report_summary).collect();
+        Ok(serde_json::json!({
+            "workspace": workspace,
+            "reports": summaries,
+            "selection": selection,
+            "note": selection_guidance(&selection),
+        }))
+    }
+
+    /// One report in full — every finding with its evidence and remediation.
+    async fn get_review_payload(
+        &self,
+        caller: &SessionKey,
+        report_id: &str,
+    ) -> Result<serde_json::Value, McpError> {
+        let workspace = caller.as_str().to_string();
+        let id = report_id.trim().to_string();
+        let ws = workspace.clone();
+        let wanted = id.clone();
+        let report = crate::store_blocking(&self.config.store, move |store| {
+            review_store::get_report(store, &ws, &wanted)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("read review: {error}"), None))?
+        .ok_or_else(|| {
+            McpError::invalid_request(
+                format!("workspace {workspace} has no review report {id:?}"),
+                None,
+            )
+        })?;
+        Ok(serde_json::json!({
+            "report": report,
+            "bindable": report.is_bindable(),
+        }))
+    }
+
+    /// Ingest a fixer's per-finding outcomes against the report it bound.
+    async fn submit_review_result_payload(
+        &self,
+        caller: &SessionKey,
+        args: SubmitReviewResultArgs,
+        now_ms: i64,
+    ) -> Result<serde_json::Value, McpError> {
+        let workspace = caller.as_str().to_string();
+        let report_id = args.report_id.trim().to_string();
+        let ws = workspace.clone();
+        let wanted = report_id.clone();
+        // `None` here is usually a typo, but it is also what a fixer sees when
+        // retention pruned the report it bound hours ago. Refusing would throw
+        // away every outcome it just produced, so the orphan path records them.
+        let report = crate::store_blocking(&self.config.store, move |store| {
+            review_store::get_report(store, &ws, &wanted)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("read review: {error}"), None))?;
+        let (_, agent) = self.caller_identity(caller).await;
+        let run_id = self.caller_run_id(caller).await;
+        let _guard = self.config.mcp.reviews_write().lock().await;
+        let ws = workspace.clone();
+        let id = crate::store_blocking(&self.config.store, move |store| {
+            review_store::next_result_id(store, &ws)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("allocate result id: {error}"), None))?;
+        let submission = lazybox_core::ReviewResultSubmission {
+            report_id: report_id.clone(),
+            outcomes: args.outcomes.into_iter().map(Into::into).collect(),
+            checks: args.checks,
+            notes: args.notes,
+        };
+        let ingest = lazybox_core::ResultIngest {
+            id,
+            run_id,
+            agent,
+            created_at_ms: now_ms,
+        };
+        let result = match &report {
+            Some(report) => submission.into_artifact(report, ingest),
+            None => submission.into_orphan_artifact(workspace.clone(), report_id.clone(), ingest),
+        };
+        let to_save = result.clone();
+        crate::store_blocking(&self.config.store, move |store| {
+            review_store::save_result(store, &to_save)
+        })
+        .await
+        .map_err(|error| McpError::internal_error(format!("persist result: {error}"), None))?;
+        let complete = result.status == lazybox_core::ArtifactStatus::Completed;
+        Ok(serde_json::json!({
+            "result_id": result.id,
+            "report_id": result.report_id,
+            "status": if complete { "completed" } else { "draft" },
+            "outcomes": result.outcomes.len(),
+            "uncovered": result.uncovered,
+            "defects": result.defects,
+            "note": if complete {
+                "Recorded against the report, which is unchanged."
+            } else if report.is_none() {
+                "Recorded, but the report it answers is no longer retained, so the outcomes could not be checked against its findings. Your work is saved; nothing further to submit."
+            } else {
+                "Kept as a DRAFT — the report is not fully answered. Give every listed finding an outcome and submit again."
+            },
+        }))
+    }
+
+    #[tool(
+        description = "Persist the review you just produced so a fixer — a fresh session, another agent, days later — can work from it. A review is not finished until this call succeeds: nothing else survives your session. Pass the readable `report` verbatim, `scope` (`base_sha` / `head_sha` from `git rev-parse`, plus `dirty_digest` when the worktree has uncommitted changes, and a `label` naming what you reviewed), and one `findings` entry per finding with its severity, `file:line` anchors, the evidence that makes it real, and the remediation you suggest. ZERO findings is a complete review — submit the empty list rather than skipping the call, so a fixer can tell a clean tree from a review that never ran. A malformed or incomplete submission is kept as a DRAFT that no fixer will bind; the reply names each defect, so fix them and submit again."
+    )]
+    async fn submit_review(
+        &self,
+        Parameters(args): Parameters<SubmitReviewArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        Ok(json_result(
+            self.submit_review_payload(&caller, args, now_ms).await?,
+        ))
+    }
+
+    #[tool(
+        description = "Bind a review report before fixing anything. Returns this workspace's persisted reports and — in `selection` — the one decision to obey: `bound` with a report id and its freshness, `ambiguous` with the candidates to choose between, or `missing`. Pass the current `scope` (`head_sha`, and `dirty_digest` when the tree is dirty) so freshness is answerable: a report whose head has moved still binds, but every finding must be revalidated against the code as it is now. `missing` means STOP and run a deep review first — never start a fixer with no findings. A bound report with zero findings is a clean review, not missing data."
+    )]
+    async fn list_reviews(
+        &self,
+        Parameters(args): Parameters<ListReviewsArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(self.list_reviews_payload(&caller, args).await?))
+    }
+
+    #[tool(
+        description = "Read one review report in full by the id `list_reviews` bound: every finding with its stable id, severity, `file:line` anchors, the reviewer's evidence, and the suggested remediation, plus the readable report. This is the reviewer's reasoning, not yours — treat a finding as real until you refute it with a concrete, falsifiable failure scenario."
+    )]
+    async fn get_review(
+        &self,
+        Parameters(args): Parameters<GetReviewArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(
+            self.get_review_payload(&caller, &args.report_id).await?,
+        ))
+    }
+
+    #[tool(
+        description = "Record what you did about each finding of the report you bound. One outcome per finding — `fixed`, `already_resolved`, `blocked` or `refuted` — each with the evidence behind it (the change you made, or the concrete reason the finding does not hold) and the commits and checks that back it. Every finding needs one, including the ones you refute: a result that skips a finding is kept as a DRAFT naming it, because silence is not a disposition. The original report is never modified."
+    )]
+    async fn submit_review_result(
+        &self,
+        Parameters(args): Parameters<SubmitReviewResultArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        Ok(json_result(
+            self.submit_review_result_payload(&caller, args, now_ms)
+                .await?,
+        ))
+    }
+}
+
+/// The one instruction that goes with a [`lazybox_core::ReportSelection`].
+///
+/// Rendered here rather than left to the fixer to infer, because each outcome
+/// has exactly one correct next move and the wrong one is silent: a missing
+/// report that reads as "nothing to fix" produces a fixer that finishes green
+/// having done nothing, and an ambiguous one picked by recency applies a PR
+/// review to an unrelated branch.
+fn selection_guidance(selection: &lazybox_core::ReportSelection) -> String {
+    match selection {
+        lazybox_core::ReportSelection::Missing => "No completed review report for this workspace. STOP — do not fix from memory or scrollback. Run a deep review first, or capture an earlier one with submit_review (imported: true)."
+            .to_string(),
+        lazybox_core::ReportSelection::Ambiguous { candidates } => format!(
+            "Several reports describe different work ({}). Ask which one to use; do not pick the newest yourself.",
+            candidates.join(", ")
+        ),
+        lazybox_core::ReportSelection::Bound { id, freshness } => {
+            if freshness.requires_revalidation() {
+                format!(
+                    "Bound {id}, but the tree has moved ({}). Read it with get_review, then revalidate each finding against the code as it is now before fixing it — record one that no longer holds as `already_resolved` or `refuted` rather than dropping it.",
+                    freshness.label()
+                )
+            } else {
+                format!(
+                    "Bound {id}, taken against this exact tree. Read it with get_review and work from its findings."
+                )
+            }
+        }
     }
 }
 
@@ -2403,14 +4091,30 @@ impl LazyboxMcp {
 /// daemon's `/v1/events` stream, which an MCP caller does not consume. So this
 /// reports hand-off — never confirmed delivery — and points the caller at the
 /// one channel it *can* use to verify: reading the target back.
-fn notify_handoff_payload(workspace: &str, submit: bool) -> serde_json::Value {
-    serde_json::json!({
-        "handed_off": true,
-        "workspace": workspace,
-        "submit_requested": submit,
-        "delivery_confirmed": false,
-        "note": "Handed to the target's settle-gated inject; not a confirmation it was read or run. If the target was at a permission prompt the message is dropped silently. Verify with read_session when delivery matters.",
-    })
+fn notify_receipt_result(
+    workspace: &str,
+    submit: bool,
+    early: Option<crate::delivery::EarlyOutcome>,
+) -> CallToolResult {
+    match early {
+        Some(crate::delivery::EarlyOutcome::Landed) => json_result(serde_json::json!({
+            "status": "delivered",
+            "workspace": workspace,
+            "submit_requested": submit,
+            "note": "it is in the target's input, delivered between turns",
+        })),
+        None => json_result(serde_json::json!({
+            "status": "queued",
+            "workspace": workspace,
+            "submit_requested": submit,
+            "note": "the target is mid-turn; the message lands when that turn ends",
+        })),
+        Some(crate::delivery::EarlyOutcome::Refused { reason }) => {
+            CallToolResult::error(vec![ContentBlock::text(format!(
+                "the message was not delivered to {workspace}: {reason}"
+            ))])
+        }
+    }
 }
 
 /// How long `gh issue create` may take before `spawn_worker` gives up. Well
@@ -2511,8 +4215,8 @@ fn json_result(payload: serde_json::Value) -> CallToolResult {
 // every dispatch; point it at the instance we already built in `new` instead.
 #[tool_handler(router = self.tool_router.clone())]
 impl ServerHandler for LazyboxMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> McpServerInfo {
+        McpServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
                 "lazybox cross-agent coordination. Discover other sessions with \
@@ -2521,7 +4225,9 @@ impl ServerHandler for LazyboxMcp {
                  distilled context to the shared blackboard with post_note and \
                  pull it — across repos, persistently — with read_notes. To \
                  actively poke another session, push an instruction into it with \
-                 notify_session. When you need an ANSWER rather than a \
+                 notify_session; when a sibling is stuck on a question you can \
+                 answer, press the keys with answer_session (never a permission \
+                 prompt — that is the user's). When you need an ANSWER rather than a \
                  handoff, ask_session sends a question (or a catalog snippet \
                  via send_snippet) to a sibling and returns its reply; if you \
                  receive a <lazybox-request>, answer it with reply_request \
@@ -2534,7 +4240,15 @@ impl ServerHandler for LazyboxMcp {
                  record lazybox polls — is already cached here: read it with \
                  task / get_issue / get_pr / list_issues instead of spending \
                  GitHub API budget on `gh issue view`, which the daemon's own \
-                 poller shares. For cross-repo epics: epic_status is the live \
+                 poller shares. A review's findings are persisted, not \
+                 remembered: a deep review ends with submit_review, and a \
+                 fixer starts with list_reviews — which returns the one \
+                 report to bind, or says the report is missing or \
+                 ambiguous — then get_review for its full findings and \
+                 submit_review_result for what it did about each one. Never \
+                 fix from a review you only remember; a fixer with no \
+                 findings finishes green having done nothing. \
+                 For cross-repo epics: epic_status is the live \
                  plan of record (each member's derived status, blockers, and the \
                  ready/blocked rollup) and epic_ready is the ranked queue of \
                  what's workable now — answer epic questions from these rather \
@@ -2544,7 +4258,17 @@ impl ServerHandler for LazyboxMcp {
                  identifier) or create_issue to file it as a sub-issue first. \
                  The worker runs in that record's own workspace, never a named \
                  one beside it; it refuses if you aren't a Coordinator or the \
-                 epic is at its worker cap. If your own workspace hits \
+                 epic is at its worker cap. Any role hands independent work \
+                 on an existing record to an agent in that record's own \
+                 workspace with start_workspace — prefer it to a sub-agent \
+                 for work that stands on its own. Both spawn tools take a \
+                 `model` tier from the TARGET AGENT's own menu (an alias like \
+                 S/M/L/XL, the model's name or id, or a capability word — \
+                 best / high / medium / low — each agent maps to its own \
+                 ladder); the ladders differ per agent, so a word is the \
+                 portable spelling, and a tier that agent does not define is \
+                 refused with the valid ones listed rather than run at the \
+                 default. If your own workspace hits \
                  something a human must resolve, flag it with report_blocker and \
                  clear it with clear_blocker once unblocked."
                     .to_string(),
@@ -2629,6 +4353,28 @@ pub(crate) async fn persist_tokens(config: &ServerConfig) {
     .await
     {
         tracing::warn!("mcp: persist token map: {error}");
+    }
+}
+
+/// Follow a live agent's workspace through the issue→PR fold: re-key its
+/// MCP bearer from `from` to `to` and persist the map at once, so a restart
+/// restores the token under the key its terminal now wears. Blocking —
+/// called from the fold's commit, which already runs on `spawn_blocking`.
+pub(crate) fn rebadge_session_tokens_blocking(
+    config: &ServerConfig,
+    from: &SessionKey,
+    to: &SessionKey,
+) {
+    if !config.mcp.tokens().rebadge(from, to) {
+        return;
+    }
+    match serde_json::to_string(&config.mcp.tokens().snapshot()) {
+        Ok(payload) => {
+            if let Err(error) = config.store.set_kv(TOKENS_KV_KEY, &payload) {
+                tracing::warn!("mcp: persist rebadged token map: {error}");
+            }
+        }
+        Err(error) => tracing::warn!("mcp: serialize token map: {error}"),
     }
 }
 
@@ -2914,6 +4660,20 @@ fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
 /// here before the inject path gets its full window — do not shorten below it.
 const NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
+/// How long a coordination tool call waits for its delivery receipt before
+/// answering "queued" — long enough for an idle target, short enough that a
+/// busy one doesn't pin the caller's turn.
+const DELIVERY_RECEIPT_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long an `async` ask waits for its question to land before returning:
+/// enough to report an immediate refusal, never a busy target's turn.
+const ASYNC_ASK_LANDING_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long an agent-originated message may wait for a busy target to finish
+/// its turn before it is refused. Covers a long turn without letting a
+/// wedged agent hold a message forever.
+const ASK_DELIVERY_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
 /// Largest accepted `notify_session` body, in bytes. A notify is a distilled
 /// instruction to a sibling agent — the same kind of content as a blackboard
 /// note — so it shares [`MAX_NOTE_BYTES`]; the cap keeps a runaway agent from
@@ -2942,6 +4702,26 @@ const REQUEST_TTL_MS: i64 = 6 * 60 * 60 * 1000;
 /// indefinitely. That is deliberate — each such ask costs one turn and
 /// resolves, which is a dialogue, not the unbounded recursion this guards.
 const MAX_ASK_DEPTH: u32 = 3;
+
+/// Deepest chain of `start_workspace` hand-offs. A session the user started
+/// is depth 0 and may start work; what it starts is depth 1 and may start
+/// work; depth 2 may not start again.
+///
+/// Small on purpose, because start fan-out is MULTIPLICATIVE where nested
+/// asks are linear: with the per-caller cap at its default 6, depth 2 already
+/// admits 6 + 36 concurrent agents. The per-caller cap cannot bound a chain
+/// at all — A starts B, B starts C, B finishes, C starts D — because every
+/// generation is under its own bound and a finished start frees the slot.
+/// The default-on `workspace-over-subagent` standing rule points every agent
+/// at this tool, so the chain is the expected shape, not an abuse case.
+const MAX_START_DEPTH: u32 = 2;
+
+/// How long `start_workspace` waits for the spawned agent's terminal to
+/// register before reporting the spawn failed. The spawn is several async
+/// steps (worktree, backend session, registration), so the receipt has to
+/// wait for the one observable that proves it took.
+const START_WORKSPACE_SPAWN_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+const START_WORKSPACE_SPAWN_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// Default and maximum `ask_session` wait, in seconds. The MCP client's own
 /// call timeout is the real ceiling — a longer wait here just returns
 /// `pending` to a caller that already gave up.
@@ -3098,40 +4878,70 @@ pub fn spawn_request_watcher(config: &ServerConfig) -> tokio::task::JoinHandle<(
 /// alternative — a target that simply never calls `reply_request` — is a
 /// waiting asker that learns nothing until its timeout.
 ///
-/// Only requests created before this turn ended are captured. A `Done`
-/// racing an ask that has not yet reached the composer would otherwise
-/// answer a question the target never saw; the target is idle-`Done` when
-/// asked, so no further `Done` transition fires until the injected turn
-/// finishes, and the window is a few milliseconds wide.
+/// Only questions this turn could actually have SEEN are captured, and that
+/// is decided structurally rather than by timing.
+///
+/// An idle-gated question asked at a busy target is deliberately released on
+/// that target's `Done` transition — the very event that spawns this capture
+/// — so the delivery and the capture rendezvous by design, and
+/// `awaiting_delivery` alone would be decided by whichever task got there
+/// first. (The earlier reasoning here, "the target is idle-`Done` when asked
+/// so no further `Done` fires", only ever described a question asked at an
+/// already-idle target; it never covered the queued path.) Losing that race
+/// answers a question the target has not seen one token of with the result
+/// of the turn that ended before it was asked — exactly the bug idle-gating
+/// exists to prevent.
+///
+/// So the `Stop` counts its turn BEFORE broadcasting `Done`, delivery stamps
+/// the count it sees onto the request, and a capture for turn N answers only
+/// requests stamped below N. A question released by turn N's own `Done`
+/// carries N and is skipped no matter who wins.
 pub(crate) async fn capture_turn_end_answer(
     config: &ServerConfig,
     session_key: &SessionKey,
     now_ms: i64,
 ) {
+    let turn = config.mcp.turns_ended(session_key);
     let handler = LazyboxMcp::new(config.clone());
     let candidates: Vec<String> = handler
         .open_requests_for(session_key.as_str())
         .await
         .into_iter()
-        .filter(|request| request.created_at <= now_ms)
+        // Only a question that has LANDED, in a turn that has since ended,
+        // can be answered by this turn. One still queued was never seen at
+        // all; one stamped with this turn's own count landed AS the turn
+        // ended and is waiting for the next one.
+        .filter(|request| {
+            request.created_at <= now_ms
+                && !request.awaiting_delivery
+                && request.delivered_after_turns < turn
+        })
         .map(|request| request.id)
         .collect();
     if candidates.is_empty() {
         return;
     }
-    // Read the scrollback BEFORE taking the mutation lock: it is a backend
-    // round trip, and holding the lock across it would serialize every
+    // The agent's own final message beats a scrape of its terminal: take it
+    // when the turn's `Stop` hook delivered one. Otherwise read the
+    // scrollback — BEFORE taking the mutation lock, since it is a backend
+    // round trip and holding the lock across it would serialize every
     // sibling's replies behind one slow snapshot.
-    let Some(text) = handler
-        .read_session_text(session_key.as_str(), Some(TURN_END_CAPTURE_LINES))
-        .await
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-    else {
-        return;
+    let (text, source) = match config.mcp.take_turn_result(session_key) {
+        Some(result) => (result, AnswerSource::TurnResult),
+        None => {
+            let Some(text) = handler
+                .read_session_text(session_key.as_str(), Some(TURN_END_CAPTURE_LINES))
+                .await
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+            else {
+                return;
+            };
+            (text, AnswerSource::TurnEndCapture)
+        }
     };
     for (request, answer) in
-        apply_captured_answers(config, &handler, candidates, &text, now_ms).await
+        apply_captured_answers(config, &handler, candidates, &text, source, now_ms, turn).await
     {
         tracing::info!(
             request = %request.id,
@@ -3162,12 +4972,15 @@ pub(crate) async fn capture_turn_end_answer(
 /// real in that window. Taking a stale snapshot as an argument is exactly the
 /// hazard, so the CAS lives here and is exercised directly by passing ids
 /// whose rows have since moved on.
+#[allow(clippy::too_many_arguments)]
 async fn apply_captured_answers(
     config: &ServerConfig,
     handler: &LazyboxMcp,
     candidates: Vec<String>,
     text: &str,
+    source: AnswerSource,
     now_ms: i64,
+    turn: u64,
 ) -> Vec<(AgentRequest, RequestAnswer)> {
     let mut captured = Vec::new();
     let _write_guard = config.mcp.requests_write().lock().await;
@@ -3178,13 +4991,16 @@ async fn apply_captured_answers(
         let Some(mut request) = handler.load_request(&id).await else {
             continue;
         };
-        if request.status != RequestStatus::Pending {
+        if request.status != RequestStatus::Pending
+            || request.awaiting_delivery
+            || request.delivered_after_turns >= turn
+        {
             continue;
         }
         let answer = RequestAnswer {
             text: text.to_string(),
             answered_at: now_ms,
-            source: AnswerSource::TurnEndCapture,
+            source,
         };
         request.answers.push(answer.clone());
         request.status = RequestStatus::AnsweredByCapture;
@@ -3199,20 +5015,49 @@ async fn apply_captured_answers(
 /// Every workspace currently carrying an open request, with its count.
 /// Replayed after the `Subscribe` snapshot so a connecting client seeds its
 /// `?N` badges instead of waiting for the next change.
-pub async fn open_request_counts(
+pub async fn open_requests_by_target(
     config: &ServerConfig,
-) -> Vec<(lazybox_core::WorkspaceKey, usize)> {
+) -> Vec<(
+    lazybox_core::WorkspaceKey,
+    Vec<lazybox_ipc::OpenAgentRequest>,
+)> {
     let handler = LazyboxMcp::new(config.clone());
-    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for request in handler.all_requests().await {
+    let mut by_target: std::collections::BTreeMap<String, Vec<&AgentRequest>> =
+        std::collections::BTreeMap::new();
+    let requests = handler.all_requests().await;
+    for request in &requests {
         if request.status == RequestStatus::Pending {
-            *counts.entry(request.target).or_default() += 1;
+            by_target
+                .entry(request.target.clone())
+                .or_default()
+                .push(request);
         }
     }
-    counts
+    by_target
         .into_iter()
-        .map(|(target, open)| (lazybox_core::WorkspaceKey::new(target), open))
+        .map(|(target, mut open)| {
+            open.sort_by_key(|r| r.created_at);
+            (
+                lazybox_core::WorkspaceKey::new(target),
+                open.into_iter().map(open_request_summary).collect(),
+            )
+        })
         .collect()
+}
+
+/// What a client is told about one open request: who asked, the gist of
+/// the question, and when.
+fn open_request_summary(request: &AgentRequest) -> lazybox_ipc::OpenAgentRequest {
+    let question: String = request
+        .text
+        .chars()
+        .take(lazybox_ipc::OPEN_REQUEST_QUESTION_MAX_CHARS)
+        .collect();
+    lazybox_ipc::OpenAgentRequest {
+        asker: lazybox_core::WorkspaceKey::new(&request.asker),
+        question,
+        asked_at: request.created_at,
+    }
 }
 
 /// kv prefix under which every blackboard note lives.
@@ -3292,6 +5137,131 @@ fn sanitize_key(key: &str) -> String {
 mod tests {
     use super::*;
     use crate::backend::SessionBackend;
+
+    /// The MCP tools are adapters over `crate::work_calls`; the one piece of
+    /// logic that lives only here is the `deliver` default, so it is the piece
+    /// that needs pinning. Everything else about a work row is tested where it
+    /// is shaped.
+    #[tokio::test]
+    async fn assigning_work_through_the_tool_delivers_it_by_default() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let payload = handler
+            .work_call(lazybox_ipc::work::WorkRequest::Create {
+                requester: SessionKey::from("github:acme/widget#1"),
+                title: "do this".into(),
+                brief: String::new(),
+                owner: Some(SessionKey::from("github:acme/other#2")),
+                deliver: true,
+                plan: None,
+                parent: None,
+                links: Vec::new(),
+            })
+            .await
+            .expect("payload");
+        // No agent is running there, so the honest answer is a refusal that
+        // still leaves the work assigned — and it must survive the JSON hop.
+        assert!(
+            payload["One"]["delivery"]["Refused"]["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no running agent"),
+            "{payload}"
+        );
+        assert_eq!(payload["One"]["work"]["lifecycle"], "pending");
+    }
+
+    #[tokio::test]
+    async fn a_work_bad_request_is_a_protocol_error_not_an_error_result() {
+        // A caller's mistake has to reach the agent as an error it can read
+        // and correct, not as a successful tool result it might act on.
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let error = handler
+            .work_call(lazybox_ipc::work::WorkRequest::Create {
+                requester: SessionKey::from("a"),
+                title: "   ".into(),
+                brief: String::new(),
+                owner: None,
+                deliver: false,
+                plan: None,
+                parent: None,
+                links: Vec::new(),
+            })
+            .await
+            .expect_err("refused");
+        assert!(error.to_string().contains("title"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn my_work_through_the_tool_carries_the_three_lists_as_json() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let payload = handler
+            .work_call(lazybox_ipc::work::WorkRequest::Mine {
+                workspace: SessionKey::from("github:acme/widget#1"),
+                include_done: false,
+            })
+            .await
+            .expect("payload");
+        for list in ["mine", "waiting_on_others", "unassigned"] {
+            assert!(
+                payload["Mine"][list].is_array(),
+                "{list} missing from the JSON: {payload}"
+            );
+        }
+    }
+
+    /// The guard that would have caught #1935 and #1936: four tools shipped
+    /// whose existence no agent-facing text mentioned, because the briefing
+    /// was at 7030 of a 7050-byte cap and there was no room. Now a tool that
+    /// no guide topic names fails here instead of shipping unannounced.
+    #[test]
+    fn every_mcp_tool_is_named_by_the_briefing_or_a_guide_topic() {
+        let source = include_str!("mcp.rs");
+        // Every `#[tool(...)]` attribute is followed by the `async fn` it
+        // decorates; splitting on the attribute is enough and avoids any
+        // index arithmetic over a file full of em dashes.
+        let names: Vec<String> = source
+            .split("#[tool(")
+            .skip(1)
+            .filter_map(|chunk| {
+                let at = chunk.find("async fn ")? + "async fn ".len();
+                let name = chunk[at..].split(['(', '<', ' ']).next()?.trim();
+                // A valid identifier only: the split can otherwise pick up a
+                // fragment from a description that happens to contain the
+                // words, and a phantom name would fail this test forever.
+                let valid = !name.is_empty()
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && name.starts_with(|c: char| c.is_ascii_lowercase());
+                valid.then(|| name.to_string())
+            })
+            .collect();
+        assert!(
+            names.len() >= 25,
+            "the tool scrape found only {} names; it has stopped working: {names:?}",
+            names.len()
+        );
+
+        let briefing = lazybox_agents::session_context::lazybox_mcp_coordination_context();
+        let guide: String = lazybox_agents::guide::Topic::ALL
+            .into_iter()
+            .map(|topic| topic.body())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut unannounced: Vec<&str> = Vec::new();
+        for name in &names {
+            let needle = format!("`{name}`");
+            // `lazybox_guide` itself is named by the briefing's pointer, and a
+            // tool named in either tier is discoverable in one call.
+            if !briefing.contains(&needle) && !guide.contains(&needle) && name != "lazybox_guide" {
+                unannounced.push(name);
+            }
+        }
+        assert!(
+            unannounced.is_empty(),
+            "these tools exist and no agent is ever told so — name them in a \
+             `lazybox_guide` topic (crates/agents/src/guide.rs) or, if an agent must \
+             know unprompted, in the briefing: {unannounced:?}"
+        );
+    }
 
     #[test]
     fn parse_bearer_strips_scheme_and_whitespace() {
@@ -3917,7 +5887,7 @@ mod tests {
         );
 
         // Clear — back to Ready, no blockers.
-        let cleared = handler.clear_blocker_payload(&caller).await;
+        let cleared = handler.clear_blocker_payload(&caller).await.expect("clear");
         assert_eq!(cleared["cleared"], true);
         let status = handler.epic_status_payload(Some("e")).await;
         let member = &status["epics"][0]["members"][0];
@@ -3939,7 +5909,9 @@ mod tests {
 
     #[tokio::test]
     async fn report_blocker_payload_parses_explicit_kind() {
-        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let config = ServerConfig::in_memory();
+        seed_workspace(&config, "w");
+        let handler = LazyboxMcp::new(config);
         let caller = SessionKey::from("w");
         let reported = handler
             .report_blocker_payload(&caller, "need the API key", Some("credential"))
@@ -3981,6 +5953,14 @@ mod tests {
         crate::epics::upsert(config, record).await;
     }
 
+    /// The config the spawn gates read: tier menus, the fleet cap. Built
+    /// rather than loaded, so a test never depends on (or is steered by) the
+    /// developer's own `~/.lazybox/config.yaml` — `Config::default()` gives
+    /// each agent its built-in ladder, which is what these assertions name.
+    fn test_config() -> lazybox_config::Config {
+        lazybox_config::Config::default()
+    }
+
     /// A `spawn_worker` request targeting an existing record.
     fn spawn_worker_args(task: &str, brief: &str) -> SpawnWorkerArgs {
         SpawnWorkerArgs {
@@ -3988,6 +5968,7 @@ mod tests {
             create_issue: None,
             brief: brief.to_string(),
             agent: None,
+            model: None,
             workspace_name: None,
         }
     }
@@ -4035,6 +6016,455 @@ mod tests {
             .unwrap();
     }
 
+    fn start_workspace_args(task: &str) -> StartWorkspaceArgs {
+        StartWorkspaceArgs {
+            task: task.to_string(),
+            brief: "implement the parser".to_string(),
+            agent: None,
+            model: None,
+        }
+    }
+
+    /// Any role may hand independent work to a record's own workspace: no
+    /// Coordinator role, no epic, and neither is changed by the start.
+    #[tokio::test]
+    async fn start_workspace_needs_no_role_and_targets_the_record_workspace() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config.clone());
+        let caller = SessionKey::from("some-agent");
+        let (key, anchor, agent, _model, _claim) = handler
+            .start_workspace_prepare(
+                &caller,
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect("an unroled agent may start a workspace");
+        assert_eq!(key.as_str(), "github-acme-widget-7");
+        assert_eq!(anchor.key, "acme/widget#7");
+        assert_eq!(agent, "claude");
+        let ws = handler.load_workspace(&key).expect("persisted");
+        assert_eq!(ws.effective_role(), None, "no role is stamped");
+        assert!(
+            crate::epics::list_all(&config)
+                .unwrap_or_default()
+                .is_empty(),
+            "no epic is touched"
+        );
+    }
+
+    /// #1911: an agent could pick *which* agent to spawn but not *how
+    /// strong*, so "start a workspace on this and send the highest model on
+    /// it" was unexpressible and the spawn silently took the default tier.
+    ///
+    /// The whole chain in one test: the tool's `model` token resolves on the
+    /// target agent's own menu, and that resolved tier is what the spawn plan
+    /// the daemon builds actually carries — argv, label and alias. Asserted
+    /// through `build_spawn_plan`, not a stub, because the gap this closes was
+    /// precisely a boundary that looked wired and was not.
+    #[tokio::test]
+    async fn start_workspace_carries_an_explicit_tier_into_the_spawn_plan() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config.clone());
+        let cfg = test_config();
+
+        // Each spelling a caller might reach for: the ladder alias, the
+        // model's own name, and the capability word an orchestrator can use
+        // without knowing this agent's ladder at all.
+        for token in ["XL", "Fable", "claude-fable-5-1", "best"] {
+            let args = StartWorkspaceArgs {
+                model: Some(token.to_string()),
+                ..start_workspace_args("acme/widget#7")
+            };
+            let (_key, _anchor, agent, model_alias, _claim) = handler
+                .start_workspace_prepare(&SessionKey::from("some-agent"), &args, 6, "claude", &cfg)
+                .await
+                .unwrap_or_else(|e| panic!("{token}: {}", e.message));
+            assert_eq!(agent, "claude");
+            assert_eq!(
+                model_alias.as_deref(),
+                Some("XL"),
+                "{token} must canonicalise to the menu's own alias"
+            );
+
+            let mut input =
+                crate::spawn_plan::test_input(lazybox_ipc::TerminalKind::Agent(agent.clone()));
+            input.model_alias = model_alias;
+            // The record's own labels would otherwise pick the tier; an
+            // explicit request outranks them.
+            input.declared_model_alias = Some("S".into());
+            let plan = crate::spawn_plan::build_spawn_plan(
+                input,
+                &cfg,
+                &lazybox_agents::Registry::default_builtins(),
+            )
+            .expect("valid plan");
+
+            assert!(
+                plan.argv
+                    .windows(2)
+                    .any(|a| a == ["--model", "claude-fable-5-1"]),
+                "{token}: the plan must spawn the requested tier, not the default: {:?}",
+                plan.argv
+            );
+            assert_eq!(plan.model_alias.as_deref(), Some("XL"));
+            assert_eq!(plan.model_label.as_deref(), Some("Fable"));
+        }
+    }
+
+    /// The refusal is the feature. A silent fallback to the default tier is
+    /// what made "spawn at the best model" look like it worked when it did
+    /// not (#1911), so an alias the target agent has no name for stops the
+    /// call — with the menu listed, because the ladder differs per agent —
+    /// and nothing is attached, claimed or spawned.
+    #[tokio::test]
+    async fn start_workspace_refuses_an_unknown_tier_and_names_the_menu() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config.clone());
+        let caller = SessionKey::from("some-agent");
+        // `XXL` is a real rung in some users' own menus and in none of the
+        // built-in ones — the shape of the mistake this catches.
+        let args = StartWorkspaceArgs {
+            model: Some("XXL".into()),
+            ..start_workspace_args("acme/widget#7")
+        };
+        let err = handler
+            .start_workspace_prepare(&caller, &args, 6, "claude", &test_config())
+            .await
+            .expect_err("an unknown tier must not fall back to the default");
+
+        assert!(
+            err.message.contains("unknown model tier") && err.message.contains("\"XXL\""),
+            "the refusal names what was rejected: {}",
+            err.message
+        );
+        for valid in ["S (claude-haiku-4-5)", "L (claude-opus-5)", "best (→ XL)"] {
+            assert!(
+                err.message.contains(valid),
+                "the refusal must list {valid:?}: {}",
+                err.message
+            );
+        }
+        // Refused before any side effect: the claim is free and the row is
+        // untouched, so a retry with a valid tier works.
+        let ok = StartWorkspaceArgs {
+            model: Some("best".into()),
+            ..start_workspace_args("acme/widget#7")
+        };
+        let (_key, _anchor, _agent, model_alias, _claim) = handler
+            .start_workspace_prepare(&caller, &ok, 6, "claude", &test_config())
+            .await
+            .expect("the refusal left nothing claimed");
+        assert_eq!(model_alias.as_deref(), Some("XL"));
+    }
+
+    /// `spawn_worker` had the same gap and takes the same argument — the
+    /// Coordinator path must not be the one that still cannot say it, and its
+    /// refusal must land before `create_issue` files anything.
+    #[tokio::test]
+    async fn spawn_worker_takes_a_tier_and_refuses_an_unknown_one_before_filing() {
+        let config = ServerConfig::in_memory();
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+        seed_epic(&config, "e", &["coord"]).await;
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config.clone());
+        let caller = SessionKey::from("coord");
+
+        let prepared = handler
+            .spawn_worker_prepare(
+                &caller,
+                &SpawnWorkerArgs {
+                    model: Some("high".into()),
+                    ..spawn_worker_args("acme/widget#7", "do it")
+                },
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect("a Coordinator may pick the worker's tier");
+        assert_eq!(prepared.model_alias.as_deref(), Some("L"));
+
+        // An unknown tier refuses with the menu, and `create_issue` is never
+        // reached — the same ordering the agent-id check above it relies on.
+        let err = handler
+            .spawn_worker_prepare(
+                &caller,
+                &SpawnWorkerArgs {
+                    task: None,
+                    create_issue: Some(CreateIssueArgs {
+                        title: "would be filed".into(),
+                        body: "b".into(),
+                        repo: "acme/widget".into(),
+                        parent: None,
+                        blocked_by: Vec::new(),
+                    }),
+                    model: Some("strongest".into()),
+                    ..spawn_worker_args("acme/widget#7", "do it")
+                },
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect_err("an unknown tier must be refused");
+        assert!(
+            err.message.contains("unknown model tier") && err.message.contains("best (→ XL)"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn start_workspace_refuses_the_callers_own_row_and_a_non_record() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config);
+        let own = SessionKey::from("github-acme-widget-7");
+        let err = handler
+            .start_workspace_prepare(
+                &own,
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect_err("own workspace");
+        assert!(
+            err.message.contains("your own workspace"),
+            "{}",
+            err.message
+        );
+
+        let err = handler
+            .start_workspace_prepare(
+                &SessionKey::from("other"),
+                &start_workspace_args("fix the parser"),
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect_err("not a record");
+        assert!(err.message.contains("propose one"), "{}", err.message);
+
+        let err = handler
+            .start_workspace_prepare(
+                &SessionKey::from("other"),
+                &start_workspace_args("acme/widget#7"),
+                0,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect_err("disabled");
+        assert!(err.message.contains("disabled"), "{}", err.message);
+    }
+
+    /// Regression: two siblings starting the same record must not both
+    /// spawn into it.
+    ///
+    /// The "already has a running agent" check and `handle_spawn` are
+    /// several awaits apart (`attach_to_record`, `record_started`), so both
+    /// callers read the record free and both spawned — the double-spawn the
+    /// `working` claim exists to prevent. The claim is
+    /// taken before the check and held through the spawn.
+    #[tokio::test]
+    async fn two_callers_starting_one_record_do_not_both_spawn() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config);
+
+        // The first caller holds the claim (its guard is still alive).
+        let (_key, _anchor, _agent, _model, claim) = handler
+            .start_workspace_prepare(
+                &SessionKey::from("first"),
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect("the first caller claims the record");
+
+        let err = handler
+            .start_workspace_prepare(
+                &SessionKey::from("second"),
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect_err("the second caller must be refused while the spawn is in flight");
+        assert!(
+            err.message.contains("already starting work"),
+            "the refusal names the in-flight start: {}",
+            err.message
+        );
+
+        // Releasing the claim frees the record again — a refused or failed
+        // start must never wedge it.
+        drop(claim);
+        handler
+            .start_workspace_prepare(
+                &SessionKey::from("second"),
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect("the claim is released on drop");
+    }
+
+    /// Regression: a spawn that never brought an agent up must not report
+    /// `handed_off: true`.
+    ///
+    /// `handle_spawn` returns `()`, so the payload hardcoded success — a
+    /// failed worktree or a misconfigured agent binary read to the caller as
+    /// work started. The receipt now waits for the agent terminal, the one
+    /// observable that proves the spawn took. Here nothing can spawn (the
+    /// in-memory config has no worktree to attach), so it must error.
+    #[tokio::test(start_paused = true)]
+    async fn a_spawn_that_brings_no_agent_up_is_not_reported_as_handed_off() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config);
+        let err = handler
+            .start_workspace_payload(
+                &SessionKey::from("caller"),
+                start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect_err("no agent terminal came up, so this is not a hand-off");
+        assert!(
+            err.message.contains("nothing is running there"),
+            "the error says the spawn did not take: {}",
+            err.message
+        );
+    }
+
+    /// Regression: a `start_workspace` chain must terminate.
+    ///
+    /// The per-caller cap bounds ONE session's fan-out and nothing else, so
+    /// A starts B, B starts C, C starts D … ran forever — each generation
+    /// comfortably under its own bound, and a finished start freeing the slot
+    /// that would otherwise have stopped it. The depth ledger makes the chain
+    /// itself the bounded thing.
+    #[tokio::test]
+    async fn a_start_chain_is_refused_once_it_runs_too_deep() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let handler = LazyboxMcp::new(config.clone());
+
+        // Depth 0 is the user's own session: it may hand work off.
+        let root = SessionKey::from("root");
+        handler
+            .start_workspace_prepare(
+                &root,
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect("a session nobody started may start work");
+
+        // Walk the chain the way `record_started` stamps it.
+        let mut previous = root;
+        for generation in 1..=MAX_START_DEPTH {
+            let started = lazybox_core::WorkspaceKey::new(format!("gen-{generation}"));
+            config.mcp.record_started(&previous, started.clone());
+            previous = SessionKey::from(&started);
+        }
+        let err = handler
+            .start_workspace_prepare(
+                &previous,
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect_err("the chain must stop");
+        assert!(
+            err.message.contains("start depth"),
+            "the refusal names the depth bound: {}",
+            err.message
+        );
+    }
+
+    /// Regression: the per-caller cap is blind to a fleet that grew by
+    /// recursion — six sessions each under their own cap is 36 agents nobody
+    /// asked for. The fleet cap refuses even a caller with an empty ledger.
+    #[tokio::test]
+    async fn the_fleet_cap_refuses_a_caller_that_is_under_its_own_cap() {
+        let config = ServerConfig::in_memory();
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let fleet_cap = lazybox_config::Config::load()
+            .unwrap_or_default()
+            .agent
+            .live_agent_cap()
+            .expect("the advisory fleet ceiling is set by default");
+
+        // Other sessions already hold the whole fleet ceiling, each running.
+        for n in 0..fleet_cap {
+            let key = lazybox_core::WorkspaceKey::new(format!("busy-{n}"));
+            config
+                .mcp
+                .record_started(&SessionKey::from(format!("starter-{n}")), key.clone());
+            config
+                .terminal
+                .register_terminal(
+                    lazybox_ipc::TerminalId(900 + n as u64),
+                    format!("backend-{n}"),
+                    SessionKey::from(&key),
+                    lazybox_ipc::TerminalKind::Agent("claude".into()),
+                )
+                .await;
+        }
+
+        let handler = LazyboxMcp::new(config);
+        // A caller with an EMPTY per-session ledger — under its own cap.
+        let err = handler
+            .start_workspace_prepare(
+                &SessionKey::from("fresh"),
+                &start_workspace_args("acme/widget#7"),
+                6,
+                "claude",
+                &test_config(),
+            )
+            .await
+            .expect_err("the fleet is already full");
+        assert!(
+            err.message.contains("across the fleet"),
+            "the refusal names the fleet bound: {}",
+            err.message
+        );
+    }
+
+    /// The fan-out bound counts what a session started, once per workspace.
+    #[test]
+    fn started_workspaces_are_tracked_per_caller_without_duplicates() {
+        let runtime = McpRuntime::default();
+        let caller = SessionKey::from("a");
+        let key = lazybox_core::WorkspaceKey::new("github-acme-widget-7");
+        runtime.record_started(&caller, key.clone());
+        runtime.record_started(&caller, key.clone());
+        assert_eq!(runtime.started_by(&caller), vec![key]);
+        assert!(runtime.started_by(&SessionKey::from("b")).is_empty());
+    }
+
     #[tokio::test]
     async fn spawn_worker_refuses_a_non_coordinator() {
         let config = ServerConfig::in_memory();
@@ -4046,7 +6476,7 @@ mod tests {
         let caller = SessionKey::from("not-coord");
         let args = spawn_worker_args("acme/widget#7", "do the thing");
         let err = handler
-            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .spawn_worker_prepare(&caller, &args, 6, "claude", &test_config())
             .await
             .expect_err("a non-coordinator must be refused");
         assert!(
@@ -4066,7 +6496,7 @@ mod tests {
         let caller = SessionKey::from("coord");
         let args = spawn_worker_args("acme/widget#7", "do the thing");
         let err = handler
-            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .spawn_worker_prepare(&caller, &args, 6, "claude", &test_config())
             .await
             .expect_err("no epic must be refused");
         assert!(err.message.contains("epic"), "{}", err.message);
@@ -4084,7 +6514,7 @@ mod tests {
         let caller = SessionKey::from("coord");
         let args = spawn_worker_args("acme/widget#7", "do the thing");
         let err = handler
-            .spawn_worker_prepare(&caller, &args, 1, "claude")
+            .spawn_worker_prepare(&caller, &args, 1, "claude", &test_config())
             .await
             .expect_err("over-cap must be refused");
         assert!(
@@ -4105,7 +6535,7 @@ mod tests {
         seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
         let args = spawn_worker_args("acme/widget#7", "implement the parser");
         let prepared = handler
-            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .spawn_worker_prepare(&caller, &args, 6, "claude", &test_config())
             .await
             .expect("prepare should succeed for an in-cap coordinator");
 
@@ -4152,7 +6582,13 @@ mod tests {
             "<https://github.com/acme/widget/pull/7>",
         ] {
             let prepared = handler
-                .spawn_worker_prepare(&caller, &spawn_worker_args(reference, "do it"), 6, "claude")
+                .spawn_worker_prepare(
+                    &caller,
+                    &spawn_worker_args(reference, "do it"),
+                    6,
+                    "claude",
+                    &test_config(),
+                )
                 .await
                 .unwrap_or_else(|e| panic!("{reference} should resolve: {}", e.message));
             assert_eq!(prepared.key.as_str(), "github-acme-widget-7", "{reference}");
@@ -4174,10 +6610,11 @@ mod tests {
             create_issue: None,
             brief: "do the thing".into(),
             agent: None,
+            model: None,
             workspace_name: Some("build the parser".into()),
         };
         let err = handler
-            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .spawn_worker_prepare(&caller, &args, 6, "claude", &test_config())
             .await
             .expect_err("a named workspace must be refused");
         assert!(
@@ -4221,6 +6658,7 @@ mod tests {
                 &spawn_worker_args("acme/widget#100", "do it"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("a coordinator must not staff itself");
@@ -4270,6 +6708,7 @@ mod tests {
                 &spawn_worker_args("acme/widget#7", "do it"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("a row with a live agent must not be taken over");
@@ -4311,10 +6750,17 @@ mod tests {
             }),
             brief: "do it".into(),
             agent: None,
+            model: None,
             workspace_name: None,
         };
         let err = handler
-            .spawn_worker_prepare(&SessionKey::from("coord"), &args, 6, "claude")
+            .spawn_worker_prepare(
+                &SessionKey::from("coord"),
+                &args,
+                6,
+                "claude",
+                &test_config(),
+            )
             .await
             .expect_err("task and create_issue together is a contradiction");
         assert!(err.message.contains("not both"), "{}", err.message);
@@ -4333,10 +6779,11 @@ mod tests {
             create_issue: None,
             brief: "do the thing".into(),
             agent: None,
+            model: None,
             workspace_name: None,
         };
         let err = handler
-            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .spawn_worker_prepare(&caller, &args, 6, "claude", &test_config())
             .await
             .expect_err("neither a task nor create_issue leaves nothing to attach to");
         assert!(err.message.contains("create_issue"), "{}", err.message);
@@ -4356,6 +6803,7 @@ mod tests {
                 &spawn_worker_args("build the parser", "do the thing"),
                 6,
                 "claude",
+                &test_config(),
             )
             .await
             .expect_err("prose is not a tracker record");
@@ -4490,25 +6938,29 @@ mod tests {
         assert!(gh_issue_create_argv(&create, None).is_ok());
     }
 
+    /// The receipt, not a guess: `delivered` only when the text landed,
+    /// `queued` while a busy target holds it, and an error with the reason
+    /// when it was refused. The old payload said "handed off, verify with
+    /// read_session" for all three.
     #[test]
-    fn notify_handoff_payload_never_claims_confirmed_delivery() {
-        // The registered-not-delivered contract: the success payload must not
-        // read as "the target got it", since a target at a permission prompt
-        // silently drops the inject and no async channel tells the MCP caller.
-        let payload = notify_handoff_payload("github:acme/widget#1", true);
-        assert_eq!(payload["handed_off"], true);
-        assert_eq!(payload["delivery_confirmed"], false);
-        assert_eq!(payload["submit_requested"], true);
-        // The prior wording ("accepted") invited exactly the misread this fix
-        // removes — it must be gone.
-        assert!(payload.get("accepted").is_none(), "{payload}");
-        assert!(
-            payload["note"]
-                .as_str()
-                .expect("note")
-                .contains("read_session"),
-            "the caller must be pointed at the one channel that can verify"
+    fn notify_reports_what_actually_happened_to_the_message() {
+        use crate::delivery::EarlyOutcome;
+        let text = |r: &CallToolResult| format!("{:?}", r.content);
+        let delivered = notify_receipt_result("w", true, Some(EarlyOutcome::Landed));
+        assert_ne!(delivered.is_error, Some(true));
+        assert!(text(&delivered).contains("delivered"));
+        let queued = notify_receipt_result("w", true, None);
+        assert_ne!(queued.is_error, Some(true));
+        assert!(text(&queued).contains("queued"));
+        let refused = notify_receipt_result(
+            "w",
+            true,
+            Some(EarlyOutcome::Refused {
+                reason: "the agent terminal exited".into(),
+            }),
         );
+        assert_eq!(refused.is_error, Some(true));
+        assert!(text(&refused).contains("terminal exited"));
     }
 
     #[test]
@@ -4613,6 +7065,63 @@ mod tests {
         );
     }
 
+    /// #1793: a blocker reported for a workspace that has no row was stored,
+    /// then pruned by the next recompute, while the tool answered
+    /// `"reported": true`. It must refuse and say why.
+    #[tokio::test]
+    async fn report_blocker_refuses_a_caller_with_no_workspace_row() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let error = handler
+            .report_blocker_payload(&SessionKey::from("github:o/r#7"), "need a call", None)
+            .await
+            .expect_err("no row, no blocker");
+        assert!(
+            error.message.contains("no workspace row"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// #1837: the issue→PR fold re-keys a live agent's workspace (and its
+    /// terminal metadata). Its bearer must follow — resolving to the PR key
+    /// now, and restored under it after a restart. Before, the token stayed
+    /// on the dead issue key and restart dropped it, so every MCP call the
+    /// agent made failed.
+    #[tokio::test]
+    async fn a_folded_agents_token_follows_it_to_the_pr_and_survives_restart() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "folded")
+            .await
+            .expect("spawn mock session");
+        let issue = SessionKey::from("github:o/r#7");
+        let pr = SessionKey::from("github:o/r#8");
+        config.mcp.tokens().register("agent-tok", issue.clone());
+        persist_tokens(&config).await;
+
+        // The fold: terminal metadata now wears the PR key; tokens follow.
+        let meta = serde_json::to_string(&(
+            pr.as_str().to_string(),
+            lazybox_ipc::TerminalKind::Agent("claude".to_string()),
+        ))
+        .unwrap();
+        config
+            .store
+            .set_kv(&format!("terminal:{backend_key}"), &meta)
+            .unwrap();
+        rebadge_session_tokens_blocking(&config, &issue, &pr);
+        assert_eq!(config.mcp.tokens().resolve("agent-tok"), Some(pr.clone()));
+
+        // Restart.
+        config.mcp.tokens().forget("agent-tok");
+        restore_tokens(&config).await;
+        assert_eq!(
+            config.mcp.tokens().resolve("agent-tok"),
+            Some(pr),
+            "the bearer survives the restart under the PR key"
+        );
+    }
+
     #[tokio::test]
     async fn bind_loopback_reuses_a_freed_port_and_falls_back_when_taken() {
         // A freed port rebinds (the restart case: old daemon gone), so a
@@ -4668,6 +7177,460 @@ mod tests {
         assert_eq!(note_seq(&k10), Some(10));
         // Zero-padding makes lexical order == insertion order.
         assert!(k9 < k10, "{k9} !< {k10}");
+    }
+
+    // ── review artifacts (#1732) ────────────────────────────────────────
+
+    fn review_scope_args(head: &str, dirty: Option<&str>) -> ReviewScopeArgs {
+        ReviewScopeArgs {
+            label: "diff vs main".to_string(),
+            base_sha: Some("base0".to_string()),
+            head_sha: Some(head.to_string()),
+            dirty_digest: dirty.map(str::to_string),
+        }
+    }
+
+    fn finding_args(title: &str) -> FindingArgs {
+        FindingArgs {
+            id: None,
+            title: title.to_string(),
+            severity: "blocker".to_string(),
+            anchors: vec!["crates/server/src/poll.rs:88".to_string()],
+            evidence: "a 500 from the provider returns Ok(vec![]), archiving the row".to_string(),
+            remediation: "propagate the error".to_string(),
+            checks: vec!["cargo test -p lazybox-server".to_string()],
+        }
+    }
+
+    fn submit_args(head: &str, findings: Vec<FindingArgs>) -> SubmitReviewArgs {
+        SubmitReviewArgs {
+            report: "## Findings\n1. drops the error".to_string(),
+            findings,
+            scope: Some(review_scope_args(head, None)),
+            checks: vec!["make test".to_string()],
+            open_questions: vec![],
+            imported: false,
+        }
+    }
+
+    /// The acceptance case: a review submitted by one session is bound and
+    /// read in full by another — a different agent, a different session key
+    /// for the run, nothing shared but the workspace and the store.
+    #[tokio::test]
+    async fn a_review_submitted_by_one_session_is_bound_by_a_fresh_fixer() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+
+        let submitted = handler
+            .submit_review_payload(
+                &workspace,
+                submit_args("head1", vec![finding_args("a")]),
+                1_000,
+            )
+            .await
+            .expect("submit");
+        assert_eq!(submitted["status"], "completed");
+        assert_eq!(submitted["bindable"], true);
+        assert_eq!(submitted["findings"], 1);
+        let report_id = submitted["report_id"].as_str().expect("id").to_string();
+
+        // The fixer is a separate call with no memory of the review: it asks
+        // what to bind, at the tree as it is now.
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "bound");
+        assert_eq!(listed["selection"]["id"], report_id.as_str());
+        assert_eq!(listed["selection"]["freshness"]["state"], "current");
+
+        let full = handler
+            .get_review_payload(&workspace, &report_id)
+            .await
+            .expect("get");
+        // The reasoning survives the handoff, not just the headline.
+        assert_eq!(full["report"]["findings"][0]["id"], "f1");
+        assert_eq!(
+            full["report"]["findings"][0]["evidence"],
+            "a 500 from the provider returns Ok(vec![]), archiving the row"
+        );
+        assert_eq!(full["report"]["findings"][0]["anchors"][0]["line"], 88);
+        assert_eq!(full["report"]["report"], "## Findings\n1. drops the error");
+
+        let result = handler
+            .submit_review_result_payload(
+                &workspace,
+                SubmitReviewResultArgs {
+                    report_id: report_id.clone(),
+                    outcomes: vec![OutcomeArgs {
+                        finding_id: "f1".to_string(),
+                        disposition: "fixed".to_string(),
+                        evidence: "propagated the provider error".to_string(),
+                        commits: vec!["abc1234".to_string()],
+                        checks: vec!["cargo test".to_string()],
+                    }],
+                    checks: vec!["make test".to_string()],
+                    notes: String::new(),
+                },
+                2_000,
+            )
+            .await
+            .expect("result");
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["report_id"], report_id.as_str());
+        assert!(result["uncovered"].as_array().expect("array").is_empty());
+
+        // The report is untouched by the result written against it.
+        let after = handler
+            .get_review_payload(&workspace, &report_id)
+            .await
+            .expect("get");
+        assert_eq!(after["report"], full["report"]);
+    }
+
+    /// No report means STOP, and the reply says so. A fixer that reads
+    /// "nothing to fix" here finishes green having done nothing.
+    #[tokio::test]
+    async fn listing_with_no_report_says_missing_and_stop() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        let listed = handler
+            .list_reviews_payload(&workspace, ListReviewsArgs::default())
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "missing");
+        assert!(listed["reports"].as_array().expect("array").is_empty());
+        assert!(
+            listed["note"].as_str().expect("note").contains("STOP"),
+            "{}",
+            listed["note"]
+        );
+    }
+
+    /// A clean review binds like any other, and is not confusable with a
+    /// missing one.
+    #[tokio::test]
+    async fn a_zero_finding_review_binds_rather_than_reading_as_missing() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        handler
+            .submit_review_payload(&workspace, submit_args("head1", vec![]), 1_000)
+            .await
+            .expect("submit");
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "bound");
+        assert_eq!(listed["reports"][0]["findings"], 0);
+    }
+
+    /// An incomplete submission is kept, named as a draft, and refused to any
+    /// fixer — "the agent stopped typing" is not "the review is done".
+    #[tokio::test]
+    async fn an_incomplete_submission_is_a_draft_no_fixer_will_bind() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        let mut bad = finding_args("a");
+        bad.anchors.clear();
+        let submitted = handler
+            .submit_review_payload(&workspace, submit_args("head1", vec![bad]), 1_000)
+            .await
+            .expect("submit");
+        assert_eq!(submitted["status"], "draft");
+        assert_eq!(submitted["bindable"], false);
+        assert!(!submitted["defects"].as_array().expect("array").is_empty());
+
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "missing");
+        // Still retained and visible — the prose is not thrown away.
+        assert_eq!(listed["reports"][0]["status"], "draft");
+    }
+
+    /// A moved head still binds — the findings are the expensive part — but
+    /// the reply demands revalidation rather than blind fixing.
+    #[tokio::test]
+    async fn a_moved_head_binds_stale_and_demands_revalidation() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        handler
+            .submit_review_payload(
+                &workspace,
+                submit_args("head1", vec![finding_args("a")]),
+                1_000,
+            )
+            .await
+            .expect("submit");
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head2", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "bound");
+        assert_eq!(listed["selection"]["freshness"]["state"], "head_moved");
+        assert!(
+            listed["note"]
+                .as_str()
+                .expect("note")
+                .contains("revalidate each finding"),
+            "{}",
+            listed["note"]
+        );
+    }
+
+    /// Two reports describing different work are not resolved by recency.
+    #[tokio::test]
+    async fn two_scopes_at_one_head_are_ambiguous() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        handler
+            .submit_review_payload(
+                &workspace,
+                submit_args("head1", vec![finding_args("a")]),
+                1_000,
+            )
+            .await
+            .expect("submit");
+        let mut other = submit_args("head1", vec![finding_args("b")]);
+        other.scope = Some(ReviewScopeArgs {
+            label: "PR #1732 head".to_string(),
+            ..review_scope_args("head1", None)
+        });
+        handler
+            .submit_review_payload(&workspace, other, 2_000)
+            .await
+            .expect("submit");
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "ambiguous");
+        assert_eq!(
+            listed["selection"]["candidates"]
+                .as_array()
+                .expect("array")
+                .len(),
+            2
+        );
+    }
+
+    /// One workspace's findings never reach another's fixer.
+    #[tokio::test]
+    async fn a_report_is_scoped_to_the_workspace_that_submitted_it() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let mine = SessionKey::from("github:acme/widget#1");
+        let theirs = SessionKey::from("github:other/thing#7");
+        handler
+            .submit_review_payload(&mine, submit_args("head1", vec![finding_args("a")]), 1_000)
+            .await
+            .expect("submit");
+        let listed = handler
+            .list_reviews_payload(
+                &theirs,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "missing");
+        assert!(handler.get_review_payload(&theirs, "r1").await.is_err());
+    }
+
+    /// A result that answers only some findings is a draft naming the rest:
+    /// silence is not a disposition.
+    #[tokio::test]
+    async fn a_partial_result_is_a_draft_naming_the_uncovered_findings() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        handler
+            .submit_review_payload(
+                &workspace,
+                submit_args("head1", vec![finding_args("a"), finding_args("b")]),
+                1_000,
+            )
+            .await
+            .expect("submit");
+        let result = handler
+            .submit_review_result_payload(
+                &workspace,
+                SubmitReviewResultArgs {
+                    report_id: "r1".to_string(),
+                    outcomes: vec![OutcomeArgs {
+                        finding_id: "f1".to_string(),
+                        disposition: "fixed".to_string(),
+                        evidence: "propagated the error".to_string(),
+                        commits: vec![],
+                        checks: vec![],
+                    }],
+                    checks: vec![],
+                    notes: String::new(),
+                },
+                2_000,
+            )
+            .await
+            .expect("result");
+        assert_eq!(result["status"], "draft");
+        assert_eq!(result["uncovered"][0], "f2");
+    }
+
+    /// Retention can delete the report a fixer bound hours ago — binding and
+    /// submitting are far apart. Refusing the result threw away every outcome
+    /// at the last step, after all the work. It is recorded as a draft naming
+    /// why instead, so nothing the fixer produced is lost.
+    #[tokio::test]
+    async fn a_result_outlives_the_report_it_answers() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        let result = handler
+            .submit_review_result_payload(
+                &workspace,
+                SubmitReviewResultArgs {
+                    report_id: "r9".to_string(),
+                    outcomes: vec![OutcomeArgs {
+                        finding_id: "f1".to_string(),
+                        disposition: "fixed".to_string(),
+                        evidence: "propagated the provider error".to_string(),
+                        commits: vec!["abc1234".to_string()],
+                        checks: vec![],
+                    }],
+                    checks: vec!["make test".to_string()],
+                    notes: String::new(),
+                },
+                1,
+            )
+            .await
+            .expect("an absent report must not discard the fixer's work");
+        assert_eq!(result["status"], "draft");
+        assert_eq!(result["report_id"], "r9");
+        assert_eq!(result["outcomes"], 1, "the outcome survived");
+        assert!(
+            result["defects"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .any(|d| d
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("no longer retained")),
+            "{result:?}"
+        );
+        // And it is durable, not just reported back.
+        let stored = crate::store_blocking(&handler.config.store, |store| {
+            review_store::list_results(store, "github:acme/widget#1")
+        })
+        .await
+        .expect("list");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].outcomes.len(), 1);
+    }
+
+    /// An import needs no head SHA and is flagged as needing revalidation —
+    /// a legacy in-conversation review is captured deliberately, never
+    /// assumed to describe the current tree.
+    #[tokio::test]
+    async fn an_imported_review_completes_without_a_head_sha() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+        let submitted = handler
+            .submit_review_payload(
+                &workspace,
+                SubmitReviewArgs {
+                    scope: None,
+                    imported: true,
+                    ..submit_args("unused", vec![finding_args("a")])
+                },
+                1_000,
+            )
+            .await
+            .expect("submit");
+        assert_eq!(submitted["status"], "completed");
+        let listed = handler
+            .list_reviews_payload(
+                &workspace,
+                ListReviewsArgs {
+                    scope: Some(review_scope_args("head1", None)),
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed["selection"]["outcome"], "bound");
+        assert_eq!(listed["selection"]["freshness"]["state"], "unknown");
+        assert_eq!(listed["reports"][0]["origin"], "imported");
+    }
+
+    /// An oversized submission is refused at the boundary rather than
+    /// persisted — whichever field carries the bytes.
+    ///
+    /// Capping `report` alone bounded nothing: the same payload routed through
+    /// `findings[].evidence` sailed past it into one kv row that every
+    /// `list_reviews` then deserializes in full (#1831 review).
+    #[tokio::test]
+    async fn an_oversized_submission_is_refused_whichever_field_carries_it() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let workspace = SessionKey::from("github:acme/widget#1");
+
+        let mut in_report = submit_args("head1", vec![]);
+        in_report.report = "x".repeat(review_store::MAX_SUBMISSION_BYTES + 1);
+        assert!(
+            handler
+                .submit_review_payload(&workspace, in_report, 1)
+                .await
+                .is_err(),
+            "an oversized report must be refused"
+        );
+
+        // The same volume, spread across findings instead.
+        let per_finding = review_store::MAX_SUBMISSION_BYTES / 8;
+        let findings: Vec<FindingArgs> = (0..10)
+            .map(|_| {
+                let mut f = finding_args("bulk");
+                f.evidence = "y".repeat(per_finding);
+                f
+            })
+            .collect();
+        assert!(
+            handler
+                .submit_review_payload(&workspace, submit_args("head1", findings), 1)
+                .await
+                .is_err(),
+            "bytes routed through findings must be refused the same way"
+        );
+
+        // Nothing oversized reached the store.
+        let stored = crate::store_blocking(&handler.config.store, |store| {
+            review_store::list_reports(store, "github:acme/widget#1")
+        })
+        .await
+        .expect("list");
+        assert!(stored.is_empty(), "a refused submission must not persist");
     }
 
     #[tokio::test]
@@ -4797,6 +7760,51 @@ mod tests {
             .map(|note| note["text"].as_str().unwrap())
             .collect();
         assert_eq!(texts, vec!["db note", "api note"]);
+    }
+
+    /// #1836: `a/b` and `a:b` sanitize to the same key prefix. Filling one
+    /// to its retention cap must not evict the other's notes.
+    #[tokio::test]
+    async fn retention_never_prunes_a_colliding_scopes_notes() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let author = SessionKey::from("author");
+        assert_eq!(
+            note_key_prefix("a/b"),
+            note_key_prefix("a:b"),
+            "fixture: prefixes collide"
+        );
+        handler
+            .post_note_payload(&author, "keep me".into(), Some("a:b"), vec![], 0)
+            .await
+            .expect("post");
+        for i in 0..NOTES_PER_SCOPE + 3 {
+            handler
+                .post_note_payload(
+                    &author,
+                    format!("noise {i}"),
+                    Some("a/b"),
+                    vec![],
+                    1 + i as i64,
+                )
+                .await
+                .expect("post");
+        }
+        let kept = handler
+            .read_notes_payload(&author, Some("a:b"), &[], None)
+            .await
+            .expect("read");
+        let texts: Vec<&str> = kept["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["keep me"], "the other scope's note survives");
+        let noisy = handler
+            .read_notes_payload(&author, Some("a/b"), &[], None)
+            .await
+            .expect("read");
+        assert_eq!(noisy["notes"].as_array().unwrap().len(), NOTES_PER_SCOPE);
     }
 
     #[tokio::test]
@@ -4945,6 +7953,92 @@ mod tests {
             .record_agent_state(terminal_id, lazybox_ipc::AgentState::Done)
             .await;
         backend_key
+    }
+
+    /// Named keys encode exactly as the TUI encodes the physical key.
+    #[test]
+    fn answer_keys_encode_like_the_keyboard() {
+        assert_eq!(answer_key_bytes("2"), Some(&b"2"[..]));
+        assert_eq!(answer_key_bytes("Enter"), Some(&b"\r"[..]));
+        assert_eq!(answer_key_bytes("down"), Some(&b"\x1b[B"[..]));
+        assert_eq!(answer_key_bytes("esc"), Some(&b"\x1b"[..]));
+        assert_eq!(
+            answer_key_bytes("ctrl-c"),
+            None,
+            "no keys beyond the vocabulary"
+        );
+        assert_eq!(answer_key_bytes("0"), None);
+    }
+
+    /// An agent may answer a sibling's question, never its permission
+    /// prompt, and never press keys into an agent that is not waiting.
+    #[test]
+    fn answer_refusal_keeps_permission_prompts_for_the_human() {
+        use lazybox_ipc::AgentState;
+        let question = "☐ PR base\n❯ 1. Stack on #1834's branch now\n  2. Hold until #1834 merges";
+        assert_eq!(
+            answer_refusal(Some(AgentState::InputNeeded), question),
+            None
+        );
+        let permission =
+            "Bash command\n  rm -rf target\nDo you want to proceed?\n❯ 1. Yes\n  2. No";
+        let refusal = answer_refusal(Some(AgentState::InputNeeded), permission).expect("refused");
+        assert!(refusal.contains("PERMISSION"), "{refusal}");
+        let busy = answer_refusal(Some(AgentState::Working), question).expect("refused");
+        assert!(busy.contains("not waiting on input"), "{busy}");
+    }
+
+    /// End to end: the keys reach the waiting agent's terminal, one write
+    /// per key, and the caller gets the screen back.
+    #[tokio::test(start_paused = true)]
+    async fn answer_session_presses_the_keys_into_a_waiting_sibling() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let target = SessionKey::from("github:o/r#1855");
+        let terminal = lazybox_ipc::TerminalId(41);
+        let backend_key = live_agent(&config, &mock, &target, terminal).await;
+        config
+            .terminal
+            .record_agent_state(terminal, lazybox_ipc::AgentState::InputNeeded)
+            .await;
+        let handler = LazyboxMcp::new(config.clone());
+        let result = handler
+            .answer_session_payload(
+                &SessionKey::from("github:o/r#9"),
+                &AnswerSessionArgs {
+                    workspace: target.as_str().into(),
+                    keys: vec!["2".into()],
+                    text: None,
+                },
+            )
+            .await
+            .expect("answered");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let writes = mock.writes_for(&backend_key).await;
+        assert!(writes.iter().any(|w| w == b"2"), "{writes:?}");
+
+        // Its own session, an empty answer and an unknown key are refused.
+        let own = handler
+            .answer_session_payload(
+                &target,
+                &AnswerSessionArgs {
+                    workspace: target.as_str().into(),
+                    keys: vec!["1".into()],
+                    text: None,
+                },
+            )
+            .await;
+        assert!(own.is_err());
+        let unknown = handler
+            .answer_session_payload(
+                &SessionKey::from("github:o/r#9"),
+                &AnswerSessionArgs {
+                    workspace: target.as_str().into(),
+                    keys: vec!["ctrl-c".into()],
+                    text: None,
+                },
+            )
+            .await;
+        assert!(unknown.is_err());
     }
 
     #[test]
@@ -5130,6 +8224,94 @@ mod tests {
         assert_eq!(payload["status"], "answered", "{payload}");
         assert_eq!(payload["answer"], "three tests left");
         assert_eq!(payload["source"], "reply_request");
+    }
+
+    /// Regression: a question that lands AS a turn ends must not be
+    /// answered by that turn.
+    ///
+    /// An idle-gated question asked at a busy target is released on the
+    /// target's `Done` transition — the same event that spawns the capture —
+    /// so the two rendezvous by design and `awaiting_delivery` alone is
+    /// decided by whichever task wins. Losing that race answered a question
+    /// the target had not seen one token of with the result of the turn that
+    /// ended before it was asked, which is the bug idle-gating exists to
+    /// prevent. Here the delivery wins outright (the request is marked
+    /// delivered before the capture runs); only the turn stamp can exclude
+    /// it.
+    #[tokio::test(start_paused = true)]
+    async fn a_question_landing_as_the_turn_ends_is_not_answered_by_that_turn() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let terminal = lazybox_ipc::TerminalId(9501);
+        live_agent(&config, &mock, &target, terminal).await;
+        // Mid-turn, so the idle gate queues the question instead of
+        // delivering it — the path whose release races the capture.
+        config
+            .terminal
+            .record_agent_state(terminal, lazybox_ipc::AgentState::Working)
+            .await;
+
+        // The question is asked while the target is mid-turn, so it queues.
+        let result = handler
+            .ask_session_payload(
+                &asker,
+                &ask(&target, "what is the contract?", "async", None),
+                1_000,
+            )
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        assert!(
+            handler
+                .load_request(&id)
+                .await
+                .expect("the request row")
+                .awaiting_delivery,
+            "a mid-turn target queues the question rather than taking it now",
+        );
+
+        // The turn ends: the `Stop` counts it and records its result, and
+        // the SAME transition releases the queued question into the input.
+        config.mcp.end_turn(&target);
+        config
+            .mcp
+            .record_turn_result(target.clone(), "I refactored the parser.".into());
+        handler.mark_request_delivered(&id).await;
+
+        // The capture for that turn now runs — and must skip the question.
+        capture_turn_end_answer(&config, &target, 2_000).await;
+
+        let polled = handler
+            .poll_request_payload(&asker, &id, 3_000)
+            .await
+            .expect("poll");
+        assert_eq!(
+            polled["status"], "pending",
+            "the turn that ended before the question arrived must not answer it: {polled}"
+        );
+        assert!(polled["answer"].is_null(), "{polled}");
+
+        // The NEXT turn may answer it, which is the whole point.
+        config.mcp.end_turn(&target);
+        config
+            .mcp
+            .record_turn_result(target.clone(), "The contract is Foo -> Bar.".into());
+        capture_turn_end_answer(&config, &target, 4_000).await;
+        let polled = handler
+            .poll_request_payload(&asker, &id, 5_000)
+            .await
+            .expect("poll");
+        assert_eq!(polled["status"], "answered_by_capture", "{polled}");
+        assert_eq!(polled["answer"], "The contract is Foo -> Bar.");
+        assert_eq!(polled["source"], "turn_result");
     }
 
     /// A reply that never comes leaves the request OPEN and the asker told
@@ -5371,6 +8553,9 @@ mod tests {
             .expect("request id")
             .to_string();
 
+        // The turn the question was delivered into now ends, as its `Stop`
+        // hook would record it.
+        config.mcp.end_turn(&target);
         capture_turn_end_answer(&config, &target, 5_000).await;
 
         let polled = handler
@@ -5387,6 +8572,97 @@ mod tests {
             handler.open_requests_for(target.as_str()).await.is_empty(),
             "the capture closes the request so the badge clears"
         );
+    }
+
+    /// A turn that ends without `reply_request` used to be answered with the
+    /// last 60 lines of its terminal. When the agent's `Stop` hook reported
+    /// its own final message, THAT is the answer — what it said, not what
+    /// was on screen.
+    #[tokio::test]
+    async fn the_agents_own_final_message_answers_before_any_scrollback() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let terminal_id = lazybox_ipc::TerminalId(9906);
+        let backend_key = live_agent(&config, &mock, &target, terminal_id).await;
+        mock.emit(
+            &backend_key,
+            b"\x1b[2K spinner noise, box drawing, prompts\n",
+        )
+        .await;
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+
+        // The Stop that carries the result counts its turn first, exactly as
+        // the hook path does — otherwise the capture is asked to answer for
+        // a turn that, by the count, never ended.
+        config.mcp.end_turn(&target);
+        config
+            .mcp
+            .record_turn_result(target.clone(), "CI is green; PR #42 ready to merge.".into());
+        capture_turn_end_answer(&config, &target, 5_000).await;
+
+        let polled = handler
+            .poll_request_payload(&asker, &id, 6_000)
+            .await
+            .expect("poll");
+        assert_eq!(polled["source"], "turn_result", "{polled}");
+        assert_eq!(polled["answer"], "CI is green; PR #42 ready to merge.");
+    }
+
+    /// **The capture race.** A question asked while the target is mid-turn
+    /// used to be pasted straight in, and the end of that unrelated turn was
+    /// then captured as its "answer". The question now waits for the turn to
+    /// end; that turn's `Done` must answer nothing, and only once the
+    /// question has landed can a turn answer it.
+    #[tokio::test]
+    async fn a_turn_already_running_when_asked_never_answers_the_question() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let handler = LazyboxMcp::new(config.clone());
+        let asker = SessionKey::from("github:acme/widget#1");
+        let target = SessionKey::from("github:acme/widget#2");
+        let terminal_id = lazybox_ipc::TerminalId(9905);
+        let backend_key = live_agent(&config, &mock, &target, terminal_id).await;
+        config
+            .terminal
+            .record_agent_state(terminal_id, lazybox_ipc::AgentState::Working)
+            .await;
+        mock.emit(&backend_key, b"refactoring the parser, unrelated work\n")
+            .await;
+
+        let result = handler
+            .ask_session_payload(&asker, &ask(&target, "status?", "async", None), 1_000)
+            .await
+            .expect("ask_session");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text").text)
+                .expect("json payload");
+        let id = payload["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        assert!(
+            mock.writes_for(&backend_key).await.is_empty(),
+            "the question must not be pasted into a mid-turn agent"
+        );
+
+        // The unrelated turn ends: its output is NOT an answer.
+        capture_turn_end_answer(&config, &target, 5_000).await;
+        let polled = handler
+            .poll_request_payload(&asker, &id, 6_000)
+            .await
+            .expect("poll");
+        assert_eq!(polled["status"], "pending", "{polled}");
     }
 
     /// **The lost update (review finding 2).** The capture snapshots the open
@@ -5436,8 +8712,18 @@ mod tests {
 
         // The capture now writes its stale snapshot. Before the CAS this
         // replaced the reply with scrollback.
-        let captured =
-            apply_captured_answers(&config, &handler, stale, "...scrollback noise...", 3_000).await;
+        let captured = apply_captured_answers(
+            &config,
+            &handler,
+            stale,
+            "...scrollback noise...",
+            AnswerSource::TurnEndCapture,
+            3_000,
+            // A turn later than the request's stamp, so only the CAS below
+            // can exclude it — which is what this test is about.
+            1,
+        )
+        .await;
         assert!(
             captured.is_empty(),
             "a request that was answered while we read must not be captured"
@@ -5532,7 +8818,7 @@ mod tests {
             "past the TTL the request must stop counting as open"
         );
         assert!(
-            open_request_counts(&config).await.is_empty(),
+            open_requests_by_target(&config).await.is_empty(),
             "and stop being re-seeded as a badge on every client connect"
         );
     }
@@ -5710,20 +8996,30 @@ mod tests {
             if let lazybox_ipc::Event::AgentRequestsOpen {
                 workspace_key,
                 open,
+                requests,
             } = event
             {
-                opened = Some((workspace_key, open));
+                opened = Some((workspace_key, open, requests));
             }
         }
+        let expected = vec![lazybox_ipc::OpenAgentRequest {
+            asker: lazybox_core::WorkspaceKey::new(asker.as_str()),
+            question: "status?".into(),
+            asked_at: 1_000,
+        }];
         assert_eq!(
             opened,
-            Some((lazybox_core::WorkspaceKey::new(target.as_str()), 1)),
-            "an ask badges the target"
+            Some((
+                lazybox_core::WorkspaceKey::new(target.as_str()),
+                1,
+                expected.clone()
+            )),
+            "an ask badges the target and names who asked what"
         );
         assert_eq!(
-            open_request_counts(&config).await,
-            vec![(lazybox_core::WorkspaceKey::new(target.as_str()), 1)],
-            "and a client connecting now seeds the same count"
+            open_requests_by_target(&config).await,
+            vec![(lazybox_core::WorkspaceKey::new(target.as_str()), expected)],
+            "and a client connecting now seeds the same requests"
         );
 
         handler
@@ -5731,7 +9027,7 @@ mod tests {
             .await
             .expect("reply");
         assert!(
-            open_request_counts(&config).await.is_empty(),
+            open_requests_by_target(&config).await.is_empty(),
             "answering clears the badge"
         );
     }

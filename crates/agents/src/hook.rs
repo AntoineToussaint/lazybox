@@ -47,7 +47,66 @@ fn hook_from_value(v: &Value) -> HookEvent {
         notification: str_field(v, "notification_type")
             .or_else(|| str_field(v, "message"))
             .map(str::to_string),
+        // Only a `Stop` carries a turn result. When the agent reports its
+        // final message directly, take it; otherwise the helper falls back
+        // to the transcript (`last_assistant_text`).
+        turn_result: (str_field(v, "hook_event_name") == Some("Stop"))
+            .then(|| str_field(v, "last_assistant_message"))
+            .flatten()
+            .map(|text| cap_turn_result(text.trim()))
+            .filter(|text| !text.is_empty()),
     }
+}
+
+/// Largest turn result carried over the socket. A result is the agent's
+/// final message, not its whole transcript; the tail is what answers.
+pub const MAX_TURN_RESULT_BYTES: usize = 16 * 1024;
+
+/// Keep the END of an over-long result — the conclusion — on a char
+/// boundary.
+pub fn cap_turn_result(text: &str) -> String {
+    if text.len() <= MAX_TURN_RESULT_BYTES {
+        return text.to_string();
+    }
+    let mut start = text.len() - MAX_TURN_RESULT_BYTES;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
+}
+
+/// The `transcript_path` a hook payload names, if any.
+pub fn transcript_path(json: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(json.trim()).ok()?;
+    str_field(&value, "transcript_path").map(str::to_string)
+}
+
+/// The text of the LAST assistant message in a Claude-style JSONL
+/// transcript tail. Each line is `{"type":"assistant","message":{"content":
+/// [{"type":"text","text":…}, …]}}` (or `content` as a bare string); tool
+/// calls and thinking blocks carry no text and are skipped. Lines that don't
+/// parse — including a first line cut mid-record by reading only the tail —
+/// are ignored.
+pub fn last_assistant_text(jsonl_tail: &str) -> Option<String> {
+    jsonl_tail.lines().rev().find_map(|line| {
+        let value: Value = serde_json::from_str(line).ok()?;
+        if str_field(&value, "type") != Some("assistant") {
+            return None;
+        }
+        let content = value.get("message")?.get("content")?;
+        let text = match content {
+            Value::String(text) => text.clone(),
+            Value::Array(parts) => parts
+                .iter()
+                .filter(|part| str_field(part, "type") == Some("text"))
+                .filter_map(|part| str_field(part, "text"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => return None,
+        };
+        let text = text.trim();
+        (!text.is_empty()).then(|| cap_turn_result(text))
+    })
 }
 
 fn kind_from_name(name: Option<&str>) -> HookEventKind {
@@ -681,5 +740,47 @@ mod tests {
             hook_to_state(&blocking, Some(AgentState::InputNeeded)),
             Some(AgentState::InputNeeded)
         );
+    }
+
+    /// A `Stop` that names the agent's final message carries it as the
+    /// turn's result; no other hook does.
+    #[test]
+    fn a_stop_carries_the_agents_final_message() {
+        let stop = parse(
+            r#"{"hook_event_name":"Stop","last_assistant_message":"  Tests pass; PR #12 opened.  "}"#,
+        );
+        assert_eq!(
+            stop.turn_result.as_deref(),
+            Some("Tests pass; PR #12 opened.")
+        );
+        let other = parse(r#"{"hook_event_name":"PostToolUse","last_assistant_message":"x"}"#);
+        assert_eq!(other.turn_result, None);
+    }
+
+    /// The transcript fallback takes the LAST assistant text, skipping tool
+    /// calls, user turns and a first line cut mid-record.
+    #[test]
+    fn the_transcript_fallback_finds_the_last_assistant_text() {
+        let tail = concat!(
+            "t\":\"cut mid-record\"}]}}\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first answer"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"next question"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"},{"type":"text","text":"final answer"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
+            "\n",
+        );
+        assert_eq!(last_assistant_text(tail).as_deref(), Some("final answer"));
+        assert_eq!(last_assistant_text("not json\n"), None);
+    }
+
+    #[test]
+    fn an_overlong_result_keeps_its_conclusion() {
+        let long = format!("{}conclusion", "x".repeat(MAX_TURN_RESULT_BYTES));
+        let capped = cap_turn_result(&long);
+        assert!(capped.len() <= MAX_TURN_RESULT_BYTES);
+        assert!(capped.ends_with("conclusion"));
     }
 }

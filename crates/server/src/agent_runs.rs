@@ -44,23 +44,6 @@ pub const AGENT_INPUT_CHANNEL_CAPACITY: usize = 64;
 /// is a pacing signal, never an admission gate (#1249).
 const AGENT_INPUT_STALL_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Resolve the model-tier args to append to a structured run's argv.
-/// Only an *explicit* alias adds args — a `None` alias keeps the agent's
-/// own default, unlike [`lazybox_core::AgentModels::resolve_args`]`(None)`,
-/// which falls back to the configured default tier and would silently
-/// re-pin every existing headless run's model. Mirrors the PTY-spawn
-/// resolution in [`crate::spawn_plan`].
-fn structured_model_args(
-    cfg: &lazybox_config::Config,
-    agent: &str,
-    model_alias: Option<&str>,
-) -> Vec<String> {
-    match model_alias {
-        Some(alias) => cfg.agent_models(agent).resolve_args(Some(alias)),
-        None => Vec::new(),
-    }
-}
-
 pub async fn handle_start_agent_run(
     config: &ServerConfig,
     request_id: AgentRunRequestId,
@@ -139,12 +122,45 @@ pub async fn handle_start_agent_run(
     // Load the config once for both the model-tier resolution and the
     // gateway/env routing below.
     let yaml = lazybox_config::Config::load().unwrap_or_default();
-    // Escalate this headless run to a chosen model tier when asked — a
-    // Critic review or Ask-about-this-PR can run at Opus while the working
-    // agent stays on its default (#1312 follow-up). Model args land last on
-    // argv, exactly as PTY spawns append them (`spawn_plan::argv_for`).
-    let model_args = structured_model_args(&yaml, &agent, model_alias.as_deref());
+    // Pin the configured default on a bare headless run, or the explicitly
+    // requested tier when present. Model args land last on argv, exactly as
+    // PTY spawns append them (`spawn_plan::argv_for`).
+    let model_args = match crate::spawn_plan::resolve_model_for_agent(
+        &yaml,
+        agent_impl.as_ref(),
+        &agent,
+        model_alias.as_deref(),
+    ) {
+        Ok(model) => model.args,
+        Err(message) => {
+            let _ = config.bus.send(Event::AgentRunStartFailed {
+                request_id: request_id.clone(),
+                message: message.to_string(),
+            });
+            return;
+        }
+    };
     let mut argv = agent_impl.spawn(&spawn_ctx);
+    let workspace = crate::spawn_handler::load_workspace(
+        config,
+        &lazybox_core::WorkspaceKey::new(resolved_session_key.as_str()),
+    )
+    .ok();
+    // The standing rules are resolved here, against this run's own repo, and
+    // handed to the driver as prose: the injection point sits at the provider
+    // boundary, far from any `Config`.
+    let standing_rules = crate::session_briefing::standing_rules(
+        &yaml,
+        workspace
+            .as_ref()
+            .and_then(lazybox_core::Workspace::repo_slug)
+            .as_deref(),
+    );
+    if let Some(workspace) = workspace.as_ref()
+        && let Some(context) = crate::workspace::floating::coordination_prompt(workspace, &yaml)
+    {
+        argv.extend(agent_impl.session_context_args(&context));
+    }
     argv.extend(model_args);
     let Some((program, extra_args)) = argv.split_first() else {
         let _ = config.bus.send(Event::AgentRunStartFailed {
@@ -227,6 +243,7 @@ pub async fn handle_start_agent_run(
             spawner,
             input_rx,
             bus.clone(),
+            standing_rules,
         )
         .await;
         // The handle in `runs` is the single token for the terminal
@@ -466,6 +483,19 @@ async fn resolve_target(
         .ok_or_else(|| "agent workspace has no persisted session data".to_string())?;
     let workspace = lazybox_core::Workspace::decode_persisted(&json)
         .map_err(|error| format!("could not decode agent workspace: {error}"))?;
+    if workspace.floating.is_some() {
+        let (path, id, _) = crate::workspace::floating::resolve_session(
+            config,
+            &key,
+            session_id,
+            lazybox_core::SessionKind::Agent {
+                agent_id: agent.into(),
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        return Ok((Some(path), Some(id), session_key.clone()));
+    }
     let session = match session_id {
         Some(id) => workspace
             .find_session(id)
@@ -517,13 +547,14 @@ async fn drive_agent_stream(
     spawner: Arc<dyn AgentStreamSpawner>,
     input_rx: mpsc::Receiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
+    standing_rules: String,
 ) -> DriveOutcome {
     match protocol {
         StructuredAgentProtocol::ClaudeStreamJson => {
-            drive_persistent_stream(run_id, protocol, io, input_rx, bus).await
+            drive_persistent_stream(run_id, protocol, io, input_rx, bus, standing_rules).await
         }
         StructuredAgentProtocol::CodexExecJson => {
-            drive_codex_exec(run_id, io, config, spawner, input_rx, bus).await
+            drive_codex_exec(run_id, io, config, spawner, input_rx, bus, standing_rules).await
         }
     }
 }
@@ -535,6 +566,7 @@ async fn drive_persistent_stream(
     io: AgentStreamIo,
     mut input_rx: mpsc::Receiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
+    standing_rules: String,
 ) -> DriveOutcome {
     let AgentStreamIo {
         mut stdin,
@@ -544,6 +576,7 @@ async fn drive_persistent_stream(
     let mut stdout = BufReader::new(stdout).lines();
     let mut mapper = StreamEventMapper::default();
     let mut input_closed = false;
+    let mut session_context_pending = true;
     loop {
         tokio::select! {
             input = input_rx.recv(), if !input_closed => {
@@ -551,11 +584,34 @@ async fn drive_persistent_stream(
                     input_closed = true;
                     continue;
                 };
+                let input = match input_with_session_context(
+                    protocol,
+                    input,
+                    session_context_pending,
+                    &standing_rules,
+                ) {
+                    Ok(Some(input)) => input,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        let _ = bus.send(Event::provider_error_permanent(
+                            "agent_run:input",
+                            e.to_string(),
+                        ));
+                        continue;
+                    }
+                };
                 if let Err(e) = write_agent_input(&mut stdin, input).await {
                     let _ = bus.send(Event::provider_error_retryable(
                         "agent_run:stdin",
                         e.to_string(),
                     ));
+                } else if session_context_pending {
+                    session_context_pending = false;
+                    tracing::info!(
+                        run_id = ?run_id,
+                        protocol = protocol.display_name(),
+                        "agent run: injected lazybox session briefing before first prompt"
+                    );
                 }
             }
             line = stdout.next_line() => {
@@ -602,13 +658,31 @@ async fn drive_codex_exec(
     spawner: Arc<dyn AgentStreamSpawner>,
     mut input_rx: mpsc::Receiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
+    standing_rules: String,
 ) -> DriveOutcome {
     let protocol = StructuredAgentProtocol::CodexExecJson;
     let mut first_io = Some(first_io);
     let mut session_id: Option<String> = None;
     let mut mapper = StreamEventMapper::default();
+    let mut session_context_pending = true;
 
     while let Some(input) = input_rx.recv().await {
+        let input = match input_with_session_context(
+            protocol,
+            input,
+            session_context_pending,
+            &standing_rules,
+        ) {
+            Ok(Some(input)) => input,
+            Ok(None) => continue,
+            Err(error) => {
+                let _ = bus.send(Event::provider_error_permanent(
+                    "agent_run:input",
+                    error.to_string(),
+                ));
+                continue;
+            }
+        };
         let io = if let Some(io) = first_io.take() {
             io
         } else {
@@ -639,6 +713,14 @@ async fn drive_codex_exec(
             return DriveOutcome::Errored {
                 error: format!("write Codex turn: {error}"),
             };
+        }
+        if session_context_pending {
+            session_context_pending = false;
+            tracing::info!(
+                run_id = ?run_id,
+                protocol = protocol.display_name(),
+                "agent run: injected lazybox session briefing before first prompt"
+            );
         }
         if let Err(error) = stdin.shutdown().await {
             return DriveOutcome::Errored {
@@ -700,6 +782,80 @@ async fn drive_codex_exec(
     }
 
     DriveOutcome::Completed { exit_code: Some(0) }
+}
+
+/// Put lazybox's spawn-intrinsic briefing in front of the first real prompt
+/// sent to a structured/headless agent. Those runs deliberately do not use
+/// the PTY lifecycle-hook settings path, so relying on Claude's `SessionStart`
+/// stdout left both Claude stream-json and Codex exec-json unaware of lazybox.
+///
+/// The transform happens at the provider boundary: ordinary text stays text,
+/// while Claude's raw JSON form is edited in place so it remains one user turn
+/// (sending a separate briefing record would make the model answer the briefing
+/// before it ever saw the caller's task).
+fn input_with_session_context(
+    protocol: StructuredAgentProtocol,
+    mut input: AgentInputMessage,
+    inject: bool,
+    standing_rules: &str,
+) -> Result<Option<AgentInputMessage>, crate::ServerError> {
+    if input.text.is_none() && input.json.is_none() {
+        return Ok(None);
+    }
+    if !inject {
+        return Ok(Some(input));
+    }
+
+    let briefing = lazybox_agents::lazybox_session_context(standing_rules);
+    let prefix = |text: &str| lazybox_agents::lazybox_session_prompt(standing_rules, text);
+    if let Some(text) = input.text.take() {
+        input.text = Some(prefix(&text));
+        return Ok(Some(input));
+    }
+
+    let json = input.json.take().unwrap_or_default();
+    input.json = Some(match protocol {
+        StructuredAgentProtocol::CodexExecJson => prefix(&json),
+        StructuredAgentProtocol::ClaudeStreamJson => {
+            let mut value: Value = serde_json::from_str(&json).map_err(|error| {
+                crate::ServerError::Agent(format!(
+                    "cannot inject lazybox session briefing into raw Claude input: {error}"
+                ))
+            })?;
+            let content = value
+                .pointer_mut("/message/content")
+                .ok_or_else(|| crate::ServerError::Agent(
+                    "cannot inject lazybox session briefing into raw Claude input: missing message.content"
+                        .into(),
+                ))?;
+            match content {
+                Value::String(text) => *text = prefix(text),
+                Value::Array(blocks) => {
+                    if let Some(block) = blocks.iter_mut().find(|block| {
+                        block.get("type").and_then(Value::as_str) == Some("text")
+                            && block.get("text").is_some_and(Value::is_string)
+                    }) {
+                        let original = block["text"].as_str().unwrap_or_default().to_owned();
+                        block["text"] = Value::String(prefix(&original));
+                    } else {
+                        blocks.insert(0, serde_json::json!({"type": "text", "text": briefing}));
+                    }
+                }
+                _ => {
+                    return Err(crate::ServerError::Agent(
+                        "cannot inject lazybox session briefing into raw Claude input: message.content is neither text nor blocks"
+                            .into(),
+                    ));
+                }
+            }
+            serde_json::to_string(&value).map_err(|error| {
+                crate::ServerError::Agent(format!(
+                    "serialize briefing-injected Claude input: {error}"
+                ))
+            })?
+        }
+    });
+    Ok(Some(input))
 }
 
 async fn write_agent_input<W>(
@@ -970,31 +1126,117 @@ fn question_choices(raw: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Stand-in for the rendered policy block the run resolves from config,
+    /// passed explicitly so these tests do not depend on what is on disk.
+    const RULES: &str = "Standing rules:\n  - Ask before filing anything.";
+
     use super::*;
     use serde_json::json;
 
-    /// A headless run escalates to an explicit tier's `--model` args, while
-    /// `None` keeps the agent's own default — crucially NOT the configured
-    /// default tier (which `resolve_args(None)` would apply), so existing
-    /// headless runs are unchanged (#1312 follow-up).
+    /// Headless runs pin the same configured default as PTY runs, while an
+    /// explicit tier still wins and an unknown tier is refused.
     #[test]
-    fn structured_model_args_only_applies_an_explicit_tier() {
+    fn structured_model_args_always_pins_builtin_agents() {
         let cfg = lazybox_config::Config::default();
-        // Claude ships a built-in S/M/L menu, so an explicit tier resolves
-        // to `--model …`.
-        let large = structured_model_args(&cfg, "claude", Some("L"));
-        assert!(
-            large.iter().any(|a| a == "--model"),
-            "an explicit tier appends model args: {large:?}",
+        let registry = lazybox_agents::registry();
+        let claude = registry.get("claude").expect("Claude built-in");
+        let codex = registry.get("codex").expect("Codex built-in");
+
+        assert_eq!(
+            crate::spawn_plan::resolve_model_for_agent(&cfg, claude.as_ref(), "claude", None)
+                .unwrap()
+                .args,
+            vec!["--model".to_string(), "claude-opus-5".to_string()]
         );
-        // None keeps the agent's default — no args, unlike resolve_args(None)
-        // which would fall back to the default tier.
-        assert!(structured_model_args(&cfg, "claude", None).is_empty());
-        // An unknown alias falls through to the agent default, not the
-        // configured default tier.
-        assert!(structured_model_args(&cfg, "claude", Some("zzz")).is_empty());
-        // An agent with no configured tiers adds nothing even for an alias.
-        assert!(structured_model_args(&cfg, "no-such-agent", Some("L")).is_empty());
+        assert_eq!(
+            crate::spawn_plan::resolve_model_for_agent(&cfg, codex.as_ref(), "codex", None)
+                .unwrap()
+                .args,
+            vec!["--model".to_string(), "gpt-5.6-sol".to_string()]
+        );
+        assert_eq!(
+            crate::spawn_plan::resolve_model_for_agent(&cfg, claude.as_ref(), "claude", Some("M"),)
+                .unwrap()
+                .args,
+            vec!["--model".to_string(), "claude-sonnet-5".to_string()]
+        );
+        assert!(
+            crate::spawn_plan::resolve_model_for_agent(&cfg, codex.as_ref(), "codex", Some("zzz"),)
+                .is_err(),
+            "a bad alias must fail rather than start Codex on its ambient default"
+        );
+    }
+
+    #[test]
+    fn first_headless_text_prompt_gets_the_lazybox_briefing_once() {
+        let first = input_with_session_context(
+            StructuredAgentProtocol::CodexExecJson,
+            AgentInputMessage {
+                text: Some("review this PR".into()),
+                json: None,
+            },
+            true,
+            RULES,
+        )
+        .expect("inject briefing")
+        .expect("non-empty input");
+        let first = first.text.expect("text remains text");
+        assert!(first.contains("lazybox log"), "briefing missing: {first}");
+        assert!(
+            first.contains("Ask before filing anything."),
+            "the caller's standing rules ride the structured injection too: {first}"
+        );
+        assert!(first.ends_with("---\n\nreview this PR"));
+
+        let follow_up = input_with_session_context(
+            StructuredAgentProtocol::CodexExecJson,
+            AgentInputMessage {
+                text: Some("and run the tests".into()),
+                json: None,
+            },
+            false,
+            RULES,
+        )
+        .expect("preserve follow-up")
+        .expect("non-empty input");
+        assert_eq!(follow_up.text.as_deref(), Some("and run the tests"));
+    }
+
+    #[test]
+    fn raw_claude_headless_prompt_stays_one_json_turn_with_the_briefing() {
+        let input = AgentInputMessage {
+            text: None,
+            json: Some(
+                json!({
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "inspect the failure"}]
+                    }
+                })
+                .to_string(),
+            ),
+        };
+        let injected = input_with_session_context(
+            StructuredAgentProtocol::ClaudeStreamJson,
+            input,
+            true,
+            RULES,
+        )
+        .expect("inject raw Claude message")
+        .expect("non-empty input");
+        let value: Value = serde_json::from_str(injected.json.as_deref().expect("raw JSON"))
+            .expect("still valid JSON");
+        let text = value["message"]["content"][0]["text"]
+            .as_str()
+            .expect("text block");
+        assert!(text.contains("lazybox log"), "briefing missing: {text}");
+        assert!(
+            text.contains("Ask before filing anything."),
+            "the caller's standing rules ride the raw-JSON injection too: {text}"
+        );
+        assert!(text.ends_with("---\n\ninspect the failure"));
+        assert_eq!(value["message"]["content"].as_array().unwrap().len(), 1);
     }
 
     fn tool_finished_ids(events: &[Event]) -> Vec<String> {

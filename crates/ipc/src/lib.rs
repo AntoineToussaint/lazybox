@@ -30,6 +30,7 @@ pub mod port_forward;
 pub mod socket;
 pub mod task_status;
 pub mod transport;
+pub mod work;
 
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
@@ -52,6 +53,25 @@ pub const MAX_COMMAND_FRAME_BYTES: u32 = 256 * 1024;
 /// emission site can produce a frame the daemon's bounded command
 /// reader refuses.
 pub const MAX_WRITE_CHUNK_BYTES: usize = (MAX_COMMAND_FRAME_BYTES / 2) as usize;
+
+/// Needles one [`Command::SearchAgentOutput`] may carry (#1780) — a cost
+/// bound, so the daemon's per-line work stays linear in a number the user
+/// cannot inflate.
+///
+/// **A needle past this cap is not free.** The client ANDs every `agent:`
+/// term against the corpus the scan returns, so a term the daemon never
+/// scanned for has no evidence and EXCLUDES the workspace — a false
+/// negative, not a widening. The cap is therefore set well past any
+/// realistic query rather than tight: a search with more than eight
+/// `agent:` terms degrades to prompt-only matching for the extras, and
+/// nothing on screen explains it. Raise this before trimming it.
+pub const MAX_AGENT_OUTPUT_NEEDLES: usize = 8;
+
+/// Longest needle [`Command::SearchAgentOutput`] scans with. A needle past
+/// this is truncated rather than dropped — truncating widens the match set
+/// (the client still applies the full term), while dropping would hand back
+/// text that answers a different question.
+pub const MAX_AGENT_OUTPUT_NEEDLE_BYTES: usize = 128;
 
 /// Magic prefix of the 8-byte connection preamble each side sends
 /// before any frames (`PROTOCOL_MAGIC ++ PROTOCOL_FINGERPRINT as u32
@@ -249,6 +269,12 @@ pub enum PromptSource {
     /// key and category so the history can name which snippet it was
     /// (`category` is empty when the snippet declares none).
     Snippet { key: String, category: String },
+    /// Delivered by another agent session through the coordination tools
+    /// (`notify_session`, `ask_session`). `from` is that session's key.
+    Agent { from: String },
+    /// Delivered by lazybox's own automation (auto-fix, resume, epic
+    /// dispatch). `reason` names which.
+    Lazybox { reason: String },
 }
 
 /// One prompt the user submitted to an agent terminal, retained in a
@@ -539,6 +565,22 @@ pub struct MergeOrderEntry {
     pub held_by: Vec<lazybox_core::WorkspaceKey>,
 }
 
+/// One open `ask_session` request against a workspace, as a client shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct OpenAgentRequest {
+    /// The asking agent's workspace.
+    pub asker: lazybox_core::WorkspaceKey,
+    /// The question, capped at [`OPEN_REQUEST_QUESTION_MAX_CHARS`].
+    pub question: String,
+    /// Unix ms when it was asked.
+    pub asked_at: i64,
+}
+
+/// The longest question an [`OpenAgentRequest`] carries to a client, in
+/// characters. The badge's reader needs the gist, not the whole prompt.
+pub const OPEN_REQUEST_QUESTION_MAX_CHARS: usize = 200;
+
 /// Derived status of one epic member. Precedence (first match wins): Done →
 /// Failed → Asking → InProgress → Mergeable → PrOpen → Claimed → Blocked →
 /// Ready.
@@ -708,6 +750,12 @@ pub struct HookEvent {
     /// Notification descriptor (`notification_type` or `message`), used
     /// to distinguish a permission/elicitation prompt from an idle one.
     pub notification: Option<String>,
+    /// On `Stop`: the agent's final message for the turn, as the agent
+    /// wrote it — Claude's `last_assistant_message`, or the last assistant
+    /// text in its transcript. The turn's result, where lazybox used to
+    /// scrape the terminal's scrollback for one.
+    #[serde(default)]
+    pub turn_result: Option<String>,
 }
 
 /// The lifecycle point a [`HookEvent`] fired at. `Other` is the
@@ -995,6 +1043,33 @@ pub struct SnippetRef {
     pub category: String,
 }
 
+/// What a removal (and its [`Command::InspectRemovalRisks`]
+/// preflight) targets: one workspace row, or a project and the cascade
+/// under it. Modelled as an enum rather than two optional keys so a
+/// preflight reply can be matched back to the confirm that asked for
+/// it without the "both set / neither set" cases existing at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum RemovalTarget {
+    Workspace(SessionKey),
+    Project(lazybox_core::ProjectKey),
+}
+
+/// One checkout a removal would destroy, as the confirm renders it.
+///
+/// The daemon owns the classification (it is the only side that can
+/// run git), and the client owns the wording, so the risk is carried
+/// as its parts rather than as a pre-rendered sentence: the path, and
+/// the reason tags (`uncommitted changes to tracked files`, `unpushed
+/// commits`, `cleanliness could not be proven`, …) exactly as the
+/// removal gate names them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct RemovalRiskDto {
+    pub path: std::path::PathBuf,
+    pub reasons: Vec<String>,
+}
+
 /// One row of `Event::WorktreesInspected`. Mirrors
 /// `lazybox_git_ops::WorktreeInspection` as a wire-friendly value type
 /// (no `SystemTime`, no library-specific enum). `reasons` carries the
@@ -1017,7 +1092,9 @@ pub struct WorktreeInspectionDto {
     pub is_safe_to_delete: bool,
 }
 
-/// Wire-friendly projection of a combined staged/unstaged worktree diff.
+/// Wire-friendly projection of one reviewable diff — a checkout's
+/// combined staged/unstaged changes, or a pull request's diff against
+/// its merge base.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct WorkspaceDiffDto {
@@ -1025,14 +1102,95 @@ pub struct WorkspaceDiffDto {
     pub stat: Vec<String>,
     pub files: Vec<DiffFileDto>,
     pub truncated: bool,
+    /// The commit a pull request's diff was read at; `None` for a local
+    /// diff. A review raised from this document pins its comments to
+    /// this commit, so a push landing mid-review cannot re-anchor them
+    /// onto lines the reviewer never saw.
+    pub head_sha: Option<String>,
+    /// How the workspace's local checkout stands against the pull
+    /// request this diff was read from. `None` for a local diff, and
+    /// for a PR diff whose workspace has no checkout to compare.
+    pub divergence: Option<WorkspaceDiffDivergenceDto>,
 }
 
-/// Exact checkout whose local changes should be reviewed.
+/// How far the local checkout has drifted from the pull request whose
+/// diff is on screen — the reason a reviewer can read one document and
+/// merge another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct WorkspaceDiffDivergenceDto {
+    /// Files with uncommitted changes in the checkout, or `None` when
+    /// git could not say. Never `Some(0)` for a checkout that was not
+    /// read: a warning that reports an unreadable worktree as clean is
+    /// worse than no warning.
+    pub dirty_files: Option<u32>,
+    pub commits: CommitComparisonDto,
+}
+
+/// Where the checkout's `HEAD` stands relative to the pull request's
+/// head commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum CommitComparisonDto {
+    Counted(CommitSpreadDto),
+    /// The PR's head commit is not in the checkout — usually because it
+    /// was never fetched, which is the ordinary case when reviewing
+    /// someone else's branch. Not a count, and not "in sync".
+    ReferenceAbsent,
+    /// The comparison could not be made.
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct CommitSpreadDto {
+    /// Commits the checkout holds that the pull request does not.
+    pub local_only: u32,
+    /// Commits the pull request holds that the checkout does not.
+    pub pr_only: u32,
+}
+
+/// What a submitted review says about the pull request as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum ReviewVerdictDto {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+/// One inline comment in a submitted review, anchored the way GitHub
+/// anchors them: a path, a line number in the PR's diff, and which side
+/// of that diff the line sits on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ReviewCommentDto {
+    pub path: String,
+    pub line: u32,
+    pub side: DiffSideDto,
+    pub body: String,
+}
+
+/// Which side of a diff a line belongs to — `Left` is the pre-image
+/// (a deleted or context line's old number), `Right` the post-image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum DiffSideDto {
+    Left,
+    Right,
+}
+
+/// Which document `Command::InspectWorkspaceDiff` should read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum WorkspaceDiffTarget {
     Session(lazybox_core::SessionId),
     LinkedCheckout,
+    /// The workspace's pull request as GitHub renders it: its diff
+    /// against the merge base, carrying other people's commits and
+    /// missing unpushed local work. The only source a review comment
+    /// can anchor to.
+    PullRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1377,8 +1535,34 @@ pub enum Command {
         #[serde(default)]
         backend_key: Option<String>,
     },
+    /// Drop a workspace: kill its sessions, archive the row, reclaim
+    /// only the checkouts the safety gate cleared.
+    ///
+    /// `force` says **who asked**, not how hard to try. `true` is an
+    /// explicit, user-confirmed delete: the daemon still inspects the
+    /// checkout, but it may not refuse — it deletes, worktree included,
+    /// and logs the destroyed risk detail at `warn`, which is the only
+    /// record left of it. `false` is an unattended removal, which fails
+    /// closed on uncommitted changes or unpushed commits.
+    ///
+    /// The field is not `#[serde(default)]` on purpose: every
+    /// construction site must choose, and bincode would not apply a
+    /// default anyway.
     Kill {
         session_key: SessionKey,
+        force: bool,
+    },
+    /// Read-only preflight for a removal the user is about to confirm:
+    /// freshly inspect the target's backing checkouts and reply with
+    /// [`Event::RemovalRisksInspected`].
+    ///
+    /// This exists so the one confirm an explicit delete costs can name
+    /// what it destroys. Nothing is mutated and no terminal is stopped
+    /// — it is the `require_stopped = false` variant of the same gate
+    /// the removal itself runs, so an answer of "no risks" is about
+    /// this instant and is never carried forward as authority.
+    InspectRemovalRisks {
+        target: RemovalTarget,
     },
     /// Answer to a `MergedPrRemovable` event (the user confirmed the
     /// "this PR merged — remove its workspace and worktree?" modal).
@@ -1398,6 +1582,11 @@ pub enum Command {
     /// ActionConfirm modal on the TUI side.
     DeleteProject {
         project_key: lazybox_core::ProjectKey,
+        /// The same "who asked" flag as [`Command::Kill`], applied to
+        /// the cascade: an explicit delete skips the project-wide
+        /// local-work preflight AND each child's own refusal. An
+        /// unattended one refuses the whole project on one dirty child.
+        force: bool,
     },
     /// Manually collapse an issue workspace into the PR workspace
     /// that closes it. Same end-state as the auto-detect path
@@ -1502,6 +1691,13 @@ pub enum Command {
         /// rule that a tracker record never gets a second workspace.
         #[serde(default)]
         scratch: bool,
+    },
+    /// Create a persistent repo-free directory and optionally start an agent.
+    CreateFloatingWorkspace {
+        name: String,
+        kind: lazybox_core::FloatingWorkspaceKind,
+        spawn_agent: Option<String>,
+        client_request_id: Option<String>,
     },
     /// Create a brand-new local Project — a top-level container the
     /// sidebar groups workspaces under, like a github repo but with
@@ -1783,11 +1979,32 @@ pub enum Command {
     /// Read-only — no deletes happen until the TUI follows up with
     /// per-row `DeleteOrphanedWorktree` calls.
     InspectWorktrees,
-    /// Read the focused checkout and reply
+    /// Read the diff `target` names and reply
     /// with `Event::WorkspaceDiffInspected`.
     InspectWorkspaceDiff {
         workspace_key: lazybox_core::WorkspaceKey,
         target: WorkspaceDiffTarget,
+    },
+    /// Submit the reviewer's drafted inline comments to the workspace's
+    /// pull request as **one** review — a single
+    /// `POST /repos/{o}/{r}/pulls/{n}/reviews` carrying every comment,
+    /// not N standalone comments. Replies with
+    /// `Event::PullRequestReviewSubmitted`.
+    ///
+    /// Each comment anchors to a `(path, line, side)` in the PR's own
+    /// diff, which is why only `WorkspaceDiffTarget::PullRequest` can
+    /// raise this: a line that exists solely in a local worktree has no
+    /// counterpart on GitHub.
+    SubmitPullRequestReview {
+        workspace_key: lazybox_core::WorkspaceKey,
+        /// The commit whose diff the reviewer actually read, carried
+        /// from `WorkspaceDiffDto::head_sha`.
+        head_sha: String,
+        /// The review's own body. GitHub requires one for a `Comment`
+        /// or `RequestChanges` verdict.
+        summary: String,
+        verdict: ReviewVerdictDto,
+        comments: Vec<ReviewCommentDto>,
     },
     /// Walk the configured dev roots (`scan.roots`, or `roots` when the
     /// user pointed the scan at an explicit folder) and reply with
@@ -2294,6 +2511,69 @@ pub enum Command {
         /// shim waits for before exiting.
         client_request_id: String,
     },
+    /// Scan live agent terminals' output for the `/` search's `agent:` /
+    /// `said:` qualifiers (#1780). What the agent *said back* lives only
+    /// daemon-side, in the per-terminal replay rings; the client holds a
+    /// 4 KiB rolling window per terminal, far too shallow to answer "an
+    /// hour ago".
+    ///
+    /// Each needle is a qualifier VALUE, already lowercased by the
+    /// client's own query normalization — the daemon folds the haystack
+    /// the same way, so the two halves of an `agent:` term can't disagree
+    /// on case. The daemon replies on this connection alone with
+    /// [`Event::AgentOutputMatches`], carrying `request_id` back so the
+    /// client can drop a reply the user has already typed past.
+    ///
+    /// Appended last: bincode identifies variants by ordinal, so this
+    /// position keeps the change mechanical.
+    SearchAgentOutput {
+        request_id: u64,
+        needles: Vec<String>,
+    },
+    /// Request the set of archived workspace keys — the tombstones `x x`
+    /// writes, which the poll then skips instead of re-creating the row
+    /// (#1824). The daemon replies with [`Event::ArchivedWorkspaces`], and
+    /// re-broadcasts it after a [`Command::UnarchiveWorkspace`] so an open
+    /// browser refreshes. Appended last (bincode is ordinal-sensitive).
+    ListArchivedWorkspaces,
+    /// Drop one archived key's tombstone — and the tombstones of the keys
+    /// that row absorbed — so the record can return to the inbox (#1824).
+    ///
+    /// `key` is a workspace key as [`Event::ArchivedWorkspaces`] lists it,
+    /// which for a tracker record is `lazybox_core::workspace_key_for_id` of
+    /// its id — so a CLI caller holding `owner/repo#N` can name it without
+    /// having listed first. Appended last (bincode is ordinal-sensitive).
+    UnarchiveWorkspace {
+        key: String,
+        /// Correlates [`Event::CommandCompleted`] / [`Event::CommandFailed`]
+        /// for a caller that needs to know the tombstone is really gone.
+        client_request_id: Option<String>,
+    },
+    /// Replace a TODO's checklist with `items`, in order. The whole list
+    /// travels, so a save is one write and one `WorkspaceUpserted`. Every item
+    /// carries an id the CLIENT minted (`TodoItem::new_id`), unique within the
+    /// list — the daemon refuses an empty or duplicated one. Client-minted
+    /// because an id the daemon invents cannot be named as a `parent` by a
+    /// sibling in the same request, which made a new subtree unexpressible in
+    /// one save. Appended last (bincode is ordinal-sensitive).
+    SaveTodoItems {
+        workspace_key: lazybox_core::WorkspaceKey,
+        items: Vec<lazybox_core::TodoItem>,
+    },
+    /// Read or move the task/plan store (#1935). One command for every verb,
+    /// because the CLI twin and the MCP tools must reach the same code: a
+    /// second path would diverge the first time either was edited, which is
+    /// the lesson [`Command::QueryTaskStatus`] already carries.
+    ///
+    /// The answer comes back as [`Event::WorkReport`] correlated by
+    /// `client_request_id`. The acting party rides inside
+    /// [`work::WorkRequest`] rather than being inferred here, so provenance
+    /// comes from the channel that knows it. Appended last (bincode is
+    /// ordinal-sensitive).
+    WorkCall {
+        request: work::WorkRequest,
+        client_request_id: Option<String>,
+    },
 }
 
 /// How a branch-namespace collision should be cleared (#1742). Both arms
@@ -2421,6 +2701,22 @@ pub struct ErrorInboxRecord {
     pub count: u64,
     pub first_seen: chrono::DateTime<chrono::Utc>,
     pub last_seen: chrono::DateTime<chrono::Utc>,
+}
+
+/// One archived workspace key: a tombstone `x x` wrote, which suppresses
+/// the row the next poll would otherwise re-create (#1824).
+///
+/// `absorbed` are the keys this row was standing in for — the standalone
+/// key of every task a PR row had folded in (`Closes #40`) — which an
+/// unarchive of `key` takes back out with it. They are listed under their
+/// owner and never as entries of their own, because they have no separate
+/// existence: nothing can restore one without restoring the row that
+/// absorbed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ArchivedWorkspaceRecord {
+    pub key: String,
+    pub absorbed: Vec<String>,
 }
 
 /// One rolled-up daily usage bucket, mirrored onto the wire from the
@@ -3230,14 +3526,37 @@ pub enum Event {
     WorktreesInspected {
         inspections: Vec<WorktreeInspectionDto>,
     },
+    /// `Command::InspectRemovalRisks` finished: what deleting `target`
+    /// right now would destroy.
+    ///
+    /// An **empty** `risks` means the preflight ran and found nothing —
+    /// not that it could not run. `error` carries the reason it could
+    /// not, and a client that gets one must not render "nothing will be
+    /// lost": an uninspectable checkout is precisely the case where the
+    /// user most needs to be told the content could not be classified.
+    RemovalRisksInspected {
+        target: RemovalTarget,
+        risks: Vec<RemovalRiskDto>,
+        #[serde(default)]
+        error: Option<String>,
+    },
     /// `Command::InspectWorkspaceDiff` finished. `diff` is absent when
-    /// the workspace/target disappeared or git could not read it.
+    /// the workspace/target disappeared, git could not read it, or the
+    /// pull request's diff could not be fetched.
     WorkspaceDiffInspected {
         workspace_key: lazybox_core::WorkspaceKey,
         target: WorkspaceDiffTarget,
-        /// Live agent terminals rooted in the inspected checkout.
+        /// Live agent terminals rooted in the workspace's checkout.
         agent_terminal_ids: Vec<TerminalId>,
         diff: Option<WorkspaceDiffDto>,
+        error: Option<String>,
+    },
+    /// `Command::SubmitPullRequestReview` finished. `url` is the posted
+    /// review on success; `error` carries GitHub's refusal otherwise.
+    PullRequestReviewSubmitted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        comments: u32,
+        url: Option<String>,
         error: Option<String>,
     },
     /// `Command::ScanCheckouts` finished. `checkouts` is every on-disk
@@ -3661,8 +3980,8 @@ pub enum Event {
     /// New-item discovery is behind (#1391): a due GitHub full sweep has
     /// been deferred by the background rate governor for several
     /// consecutive ticks, so new-issue/PR reconcile discovery has stalled
-    /// (past ~25 `watch:` repos the forecast permanently exceeds the
-    /// per-tick GraphQL allowance). A **standing, self-clearing** signal —
+    /// (a squeezed GraphQL budget, or a token already spending its window
+    /// elsewhere). A **standing, self-clearing** signal —
     /// `behind: true` when the stall sets in, `behind: false` when a sweep
     /// is finally admitted (or stops being due) — so the client shows a
     /// persistent indicator that retracts itself, not a one-shot toast that
@@ -3670,12 +3989,15 @@ pub enum Event {
     /// issue-discovery probe keeps surfacing new issues meanwhile, so it
     /// must NOT flow through the `ProviderError` error channel (which would
     /// register a phantom failing provider and, cross-client, a bare error).
-    /// The `watched_repos` / `required_points` / `allowance` figures name
-    /// the lever; they are `0` on the clearing (`behind: false`) event.
+    /// `required_points` vs `allowance` is the governor's own refusal —
+    /// what the sweep costs against what this tick affords — and
+    /// `deferred_secs` is how long the stall has held; together they say
+    /// why discovery is behind rather than merely that it is (#1806). All
+    /// three are `0` on the clearing (`behind: false`) event.
     /// Appended last (bincode is ordinal-sensitive).
     GithubDiscoveryBehind {
         behind: bool,
-        watched_repos: u32,
+        deferred_secs: u32,
         required_points: u32,
         allowance: u32,
     },
@@ -3799,11 +4121,15 @@ pub enum Event {
     /// (#1653). Broadcast whenever the count moves — an ask injected, a
     /// reply landed, a turn-end capture closed one — and replayed after the
     /// `Subscribe` snapshot for every workspace currently carrying one, so a
-    /// client seeds the `?N` sidebar badge on connect rather than waiting
+    /// client seeds the `⟲N` sidebar badge on connect rather than waiting
     /// for the next change. `open: 0` clears the badge. Appended last.
     AgentRequestsOpen {
         workspace_key: lazybox_core::WorkspaceKey,
         open: usize,
+        /// The open requests themselves, oldest first — who asked what, so
+        /// the badge is not a count with no way to see behind it.
+        #[serde(default)]
+        requests: Vec<OpenAgentRequest>,
     },
     /// Reply to [`Command::QueryTaskStatus`] (#1785): what the daemon can
     /// observe about work on one tracker record.
@@ -3825,6 +4151,64 @@ pub enum Event {
     GhShimReply {
         client_request_id: String,
         reply: gh_shim::GhReply,
+    },
+    /// Reply to [`Command::SearchAgentOutput`] (#1780): per-workspace
+    /// excerpts of terminal OUTPUT that matched one of the needles, as
+    /// `(session_key, text)`. Sent on the asking connection, not the bus
+    /// — the scan belongs to one client's query, and the matched text is
+    /// only meaningful against the request that asked for it.
+    ///
+    /// The text is ANSI-stripped and deduplicated matching LINES, not a
+    /// byte window: an agent TUI repaints its whole box continuously, so
+    /// a raw window is mostly duplicate frames. `entries` is keyed by
+    /// workspace rather than terminal because that is what the search
+    /// filters, and a workspace with several agent terminals contributes
+    /// all of them. Empty is the normal "nothing matched" answer, and the
+    /// client must apply it — it is what clears a previous query's rows.
+    AgentOutputMatches {
+        request_id: u64,
+        entries: Vec<(String, String)>,
+    },
+    /// Markdown artifacts an agent spooled into this workspace's worktrees
+    /// (#1822), as the daemon's spool sweep last read them.
+    ///
+    /// Broadcast whenever the set moves — a file appeared, changed or was
+    /// removed — and replayed after the `Subscribe` snapshot for every
+    /// workspace carrying one, so a client that connects between two changes
+    /// still seeds the row's badge. An empty `artifacts` clears it.
+    ///
+    /// `hidden` counts the artifacts past `ARTIFACT_MAX_PER_WORKSPACE`: they
+    /// are still on disk, and the reader names them rather than presenting a
+    /// truncated set as the whole one. Appended last (bincode is
+    /// ordinal-sensitive).
+    WorkspaceArtifacts {
+        workspace_key: lazybox_core::WorkspaceKey,
+        artifacts: Vec<lazybox_core::Artifact>,
+        hidden: usize,
+    },
+    /// Reply to [`Command::ListArchivedWorkspaces`], and re-broadcast after
+    /// a [`Command::UnarchiveWorkspace`] so an open archive browser
+    /// refreshes (#1824). Appended last (bincode is ordinal-sensitive).
+    ArchivedWorkspaces {
+        records: Vec<ArchivedWorkspaceRecord>,
+    },
+    /// Reply to [`Command::WorkCall`] (#1935): what the task/plan store says,
+    /// or why it could not say it.
+    ///
+    /// Sent on the asking connection rather than the bus. The reply belongs to
+    /// one invocation, and a lagging subscriber's dropped event would leave a
+    /// `lazybox work` command hanging for its whole timeout —
+    /// [`Event::GhShimReply`] made the same call for the same reason.
+    ///
+    /// `Err` means the call could not be *answered*: a malformed request, or a
+    /// store the daemon could not read. Work that does not exist, a plan with
+    /// nothing on it and a refused transition are all successful reports whose
+    /// content says so, because a caller must never have to read "there is no
+    /// such work" out of a failure. Appended last (bincode is
+    /// ordinal-sensitive).
+    WorkReport {
+        client_request_id: Option<String>,
+        result: Result<work::WorkReport, work::WorkError>,
     },
 }
 
@@ -4033,6 +4417,9 @@ pub enum AutonomousTrigger {
     /// its `REVIEW` latch dispatching a Reviewer onto a green PR (#1525).
     /// Appended last (bincode is ordinal-sensitive).
     EpicAuto,
+    /// Another agent handed independent work to a workspace of its own
+    /// (`start_workspace`). Appended last (bincode is ordinal-sensitive).
+    Agent,
 }
 
 impl AutonomousTrigger {
@@ -4045,6 +4432,7 @@ impl AutonomousTrigger {
             Self::AutoFix => "auto-fix",
             Self::Restore => "restored",
             Self::EpicAuto => "AUTO",
+            Self::Agent => "from an agent",
         }
     }
 }

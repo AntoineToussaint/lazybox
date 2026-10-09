@@ -40,6 +40,7 @@ which is the canonical source of truth for defaults and field names.
 | [`auto_fix`](#auto_fix) | Auto-fix PRs on CI failure / conflict |
 | [`merge_on_green`](#merge_on_green) | Opt bot authors into merge-on-green |
 | [`conventions`](#conventions) | Commit / PR conventions injected into the agent-work brief |
+| [`policies`](#policies) | Standing rules stated in every spawned agent's briefing |
 | [`shell`](#shell) | Shell command for the `s` spawn |
 | [`sandbox`](#sandbox) | Remote dev-box lifecycle for `lazybox sandbox …` and the `r`-spawn |
 | [`remote`](#remote) | Client-side `--connect` port-forward supervisor (`remote.tunnel`) |
@@ -110,19 +111,34 @@ agent:
   # Point every spawned agent at your own LLM gateway (injected as
   # ANTHROPIC_BASE_URL / OPENAI_BASE_URL depending on the agent).
   llm_gateway_url: "http://gateway.internal"
+  # Hard per-epic cap for Coordinator spawn_worker calls; 0 disables them.
+  max_epic_workers: 6
+  # Override the extra startup brief for coordination workspaces (x c).
+  # coordination_prompt: "Our planning and coordination procedure..."
 
 # ── agents (per-agent overrides) ─────────────────────────────────────
 # Model-tier menu the `w S`/`w M`/`w L` and `a S`/`a M`/`a L` chords and
 # the `model:<tier>` task labels pick from. Claude ships a built-in
-# Haiku/Sonnet/Opus/Fable menu; other agents define theirs here.
+# Haiku/Sonnet/Opus/Fable menu; Codex ships a pinned GPT-5.5 default.
+#
+# This menu is what Settings calls the agent's **strength** — one concept,
+# stored here and nowhere else. A tier's `args` carry the model AND its
+# reasoning flags, so there is no separate thinking setting to keep in
+# step. `models.default` is the strength a bare spawn runs at; each agent
+# resolves the same alias in its own menu, so switching agents switches
+# the model without touching the choice.
 agents:
   codex:
     models:
-      default: M             # tier a bare spawn uses; unset → agent default
+      default: M             # strength a bare spawn uses; overlays Lazybox's default
       tiers:
         - alias: M
           label: GPT-5
           args: ["-m", "gpt-5"]
+        - alias: L
+          label: GPT-5 · high
+          # One tier, one decision: the model and how hard it thinks.
+          args: ["-m", "gpt-5", "-c", "model_reasoning_effort=high"]
   aider:
     name: Aider
     command: aider
@@ -162,9 +178,9 @@ ui:
   theme: Lazybox Dark        # written back by the `t` theme picker
   terminal_new_layout: split # ordinary new terminals: split | tabs (`]]t` toggles)
   activity_pane_default: full # right pane start mode: full | summary | hidden (`Shift-P` cycles)
-  confirm_default:           # which Confirm button Enter highlights, by source
-    destructive_shortcut: yes # a destructive chord (x x, g m, …): the chord is the intent
-    event: no                # an unsolicited prompt (merged-PR removal): don't destroy on a stray Enter
+  confirm_default:           # which Confirm button Enter highlights, by axis
+    destructive_shortcut: yes # you pressed a destructive chord (x x, g m, c): the chord is the intent
+    event: no                # lazybox pushed the prompt (a row is leaving, its agent is live)
   # Remap any catalog action. Keys are snake_case action ids; values are
   # key-spec strings. Unset actions keep their default binding.
   action_keys:
@@ -267,6 +283,12 @@ Provide either `content` or `source` per script, never both.
 | --- | --- |
 | string | Override [`worktree.branch_prefix`](#worktree) for this repo. `"at"` → `at/issue-42`; `""` drops the prefix (`issue-42`); omit to inherit the global value. |
 
+### `policies`
+
+| Type | Description |
+| --- | --- |
+| map of policy id → bool \| string | Standing agent rules for this repo, layered **on top** of the box-wide [`policies`](#policies) block. Same shape and same ids. |
+
 See [Per-repo env & mounts](/docs/how-to/per-repo-env-and-mounts/) for a
 walkthrough.
 
@@ -302,6 +324,7 @@ hand.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
+| `coordination_prompt` | string | built-in brief | Extra startup instructions for coordination workspaces (`x c`). Covers epics, owner contracts, cross-repo blockers, and minimal issue count. Read on every start/resume. An empty string disables this extra brief; shared Lazybox startup rules still apply. |
 | `autonomous_skip_permissions` | bool | unset | Whether autonomous `@lazybox` work runs Claude with `--dangerously-skip-permissions`. **Unset** resolves per spawn from *who* triggered it: `true` for your own work (`w`, your own mentions/labels), but `false` for a spawn a foreign actor triggered — a mention from someone other than you, or a `lazybox:` label on an issue you didn't author — so their attacker-influenceable issue text can't drive an unattended skip-permissions agent on your host. Set `true`/`false` to pin it either way. |
 | `skip_permissions` | bool | `false` | Skip permission prompts for interactively spawned agents too |
 | `llm_gateway_url` | string | unset | Global LLM-gateway base URL. When set, every spawned agent gets it injected as the base-URL env var its CLI reads (`ANTHROPIC_BASE_URL` for Claude, `OPENAI_BASE_URL` for Codex / Cursor). A per-repo `env` entry for the same var wins. Auth keys are deliberately not managed here. |
@@ -309,9 +332,10 @@ hand.
 | `quiet_classify_secs` | int | `5` | Quiet-timer window: seconds of PTY silence before a `Working` turn settles to `Done`. Cannot be disabled (`0` falls back to 5); raise it to be less eager to call a turn finished. |
 | `metering_proxy` | bool | `false` | Route every spawned agent's LLM traffic through lazybox's local metering proxy — the real data source behind the header's usage summary. The proxy forwards each request to the true upstream (or `llm_gateway_url` when set) and reads token counts off the response, so both Claude and Codex (and interactive terminal sessions) report real per-provider quota. Opt-in: it inserts a loopback hop in front of every agent API call. |
 | `max_live_agents` | int | `32` | Advisory ceiling on concurrently live agent terminals across all workspaces. Over the cap, spawns and startup recovery **warn** (a footer notice naming `]]x`) but are never refused — lazybox advises, it does not forbid. `0` disables the warnings. |
+| `max_epic_workers` | int | `6` | Hard per-epic ceiling on Worker sessions a Coordinator may create through `spawn_worker`. Unlike `max_live_agents`, the tool refuses over the cap. `0` disables Coordinator worker spawning. |
 | `nice` | int | `10` | Scheduling niceness for spawned agent processes and their children, so a large fleet yields under contention and never starves the interactive UI (liveness over throughput). `0` disables (agents run at normal priority). Clamped to `0..=20`. |
 | `strict_mcp` | bool | `false` | Launch unattended (skip-permissions) Claude spawns with `--strict-mcp-config`, disabling every ambient MCP server you configured. Default `false`: autonomous agents inherit your normal MCP setup. Read-only reviewer spawns stay strict regardless. |
-| `reap_closed_after` | duration | `48h` | How long after a workspace's PR/issue merges or closes its persistent sessions may keep running before the daemon reaps them (an idle agent is a ~110 MB memory ratchet). Reaped sessions stop being restored at startup; `w w` respawns one fresh and prompt history persists. `0s` disables reaping entirely. |
+| `reap_closed_after` | duration | unset (never reaps) | **Opt-in.** How long after a workspace's PR/issue merges or closes its persistent sessions may keep running before the daemon reaps them (an idle agent is a ~110 MB memory ratchet). Reaping kills the tmux session and with it its scrollback, so lazybox never does it unless you ask: leave this unset (or `0s`) and nothing is reaped. `48h` is the suggested value. Reaped sessions stop being restored at startup; `w w` respawns one fresh and prompt history persists. |
 
 The legacy `name`, `command`, `args`, `resume_args`, and `asking_patterns`
 fields under `agent` remain accepted so old files parse, but new custom agents
@@ -323,8 +347,11 @@ Per-agent definitions and overrides keyed by agent id (`claude`, `codex`, …).
 An entry with `command` registers a generic agent CLI at daemon startup. Add
 that id to `setup.agents`, then give it a chord through
 `ui.action_keys.spawn_agent.<id>`. Entries without `command` simply customize
-a built-in. Claude ships a Haiku (`S`) / Sonnet (`M`) / Opus (`L`) model menu;
-other agents have no built-in menu.
+a built-in. Claude ships a Haiku (`S`) / Sonnet (`M`) / Opus (`L`) model menu,
+and Codex ships a pinned GPT-5.5 (`L`) default. Both built-ins pass an explicit
+model on interactive, resume, and structured/headless launches; a missing or
+malformed selected tier refuses the launch instead of inheriting a provider
+CLI/account default. Other agents have no built-in menu.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -333,9 +360,9 @@ other agents have no built-in menu.
 | `args` | list of string | `[]` | Arguments appended to `command` for a fresh session |
 | `resume_args` | list of string | unset | Arguments appended to `command` for resume; unset reuses `args` |
 | `asking_patterns` | list of string | `[]` | Output markers that classify the custom agent as **Input Needed** |
-| `models.default` | string | unset | Alias of the tier a bare spawn uses; unset → the agent's own default model |
-| `models.tiers` | list | `[]` | Ordered tier menu. Each entry: `alias` (the chord key — a single uppercase letter binds as `Shift`, e.g. `S` → `w S`), `label` (shown in the popup and the `◆` tab badge), `args` (appended to the spawn argv) |
-| `models.priority` | map | `{}` | Deprecated `best` / `high` / `medium` / `low` task keys → tier alias, used when a spawn declares no explicit tier and the task carries one of them. The current spelling, a `model:<tier>` label, names a `models.tiers` entry directly and needs no map |
+| `models.default` | string | built-in-dependent | Alias of the tier a bare spawn uses — the agent's **strength** as Settings shows it. Claude and Codex inherit Lazybox's pinned built-in default; custom agents without a menu may use their own default model. An alias this menu doesn't declare resolves to no strength rather than borrowing the built-in menu's |
+| `models.tiers` | list | `[]` | Ordered tier menu. Each entry: `alias` (the chord key — a single uppercase letter binds as `Shift`, e.g. `S` → `w S`), `label` (shown in the popup and the `◆` tab badge), `args` (appended to the spawn argv — the model id and any reasoning/effort flags that go with it) |
+| `models.capability` | map | `{}` | `best` / `high` / `medium` / `low` capability labels → tier alias, used when a spawn declares no explicit tier. The deprecated `models.priority` spelling still parses and is rewritten on save. A `model:<tier>` label names a `models.tiers` entry directly and needs no map |
 | `auto_update` | bool | `false` | Let lazybox apply this agent's CLI updates automatically when the scheduled out-of-band check finds a newer version. Off by default: the check still runs and surfaces "update available", but installing waits for the manual "update agent CLIs" action. |
 
 ## `worktree`
@@ -435,12 +462,13 @@ action in
 | `manage_labels` | `g l` | Edit labels |
 | `open_in_browser` | `g o` | Open the PR / issue in the browser |
 | `archive` | `x x` | Archive the workspace |
-| `new_workspace` | `x n` | New pre-PR workspace |
+| `new_workspace` | `x n` | Repo-free floating workspace |
+| `new_coordination_workspace` | `x c` | Repo-free coordination workspace |
 | `new_project` | `x p` | New project / pick a repo |
 | `adopt_sessions` | `x a` | Move sessions into another workspace |
 | `collapse_into_pr` | `x j` | Join an issue workspace into its closing PR |
 | `long_snooze` | `x z` | Snooze the workspace for about a year |
-| `close_issue` | `x c` | Close an issue upstream |
+| `close_issue` | `x C` | Close an issue upstream |
 
 See the [keybindings reference](/docs/reference/keybindings/) for the full
 default keymap.
@@ -450,6 +478,7 @@ default keymap.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `collapsed_repos` | list of string | `[]` | Repo names whose sidebar group starts collapsed (written back automatically) |
+| `mobile_session_order` | list of `{session_key, terminal_id}` | `[]` | Mobile tab priority, saved by `p` in Sessions and restored across client launches. Each reorder is applied to the saved list as it is on disk rather than overwriting it, so entries for terminals that have not streamed in yet — and a second client's entries — survive. New terminals follow saved tabs; desktop ordering is unaffected. |
 | `pinned_repos` | list of string | `[]` | Repo names pinned to the top of the sidebar, in pin order (`p` toggles). A list, not a set — the order you pinned in is the display order. Written back automatically. |
 | `focused_workspaces` | list of string | `[]` | Workspace keys you've starred ("focused"), in focus order — lifted into a synthetic `★ Focused` section at the top and numbered for `]]<digit>` focus jumps. Written back automatically. |
 | `spaces` | list | `[]` | User-defined Spaces — the grouping tier above repo headers (`x m` moves a source into one). Each entry names a bucket and lists its assigned source labels; the list position is the display order. Written back automatically. |
@@ -466,7 +495,7 @@ default keymap.
 | `long_snooze` | duration | `365d` | `x z` long-snooze duration |
 | `log_path` | path | `/tmp/lazybox.log` | Where the client writes its log |
 | `browser` | string | OS default | Preferred browser for `g o` / terminal links. macOS: the app name for `open -a` (`"Google Chrome"`); Linux: the executable. |
-| `keep_awake` | `off` \| `working` \| `asking` \| `always` (or bool) | `off` | Hold an OS sleep inhibitor (`caffeinate` on macOS, `systemd-inhibit` on Linux) while agents are active. `working` (the historical `true`) holds while ≥1 agent is `Working`; `asking` also holds while one is parked on input (a run one keystroke from resuming); `always` holds for as long as lazybox runs. `off` (`false`) never inhibits. Released the moment nothing qualifies; re-read on every agent transition — no restart needed. **macOS laptop:** the assertion covers system sleep only on AC power and never a closed lid, so on battery the sidebar badge reads `☼ awake (AC only)` rather than implying a protection the OS isn't giving. |
+| `keep_awake` | `off` \| `working` \| `asking` \| `always` (or bool) | `off` | Hold an OS sleep inhibitor (`caffeinate` on macOS, `systemd-inhibit` on Linux) while agents are active. `working` (the historical `true`) holds while ≥1 agent is `Working`; `asking` also holds while one is parked on input (a run one keystroke from resuming); `always` holds for as long as lazybox runs. `off` (`false`) never inhibits. `working` and `asking` keep holding for 30 minutes after the last agent qualified, so the gaps between turns, background builds and a question you haven't answered yet don't hand the machine to idle sleep; after that quiet stretch it releases. If lazybox stops while holding (a restart, an install), it leaves a 30-minute inhibitor behind, since agents keep running in tmux without it. Re-read on every agent transition — no restart needed. **macOS laptop:** the assertion covers system sleep only on AC power and never a closed lid, so on battery the sidebar badge reads `☼ awake (AC only)` rather than implying a protection the OS isn't giving. |
 | `keymap_preset` | `default` \| `vim` | unset | Base keymap layer shipped in-tree; your `action_keys` still layer on top (`vim` moves pane-cycling to `Ctrl-w`) |
 | `theme` | string | unset | Active UI theme by exact name (`"Lazybox Dark"`, `"Lazybox Light"`, `"High Contrast"`, …). Written back by the `t` theme picker (live preview; `Esc` restores); unknown / unset keeps the default theme. Full theme list: [docs/themes.md](https://github.com/AntoineToussaint/lazybox/blob/main/docs/themes.md). |
 | `show_tips` | bool | `true` | Show progressive feature-discovery tips (opt-out) |
@@ -480,8 +509,19 @@ default keymap.
 | `auto_wait_on_limit` | bool | `false` | Auto-press "Wait" when a Claude agent hits its usage / monthly limit, so N agents hitting the cap at once don't each need a manual visit — re-auth with another account and then `Shift-K` to resume them. Re-read on every transition. |
 | `show_agent_model` | bool | `true` | Show each running agent's model + reasoning effort next to its sidebar badge (`C Opus`, `X gpt-5.5 · xhigh`) and on its terminal tab. Set `false` to keep the sidebar compact. |
 | `credit_recovery_prompt` | string | built-in | Prompt submitted after a credit chooser has cleared and the provider composer is ready (the `Ctrl-k` recover-credit flow). |
-| `confirm_default.destructive_shortcut` | `yes` \| `no` | `yes` | Which button `Enter` highlights on a Confirm modal raised by a destructive chord (`x x` archive, `g m` merge, …). The chord is the intent, so `Enter` confirms; set `no` to require an explicit arrow-then-Enter. |
-| `confirm_default.event` | `yes` \| `no` | `no` | Which button `Enter` highlights on a Confirm modal raised unsolicited by a provider event (a merged-PR "remove this workspace?"). Defaults to `no` so a stray `Enter` can't destroy a workspace you didn't ask about. |
+| `confirm_default.destructive_shortcut` | `yes` \| `no` | `yes` | Which button `Enter` highlights on a destructive Confirm modal **you opened with a chord** — `x x` archive, `g m` merge (and its out-of-order override), `c` clear the Error Inbox, the spawn key onto a claimed task, applying a snippet over one that already exists, preserving a checkout aside to rebuild its worktree. The chord is the intent, so `Enter` confirms; set `no` to require an explicit `←`/Tab (or `y`) first on all of them at once. |
+| `confirm_default.event` | `yes` \| `no` | `no` | Which button `Enter` highlights on a destructive Confirm modal **lazybox pushed at you**, with no keystroke behind it: the "remove this workspace?" prompt over a row whose agent is still running. Defaults to `no` — a stray `Enter` there kills a live agent and deletes its worktree, which no re-clone undoes. Set `yes` if you want `Enter` to complete it; that also makes `No` there a decision that stops the prompt coming back, rather than a defer. |
+
+A prompt only follows these keys when it is both destructive *and* on one of
+the two axes. Four are deliberately on neither, and stay on `No` whatever you
+set: the Settings → Clean worktrees bulk wipe, the worktree inspector's
+delete of a dirty checkout, the "delete these workspaces" gate when you un-tick a repo in setup
+(the chord there is *save my filter*, and the deletion is a consequence of
+it), and the sandbox wizard's auto-connect-at-launch step, where `No` is the
+recommended answer rather than a guard. A removal prompt with nothing running
+is on neither axis either, and affirms: its worktree is reconstructible and
+the row has already left your scope. Benign gates — the on-main spawn
+awareness prompt — destroy nothing and always affirm.
 
 Duration values take a unit suffix (`30s`, `15m`, `4h`, `365d`).
 
@@ -721,6 +761,62 @@ and on the interactive `w` work command.
 | `commit_style` | `conventional` \| `none` \| `custom` | `conventional` | Commit-message / PR-title-prefix style. `conventional` = [Conventional Commits](https://www.conventionalcommits.org/); `none` = no convention; `custom` = use `custom_instruction`. An unknown value falls back to `conventional`. |
 | `custom_instruction` | string | _(unset)_ | House style injected verbatim when `commit_style: custom`. A blank value falls back to the default guidance. |
 | `include_closes` | bool | `true` | Keep the `Closes #N.` body line that collapses an issue and its PR. Set `false` to have the brief tell the agent NOT to add it (repos that close issues manually). |
+
+## `policies`
+
+The **standing rules** lazybox states in every spawned agent's briefing — one
+named rule per entry, each one individually overridable. They ride the
+spawn-intrinsic briefing, so they reach every agent kind (Claude, Codex,
+Cursor, a `GenericCli` you declared yourself) and a bare `a c` start as surely
+as a `w` work prompt.
+
+Five rules ship by default. Each row is the text agents actually receive,
+verbatim — a paraphrase here is a rule nobody is following:
+
+| Policy id | What it says |
+| --- | --- |
+| `ask-before-filing-a-record` | Never open a GitHub issue or a Linear ticket without the user's explicit go-ahead — not for a follow-up you noticed, not for a slice you carved out, not because a prompt said to file one "if needed". Say what you would file and wait for a yes. Once you have it, the filed record is the deliverable: report its URL. |
+| `one-self-contained-pr` | Prefer one self-contained pull request, even a large one, over a stack of dependent PRs. A stack moves merge-order work onto the reviewer, and a stacked child that lands by squash can strand its parent's commits off the default branch. Split only when the user asks you to. |
+| `check-for-existing-work` | Before starting, check no open issue or PR already covers or conflicts with the work (`list_issues` / `task_status` are free); build on overlap or say so, never duplicate. |
+| `docs-current-in-pr` | A PR that changes behaviour updates the docs describing it (README, `AGENTS.md`, `docs/`) in the same PR, and names them in its body. |
+| `workspace-over-subagent` | Give independent work its own workspace (`start_workspace` on its record), not a sub-agent: it stays visible, resumable and costed. Sub-agents are for research feeding your own task. |
+
+Each entry is keyed by policy id, and its value is one of:
+
+| Value | Effect |
+| --- | --- |
+| `false` | Drop the rule — it is not stated at all. |
+| `true` | Keep lazybox's own wording. Useful per repo, to re-assert a rule the box-wide block turned off. |
+| a string | Replace the wording. An id no built-in defines **adds** a rule of your own, in the same block. |
+| `""` (blank) | Same as `false` — an empty bullet is noise, not a policy. |
+
+```yaml
+policies:
+  one-self-contained-pr: false                      # drop it box-wide
+  ask-before-filing-a-record: "Ask me before filing anything, anywhere."
+  house-rule: "Never push to `main`; always open a PR."
+```
+
+`repos.<owner/name>.policies` takes the same shape and layers **on top** of the
+box-wide block for work in that repo:
+
+```yaml
+repos:
+  acme/api:
+    policies:
+      one-self-contained-pr: true       # ...but keep it here
+      ask-before-filing-a-record: false # this repo wants issues filed freely
+```
+
+Turning every rule off removes the section from the briefing entirely — no
+header, no blank gap. The rules a session was given are prose in its own
+context, so an agent can quote back which ones it is following.
+
+Repo-scoped rules reach a session through the spawn-side channels, which know
+the workspace. Claude's `SessionStart` hook runs as its own process,
+correlated to a terminal rather than a workspace, so it states the box-wide
+set; on a repo that overrides a rule, the override still arrives via the
+spawn's own briefing.
 
 ## `shell`
 

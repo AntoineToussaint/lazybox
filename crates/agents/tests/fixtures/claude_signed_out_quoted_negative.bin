@@ -1,0 +1,7 @@
+Looking at #1847: the pane this detector missed renders as
+```
+  ⎿ Not logged in · Please run /login
+
+✻ Worked for 13m 42s · done 12:53 PM
+```
+so the six literals that each demand ". run" never fire on it.

@@ -101,8 +101,11 @@ pub enum Action {
     OpenWithApp(String),
     /// Review the workspace's combined staged/unstaged worktree diff.
     ViewDiff,
-    /// Create a brand-new pre-PR workspace (asks for a name).
+    /// Create a repo-free floating workspace (asks for a name).
     NewWorkspace,
+    FloatingWorkspace,
+    /// Create a repo-free workspace with coordination startup instructions.
+    NewCoordinationWorkspace,
     /// Rename the focused workspace's display name in place — opens an
     /// input prefilled with the current name. Only the display label
     /// changes; the workspace key and worktree path stay stable so
@@ -257,6 +260,9 @@ pub enum Action {
     /// a free-form local scratchpad that never syncs to a provider
     /// (issue #458). Pre-filled with the current note; submit persists.
     EditNotes,
+    /// Open the markdown artifacts this workspace's agents spooled into
+    /// `.lazybox/artifacts/` (#1822) in the description reader.
+    OpenArtifacts,
 
     // ── Sidebar list management ────────────────────────────────────
     // These act on the sidebar's list/view rather than a single
@@ -403,6 +409,12 @@ pub enum Action {
     /// the session-only messages log, it survives restart and can turn
     /// an error class into an issue, an agent run, or a JSONL export.
     OpenErrorInbox,
+    /// Open the archive browser (#1824) — the keys `x x` tombstoned, each
+    /// with the keys its row absorbed, and the restore that takes a set
+    /// back out. Without it an archived record is in no mailbox at all:
+    /// `x x` deletes the row, and the tombstone stops the poll re-creating
+    /// it.
+    OpenArchive,
     /// Open the usage-stats view (#1339) — a day/week breakdown of what
     /// you've done (agent sessions, prompts, merges, turns, tokens,
     /// cost) built from the daemon's persisted event accumulator.
@@ -446,6 +458,9 @@ pub enum Action {
     /// Jump the sidebar cursor to the next workspace with unread
     /// activity (`Shift-N`, #1502). Wraps around.
     JumpToUnread,
+    /// Jump the sidebar cursor to the next workspace with a review
+    /// requested or pending (`Shift-O`) — the `⟳N review` count's jump.
+    JumpToReviewPending,
     /// Jump the sidebar cursor to the next blocked workspace (`E j`,
     /// #1521): one that declares a `Blocked on:` reason or carries a
     /// dependency edge. Declared blockers sweep first, then edges. Wraps
@@ -605,6 +620,8 @@ pub enum ActionKind {
     OpenWithApp,
     ViewDiff,
     NewWorkspace,
+    FloatingWorkspace,
+    NewCoordinationWorkspace,
     RenameWorkspace,
     MoveToSpace,
     NewProject,
@@ -641,6 +658,7 @@ pub enum ActionKind {
     ConvertToDraft,
     MarkReady,
     EditNotes,
+    OpenArtifacts,
     // Sidebar list management
     OpenFilterMenu,
     CycleSort,
@@ -683,6 +701,7 @@ pub enum ActionKind {
     OpenSyncStatus,
     OpenMessages,
     OpenErrorInbox,
+    OpenArchive,
     OpenStats,
     OpenHopper,
     DismissNotice,
@@ -695,6 +714,7 @@ pub enum ActionKind {
     JumpToFailingCi,
     JumpToLimited,
     JumpToUnread,
+    JumpToReviewPending,
     JumpToBlocked,
     EpicMergeOrder,
     EpicGraph,
@@ -746,6 +766,7 @@ impl ActionKind {
         Self::OpenSyncStatus,
         Self::OpenMessages,
         Self::OpenErrorInbox,
+        Self::OpenArchive,
         Self::OpenStats,
         Self::OpenHopper,
         Self::DismissNotice,
@@ -757,6 +778,7 @@ impl ActionKind {
         Self::JumpToFailingCi,
         Self::JumpToLimited,
         Self::JumpToUnread,
+        Self::JumpToReviewPending,
         Self::JumpToBlocked,
         Self::EpicMergeOrder,
         Self::EpicGraph,
@@ -793,6 +815,8 @@ impl ActionKind {
         // hiding/destructive actions last. The runtime which-key popup
         // inherits this order directly.
         Self::NewWorkspace,
+        Self::FloatingWorkspace,
+        Self::NewCoordinationWorkspace,
         Self::RenameWorkspace,
         Self::MoveToSpace,
         Self::NewProject,
@@ -832,6 +856,7 @@ impl ActionKind {
         Self::ViewDiff,
         Self::Reply,
         Self::EditNotes,
+        Self::OpenArtifacts,
         Self::SetRole,
         Self::SpawnPlanner,
         Self::SpawnCoordinator,
@@ -932,6 +957,8 @@ impl Action {
             Action::OpenWithApp(_) => ActionKind::OpenWithApp,
             Action::ViewDiff => ActionKind::ViewDiff,
             Action::NewWorkspace => ActionKind::NewWorkspace,
+            Action::FloatingWorkspace => ActionKind::FloatingWorkspace,
+            Action::NewCoordinationWorkspace => ActionKind::NewCoordinationWorkspace,
             Action::RenameWorkspace => ActionKind::RenameWorkspace,
             Action::MoveToSpace => ActionKind::MoveToSpace,
             Action::NewProject => ActionKind::NewProject,
@@ -992,6 +1019,7 @@ impl Action {
             Action::ActivityBottom => ActionKind::ActivityBottom,
             Action::Reply => ActionKind::Reply,
             Action::EditNotes => ActionKind::EditNotes,
+            Action::OpenArtifacts => ActionKind::OpenArtifacts,
             Action::SelectRow => ActionKind::SelectRow,
             Action::ToggleDescription => ActionKind::ToggleDescription,
             Action::UndoMarkRead => ActionKind::UndoMarkRead,
@@ -1007,6 +1035,7 @@ impl Action {
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
             Action::OpenMessages => ActionKind::OpenMessages,
             Action::OpenErrorInbox => ActionKind::OpenErrorInbox,
+            Action::OpenArchive => ActionKind::OpenArchive,
             Action::OpenStats => ActionKind::OpenStats,
             Action::OpenHopper => ActionKind::OpenHopper,
             Action::DismissNotice => ActionKind::DismissNotice,
@@ -1018,6 +1047,7 @@ impl Action {
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::JumpToLimited => ActionKind::JumpToLimited,
             Action::JumpToUnread => ActionKind::JumpToUnread,
+            Action::JumpToReviewPending => ActionKind::JumpToReviewPending,
             Action::JumpToBlocked => ActionKind::JumpToBlocked,
             Action::EpicMergeOrder => ActionKind::EpicMergeOrder,
             Action::EpicGraph => ActionKind::EpicGraph,
@@ -1150,6 +1180,13 @@ impl ActionDef {
                 describe: "Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. Sorted by frequency, filterable by source; the selected class shows its full raw + humanized detail. Turn a class into a GitHub issue (`i`), route it to an agent (`a`), or export the set as JSONL (`x`); `d` deletes one class, `c` clears all.",
                 section: Section::Global,
             },
+            ActionKind::OpenArchive => &Self {
+                kind: ActionKind::OpenArchive,
+                default_keys: "x U",
+                label: "archived",
+                describe: "Open the archive browser — every workspace `x x` archived, each with the keys its row stood in for (a PR row takes the issues it closed with it). `u` or Enter restores the selected set: the tombstone goes, and the record's row returns on the next poll. Under the same `x` leader as the archive it undoes.",
+                section: Section::Global,
+            },
             ActionKind::OpenStats => &Self {
                 kind: ActionKind::OpenStats,
                 default_keys: "Shift-U",
@@ -1160,8 +1197,8 @@ impl ActionDef {
             ActionKind::OpenHopper => &Self {
                 kind: ActionKind::OpenHopper,
                 default_keys: "Shift-H",
-                label: "hopper",
-                describe: "Open the personal Hopper editor. Active items are editable lines; Tab opens dated completion and cancellation history.",
+                label: "todo",
+                describe: "Open your TODO list — the personal cross-project juggler. Each line is a TODO you can start work on; `l` opens its checklist of nested items, each of which can link to an issue, PR or URL and checks itself off when that lands. Tab opens dated completion and cancellation history.",
                 section: Section::Global,
             },
             ActionKind::DismissNotice => &Self {
@@ -1234,6 +1271,13 @@ impl ActionDef {
                 describe: "Jump the cursor to the next workspace with unread activity, wrapping around (#1502). The keyboard answer to the `●N` badge — no filter mode needed.",
                 section: Section::Global,
             },
+            ActionKind::JumpToReviewPending => &Self {
+                kind: ActionKind::JumpToReviewPending,
+                default_keys: "Shift-O",
+                label: "next review",
+                describe: "Jump the cursor to the next workspace with a reviewer requested or a review pending, wrapping around. The keyboard answer to the `⟳N review` count.",
+                section: Section::Global,
+            },
             ActionKind::JumpToBlocked => &Self {
                 kind: ActionKind::JumpToBlocked,
                 default_keys: "E j",
@@ -1301,21 +1345,21 @@ impl ActionDef {
                 kind: ActionKind::JumpPrevGroup,
                 default_keys: "{",
                 label: "prev group",
-                describe: "Move the cursor to the previous group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502).",
+                describe: "Move the cursor to the previous group header (Space / repo / Focused / TODO) so a long inbox can be crossed a group at a time (#1502).",
                 section: Section::Sidebar,
             },
             ActionKind::JumpNextGroup => &Self {
                 kind: ActionKind::JumpNextGroup,
                 default_keys: "}",
                 label: "next group",
-                describe: "Move the cursor to the next group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502).",
+                describe: "Move the cursor to the next group header (Space / repo / Focused / TODO) so a long inbox can be crossed a group at a time (#1502).",
                 section: Section::Sidebar,
             },
             ActionKind::ResumeRateLimited => &Self {
                 kind: ActionKind::ResumeRateLimited,
                 default_keys: "Shift-K",
                 label: "resume stopped agents",
-                describe: "Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike. An agent whose account is still limited simply parks again and says so. If you switched Claude account / API key, `a R` (restart stopped agents) also swaps in the fresh credentials: a running process never re-reads them.",
+                describe: "Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike — except an agent whose login has died, which is held back and offered sign-in instead, because 'continue' cannot move a logged-out agent and the notice would otherwise claim a recovery that did not happen. An agent whose account is still limited simply parks again and says so. If you switched Claude account / API key, `a R` (restart stopped agents) also swaps in the fresh credentials: a running process never re-reads them.",
                 section: Section::Global,
             },
             ActionKind::RestartRateLimited => &Self {
@@ -1490,14 +1534,32 @@ impl ActionDef {
                 kind: ActionKind::ViewDiff,
                 default_keys: "g v",
                 label: "review diff",
-                describe: "Review the worktree's staged, unstaged, and untracked changes in a full-screen viewer — file tree beside side-by-side hunks, `t` and `s` toggle either; search or annotate lines and send the draft to the running agent.",
+                describe: "Review a diff in a full-screen viewer — file tree beside side-by-side hunks, `t` and `s` toggle either. Opens on the PR's diff when the workspace has one and the worktree's otherwise; `p` switches, and the header names the source and any drift between them. Annotate lines with `c`, then `Shift-S` submits them to GitHub as one review on the PR source, or sends them to the running agent on the local one.",
                 section: Section::Workspace,
             },
             ActionKind::NewWorkspace => &Self {
                 kind: ActionKind::NewWorkspace,
                 default_keys: "x n",
                 label: "new workspace",
-                describe: "Create a pre-PR workspace (asks for a name).",
+                describe: "Create a named workspace under the cursor's project — a home in that repo for long-running work with no tracker record yet (asks for a name). It becomes the PR row via the normal rebadge once a PR opens. With no project under the cursor this falls back to a floating workspace and says so.",
+                section: Section::Workspace,
+            },
+            ActionKind::FloatingWorkspace => &Self {
+                kind: ActionKind::FloatingWorkspace,
+                // NOT `x f`: that is `ConvertSession`, and the collision
+                // detector fails the build on a double-bind. `x F` keeps the
+                // f-for-floating mnemonic without displacing an existing
+                // binding (#1863).
+                default_keys: "x F",
+                label: "floating workspace",
+                describe: "Create a persistent empty folder for thinking, with no repository or tracker record (asks for a name).",
+                section: Section::Workspace,
+            },
+            ActionKind::NewCoordinationWorkspace => &Self {
+                kind: ActionKind::NewCoordinationWorkspace,
+                default_keys: "x c",
+                label: "coordination workspace",
+                describe: "Create a repo-free workspace whose agent knows Lazybox's epic, cross-repo, owner-contract, and blocker workflow. Override its brief with agent.coordination_prompt.",
                 section: Section::Workspace,
             },
             ActionKind::RenameWorkspace => &Self {
@@ -1517,7 +1579,7 @@ impl ActionDef {
             ActionKind::NewProject => &Self {
                 kind: ActionKind::NewProject,
                 default_keys: "x p",
-                // Distinct from NewWorkspace's "new workspace" — the two
+                // Distinct from NewWorkspace's "floating workspace" — the two
                 // used to share a label, rendering two identical footer
                 // cells for different actions.
                 label: "new project",
@@ -1563,12 +1625,12 @@ impl ActionDef {
                 kind: ActionKind::Archive,
                 default_keys: "x x",
                 label: "archive",
-                describe: "Drop the workspace and kill any sessions. Destructive.",
+                describe: "Delete the workspace: kill any sessions, remove its worktree, drop the row. The confirm names any uncommitted changes or unpushed commits in the checkout before you answer; answering yes destroys them. Destructive, and never refused — an explicit delete deletes.",
                 section: Section::Workspace,
             },
             ActionKind::CloseIssue => &Self {
                 kind: ActionKind::CloseIssue,
-                default_keys: "x c",
+                default_keys: "x C",
                 label: "close issue",
                 describe: "Close the focused GitHub issue upstream (as not-planned). Only on issue workspaces; a true delete needs elevated permissions, so this closes instead. Confirmed first.",
                 section: Section::Workspace,
@@ -1927,6 +1989,17 @@ impl ActionDef {
                 default_keys: "n",
                 label: "notes",
                 describe: "Edit this workspace's local scratchpad — a private note that never syncs to a provider.",
+                section: Section::Workspace,
+            },
+            ActionKind::OpenArtifacts => &Self {
+                kind: ActionKind::OpenArtifacts,
+                // Under the agent leader (#1822): artifacts are what the
+                // agent handed you. Uppercase like `a R` / `a K`, because
+                // the lowercase half of that leader is generated per agent
+                // id and a new agent must not collide with this row.
+                default_keys: "a A",
+                label: "artifacts",
+                describe: "Read the markdown artifacts this workspace's agents wrote to `.lazybox/artifacts/` — a plan, a findings write-up, anything a paragraph in the terminal could not carry. Opens in the description reader.",
                 section: Section::Workspace,
             },
             ActionKind::SelectRow => &Self {
@@ -2305,10 +2378,17 @@ impl ActionDef {
     pub fn guard(&self) -> Guard {
         match self.kind {
             ActionKind::Quit => Guard::DoublePress,
-            // Kills live sessions and drops the row — no undo.
+            // The one step an explicit delete costs, and the only one.
+            // It names the
+            // worktree because that is what leaves the disk, and the
+            // daemon's removal-risk preflight appends the specific
+            // checkouts and the kinds of work in them as soon as it
+            // answers — there is no second prompt and no refusal after
+            // this.
             ActionKind::Archive => Guard::Confirm {
-                prompt: "Archive the focused workspace? Active sessions \
-                 are killed and the row drops from the inbox.",
+                prompt: "Delete the focused workspace? Active sessions are \
+                 killed, its worktree is removed, and the row drops from \
+                 the inbox.",
             },
             // Mutates the upstream issue (reopen on GitHub to undo).
             ActionKind::CloseIssue => Guard::Confirm {
@@ -2475,6 +2555,8 @@ impl ActionKind {
             ActionKind::OpenWithApp => "open_with_app",
             ActionKind::ViewDiff => "view_diff",
             ActionKind::NewWorkspace => "new_workspace",
+            ActionKind::FloatingWorkspace => "floating_workspace",
+            ActionKind::NewCoordinationWorkspace => "new_coordination_workspace",
             ActionKind::RenameWorkspace => "rename_workspace",
             ActionKind::MoveToSpace => "move_to_space",
             ActionKind::NewProject => "new_project",
@@ -2535,6 +2617,7 @@ impl ActionKind {
             ActionKind::ActivityBottom => "activity_bottom",
             ActionKind::Reply => "reply",
             ActionKind::EditNotes => "edit_notes",
+            ActionKind::OpenArtifacts => "open_artifacts",
             ActionKind::SelectRow => "select_row",
             ActionKind::ToggleDescription => "toggle_description",
             ActionKind::UndoMarkRead => "undo_mark_read",
@@ -2550,6 +2633,7 @@ impl ActionKind {
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenMessages => "open_messages",
             ActionKind::OpenErrorInbox => "open_error_inbox",
+            ActionKind::OpenArchive => "open_archive",
             ActionKind::OpenStats => "open_stats",
             ActionKind::OpenHopper => "open_hopper",
             ActionKind::DismissNotice => "dismiss_notice",
@@ -2562,6 +2646,7 @@ impl ActionKind {
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::JumpToLimited => "jump_to_limited",
             ActionKind::JumpToUnread => "jump_to_unread",
+            ActionKind::JumpToReviewPending => "jump_to_review_pending",
             ActionKind::JumpToBlocked => "jump_to_blocked",
             ActionKind::EpicMergeOrder => "epic_merge_order",
             ActionKind::EpicGraph => "epic_graph",
@@ -2732,6 +2817,26 @@ pub fn agent_default_key(id: &str) -> Option<char> {
     }
 }
 
+/// A model-tier menu together with the agent whose menu it is.
+///
+/// The tier *alias* is agent-agnostic — every agent resolves the same
+/// `S` / `M` / `L` handle in its own menu — but the *label* is not.
+/// Carrying the two together is what lets the generated `w <alias>`
+/// rows say whose menu the model name came from, instead of painting
+/// one agent's model name on a chord that will run another's (#1827).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TierMenu<'a> {
+    /// Agent the menu belongs to. Empty only for the tier-less catalog.
+    pub agent: &'a str,
+    pub tiers: &'a [lazybox_core::ModelTier],
+}
+
+impl<'a> TierMenu<'a> {
+    pub fn new(agent: &'a str, tiers: &'a [lazybox_core::ModelTier]) -> Self {
+        Self { agent, tiers }
+    }
+}
+
 /// The keystroke that completes a tier chord under the `w` / `a`
 /// leader, derived from the tier's `alias`. A single uppercase letter
 /// (`"S"`) folds into a `Shift`-modified stroke (`Shift-s`) so it reads
@@ -2784,11 +2889,14 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ViewDiff => Some("github"),
         ActionKind::SpawnAgent
         | ActionKind::RecoverAllAgentCredit
+        | ActionKind::OpenArtifacts
         | ActionKind::RestartRateLimited => Some("agent"),
         ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
         ActionKind::NewWorkspace
+        | ActionKind::FloatingWorkspace
+        | ActionKind::NewCoordinationWorkspace
         | ActionKind::RenameWorkspace
         | ActionKind::MoveToSpace
         | ActionKind::NewProject
@@ -2813,7 +2921,8 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ResetAgentContext
         | ActionKind::ToggleMetering
         | ActionKind::ToggleContextCompaction
-        | ActionKind::CollapseIntoPr => Some("workspace"),
+        | ActionKind::CollapseIntoPr
+        | ActionKind::OpenArchive => Some("workspace"),
         // The `E` epic leader (#1521): dependency-graph navigation. `E j`
         // jumps to the next blocked workspace; the group grows as later
         // epic slices land. `Shift-E` is the Error Inbox and `e` the
@@ -2867,20 +2976,20 @@ impl ActionDef {
         agents: &[String],
         overrides: &std::collections::BTreeMap<String, String>,
     ) -> Vec<CatalogEntry> {
-        Self::catalog_with_tiers(agents, overrides, &[])
+        Self::catalog_with_tiers(agents, overrides, TierMenu::default())
     }
 
     /// [`ActionDef::catalog`] plus the model-tier chords: one `w S` /
-    /// `a S` row per entry in `tiers` (the default work agent's model
+    /// `a S` row per entry in `menu` (the default work agent's model
     /// menu). The tier alias is agent-agnostic at the chord level — the
     /// daemon maps it to the actual target agent's tier at spawn — so a
     /// single set of tier chords serves whichever agent `w` resolves to.
     pub fn catalog_with_tiers(
         agents: &[String],
         overrides: &std::collections::BTreeMap<String, String>,
-        tiers: &[lazybox_core::ModelTier],
+        menu: TierMenu<'_>,
     ) -> Vec<CatalogEntry> {
-        Self::catalog_full(agents, overrides, tiers, &[])
+        Self::catalog_full(agents, overrides, menu, &[])
     }
 
     /// [`ActionDef::catalog_with_tiers`] plus the remote-spawn chords:
@@ -2892,10 +3001,10 @@ impl ActionDef {
     pub fn catalog_full(
         agents: &[String],
         overrides: &std::collections::BTreeMap<String, String>,
-        tiers: &[lazybox_core::ModelTier],
+        menu: TierMenu<'_>,
         remotes: &[String],
     ) -> Vec<CatalogEntry> {
-        Self::catalog_complete(agents, overrides, tiers, remotes, &[])
+        Self::catalog_complete(agents, overrides, menu, remotes, &[])
     }
 
     /// [`ActionDef::catalog_full`] plus the per-app "open with" chords
@@ -2906,7 +3015,7 @@ impl ActionDef {
     pub fn catalog_complete(
         agents: &[String],
         overrides: &std::collections::BTreeMap<String, String>,
-        tiers: &[lazybox_core::ModelTier],
+        menu: TierMenu<'_>,
         remotes: &[String],
         open_with: &[(String, String)],
     ) -> Vec<CatalogEntry> {
@@ -3119,8 +3228,16 @@ impl ActionDef {
         // so one row per tier serves both leaders. Rows are dropped for
         // an alias that can't form a chord (multi-char) so the tier
         // still configures a model without claiming a key.
+        //
+        // The two leaders differ in what their label may promise. `a S`
+        // spawns THIS menu's agent, so the bare model name is exact.
+        // `w S` targets whatever agent the row's live conversation runs,
+        // which may resolve the alias to a different model or to none at
+        // all, so its label names the menu it was read from rather than
+        // pretending to be the run's model (#1827). Surfaces that know
+        // the contextual target — the which-key popup — override it.
         let spawn_leader = KeyStroke::new(false, false, false, ChordCode::Char('a'));
-        for tier in tiers {
+        for tier in menu.tiers {
             let Some(stroke) = tier_chord_stroke(&tier.alias) else {
                 continue;
             };
@@ -3135,7 +3252,7 @@ impl ActionDef {
                     kind: ActionKind::WorkWith,
                     param: Some(Param::Tier(tier.alias.clone())),
                     section: work.section,
-                    label: std::borrow::Cow::Owned(tier.label.clone()),
+                    label: std::borrow::Cow::Owned(format!("{} · {}", tier.label, menu.agent)),
                     describe: work.describe,
                     chords,
                     keys_display,
@@ -3530,6 +3647,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // Notes attach to any workspace — even a session-less/empty
         // one — so gate purely on a workspace being under the cursor.
         | ActionKind::EditNotes
+        // Artifacts hang off the workspace, not a live session — an agent
+        // that exited still leaves its spool behind. The dispatcher says so
+        // when the workspace has none; the catalog cannot see the spool.
+        | ActionKind::OpenArtifacts
         // Role attaches to any workspace under the cursor — the Choice
         // modal picks one of five roles or clears it (#1523). Gate on
         // the workspace's existence like EditNotes/RenameWorkspace.
@@ -3603,6 +3724,8 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         ActionKind::VisualSelect => has_ws,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
+        | ActionKind::FloatingWorkspace
+        | ActionKind::NewCoordinationWorkspace
         | ActionKind::NewProject
         | ActionKind::ImportCheckout
         | ActionKind::AddScanRoot
@@ -3622,6 +3745,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenMessages
         | ActionKind::OpenErrorInbox
+        | ActionKind::OpenArchive
         | ActionKind::OpenStats
         | ActionKind::OpenHopper
         | ActionKind::DismissNotice
@@ -3634,6 +3758,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToFailingCi
         | ActionKind::JumpToLimited
         | ActionKind::JumpToUnread
+        | ActionKind::JumpToReviewPending
         | ActionKind::JumpToBlocked
         | ActionKind::EpicMergeOrder
         | ActionKind::EpicGraph
@@ -3681,6 +3806,36 @@ pub fn universal_shortcuts() -> Vec<&'static ActionDef> {
 
 #[cfg(test)]
 mod tests {
+    /// Regression (#1863): `x n` is the PROJECT-SCOPED new workspace and
+    /// `x f` is the floating one — two chords, two actions.
+    ///
+    /// `x n` had been repointed at the floating input, which left no chord
+    /// able to create a named workspace inside a repo. That is how every
+    /// long-running non-PR line of work gets a home there, so the split is
+    /// pinned here: same key, same meaning, and floating reachable on its own.
+    #[test]
+    fn new_workspace_and_floating_workspace_are_separate_chords() {
+        let nw = ActionDef::for_kind(ActionKind::NewWorkspace);
+        let fw = ActionDef::for_kind(ActionKind::FloatingWorkspace);
+
+        assert_eq!(nw.default_keys, "x n");
+        assert_eq!(fw.default_keys, "x F");
+        assert_ne!(nw.kind, fw.kind);
+
+        // `x n` must not describe itself as floating — the label is what the
+        // footer and `?` help show, and it is how the meaning drifted before.
+        assert!(
+            !nw.label.contains("floating"),
+            "x n must not be the floating workspace: {:?}",
+            nw.label,
+        );
+        assert!(fw.label.contains("floating"), "{:?}", fw.label);
+
+        // Both are workspace-group actions: `x` is the workspace leader.
+        assert_eq!(nw.section, Section::Workspace);
+        assert_eq!(fw.section, Section::Workspace);
+    }
+
     use super::*;
 
     #[test]
@@ -4243,7 +4398,7 @@ mod tests {
             def.default_chord(),
             Some(Chord::Seq(vec![
                 KeyStroke::new(false, false, false, ChordCode::Char('x')),
-                KeyStroke::new(false, false, false, ChordCode::Char('c')),
+                KeyStroke::new(false, true, false, ChordCode::Char('c')),
             ])),
             "close-issue lives in the workspace-management menu",
         );
@@ -4956,28 +5111,36 @@ mod tests {
         use std::collections::BTreeMap;
         let agents = vec!["claude".to_string()];
         let tiers = lazybox_core::AgentModels::builtin("claude").unwrap().tiers;
-        let catalog = ActionDef::catalog_with_tiers(&agents, &BTreeMap::new(), &tiers);
+        let catalog = ActionDef::catalog_with_tiers(
+            &agents,
+            &BTreeMap::new(),
+            TierMenu::new("claude", &tiers),
+        );
 
         let w = KeyStroke::new(false, false, false, ChordCode::Char('w'));
         let a = KeyStroke::new(false, false, false, ChordCode::Char('a'));
         let shift_s = KeyStroke::new(false, true, false, ChordCode::Char('s'));
 
-        // `w S` → a WorkWith row tagged with the tier alias, labeled by
-        // the model name so the which-key popup reads "Haiku".
+        // `w S` → a WorkWith row tagged with the tier alias. The label
+        // names the menu it was read from: `w` targets the row's live
+        // agent, which may resolve `S` to another model or to none
+        // (#1827).
         let work_tier = catalog
             .iter()
             .find(|e| e.kind == ActionKind::WorkWith && e.param == Some(Param::Tier("S".into())))
             .expect("w S tier row");
         assert_eq!(work_tier.chords, vec![Chord::Seq(vec![w, shift_s])]);
-        assert_eq!(work_tier.label, "Haiku");
+        assert_eq!(work_tier.label, "Haiku · claude");
         assert_eq!(work_tier.config_key, "work_tier.S");
 
-        // `a S` → a SpawnAgent row under the agent leader.
+        // `a S` → a SpawnAgent row under the agent leader. It spawns
+        // THIS menu's agent, so the bare model name is an exact promise.
         let spawn_tier = catalog
             .iter()
             .find(|e| e.kind == ActionKind::SpawnAgent && e.param == Some(Param::Tier("S".into())))
             .expect("a S tier row");
         assert_eq!(spawn_tier.chords, vec![Chord::Seq(vec![a, shift_s])]);
+        assert_eq!(spawn_tier.label, "Haiku");
 
         // The tier chords must not collide with the agent chords that
         // share the same leaders (`w c`, `a c`). Every Seq chord in the
@@ -5286,6 +5449,7 @@ mod tests {
     fn workspace_management_actions_share_the_x_leader() {
         let expected = [
             (ActionKind::NewWorkspace, 'n'),
+            (ActionKind::NewCoordinationWorkspace, 'c'),
             (ActionKind::NewProject, 'p'),
             (ActionKind::ImportCheckout, 'i'),
             (ActionKind::AddScanRoot, 'r'),
@@ -5295,7 +5459,7 @@ mod tests {
             (ActionKind::CollapseIntoPr, 'j'),
             (ActionKind::LongSnooze, 'z'),
             (ActionKind::Archive, 'x'),
-            (ActionKind::CloseIssue, 'c'),
+            (ActionKind::CloseIssue, 'C'),
         ];
         let leader = KeyStroke::new(false, false, false, ChordCode::Char('x'));
         for (kind, key) in expected {
@@ -5303,7 +5467,12 @@ mod tests {
                 ActionDef::for_kind(kind).default_chord(),
                 Some(Chord::Seq(vec![
                     leader,
-                    KeyStroke::new(false, false, false, ChordCode::Char(key)),
+                    KeyStroke::new(
+                        false,
+                        key.is_ascii_uppercase(),
+                        false,
+                        ChordCode::Char(key.to_ascii_lowercase()),
+                    ),
                 ])),
                 "{kind:?} must stay in the workspace menu",
             );
@@ -5369,7 +5538,8 @@ mod tests {
     fn open_with_key_generates_a_direct_workspace_row() {
         use std::collections::BTreeMap;
         let binds = vec![("Obsidian".to_string(), "O".to_string())];
-        let catalog = ActionDef::catalog_complete(&[], &BTreeMap::new(), &[], &[], &binds);
+        let catalog =
+            ActionDef::catalog_complete(&[], &BTreeMap::new(), TierMenu::default(), &[], &binds);
         let row = catalog
             .iter()
             .find(|e| e.param == Some(Param::OpenWith("Obsidian".into())))
@@ -5380,7 +5550,8 @@ mod tests {
         // A `ui.action_keys` override wins over the config `key`.
         let mut overrides = BTreeMap::new();
         overrides.insert("open_with_app.Obsidian".to_string(), "Ctrl-o".to_string());
-        let catalog = ActionDef::catalog_complete(&[], &overrides, &[], &[], &binds);
+        let catalog =
+            ActionDef::catalog_complete(&[], &overrides, TierMenu::default(), &[], &binds);
         let row = catalog
             .iter()
             .find(|e| e.param == Some(Param::OpenWith("Obsidian".into())))
@@ -5392,7 +5563,8 @@ mod tests {
     fn open_with_key_that_does_not_parse_yields_no_row() {
         use std::collections::BTreeMap;
         let binds = vec![("X".to_string(), String::new())];
-        let catalog = ActionDef::catalog_complete(&[], &BTreeMap::new(), &[], &[], &binds);
+        let catalog =
+            ActionDef::catalog_complete(&[], &BTreeMap::new(), TierMenu::default(), &[], &binds);
         assert!(
             catalog.iter().all(|e| e.kind != ActionKind::OpenWithApp),
             "an unparseable key produces no row (still reachable via `x o`)",
@@ -5438,7 +5610,11 @@ mod tests {
         let mut overrides = BTreeMap::new();
         overrides.insert("work_tier.S".to_string(), "Ctrl-1".to_string());
         overrides.insert("spawn_tier.S".to_string(), "Ctrl-2".to_string());
-        let catalog = ActionDef::catalog_with_tiers(&["claude".to_string()], &overrides, &tiers);
+        let catalog = ActionDef::catalog_with_tiers(
+            &["claude".to_string()],
+            &overrides,
+            TierMenu::new("claude", &tiers),
+        );
         let work_tier = catalog
             .iter()
             .find(|e| e.kind == ActionKind::WorkWith && e.param == Some(Param::Tier("S".into())))
@@ -5499,6 +5675,17 @@ mod tests {
             ActionDef::for_kind(ActionKind::NewWorkspace).label,
             "new workspace"
         );
+        // …and the three must be mutually distinct, which is what this test
+        // is actually for: no two footer cells reading the same. Pinning
+        // NewWorkspace to "floating workspace" is how #1863's regression
+        // survived — the test agreed with the bug.
+        let labels = [
+            ActionDef::for_kind(ActionKind::NewProject).label,
+            ActionDef::for_kind(ActionKind::NewWorkspace).label,
+            ActionDef::for_kind(ActionKind::FloatingWorkspace).label,
+        ];
+        let unique: std::collections::BTreeSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len(), "labels collide: {labels:?}");
     }
 
     /// The mouse-capture toggle is a catalog row (discoverable in `?`,

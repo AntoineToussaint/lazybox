@@ -183,6 +183,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// legible without opening it; nothing when zero. Deliberately not `?`,
     /// which the state slot already spends on the agent asking its *operator*.
     pub inbound_requests: usize,
+    /// Markdown artifacts this workspace's agents spooled into
+    /// `.lazybox/artifacts/` (#1822). Renders a dim ` ▤N ` badge in the
+    /// passive cluster so output the agent handed over is visible without
+    /// opening the row; nothing when zero. `a A` reads them.
+    pub artifacts: usize,
     /// A declared `Blocked on:` reason exists on some task. Renders ` ⊗! `
     /// when there are no dependency blockers, else folds into the count
     /// badge (the count already says "blocked"). The reason text itself is
@@ -724,6 +729,13 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ctx.theme,
     ));
     spans.extend(labels);
+    // The agent-text match cue is the cell's outer tail (#1774): it
+    // explains a result the user is already looking at, so it outranks
+    // nothing — not the chips, not the title — and is the first thing a
+    // narrowing row gives up.
+    let excerpt = agent_excerpt_spans(ctx);
+    let cue = excerpt.len();
+    spans.extend(excerpt);
     // A `★ Focused` row is lifted out of its repo group, so it has no repo
     // header to say where it came from — name the source inline (#1450).
     // It trails the title rather than leading it: the row must open with
@@ -732,28 +744,28 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // `owner/repo · Bug` compound that swallows the name (#1747). Dim so
     // it reads as a cue rather than competing with the title, but legible
     // (no forced dim) on the cursor row, mirroring the title and the tree
-    // prefix. It is the cell's outer tail: a narrow pane sheds it whole,
-    // and before the label chips, so starring a row never costs it the
-    // chips it shows under its repo header — never the title either.
-    let mut cue = 0;
+    // prefix.
+    //
+    // It is PINNED, never shed: it used to be the first thing a narrow
+    // row dropped, which kept it on a short task-less name and lost it on
+    // every long issue / PR title — so exactly the agents working on
+    // tracked work showed no repo. The title truncates to make room; the
+    // chips and the excerpt still go first.
+    let mut cell = Cell::new(spans).atomic_tail(tail).outer_tail(cue);
     if let Some(repo) = &ctx.source_repo {
         let cue_style = if ctx.is_cursor {
             ctx.row_style()
         } else {
             ctx.row_style().fg(ctx.theme.text_dim)
         };
-        spans.push(Span::styled(format!(" · {repo}"), cue_style));
-        cue = 1;
+        let short = repo
+            .rsplit_once('/')
+            .map_or(repo.as_str(), |(_, name)| name);
+        cell = cell
+            .pinned(vec![Span::styled(format!(" · {repo}"), cue_style)])
+            .pinned_compact(vec![Span::styled(format!(" · {short}"), cue_style)]);
     }
-    // The agent-text match cue joins that same outer tail, outermost of
-    // all (#1774): it explains a result the user is already looking at,
-    // so it outranks nothing — not the chips, not the source cue, and
-    // certainly not the title. Trailing the source cue keeps #1747's
-    // reading intact: the row still opens as `Bug · owner/repo`.
-    let excerpt = agent_excerpt_spans(ctx);
-    cue += excerpt.len();
-    spans.extend(excerpt);
-    Cell::new(spans).atomic_tail(tail).outer_tail(cue)
+    cell
 }
 
 /// The agent-text match cue: a dim `⌕ …excerpt…` trailing the row
@@ -976,7 +988,7 @@ fn label_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
 /// char count, so without the gate a 2-byte UTF-8 char that happens
 /// to fit in 6 bytes would slice through a code point and panic.
 /// GitHub never returns that, but providers are external input.
-fn label_text_style(theme: &Theme, hex: &str) -> Style {
+pub(crate) fn label_text_style(theme: &Theme, hex: &str) -> Style {
     let cleaned = hex.trim_start_matches('#');
     if !cleaned.is_ascii() || cleaned.len() != 6 {
         return Style::default().fg(theme.text_dim);
@@ -1236,6 +1248,7 @@ fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         cell_stack(ctx),
         cell_blocked(ctx),
         cell_inbound_request(ctx),
+        cell_artifacts(ctx),
         cell_linked(ctx),
         cell_notes(ctx),
         cell_snippet(ctx),
@@ -1393,6 +1406,23 @@ fn cell_linked(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .add_modifier(Modifier::BOLD)
     };
     Cell::from_span(Span::styled(" ⎇ local ", style))
+}
+
+/// The ` ▤N ` spooled-artifacts badge (#1822): the agent wrote `N` markdown
+/// documents into this workspace's `.lazybox/artifacts/`. Dim like the note
+/// and snippet badges — something to read, not something to act on — and a
+/// filled-page glyph rather than one of the alarm symbols, because an
+/// artifact is the agent handing over work, not reporting a problem.
+fn cell_artifacts(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if ctx.artifacts == 0 {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default().fg(ctx.theme.text_dim)
+    };
+    Cell::from_span(Span::styled(format!(" ▤{} ", ctx.artifacts), style))
 }
 
 /// The `✎` has-notes badge (issue #458). Passive info, not an urgent
@@ -1821,6 +1851,7 @@ mod tests {
             blocked_by: 0,
             blocked_on: false,
             inbound_requests: 0,
+            artifacts: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             agent_excerpt: None,
@@ -2344,6 +2375,7 @@ mod tests {
             blocked_by: 0,
             blocked_on: false,
             inbound_requests: 0,
+            artifacts: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             agent_excerpt: None,
@@ -2366,7 +2398,7 @@ mod tests {
 
     /// #1747: the source cue trails the title. The cell opens with the
     /// title exactly as it renders under the row's own repo header, and
-    /// the dim ` · repo` follows it as a droppable tail.
+    /// the dim ` · repo` follows it, pinned so it is never shed.
     #[test]
     fn cell_title_appends_dim_source_repo_when_set() {
         let task = make_task("owner/repo#1", "Fix the thing");
@@ -2376,10 +2408,11 @@ mod tests {
         ctx.source_repo = Some("owner/repo".into());
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), "Fix the thing");
-        let cue = cell.spans.last().expect("cue span");
+        let cue = cell.pinned.last().expect("cue span");
         assert_eq!(cue.content.as_ref(), " · owner/repo");
         assert_eq!(cue.style.fg, Some(theme.text_dim));
-        assert_eq!(cell.outer_tail, 1, "the cue is the outer, first-shed tail");
+        assert_eq!(cell.pinned_compact[0].content.as_ref(), " · repo");
+        assert_eq!(cell.outer_tail, 0, "the cue is pinned, not a shed tail");
         assert_eq!(cell.atomic_tail, 0);
     }
 
@@ -2402,7 +2435,7 @@ mod tests {
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), "Bug");
         assert_eq!(
-            cell.spans[1].content.as_ref(),
+            cell.pinned[0].content.as_ref(),
             " · AntoineToussaint/lazybox"
         );
     }
@@ -2416,41 +2449,63 @@ mod tests {
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans.len(), 1);
         assert_eq!(cell.spans[0].content.as_ref(), "Fix the thing");
+        assert!(cell.pinned.is_empty());
     }
 
     /// #1450 regression: the original fix put the `repo · ` prefix ahead
     /// of the title in the same cell, and right-edge truncation then ate
-    /// the title and left only the prefix on a narrow pane. The cue is a
-    /// droppable atomic tail, so it sheds whole and the title stays.
+    /// the title and left only the prefix on a narrow pane. The pin keeps a
+    /// readable head of the title, falling back to the bare repo name when
+    /// `owner/repo` would crowd it out.
     #[test]
     fn focused_source_never_evicts_the_title_on_a_narrow_pane() {
         let task = make_task("owner/repo#1", "Fix the thing");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
-        // A long owner/repo that, kept at any cost, would have shoved the
-        // title off the row entirely.
         ctx.source_repo = Some("AntoineToussaint/lazybox".into());
         let columns = build_columns(4);
         let lines = crate::components::table::render_table(&[build_row(&ctx)], &columns, 30);
         let text = line_text(&lines[0]);
         assert!(
-            text.contains("Fix the thing"),
-            "the title must stay whole, not be crowded out by the cue: {text:?}",
+            text.contains("Fix the"),
+            "the title head must survive beside the cue: {text:?}",
         );
         assert!(
-            !text.contains("AntoineToussaint"),
-            "the long repo cue must shed, not swallow the title: {text:?}",
+            text.contains("· lazybox"),
+            "the repo is still named, compactly: {text:?}",
         );
     }
 
-    /// #1747: the cue sheds BEFORE the label chips. Starring a labelled
-    /// row must not cost it the chips it shows under its repo header, so
-    /// at a width where title + chips fit but the cue does not, the chips
-    /// stay and only the cue goes; with room for all of it, the title
-    /// leads and chips then source follow.
+    /// The reported inconsistency: a focused task-less row (short name)
+    /// showed its repo, while a focused issue / PR row — a long title —
+    /// always shed it, so exactly the agents on tracked work had no repo.
+    /// A long title now truncates to keep the repo.
     #[test]
-    fn focused_source_sheds_before_the_label_chips() {
+    fn a_long_focused_title_keeps_its_repo() {
+        let task = make_task(
+            "owner/repo#1",
+            "Workspace cannot be deleted: squash-merged branches read as unpushed commits forever",
+        );
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.source_repo = Some("AntoineToussaint/lazybox".into());
+        let columns = build_columns(4);
+        let text =
+            line_text(&crate::components::table::render_table(&[build_row(&ctx)], &columns, 60)[0]);
+        assert!(
+            text.contains("… · AntoineToussaint/lazybox"),
+            "the title truncates, the repo stays: {text:?}",
+        );
+    }
+
+    /// Chips now shed BEFORE the repo: a focused row's repo is the one cue
+    /// it cannot get from a header, while its chips are one keystroke away.
+    /// With room for everything, the title leads and chips then source
+    /// follow (#1747's reading order is unchanged).
+    #[test]
+    fn focused_source_outlasts_the_label_chips() {
         let mut task = make_task("owner/repo#1", "Fix the thing");
         task.labels = vec![lazybox_core::Label {
             name: "bug".into(),
@@ -2465,21 +2520,14 @@ mod tests {
                 &crate::components::table::render_table(&[build_row(ctx)], &columns, width)[0],
             )
         };
-        let under_header = render(&ctx, 46);
-        assert!(
-            under_header.contains("Fix the thing [bug]"),
-            "fixture: the chips fit under the repo header at 46: {under_header:?}",
-        );
-
         ctx.source_repo = Some("owner/repo".into());
         let cell = cell_title(&ctx);
         assert_eq!(cell.atomic_tail, label_spans(&ctx).len());
-        assert_eq!(cell.outer_tail, 1);
 
-        let starred = render(&ctx, 46);
+        let narrow = render(&ctx, 46);
         assert!(
-            starred.contains("Fix the thing [bug]") && !starred.contains("owner/repo"),
-            "starred at 46: chips survive, only the cue sheds: {starred:?}",
+            narrow.contains("owner/repo"),
+            "at 46 the repo survives: {narrow:?}",
         );
         let wide = render(&ctx, 80);
         assert!(
@@ -2501,7 +2549,7 @@ mod tests {
         ctx.source_repo = Some("owner/repo".into());
         ctx.is_cursor = true;
         let cell = cell_title(&ctx);
-        let cue = cell.spans.last().expect("cue span");
+        let cue = cell.pinned.last().expect("cue span");
         assert_eq!(cue.content.as_ref(), " · owner/repo");
         assert_ne!(
             cue.style.fg,
@@ -3077,6 +3125,7 @@ mod tests {
             blocked_by: 0,
             blocked_on: false,
             inbound_requests: 0,
+            artifacts: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             agent_excerpt: None,
@@ -3302,7 +3351,7 @@ mod tests {
         assert_eq!(cell_arm(&ctx).width(), 0, "unarmed row has no ARM slot");
         ctx.auto_merge_armed = true;
         let cell = cell_arm(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), " ⚡ ");
+        assert_eq!(cell.spans[0].content.as_ref(), " ⚡\u{FE0E} ");
         // The status cell stays empty — no CI/review pill here.
         assert_eq!(cell_status(&ctx).width(), 0);
     }
@@ -3681,6 +3730,24 @@ mod tests {
         );
     }
 
+    /// A row whose agent spooled artifacts carries ` ▤N ` (#1822); one
+    /// with none carries nothing, so the badge stays absence-by-default
+    /// like every other passive decoration.
+    #[test]
+    fn cell_artifacts_counts_spooled_documents() {
+        let task = make_task("owner/repo#2", "child");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(
+            cell_artifacts(&ctx).width(),
+            0,
+            "nothing has been spooled for this workspace"
+        );
+        ctx.artifacts = 3;
+        assert_eq!(cell_artifacts(&ctx).spans[0].content.to_string(), " ▤3 ");
+    }
+
     /// With neither a counted edge nor a declared reason, the badge slot
     /// is empty (#1521).
     #[test]
@@ -3738,7 +3805,7 @@ mod tests {
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.auto_merge_armed = true;
-        assert_eq!(cell_arm(&ctx).spans[0].content.as_ref(), " ⚡ ");
+        assert_eq!(cell_arm(&ctx).spans[0].content.as_ref(), " ⚡\u{FE0E} ");
         assert!(
             cell_status(&ctx)
                 .spans
@@ -4668,6 +4735,7 @@ mod tests {
             blocked_by: 0,
             blocked_on: false,
             inbound_requests: 0,
+            artifacts: 0,
             model_shorts: empty_shorts(),
             highlight_query: None,
             agent_excerpt: None,
@@ -4778,7 +4846,7 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(arms, " ⚡ ");
+        assert_eq!(arms, " ⚡\u{FE0E} ");
 
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx0), build_row(&ctx1), build_row(&ctx2)];
@@ -4795,7 +4863,10 @@ mod tests {
 
         // The all-badges row shows both clusters, arms right of the info;
         // the badge-less row shows none of them.
-        assert!(l0.contains(" ⎇ local  ✎  ]2  ⚙\u{FE0E}  ⚡ "), "{l0:?}");
+        assert!(
+            l0.contains(" ⎇ local  ✎  ]2  ⚙\u{FE0E}  ⚡\u{FE0E} "),
+            "{l0:?}"
+        );
         assert!(l1.contains('✎'), "{l1:?}");
         assert!(
             !l2.contains('✎') && !l2.contains('⎇') && !l2.contains('⚡'),

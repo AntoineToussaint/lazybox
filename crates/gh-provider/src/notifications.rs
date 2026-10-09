@@ -111,6 +111,14 @@ pub struct NotificationTarget {
     pub kind: NotificationTargetKind,
 }
 
+impl NotificationTarget {
+    /// `owner/name`, the shape scope filters and installation coverage
+    /// are expressed in.
+    pub fn repo_slug(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NotificationTargetKind {
     PullRequest,

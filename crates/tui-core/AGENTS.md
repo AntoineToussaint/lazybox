@@ -55,6 +55,13 @@ a focus or state one.
   actually did something consumes the selection; a run where every target was
   ineligible keeps it so it can be retried. Inherently single-target actions
   stay focused-only.
+- **A tier chord's label promises a model only for the menu it came from.**
+  `a S` spawns *this* menu's agent, so its row may name the model outright.
+  `w S` targets whatever agent the row's live conversation runs, so the
+  catalog row names the menu it read (`Haiku · claude`) and the which-key
+  popup relabels it against the real target — "agent default" when that
+  agent's menu defines no such tier, since nothing is then pinned. No
+  surface may name a model the run will not use (#1827).
 - **`ui.keymap_preset`** selects an in-tree starter keymap; explicit
   `ui.action_keys` layers on top. Both must survive a new row without manual
   migration.

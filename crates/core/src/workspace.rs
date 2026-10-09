@@ -37,13 +37,26 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// GitHub-native fleet coordination label applied while a lazybox agent owns
-/// a task. Kept in core so providers, daemon, and clients cannot drift onto
-/// different spellings.
+/// The GitHub-native fleet coordination label applied while a lazybox agent
+/// owns a task — the one stable name a claim ever uses (#1922). Kept in core
+/// so providers, daemon, and clients cannot drift onto different spellings.
+///
+/// This label is **presence only**: it rides free in the poll payload, so
+/// "is this claimed?" costs no GitHub call on any tick. Who holds it, with
+/// which agent and model, and when the lease lapses live in the sticky claim
+/// comment ([`WorkingClaimNote`](crate::WorkingClaimNote)), fetched only at a
+/// decision point.
 pub const WORKING_LABEL_NAME: &str = "working";
 
-/// Prefix for owner-qualified GitHub fleet claims. The remainder encodes a
-/// stable box fingerprint, a claim-session fingerprint, and an expiry.
+/// Prefix for the superseded owner-qualified GitHub fleet claims, whose label
+/// *name* encoded the whole lease: a truncated box fingerprint, a
+/// claim-session fingerprint, and an expiry.
+///
+/// **Legacy, read-only.** lazybox no longer mints these — one label per claim
+/// grew the repository's label namespace forever and told a human nothing
+/// (#1922). They are still parsed so a claim held by a box on an older build
+/// keeps being honoured, and a holder on this build removes its own as soon
+/// as it has attached [`WORKING_LABEL_NAME`] in its place.
 pub const WORKING_CLAIM_LABEL_PREFIX: &str = "lazybox:w:";
 
 /// Prefix for the upstream orchestration-role projection label (#1523). The
@@ -324,11 +337,22 @@ pub enum CleanupPrompt {
 ///   canary). Optional with `#[serde(default)]`, so older records read
 ///   back cleanly as not opted in — the canary is never inherited, only
 ///   chosen.
-/// - 14: `Workspace::provider_ops` (in-flight provider intent, #1736).
+/// - 14: `Workspace::floating` records ownership of a repo-free directory.
+/// - 15: `Workspace::todo_items` (a TODO's checklist). Defaulted on read,
+///   so older records read back cleanly. No `skip_serializing_if`: the
+///   workspace also travels over bincode, which cannot skip fields.
+/// - 16: `Workspace::provider_ops` (in-flight provider intent, #1736).
 ///   Optional with `#[serde(default)]`, so older records read back with
 ///   an empty ledger — nothing was in flight across an upgrade that
 ///   restarted the daemon anyway.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 14;
+///
+///   This branch wrote the field as 14, and 14 and 15 were both published
+///   while it waited, so it takes 16. The number is not cosmetic: a record
+///   written by this build and read by an older one is refused through
+///   `WorkspaceDecodeError::NewerSchema` rather than decoded leniently, so
+///   claiming an already-published version would hand an older daemon a row
+///   carrying a field it does not know, as a shape it believes it understands.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 16;
 
 /// How long a workspace counts as "recently woken" after an
 /// event-conditional snooze fires (#scale): within this window the row
@@ -398,6 +422,59 @@ pub struct HopperMeta {
     /// active Hopper while preserving its workspace and history.
     #[serde(default)]
     pub canceled_at: Option<DateTime<Utc>>,
+}
+
+/// One checklist item under a TODO (a Hopper workspace). Items are cheap —
+/// they are not workspaces — and nest through `parent`. An item can link to
+/// the work it stands for, and a linked item checks itself off when that
+/// work lands (see [`Workspace::check_items_linked_to`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct TodoItem {
+    /// Minted once ([`TodoItem::new_id`]) and never reused, so a link to an
+    /// item — from an agent, a note, another item — stays valid.
+    pub id: String,
+    /// The item this one nests under; `None` at the top level.
+    #[serde(default)]
+    pub parent: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub done_at: Option<DateTime<Utc>>,
+    /// Dropped rather than done: out of the progress count altogether.
+    #[serde(default)]
+    pub canceled_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub link: Option<TodoLink>,
+    /// Checked off by lazybox (the linked PR merged, the issue closed)
+    /// rather than by hand.
+    #[serde(default)]
+    pub auto_checked: bool,
+}
+
+impl TodoItem {
+    /// A fresh, never-reused item id.
+    pub fn new_id() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.done_at.is_some()
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.canceled_at.is_some()
+    }
+}
+
+/// What a TODO item points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum TodoLink {
+    /// An issue, PR or ticket; checks the item off when it merges / closes.
+    Task(TaskId),
+    /// A workspace, by key.
+    Workspace(WorkspaceKey),
+    Url(String),
 }
 
 /// The orchestration **role** a workspace plays inside a cross-repo epic
@@ -527,6 +604,15 @@ pub enum WorkspaceDecodeError {
     NewerSchema { found: u32, supported: u32 },
 }
 
+/// Purpose of a persistent Lazybox-owned directory with no repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum FloatingWorkspaceKind {
+    Thinking,
+    Coordination,
+}
+
 /// One workspace = one unit of work (PR + linked issues), holding
 /// **zero or more sessions**. A session is one folder worktree on
 /// disk; without sessions the workspace is purely a tracking row
@@ -556,11 +642,18 @@ pub struct Workspace {
     /// derived workspaces leave this `false`.
     #[serde(default)]
     pub local: bool,
+    /// Repo-free directory purpose, independent of sidebar grouping and name.
+    #[serde(default)]
+    pub floating: Option<FloatingWorkspaceKind>,
     /// Present when this is a user-captured personal Hopper workspace.
     /// Kept separate from local: imported checkouts and hand-created
     /// project workspaces are local too, but do not belong in the Hopper.
     #[serde(default)]
     pub hopper: Option<HopperMeta>,
+    /// The TODO's checklist, in display order (nesting via
+    /// [`TodoItem::parent`]). Empty for any workspace that is not a TODO.
+    #[serde(default)]
+    pub todo_items: Vec<TodoItem>,
     /// When `Some`, this is a **linked (no-worktree) checkout**: the
     /// workspace points directly at an existing clone on disk (a
     /// canonical `~/development/<owner>/<repo>` folder imported via the
@@ -753,7 +846,9 @@ impl Workspace {
             key,
             project_key: None,
             local: false,
+            floating: None,
             hopper: None,
+            todo_items: Vec::new(),
             linked_checkout: None,
             branch,
             sessions: Vec::new(),
@@ -1225,6 +1320,45 @@ impl Workspace {
         }
     }
 
+    /// `(done, total)` over the TODO checklist — the `2/3` a TODO row shows.
+    ///
+    /// Counts LEAF items only. An item with live children is a **heading**, and
+    /// a heading's completion is its children's: counting it as work of its own
+    /// left a finished TODO reading `3/4` forever, because nothing ticks a
+    /// heading — [`Self::check_items_linked_to`] only ticks items whose own link
+    /// landed, so the last point was reachable only by hand.
+    ///
+    /// Canceled items are out of the count entirely, and they do not keep a
+    /// parent out of it either: a heading whose every child was dropped has no
+    /// live children left, so it counts as the leaf it has become.
+    ///
+    /// Quadratic in the checklist's length, which is bounded by what a person
+    /// types into one TODO.
+    pub fn todo_progress(&self) -> (usize, usize) {
+        let live = || self.todo_items.iter().filter(|i| !i.is_canceled());
+        let is_heading = |id: &str| live().any(|i| i.parent.as_deref() == Some(id));
+        live()
+            .filter(|i| !is_heading(&i.id))
+            .fold((0, 0), |(d, t), i| (d + usize::from(i.is_done()), t + 1))
+    }
+
+    /// Check off every open item linked to `task`, stamped as done by
+    /// lazybox at `now`. Called when that task's PR merges or its issue
+    /// closes. Returns how many items changed, so the caller persists only
+    /// on a real change.
+    pub fn check_items_linked_to(&mut self, task: &TaskId, now: DateTime<Utc>) -> usize {
+        let mut changed = 0;
+        for item in &mut self.todo_items {
+            let linked = matches!(&item.link, Some(TodoLink::Task(id)) if id == task);
+            if linked && !item.is_done() && !item.is_canceled() {
+                item.done_at = Some(now);
+                item.auto_checked = true;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// Fold every **user-owned** field of `other` into this workspace,
     /// each by an explicit merge rule. The single source of truth for
     /// what survives when a session moves between workspaces — the
@@ -1266,7 +1400,10 @@ impl Workspace {
             key: _,
             project_key: _,
             local: _,
+            floating: _,
             hopper: _,
+            // A TODO's checklist is part of the TODO row itself.
+            todo_items: _,
             linked_checkout: _,
             name: _,
             branch: _,
@@ -1462,8 +1599,8 @@ impl Workspace {
     /// its dependency edges. The edges are de-duplicated across tasks — a
     /// single blocking task referenced by two of this workspace's tasks (a
     /// gh issue and its PR, or two sibling sub-issues) is one blocker of the
-    /// workspace, not two, so the `⊘N` badge and the "N blockers" line count
-    /// it once.
+    /// workspace, not two, so the `⊗N` badge and the header's `Blocked on:`
+    /// links list it once.
     pub fn hierarchy_blocked_by(&self) -> impl Iterator<Item = &TaskId> {
         let mut seen = std::collections::HashSet::new();
         self.pr
@@ -1501,8 +1638,8 @@ impl Workspace {
             .find_map(|task| task.blocked_on.as_deref())
     }
 
-    /// Whether the headline task has an active qualified claim or a
-    /// conservatively preserved legacy [`WORKING_LABEL_NAME`] claim.
+    /// Whether the headline task carries the stable [`WORKING_LABEL_NAME`]
+    /// claim or an active legacy qualified claim.
     pub fn is_claimed(&self) -> bool {
         self.primary_task().is_some_and(Task::has_working_claim)
     }
@@ -2077,6 +2214,26 @@ pub enum TileDirection {
     Down,
 }
 
+/// Which way a split divides its rect. Named for the arrangement of
+/// the *children*, not of the divider line between them: a
+/// `Horizontal` split puts them side by side and so draws a vertical
+/// `│`. Returned by [`TileTree::axis_at`] so a caller resizing a
+/// divider knows whether the pointer's column or its row is the
+/// meaningful coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileAxis {
+    Horizontal,
+    Vertical,
+}
+
+/// Floor and ceiling for a split's `ratio`. A divider dragged to the
+/// very edge would leave a zero-width tile that still owns a PTY and
+/// still takes keystrokes — invisible but live, which is the one state
+/// a tiling layout must not reach. 10% keeps the smaller tile legible
+/// enough to aim at and drag back.
+pub const TILE_RATIO_MIN: u8 = 10;
+pub const TILE_RATIO_MAX: u8 = 90;
+
 impl TileTree {
     /// Every leaf's terminal id, in pre-order. Stable ordering — the
     /// renderer relies on this for the focused-tile highlight.
@@ -2293,6 +2450,119 @@ impl TileTree {
             return Some(self.descend_to_leaf(&mut new_path));
         }
         None
+    }
+
+    /// The axis of the split at `path`, or `None` when the path names a
+    /// leaf or does not exist. `Horizontal` is an `HSplit` — children
+    /// side by side, so the divider between them is a *vertical* line.
+    pub fn axis_at(&self, path: &[u8]) -> Option<TileAxis> {
+        match self.subtree_at(path)? {
+            TileTree::Leaf { .. } => None,
+            TileTree::HSplit { .. } => Some(TileAxis::Horizontal),
+            TileTree::VSplit { .. } => Some(TileAxis::Vertical),
+        }
+    }
+
+    /// The first child's share of the split at `path`. `None` for a
+    /// leaf or a path that does not exist.
+    pub fn ratio_at(&self, path: &[u8]) -> Option<u8> {
+        match self.subtree_at(path)? {
+            TileTree::Leaf { .. } => None,
+            TileTree::HSplit { ratio, .. } | TileTree::VSplit { ratio, .. } => Some(*ratio),
+        }
+    }
+
+    /// Move the divider of the split at `path`: set the first child's
+    /// share to `ratio`, clamped into [`TILE_RATIO_MIN`]..=[`TILE_RATIO_MAX`]
+    /// so neither tile can be driven to an unusable sliver. Returns
+    /// `true` when the stored ratio actually changed, so a caller can
+    /// decide whether to redraw and persist — a drag delivers many
+    /// pointer positions that land on the same percentage.
+    ///
+    /// Clamping here rather than at the call sites is deliberate: the
+    /// pointer, the keyboard nudge and a restored `SessionLayout` all
+    /// reach the same invariant through this one door.
+    pub fn set_ratio_at(&mut self, path: &[u8], ratio: u8) -> bool {
+        let clamped = ratio.clamp(TILE_RATIO_MIN, TILE_RATIO_MAX);
+        match self.subtree_at_mut(path) {
+            Some(TileTree::HSplit { ratio: r, .. }) | Some(TileTree::VSplit { ratio: r, .. }) => {
+                if *r == clamped {
+                    return false;
+                }
+                *r = clamped;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Move the divider nearest to the leaf at `leaf_path` by `step`
+    /// percentage points in the direction `dir`. Returns the path of
+    /// the split it moved, so the caller can skip its redraw and its
+    /// persist when nothing happened; `None` when no divider lies on
+    /// that axis above the leaf, or the ratio is already clamped.
+    ///
+    /// **The divider moves the way the arrow points** — not "the
+    /// current tile grows". Those two readings agree for a tile in the
+    /// first child and disagree for one in the second, and a divider
+    /// is a single line: pushing it right always widens whatever is
+    /// left of it. So the sign is a function of `dir` alone, which is
+    /// what makes the gesture invertible (Left then Right returns you
+    /// to where you were) and what makes it mean the same thing as
+    /// dragging that divider with the mouse. The keyboard and the
+    /// pointer must not disagree about which way is which.
+    ///
+    /// *Which* divider is the same walk [`neighbor`](Self::neighbor)
+    /// does — the nearest ancestor split on `dir`'s axis — so the
+    /// divider a resize moves is the one between this tile and the tile
+    /// the matching bare arrow would move focus to.
+    pub fn resize_toward(
+        &mut self,
+        leaf_path: &[u8],
+        dir: TileDirection,
+        step: i16,
+    ) -> Option<Vec<u8>> {
+        let want_horizontal = matches!(dir, TileDirection::Left | TileDirection::Right);
+        let signed = match dir {
+            // `ratio` is the FIRST child's share, and the first child is
+            // the left / top one.
+            TileDirection::Right | TileDirection::Down => step,
+            TileDirection::Left | TileDirection::Up => -step,
+        };
+        for i in (0..leaf_path.len()).rev() {
+            let prefix = &leaf_path[..i];
+            let node = self.subtree_at(prefix)?;
+            if matches!(node, TileTree::HSplit { .. }) != want_horizontal {
+                continue;
+            }
+            let current = self.ratio_at(prefix)? as i16;
+            let next = (current + signed).clamp(TILE_RATIO_MIN as i16, TILE_RATIO_MAX as i16) as u8;
+            let owner = prefix.to_vec();
+            return self.set_ratio_at(&owner, next).then_some(owner);
+        }
+        None
+    }
+
+    fn subtree_at_mut(&mut self, path: &[u8]) -> Option<&mut TileTree> {
+        let mut node = self;
+        for &step in path {
+            node = match node {
+                TileTree::HSplit { left, right, .. }
+                | TileTree::VSplit {
+                    top: left,
+                    bottom: right,
+                    ..
+                } => {
+                    if step == 0 {
+                        left.as_mut()
+                    } else {
+                        right.as_mut()
+                    }
+                }
+                TileTree::Leaf { .. } => return None,
+            };
+        }
+        Some(node)
     }
 
     fn subtree_at(&self, path: &[u8]) -> Option<&TileTree> {
@@ -2544,6 +2814,160 @@ mod tile_tree_tests {
         let n = t.neighbor(&path1, TileDirection::Right);
         assert_eq!(n, Some(vec![1, 0]));
     }
+
+    // ── Divider ratios (#1920) ───────────────────────────────────────
+    //
+    // Until #1920 `ratio` was written once as a hardcoded 50 by the
+    // split that created it and read only by the renderer, so every
+    // divider in a tiled session was immovable. These pin the one door
+    // through which it now changes.
+
+    #[test]
+    fn axis_names_the_children_not_the_divider() {
+        let t = hsplit(leaf(1), vsplit(leaf(2), leaf(3)));
+        // Side-by-side children, so the divider drawn between them is
+        // the vertical `│` — the axis names the arrangement.
+        assert_eq!(t.axis_at(&[]), Some(TileAxis::Horizontal));
+        assert_eq!(t.axis_at(&[1]), Some(TileAxis::Vertical));
+        // A leaf has no divider to resize, including one reached
+        // through a longer path.
+        assert_eq!(t.axis_at(&[0]), None);
+        assert_eq!(t.axis_at(&[1, 0]), None);
+        assert_eq!(t.axis_at(&[0, 0]), None, "descending past a leaf");
+    }
+
+    #[test]
+    fn set_ratio_reports_whether_it_changed() {
+        let mut t = hsplit(leaf(1), leaf(2));
+        assert_eq!(t.ratio_at(&[]), Some(50));
+        assert!(t.set_ratio_at(&[], 70));
+        assert_eq!(t.ratio_at(&[]), Some(70));
+        // A drag delivers many pointer positions that land on the same
+        // percentage; the caller must be able to skip the redraw and
+        // the persist for those.
+        assert!(!t.set_ratio_at(&[], 70));
+        assert!(!t.set_ratio_at(&[0], 70), "a leaf has no ratio to set");
+    }
+
+    /// A tile driven to zero width would still own a PTY and still take
+    /// keystrokes while being invisible. Both ends clamp.
+    #[test]
+    fn set_ratio_clamps_both_ends_away_from_an_invisible_tile() {
+        let mut t = hsplit(leaf(1), leaf(2));
+        assert!(t.set_ratio_at(&[], 0));
+        assert_eq!(t.ratio_at(&[]), Some(TILE_RATIO_MIN));
+        assert!(t.set_ratio_at(&[], 100));
+        assert_eq!(t.ratio_at(&[]), Some(TILE_RATIO_MAX));
+    }
+
+    /// The divider moves the way the arrow points, from EITHER tile —
+    /// the reading that makes the gesture invertible and makes it agree
+    /// with dragging the same divider by mouse. The tempting
+    /// alternative ("the current tile grows") disagrees for a tile in
+    /// the second child and would make Shift-Right mean two different
+    /// things depending on which side the user had clicked into.
+    #[test]
+    fn resize_toward_moves_the_divider_the_way_the_arrow_points() {
+        // H(1, 2) — the agent on the left, its `lazybox log` on the right.
+        let mut t = hsplit(leaf(1), leaf(2));
+        let agent = t.path_to(1).unwrap();
+        let log = t.path_to(2).unwrap();
+
+        assert_eq!(
+            t.resize_toward(&agent, TileDirection::Right, 5),
+            Some(vec![])
+        );
+        assert_eq!(t.ratio_at(&[]), Some(55), "divider right, agent wider");
+
+        // Pressed from the OTHER tile, the same arrow moves the same
+        // divider the same way.
+        assert_eq!(t.resize_toward(&log, TileDirection::Right, 5), Some(vec![]));
+        assert_eq!(t.ratio_at(&[]), Some(60));
+
+        // And it inverts, from either side.
+        assert_eq!(t.resize_toward(&log, TileDirection::Left, 5), Some(vec![]));
+        assert_eq!(
+            t.resize_toward(&agent, TileDirection::Left, 5),
+            Some(vec![])
+        );
+        assert_eq!(t.ratio_at(&[]), Some(50), "back where it started");
+    }
+
+    /// The divider a "wider" keystroke means is the one between this
+    /// tile and the tile the matching arrow would MOVE to — so the walk
+    /// skips ancestors on the wrong axis, exactly like `neighbor`.
+    #[test]
+    fn resize_toward_skips_ancestors_on_the_wrong_axis() {
+        // H(1, V(2, 3)): tile 2 sits in a vertical split nested inside a
+        // horizontal one. A Left/Right resize from 2 must move the OUTER
+        // horizontal divider, not the vertical one it sits directly in.
+        let mut t = hsplit(leaf(1), vsplit(leaf(2), leaf(3)));
+        let two = t.path_to(2).unwrap();
+        assert_eq!(two, vec![1, 0]);
+
+        assert_eq!(
+            t.resize_toward(&two, TileDirection::Left, 10),
+            Some(vec![]),
+            "Left from the nested tile moves the outer vertical divider",
+        );
+        assert_eq!(t.ratio_at(&[]), Some(40), "the outer divider went left");
+        assert_eq!(t.ratio_at(&[1]), Some(50), "the inner split is untouched");
+
+        assert_eq!(
+            t.resize_toward(&two, TileDirection::Down, 10),
+            Some(vec![1]),
+            "Down from the nested tile moves the inner horizontal divider",
+        );
+        assert_eq!(t.ratio_at(&[1]), Some(60));
+        assert_eq!(t.ratio_at(&[]), Some(40), "the outer split is untouched");
+    }
+
+    #[test]
+    fn resize_toward_reports_nothing_when_no_divider_lies_that_way() {
+        // A lone leaf has no ancestor at all.
+        let mut only = leaf(1);
+        assert_eq!(only.resize_toward(&[], TileDirection::Left, 5), None);
+
+        // H(1, 2) has no horizontal divider, so Up/Down move nothing.
+        let mut t = hsplit(leaf(1), leaf(2));
+        let left = t.path_to(1).unwrap();
+        assert_eq!(t.resize_toward(&left, TileDirection::Up, 5), None);
+        assert_eq!(t.resize_toward(&left, TileDirection::Down, 5), None);
+        assert_eq!(t.ratio_at(&[]), Some(50), "nothing moved");
+    }
+
+    /// At the clamp the keystroke reports "nothing moved" rather than
+    /// claiming a resize the tree refused — the caller shows no notice
+    /// and skips the persist.
+    #[test]
+    fn resize_toward_at_the_clamp_reports_no_change() {
+        let mut t = hsplit(leaf(1), leaf(2));
+        let left = t.path_to(1).unwrap();
+        assert!(t.set_ratio_at(&[], TILE_RATIO_MAX));
+        assert_eq!(t.resize_toward(&left, TileDirection::Right, 5), None);
+        assert_eq!(t.ratio_at(&[]), Some(TILE_RATIO_MAX));
+    }
+
+    /// A resized tree is the persisted one: `SessionLayout` round-trips
+    /// through serde, which is how a divider position survives a
+    /// restart (`Command::SetSessionLayout`). No new config knob is
+    /// involved — the ratio IS the stored percentage.
+    #[test]
+    fn a_moved_divider_survives_the_layout_round_trip() {
+        let mut tree = hsplit(leaf(1), leaf(2));
+        assert!(tree.set_ratio_at(&[], 72));
+        let layout = SessionLayout::Splits {
+            tree,
+            focused: vec![1],
+        };
+        let json = serde_json::to_string(&layout).expect("layout serializes");
+        let back: SessionLayout = serde_json::from_str(&json).expect("layout deserializes");
+        let SessionLayout::Splits { tree, focused } = back else {
+            panic!("expected Splits, got {back:?}");
+        };
+        assert_eq!(tree.ratio_at(&[]), Some(72));
+        assert_eq!(focused, vec![1]);
+    }
 }
 
 #[cfg(test)]
@@ -2609,6 +3033,110 @@ mod tests {
             contracts: vec![],
             blocked_on: None,
         }
+    }
+
+    fn todo(text: &str, link: Option<TodoLink>) -> TodoItem {
+        TodoItem {
+            id: TodoItem::new_id(),
+            parent: None,
+            text: text.into(),
+            done_at: None,
+            canceled_at: None,
+            link,
+            auto_checked: false,
+        }
+    }
+
+    fn gh(key: &str) -> TaskId {
+        TaskId {
+            source: "github".into(),
+            key: key.into(),
+        }
+    }
+
+    /// Progress counts leaf items, skips canceled ones, and does not count a
+    /// heading as work of its own.
+    #[test]
+    fn todo_progress_counts_leaves_and_skips_canceled() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
+        let parent = todo("ship 0.1.18", None);
+        let mut child = todo("cut the release", None);
+        child.parent = Some(parent.id.clone());
+        child.done_at = Some(now());
+        let mut dropped = todo("skip this", None);
+        dropped.canceled_at = Some(now());
+        ws.todo_items = vec![parent, child, dropped];
+        assert_eq!(
+            ws.todo_progress(),
+            (1, 1),
+            "the heading is not its own unit of work"
+        );
+    }
+
+    /// The case the old counting could never reach: every child done reads as
+    /// complete, without anyone hand-ticking the heading above them.
+    #[test]
+    fn todo_progress_completes_when_every_child_is_done() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
+        let parent = todo("ship 0.1.18", None);
+        let mut children: Vec<TodoItem> = (0..3)
+            .map(|n| {
+                let mut c = todo(&format!("step {n}"), None);
+                c.parent = Some(parent.id.clone());
+                c.done_at = Some(now());
+                c
+            })
+            .collect();
+        ws.todo_items = vec![parent];
+        ws.todo_items.append(&mut children);
+        assert_eq!(ws.todo_progress(), (3, 3));
+
+        // A heading whose every child was dropped is a leaf again, so it counts
+        // and can be completed on its own.
+        let only_parent = todo("nothing under me", None);
+        let mut gone = todo("dropped", None);
+        gone.parent = Some(only_parent.id.clone());
+        gone.canceled_at = Some(now());
+        ws.todo_items = vec![only_parent, gone];
+        assert_eq!(ws.todo_progress(), (0, 1));
+    }
+
+    /// The linked PR merging checks its item off, once, marked as lazybox's
+    /// doing; items linked elsewhere, or canceled, are untouched.
+    #[test]
+    fn a_merged_pr_checks_off_the_items_linked_to_it() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
+        let mut canceled = todo("old attempt", Some(TodoLink::Task(gh("o/r#1890"))));
+        canceled.canceled_at = Some(now());
+        ws.todo_items = vec![
+            todo("merge the PR", Some(TodoLink::Task(gh("o/r#1890")))),
+            todo("other work", Some(TodoLink::Task(gh("o/r#7")))),
+            canceled,
+        ];
+        assert_eq!(ws.check_items_linked_to(&gh("o/r#1890"), now()), 1);
+        assert!(ws.todo_items[0].is_done() && ws.todo_items[0].auto_checked);
+        assert!(!ws.todo_items[1].is_done());
+        assert!(
+            !ws.todo_items[2].is_done(),
+            "a canceled item stays canceled"
+        );
+        assert_eq!(
+            ws.check_items_linked_to(&gh("o/r#1890"), now()),
+            0,
+            "a second merge event changes nothing"
+        );
+    }
+
+    /// A checklist survives the JSON round trip.
+    #[test]
+    fn todo_items_round_trip() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("todo-ship"), "main", now());
+        let mut child = todo("nested", Some(TodoLink::Url("https://x.test".into())));
+        let parent = todo("top", Some(TodoLink::Workspace(WorkspaceKey::new("w"))));
+        child.parent = Some(parent.id.clone());
+        ws.todo_items = vec![parent, child];
+        let back: Workspace = serde_json::from_str(&serde_json::to_string(&ws).unwrap()).unwrap();
+        assert_eq!(back.todo_items, ws.todo_items);
     }
 
     #[test]

@@ -82,7 +82,8 @@ make test-loaded RUNS=10              # the acceptance bar from #1751
 make test-loaded LOAD_FACTOR=0 RUNS=5 # repeat runs only (kind to a shared box)
 ```
 
-The merge queue runs the same script as its `loaded` lane. If a test is red
+CI's `loaded` lane runs the same script on every push to main (main has no
+merge queue, so it is a post-merge signal, not a gate). If a test is red
 there and green in isolation, fix the test's assumption — condition-based
 waiting instead of a fixed timeout, a lock or a per-binary sandbox instead
 of unguarded global state — not the budget.

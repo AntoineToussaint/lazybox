@@ -1,9 +1,37 @@
 {
-  "schema": 14,
+  "schema": 16,
   "key": "github-acme-widget-7",
   "project_key": "github-acme-widget",
   "local": true,
+  "floating": null,
   "hopper": null,
+  "todo_items": [
+    {
+      "id": "4b1a0c7e-2f38-4d6a-9d0b-7a1c2e3f4a5b",
+      "parent": null,
+      "text": "ship the frobnicator",
+      "done_at": null,
+      "canceled_at": null,
+      "link": {
+        "Workspace": "github-acme-widget-7"
+      },
+      "auto_checked": false
+    },
+    {
+      "id": "9c2d1e0f-3a47-4b5c-8e6d-1f2a3b4c5d6e",
+      "parent": "4b1a0c7e-2f38-4d6a-9d0b-7a1c2e3f4a5b",
+      "text": "merge #7",
+      "done_at": "2026-03-14T12:00:00Z",
+      "canceled_at": null,
+      "link": {
+        "Task": {
+          "source": "github",
+          "key": "acme/widget#7"
+        }
+      },
+      "auto_checked": true
+    }
+  ],
   "linked_checkout": "/home/dev/code/acme/widget",
   "name": "Add the frobnicator",
   "branch": "feat/frobnicator",

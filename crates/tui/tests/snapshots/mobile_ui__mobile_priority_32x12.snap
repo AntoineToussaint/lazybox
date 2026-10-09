@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: priority
+---
+Ctrl-T Sessions | phone         
+Priority j/k move   │           
+● a phone · codex   │           
+! b phone · codex   │           
+✓ c phone · codex   │           
+Move phone          │           
+Enter move Esc back │           
+                                
+                                
+                                
+                                
+Pick position · Esc cancel

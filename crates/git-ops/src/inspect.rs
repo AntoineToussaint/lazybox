@@ -82,6 +82,114 @@ impl OrphanReason {
 /// checkout without losing anything.
 pub const BUILD_DIR: &str = "target";
 
+/// Every top-level directory a checkout can carry whose contents a tool
+/// regenerates from the sources already committed beside it — build
+/// output and installed dependencies.
+///
+/// Inclusion rule: one documented command run inside the checkout
+/// (`cargo build`, `npm install`, `python -m venv`) recreates the whole
+/// directory from what is already tracked, so losing it costs CPU time
+/// and never costs work. That is what lets a delete gate look past one.
+/// A directory that can hold hand-written source — `src/`, `docs/`,
+/// `vendor/` — never qualifies however routinely a build also writes
+/// into it: when in doubt, leave it off and the checkout keeps blocking.
+pub const BUILD_OUTPUT_DIRS: &[&str] = &[
+    BUILD_DIR,      // cargo, gradle, maven-ish
+    "node_modules", // npm / yarn / pnpm
+    "dist",         // bundlers, python sdists/wheels
+    "build",        // cmake, gradle, setuptools
+    ".venv",        // python virtualenv (conventional name)
+    "venv",         // python virtualenv (the other conventional name)
+    "__pycache__",  // python bytecode
+    ".next",        // Next.js
+    ".turbo",       // Turborepo
+];
+
+/// How dirty a checkout is, split by what losing the dirt would cost.
+///
+/// `git status --porcelain` collapses everything into one yes/no, which
+/// is why a checkout carrying nothing but an untracked `target/` read
+/// as "the user has work here" and could never be deleted (#1866). The
+/// split is made here, next to the probe and the
+/// [`BUILD_OUTPUT_DIRS`] vocabulary, rather than by matching status
+/// prose in a consumer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirtyState {
+    /// `git status --porcelain` reported at least one entry — the exact
+    /// question the old boolean answered, unchanged.
+    pub any: bool,
+    /// At least one entry touches a **tracked** path: staged, unstaged,
+    /// renamed, deleted or conflicted. Work only the user can rescue.
+    pub tracked_changes: bool,
+    /// At least one **untracked** entry that is not recognized build
+    /// output — a new file nobody has committed yet, which is work.
+    pub untracked_work: bool,
+    /// At least one untracked top-level [`BUILD_OUTPUT_DIRS`] directory.
+    pub untracked_build_output: bool,
+}
+
+impl DirtyState {
+    /// The checkout is dirty, and every entry making it dirty is
+    /// regenerable build output. Fails closed: an unparsable status line
+    /// lands in `tracked_changes`, and a dirty state with no recognized
+    /// build directory in it is never "only build output".
+    pub fn is_only_build_output(&self) -> bool {
+        self.untracked_build_output && !self.tracked_changes && !self.untracked_work
+    }
+}
+
+/// Whether one `git status --porcelain` untracked path is a whole
+/// top-level [`BUILD_OUTPUT_DIRS`] directory.
+///
+/// Porcelain v1 collapses a wholly-untracked directory into a single
+/// `name/` entry, so the test is that the entry is *exactly* a listed
+/// name plus its trailing slash. `src/target.rs`, a plain file named
+/// `dist`, and `target/foo` all fail it — git only reports the last
+/// shape when part of `target/` is already tracked, and a directory
+/// holding tracked files is content, not output.
+fn is_build_output_entry(path: &str) -> bool {
+    let Some(dir) = path.strip_suffix('/') else {
+        return false;
+    };
+    BUILD_OUTPUT_DIRS.contains(&dir)
+}
+
+/// Classify `git status --porcelain` output (v1, `-unormal`, no
+/// `--ignored`). `any` mirrors the raw "is there any output at all"
+/// test byte for byte so the classification can never disagree with it.
+fn classify_status(stdout: &[u8]) -> DirtyState {
+    let mut state = DirtyState {
+        any: !stdout.is_empty(),
+        ..DirtyState::default()
+    };
+    for line in String::from_utf8_lossy(stdout).lines() {
+        if line.is_empty() {
+            continue;
+        }
+        // `XY PATH`: two status columns, a space, then the path. A line
+        // too short or split mid-character is unparsable — count it as a
+        // tracked change so an odd status can only ever block a delete.
+        let (Some(code), Some(path)) = (line.get(..3), line.get(3..)) else {
+            state.tracked_changes = true;
+            continue;
+        };
+        match code {
+            "?? " => {
+                if is_build_output_entry(path) {
+                    state.untracked_build_output = true;
+                } else {
+                    state.untracked_work = true;
+                }
+            }
+            // Only emitted under `--ignored`, which this probe never
+            // passes; ignored paths are not dirt either way.
+            "!! " => {}
+            _ => state.tracked_changes = true,
+        }
+    }
+    state
+}
+
 /// Directory name of a repo's shared main checkout, `<base>/<scope>/_main`.
 /// Every workspace on the repo shares it, so no session owns it: the
 /// inspector never classes it as untracked or session-stopped debris. The
@@ -127,8 +235,24 @@ pub struct WorktreeInspection {
     /// itself when the walk found nothing. `None` for vanished dirs
     /// (prunable entries).
     pub last_modified: Option<SystemTime>,
-    /// `git status --porcelain` reported at least one entry.
+    /// `git status --porcelain` reported at least one entry. Says
+    /// nothing about what the entries *are*: an untracked `target/`
+    /// sets this exactly as a half-written source file does. Callers
+    /// deciding whether a checkout holds rescuable work want
+    /// [`Self::has_tracked_modifications`] /
+    /// [`Self::has_untracked_work`] instead.
     pub has_uncommitted_changes: bool,
+    /// A **tracked** path is modified — staged, unstaged, renamed,
+    /// deleted or conflicted. Work only the user can rescue.
+    pub has_tracked_modifications: bool,
+    /// An **untracked** entry that is not recognized build output — a
+    /// file nobody has committed yet. Also work only the user can
+    /// rescue, and the reason a new source file still blocks a delete.
+    pub has_untracked_work: bool,
+    /// An untracked top-level [`BUILD_OUTPUT_DIRS`] directory is
+    /// present. On its own this is not work: the next build recreates
+    /// it (see [`Self::is_dirty_only_with_build_output`]).
+    pub has_untracked_build_output: bool,
     /// `git status --porcelain` completed successfully. A `false` value is
     /// distinct from a verified-clean checkout: destructive preflights must
     /// preserve the worktree when cleanliness could not be established.
@@ -152,6 +276,30 @@ impl WorktreeInspection {
     /// directory.
     pub fn has_reapable_reason(&self) -> bool {
         self.reasons.iter().any(is_reapable_reason)
+    }
+
+    /// The checkout is dirty, and every entry making it dirty is an
+    /// untracked [`BUILD_OUTPUT_DIRS`] directory — a `target/` the next
+    /// `cargo build` recreates, a `node_modules/` the next `npm
+    /// install` does. Nothing here is work, so a delete the user asked
+    /// for must not be refused over it (#1866).
+    ///
+    /// Note what this deliberately does NOT require: that the repo
+    /// gitignores the directory. An ignored `target/` never reaches
+    /// `git status` at all, so requiring the ignore would fix only the
+    /// checkouts that were never stuck. The reported case is precisely
+    /// a repo that forgot the ignore — gitignore is a confirming
+    /// signal here, never the qualifying one. [`WorktreeManager::reclaim_build_dir`]
+    /// answers a *different* question and does require it: it deletes
+    /// `target/` out of a checkout that survives, so "is this directory
+    /// content the repo means to keep?" is git's call, and an unignored
+    /// path might be about to be committed. Here the whole checkout is
+    /// going away by the user's own instruction, so the only question
+    /// is whether anything in it is irreplaceable.
+    pub fn is_dirty_only_with_build_output(&self) -> bool {
+        self.has_untracked_build_output
+            && !self.has_tracked_modifications
+            && !self.has_untracked_work
     }
 }
 
@@ -495,6 +643,9 @@ impl WorktreeManager {
                 build_bytes: 0,
                 last_modified: None,
                 has_uncommitted_changes: false,
+                has_tracked_modifications: false,
+                has_untracked_work: false,
+                has_untracked_build_output: false,
                 status_verified: false,
                 has_unpushed_commits: false,
                 is_safe_to_delete: true,
@@ -565,6 +716,9 @@ impl WorktreeManager {
                     build_bytes: 0,
                     last_modified: None,
                     has_uncommitted_changes: false,
+                    has_tracked_modifications: false,
+                    has_untracked_work: false,
+                    has_untracked_build_output: false,
                     status_verified: false,
                     has_unpushed_commits: false,
                     is_safe_to_delete: true,
@@ -577,9 +731,11 @@ impl WorktreeManager {
 
     /// Delete a worktree the inspector flagged. A non-force call treats the
     /// inspection as advisory and freshly re-checks locked, dirty, and
-    /// unpushed state under the repo lock before removal. `force` remains an
-    /// explicit administrative override for the orphan-cleanup UI; workspace
-    /// lifecycle deletion never uses it.
+    /// unpushed state under the repo lock before removal. `force` is an
+    /// explicit administrative override: the orphan-cleanup UI, and a
+    /// workspace-lifecycle removal the user confirmed as a wipe after being
+    /// shown the exact work it destroys. Routine lifecycle deletion does not
+    /// use it.
     pub async fn delete_inspected(
         &self,
         inspection: &WorktreeInspection,
@@ -611,7 +767,10 @@ impl WorktreeManager {
                     inspection.path.display()
                 )));
             }
-            if inspection.has_uncommitted_changes {
+            // An untracked `target/` is not "uncommitted changes" to
+            // refuse over — the next build recreates it (#1866). Advisory
+            // either way: the in-lock re-probe below is the authority.
+            if inspection.has_uncommitted_changes && !inspection.is_dirty_only_with_build_output() {
                 return Err(GitError::Command(format!(
                     "worktree {} has uncommitted changes — pass force to override",
                     inspection.path.display()
@@ -697,12 +856,20 @@ impl WorktreeManager {
                 inspection.path.display()
             )));
         }
-        if uncommitted(self.git_runner(), &inspection.path).await != Some(false) {
-            return Err(GitError::Command(format!(
-                "worktree {} has uncommitted or unverifiable changes — refusing to delete",
-                inspection.path.display()
-            )));
-        }
+        // Fresh, in-lock classification of the dirt. Clean removes as
+        // before; dirty ONLY with untracked build output removes too,
+        // because nothing there is work (#1866); anything else — or a
+        // status we could not read at all — is preserved.
+        let build_output_only = match dirty_state(self.git_runner(), &inspection.path).await {
+            Some(state) if !state.any => false,
+            Some(state) if state.is_only_build_output() => true,
+            _ => {
+                return Err(GitError::Command(format!(
+                    "worktree {} has uncommitted or unverifiable changes — refusing to delete",
+                    inspection.path.display()
+                )));
+            }
+        };
         if unpushed(
             self.git_runner(),
             &inspection.path,
@@ -717,12 +884,20 @@ impl WorktreeManager {
             )));
         }
 
-        crate::run_git_in(
-            self.git_runner(),
-            bare,
-            &["worktree", "remove", &inspection.path.to_string_lossy()],
-        )
-        .await?;
+        // `git worktree remove` runs its own dirty check and refuses on
+        // ANY untracked file, ignored ones excepted — which is why the
+        // unignored `target/` case needs `--force` here even though the
+        // probe above just proved the checkout holds no work. This is
+        // the one thing `--force` buys: it is reached only on the
+        // build-output-only branch, under the repo lock, immediately
+        // after a fresh classification.
+        let mut args = vec!["worktree", "remove"];
+        if build_output_only {
+            args.push("--force");
+        }
+        let path = inspection.path.to_string_lossy();
+        args.push(path.as_ref());
+        crate::run_git_in(self.git_runner(), bare, &args).await?;
 
         // `git worktree remove` only drops the working tree — the
         // `refs/heads/<branch>` ref survives. Now that the worktree is
@@ -1161,7 +1336,7 @@ async fn inspect_one(
         async {
             if crate::worktree_dir_ready(path).await {
                 tokio::join!(
-                    uncommitted(git, path),
+                    dirty_state(git, path),
                     unpushed(git, path, bare_path.as_deref(), branch.as_deref())
                 )
             } else {
@@ -1170,7 +1345,8 @@ async fn inspect_one(
         },
     );
     let (size_bytes, build_bytes, last_modified) = size_pair;
-    let has_uncommitted_changes = uncommitted_state.unwrap_or(false);
+    let dirty = uncommitted_state.unwrap_or_default();
+    let has_uncommitted_changes = dirty.any;
 
     // Branch-existence reasons only fire when we knew the branch +
     // bare in the first place; otherwise the lookups defaulted to
@@ -1197,7 +1373,7 @@ async fn inspect_one(
     }
 
     let is_safe_to_delete = !locked
-        && uncommitted_state == Some(false)
+        && uncommitted_state.is_some_and(|state| !state.any)
         && !has_unpushed_commits
         && reasons.iter().any(is_reapable_reason);
 
@@ -1211,6 +1387,9 @@ async fn inspect_one(
         build_bytes,
         last_modified,
         has_uncommitted_changes,
+        has_tracked_modifications: dirty.tracked_changes,
+        has_untracked_work: dirty.untracked_work,
+        has_untracked_build_output: dirty.untracked_build_output,
         status_verified: uncommitted_state.is_some(),
         has_unpushed_commits,
         is_safe_to_delete,
@@ -1328,6 +1507,146 @@ pub async fn worktree_is_pristine(
 /// bounded diff includes them without mutating the checkout's real index.
 pub async fn inspect_worktree_diff(worktree: &Path) -> Result<WorktreeDiff, GitError> {
     inspect_worktree_diff_with(default_git_runner(), worktree).await
+}
+
+/// How a checkout stands against one reference commit — the drift that
+/// makes a diff on screen a different document from the one being
+/// merged.
+///
+/// Each field carries exactly one fact and says when it has none.
+/// Folding "the probe failed" into "the probe answered zero" is what
+/// makes a drift warning worse than no warning at all: an unreadable
+/// checkout reported as clean, and an unfetched commit reported as
+/// unrelated history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckoutDivergence {
+    /// Paths `git status --porcelain` reports as changed, or `None`
+    /// when it could not answer — never `Some(0)` for a checkout that
+    /// was not read.
+    pub dirty_files: Option<usize>,
+    pub commits: CommitComparison,
+}
+
+impl CheckoutDivergence {
+    /// Nothing could be read about this checkout, so nothing true can
+    /// be said about it.
+    pub fn is_unknown(&self) -> bool {
+        self.dirty_files.is_none() && self.commits == CommitComparison::Unknown
+    }
+}
+
+/// Where the checkout's `HEAD` stands relative to the reference commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitComparison {
+    /// Both revisions resolved and were counted.
+    Counted {
+        local_only: u32,
+        reference_only: u32,
+    },
+    /// The checkout is readable but the reference commit is not in it —
+    /// never fetched, or genuinely unrelated history. Distinct from a
+    /// zero count, and distinct from a failed probe.
+    ReferenceAbsent,
+    /// The comparison could not be made at all.
+    Unknown,
+}
+
+/// Compare the checkout against `reference` (any revision — typically a
+/// pull request's head SHA).
+///
+/// Best-effort by design: this annotates a diff that has already been
+/// produced, so a checkout that is gone or a commit that was never
+/// fetched reports *that*, rather than failing or inventing a zero.
+pub async fn checkout_divergence(worktree: &Path, reference: &str) -> CheckoutDivergence {
+    checkout_divergence_with(default_git_runner(), worktree, reference).await
+}
+
+async fn checkout_divergence_with(
+    git: &dyn GitRunner,
+    worktree: &Path,
+    reference: &str,
+) -> CheckoutDivergence {
+    let dirty_files = git
+        .run(Some(worktree), &["status", "--porcelain"], &[])
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+        });
+    // `cat-file` failing means "that commit is not here" only once the
+    // checkout is known readable — every probe fails against a
+    // directory that is gone, and reading that as a missing *commit*
+    // blames a checkout for something it cannot be guilty of.
+    let commits = if dirty_files.is_none() {
+        CommitComparison::Unknown
+    } else if !commit_present(git, worktree, reference).await {
+        // Split before counting so "you have not fetched this commit"
+        // never masquerades as "your history is unrelated" — the first
+        // is the everyday case when reviewing someone else's branch.
+        CommitComparison::ReferenceAbsent
+    } else {
+        match rev_list_left_right(git, worktree, reference).await {
+            Some((local_only, reference_only)) => CommitComparison::Counted {
+                local_only,
+                reference_only,
+            },
+            None => CommitComparison::Unknown,
+        }
+    };
+    CheckoutDivergence {
+        dirty_files,
+        commits,
+    }
+}
+
+/// Does the checkout hold `reference` as a commit? `git cat-file -e`
+/// answers without walking history, and separates "not fetched" from
+/// "not a repository": both fail, but only the first has a readable
+/// `git status` beside it.
+async fn commit_present(git: &dyn GitRunner, worktree: &Path, reference: &str) -> bool {
+    git.run(
+        Some(worktree),
+        &["cat-file", "-e", &format!("{reference}^{{commit}}")],
+        &[],
+    )
+    .await
+    .map(|output| output.status.success())
+    .unwrap_or(false)
+}
+
+/// `git rev-list --left-right --count <reference>...HEAD`, which answers
+/// both directions in one process. `None` when either side does not
+/// resolve — an unborn `HEAD`, say.
+async fn rev_list_left_right(
+    git: &dyn GitRunner,
+    worktree: &Path,
+    reference: &str,
+) -> Option<(u32, u32)> {
+    let output = git
+        .run(
+            Some(worktree),
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{reference}...HEAD"),
+            ],
+            &[],
+        )
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut counts = text.split_whitespace();
+    let reference_only = counts.next()?.parse().ok()?;
+    let local_only = counts.next()?.parse().ok()?;
+    Some((local_only, reference_only))
 }
 
 const DIFF_STATUS_BYTES: usize = 512 * 1024;
@@ -1516,6 +1835,78 @@ fn parse_status_porcelain(bytes: &[u8]) -> Vec<String> {
     rows
 }
 
+/// Parse the hunks of ONE file's patch — the `@@`-and-lines shape a
+/// forge serves per file, with no `diff --git` preamble.
+///
+/// This is the entry point for a caller that already knows the file's
+/// paths and status as structured data. Assembling a `diff --git`
+/// document just to re-parse those fields back out cannot add
+/// information and can lose it: git quotes a path containing a tab or a
+/// newline, and a caller writing the marker lines by hand does not.
+pub fn parse_diff_hunks(patch: &str) -> Vec<DiffHunk> {
+    let mut hunks = Vec::new();
+    let mut hunk: Option<DiffHunk> = None;
+    let mut old_line = 0u32;
+    let mut new_line = 0u32;
+    for line in patch.lines() {
+        if line.starts_with("@@ ") {
+            if let Some(previous) = hunk.take() {
+                hunks.push(previous);
+            }
+            let (parsed_old, parsed_new) = parse_hunk_starts(line);
+            old_line = parsed_old;
+            new_line = parsed_new;
+            hunk = Some(DiffHunk {
+                header: line.to_string(),
+                old_start: old_line,
+                new_start: new_line,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(current) = hunk.as_mut() {
+            current
+                .lines
+                .push(hunk_line(line, &mut old_line, &mut new_line));
+        }
+    }
+    if let Some(hunk) = hunk {
+        hunks.push(hunk);
+    }
+    hunks
+}
+
+/// Classify one line inside a hunk and advance the side counters it
+/// consumes.
+fn hunk_line(line: &str, old_line: &mut u32, new_line: &mut u32) -> DiffLine {
+    let (kind, old, new) = match line.as_bytes().first() {
+        Some(b'+') => {
+            let current = *new_line;
+            *new_line = new_line.saturating_add(1);
+            (DiffLineKind::Addition, None, Some(current))
+        }
+        Some(b'-') => {
+            let current = *old_line;
+            *old_line = old_line.saturating_add(1);
+            (DiffLineKind::Deletion, Some(current), None)
+        }
+        Some(b' ') => {
+            let old = *old_line;
+            let new = *new_line;
+            *old_line = old_line.saturating_add(1);
+            *new_line = new_line.saturating_add(1);
+            (DiffLineKind::Context, Some(old), Some(new))
+        }
+        _ => (DiffLineKind::Meta, None, None),
+    };
+    DiffLine {
+        kind,
+        text: line.to_string(),
+        old_line: old,
+        new_line: new,
+    }
+}
+
 fn parse_unified_diff(source: &str) -> Vec<DiffFile> {
     let mut files = Vec::new();
     let mut file: Option<DiffFile> = None;
@@ -1555,32 +1946,9 @@ fn parse_unified_diff(source: &str) -> Vec<DiffFile> {
             continue;
         }
         if let Some(current_hunk) = hunk.as_mut() {
-            let (kind, old, new) = match line.as_bytes().first() {
-                Some(b'+') => {
-                    let current = new_line;
-                    new_line = new_line.saturating_add(1);
-                    (DiffLineKind::Addition, None, Some(current))
-                }
-                Some(b'-') => {
-                    let current = old_line;
-                    old_line = old_line.saturating_add(1);
-                    (DiffLineKind::Deletion, Some(current), None)
-                }
-                Some(b' ') => {
-                    let old = old_line;
-                    let new = new_line;
-                    old_line = old_line.saturating_add(1);
-                    new_line = new_line.saturating_add(1);
-                    (DiffLineKind::Context, Some(old), Some(new))
-                }
-                _ => (DiffLineKind::Meta, None, None),
-            };
-            current_hunk.lines.push(DiffLine {
-                kind,
-                text: line.to_string(),
-                old_line: old,
-                new_line: new,
-            });
+            current_hunk
+                .lines
+                .push(hunk_line(line, &mut old_line, &mut new_line));
             continue;
         }
 
@@ -1755,12 +2123,22 @@ async fn directory_has_real_content(path: &Path) -> bool {
     }
 }
 
-async fn uncommitted(git: &dyn GitRunner, worktree: &Path) -> Option<bool> {
+/// `git status --porcelain` in `worktree`, classified by what losing
+/// the dirt would cost. `None` when the probe could not run or git
+/// failed — never "clean" (see `status_verified`).
+async fn dirty_state(git: &dyn GitRunner, worktree: &Path) -> Option<DirtyState> {
     let output = git
         .run(Some(worktree), &["status", "--porcelain"], &[])
         .await
         .ok()?;
-    output.status.success().then_some(!output.stdout.is_empty())
+    output
+        .status
+        .success()
+        .then(|| classify_status(&output.stdout))
+}
+
+async fn uncommitted(git: &dyn GitRunner, worktree: &Path) -> Option<bool> {
+    dirty_state(git, worktree).await.map(|state| state.any)
 }
 
 /// `git rev-list --count <range>` in `worktree`. `None` when the
@@ -1792,10 +2170,18 @@ async fn rev_list_count(git: &dyn GitRunner, worktree: &Path, range: &str) -> Op
 ///    own remote ref is immune — and when tracking IS the branch's own
 ///    counterpart (the PR shape `checkout_at` records), `@{u}` maps
 ///    through the refspec to this very ref, so the two tiers agree.
-/// 2. [`branch_tip_on_remote`] — the branch's remote ref is gone, but
-///    the tip is reachable from *some* remote-tracking ref, proving the
-///    commits reached the remote (merged + branch auto-deleted
-///    upstream): pushed.
+///    Being *ahead* of that ref is not the same as being absent from
+///    the remote, so an ahead count falls through to tier 2 rather than
+///    concluding: see [`branch_tip_on_remote`].
+/// 2. [`branch_tip_on_remote`] — the tip is reachable from *some*
+///    remote-tracking ref, proving the commits reached the remote:
+///    pushed. Two shapes need it. The branch's remote ref is gone
+///    (merged + branch auto-deleted upstream), or the branch's remote
+///    ref still exists and was simply never advanced — the PR was
+///    merged into `main` and `origin/<branch>` stayed where it was, so
+///    tier 1 counts the merge commit as ahead although `origin/main`
+///    already contains it. That second shape reported such a checkout
+///    unpushed forever, with no state change that could ever clear it.
 /// 3. `@{u}..HEAD` — the configured upstream, for worktrees whose
 ///    branch the caller doesn't know (detached HEAD, callers without a
 ///    branch column). Needs the bare clone's `remote.origin.fetch`
@@ -1824,7 +2210,22 @@ async fn unpushed(
         let remote_ref = format!("refs/remotes/origin/{branch}");
         if ref_exists(git, bare, &remote_ref).await {
             if let Some(n) = rev_list_count(git, worktree, &format!("{remote_ref}..HEAD")).await {
-                return n > 0;
+                if n == 0 {
+                    return false;
+                }
+                // Ahead of its own remote ref — but that ref is not the
+                // only place the remote keeps these commits. A PR merged
+                // into `main` leaves `origin/<branch>` exactly where it
+                // was while `origin/main` grows to contain the tip; the
+                // count above is then positive forever, and no commit,
+                // stash or push the user could perform would change it.
+                // `--contains` answers the question that actually
+                // matters: is this tip an ancestor of anything the
+                // remote has? Only a "no" is unpushed. The probe is the
+                // same one tier 2 already trusts for the same
+                // conclusion, and it runs only on the ahead path — the
+                // one that was about to refuse.
+                return !branch_tip_on_remote(git, bare, branch).await;
             }
         } else if branch_tip_on_remote(git, bare, branch).await {
             return false;
@@ -1869,8 +2270,14 @@ async fn branch_has_upstream_config(git: &dyn GitRunner, bare: &Path, branch: &s
 
 /// Whether the branch tip is reachable from ANY remote-tracking ref —
 /// i.e. its commits made it to the remote at some point (covers
-/// worktrees created before upstream config was recorded, as long as
-/// the merge wasn't a squash).
+/// worktrees created before upstream config was recorded, and merges
+/// the branch's own remote ref never took, as long as the merge wasn't
+/// a squash).
+///
+/// A non-empty answer is proof, not a heuristic: `--contains` lists a
+/// remote-tracking ref only when the tip is an ancestor of it, and a
+/// remote-tracking ref mirrors what the remote holds. Everything
+/// reachable from the tip is therefore on the remote.
 async fn branch_tip_on_remote(git: &dyn GitRunner, bare: &Path, branch: &str) -> bool {
     let Ok(output) = git
         .run(
@@ -1947,6 +2354,91 @@ fn walk_sync(root: &Path, skip: Option<&Path>) -> (u64, Option<SystemTime>) {
 
 fn canonical_or_self(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Unit coverage for the `git status --porcelain` classifier (#1866).
+/// Pure string work, so no fixture, no git, no unix gate.
+#[cfg(test)]
+mod dirty_classification_tests {
+    use super::*;
+
+    #[test]
+    fn an_untracked_build_dir_is_not_work() {
+        let state = classify_status(b"?? target/\n");
+        assert!(state.any);
+        assert!(state.untracked_build_output);
+        assert!(!state.tracked_changes);
+        assert!(!state.untracked_work);
+        assert!(state.is_only_build_output());
+    }
+
+    #[test]
+    fn every_recognized_build_dir_classifies_the_same_way() {
+        for dir in BUILD_OUTPUT_DIRS {
+            let line = format!("?? {dir}/\n");
+            let state = classify_status(line.as_bytes());
+            assert!(
+                state.is_only_build_output(),
+                "{dir}/ must read as regenerable output, got {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_source_file_beside_build_output_is_still_work() {
+        let state = classify_status(b"?? notes.md\n?? target/\n");
+        assert!(state.untracked_work);
+        assert!(state.untracked_build_output);
+        assert!(!state.is_only_build_output());
+    }
+
+    #[test]
+    fn a_modified_tracked_file_is_work() {
+        for line in [
+            " M src/lib.rs",
+            "M  src/lib.rs",
+            "A  new.rs",
+            "UU merged.rs",
+        ] {
+            let state = classify_status(format!("{line}\n?? target/\n").as_bytes());
+            assert!(state.tracked_changes, "{line} must read as tracked work");
+            assert!(!state.is_only_build_output(), "{line}");
+        }
+    }
+
+    #[test]
+    fn only_a_whole_top_level_directory_counts_as_build_output() {
+        // A source file merely NAMED after a build dir, a plain file
+        // called `dist`, a nested build dir, and an entry inside a
+        // partly-tracked `target/` are all work.
+        for path in [
+            "src/target.rs",
+            "dist",
+            "crates/core/target/",
+            "target/debug/thing",
+            "\"target/\"",
+        ] {
+            let state = classify_status(format!("?? {path}\n").as_bytes());
+            assert!(
+                state.untracked_work && !state.is_only_build_output(),
+                "{path} must not read as regenerable output, got {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clean_status_is_not_dirty_at_all() {
+        let state = classify_status(b"");
+        assert_eq!(state, DirtyState::default());
+        assert!(!state.is_only_build_output());
+    }
+
+    #[test]
+    fn an_unparsable_line_fails_closed_onto_tracked_work() {
+        let state = classify_status(b"??\n");
+        assert!(state.tracked_changes);
+        assert!(!state.is_only_build_output());
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -2164,6 +2656,130 @@ mod tests {
         assert!(!inspections[0].status_verified);
         assert!(!inspections[0].is_safe_to_delete);
         assert!(!worktree_is_pristine_with(git.as_ref(), &worktree, Some(&bare), None).await);
+    }
+
+    /// The divergence notice is only as good as this probe: a reviewer
+    /// reading the PR diff needs to know their checkout carries work
+    /// the PR does not, and vice versa.
+    #[tokio::test]
+    async fn checkout_divergence_counts_both_directions_and_dirty_files() {
+        fn git(repo: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(repo)
+                .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        fn head(repo: &Path) -> String {
+            let output = std::process::Command::new("git")
+                .current_dir(repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("rev-parse");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-q"]);
+        git(tmp.path(), &["config", "user.name", "Lazybox Test"]);
+        git(
+            tmp.path(),
+            &["config", "user.email", "lazybox@example.invalid"],
+        );
+        std::fs::write(tmp.path().join("a.txt"), "one\n").expect("seed");
+        git(tmp.path(), &["add", "a.txt"]);
+        git(tmp.path(), &["commit", "-qm", "seed"]);
+        let base = head(tmp.path());
+
+        // The commit that stands in for the pull request's head.
+        git(tmp.path(), &["checkout", "-q", "-b", "pr"]);
+        std::fs::write(tmp.path().join("b.txt"), "pr\n").expect("pr file");
+        git(tmp.path(), &["add", "b.txt"]);
+        git(tmp.path(), &["commit", "-qm", "on the PR"]);
+        let pr_head = head(tmp.path());
+
+        // The checkout: one commit of its own off the shared base, plus
+        // an uncommitted edit.
+        git(tmp.path(), &["checkout", "-q", &base]);
+        git(tmp.path(), &["checkout", "-q", "-b", "local"]);
+        std::fs::write(tmp.path().join("c.txt"), "local\n").expect("local file");
+        git(tmp.path(), &["add", "c.txt"]);
+        git(tmp.path(), &["commit", "-qm", "only here"]);
+        std::fs::write(tmp.path().join("a.txt"), "edited\n").expect("dirty edit");
+
+        let divergence = checkout_divergence(tmp.path(), &pr_head).await;
+        assert_eq!(
+            divergence.commits,
+            CommitComparison::Counted {
+                local_only: 1,
+                reference_only: 1,
+            }
+        );
+        assert_eq!(divergence.dirty_files, Some(1));
+
+        // A checkout sitting exactly on the PR's head with nothing
+        // uncommitted has not diverged — and must not be told it has.
+        git(tmp.path(), &["checkout", "-q", "--", "a.txt"]);
+        git(tmp.path(), &["checkout", "-q", "pr"]);
+        let in_sync = checkout_divergence(tmp.path(), &pr_head).await;
+        assert_eq!(
+            in_sync.commits,
+            CommitComparison::Counted {
+                local_only: 0,
+                reference_only: 0,
+            }
+        );
+        assert_eq!(in_sync.dirty_files, Some(0));
+    }
+
+    /// A PR head the checkout has never fetched is the ordinary case
+    /// when reviewing someone else's branch. It must read as
+    /// "reference absent" — never as a zero count (which claims the
+    /// checkout is in sync) and never as an unreadable checkout
+    /// (which would suppress the notice that says to fetch).
+    #[tokio::test]
+    async fn an_unfetched_reference_is_absent_not_zero() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::process::Command::new("git")
+            .current_dir(tmp.path())
+            .args(["init", "-q"])
+            .output()
+            .expect("init");
+
+        let divergence =
+            checkout_divergence(tmp.path(), "0000000000000000000000000000000000000000").await;
+        assert_eq!(divergence.commits, CommitComparison::ReferenceAbsent);
+        assert_eq!(
+            divergence.dirty_files,
+            Some(0),
+            "the checkout itself was readable"
+        );
+        assert!(!divergence.is_unknown());
+    }
+
+    /// A checkout that is gone — deleted by hand, or a `.git` pointing
+    /// at a pruned bare clone — must report that it could not be read.
+    ///
+    /// Reporting zero dirty files for it told the reviewer the
+    /// worktree was clean, and reporting "no counts" alongside made the
+    /// viewer accuse an absent checkout of unrelated history. Both
+    /// claims were invented from two probes that simply failed.
+    #[tokio::test]
+    async fn an_unreadable_checkout_claims_nothing_about_itself() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gone = tmp.path().join("never-existed");
+
+        let divergence = checkout_divergence(&gone, "HEAD").await;
+        assert_eq!(divergence.dirty_files, None, "never Some(0) — not read");
+        assert_eq!(divergence.commits, CommitComparison::Unknown);
+        assert!(divergence.is_unknown());
     }
 
     #[tokio::test]

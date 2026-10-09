@@ -4,6 +4,8 @@
 //! GitHub, Linear, or any specific provider.
 
 pub mod agent;
+pub mod agent_policy;
+pub mod artifact;
 pub mod autofix;
 pub mod branch_namespace;
 pub mod branch_template;
@@ -22,6 +24,7 @@ pub mod project;
 pub mod prompts;
 pub mod provider;
 pub mod provider_ops;
+pub mod review;
 pub mod scope;
 mod session_key;
 pub mod slug;
@@ -30,9 +33,16 @@ mod task;
 pub mod task_record;
 pub mod task_ref;
 pub mod time;
+pub mod work;
+mod working_claim;
 mod workspace;
 
 pub use agent::{AgentConfig, AgentModels, CapabilityAliases, ModelChoice, ModelTier};
+pub use agent_policy::{AgentPolicies, AgentPolicy, AgentPolicyOverride, AgentPolicyOverrides};
+pub use artifact::{
+    ARTIFACT_EXTENSION, ARTIFACT_MAX_BYTES, ARTIFACT_MAX_PER_WORKSPACE, ARTIFACT_MAX_TOTAL_BYTES,
+    ARTIFACT_SPOOL_RELATIVE_PATH, Artifact, artifact_document,
+};
 pub use autofix::{
     AutoFixKind, AutoFixSettings, auto_fix_candidate, auto_fix_enabled_and_permitted,
     evaluate_auto_fix, is_auto_fix_opted_out, resolve_auto_fix,
@@ -76,6 +86,12 @@ pub use provider_ops::{
     DesiredFields, FailureClass, MutationField, OpEffect, OpEvent, OpPhase, OperationId,
     PendingMutation, ProviderOps, StateWrite,
 };
+pub use review::{
+    ArtifactStatus, Disposition, FileAnchor, Finding, FindingInput, FindingOutcome, Freshness,
+    OutcomeInput, REVIEW_SCHEMA_VERSION, ReportSelection, ResultIngest, ReviewArtifact,
+    ReviewIngest, ReviewOrigin, ReviewResult, ReviewResultSubmission, ReviewScope,
+    ReviewSubmission, Severity, select_report,
+};
 pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};
 pub use session_key::SessionKey;
 pub use stack::{StackPosition, detect_stacks};
@@ -85,12 +101,13 @@ pub use task_record::{
     RECORD_LIST_BODY_PREVIEW_BYTES, RecordComment, RecordKind, TASK_FILE_RELATIVE_PATH, TaskRecord,
     WORKSPACE_RECORD_FILE_SCHEMA, WorkspaceRecordFile, sub_issue_ids,
 };
+pub use working_claim::{WORKING_CLAIM_COMMENT_MARKER, WorkingClaimNote};
 pub use workspace::{
-    CleanupPrompt, HopperMeta, MAX_ACTIVITY_ITEMS, ROLE_LABEL_PREFIX, Role, SENT_SNIPPETS_MAX,
-    Session as WorkspaceSession, SessionId, SessionKind, SessionLayout, SessionRunState,
-    SnippetDeliveryLog, SnoozeWake, TileDirection, TileTree, WOKE_WINDOW,
-    WORKING_CLAIM_HEARTBEAT_SECS, WORKING_CLAIM_LABEL_PREFIX, WORKING_CLAIM_TTL_SECS,
-    WORKING_LABEL_NAME, WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceDecodeError, WorkspaceKey,
-    project_key_for_task, snooze_wake_due, workspace_key_for, workspace_key_for_id,
-    workspace_project_key,
+    CleanupPrompt, FloatingWorkspaceKind, HopperMeta, MAX_ACTIVITY_ITEMS, ROLE_LABEL_PREFIX, Role,
+    SENT_SNIPPETS_MAX, Session as WorkspaceSession, SessionId, SessionKind, SessionLayout,
+    SessionRunState, SnippetDeliveryLog, SnoozeWake, TILE_RATIO_MAX, TILE_RATIO_MIN, TileAxis,
+    TileDirection, TileTree, TodoItem, TodoLink, WOKE_WINDOW, WORKING_CLAIM_HEARTBEAT_SECS,
+    WORKING_CLAIM_LABEL_PREFIX, WORKING_CLAIM_TTL_SECS, WORKING_LABEL_NAME,
+    WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceDecodeError, WorkspaceKey, project_key_for_task,
+    snooze_wake_due, workspace_key_for, workspace_key_for_id, workspace_project_key,
 };

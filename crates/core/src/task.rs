@@ -1,7 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// An owner-qualified fleet claim decoded from a GitHub label.
+/// An owner-qualified fleet claim decoded from a **legacy** GitHub label
+/// (`lazybox:w:<device>:<session>:<expiry>`).
+///
+/// lazybox no longer writes these — a claim is now the stable
+/// [`WORKING_LABEL_NAME`](crate::WORKING_LABEL_NAME) label plus a sticky
+/// comment ([`WorkingClaimNote`](crate::WorkingClaimNote)), #1922. Parsing
+/// stays so a claim held by a box on an older build is still honoured until
+/// its lease lapses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QualifiedWorkingClaim {
     pub label: String,
@@ -54,6 +61,10 @@ impl QualifiedWorkingClaim {
 /// Build the bounded GitHub label name for a box-owned claim. The stable box
 /// id is the existing 128-bit Ed25519 fingerprint; 80 bits are carried
 /// upstream, while the full id remains in the daemon's durable provenance.
+///
+/// **No longer used to claim** (#1922) — kept so the truncation that produces
+/// a holder's `(device, session)` pair has one definition shared with
+/// [`working_claim_identity`], and so the legacy shape stays testable.
 pub fn qualified_working_claim_label(
     box_id: &str,
     claim_session: uuid::Uuid,
@@ -79,6 +90,26 @@ pub fn qualified_working_claim_label(
 pub fn is_working_claim_label_name(name: &str) -> bool {
     name.eq_ignore_ascii_case(crate::WORKING_LABEL_NAME)
         || QualifiedWorkingClaim::parse(name).is_some()
+}
+
+/// The `(device, session)` pair identifying one lease, derived from the box
+/// fingerprint and the claim session exactly as
+/// [`qualified_working_claim_label`] encoded them.
+///
+/// One definition, two shapes: the sticky claim comment carries these tokens
+/// verbatim, so a holder is comparable against a legacy label and against the
+/// daemon's own claim rows without either side re-implementing the
+/// truncation.
+pub fn working_claim_identity(box_id: &str, claim_session: uuid::Uuid) -> Option<(String, String)> {
+    if box_id.len() < 20
+        || !box_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let session = claim_session.simple().to_string();
+    Some((box_id[..20].to_string(), session[..10].to_string()))
 }
 
 /// A unique identifier for a task, scoped by source.
@@ -700,12 +731,26 @@ impl Task {
 
     /// Whether this is a GitHub task carrying an active lazybox fleet claim.
     ///
+    /// This is the **free presence read** (#1922): the stable `working` label
+    /// arrives in the poll payload, so asking costs no GitHub call. It says
+    /// a claim exists, never who holds it — the holder, agent, model and
+    /// lease live in the sticky claim comment
+    /// ([`WorkingClaimNote`](crate::WorkingClaimNote)), which a caller fetches
+    /// only at a decision point.
+    ///
     /// `working` is also a legitimate workflow label in other providers
     /// (notably Linear). Centralizing the source check prevents those tasks
     /// from being rendered as agent-owned, hidden from the ordinary label
     /// chips, or guarded by the GitHub-only spawn confirmation.
     pub fn has_working_claim(&self) -> bool {
         self.has_working_claim_at(Utc::now())
+    }
+
+    /// Whether this GitHub task carries the stable `working` claim label,
+    /// ignoring legacy qualified claims. The half of
+    /// [`has_working_claim`](Self::has_working_claim) a claim comment backs.
+    pub fn has_stable_working_claim(&self) -> bool {
+        self.id.source == crate::GITHUB_SOURCE && self.has_label(crate::WORKING_LABEL_NAME)
     }
 
     pub fn has_working_claim_at(&self, now: DateTime<Utc>) -> bool {
@@ -1207,6 +1252,53 @@ mod status_tag_tests {
         assert!(
             !task.has_working_claim(),
             "a Linear workflow label is not a GitHub fleet claim"
+        );
+    }
+
+    /// Migration (#1922), on the read side. Presence must be true for the new
+    /// stable label AND for a legacy per-claim label a box on an older build
+    /// is still renewing — until that one's own expiry passes, and not after.
+    /// Dropping either half double-spawns; honouring an expired legacy label
+    /// forever blocks a task nobody is working on.
+    #[test]
+    fn presence_honours_the_stable_label_and_a_legacy_label_until_its_expiry() {
+        let now = DateTime::from_timestamp(1_790_000_000, 0).expect("fixture clock");
+        let legacy = |expires: DateTime<Utc>| {
+            crate::qualified_working_claim_label(
+                "0123456789abcdef0123456789abcdef",
+                uuid::Uuid::from_u128(7),
+                expires,
+            )
+            .expect("a well-formed box id yields a label")
+        };
+
+        let mut task = base();
+        task.id.source = crate::GITHUB_SOURCE.to_string();
+        assert!(!task.has_working_claim_at(now), "no labels, no claim");
+
+        // The stable label carries no expiry of its own — presence is binary,
+        // and the lease lives in the claim comment.
+        task.labels = vec![Label::new(crate::WORKING_LABEL_NAME)];
+        assert!(task.has_working_claim_at(now));
+        assert!(task.has_stable_working_claim());
+        assert!(
+            task.has_working_claim_at(now + chrono::Duration::days(365)),
+            "the stable label never lapses on its own; the sweep retires it"
+        );
+
+        // A legacy claim is honoured on its own expiry, and only until then.
+        task.labels = vec![Label::new(legacy(now + chrono::Duration::minutes(1)))];
+        assert!(task.has_working_claim_at(now));
+        assert!(
+            !task.has_stable_working_claim(),
+            "a legacy label is not the stable one"
+        );
+        assert!(!task.has_working_claim_at(now + chrono::Duration::minutes(2)));
+        assert_eq!(
+            task.expired_working_claim_labels(now + chrono::Duration::minutes(2))
+                .len(),
+            1,
+            "a lapsed legacy label is still offered up for cleanup"
         );
     }
 

@@ -80,6 +80,8 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// Spinner modal. `pending(label)` builds it; the producer hand
 /// resolves via [`LoadingResult::send`].
 pub struct Loading {
+    presentation: crate::realm::presentation::Presentation,
+    mobile_scroll: u16,
     title: String,
     label: String,
     spinner_idx: usize,
@@ -93,6 +95,8 @@ impl Loading {
     pub fn pending(label: impl Into<String>) -> (Self, LoadingResult) {
         let (tx, rx) = sync_channel::<LoadingPayload>(1);
         let modal = Self {
+            presentation: crate::realm::presentation::Presentation::Desktop,
+            mobile_scroll: 0,
             title: "Loading".to_string(),
             label: label.into(),
             spinner_idx: 0,
@@ -155,6 +159,21 @@ enum TakeOutcome {
 
 impl Component for Loading {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
+        if self.presentation == crate::realm::presentation::Presentation::Mobile {
+            crate::realm::presentation::render_reader(
+                frame,
+                area,
+                &self.title,
+                &format!(
+                    "{}  {}",
+                    SPINNER_FRAMES[self.spinner_idx % SPINNER_FRAMES.len()],
+                    self.label
+                ),
+                &mut self.mobile_scroll,
+                "Esc cancel",
+            );
+            return;
+        }
         let theme = crate::theme::current();
         let modal_w = 60u16.min(area.width.saturating_sub(4));
         let modal_h = 5u16;
@@ -195,7 +214,9 @@ impl Component for Loading {
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
         None
     }
-    fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.presentation.apply_attribute(attr, value);
+    }
     fn state(&self) -> State {
         State::None
     }
@@ -231,13 +252,14 @@ impl AppComponent<Msg, UserEvent> for Loading {
                     }
                     TakeOutcome::Cancelled => {
                         // Producer task died (panic, dropped sender,
-                        // etc.) — dismiss the modal so the user
-                        // isn't stuck on a forever spinner.
+                        // etc.) — dismiss the modal so the user isn't
+                        // stuck on a forever spinner, but as a FAILURE
+                        // the model announces, never as a silent Esc.
                         tracing::warn!(
                             label = %self.label,
                             "Loading modal producer dropped sender without delivering — dismissing"
                         );
-                        Some(Msg::ModalDismissed)
+                        Some(Msg::LoadingFailed)
                     }
                     TakeOutcome::Pending if self.started_at.elapsed() >= self.timeout => {
                         // The value never landed within budget — the
@@ -295,6 +317,17 @@ mod tests {
             matches!(tick(&mut modal), Some(Msg::LoadingTimedOut)),
             "a Loading modal must never spin forever — it times out and dismisses"
         );
+    }
+
+    /// A producer that dies without answering is a failure the model
+    /// announces — not `ModalDismissed`, which reads as the user's Esc and
+    /// made a Settings flow vanish without a word.
+    #[test]
+    fn a_dead_producer_is_a_failure_not_a_silent_dismissal() {
+        let (modal, result) = Loading::pending("listing orgs…");
+        drop(result);
+        let mut modal = modal;
+        assert!(matches!(tick(&mut modal), Some(Msg::LoadingFailed)));
     }
 
     #[test]

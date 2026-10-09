@@ -1536,7 +1536,7 @@ mod filter_tests {
     #[test]
     fn every_filter_has_an_axis_and_appears_in_all() {
         // ALL must list each variant exactly once; drives the menu.
-        assert_eq!(Filter::ALL.len(), 30);
+        assert_eq!(Filter::ALL.len(), 31);
         let mut seen = std::collections::BTreeSet::new();
         for f in Filter::ALL {
             assert!(seen.insert(f), "{f:?} listed twice in Filter::ALL");
@@ -2504,6 +2504,62 @@ mod search_tests {
         assert_eq!((epic.done, epic.total), (3, 9));
     }
 
+    /// The epic overview's Blocked on, Merge order and Critical path rows
+    /// each jump to their member on click — they were the rows that matter
+    /// most and the only ones with no target.
+    #[test]
+    fn epic_overview_blocker_merge_and_path_rows_are_click_targets() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("acme/api", "1", "token schema");
+        let b = issue_ws_in_repo("acme/api", "2", "consume token");
+        let (ka, kb) = (SessionKey::from(&a.key), SessionKey::from(&b.key));
+        sb.workspaces.insert(ka.clone(), a);
+        sb.workspaces.insert(kb.clone(), b);
+        let mut snap = epic_snap("auth", "Auth refactor", &[ka.as_str(), kb.as_str()]);
+        snap.members[1].blockers = vec![lazybox_ipc::Blocker {
+            kind: lazybox_ipc::BlockerKind::Decision,
+            reason: "token expiry".into(),
+            owner: lazybox_ipc::BlockerOwner::Operator,
+            since: 0,
+            holds: 0,
+        }];
+        let wk = |k: &SessionKey| lazybox_core::WorkspaceKey::new(k.as_str());
+        snap.merge_order = vec![lazybox_ipc::MergeOrderEntry {
+            key: wk(&kb),
+            held_by: vec![wk(&ka)],
+        }];
+        snap.critical_path = vec![wk(&ka), wk(&kb)];
+        sb.set_epic_snapshot(snap);
+        let epic_at = sb
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::EpicHeader(_)))
+            .expect("epic header");
+        sb.set_cursor(epic_at);
+
+        let overview = sb.header_overview().expect("overview");
+        let (lines, hits) = overview.lines(90);
+        let text = |i: usize| {
+            lines[i]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        let target_of = |needle: &str| {
+            hits.iter()
+                .find(|(i, _)| text(*i).contains(needle))
+                .map(|(_, k)| k.clone())
+        };
+        assert_eq!(target_of("token expiry"), Some(kb.clone()), "blocker row");
+        assert_eq!(
+            target_of("held behind"),
+            Some(kb.clone()),
+            "merge-order row"
+        );
+        assert_eq!(target_of("→ #2"), Some(kb), "critical-path row");
+    }
+
     /// Frame-budget regression gate (#1090, acceptance #4): the sidebar's
     /// per-frame widget build must stay cheap at scale.
     /// `prebuild_workspace_lines` rebuilds every visible row every frame
@@ -3201,6 +3257,19 @@ mod search_tests {
         );
     }
 
+    /// The today strip is a way into Stats: a click on it is a hit, a
+    /// click on the chips beside it is not.
+    #[test]
+    fn a_click_on_the_today_strip_is_a_stats_hit() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+        let row = today_row(&mut sb, 80);
+        let dollar = row.chars().position(|c| c == '$').expect("cost drawn") as u16;
+        assert!(sb.stats_hit(dollar, 1), "{row:?}");
+        assert!(!sb.stats_hit(3, 1), "the filter chip is not the strip");
+        assert!(!sb.stats_hit(dollar, 5), "another row");
+    }
+
     /// A zero cost is noise, not information — it is dropped (#1502).
     #[test]
     fn today_strip_omits_a_zero_cost() {
@@ -3643,6 +3712,101 @@ mod search_tests {
         );
     }
 
+    /// Stage 2 (#1780): the daemon's terminal-OUTPUT scan is a THIRD
+    /// corpus, appended to the prompt halves rather than overriding them.
+    /// A workspace has to stay matchable on what it was asked AND on what
+    /// it answered — shadowing either would make a query's result depend
+    /// on which half the daemon happened to reach.
+    #[test]
+    fn scanned_output_extends_the_corpus_without_shadowing_the_prompts() {
+        let asked = issue_ws_in_repo("o/a", "1", "Tidy the changelog");
+        let said = issue_ws_in_repo("o/a", "2", "Bump deps");
+        let asked_key = SessionKey::from(&asked.key);
+        let said_key = SessionKey::from(&said.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(asked_key.clone(), asked);
+        sb.workspaces.insert(said_key.clone(), said);
+        sb.set_agent_text(HashMap::from([(
+            asked_key.clone(),
+            "rewrite the parser".to_string(),
+        )]));
+        sb.recompute_visible();
+
+        let shown = |sb: &Sidebar| -> Vec<SessionKey> {
+            sb.visible
+                .iter()
+                .filter_map(|r| match r {
+                    VisibleRow::Workspace(k) => Some(k.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Before the scan lands, only the prompt corpus answers.
+        sb.open_search();
+        type_query(&mut sb, "agent:borrow");
+        assert!(shown(&sb).is_empty());
+
+        // The scan reaches a workspace whose PROMPTS never mentioned the
+        // term — the half that was unreachable before #1780 — and the row
+        // carries an excerpt of the output line that matched.
+        sb.set_agent_output_text(vec![
+            (
+                said_key.to_string(),
+                "error[E0502]: cannot borrow `self` as mutable".into(),
+            ),
+            (asked_key.to_string(), "nothing about that here".into()),
+        ]);
+        assert_eq!(shown(&sb), vec![said_key.clone()]);
+        let excerpt = sb.agent_excerpt(&said_key).expect("the hit carries a cue");
+        assert!(excerpt.contains("cannot borrow"), "{excerpt:?}");
+
+        // The prompt corpus still answers its own term: appending output
+        // must not have displaced it.
+        sb.search = None;
+        sb.recompute_visible();
+        sb.open_search();
+        type_query(&mut sb, "agent:parser");
+        assert_eq!(shown(&sb), vec![asked_key.clone()]);
+
+        // A reply is scoped to the query that asked for it, so a new scan
+        // REPLACES the previous one — including an empty reply, which is
+        // how "nothing matched" clears the last query's rows.
+        sb.set_agent_output_text(Vec::new());
+        sb.search = None;
+        sb.recompute_visible();
+        sb.open_search();
+        type_query(&mut sb, "agent:borrow");
+        assert!(
+            shown(&sb).is_empty(),
+            "an empty reply must clear the previous scan's rows"
+        );
+    }
+
+    /// The needles derived for the daemon scan come from the live query,
+    /// and an empty vec is the signal that no scan is owed (#1780).
+    #[test]
+    fn needles_are_derived_from_the_live_query() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = issue_ws_in_repo("o/a", "1", "Tidy the changelog");
+        sb.workspaces.insert(SessionKey::from(&ws.key), ws);
+        sb.recompute_visible();
+        assert!(
+            sb.agent_qualifier_needles().is_empty(),
+            "no search, no scan"
+        );
+
+        sb.open_search();
+        type_query(&mut sb, "login is:pr");
+        assert!(
+            sb.agent_qualifier_needles().is_empty(),
+            "a query with no agent term owes no scan"
+        );
+
+        type_query(&mut sb, " said:deadlock");
+        assert_eq!(sb.agent_qualifier_needles(), vec!["deadlock".to_string()]);
+    }
+
     /// The daemon re-publishes ONE workspace's corpus each time a prompt is
     /// persisted, so ingestion has to merge (#1774). Replacing would let a
     /// single incremental push wipe every other workspace's agent text and
@@ -4051,6 +4215,104 @@ mod search_tests {
         assert!(
             sb.focus_workspace_key(&key),
             "focus must find a row upserted while a batch is open"
+        );
+    }
+
+    /// A header blocker names a task, not a workspace: the lookup finds the
+    /// workspace carrying that task so a click can jump to it.
+    #[test]
+    fn workspace_key_for_task_finds_the_workspace_carrying_it() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let workspace = issue_ws("992", "Blocker");
+        let key = SessionKey::from(&workspace.key);
+        let task = workspace.gh_issues[0].id.clone();
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        assert_eq!(sb.workspace_key_for_task(&task), Some(key));
+        let elsewhere = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "x/y#1".into(),
+        };
+        assert_eq!(sb.workspace_key_for_task(&elsewhere), None);
+    }
+
+    /// The right pane strikes through a blocker that has since closed; it
+    /// learns that from whichever workspace carries the blocking task.
+    #[test]
+    fn task_state_for_reads_the_state_of_a_tracked_task() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut workspace = issue_ws("993", "Closed blocker");
+        workspace.gh_issues[0].state = lazybox_core::TaskState::Closed;
+        let task = workspace.gh_issues[0].id.clone();
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        assert_eq!(
+            sb.task_state_for(&task),
+            Some(lazybox_core::TaskState::Closed)
+        );
+        let untracked = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "x/y#1".into(),
+        };
+        assert_eq!(sb.task_state_for(&untracked), None);
+    }
+
+    /// A requested removal hides the row at once; the daemon's
+    /// `WorkspaceRemoved` makes it final, and a removal that never
+    /// completes brings the row back with its name reported.
+    #[test]
+    fn a_pending_removal_hides_then_confirms_or_comes_back() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let workspace = issue_ws("995", "Merged PR");
+        let key = SessionKey::from(&workspace.key);
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace.clone(),
+        )));
+        assert_eq!(sb.visible_workspace_count(), 1);
+
+        sb.hide_pending_removal(key.clone());
+        assert_eq!(
+            sb.visible_workspace_count(),
+            0,
+            "gone from the list at once"
+        );
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        assert_eq!(
+            sb.expire_pending_removals(later, std::time::Duration::from_secs(90)),
+            vec!["Merged PR".to_string()],
+            "an unconfirmed removal comes back, by name"
+        );
+        assert_eq!(sb.visible_workspace_count(), 1);
+
+        sb.hide_pending_removal(key.clone());
+        sb.on_event(&lazybox_ipc::Event::WorkspaceRemoved(workspace.key.clone()));
+        assert!(
+            !sb.is_pending_removal(&key),
+            "confirmed removals are cleared"
+        );
+        assert!(
+            sb.expire_pending_removals(later, std::time::Duration::from_secs(90))
+                .is_empty(),
+            "nothing to restore once the daemon confirmed"
+        );
+    }
+
+    /// Another workspace is named `#N title` when it is a tracked task.
+    #[test]
+    fn workspace_reference_label_names_a_task_by_number_and_title() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let workspace = issue_ws("994", "Token schema");
+        let key = SessionKey::from(&workspace.key);
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        let label = sb.workspace_reference_label(&key).expect("tracked");
+        assert!(label.ends_with("Token schema"), "{label}");
+        assert_eq!(
+            sb.workspace_reference_label(&SessionKey::new("github:x/y#1")),
+            None
         );
     }
 }
@@ -4602,7 +4864,10 @@ mod broadcast_select_tests {
                         "◆ auto-merge (GitHub)",
                     ]
                 } else {
-                    ["MERGE ON GREEN · lazybox only", "⚡ on-green (lazybox)"]
+                    [
+                        "MERGE ON GREEN · lazybox only",
+                        "⚡\u{FE0E} on-green (lazybox)",
+                    ]
                 };
                 for label in labels {
                     let spans = sb.stats_row_spans(visual_width(label), theme);
@@ -7953,7 +8218,7 @@ mod focused_row_identity_tests {
     }
 
     #[test]
-    fn focused_pr_row_keeps_every_column_and_trails_its_source() {
+    fn focused_pr_row_keeps_every_column_and_its_source() {
         let (mut sb, key) = sidebar_with_pr();
         let under_header = row_containing(&mut sb, 120, "orion");
         // The identity cluster is whatever the row shows under its repo
@@ -7983,12 +8248,13 @@ mod focused_row_identity_tests {
             );
         }
 
-        // Narrow: the cue is the redundant half, so it is what gives way —
-        // the number, role, agent, CI and age all survive.
+        // Narrow: the title truncates. The repo is the one thing a focused
+        // row cannot get from a header, so it stays — and the number, role,
+        // agent, CI and age all survive beside it.
         let narrow = row_containing(&mut sb, 60, "orion");
         assert!(
-            !narrow.contains(REPO),
-            "the source cue must shed before the row's own columns: {narrow:?}",
+            narrow.contains("…") && narrow.contains("lazybox"),
+            "the title truncates and the source cue stays: {narrow:?}",
         );
         for column in ["⇄ 798 A", "X", "✗", "13h"] {
             assert!(

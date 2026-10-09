@@ -311,6 +311,7 @@ async fn hook_ingest_over_socket_reaches_shared_embedded_config() {
                 cwd: None,
                 tool_name: Some("Bash".into()),
                 notification: None,
+                turn_result: None,
             },
             backend_key: Some(key),
         })

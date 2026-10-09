@@ -97,6 +97,18 @@ impl Sidebar {
     /// Fire any coalesced desktop notifications whose debounce window
     /// has elapsed, collapsing a same-kind burst into one summary
     /// banner. Called each run-loop iteration (#1370).
+    pub fn hide_pending_removal(&mut self, key: lazybox_core::SessionKey) {
+        self.inner.hide_pending_removal(key);
+    }
+
+    pub fn expire_pending_removals(
+        &mut self,
+        now: std::time::Instant,
+        limit: std::time::Duration,
+    ) -> Vec<String> {
+        self.inner.expire_pending_removals(now, limit)
+    }
+
     pub fn flush_due_notifications(&mut self) {
         for notif in self.coalescer.flush_due(std::time::Instant::now()) {
             crate::platform::notify_user(&notif.title, &notif.body, &notif.workspace_key);
@@ -302,6 +314,12 @@ impl Sidebar {
         self.inner.set_default_model_labels(defaults);
     }
 
+    /// Test-facing read of the badge's default-tier comparison values.
+    #[cfg(test)]
+    pub(crate) fn default_model_label(&self, letter: char) -> Option<&str> {
+        self.inner.default_model_label(letter)
+    }
+
     /// Record whether `ui.usage_summary` is on — gates the always-visible
     /// per-provider usage row in the header (#1059).
     pub fn set_usage_summary(&mut self, show: bool) {
@@ -448,6 +466,26 @@ impl Sidebar {
         agent_text: std::collections::HashMap<lazybox_core::SessionKey, String>,
     ) {
         self.inner.set_agent_text(agent_text);
+    }
+
+    /// Replace the terminal-OUTPUT half of that corpus with one daemon
+    /// scan's answer (#1780). See
+    /// [`crate::components::sidebar::Sidebar::set_agent_output_text`].
+    pub fn set_agent_output_text(&mut self, entries: Vec<(String, String)>) {
+        self.inner.set_agent_output_text(entries);
+    }
+
+    /// Note whether a daemon output scan is in flight (#1780). See
+    /// [`crate::components::sidebar::Sidebar::set_agent_output_scanning`].
+    pub fn set_agent_output_scanning(&mut self, scanning: bool) {
+        self.inner.set_agent_output_scanning(scanning);
+    }
+
+    /// The `agent:` / `said:` needles the live query would scan output for
+    /// (#1780). See
+    /// [`crate::components::sidebar::Sidebar::agent_qualifier_needles`].
+    pub fn agent_qualifier_needles(&self) -> Vec<String> {
+        self.inner.agent_qualifier_needles()
     }
 
     /// Read currently selected workspace key (for selection projection).
@@ -711,10 +749,40 @@ impl Sidebar {
         self.inner.set_open_requests(key, open);
     }
 
+    /// See `Sidebar::set_artifact_count` — how many markdown artifacts a
+    /// workspace's agents have spooled (#1822), for the row's `▤N` badge.
+    pub fn set_artifact_count(&mut self, key: lazybox_core::SessionKey, count: usize) {
+        self.inner.set_artifact_count(key, count);
+    }
+
     /// See `Sidebar::open_requests` — open inbound requests for one
     /// workspace (#1653).
     pub fn open_requests(&self, key: &lazybox_core::SessionKey) -> usize {
         self.inner.open_requests(key)
+    }
+
+    pub fn set_open_request_rows(
+        &mut self,
+        key: lazybox_core::SessionKey,
+        rows: Vec<lazybox_ipc::OpenAgentRequest>,
+    ) {
+        self.inner.set_open_request_rows(key, rows);
+    }
+
+    pub fn open_request_rows(
+        &self,
+        key: &lazybox_core::SessionKey,
+    ) -> &[lazybox_ipc::OpenAgentRequest] {
+        self.inner.open_request_rows(key)
+    }
+
+    pub fn workspace_reference_label(&self, key: &lazybox_core::SessionKey) -> Option<String> {
+        self.inner.workspace_reference_label(key)
+    }
+
+    /// See `Sidebar::artifact_count` — spooled artifacts for one workspace.
+    pub fn artifact_count(&self, key: &lazybox_core::SessionKey) -> usize {
+        self.inner.artifact_count(key)
     }
 
     /// See `Sidebar::forget_epic` — drop an archived / deleted epic (#1517).
@@ -821,6 +889,19 @@ impl Sidebar {
         self.inner.focus_workspace_key(key)
     }
 
+    /// The state of `task` as this client last saw it.
+    pub fn task_state_for(&self, task: &lazybox_core::TaskId) -> Option<lazybox_core::TaskState> {
+        self.inner.task_state_for(task)
+    }
+
+    /// The workspace carrying `task`, if this client knows one.
+    pub fn workspace_key_for_task(
+        &self,
+        task: &lazybox_core::TaskId,
+    ) -> Option<lazybox_core::SessionKey> {
+        self.inner.workspace_key_for_task(task)
+    }
+
     /// Reveal and select a workspace even when the current sidebar view
     /// hides it.
     pub fn reveal_workspace_key(&mut self, key: &lazybox_core::SessionKey) -> bool {
@@ -864,6 +945,10 @@ impl Sidebar {
     /// wrapping around. Backs the `Shift-N` global key (#1502).
     pub fn focus_next_unread_workspace(&mut self) -> bool {
         self.inner.focus_next_unread_workspace()
+    }
+
+    pub fn focus_next_review_pending_workspace(&mut self) -> bool {
+        self.inner.focus_next_review_pending_workspace()
     }
 
     /// Move the cursor onto the next blocked workspace (declared reason or
@@ -985,6 +1070,10 @@ impl Sidebar {
     /// box. The orchestrator opens the global search on a hit.
     pub fn search_chip_hit(&self, col: u16, row: u16) -> bool {
         self.inner.search_chip_hit(col, row)
+    }
+
+    pub fn stats_hit(&self, col: u16, row: u16) -> bool {
+        self.inner.stats_hit(col, row)
     }
 
     /// True iff the cursor sits on a repo header row. Used by the

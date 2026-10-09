@@ -104,6 +104,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// on a workspace the user never touched (#1805). Only a
     /// single-row removal re-focuses; a project cascade restores a
     /// header and N children with no one row to return to.
+    ///
+    /// Returns whether a stashed removal was found and rolled back.
     pub(super) fn rollback_optimistic_removal(&mut self, message: &str) -> bool {
         let Some(pos) = self
             .pending_mutations

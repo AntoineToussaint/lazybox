@@ -16,6 +16,16 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(top) = self.modal_stack.last().cloned() else {
             return Vec::new();
         };
+        if top == Id::MobileNewSession {
+            return self.mobile_new_session_picked(&picks);
+        }
+        if matches!(top, Id::MobileLinks | Id::MobileCopyText) {
+            self.mobile_link_picked(&picks);
+            return Vec::new();
+        }
+        if top == Id::MobileRunner {
+            return self.mobile_runner_picked(&picks);
+        }
         // Sandbox onboarding drives its own draft state machine rather than
         // the tui-core PickFlow catalog (#1112).
         if top == Id::SandboxProviderPick {
@@ -62,11 +72,8 @@ impl<T: TerminalAdapter> Model<T> {
                 .map(|(key, snippet)| SnippetPick {
                     key: key.to_string(),
                     category: snippet.category.clone(),
-                    // `delivery_body`, not `dispatch_body`: this payload is
-                    // what reaches the agent (submit) or seeds an editable
-                    // composer, so it carries the output contract. The
-                    // picker's *preview* rows are `PickerRow`, a separate
-                    // type that stays on the authored text (#1697).
+                    // This named delivery boundary intentionally adds no
+                    // global policy; the spawn-time briefing already did.
                     body: snippet.delivery_body(),
                 })
                 .collect()
@@ -99,8 +106,8 @@ impl<T: TerminalAdapter> Model<T> {
             Id::UrlPicker => PickFlow::Url,
             Id::ThemePicker => PickFlow::Theme,
             Id::DefaultAgentPicker => PickFlow::DefaultAgent,
-            Id::DefaultModelPicker => PickFlow::DefaultModel {
-                agent_id: self.default_model_agent.clone(),
+            Id::StrengthPicker => PickFlow::Strength {
+                agent_id: self.strength_agent.clone(),
             },
             Id::SidebarContext => {
                 let (session_key, actions) = match &self.modal_flow {
@@ -317,8 +324,8 @@ impl<T: TerminalAdapter> Model<T> {
             Id::ManageLabels => {
                 self.awaiting_repo_labels = None;
             }
-            Id::DefaultModelPicker => {
-                self.default_model_agent = None;
+            Id::StrengthPicker => {
+                self.strength_agent = None;
             }
             Id::ThemePicker => {
                 self.theme_picker_prev = None;
@@ -456,12 +463,12 @@ impl<T: TerminalAdapter> Model<T> {
                         self.set_default_agent(&agent);
                         self.flash_info(format!("default agent: {agent}"));
                         self.redraw = true;
-                        self.mount_default_model_picker(&agent);
+                        self.open_strength(&agent);
                     }
                     Err(error) => self.flash_info(format!("couldn't save config: {error}")),
                 }
             }
-            PickOutcome::SaveDefaultModel { agent_id, alias } => {
+            PickOutcome::SaveStrength { agent_id, alias } => {
                 match lazybox_config::Config::save_with(|config| {
                     if alias.is_some() || config.agents.contains_key(&agent_id) {
                         config
@@ -473,18 +480,14 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }) {
                     Ok(()) => {
-                        let merged = lazybox_config::Config::load()
-                            .unwrap_or_default()
-                            .agent_models(&agent_id);
-                        let label = merged
-                            .default
-                            .as_deref()
-                            .and_then(|value| merged.tier(value))
-                            .map(|tier| tier.label.clone());
-                        self.agent_models.insert(agent_id, merged);
-                        self.flash_info(match label {
-                            Some(label) => format!("default model: {label}"),
-                            None => "default model: agent default".to_string(),
+                        // Re-read every menu, not just this agent's: the
+                        // sidebar badges and the `w S` chords key off the
+                        // same map, so patching one entry in place left
+                        // them describing the pre-save state.
+                        self.reload_agent_models();
+                        self.flash_info(match self.strength_label(&agent_id) {
+                            Some(label) => format!("strength · {agent_id} · {label}"),
+                            None => format!("strength · {agent_id} · agent default"),
                         });
                         self.redraw = true;
                     }

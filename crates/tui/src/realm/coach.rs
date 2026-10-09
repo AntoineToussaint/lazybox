@@ -546,7 +546,7 @@ pub(crate) fn spotlight(f: &mut Frame, rect: Rect, ascii: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lazybox_tui_core::action::ActionDef;
+    use lazybox_tui_core::action::{ActionDef, TierMenu};
     use std::collections::BTreeMap;
 
     fn catalog(agents: &[&str], overrides: &[(&str, &str)]) -> Vec<CatalogEntry> {
@@ -555,7 +555,7 @@ mod tests {
             .iter()
             .map(|(a, k)| (a.to_string(), k.to_string()))
             .collect::<BTreeMap<_, _>>();
-        ActionDef::catalog_with_tiers(&agents, &overrides, &[])
+        ActionDef::catalog_with_tiers(&agents, &overrides, TierMenu::default())
     }
 
     fn default_catalog() -> Vec<CatalogEntry> {

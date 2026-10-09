@@ -67,7 +67,7 @@ mod tests {
                 skill: None,
                 provider: None,
                 next: Vec::new(),
-                answer_is_the_ending: false,
+                action: None,
                 origin: SnippetOrigin::Global,
             },
         )

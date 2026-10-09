@@ -6,7 +6,7 @@
 //! - **Key / catalog**: `key_event_to_chord` (crossterm → catalog
 //!   chord), `find_action_for_chord` (catalog lookup honoring user
 //!   overrides).
-//! - **Clipboard**: `emit_clipboard_copy` (OSC 52).
+//! - **Clipboard**: `emit_clipboard_copy` (native helper, else OSC 52).
 //! - **Run loop entry points**: `run_with_client`, `run_loop_with_model`.
 //! - **Loop-health guards**: `should_drop_stale_input` /
 //!   `StaleInputTally` (bounded input replay after a stall),
@@ -33,6 +33,11 @@ use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::widgets::{Block, Borders};
 use tuirealm::terminal::TerminalAdapter;
+
+/// How long a removed row stays hidden without the daemon confirming it
+/// before it comes back. Removals take up to ~30s when a terminal kill hits
+/// its bound; three times that is a removal that is not coming.
+const PENDING_REMOVAL_LIMIT: Duration = Duration::from_secs(90);
 
 /// True if `(col, row)` lies within `rect`'s half-open bounds.
 pub(crate) fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
@@ -918,6 +923,9 @@ pub(super) fn is_scroll_event(event: &crossterm::event::Event) -> bool {
 pub(super) struct StaleInputTally {
     dropped: usize,
     oldest: Duration,
+    // Keep queued suffixes of a discarded management chord from becoming
+    // terminal text (e.g. stale Ctrl-T followed by a session letter).
+    key_discarded_at: Option<std::time::Instant>,
 }
 
 impl StaleInputTally {
@@ -1529,6 +1537,10 @@ pub(super) fn run_loop_step<T: TerminalAdapter>(
     // (#1254): a pane whose resync came back unavailable retries with
     // backoff until it converges, even if its agent never prints again.
     model.tick_terminal_resyncs();
+    // The `agent:` output scan (#1780) is paced by TIME too: the needles
+    // change with typing, and the debounce that collapses a typed word
+    // into one scan of every ring needs a tick to expire on.
+    model.tick_agent_output_search();
     timings.ticks = ticks_start.elapsed();
 
     // 3. Process tuirealm messages without blocking.
@@ -1640,6 +1652,16 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // has now elapsed. Runs before the OSC drain below so a summary
         // banner it queues is emitted this same iteration (#1370).
         model.sidebar.flush_due_notifications();
+        // A removal the daemon never completed brings its row back.
+        for name in model
+            .sidebar
+            .expire_pending_removals(std::time::Instant::now(), PENDING_REMOVAL_LIMIT)
+        {
+            model.flash_error(format!(
+                "‘{name}’ is back — its removal did not finish; check the notices and retry"
+            ));
+            model.redraw = true;
+        }
 
         // Emit any OSC desktop notifications queued during this iteration's
         // drain. Routed through the render writer (not stdout directly) so
@@ -1848,7 +1870,18 @@ fn service_buffered_input<T: TerminalAdapter>(
         .modal_stack
         .last()
         .is_some_and(super::Id::retains_stale_keys);
-    if should_drop_stale_input(&timed.event, age, modal_retains_keys) {
+    // Mobile's live-terminal route forwards keys literally. Treat those
+    // bytes as user content, like bracketed paste, instead of dropping a
+    // half-typed prompt when a busy frame exceeds the stale-action deadline.
+    if should_drop_stale_input(&timed.event, age, modal_retains_keys)
+        && (stale_tally
+            .key_discarded_at
+            .is_some_and(|barrier| timed.read_at <= barrier)
+            || !model.mobile_retains_buffered_key(&timed.event))
+    {
+        if matches!(timed.event, crossterm::event::Event::Key(_)) {
+            stale_tally.key_discarded_at = Some(std::time::Instant::now());
+        }
         stale_tally.note(age);
         return None;
     }
@@ -2039,15 +2072,116 @@ fn crossterm_to_realm(key: crossterm::event::KeyEvent) -> RealmKey {
     RealmKey::new(code, convert_modifiers(key.modifiers))
 }
 
-/// Queue an OSC 52 clipboard-set on the host terminal writer. The host
-/// (Ghostty / iTerm2 / Kitty / WezTerm) lands the text on the system
-/// clipboard. Format: `ESC ] 52 ; c ; <base64> ESC \`. Wraps the
-/// lazybox-side "copy from terminal selection" gesture — without OSC 52
-/// the extracted text would just live in memory.
-pub(crate) fn emit_clipboard_copy(text: &str) {
+/// How far a copy actually got. The two transports lazybox has do not
+/// offer the same guarantee, and the footer used to claim success for
+/// both — so a copy that the host terminal quietly ignored read exactly
+/// like one that landed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ClipboardDelivery {
+    /// A native helper on the machine the user is sitting at took the
+    /// text: it is on the system clipboard now.
+    Host,
+    /// Handed to the host terminal as OSC 52. Modern emulators
+    /// (Ghostty / iTerm2 / Kitty / WezTerm) act on it; Terminal.app and
+    /// anything with the escape disabled drop it, and nothing comes
+    /// back either way.
+    Terminal,
+    /// Past [`OSC52_TEXT_LIMIT`] — refused rather than sent.
+    TooLarge,
+}
+
+/// Largest text lazybox will put in an OSC 52 sequence.
+///
+/// base64 inflates the payload by 4/3, and emulators and multiplexers cap
+/// the escape far below a whole scrollback snapshot — tmux buffers it,
+/// xterm's historical ceiling was 8 KiB for the entire sequence — then drop
+/// an oversized one with no reply. Since the mobile copy picker can select
+/// a whole snapshot, an unbounded payload meant the UI reporting a copy that
+/// never happened. 64 KiB is past anything known to accept the escape, so
+/// beyond it the honest answer is to refuse and say so.
+pub(crate) const OSC52_TEXT_LIMIT: usize = 64 * 1024;
+
+impl ClipboardDelivery {
+    /// Footer line for a copy of `what` ("3 lines", "word", "line").
+    pub(crate) fn notice(self, what: &str) -> String {
+        match self {
+            Self::Host => format!("copied {what} to clipboard"),
+            Self::Terminal => format!("copied {what} — OSC 52 sent, host terminal decides"),
+            Self::TooLarge => format!(
+                "{what} is over {} KiB — too large for the terminal clipboard, select less",
+                OSC52_TEXT_LIMIT / 1024
+            ),
+        }
+    }
+}
+
+/// Put the lazybox-side terminal selection on the clipboard, preferring
+/// the client machine's own clipboard and falling back to OSC 52.
+///
+/// The clipboard belongs to where the user is sitting, not to where the
+/// daemon runs, so the native attempt is made here in the client — a
+/// terminal driven by a remote daemon still copies to the laptop in
+/// front of it. OSC 52 (`ESC ] 52 ; c ; <base64> ESC \`) remains the
+/// path for every host where there is no native helper, and it is the
+/// one that travels when lazybox itself is being viewed over ssh.
+pub(crate) fn emit_clipboard_copy(text: &str) -> ClipboardDelivery {
+    if native_clipboard_copy(text) {
+        return ClipboardDelivery::Host;
+    }
+    // A payload the host will drop must not be reported as sent.
+    if text.len() > OSC52_TEXT_LIMIT {
+        return ClipboardDelivery::TooLarge;
+    }
     let encoded = base64_encode(text.as_bytes());
     let sequence = format!("\x1b]52;c;{encoded}\x1b\\");
     super::render_writer::enqueue_raw(sequence.as_bytes());
+    ClipboardDelivery::Terminal
+}
+
+/// How long the UI thread will wait on the native clipboard helper
+/// before giving up on it and falling back to OSC 52.
+#[cfg(target_os = "macos")]
+const NATIVE_CLIPBOARD_DEADLINE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Hand `text` to macOS's `pbcopy`, reporting whether it took it.
+///
+/// Runs off the UI thread and is abandoned at
+/// [`NATIVE_CLIPBOARD_DEADLINE`]: the caller is the single thread that
+/// repaints, and both the pipe write and the child's exit can block
+/// indefinitely on a wedged pasteboard server. An abandoned helper
+/// leaves its thread parked on that write until the pasteboard recovers
+/// — one parked thread, rather than a frozen UI.
+#[cfg(target_os = "macos")]
+fn native_clipboard_copy(text: &str) -> bool {
+    use std::io::Write as _;
+    let payload = text.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let spawned = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let delivered = match spawned {
+            Ok(mut child) => {
+                let wrote = child
+                    .stdin
+                    .take()
+                    .is_some_and(|mut pipe| pipe.write_all(payload.as_bytes()).is_ok());
+                // `pbcopy` writes the pasteboard on EOF, which the
+                // dropped pipe above just delivered.
+                wrote && child.wait().is_ok_and(|status| status.success())
+            }
+            Err(_) => false,
+        };
+        let _ = tx.send(delivered);
+    });
+    rx.recv_timeout(NATIVE_CLIPBOARD_DEADLINE).unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_clipboard_copy(_text: &str) -> bool {
+    false
 }
 
 /// Tiny RFC 4648 base64 encoder. Lazybox doesn't have a `base64` dep

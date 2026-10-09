@@ -74,6 +74,7 @@ impl<T: TerminalAdapter> Model<T> {
             let checkout = match target {
                 lazybox_ipc::WorkspaceDiffTarget::Session(_) => "worktree",
                 lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout => "linked checkout",
+                lazybox_ipc::WorkspaceDiffTarget::PullRequest => "pull request",
             };
             if agent_terminal_ids.is_empty() {
                 self.flash_hint(format!(
@@ -105,6 +106,96 @@ impl<T: TerminalAdapter> Model<T> {
             if comments.len() == 1 { "" } else { "s" }
         ));
         commands
+    }
+
+    /// `p` in the review modal: re-read the workspace's *other* diff
+    /// source and remount the viewer on it.
+    ///
+    /// The two are different documents, so this is a fresh read rather
+    /// than a local toggle — the PR's diff lives on GitHub and the
+    /// worktree's on disk, and neither is derivable from the other.
+    pub(super) fn switch_diff_review_source(
+        &mut self,
+        workspace_key: lazybox_core::WorkspaceKey,
+        showing: lazybox_ipc::WorkspaceDiffTarget,
+    ) {
+        let session_key: lazybox_core::SessionKey = workspace_key.as_str().into();
+        let Some(workspace) = self.sidebar.workspace_by_key(&session_key) else {
+            self.flash_hint("this workspace is gone");
+            return;
+        };
+        let showing_pull_request = matches!(showing, lazybox_ipc::WorkspaceDiffTarget::PullRequest);
+        // The SAME session `g v` resolved, not merely the newest one: a
+        // workspace can run several agents, and silently landing on a
+        // different one's worktree shows work the reviewer never asked
+        // to see while looking like the work they did.
+        let session_id = self.sidebar.selected_session_id();
+        let target = if showing_pull_request {
+            local_diff_target(workspace, session_id)
+        } else {
+            workspace
+                .pr
+                .as_ref()
+                .map(|_| lazybox_ipc::WorkspaceDiffTarget::PullRequest)
+        };
+        let Some(target) = target else {
+            self.flash_hint(if showing_pull_request {
+                "no local checkout to read — this workspace has no worktree"
+            } else {
+                "no PR diff to read — this workspace has no pull request"
+            });
+            return;
+        };
+        self.pending_diff_session = Some((workspace_key.clone(), target.clone()));
+        self.flash_hint(if showing_pull_request {
+            "reading worktree diff…"
+        } else {
+            "reading the PR diff…"
+        });
+        self.send_cmd(IpcCommand::InspectWorkspaceDiff {
+            workspace_key,
+            target,
+        });
+    }
+
+    /// Take the review viewer out of its in-flight state after GitHub
+    /// refused the review, so the drafted comments become editable and
+    /// re-submittable instead of being stranded behind a prompt.
+    pub(super) fn release_diff_review(&mut self) {
+        if self.modal_stack.last() != Some(&Id::DiffReview) {
+            return;
+        }
+        let _ = self.app.attr(
+            &Id::DiffReview,
+            tuirealm::props::Attribute::Custom(
+                crate::realm::components::diff_review::REVIEW_IN_FLIGHT,
+            ),
+            tuirealm::props::AttrValue::Flag(false),
+        );
+        self.redraw = true;
+    }
+
+    /// Re-aim a failed pull-request read at the workspace's checkout.
+    /// Returns whether there was one to aim at.
+    pub(super) fn fall_back_to_local_diff(
+        &mut self,
+        workspace_key: lazybox_core::WorkspaceKey,
+    ) -> bool {
+        let session_key: lazybox_core::SessionKey = workspace_key.as_str().into();
+        let session_id = self.sidebar.selected_session_id();
+        let Some(target) = self
+            .sidebar
+            .workspace_by_key(&session_key)
+            .and_then(|workspace| local_diff_target(workspace, session_id))
+        else {
+            return false;
+        };
+        self.pending_diff_session = Some((workspace_key.clone(), target.clone()));
+        self.send_cmd(IpcCommand::InspectWorkspaceDiff {
+            workspace_key,
+            target,
+        });
+        true
     }
 
     /// Reply textarea submit. Build a `PostReply` for the
@@ -270,6 +361,21 @@ impl<T: TerminalAdapter> Model<T> {
     /// never touches that selection). Every limited/parked workspace has a
     /// live agent (the states only come from agent detection), so none fall
     /// through to the spawn / skip cases.
+    ///
+    /// A pane whose login has died is held back and sent to sign-in instead
+    /// (#1847). This is the one exception to the "the key does the thing;
+    /// the agent reports" policy below, and it is not a softening of it:
+    /// that policy is sound because a *parked* agent can act on `continue`
+    /// and report what happened. A logged-out one cannot act on anything —
+    /// the keystroke lands in a pane that will answer `/login` and nothing
+    /// else — so there is no report to wait for, and the delivery would
+    /// only produce a notice claiming a recovery that did not occur.
+    ///
+    /// This is exactly the user's reported path: hit a limit, log out, log
+    /// back in on another subscription, and the limited agents are now
+    /// *logged out* while their `LimitReached` / `AwaitingReset` reading is
+    /// sticky — so they are still in the target set, holding a credential
+    /// their process read at startup and will never re-read.
     pub(super) fn resume_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
         // Every limited agent: the alerting `LimitReached` ones AND the
         // parked `AwaitingReset` ones (Claude's auto-continue wait). The
@@ -280,11 +386,40 @@ impl<T: TerminalAdapter> Model<T> {
         // and submit `continue`. If the account is still limited, Claude
         // parks again and says so; if credentials changed or the window
         // reset, it works. The key does the thing; the agent reports.
-        let terminals = self.sidebar.recoverable_terminals();
-        // Named in the notice so the count on screen matches the ☾ badges.
-        let parked = self.sidebar.awaiting_reset_terminals().len();
-        if terminals.is_empty() {
+        let recoverable = self.sidebar.recoverable_terminals();
+        if recoverable.is_empty() {
             self.flash_hint("no stopped agents to resume");
+            return Vec::new();
+        }
+        // Split before delivering anything: a signed-out pane is stuck on a
+        // dead credential, and `continue` typed into it is not a weaker fix
+        // than sign-in, it is no fix at all.
+        let (signed_out, terminals): (Vec<_>, Vec<_>) = recoverable
+            .iter()
+            .copied()
+            .partition(|id| self.auth_failed_terminals.contains_key(id));
+        // Counted over what actually gets the keystroke, not over every ☾
+        // badge on screen: the notice says these parked agents "got
+        // `continue` too", and a parked agent held back for sign-in did not.
+        let awaiting_reset = self.sidebar.awaiting_reset_terminals();
+        let parked = terminals
+            .iter()
+            .filter(|id| awaiting_reset.contains(id))
+            .count();
+        if terminals.is_empty() {
+            // Everything in the target set is logged out, so there is no
+            // resume to report at all — only the sign-in that is the actual
+            // remedy. Saying "resuming 0" here, or saying nothing, is how
+            // #1847 looked like a successful recovery.
+            let blocked = signed_out.len();
+            let plural = if blocked == 1 { "" } else { "s" };
+            self.route_signed_out_to_reauthentication(&signed_out);
+            self.flash_info(format!(
+                "not resuming {blocked} signed-out agent{plural} — a logged-out agent \
+                 can't act on `continue`; sign in again to recover {}",
+                if blocked == 1 { "it" } else { "them" }
+            ));
+            self.redraw = true;
             return Vec::new();
         }
         let mut cmds = Vec::new();
@@ -302,8 +437,23 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let resumed = terminals.len();
         let plural = if resumed == 1 { "" } else { "s" };
+        // Signed-out panes are reported as held back, never folded into the
+        // resumed count — the count is the whole value of this notice.
+        let held_back = if signed_out.is_empty() {
+            String::new()
+        } else {
+            let blocked = signed_out.len();
+            let blocked_plural = if blocked == 1 { "" } else { "s" };
+            self.route_signed_out_to_reauthentication(&signed_out);
+            format!(
+                "; {blocked} signed-out agent{blocked_plural} held back for sign-in, \
+                 which `continue` can't substitute for"
+            )
+        };
         if parked == 0 {
-            self.flash_info(format!("resuming {resumed} stopped agent{plural}"));
+            self.flash_info(format!(
+                "resuming {resumed} stopped agent{plural}{held_back}"
+            ));
         } else {
             // The restart key is remappable (`ui.action_keys.restart_rate_limited`);
             // resolve the effective chord so the notice never names a key the
@@ -315,11 +465,46 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info(format!(
                 "resuming {resumed} stopped agent{plural} ({parked} parked on the \
                  auto-continue wait got `continue` too; {restart_keys} restarts them with \
-                 fresh credentials if they park again)"
+                 fresh credentials if they park again){held_back}"
             ));
         }
         self.redraw = true;
         cmds
+    }
+
+    /// Send each signed-out pane back to the re-authentication flow the
+    /// daemon already owns (#1847).
+    ///
+    /// Deliberately the *existing* route rather than a new one:
+    /// `AgentAuthRequired` mounts this same prompt when the failure is first
+    /// detected, and the user may have dismissed it — so `Shift-K` re-offers
+    /// it instead of inventing a second way to sign in. `Enter` there runs
+    /// `ReauthenticateAgent`, which is login-only (lazybox never runs the
+    /// provider's `logout`, #1376) and resumes the conversation afterwards;
+    /// the daemon's post-sign-in sweep then picks up the peers riding the
+    /// same machine-wide login, which is why this does not fan a command out
+    /// per terminal itself.
+    ///
+    /// [`Self::queue_agent_auth_prompt`] dedupes per terminal and mounts one
+    /// at a time, so repeated presses cannot stack modals, and a pane whose
+    /// prompt is already up is left alone.
+    fn route_signed_out_to_reauthentication(&mut self, signed_out: &[lazybox_ipc::TerminalId]) {
+        let prompts: Vec<_> = signed_out
+            .iter()
+            .filter_map(|terminal_id| {
+                let pane = self.auth_failed_terminals.get(terminal_id)?;
+                Some(super::AgentAuthPrompt {
+                    terminal_id: *terminal_id,
+                    display_name: pane.display_name.clone(),
+                    other_session_count: pane.other_session_count,
+                    retry: false,
+                    error: None,
+                })
+            })
+            .collect();
+        for prompt in prompts {
+            self.queue_agent_auth_prompt(prompt);
+        }
     }
 
     /// `a R` — restart every limited agent so it picks up fresh credentials
@@ -348,7 +533,7 @@ impl<T: TerminalAdapter> Model<T> {
         let mut terminals = self.sidebar.recoverable_terminals();
         let extra: Vec<_> = self
             .auth_failed_terminals
-            .iter()
+            .keys()
             .copied()
             .filter(|id| live.contains(id) && !terminals.contains(id))
             .collect();
@@ -462,7 +647,7 @@ impl<T: TerminalAdapter> Model<T> {
         // A live auth-failed pane is stuck exactly the way a rate-limited one
         // is (#1719) whatever its screen reading says, and `a R` already
         // restarts it — so it resolves as blocked before the state match.
-        let signed_out = self.auth_failed_terminals.contains(&terminal_id);
+        let signed_out = self.auth_failed_terminals.contains_key(&terminal_id);
         let continue_work = match state {
             _ if signed_out => true,
             // `Stalled` joins the blocked pair: the turn is already lost to
@@ -644,13 +829,29 @@ impl<T: TerminalAdapter> Model<T> {
         project_key: lazybox_core::ProjectKey,
         name: String,
     ) -> Vec<IpcCommand> {
-        let spawn_agent = Some(self.sidebar.default_agent().to_string());
+        self.create_workspace_with_runner_cmds(
+            project_key,
+            name,
+            super::SessionRunner::Agent(self.sidebar.default_agent().to_string()),
+        )
+    }
+
+    pub(super) fn create_workspace_with_runner_cmds(
+        &mut self,
+        project_key: lazybox_core::ProjectKey,
+        name: String,
+        runner: super::SessionRunner,
+    ) -> Vec<IpcCommand> {
+        let spawn_agent = match &runner {
+            super::SessionRunner::Agent(agent) => Some(agent.clone()),
+            super::SessionRunner::Shell => None,
+        };
         let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
         self.pending_workspace_creates.insert(
             client_request_id.clone(),
             super::PendingWorkspaceCreate {
                 name: name.clone(),
-                spawn_agent: spawn_agent.is_some(),
+                runner,
                 workspace_key: None,
             },
         );
@@ -666,7 +867,7 @@ impl<T: TerminalAdapter> Model<T> {
             project_key,
             spawn_agent,
             client_request_id: Some(client_request_id),
-            // No anchor: `x n` and the Start sheet's Chat row are the
+            // No anchor: the Start sheet's project-workspace and Chat rows are
             // hand-made-workspace flows, so the daemon resolves the name
             // itself. It still attaches when the name turns out to be a
             // record (`#1586` lands on that issue's row, never beside it) —
@@ -701,6 +902,25 @@ impl<T: TerminalAdapter> Model<T> {
                 let name = text.trim().to_string();
                 let project_key = match self.modal_flow.take() {
                     Some(ModalFlow::NewWorkspaceProject { project }) => Some(project),
+                    Some(ModalFlow::FloatingWorkspace { kind }) if !name.is_empty() => {
+                        let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+                        self.pending_workspace_creates.insert(
+                            client_request_id.clone(),
+                            super::PendingWorkspaceCreate {
+                                name: name.clone(),
+                                runner: super::SessionRunner::Agent(
+                                    self.sidebar.default_agent().to_string(),
+                                ),
+                                workspace_key: None,
+                            },
+                        );
+                        return vec![IpcCommand::CreateFloatingWorkspace {
+                            name,
+                            kind,
+                            spawn_agent: Some(self.sidebar.default_agent().to_string()),
+                            client_request_id: Some(client_request_id),
+                        }];
+                    }
                     _ => None,
                 };
                 match (name.is_empty(), project_key) {
@@ -1453,7 +1673,13 @@ showing keybinding search only",
             self.drain_queued_daemon_prompts();
             return Vec::new();
         }
-        if let Some(mut runner) = self.setup.runner.take() {
+        // Only a dismissal OF the setup modal belongs to the runner. Another
+        // modal stacked over it (a failed provision's checklist, a confirm)
+        // used to hand its Esc to the runner, which cancelled the whole flow
+        // and popped the wrong modal, stranding the checklist's state.
+        if matches!(self.modal_stack.last(), Some(Id::Setup | Id::Splash))
+            && let Some(mut runner) = self.setup.runner.take()
+        {
             let step = runner.step_dismissed();
             self.handle_runner_step(runner, step);
             return Vec::new();
@@ -1461,6 +1687,10 @@ showing keybinding search only",
         // Dispatch by which modal was on top BEFORE the pop so we
         // route the "no" decision correctly.
         let top = self.modal_stack.last().cloned();
+        // An Esc'd delete confirm takes its risk preflight with it.
+        if top == Some(Id::ActionConfirm) || top == Some(Id::RemoveOutOfScope) {
+            self.pending_removal_risk = None;
+        }
         self.pop_modal();
         // Cancelling any modal drops its [`ModalFlow`] continuation.
         // This one line replaces the ~two-dozen per-variant clears that
@@ -1507,6 +1737,15 @@ showing keybinding search only",
                 // can't re-mount on a stale target.
                 self.awaiting_repo_labels = None;
             }
+            Some(Id::DiffReview) => {
+                // Closing the viewer abandons the read still in flight.
+                // A source switch (`p`) waits on a GitHub round-trip, so
+                // the window between the request and its reply is
+                // seconds wide — long enough to close the viewer and
+                // have the late reply mount it again, on a source
+                // nobody asked for any more.
+                self.pending_diff_session = None;
+            }
             Some(Id::WorktreeProgress) => {
                 // Esc on the checklist — remember WHICH provisioning op
                 // was dismissed so its later `WorktreeProgress` events
@@ -1544,8 +1783,8 @@ showing keybinding search only",
                 }
                 self.redraw = true;
             }
-            Some(Id::DefaultModelPicker) => {
-                self.default_model_agent = None;
+            Some(Id::StrengthPicker) => {
+                self.strength_agent = None;
             }
             Some(Id::Setup) => {
                 // Esc on the (non-runner) Settings window — drop the
@@ -1576,6 +1815,26 @@ showing keybinding search only",
         self.pop_modal();
         let mut cmds = Vec::new();
         match top {
+            Some(Id::MobileDeleteSession) => {
+                if let Some(ModalFlow::MobileDeleteSession { terminal_id }) = self.modal_flow.take()
+                {
+                    if yes {
+                        use crate::components::terminal_stack::CloseOutcome;
+                        // The row only disappears on `TerminalExited`, so a
+                        // request whose event never came back must say so
+                        // instead of closing this prompt over an untouched
+                        // session the user will keep pressing `x` on.
+                        match self.terminals.close_terminal(terminal_id, &mut cmds) {
+                            CloseOutcome::Removed | CloseOutcome::Requested => (),
+                            CloseOutcome::Retried => self
+                                .flash_info("still closing that session — asked the daemon again"),
+                            CloseOutcome::Unknown => self.flash_info("That session has ended"),
+                        }
+                    }
+                    self.refresh_mobile_sessions();
+                    self.redraw = true;
+                }
+            }
             Some(Id::AgentAuth) => {
                 if let Some(ModalFlow::AgentAuth { terminal_id, retry }) = self.modal_flow.take() {
                     if yes {
@@ -1599,27 +1858,56 @@ showing keybinding search only",
                 }
             }
             Some(Id::RemoveOutOfScope) => {
-                if let Some(ModalFlow::RemovalPrompt { workspace, reason }) = self.modal_flow.take()
+                // The risk preflight dies with the prompt it amends,
+                // answered either way.
+                self.pending_removal_risk = None;
+                if let Some(ModalFlow::RemovalPrompt {
+                    workspace,
+                    reason,
+                    guarded,
+                }) = self.modal_flow.take()
                 {
                     let workspace_key = workspace;
                     let session_key: lazybox_core::SessionKey = (&workspace_key).into();
                     match (yes, reason) {
                         // Out-of-scope: drop the row + kill terminals
-                        // (worktree left on disk).
+                        // (worktree left on disk). `force: true` — the
+                        // user read this prompt and said yes, so the
+                        // cleanliness gate may not put the row back.
                         (true, super::RemovalReason::OutOfScope) => {
-                            cmds.push(IpcCommand::Kill { session_key });
+                            cmds.push(IpcCommand::Kill {
+                                session_key,
+                                force: true,
+                            });
                         }
                         // Merged/Closed: also delete the worktree.
                         (true, super::RemovalReason::Merged | super::RemovalReason::Closed) => {
                             cmds.push(IpcCommand::RemoveMergedWorkspace { session_key });
                         }
-                        // Explicit "no" on the merged/closed prompt is a
-                        // decision the daemon must hear: it pins the
-                        // workspace in `removal_prompts.kept` so the
-                        // level-triggered re-emit stops asking. (Esc
-                        // routes through `handle_modal_dismissed`
-                        // instead and stays silent — the daemon
-                        // re-prompts after its reprompt interval.)
+                        // A guarded prompt (live terminal) defaults to No
+                        // precisely because the user may not be reading it, so
+                        // No here cannot be a *decision*: `KeepMergedWorkspace`
+                        // persists `CleanupPrompt::Declined` on the row, which
+                        // suppresses the prompt permanently, survives restarts,
+                        // and has no UI to see or undo. Answering it by reflex
+                        // would trade #1899's one-keystroke deletion for a
+                        // one-keystroke permanent retirement. Defer instead —
+                        // the silence Esc produces, so the daemon re-prompts
+                        // after its interval — and say so, because a keystroke
+                        // that decides nothing still has to explain itself.
+                        (false, super::RemovalReason::Merged | super::RemovalReason::Closed)
+                            if guarded =>
+                        {
+                            self.flash_info(format!(
+                                "keeping {} for now — lazybox will ask again",
+                                workspace_key.as_str(),
+                            ));
+                        }
+                        // Unguarded: an explicit "no" IS a decision the daemon
+                        // must hear, and it pins the workspace in
+                        // `removal_prompts.kept` so the level-triggered re-emit
+                        // stops asking. (Esc routes through
+                        // `handle_modal_dismissed` instead and stays silent.)
                         (false, super::RemovalReason::Merged | super::RemovalReason::Closed) => {
                             cmds.push(IpcCommand::KeepMergedWorkspace { session_key });
                         }
@@ -1667,6 +1955,11 @@ showing keybinding search only",
                 // stashed at mount time (the sidebar selection may
                 // have drifted while the modal was up). No / Esc →
                 // drop the stash silently.
+                //
+                // The risk preflight dies with the prompt it was
+                // amending, either way: a reply landing after the
+                // answer has nothing left to render into.
+                self.pending_removal_risk = None;
                 let pending = self.modal_flow.take();
                 if yes && let Some(ModalFlow::ActionConfirm { action, targets }) = pending {
                     // A single target keeps the exact per-target path (and
@@ -1905,7 +2198,7 @@ showing keybinding search only",
                     skill: None,
                     provider: None,
                     next: Vec::new(),
-                    answer_is_the_ending: false,
+                    action: None,
                     origin: Default::default(),
                 };
                 match lazybox_config::Snippets::upsert_global_snippet(&key, &snippet) {
@@ -2152,7 +2445,23 @@ showing keybinding search only",
                     self.set_modal_flow(ModalFlow::ScopeRemovalConfirm {
                         outcome: Box::new(outcome),
                     });
-                    self.mount_modal(Id::ScopeRemovalConfirm, Confirm::new(prompt).destructive());
+                    // The upstream half of #1899: Yes here authorises the
+                    // rescope sweep that deletes these workspaces with their
+                    // notes, read state and stars, and then queues the
+                    // per-workspace prompts. Un-ticking a repo to tidy a filter
+                    // is not a request to delete anything, so the reflexive
+                    // answer to a prompt that exists to name that damage has to
+                    // be the one that cancels.
+                    //
+                    // A deliberate `default_no()` floor, NOT the
+                    // `destructive_shortcut` axis (#1921): the chord behind
+                    // this is the setup wizard's Finish — "save my repo
+                    // filter" — and the deletion is a consequence of it, so
+                    // chord-is-the-intent does not reach it. It is also the
+                    // gate that queues the pushed per-workspace prompts the
+                    // `event` axis guards, which would be a strange thing to
+                    // let one Enter past.
+                    self.mount_modal(Id::ScopeRemovalConfirm, Confirm::new(prompt).default_no());
                     return;
                 }
                 self.finish_setup(outcome);
@@ -2285,27 +2594,33 @@ showing keybinding search only",
         &mut self,
         component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
     ) {
-        // Unmount whatever's on top — setup is a one-modal-at-a-time
-        // flow; the same Id::Setup gets re-mounted for each wizard
-        // step.
-        if let Some(top) = self.modal_stack.last().cloned() {
-            let _ = self.app.umount(&top);
-            self.modal_stack.pop();
-        }
+        // Replace the setup modal — the splash or the previous step — and
+        // nothing else: setup is one modal at a time, re-mounted under
+        // Id::Setup for each step. Popping "whatever's on top" removed an
+        // unrelated modal that had been stacked over the flow.
+        self.remove_setup_modals();
         self.mount_modal_boxed(Id::Setup, component);
     }
 
     /// Drop whatever setup-related modal is on top of the stack.
     /// Called on Finish / Cancel.
     pub(super) fn unmount_setup_modal(&mut self) {
-        if let Some(top) = self.modal_stack.last().cloned() {
-            let _ = self.app.umount(&top);
-            self.modal_stack.pop();
-        }
+        self.remove_setup_modals();
         if let Some(top) = self.modal_stack.last() {
             let _ = self.app.active(top);
         }
         self.redraw = true;
+    }
+
+    /// Unmount the setup flow's own modals (`Setup`, `Splash`) wherever
+    /// they sit on the stack, leaving every other modal in place.
+    fn remove_setup_modals(&mut self) {
+        for id in [Id::Setup, Id::Splash] {
+            if self.modal_stack.contains(&id) {
+                let _ = self.app.umount(&id);
+                self.modal_stack.retain(|mounted| mounted != &id);
+            }
+        }
     }
 }
 
@@ -2336,6 +2651,41 @@ pub(super) fn format_scope_removal_prompt(repos: &[(String, usize)], total: usiz
         prompt.push_str(&format!("  +{} more\n", repos.len() - CAP));
     }
     prompt
+}
+
+/// The local diff a workspace can show: the named session's worktree,
+/// else its newest session's, else a linked checkout.
+pub(super) fn local_diff_target(
+    workspace: &lazybox_core::Workspace,
+    session_id: Option<lazybox_core::SessionId>,
+) -> Option<lazybox_ipc::WorkspaceDiffTarget> {
+    session_id
+        .or_else(|| workspace.default_session().map(|session| session.id))
+        .map(lazybox_ipc::WorkspaceDiffTarget::Session)
+        .or_else(|| {
+            workspace
+                .linked_checkout
+                .as_ref()
+                .map(|_| lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout)
+        })
+}
+
+/// The source the review modal opens on.
+///
+/// A workspace with a pull request opens on the PR: it is the diff
+/// reviewers see, the one being merged, and the only one a GitHub
+/// comment can attach to. Without a PR there is nothing to read but the
+/// checkout — which is also the only diff that exists before a branch
+/// is pushed.
+pub(super) fn default_diff_target(
+    workspace: &lazybox_core::Workspace,
+    session_id: Option<lazybox_core::SessionId>,
+) -> Option<lazybox_ipc::WorkspaceDiffTarget> {
+    workspace
+        .pr
+        .as_ref()
+        .map(|_| lazybox_ipc::WorkspaceDiffTarget::PullRequest)
+        .or_else(|| local_diff_target(workspace, session_id))
 }
 
 fn format_diff_review_prompt(

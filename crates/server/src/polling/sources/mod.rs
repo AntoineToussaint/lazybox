@@ -46,6 +46,45 @@ fn full_sweep_admitted(
     will_full_sweep && governor_plan.admits_complete_graphql_unit(required_points)
 }
 
+/// Whether this tick's failure to run a full sweep counts toward the
+/// "discovery behind" streak.
+///
+/// Only a *known* budget can defer: while the GraphQL budget isn't current
+/// (startup bootstrap, an expired window) the sweep is briefly not-admitted
+/// for a reason that self-heals in a tick or two — normal warm-up, not the
+/// stall the advisory is about — so this keeps it from firing on every
+/// fresh daemon start.
+///
+/// And a reconcile with members still queued is IN FLIGHT, not stalled: the
+/// sweep stays "due" until its last batch re-arms the timer, and those
+/// batches drain whether or not a fresh seeding would be admitted. Only the
+/// ticks that fail to *start* a reconcile are deferrals — counting the drain
+/// would raise "discovery behind" over a sweep running exactly as designed,
+/// which is the common shape now that seeding no longer waits for the whole
+/// roster to fit one tick (#1806).
+fn sweep_deferrable(
+    will_full_sweep: bool,
+    graphql_budget_current: bool,
+    reconcile_in_flight: bool,
+) -> bool {
+    will_full_sweep && graphql_budget_current && !reconcile_in_flight
+}
+
+/// Roster members a repo-first reconcile's ADMISSION is priced at.
+///
+/// [`plan_repo_first_tick`] drains a reconcile one governor-sized batch
+/// per tick and floors that batch at a single member, so the points the
+/// tick that *seeds* the reconcile can actually spend are one member's
+/// unwindowed query set — never the whole roster's. Pricing admission at
+/// the roster instead is what made the sweep unadmittable past ~25 repos
+/// (#1806): the forecast grew with the roster while the spend never did,
+/// so the governor refused, every tick and forever, a sweep that would
+/// have cost one member — and since a reconcile batch is the only pass
+/// that reports [`PolledScope::Reconcile`], the retirement of a row that
+/// simply stopped appearing stopped with it. Seeding costs one member;
+/// the queue then drains at whatever rate the allowance affords.
+pub(super) const RECONCILE_ADMISSION_MEMBERS: usize = 1;
+
 /// Consecutive due-but-deferred full-sweep ticks before the daemon raises
 /// the user-visible "discovery behind" advisory (#1391). A single deferred
 /// tick is normal governor pacing and stays quiet; a persistent stall
@@ -64,8 +103,10 @@ pub(super) enum DeferralSignal {
     /// LEVEL, not a one-shot edge) so a client that subscribes mid-stall
     /// still learns the state within one tick instead of waiting for a
     /// rising edge it already missed. The client dedupes the attention
-    /// flash to the moment it first sees the level.
-    Behind,
+    /// flash to the moment it first sees the level. `deferred_secs` is how
+    /// long this episode has been stalled, so the advisory can say how
+    /// stale discovery actually is.
+    Behind { deferred_secs: u32 },
     /// A previously-asserted stall recovered (sweep admitted or no longer
     /// due): retract the indicator. Emitted once, on
     /// the falling edge.
@@ -79,18 +120,24 @@ pub(super) enum DeferralSignal {
 ///
 /// [`DeferralSignal::Behind`] is a LEVEL — returned on every deferred tick
 /// once the streak crosses [`DISCOVERY_BEHIND_TICKS`], so late-subscribing
-/// clients converge on the state rather than missing a one-shot edge.
+/// clients converge on the state rather than missing a one-shot edge. It
+/// carries how long the current episode has been stalled, measured from
+/// the first refused tick rather than derived from the streak — the
+/// governor interval moves with engagement, so ticks are not a duration.
 /// [`DeferralSignal::Recovered`] is the single falling edge when a
 /// previously-asserted stall clears (admitted or not due),
 /// re-arming for a later re-stall.
 fn note_full_sweep_deferral(
     streak: &mut u32,
+    since: &mut Option<std::time::Instant>,
     notified: &mut bool,
     sweep_due: bool,
     admitted: bool,
+    now: std::time::Instant,
 ) -> DeferralSignal {
     if !sweep_due || admitted {
         *streak = 0;
+        *since = None;
         if *notified {
             *notified = false;
             return DeferralSignal::Recovered;
@@ -98,9 +145,13 @@ fn note_full_sweep_deferral(
         return DeferralSignal::None;
     }
     *streak = streak.saturating_add(1);
+    let started = *since.get_or_insert(now);
     if *streak >= DISCOVERY_BEHIND_TICKS {
         *notified = true;
-        return DeferralSignal::Behind;
+        return DeferralSignal::Behind {
+            deferred_secs: u32::try_from(now.saturating_duration_since(started).as_secs())
+                .unwrap_or(u32::MAX),
+        };
     }
     DeferralSignal::None
 }
@@ -240,6 +291,108 @@ mod full_sweep_commit_tests {
         assert!(full_sweep_admitted(true, &plan, 40));
     }
 
+    /// Regression (#1806): a reconcile batch must be SIZED at the price it
+    /// will pay. Its members are fetched unwindowed — an open-set PR query
+    /// on top of the rotation's windowed pair — so sizing the batch with
+    /// the windowed per-member price over-selects and the tick spends more
+    /// than the allowance it was selected against. Pricing admission at
+    /// one member is what exposed this: before, seeding required the whole
+    /// roster to fit, which left the batch capped by the fan-out and never
+    /// by the allowance, so the mis-pricing could not bite.
+    #[test]
+    fn a_reconcile_batch_is_sized_at_the_unwindowed_price_it_pays() {
+        let forecast = lazybox_gh::BackgroundSweepForecast {
+            global_points: 8,
+            repo_base_points: 3,
+            per_repo_points: 4,
+            per_repo_issue_points: 2,
+        };
+        // 30 points on the tick; a reconcile member costs 2×4 + 2 = 10.
+        let allowance = 30;
+        assert_eq!(
+            forecast.repo_sweep_reconcile_capacity(allowance, 6),
+            3,
+            "three members is what 30 points actually buys"
+        );
+        assert_eq!(
+            forecast.repo_sweep_capacity(allowance, 6),
+            5,
+            "the windowed price would have selected five — a 50-point batch"
+        );
+        assert!(
+            forecast
+                .repo_sweep_reconcile_points(forecast.repo_sweep_reconcile_capacity(allowance, 6))
+                <= allowance,
+            "a batch never costs more than the allowance it was selected against"
+        );
+    }
+
+    /// Regression (#1806): a repo-first reconcile's admission price must
+    /// not scale with the roster. It drains one governor-sized batch per
+    /// tick, so pricing the gate at the whole roster refused — forever,
+    /// past ~25 repos — a sweep that only ever costs a batch. And because
+    /// a reconcile is the only pass that may retire a row it no longer
+    /// sees, that refusal stranded every row whose close the windowed
+    /// rotation had missed — Shift-R included, since a manual refresh is
+    /// admitted through this same gate.
+    #[test]
+    fn a_reconcile_is_priced_at_the_batch_it_runs_not_the_whole_roster() {
+        let forecast = lazybox_gh::BackgroundSweepForecast {
+            global_points: 8,
+            repo_base_points: 3,
+            per_repo_points: 4,
+            per_repo_issue_points: 2,
+        };
+        // A 28-repo install, and a tick allowance that comfortably covers a
+        // fan-out batch but not the roster.
+        let plan = lazybox_gh::BackgroundPlan {
+            graphql_points: 120,
+            rest_core_points: 1,
+            graphql_budget_current: true,
+            pressure: false,
+            next_eligible_at: None,
+            tick_interval: Duration::from_secs(60),
+        };
+        assert!(
+            !full_sweep_admitted(true, &plan, forecast.repo_sweep_reconcile_points(28)),
+            "the pre-fix whole-roster price is exactly what the governor refuses here"
+        );
+        assert!(
+            full_sweep_admitted(
+                true,
+                &plan,
+                forecast.repo_sweep_reconcile_points(RECONCILE_ADMISSION_MEMBERS)
+            ),
+            "seeding the reconcile costs one member, so it must be admitted"
+        );
+        // The price no longer moves with the roster, so there is no size at
+        // which the sweep — or the Shift-R that forces it — stops fitting.
+        assert_eq!(
+            forecast.repo_sweep_reconcile_points(RECONCILE_ADMISSION_MEMBERS),
+            forecast.per_repo_points * 2 + forecast.per_repo_issue_points,
+        );
+    }
+
+    /// Regression (#1806): a reconcile draining its queue must not read as
+    /// a stall. It stays sweep-"due" across every batch, so counting those
+    /// ticks would raise the advisory over a sweep that is working.
+    #[test]
+    fn a_draining_reconcile_is_in_flight_not_deferred() {
+        assert!(
+            !sweep_deferrable(true, true, true),
+            "batches still queued means the reconcile is running, not refused"
+        );
+        assert!(
+            sweep_deferrable(true, true, false),
+            "a due sweep with nothing queued is the tick that can actually stall"
+        );
+        assert!(
+            !sweep_deferrable(true, false, false),
+            "an unknown budget is warm-up, not a stall"
+        );
+        assert!(!sweep_deferrable(false, true, false));
+    }
+
     #[test]
     fn an_unknown_graphql_budget_only_admits_the_bootstrap_request() {
         let plan = lazybox_gh::BackgroundPlan {
@@ -275,29 +428,78 @@ mod heartbeat_promote_tests {
         let self_throttle = ProviderError::self_throttle("github", "tick allowance spent", 20);
         assert!(!heartbeat_error_should_promote(&self_throttle));
     }
+
+    /// #1870: a warm tick whose sweep the governor deferred did no work at
+    /// all. Reporting it as an empty result set made it indistinguishable
+    /// from a successful query that matched nothing, and the poll driver's
+    /// 0-task warning then sent the user to their filters and scopes.
+    #[test]
+    fn a_warm_tick_defers_instead_of_reporting_an_empty_inbox() {
+        assert_eq!(warm_fallback(30, 30), WarmFallback::Promote);
+        assert_eq!(warm_fallback(31, 30), WarmFallback::Promote);
+        assert_eq!(warm_fallback(29, 30), WarmFallback::Defer);
+        assert_eq!(warm_fallback(0, 30), WarmFallback::Defer);
+
+        // And a deferral reports itself as lazybox's own pacing, waiting one
+        // tick — never as a fault, and never as an empty result set.
+        let deferred = deferred_sweep_error(4, 30, Duration::from_secs(60));
+        assert!(deferred.is_self_throttle(), "{deferred}");
+        assert_eq!(deferred.retry_after_secs(), Some(60));
+        assert!(!deferred.is_auth());
+        assert_eq!(deferred.source(), lazybox_gh::SOURCE);
+        let detail = format!("{deferred:?}");
+        assert!(
+            detail.contains("4 GraphQL point(s)") && detail.contains("30 needed"),
+            "the deferral must name the shortfall it is waiting on: {detail}"
+        );
+    }
 }
 
 #[cfg(test)]
 mod discovery_behind_tests {
     use super::*;
 
-    fn run(
-        sweep_due: bool,
-        admitted: bool,
-        streak: &mut u32,
-        notified: &mut bool,
-    ) -> DeferralSignal {
-        note_full_sweep_deferral(streak, notified, sweep_due, admitted)
+    /// The deferral state plus a fake clock that advances one 60s poll
+    /// interval per tick, so the episode duration the advisory reports is
+    /// exercised alongside the level transitions.
+    struct Deferral {
+        streak: u32,
+        since: Option<std::time::Instant>,
+        notified: bool,
+        now: std::time::Instant,
+    }
+
+    impl Deferral {
+        fn new() -> Self {
+            Self {
+                streak: 0,
+                since: None,
+                notified: false,
+                now: std::time::Instant::now(),
+            }
+        }
+
+        fn tick(&mut self, sweep_due: bool, admitted: bool) -> DeferralSignal {
+            self.now += Duration::from_secs(60);
+            note_full_sweep_deferral(
+                &mut self.streak,
+                &mut self.since,
+                &mut self.notified,
+                sweep_due,
+                admitted,
+                self.now,
+            )
+        }
     }
 
     #[test]
     fn behind_asserts_at_the_threshold_then_holds_the_level() {
-        let (mut streak, mut notified) = (0, false);
+        let mut d = Deferral::new();
         // A due sweep the governor keeps refusing: quiet until the
         // threshold.
         for tick in 1..DISCOVERY_BEHIND_TICKS {
             assert_eq!(
-                run(true, false, &mut streak, &mut notified),
+                d.tick(true, false),
                 DeferralSignal::None,
                 "tick {tick} is still within the quiet window"
             );
@@ -305,11 +507,14 @@ mod discovery_behind_tests {
         // The threshold tick asserts Behind, and — crucially — it stays
         // asserted every deferred tick after, so a client that subscribes
         // mid-stall still learns the state (no missed one-shot edge). No
-        // Recovered is emitted while still deferred.
-        for tick in 0..3 {
+        // Recovered is emitted while still deferred. The reported stall
+        // grows with the episode, measured from the FIRST refused tick.
+        for tick in 0..3u32 {
             assert_eq!(
-                run(true, false, &mut streak, &mut notified),
-                DeferralSignal::Behind,
+                d.tick(true, false),
+                DeferralSignal::Behind {
+                    deferred_secs: 60 * (tick + DISCOVERY_BEHIND_TICKS - 1)
+                },
                 "deferred tick {tick} past threshold re-asserts the level"
             );
         }
@@ -317,88 +522,129 @@ mod discovery_behind_tests {
 
     #[test]
     fn a_single_deferred_tick_stays_quiet() {
-        let (mut streak, mut notified) = (0, false);
-        assert_eq!(
-            run(true, false, &mut streak, &mut notified),
-            DeferralSignal::None
-        );
-        assert_eq!(streak, 1);
+        let mut d = Deferral::new();
+        assert_eq!(d.tick(true, false), DeferralSignal::None);
+        assert_eq!(d.streak, 1);
     }
 
     #[test]
     fn admission_after_behind_emits_exactly_one_recovered() {
-        let (mut streak, mut notified) = (0, false);
+        let mut d = Deferral::new();
         for _ in 0..DISCOVERY_BEHIND_TICKS {
-            run(true, false, &mut streak, &mut notified);
+            d.tick(true, false);
         }
-        assert!(notified);
+        assert!(d.notified);
         // The sweep finally lands → one Recovered edge, streak reset, latch re-armed.
-        assert_eq!(
-            run(true, true, &mut streak, &mut notified),
-            DeferralSignal::Recovered
+        assert_eq!(d.tick(true, true), DeferralSignal::Recovered);
+        assert_eq!(d.streak, 0);
+        assert!(!d.notified);
+        assert!(
+            d.since.is_none(),
+            "a recovered episode must not carry its old start into the next stall"
         );
-        assert_eq!(streak, 0);
-        assert!(!notified);
         // A second admitted tick is a no-op — Recovered fires ONCE, not every tick.
-        assert_eq!(
-            run(true, true, &mut streak, &mut notified),
-            DeferralSignal::None
-        );
-        // A later re-stall asserts Behind again at the threshold.
+        assert_eq!(d.tick(true, true), DeferralSignal::None);
+        // A later re-stall asserts Behind again at the threshold, timed from
+        // the new episode rather than the old one.
         for tick in 1..DISCOVERY_BEHIND_TICKS {
             assert_eq!(
-                run(true, false, &mut streak, &mut notified),
+                d.tick(true, false),
                 DeferralSignal::None,
                 "re-stall tick {tick}"
             );
         }
         assert_eq!(
-            run(true, false, &mut streak, &mut notified),
-            DeferralSignal::Behind
+            d.tick(true, false),
+            DeferralSignal::Behind {
+                deferred_secs: 60 * (DISCOVERY_BEHIND_TICKS - 1)
+            }
         );
     }
 
     #[test]
     fn recovery_before_the_threshold_never_emits_recovered() {
-        let (mut streak, mut notified) = (0, false);
+        let mut d = Deferral::new();
         // Deferred once (below threshold, so never asserted Behind) then
         // admitted: resetting an un-asserted streak must NOT emit a
         // spurious Recovered.
-        assert_eq!(
-            run(true, false, &mut streak, &mut notified),
-            DeferralSignal::None
-        );
-        assert_eq!(
-            run(true, true, &mut streak, &mut notified),
-            DeferralSignal::None
-        );
+        assert_eq!(d.tick(true, false), DeferralSignal::None);
+        assert_eq!(d.tick(true, true), DeferralSignal::None);
     }
 
     #[test]
     fn a_not_due_tick_never_counts_as_deferral() {
-        let (mut streak, mut notified) = (0, false);
+        let mut d = Deferral::new();
         // Most ticks take the incremental path and aren't sweep-due; they
         // must not accumulate toward the advisory.
         for _ in 0..10 {
-            assert_eq!(
-                run(false, false, &mut streak, &mut notified),
-                DeferralSignal::None
-            );
+            assert_eq!(d.tick(false, false), DeferralSignal::None);
         }
-        assert_eq!(streak, 0);
+        assert_eq!(d.streak, 0);
+    }
+
+    /// Regression (#1806, directive 3): the advisory tells the user to
+    /// press Shift-R, so the forced sweep must clear the very stall the
+    /// advisory is made of — end to end, from the refusal that raised it
+    /// to the recovery that retracts it.
+    ///
+    /// The force comes from the ALLOWANCE, not from this gate: a pending
+    /// manual refresh makes `GhClient::begin_background_tick` hand back a
+    /// `begin_full_refresh_tick` plan, whose grant is the remaining
+    /// non-reserved window rather than one tick's sustainable share
+    /// (pinned in `lazybox_gh`'s `manual_refresh_widens_the_tick_grant`).
+    /// So the tick that follows Shift-R evaluates the same gate against a
+    /// much larger number. Modelled here as the two plans the scheduler
+    /// actually sees on consecutive ticks.
+    #[test]
+    fn a_forced_sweep_clears_the_stall_the_advisory_was_raised_by() {
+        let forecast = lazybox_gh::BackgroundSweepForecast {
+            global_points: 8,
+            repo_base_points: 3,
+            per_repo_points: 4,
+            per_repo_issue_points: 2,
+        };
+        let required = forecast.repo_sweep_reconcile_points(RECONCILE_ADMISSION_MEMBERS);
+        // The stalling plan: one tick's share, short of even one member's
+        // reconcile price (2x4 + 2 = 10).
+        let paced = lazybox_gh::BackgroundPlan {
+            graphql_points: 6,
+            rest_core_points: 1,
+            graphql_budget_current: true,
+            pressure: false,
+            next_eligible_at: None,
+            tick_interval: Duration::from_secs(60),
+        };
+        let mut d = Deferral::new();
+        for _ in 0..50 {
+            let admitted = full_sweep_admitted(true, &paced, required);
+            assert!(!admitted, "this allowance is what keeps the sweep refused");
+            d.tick(true, admitted);
+        }
+        assert!(d.notified, "so the advisory is standing");
+
+        // The user presses the key the advisory names: the next tick's
+        // plan is drawn from the remaining non-reserved window instead.
+        let forced = lazybox_gh::BackgroundPlan {
+            graphql_points: 900,
+            ..paced
+        };
+        let admitted = full_sweep_admitted(true, &forced, required);
+        assert!(admitted, "the refresh grant must cover the sweep");
+        assert_eq!(
+            d.tick(true, admitted),
+            DeferralSignal::Recovered,
+            "and the forced sweep retracts the advisory it was raised by"
+        );
     }
 
     #[test]
     fn manual_refresh_does_not_hide_a_deferred_sweep() {
-        let (mut streak, mut notified) = (0, false);
+        let mut d = Deferral::new();
         // Requesting a refresh does not prove that it was admitted.
-        run(true, false, &mut streak, &mut notified);
-        assert_eq!(streak, 1);
-        assert_eq!(
-            run(true, false, &mut streak, &mut notified),
-            DeferralSignal::None
-        );
-        assert_eq!(streak, 2);
+        d.tick(true, false);
+        assert_eq!(d.streak, 1);
+        assert_eq!(d.tick(true, false), DeferralSignal::None);
+        assert_eq!(d.streak, 2);
     }
 }
 
@@ -427,12 +673,19 @@ pub struct GhSource {
     /// everything downstream. `None` when the sweep is already the user's.
     user_client: Option<GhClient>,
     /// What `client` can actually see, when it is a GitHub App installation
-    /// client. `polled_scope` withholds retirement authority for any swept
-    /// member outside it — a member the credential cannot see answers the
-    /// sweep with zero rows and no error, which would otherwise read as
-    /// "these rows are gone". `None` for the user token, which sees
-    /// everything the user does.
+    /// client. Every read is routed through [`GhSource::client_for`] against
+    /// it, so a repo the installation cannot see is read by the user token
+    /// instead of answering with zero rows and no error — which rescope
+    /// would have read as "these rows are gone". `None` for the user token,
+    /// which sees everything the user does.
     poll_coverage: Option<lazybox_gh::InstallationCoverage>,
+    /// Roster members `poll_coverage` does not reach, from
+    /// [`uncovered_roster_members`]. Non-empty means a *global* search must
+    /// run as the user, because the installation would answer one with
+    /// silently fewer rows. Which members of a given tick's sweep go on
+    /// which credential is decided per member by [`GhSource::is_uncovered`],
+    /// not here.
+    uncovered_members: std::collections::BTreeSet<String>,
     filter: ProviderConfig,
     scopes: std::collections::BTreeSet<String>,
     watch_repos: std::collections::BTreeSet<String>,
@@ -741,6 +994,51 @@ fn heartbeat_error_should_promote(error: &lazybox_core::ProviderError) -> bool {
     !(error.is_self_throttle() || error.retry_after_secs().is_some())
 }
 
+/// What a warm (notifications-driven) tick does when the heartbeat produced no
+/// incremental data and a full sweep is the only way to make progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WarmFallback {
+    /// This tick's GraphQL allowance covers a complete sweep unit.
+    Promote,
+    /// It does not. The tick does no work, and must say so rather than
+    /// reporting an empty result set (#1870): `Ok(vec![])` is what a
+    /// successful query matching nothing looks like, and the 0-task warning
+    /// then blamed the user's filters and scopes for a budget refusal.
+    Defer,
+}
+
+fn warm_fallback(allowance: u32, required_sweep_points: u32) -> WarmFallback {
+    if allowance >= required_sweep_points {
+        WarmFallback::Promote
+    } else {
+        WarmFallback::Defer
+    }
+}
+
+/// How a [`WarmFallback::Defer`] tick reports itself.
+///
+/// A self-throttle, so `github_self_throttle_wait` in the tick driver turns it
+/// into the same honest "waiting out the budget · ~Nm" countdown a GitHub-imposed
+/// limit gets, and `broadcast_error_debounced` never escalates it to "sync
+/// failing — check your token". The retry hint is the tick interval, not the
+/// GraphQL window reset: the governor re-credits and re-plans next tick
+/// (#1203/#1218), so a deferral is a one-tick wait even when the window has an
+/// hour left on it.
+fn deferred_sweep_error(
+    allowance: u32,
+    required_sweep_points: u32,
+    tick_interval: Duration,
+) -> lazybox_core::ProviderError {
+    lazybox_core::ProviderError::self_throttle(
+        lazybox_gh::SOURCE,
+        format!(
+            "full sweep deferred: {allowance} GraphQL point(s) allowed this tick, \
+             {required_sweep_points} needed"
+        ),
+        tick_interval.as_secs().max(1),
+    )
+}
+
 pub(super) fn gh_fetch_plan(full_sweep_due: bool, poll_notifications: bool) -> GhFetchPlan {
     if full_sweep_due {
         GhFetchPlan::Full
@@ -784,6 +1082,19 @@ pub(super) fn rank_targeted_requests(
     ranked
 }
 
+/// Whether a failed hot batch should degrade to one query per target.
+///
+/// Only a genuine server rejection of the batch shape does (GHES 3.18 —
+/// see `GhClient::hot_batch_rejected`): the same targets remain reachable
+/// one at a time. Our own rate budget refusing the batch does NOT: fanning
+/// the set out as ~70 single queries cannot succeed where one request was
+/// refused, it only multiplies the refusals (509 failed targeted fetches
+/// in one minute, 2026-09-23). That refusal surfaces so the tick backs off
+/// for its `retry_after` hint, and the targets stay hot for the next tick.
+fn hot_batch_error_degrades_to_single_fetches(error: &lazybox_gh::GhError) -> bool {
+    !matches!(error, lazybox_gh::GhError::RateLimited { .. })
+}
+
 /// Split targeted requests into the hot ones the batched `nodes(ids:)`
 /// query serves (hot, node id cached from a prior poll, batch path
 /// available on this server) and the rest, fetched one at a time via
@@ -806,6 +1117,118 @@ pub(super) fn partition_targeted_requests(
         }
     }
     (batched, individual)
+}
+
+/// Split a repo-first sweep into the members the poll credential reaches
+/// and the members it does not, so each set runs on the token that can see
+/// it (#1807). `None` — the user token — reaches everything the user does,
+/// so nothing is split off.
+pub(super) fn partition_sweep_specs(
+    specs: Vec<lazybox_gh::RepoSweepSpec>,
+    coverage: Option<&lazybox_gh::InstallationCoverage>,
+) -> (
+    Vec<lazybox_gh::RepoSweepSpec>,
+    Vec<lazybox_gh::RepoSweepSpec>,
+) {
+    specs
+        .into_iter()
+        .partition(|spec| coverage.is_none_or(|coverage| coverage.covers(&spec.member)))
+}
+
+/// The roster members the poll credential cannot reach — the set that
+/// decides whether a *global* search must run as the user.
+///
+/// It is deliberately the ROSTER, not the wider reach the credential
+/// decision is made on and not this tick's rotation slice. A global
+/// `author:`/`involves:` probe's results are filtered back down to the
+/// scopes and watches ([`filter_github_tasks_with_watches`]), so a hit in a
+/// repo outside the roster is dropped anyway: one snoozed cold-target row in
+/// some third-party repo must not move every probe onto the user token,
+/// spending the budget the App exists to protect for a repo whose rows the
+/// probe could never keep. Equally, a roster member missing from *this
+/// tick's* slice still has to be visible to a search that spans the whole
+/// inbox.
+pub(super) fn uncovered_roster_members(
+    roster: &[String],
+    coverage: Option<&lazybox_gh::InstallationCoverage>,
+) -> std::collections::BTreeSet<String> {
+    let Some(coverage) = coverage else {
+        return std::collections::BTreeSet::new();
+    };
+    coverage
+        .uncovered(roster.iter().map(String::as_str))
+        .into_iter()
+        .collect()
+}
+
+/// Fold the two partitions of a split repo-first sweep into one outcome.
+///
+/// Each side carries the members it was asked to sweep, so a side that
+/// failed outright — [`GhClient::fetch_repo_sweep`] errors only when *every*
+/// member failed — can be folded back in as failed members. That is what
+/// keeps a failure on one partition from marking the other incomplete: the
+/// side that ran keeps its own `completed` set, and with it its retirement
+/// authority.
+///
+/// A side that swept NO members is not such a side. Its `Ok` is manufactured
+/// by [`GhSource::sweep_partition`] and vouches for nothing, so a failure
+/// folded into it would report a total outage as a partial sync: the tick
+/// would take its success arm, where a dead credential is never cleared, an
+/// auth failure is announced as retryable, and the empty-poll backoff doubles
+/// as if the inbox were merely quiet. An unpartitioned sweep — every tick
+/// without a GitHub App — is exactly that shape, so the discrimination is
+/// load-bearing for the common case, not just the split one.
+pub(super) fn combine_sweep_partitions(
+    covered: (
+        Vec<lazybox_gh::RepoSweepSpec>,
+        Result<lazybox_gh::RepoSweepOutcome, lazybox_gh::GhError>,
+    ),
+    uncovered: (
+        Vec<lazybox_gh::RepoSweepSpec>,
+        Result<lazybox_gh::RepoSweepOutcome, lazybox_gh::GhError>,
+    ),
+) -> Result<lazybox_gh::RepoSweepOutcome, lazybox_gh::GhError> {
+    let members = |specs: Vec<lazybox_gh::RepoSweepSpec>| {
+        specs
+            .into_iter()
+            .map(|spec| spec.member)
+            .collect::<Vec<_>>()
+    };
+    let (covered_specs, covered_result) = covered;
+    let (uncovered_specs, uncovered_result) = uncovered;
+    match (covered_result, uncovered_result) {
+        (Ok(mut covered), Ok(uncovered)) => {
+            covered.merge(uncovered);
+            Ok(covered)
+        }
+        (Ok(mut covered), Err(error)) => {
+            if covered_specs.is_empty() {
+                return Err(error);
+            }
+            covered.merge(lazybox_gh::RepoSweepOutcome::all_failed(
+                members(uncovered_specs),
+                &error,
+            ));
+            Ok(covered)
+        }
+        (Err(error), Ok(mut uncovered)) => {
+            if uncovered_specs.is_empty() {
+                return Err(error);
+            }
+            uncovered.merge(lazybox_gh::RepoSweepOutcome::all_failed(
+                members(covered_specs),
+                &error,
+            ));
+            Ok(uncovered)
+        }
+        (Err(covered), Err(uncovered)) => Err(
+            if uncovered.retry_after_secs() > covered.retry_after_secs() {
+                uncovered
+            } else {
+                covered
+            },
+        ),
+    }
 }
 
 fn merge_targeted_tasks(base: &mut Vec<Task>, targeted: Vec<Task>) {
@@ -870,16 +1293,21 @@ impl GhSource {
             "notification heartbeat / hot targets".to_string()
         } else if !self.full_sweep_admitted {
             // A sweep is DUE but the budget can't cover it. Name the
-            // numbers and the lever: with many `watch:` repos the
-            // required points can exceed the allowance on EVERY tick,
-            // and reconcile then never runs — the "sync silently
-            // stopped" failure (#scale). Shift-R still forces it.
+            // numbers and the lever; reconcile then never runs — the
+            // "sync silently stopped" failure (#scale). Shift-R still
+            // forces it.
+            //
+            // No watched-repo count here: this branch is only reachable
+            // with `repo_sweep` unset, i.e. an EMPTY roster, i.e. no
+            // scopes and no `watch:` filters — so the count is
+            // structurally always zero and printing it told the user
+            // that nothing was over budget while saying discovery had
+            // stopped (#1806).
             format!(
-                "full sweep DEFERRED — needs {} pts, allowance {} ({} watched repos); \
-                 fewer `watch:` filters or a higher background_budget_share would unblock it",
+                "full sweep DEFERRED — needs {} pts, allowance {}; \
+                 a higher background_budget_share would unblock it",
                 self.required_sweep_points(),
                 self.governor_plan.graphql_points,
-                self.watch_repos.len(),
             )
         } else if self.scheduling.run_global {
             "global reconcile".to_string()
@@ -900,6 +1328,64 @@ impl GhSource {
     /// The client to act as the human with — see the `user_client` field.
     fn as_user(&self) -> &GhClient {
         self.user_client.as_ref().unwrap_or(&self.client)
+    }
+
+    /// The credential that can actually see `repo` (`owner/name`, or a bare
+    /// `owner` org member).
+    ///
+    /// An installation token asked about a repository outside its
+    /// installation does not fail — it answers a search with no rows and a
+    /// node read with "not visible". Routing per repo is what keeps the
+    /// split honest: the covered majority spends the App's budget, and the
+    /// rest is read by the token that can read it.
+    fn client_for(&self, repo: &str) -> &GhClient {
+        if self.is_uncovered(repo) {
+            self.as_user()
+        } else {
+            &self.client
+        }
+    }
+
+    /// Whether the poll credential is a GitHub App installation that does
+    /// not reach `repo`.
+    fn is_uncovered(&self, repo: &str) -> bool {
+        self.poll_coverage
+            .as_ref()
+            .is_some_and(|coverage| !coverage.covers(repo))
+    }
+
+    /// One partition of a repo-first sweep. An empty partition is a
+    /// complete sweep of nothing — no request, no log line.
+    async fn sweep_partition(
+        &self,
+        client: &GhClient,
+        specs: &[lazybox_gh::RepoSweepSpec],
+        want_prs: bool,
+        scan_issues: bool,
+    ) -> Result<lazybox_gh::RepoSweepOutcome, lazybox_gh::GhError> {
+        if specs.is_empty() {
+            return Ok(lazybox_gh::RepoSweepOutcome::empty());
+        }
+        client
+            .fetch_repo_sweep(specs, want_prs, scan_issues, &self.mention_allowed_logins)
+            .await
+    }
+
+    /// Whether any roster member sits outside the poll credential, so a
+    /// search spanning the whole inbox has to run as the user.
+    fn poll_split(&self) -> bool {
+        !self.uncovered_members.is_empty()
+    }
+
+    /// The client a *global* (non-repo-scoped) search must run on. Under a
+    /// split that is the user token: the installation would answer an
+    /// `involves:`/`author:` search with silently fewer rows.
+    fn search_client(&self) -> &GhClient {
+        if self.poll_split() {
+            self.as_user()
+        } else {
+            &self.client
+        }
     }
 
     async fn persist_sync_cursors(&self) {
@@ -1398,12 +1884,24 @@ impl GhSource {
             partition_targeted_requests(requests, &hot_node_ids, !self.client.hot_batch_rejected());
 
         let mut tasks = Vec::new();
-        if !batched.is_empty() {
+        // One batch per credential. A node the installation cannot see
+        // comes back `Missing` rather than as an error, so a mixed batch
+        // would drop the uncovered rows with nothing but a debug line.
+        let (covered_batch, uncovered_batch): (Vec<_>, Vec<_>) = batched
+            .into_iter()
+            .partition(|(request, _)| !self.is_uncovered(&request.target.repo_slug()));
+        for (client, batched) in [
+            (&self.client, covered_batch),
+            (self.as_user(), uncovered_batch),
+        ] {
+            if batched.is_empty() {
+                continue;
+            }
             let node_ids = batched
                 .iter()
                 .map(|(_, node_id)| node_id.clone())
                 .collect::<Vec<_>>();
-            match self.client.fetch_hot_tasks(&node_ids).await {
+            match client.fetch_hot_tasks(&node_ids).await {
                 Ok(results) => {
                     for ((request, _), outcome) in batched.into_iter().zip(results) {
                         match outcome {
@@ -1423,12 +1921,14 @@ impl GhSource {
                         }
                     }
                 }
-                // The batch is one request for the whole hot set, so a
-                // server that rejects it (GHES 3.18 — see
-                // `GhClient::hot_batch_rejected`) used to fail every hot
-                // tick. The same targets are still reachable one at a
-                // time through the per-target queries: degrade to those
-                // rather than abort the tick.
+                Err(error) if !hot_batch_error_degrades_to_single_fetches(&error) => {
+                    tracing::warn!(
+                        "targeted: hot batch refused by the rate budget ({error}); \
+                         backing off instead of fetching {} hot target(s) individually",
+                        batched.len(),
+                    );
+                    return Err(lazybox_core::ProviderError::from(error));
+                }
                 Err(error) => {
                     tracing::warn!(
                         "targeted: hot batch fetch failed ({error}); fetching {} hot target(s) individually",
@@ -1441,9 +1941,10 @@ impl GhSource {
 
         let results: Vec<_> = stream::iter(individual)
             .map(|request| async move {
+                let client = self.client_for(&request.target.repo_slug());
                 let result = match request.target.kind {
                     lazybox_gh::NotificationTargetKind::PullRequest => {
-                        self.client
+                        client
                             .fetch_single_pr(
                                 &request.target.owner,
                                 &request.target.repo,
@@ -1452,7 +1953,7 @@ impl GhSource {
                             .await
                     }
                     lazybox_gh::NotificationTargetKind::Issue => {
-                        self.client
+                        client
                             .fetch_single_issue(
                                 &request.target.owner,
                                 &request.target.repo,
@@ -1579,25 +2080,59 @@ impl GhSource {
             },
         ));
         for spec in &specs {
-            let mut query = self.client.repo_sweep_pr_query(&spec.member, spec.since);
-            if let Some(companion) = self
-                .client
-                .repo_sweep_reviewer_query(&spec.member, spec.since)
-            {
+            let client = self.client_for(&spec.member);
+            let mut query = client.repo_sweep_pr_query(&spec.member, spec.since);
+            if let Some(companion) = client.repo_sweep_reviewer_query(&spec.member, spec.since) {
                 query.push_str(" + ");
                 query.push_str(&companion);
             }
             self.emit_progress(format!("repo query: {query}"));
         }
-        let outcome = match self
-            .client
-            .fetch_repo_sweep(&specs, want_prs, scan_issues, &self.mention_allowed_logins)
-            .await
-        {
+        // Sweep each partition on the credential that can see it, in the
+        // same tick. Repo-first discovery is a per-member fan-out, so this
+        // splits the member list and nothing else — a member's queries are
+        // identical whichever token carries them.
+        let swept_members = specs.len();
+        let (covered, uncovered) = partition_sweep_specs(specs, self.poll_coverage.as_ref());
+        if !uncovered.is_empty() {
+            self.emit_progress(format!(
+                "{} outside the GitHub App installation — sweeping on your token: {}",
+                uncovered.len(),
+                uncovered
+                    .iter()
+                    .map(|spec| spec.member.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+        let (covered_result, uncovered_result) = tokio::join!(
+            self.sweep_partition(&self.client, &covered, want_prs, scan_issues),
+            self.sweep_partition(self.as_user(), &uncovered, want_prs, scan_issues),
+        );
+        // `completed` is what confers retirement authority, under an
+        // invariant `partition_sweep_specs` now establishes rather than
+        // checks: the credential that swept a member can see it. Hold the
+        // installation side to it, so a future change that sweeps a member
+        // without routing it fails loudly in tests instead of quietly
+        // retiring rows it never really swept.
+        if let Ok(outcome) = &covered_result {
+            debug_assert!(
+                outcome
+                    .completed
+                    .iter()
+                    .all(|member| !self.is_uncovered(member)),
+                "the installation partition completed a member it cannot see"
+            );
+        }
+        let outcome = match combine_sweep_partitions(
+            (covered, covered_result),
+            (uncovered, uncovered_result),
+        ) {
             Ok(outcome) => outcome,
             Err(error) => {
-                // Total failure — EVERY member's query errored (e.g. a
-                // revoked token 401ing the whole roster). A reconcile that
+                // Total failure — EVERY member's query errored on every
+                // credential that carried one (e.g. a revoked token 401ing
+                // the whole roster). A reconcile that
                 // erred out entirely must still re-arm the timer, exactly
                 // like a partial one does below: otherwise `force_full_sweep`
                 // / the due-timer stay set and the full-roster reconcile
@@ -1650,7 +2185,7 @@ impl GhSource {
                 message: format!(
                     "partial sync — {} of {} repos failed: {failed}",
                     outcome.failed.len(),
-                    specs.len()
+                    swept_members
                 ),
                 detail: "see /tmp/lazybox.log for the full error".into(),
                 kind: ProviderErrorKind::Retryable.as_str().to_string(),
@@ -2227,14 +2762,7 @@ impl TaskSource for GhSource {
             // preserved. A rotation slice / windowed pass has no deletion
             // authority. See `PolledScope::Reconcile`.
             let completed = self.last_reconcile_completed.lock();
-            let authoritative =
-                reconcile_swept_under_coverage(&completed, self.poll_coverage.as_ref());
-            return repo_first_polled_scope(
-                plan.reconcile,
-                windowed,
-                &authoritative,
-                &plan.in_scope,
-            );
+            return repo_first_polled_scope(plan.reconcile, windowed, &completed, &plan.in_scope);
         }
         gh_polled_scope(
             self.scheduling.run_global,
@@ -2367,20 +2895,37 @@ impl TaskSource for GhSource {
                     GhFetchPlan::Hot => (self.fetch_hot_only().await?, FetchMode::Hot),
                     GhFetchPlan::Warm => match self.fetch_incremental().await? {
                         Some(tasks) => (tasks, FetchMode::Incremental),
-                        None => {
-                            if self.governor_plan.graphql_points >= required_sweep_points {
+                        None => match warm_fallback(
+                            self.governor_plan.graphql_points,
+                            required_sweep_points,
+                        ) {
+                            WarmFallback::Promote => {
                                 tracing::info!(
                                     "incremental returned None; promoting to full sweep"
                                 );
                                 (self.fetch_full().await?, FetchMode::Full)
-                            } else {
+                            }
+                            WarmFallback::Defer => {
+                                // A deferred sweep did no work, so reporting
+                                // `Ok(vec![])` made it indistinguishable from
+                                // a successful query that matched nothing —
+                                // and the caller's 0-task warning then blamed
+                                // the user's filters and scopes for a budget
+                                // refusal (#1870). A self-throttle says what
+                                // actually happened and lights the honest
+                                // "waiting out the budget" countdown.
                                 tracing::info!(
                                     allowance = self.governor_plan.graphql_points,
+                                    required = required_sweep_points,
                                     "incremental failed; full sweep deferred by governor"
                                 );
-                                (Vec::new(), FetchMode::Incremental)
+                                return Err(deferred_sweep_error(
+                                    self.governor_plan.graphql_points,
+                                    required_sweep_points,
+                                    self.governor_plan.tick_interval,
+                                ));
                             }
-                        }
+                        },
                     },
                 };
 
@@ -2392,7 +2937,11 @@ impl TaskSource for GhSource {
                 // two. Full is already comprehensive, so skip it there.
                 if !is_full_plan && self.client.authored_probe_due() {
                     let since = chrono::Utc::now() - chrono::Duration::minutes(10);
-                    match self.client.fetch_recently_authored_prs(since).await {
+                    match self
+                        .search_client()
+                        .fetch_recently_authored_prs(since)
+                        .await
+                    {
                         Ok(authored) if !authored.is_empty() => {
                             let authored = apply_needs_reply_toggle(
                                 filter_github_tasks_with_watches(
@@ -2423,7 +2972,11 @@ impl TaskSource for GhSource {
                 // issue display is off.
                 if !is_full_plan && self.filter.issue_enabled() && self.client.issue_probe_due() {
                     let since = chrono::Utc::now() - chrono::Duration::minutes(10);
-                    match self.client.fetch_recently_involved_issues(since).await {
+                    match self
+                        .search_client()
+                        .fetch_recently_involved_issues(since)
+                        .await
+                    {
                         Ok(issues) if !issues.is_empty() => {
                             let issues = apply_needs_reply_toggle(
                                 filter_github_tasks_with_watches(
@@ -2962,12 +3515,17 @@ pub fn github_watch_repos_from_filters(
 }
 
 /// Source-attention ladder (#scale): Muted (or source-snoozed)
-/// `watch:` repos leave the watched fan-out entirely — each entry
-/// costs 2 unrotated queries per sweep AND inflates the governor's
-/// required-points forecast (the ~25-repo cliff where full sweeps
-/// stop being admitted). Muting is the lever that buys that budget
-/// back; unmuting restores the entry on the next tick, because the
+/// `watch:` repos leave the watched fan-out entirely — each entry costs
+/// 2 unrotated queries per sweep, so muting cuts real work off every
+/// tick; unmuting restores the entry on the next tick, because the
 /// watch list is rebuilt from config every `sources_for`.
+///
+/// It no longer moves the repo-first admission gate, though: that is
+/// priced per member ([`RECONCILE_ADMISSION_MEMBERS`]) and carries no
+/// roster term, so the "~25-repo cliff where full sweeps stop being
+/// admitted" this used to buy back is gone (#1806). Muting buys
+/// throughput, not admission — do not offer it to a user whose sweep is
+/// being refused.
 fn retain_unmuted_watches(
     watch_repos: &mut std::collections::BTreeSet<String>,
     cfg: &lazybox_config::Config,
@@ -3885,6 +4443,20 @@ mod auto_fix_dispatch_tests {
                 .is_some(),
             "a delivered Done-gated repair consumes one attempt"
         );
+        // The history names lazybox as the sender, so the agent's `]]h` and
+        // recap don't present the repair prompt as something the user typed.
+        let history =
+            crate::spawn_handler::load_prompt_history_for_test(&config, &session_key).await;
+        assert!(
+            history
+                .iter()
+                .any(|p| p.text.contains("Fix the failed CI checks.")
+                    && p.source
+                        == lazybox_ipc::PromptSource::Lazybox {
+                            reason: "auto-fix".into()
+                        }),
+            "the auto-fix prompt is recorded as lazybox's: {history:?}"
+        );
     }
 
     /// Regression (issue #122 follow-up): auto-fix dispatch runs INLINE on
@@ -4151,9 +4723,12 @@ pub(super) async fn sources_for_with_engagement(
                         )
                         .await;
                         let (poll_client, poll_restore, user_client, poll_coverage) = match poll {
-                            Some((poll_client, restore, coverage)) => {
-                                (poll_client, restore, Some(client), Some(coverage))
-                            }
+                            Some(poll) => (
+                                poll.client,
+                                poll.restore_sync_cursors,
+                                Some(client),
+                                Some(poll.coverage),
+                            ),
                             None => (client, restore_sync_cursors, None, None),
                         };
                         push_github_source(
@@ -4414,51 +4989,71 @@ pub(super) fn github_poll_scopes(
         .collect()
 }
 
-/// The members a reconcile batch may retire rows for, given what the
-/// sweeping credential can actually see.
+/// The scope set and (unmuted) watch list the GitHub sweep runs against,
+/// before the optional `include_accessible_repos` widening.
 ///
-/// A reconcile's `completed` list confers deletion authority, under an
-/// invariant that was unstated until a GitHub App credential broke it: the
-/// sweeping credential can see every member it swept. A member outside the
-/// installation answers the sweep's `search` with zero rows and no error, so
-/// it "completes" empty and its rows read as retired. Treat such a member
-/// exactly as a *failed* member is treated — drop it from the authoritative
-/// set so its rows are preserved. `None` (the user token) sees everything the
-/// user does, which is the premise rescope was written under.
-pub(super) fn reconcile_swept_under_coverage(
-    completed: &[String],
-    coverage: Option<&lazybox_gh::InstallationCoverage>,
-) -> Vec<String> {
-    let Some(coverage) = coverage else {
-        return completed.to_vec();
-    };
-    completed
-        .iter()
-        .filter(|member| {
-            if coverage.covers(member) {
-                return true;
-            }
-            tracing::warn!(
-                member = member.as_str(),
-                installation = coverage.installation_id,
-                "repo-sweep member is outside the GitHub App installation — \
-                 withholding retirement authority so its rows are preserved"
-            );
-            false
-        })
+/// Shared by the credential decision and the sweep itself so both derive
+/// the same [`repo_roster`]: the split below is only safe while the sweep
+/// really is repo-first, and two independent readings of config could
+/// disagree about that.
+fn github_configured_scopes(
+    setup: &lazybox_core::PersistedSetup,
+    cfg: Option<&lazybox_config::Config>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let github_cfg = cfg.map(|c| &c.providers.github);
+    let mut scopes = setup
+        .selected_scopes
+        .get("github")
         .cloned()
-        .collect()
+        .unwrap_or_default();
+    if let Some(github) = github_cfg {
+        scopes.extend(github_scopes_from_filters(&github.filters));
+    }
+    let mut watch_repos = github_cfg
+        .map(|github| github_watch_repos_from_filters(&github.filters))
+        .unwrap_or_default();
+    if let Some(cfg) = cfg {
+        retain_unmuted_watches(&mut watch_repos, cfg, now);
+    }
+    (scopes, watch_repos)
 }
 
-/// Why the App installation cannot carry the whole sweep, phrased for the
-/// user. `None` means it can.
-pub(super) fn app_coverage_gap(
+/// How much of the sweep a resolved GitHub App installation can carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PollCredentialPlan {
+    /// The installation reaches everything the sweep queries.
+    Whole,
+    /// It reaches part of what the sweep queries. What it does not reach
+    /// runs on the user token in the same tick, so the covered majority
+    /// still runs on the App's own budget (#1807).
+    Split { uncovered: Vec<String> },
+    /// It cannot carry the sweep at all; the user token takes every bit of
+    /// it, for the reason named here.
+    Fallback { reason: String },
+}
+
+/// Decide how the App installation and the user token divide this sweep.
+///
+/// A split is only offered when discovery is *repo-first* — one windowed
+/// query pair per roster member, which partitions cleanly by credential.
+/// With no roster the sweep is a single global `involves:` search, and a
+/// search issued under a credential that cannot see a scoped repo returns
+/// fewer rows and no error: the inbox would quietly lose a project rather
+/// than merely poll it more slowly. That case still steps the whole sweep
+/// back onto the user token.
+pub(super) fn poll_credential_plan(
     coverage: &lazybox_gh::InstallationCoverage,
     scopes: &[String],
+    roster: &[String],
     include_accessible_repos: bool,
-) -> Option<String> {
+) -> PollCredentialPlan {
+    let fallback = |reason: String| PollCredentialPlan::Fallback { reason };
     if include_accessible_repos {
-        return Some(
+        return fallback(
             "`providers.github.include_accessible_repos` polls every repo you can reach, \
              which no App installation is scoped to"
                 .to_string(),
@@ -4468,31 +5063,43 @@ pub(super) fn app_coverage_gap(
         // No scopes, no filters: the inbox is every repo the token can see
         // (`involves:me` everywhere). An installation would narrow that to
         // its own repos, and the rows it dropped would just stop appearing.
-        return Some(
+        return fallback(
             "no GitHub scopes are selected, so the inbox is every repo your token can see"
                 .to_string(),
         );
     }
     let uncovered = coverage.uncovered(scopes.iter().map(String::as_str));
     if uncovered.is_empty() {
-        return None;
+        return PollCredentialPlan::Whole;
     }
-    Some(format!("not in the installation: {}", uncovered.join(", ")))
+    if roster.is_empty() {
+        return fallback(format!("not in the installation: {}", uncovered.join(", ")));
+    }
+    PollCredentialPlan::Split { uncovered }
+}
+
+/// The credential the status sweep polls through, when a GitHub App
+/// installation carries some or all of it.
+pub(super) struct PollCredential {
+    pub client: GhClient,
+    /// The client was built fresh this tick and wants its persisted
+    /// cursors / rate state restored.
+    pub restore_sync_cursors: bool,
+    pub coverage: lazybox_gh::InstallationCoverage,
 }
 
 /// Pick the client the status sweep polls through.
 ///
-/// Returns `Some(poll_client)` when a GitHub App installation credential
-/// resolves AND covers everything the sweep queries — the sweep then runs on
-/// the App's own 5,000/hour, which no agent session can spend. `None` keeps
-/// the sweep on `user_client`, exactly as before this existed.
+/// Returns `Some(..)` when a GitHub App installation credential resolves and
+/// can carry the sweep, in whole or in part — what it carries runs on the
+/// App's own 5,000/hour, which no agent session can spend. `None` keeps the
+/// sweep on `user_client`, exactly as before this existed.
 ///
-/// Falling back is all-or-nothing on purpose. The sweep's discovery side is a
-/// GraphQL *search*, not a per-repo fan-out: run under a credential that
-/// cannot see one of the scoped repos, it returns fewer rows with no error to
-/// notice. Polling everything on the user token is the only way an uncovered
-/// repo keeps appearing at all — so the gap is reported and the whole sweep
-/// steps back, rather than half the inbox going quietly dark.
+/// A partial installation splits the roster rather than surrendering the
+/// whole sweep (#1807): the members it reaches run on its budget and the
+/// rest run on the user token, in the same tick. The all-or-nothing
+/// fallback remains for the shapes a split cannot cover — see
+/// [`poll_credential_plan`].
 #[allow(clippy::too_many_arguments)]
 async fn github_poll_client(
     user_client: &GhClient,
@@ -4503,7 +5110,7 @@ async fn github_poll_client(
     state: &mut TickState,
     bus: &tokio::sync::broadcast::Sender<Event>,
     gh_client_cache: &crate::registries::GithubClientCache,
-) -> Option<(GhClient, bool, lazybox_gh::InstallationCoverage)> {
+) -> Option<PollCredential> {
     let app = github_app_credentials(cfg).await?;
 
     // Re-read coverage every tick. The verdict decides whether a sweep may
@@ -4532,10 +5139,23 @@ async fn github_poll_client(
     let focused = state.round_robin.focused_repo.clone();
     let scopes = github_poll_scopes(setup, cfg, engagement, focused.as_deref());
     let include_accessible = cfg.is_some_and(|c| c.providers.github.include_accessible_repos);
-    if let Some(gap) = app_coverage_gap(&coverage, &scopes, include_accessible) {
-        note_app_coverage_gap(state, bus, Some(gap));
-        gh_client_cache.clear_poll();
-        return None;
+    let (configured_scopes, watch_repos) = github_configured_scopes(setup, cfg, chrono::Utc::now());
+    let roster = repo_roster(&configured_scopes, &watch_repos);
+    match poll_credential_plan(&coverage, &scopes, &roster, include_accessible) {
+        PollCredentialPlan::Whole => {}
+        PollCredentialPlan::Split { uncovered } => {
+            tracing::info!(
+                installation = coverage.installation_id,
+                uncovered = uncovered.join(", "),
+                "github sweep is split: the installation carries what it reaches, \
+                 the user token carries the rest"
+            );
+        }
+        PollCredentialPlan::Fallback { reason } => {
+            note_app_coverage_gap(state, bus, Some(reason));
+            gh_client_cache.clear_poll();
+            return None;
+        }
     }
 
     let cred = match lazybox_gh::poller_credential_chain(app, host)
@@ -4570,7 +5190,11 @@ async fn github_poll_client(
     });
     if let Some(client) = cached {
         note_app_coverage_gap(state, bus, None);
-        return Some((client, false, coverage));
+        return Some(PollCredential {
+            client,
+            restore_sync_cursors: false,
+            coverage,
+        });
     }
     // The viewer is the human whose inbox this is; an installation token has
     // no user of its own, so it is carried over from the user client rather
@@ -4587,7 +5211,11 @@ async fn github_poll_client(
             // sweep. Clearing the memo before the outcome was known made a
             // persistently failing build re-notify on every tick.
             note_app_coverage_gap(state, bus, None);
-            Some((client, true, coverage))
+            Some(PollCredential {
+                client,
+                restore_sync_cursors: true,
+                coverage,
+            })
         }
         Err(e) => {
             note_app_coverage_gap(
@@ -4675,6 +5303,25 @@ mod github_app_budget_tests {
         }
     }
 
+    /// The credential plan for a setup, as `github_poll_client` computes
+    /// it: the required reach on one side, the repo-first roster on the
+    /// other.
+    fn plan_for(
+        coverage: &InstallationCoverage,
+        setup: &lazybox_core::PersistedSetup,
+        cfg: Option<&lazybox_config::Config>,
+        engagement: &EngagementSnapshot,
+        include_accessible: bool,
+    ) -> PollCredentialPlan {
+        let (scopes, watch_repos) = github_configured_scopes(setup, cfg, chrono::Utc::now());
+        poll_credential_plan(
+            coverage,
+            &github_poll_scopes(setup, cfg, engagement, None),
+            &repo_roster(&scopes, &watch_repos),
+            include_accessible,
+        )
+    }
+
     fn setup_with_scopes(scopes: &[&str]) -> lazybox_core::PersistedSetup {
         let mut setup = lazybox_core::PersistedSetup {
             enabled_providers: ["github".to_string()].into_iter().collect(),
@@ -4708,63 +5355,98 @@ mod github_app_budget_tests {
     }
 
     #[test]
-    fn a_covering_installation_reports_no_gap() {
+    fn a_covering_installation_carries_the_whole_sweep() {
         let setup = setup_with_scopes(&["github:acme/widget"]);
         assert_eq!(
-            app_coverage_gap(
+            plan_for(
                 &coverage(false, &["acme/widget"]),
-                &github_poll_scopes(&setup, None, &EngagementSnapshot::default(), None),
+                &setup,
+                None,
+                &EngagementSnapshot::default(),
                 false,
             ),
-            None,
+            PollCredentialPlan::Whole,
         );
     }
 
     #[test]
-    fn a_repo_outside_the_installation_is_named_in_the_gap() {
-        // The sweep's discovery side is a GraphQL search: under a
-        // credential that cannot see `other/thing` it just returns fewer
-        // rows. The gap must name the repo so the fallback is legible
-        // rather than an inbox quietly missing a project.
+    fn a_repo_outside_the_installation_splits_the_sweep_rather_than_surrendering_it() {
+        // One uncovered repo used to put the WHOLE inbox back on the
+        // budget agent sessions share. Repo-first discovery is a per-member
+        // fan-out, so only that repo needs the user token.
         let setup = setup_with_scopes(&["github:acme/widget", "github:other/thing"]);
-        let gap = app_coverage_gap(
-            &coverage(false, &["acme/widget"]),
-            &github_poll_scopes(&setup, None, &EngagementSnapshot::default(), None),
-            false,
-        )
-        .expect("an uncovered repo is a gap");
-        assert!(gap.contains("other/thing"), "{gap}");
-        assert!(!gap.contains("acme/widget"), "{gap}");
+        assert_eq!(
+            plan_for(
+                &coverage(false, &["acme/widget"]),
+                &setup,
+                None,
+                &EngagementSnapshot::default(),
+                false,
+            ),
+            PollCredentialPlan::Split {
+                uncovered: vec!["other/thing".to_string()]
+            },
+        );
     }
 
     #[test]
-    fn an_unscoped_inbox_is_itself_a_gap() {
+    fn an_unscoped_inbox_cannot_be_split() {
         // Empty scopes means `involves:me` everywhere — unbounded, so an
         // "All repositories" installation on one org still would not cover
-        // it, and the repos it dropped would just stop appearing.
+        // it, and the repos it dropped would just stop appearing. There is
+        // no roster to partition either, so the whole sweep steps back.
         let setup = setup_with_scopes(&[]);
-        let gap = app_coverage_gap(
+        let PollCredentialPlan::Fallback { reason } = plan_for(
             &coverage(true, &[]),
-            &github_poll_scopes(&setup, None, &EngagementSnapshot::default(), None),
+            &setup,
+            None,
+            &EngagementSnapshot::default(),
             false,
-        )
-        .expect("an unscoped inbox is a gap");
-        assert!(gap.contains("no GitHub scopes"), "{gap}");
+        ) else {
+            panic!("an unscoped inbox has no roster to split");
+        };
+        assert!(reason.contains("no GitHub scopes"), "{reason}");
     }
 
     #[test]
-    fn widening_the_inbox_to_every_reachable_repo_is_itself_a_gap() {
+    fn widening_the_inbox_to_every_reachable_repo_cannot_be_split() {
         // `include_accessible_repos` makes the roster open-ended — repos
         // the user joins tomorrow are in scope — so no installation can
         // be proven to cover it.
         let setup = setup_with_scopes(&["github:acme/widget"]);
-        let gap = app_coverage_gap(
+        let PollCredentialPlan::Fallback { reason } = plan_for(
             &coverage(true, &[]),
-            &github_poll_scopes(&setup, None, &EngagementSnapshot::default(), None),
+            &setup,
+            None,
+            &EngagementSnapshot::default(),
             true,
-        )
-        .expect("an open-ended roster is a gap");
-        assert!(gap.contains("include_accessible_repos"), "{gap}");
+        ) else {
+            panic!("an open-ended roster cannot be partitioned");
+        };
+        assert!(reason.contains("include_accessible_repos"), "{reason}");
+    }
+
+    /// The split rides on repo-first discovery. Without a roster the sweep
+    /// is one global `involves:` search, and a search issued under a
+    /// credential that cannot see a repo returns fewer rows and no error —
+    /// so that shape still steps the whole sweep back onto the user token,
+    /// naming the repos it could not reach.
+    /// The split rides on repo-first discovery. With no roster the sweep is
+    /// one global `involves:` search, and a search issued under a
+    /// credential that cannot see a repo returns fewer rows and no error —
+    /// so that shape still steps the whole sweep back, naming what it
+    /// could not reach.
+    #[test]
+    fn a_global_search_sweep_falls_back_whole_rather_than_splitting() {
+        let PollCredentialPlan::Fallback { reason } = poll_credential_plan(
+            &coverage(true, &[]),
+            &["acme/widget".to_string(), "otherorg/api".to_string()],
+            &[],
+            false,
+        ) else {
+            panic!("a rosterless sweep cannot be partitioned");
+        };
+        assert!(reason.contains("otherorg/api"), "{reason}");
     }
 
     /// Authoring must stay the user's. With the poller on an App
@@ -4820,38 +5502,193 @@ mod github_app_budget_tests {
     }
 
     #[test]
-    fn a_session_bearing_repo_outside_the_installation_is_a_gap() {
+    fn a_session_bearing_repo_outside_the_installation_is_swept_as_the_user() {
         // "All repositories on acme" covers every configured scope, but the
-        // user holds a session on otherorg/api. Before this was checked, the
-        // App carried the sweep and otherorg/api's session-less rows were
-        // silently retired.
+        // user holds a session on otherorg/api, which the scheduler sweeps
+        // as a reconcile member. It belongs on the token that can see it.
         let setup = setup_with_scopes(&["github:acme"]);
         let engagement = engagement_with(&["otherorg/api"], &[]);
-        let gap = app_coverage_gap(
-            &coverage(true, &[]),
-            &github_poll_scopes(&setup, None, &engagement, None),
-            false,
-        )
-        .expect("a session-bearing repo outside the installation is a gap");
-        assert!(gap.contains("otherorg/api"), "{gap}");
+        assert_eq!(
+            plan_for(&coverage(true, &[]), &setup, None, &engagement, false),
+            PollCredentialPlan::Split {
+                uncovered: vec!["otherorg/api".to_string()]
+            },
+        );
     }
 
-    /// Defence in depth for the same hazard at the site that actually
-    /// confers deletion authority: a swept member the credential cannot see
-    /// must be treated exactly like a member whose queries failed.
+    fn spec(member: &str) -> lazybox_gh::RepoSweepSpec {
+        lazybox_gh::RepoSweepSpec {
+            member: member.to_string(),
+            since: None,
+        }
+    }
+
+    fn members(specs: &[lazybox_gh::RepoSweepSpec]) -> Vec<&str> {
+        specs.iter().map(|spec| spec.member.as_str()).collect()
+    }
+
+    /// The heart of the split: each member goes to the credential that can
+    /// see it, including members the scheduler added on top of the roster.
     #[test]
-    fn retirement_authority_is_withheld_for_members_outside_the_installation() {
-        let completed = vec!["acme/widget".to_string(), "otherorg/api".to_string()];
+    fn a_sweep_partitions_by_what_the_installation_reaches() {
+        let specs = vec![spec("acme/widget"), spec("otherorg/api"), spec("acme")];
+        let (covered, uncovered) =
+            partition_sweep_specs(specs.clone(), Some(&coverage(false, &["acme/widget"])));
+        assert_eq!(members(&covered), ["acme/widget"]);
         assert_eq!(
-            reconcile_swept_under_coverage(&completed, Some(&coverage(false, &["acme/widget"]))),
-            vec!["acme/widget".to_string()],
-            "an unseeable member must not confer retirement authority",
+            members(&uncovered),
+            ["otherorg/api", "acme"],
+            "a bare org member is only covered by an All-repositories install",
+        );
+
+        let (covered, uncovered) = partition_sweep_specs(specs, None);
+        assert_eq!(covered.len(), 3, "the user token sees what the user sees");
+        assert!(uncovered.is_empty());
+    }
+
+    fn outcome_of(completed: &[&str], failed: &[&str]) -> lazybox_gh::RepoSweepOutcome {
+        lazybox_gh::RepoSweepOutcome {
+            completed: completed.iter().map(|m| (*m).to_string()).collect(),
+            failed: failed
+                .iter()
+                .map(|m| ((*m).to_string(), "boom".to_string()))
+                .collect(),
+            ..lazybox_gh::RepoSweepOutcome::empty()
+        }
+    }
+
+    #[test]
+    fn the_two_partitions_fold_into_one_outcome() {
+        let combined = combine_sweep_partitions(
+            (
+                vec![spec("acme/widget")],
+                Ok(outcome_of(&["acme/widget"], &[])),
+            ),
+            (
+                vec![spec("otherorg/api")],
+                Ok(outcome_of(&["otherorg/api"], &[])),
+            ),
+        )
+        .expect("both sides ran");
+        assert_eq!(
+            combined.completed,
+            vec!["acme/widget".to_string(), "otherorg/api".to_string()],
+        );
+        assert!(combined.is_complete());
+    }
+
+    /// A failure on one partition must not mark the other incomplete — the
+    /// side that ran keeps its own `completed` set, and with it its
+    /// retirement authority.
+    #[test]
+    fn one_failed_partition_leaves_the_others_authority_intact() {
+        let error = lazybox_gh::GhError::RateLimited {
+            retry_after_secs: 90,
+            reason: "primary budget exhausted".into(),
+            self_throttle: false,
+        };
+        let combined = combine_sweep_partitions(
+            (
+                vec![spec("acme/widget")],
+                Ok(outcome_of(&["acme/widget"], &[])),
+            ),
+            (vec![spec("otherorg/api")], Err(error)),
+        )
+        .expect("the covered partition still ran");
+        assert_eq!(combined.completed, vec!["acme/widget".to_string()]);
+        assert_eq!(
+            combined
+                .failed
+                .iter()
+                .map(|(m, _)| m.as_str())
+                .collect::<Vec<_>>(),
+            ["otherorg/api"],
+            "the failed partition's members are reported, not silently dropped",
+        );
+        assert!(!combined.is_complete(), "the sweep as a whole is partial");
+        assert_eq!(combined.retry_after_secs, Some(90));
+    }
+
+    /// The unpartitioned shape — every tick without a GitHub App — puts all
+    /// the members on one side and leaves the other empty. A total failure
+    /// there must still surface as an error: an empty partition's `Ok` is
+    /// manufactured and vouches for nothing, and folding the failure into it
+    /// would send the tick down its success arm, where a dead credential is
+    /// never cleared, an auth failure is announced as retryable, and the
+    /// empty-poll backoff doubles as if the inbox were merely quiet.
+    #[test]
+    fn a_total_failure_beside_an_empty_partition_still_errors() {
+        let error = combine_sweep_partitions(
+            (
+                vec![spec("acme/widget"), spec("acme/api")],
+                Err(lazybox_gh::GhError::Graphql("401 Bad credentials".into())),
+            ),
+            (Vec::new(), Ok(lazybox_gh::RepoSweepOutcome::empty())),
+        )
+        .expect_err("nothing was swept — this is not a partial sync");
+        assert!(format!("{error}").contains("401"), "{error}");
+    }
+
+    /// The mirror: the installation covers none of this tick's members, so
+    /// the covered partition is empty and the user token carries the lot.
+    /// Its total failure is total.
+    #[test]
+    fn a_total_failure_on_the_only_populated_partition_still_errors() {
+        combine_sweep_partitions(
+            (Vec::new(), Ok(lazybox_gh::RepoSweepOutcome::empty())),
+            (
+                vec![spec("otherorg/api")],
+                Err(lazybox_gh::GhError::Graphql("403 Forbidden".into())),
+            ),
+        )
+        .expect_err("the only partition that ran failed outright");
+    }
+
+    /// The probes' results are filtered back down to the roster, so the
+    /// roster is what a global search must be able to see. A snoozed
+    /// cold-target row in some third-party repo reaches the credential
+    /// decision but not this set — otherwise one lingering row would move
+    /// every probe onto the user token for rows the probe could never keep.
+    #[test]
+    fn only_roster_members_decide_whether_a_global_search_runs_as_the_user() {
+        let coverage = coverage(false, &["acme/widget"]);
+        assert!(
+            uncovered_roster_members(&["acme/widget".to_string()], Some(&coverage)).is_empty(),
+            "a fully covered roster needs no user-token search",
         );
         assert_eq!(
-            reconcile_swept_under_coverage(&completed, None),
-            completed,
-            "the user token sees what the user sees; authority is unchanged",
+            uncovered_roster_members(
+                &["acme/widget".to_string(), "otherorg/api".to_string()],
+                Some(&coverage),
+            ),
+            ["otherorg/api".to_string()].into_iter().collect(),
         );
+        assert!(
+            uncovered_roster_members(&["acme/widget".to_string()], None).is_empty(),
+            "the user token sees what the user sees",
+        );
+    }
+
+    /// Only when neither partition ran does the sweep itself fail, and it
+    /// carries the longer of the two retry hints.
+    #[test]
+    fn both_partitions_failing_fails_the_sweep_with_the_longer_wait() {
+        let short = lazybox_gh::GhError::RateLimited {
+            retry_after_secs: 10,
+            reason: "covered".into(),
+            self_throttle: false,
+        };
+        let long = lazybox_gh::GhError::RateLimited {
+            retry_after_secs: 300,
+            reason: "uncovered".into(),
+            self_throttle: false,
+        };
+        let error = combine_sweep_partitions(
+            (vec![spec("acme/widget")], Err(short)),
+            (vec![spec("otherorg/api")], Err(long)),
+        )
+        .expect_err("nothing was swept");
+        assert_eq!(error.retry_after_secs(), Some(300));
     }
 
     /// The notice fires when the gap appears and when its reason changes,
@@ -4911,7 +5748,7 @@ async fn push_github_source(
     client: GhClient,
     restore_sync_cursors: bool,
     // What `client` can see, when the sweep moved onto an App installation
-    // credential. Gates the reconcile's retirement authority.
+    // credential. Routes each read to the token that can see its repo.
     poll_coverage: Option<lazybox_gh::InstallationCoverage>,
     // The user-token client, when the poller is NOT running on it — i.e.
     // when `client` above is a GitHub App installation client with its own
@@ -4936,15 +5773,8 @@ async fn push_github_source(
     // documented `providers.github.*` section.
     let cfg = lazybox_config::Config::load().ok();
     let github_cfg = cfg.as_ref().map(|c| &c.providers.github);
-    let config_scopes = github_cfg
-        .map(|g| github_scopes_from_filters(&g.filters))
-        .unwrap_or_default();
-    let mut watch_repos = github_cfg
-        .map(|g| github_watch_repos_from_filters(&g.filters))
-        .unwrap_or_default();
-    if let Some(cfg) = cfg.as_ref() {
-        retain_unmuted_watches(&mut watch_repos, cfg, chrono::Utc::now());
-    }
+    let (mut scopes, watch_repos) =
+        github_configured_scopes(setup, cfg.as_ref(), chrono::Utc::now());
     let detect_needs_reply = github_cfg.map(|g| g.detect_needs_reply).unwrap_or(true);
     let poll_interval = github_cfg
         .map(|g| g.poll_interval)
@@ -4955,12 +5785,6 @@ async fn push_github_source(
     let background_budget_share = github_cfg
         .map(|g| g.background_budget_share)
         .unwrap_or(lazybox_gh::rate_budget::DEFAULT_BACKGROUND_SHARE);
-    let mut scopes = setup
-        .selected_scopes
-        .get("github")
-        .cloned()
-        .unwrap_or_default();
-    scopes.extend(config_scopes);
     // Opt-in (`providers.github.include_accessible_repos`):
     // widen the allowlist to every repo the user can reach
     // (owned / org-member / direct-collaborator), so an
@@ -5003,7 +5827,7 @@ async fn push_github_source(
     // sync with what GhSource holds.
     let client = client
         .with_background_share(background_budget_share)
-        .with_filters(pr_qualifiers, issue_qualifiers)
+        .with_filters(pr_qualifiers.clone(), issue_qualifiers.clone())
         .with_watch_repos(watch_repos.iter().cloned().collect())
         .with_needs_reply(detect_needs_reply)
         // Native `blocked_by` edges refresh on the same cadence as the row:
@@ -5012,8 +5836,22 @@ async fn push_github_source(
     // The heartbeat runs on the user client while the sweep runs on the App
     // client, so they must agree on the notification cursor and the sweep
     // clocks. Adopt before caching, so the copy handlers reach for is
-    // coherent too.
-    let user_client = user_client.map(|user| user.sharing_sync_state_with(&client));
+    // coherent too. The search qualifiers come with it: once the user token
+    // sweeps the uncovered half of a split roster, the two clients must
+    // build the same queries, and giving both the same filters is what
+    // makes either one substitutable for a search.
+    let user_client = user_client.map(|user| {
+        // Deliberately NOT `with_background_share`: that knob is
+        // "how much of the budget background polling may take", and on the
+        // user client it also moves the reserve `gh_shim::reserve_breached`
+        // holds agent `gh` calls against. Tuning the poller's share must not
+        // silently retune when an agent's shell command is throttled.
+        user.with_filters(pr_qualifiers, issue_qualifiers)
+            .with_watch_repos(watch_repos.iter().cloned().collect())
+            .with_needs_reply(detect_needs_reply)
+            .with_repo_refresh_interval(repo_refresh_interval)
+            .sharing_sync_state_with(&client)
+    });
     if restore_sync_cursors && let Some(store) = cursor_store.clone() {
         let key = gh_state_key("github:sync-cursors:v1", &client);
         match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {
@@ -5137,6 +5975,17 @@ async fn push_github_source(
     let sessioned_repos = engagement.sessioned_repos();
     let governor_interval = super::background_tick_interval(poll_interval, engagement.hot_count());
     let governor_plan = client.begin_background_tick(governor_interval);
+    // The user client owns a second `RateBudget`, and a budget that never
+    // begins a tick never clears its per-tick scheduled accounting: its
+    // spend accrues until every scheduled request it makes — the
+    // notifications heartbeat, and the uncovered half of a split sweep — is
+    // refused for exhausting an allowance nobody granted. Give it its own
+    // governor pass. The sweep's admission math still runs off the poll
+    // client's plan, which forecasts the whole roster and so over-states
+    // what the covered partition will actually spend.
+    if let Some(user) = &user_client {
+        user.begin_background_tick(governor_interval);
+    }
     let want_prs = filter.pr_enabled();
     let scan_issues = filter.issue_enabled() || !mention_allowed.is_empty();
     let forecast = client.background_sweep_forecast(want_prs, scan_issues);
@@ -5177,7 +6026,7 @@ async fn push_github_source(
                 DEFAULT_ROUND_ROBIN_N,
             ));
     let required_sweep_points = if repo_first {
-        forecast.repo_sweep_reconcile_points(roster.len() + sessioned_repos.len())
+        forecast.repo_sweep_reconcile_points(RECONCILE_ADMISSION_MEMBERS)
     } else {
         forecast.required_points(global_due, want_prs)
     };
@@ -5194,29 +6043,31 @@ async fn push_github_source(
     // stalled; raise one dismissable advisory that names the numbers and
     // the levers instead of burying it in the `Shift-D` sync string.
     //
-    // Only count a deferral against a *known* budget: while the GraphQL
-    // budget isn't current (startup bootstrap, an expired window) the sweep
-    // is briefly not-admitted for a reason that self-heals in a tick or
-    // two, which is normal warm-up rather than the scale stall this notice
-    // is about. Gating on `graphql_budget_current` keeps the advisory from
-    // firing on every fresh daemon start.
-    let sweep_deferrable = will_full_sweep && governor_plan.graphql_budget_current;
+    let sweep_deferrable = sweep_deferrable(
+        will_full_sweep,
+        governor_plan.graphql_budget_current,
+        repo_first && !state.reconcile_pending.is_empty(),
+    );
     match note_full_sweep_deferral(
         &mut state.full_sweep_deferral_streak,
+        &mut state.full_sweep_deferral_since,
         &mut state.discovery_behind_notified,
         sweep_deferrable,
         full_sweep_admitted,
+        now,
     ) {
         // A DEDICATED standing signal, not a `ProviderError`: the client
         // holds it as a persistent, self-retracting indicator (so it can't
         // be missed the way a one-shot toast can), it never registers a
         // phantom failing provider in the sync summary, and it never
-        // cross-leaks to other clients as a bare error. The figures name the
-        // lever the user can pull (`Shift-R`, or fewer `watch:` filters).
-        DeferralSignal::Behind => {
+        // cross-leaks to other clients as a bare error. The figures are the
+        // governor's own refusal — what the sweep costs against what this
+        // tick affords — plus how long it has been refused, so the advisory
+        // explains the stall instead of merely asserting it (#1806).
+        DeferralSignal::Behind { deferred_secs } => {
             let _ = bus.send(Event::GithubDiscoveryBehind {
                 behind: true,
-                watched_repos: watch_repos.len() as u32,
+                deferred_secs,
                 required_points: required_sweep_points,
                 allowance: governor_plan.graphql_points,
             });
@@ -5225,7 +6076,7 @@ async fn push_github_source(
         DeferralSignal::Recovered => {
             let _ = bus.send(Event::GithubDiscoveryBehind {
                 behind: false,
-                watched_repos: 0,
+                deferred_secs: 0,
                 required_points: 0,
                 allowance: 0,
             });
@@ -5261,7 +6112,13 @@ async fn push_github_source(
                 roster.len(),
                 rotation_target_ticks(repo_refresh_interval, poll_interval),
             ),
-            |limit| forecast.repo_sweep_capacity(governor_plan.graphql_points, limit),
+            |limit, reconcile| {
+                if reconcile {
+                    forecast.repo_sweep_reconcile_capacity(governor_plan.graphql_points, limit)
+                } else {
+                    forecast.repo_sweep_capacity(governor_plan.graphql_points, limit)
+                }
+            },
             now,
         );
         tracing::info!(
@@ -5301,6 +6158,7 @@ async fn push_github_source(
     }
     sources.push(Box::new(GhSource {
         user_client,
+        uncovered_members: uncovered_roster_members(&roster, poll_coverage.as_ref()),
         poll_coverage,
         client,
         filter,
@@ -5427,7 +6285,7 @@ mod repo_first_tests {
             false,
             true,
             2,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(plan.reconcile && !plan.reconcile_final);
@@ -5454,7 +6312,7 @@ mod repo_first_tests {
             false,
             true,
             2,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(plan.reconcile && plan.reconcile_final);
@@ -5489,7 +6347,8 @@ mod repo_first_tests {
             true,
             true,
             3,
-            |limit| {
+            |limit, reconcile| {
+                assert!(reconcile, "a reconcile batch is priced unwindowed");
                 assert_eq!(limit, 6);
                 5
             },
@@ -5516,7 +6375,7 @@ mod repo_first_tests {
             false,
             true,
             3,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(plan.reconcile && plan.reconcile_final);
@@ -5540,7 +6399,7 @@ mod repo_first_tests {
             false,
             false,
             3,
-            |limit| limit,
+            |limit, _| limit,
             Instant::now(),
         );
         assert!(!plan.reconcile);
@@ -5569,7 +6428,8 @@ mod repo_first_tests {
             false,
             true,
             2,
-            |limit| {
+            |limit, reconcile| {
+                assert!(!reconcile, "a rotation slice is priced windowed");
                 assert_eq!(limit, 2 + 1 + 1);
                 2
             },
@@ -5603,7 +6463,7 @@ mod repo_first_tests {
                 false,
                 true,
                 rotation_fanout(members.len(), 3),
-                |limit| limit,
+                |limit, _| limit,
                 Instant::now(),
             );
             seen.extend(plan.members);
@@ -5635,7 +6495,10 @@ pub(super) fn rotation_target_ticks(
 ///   then repos with a LIVE agent (forced every tick), then the `fanout`
 ///   stalest members (idle session-bearing repos rotate here like any
 ///   other, so 20 open worktrees don't cost 20 query pairs a minute) —
-///   capped by what the governor allowance admits (`capacity_for(limit)`).
+///   capped by what the governor allowance admits
+///   (`capacity_for(limit, reconcile)` — the flag picks the windowed or
+///   the unwindowed per-member price, which differ by the reconcile's
+///   extra open-set PR query).
 ///   Members that don't fit keep their cursor age and lead the next tick.
 /// - Hot-only tick: nothing (hot targets are fetched by the caller).
 #[allow(clippy::too_many_arguments)]
@@ -5649,7 +6512,7 @@ pub(super) fn plan_repo_first_tick(
     manual_refresh: bool,
     poll_notifications: bool,
     fanout: usize,
-    capacity_for: impl Fn(usize) -> usize,
+    capacity_for: impl Fn(usize, bool) -> usize,
     now: std::time::Instant,
 ) -> RepoSweepPlan {
     let roster_len = roster.len();
@@ -5690,6 +6553,7 @@ pub(super) fn plan_repo_first_tick(
             fanout
                 .max(1)
                 .saturating_mul(if manual_refresh { 2 } else { 1 }),
+            true,
         )
         .max(1)
         .min(reconcile_pending.len());
@@ -5739,7 +6603,7 @@ pub(super) fn plan_repo_first_tick(
         &eligible,
         live_agent_repos,
         fanout,
-        capacity_for(limit),
+        capacity_for(limit, false),
         now,
     );
     RepoSweepPlan {
@@ -5789,4 +6653,32 @@ pub async fn default_sources(
         throwaway_client_cache,
     )
     .await
+}
+
+#[cfg(test)]
+mod hot_batch_fallback_tests {
+    use super::hot_batch_error_degrades_to_single_fetches;
+    use lazybox_gh::GhError;
+
+    /// A budget refusal of the one hot batch must not fan out into a
+    /// single query per target — each would be refused the same way.
+    #[test]
+    fn a_rate_budget_refusal_backs_off_instead_of_fanning_out() {
+        for self_throttle in [true, false] {
+            let refused = GhError::RateLimited {
+                retry_after_secs: 15,
+                reason: "local rate budget is empty".into(),
+                self_throttle,
+            };
+            assert!(!hot_batch_error_degrades_to_single_fetches(&refused));
+        }
+    }
+
+    /// A server that rejects the batch shape (GHES) still degrades to the
+    /// per-target queries that reach the same rows.
+    #[test]
+    fn a_rejected_batch_still_degrades_to_single_fetches() {
+        let rejected = GhError::Graphql("Field 'nodes' doesn't exist on type 'Query'".into());
+        assert!(hot_batch_error_degrades_to_single_fetches(&rejected));
+    }
 }

@@ -2,6 +2,7 @@
 import type { Activity } from "./Activity";
 import type { AutomationPolicies } from "./AutomationPolicies";
 import type { CleanupPrompt } from "./CleanupPrompt";
+import type { FloatingWorkspaceKind } from "./FloatingWorkspaceKind";
 import type { HopperMeta } from "./HopperMeta";
 import type { ProjectKey } from "./ProjectKey";
 import type { ProviderOps } from "./ProviderOps";
@@ -10,6 +11,7 @@ import type { Session } from "./Session";
 import type { SnippetDeliveryLog } from "./SnippetDeliveryLog";
 import type { SnoozeWake } from "./SnoozeWake";
 import type { Task } from "./Task";
+import type { TodoItem } from "./TodoItem";
 import type { WorkspaceKey } from "./WorkspaceKey";
 
 /**
@@ -44,11 +46,20 @@ project_key: ProjectKey | null,
  */
 local: boolean,
 /**
+ * Repo-free directory purpose, independent of sidebar grouping and name.
+ */
+floating: FloatingWorkspaceKind | null,
+/**
  * Present when this is a user-captured personal Hopper workspace.
  * Kept separate from local: imported checkouts and hand-created
  * project workspaces are local too, but do not belong in the Hopper.
  */
 hopper: HopperMeta | null,
+/**
+ * The TODO's checklist, in display order (nesting via
+ * [`TodoItem::parent`]). Empty for any workspace that is not a TODO.
+ */
+todo_items: Array<TodoItem>,
 /**
  * When `Some`, this is a **linked (no-worktree) checkout**: the
  * workspace points directly at an existing clone on disk (a

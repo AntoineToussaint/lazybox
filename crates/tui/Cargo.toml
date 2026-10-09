@@ -31,6 +31,21 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 name = "terminal_feed"
 harness = false
 
+# The client's own hot paths through `TerminalStack`'s public surface
+# (#1919). The regression GATE is `tests/terminal_hot_paths.rs`, which
+# counts work rather than time; this is the companion wall-clock report,
+# run with `make bench` on a quiet box.
+[[bench]]
+name = "client_hot_paths"
+harness = false
+
+# Per-call CPU time rather than wall clock, so a number can be taken on
+# this shared box at all — see the file's own docs for why the criterion
+# groups above cannot be (#1919). Plain `main`, no criterion.
+[[bench]]
+name = "vt_call_cost"
+harness = false
+
 # A thin renderer over IPC (#548): the UI library depends only on the wire
 # crate, pure TUI logic, the embedded terminal, config, and core. The
 # daemon, store, providers, and agents are reached through the boot crate

@@ -132,6 +132,44 @@ mod tests {
         assert!(m.dangling_aliases().is_empty());
     }
 
+    /// `default_tier` is the single answer to "which strength does this
+    /// agent run at": the menu's own `default`, resolved in the menu
+    /// itself. A dangling default names no tier — it must not fall
+    /// through to the built-in menu, or a deliberately restricted
+    /// (`replace: true`) menu gets labelled with a tier it dropped.
+    #[test]
+    fn default_tier_resolves_the_menus_own_default_only() {
+        let claude = AgentModels::builtin("claude").unwrap();
+        assert_eq!(
+            claude.default_tier().map(|t| t.label.as_str()),
+            Some("Opus"),
+        );
+
+        let mut restricted = AgentModels {
+            replace: true,
+            default: Some("M".into()),
+            tiers: vec![ModelTier {
+                alias: "M".into(),
+                label: "Sonnet".into(),
+                short: None,
+                args: vec!["--model".into(), "claude-sonnet-5".into()],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            restricted.default_tier().map(|t| t.label.as_str()),
+            Some("Sonnet"),
+        );
+
+        // The built-in menu declares `L`; this one does not, so the
+        // strength is unresolved rather than borrowed.
+        restricted.default = Some("L".into());
+        assert!(restricted.default_tier().is_none());
+
+        restricted.default = None;
+        assert!(restricted.default_tier().is_none());
+    }
+
     #[test]
     fn resolve_args_uses_named_alias() {
         let m = AgentModels::builtin("claude").unwrap();
@@ -199,6 +237,85 @@ mod tests {
                 "claude-fable-5-1",
             ]
         );
+    }
+
+    /// Claude's ladder is bare-id-pinned (above); Codex's is pinned to the
+    /// four general coding models its own CLI catalog declares. Both are
+    /// asserted by exact id and in ladder order, because a pinned model id
+    /// is not a detail that may drift quietly: a spawn passes it verbatim,
+    /// and a wrong one fails at the provider with an error the user reads as
+    /// lazybox being broken.
+    #[test]
+    fn builtin_codex_tiers_pin_the_current_coding_ladder() {
+        let m = AgentModels::builtin("codex").unwrap();
+        assert_eq!(
+            m.tiers
+                .iter()
+                .map(|t| (
+                    t.alias.as_str(),
+                    t.model_id().expect("every tier pins a model")
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("S", "gpt-5.6-luna"),
+                ("M", "gpt-5.6-terra"),
+                ("L", "gpt-5.6-sol"),
+                ("XL", "gpt-6-astra"),
+            ]
+        );
+        // `L` is the bare-spawn default, and it is a real rung — the
+        // one-tier menu this replaced made `default` and "the only model"
+        // the same fact, which is why nothing noticed the pin going stale.
+        assert_eq!(m.default.as_deref(), Some("L"));
+        // The whole ladder is reachable by strength, not just the default.
+        assert_eq!(
+            m.alias_for_capability(crate::CapabilityTier::Best),
+            Some("XL")
+        );
+        assert_eq!(
+            m.alias_for_capability(crate::CapabilityTier::High),
+            Some("L")
+        );
+        assert_eq!(
+            m.alias_for_capability(crate::CapabilityTier::Medium),
+            Some("M")
+        );
+        assert_eq!(
+            m.alias_for_capability(crate::CapabilityTier::Low),
+            Some("S")
+        );
+        // Unlike Claude's XL (Fable, a writing model), Codex's top rung is a
+        // coding model: nothing may quietly exclude it.
+        assert!(m.tiers.iter().all(|t| !t.excluded_from_default()));
+    }
+
+    /// Every rung of every built-in ladder resolves to a distinct model —
+    /// the failure mode a one-tier menu hides, where "pick a strength"
+    /// silently runs the same model four times.
+    #[test]
+    fn builtin_ladders_map_each_strength_to_a_distinct_model() {
+        for agent in ["claude", "codex"] {
+            let m = AgentModels::builtin(agent).expect("built-in menu");
+            let ids: Vec<&str> = crate::CapabilityTier::ALL
+                .into_iter()
+                .map(|tier| {
+                    let alias = m
+                        .alias_for_capability(tier)
+                        .unwrap_or_else(|| panic!("{agent}: {tier:?} maps to no tier"));
+                    m.tier(alias)
+                        .and_then(ModelTier::model_id)
+                        .unwrap_or_else(|| panic!("{agent}: {alias} pins no model"))
+                })
+                .collect();
+            let mut unique = ids.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(
+                unique.len(),
+                ids.len(),
+                "{agent}: strengths must not collapse onto one model: {ids:?}"
+            );
+        }
     }
 
     #[test]
@@ -308,9 +425,15 @@ mod tests {
     }
 
     #[test]
-    fn only_claude_has_builtin_tiers() {
-        assert!(AgentModels::builtin("claude").is_some());
-        assert!(AgentModels::builtin("codex").is_none());
+    fn builtins_that_launch_llms_have_pinned_default_tiers() {
+        for agent in ["claude", "codex"] {
+            let models = AgentModels::builtin(agent).expect("built-in model menu");
+            let default = models.default.as_deref().expect("default alias");
+            assert!(
+                models.tier(default).and_then(ModelTier::model_id).is_some(),
+                "{agent}'s default tier must carry an explicit model"
+            );
+        }
         assert!(AgentModels::builtin("cursor-agent").is_none());
     }
 
@@ -343,6 +466,100 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(m.alias_for_capability(CapabilityTier::High), None);
+    }
+
+    /// A caller-supplied token reaches a tier by every spelling the
+    /// menu already understands, plus the capability words — so an
+    /// orchestrator that doesn't know this agent's ladder can still ask
+    /// for the strongest run (#1911).
+    #[test]
+    fn a_requested_token_resolves_by_alias_label_id_or_capability_word() {
+        let m = AgentModels::builtin("claude").unwrap();
+        assert_eq!(m.alias_for_requested_token("L"), Some("L"));
+        assert_eq!(m.alias_for_requested_token("Opus"), Some("L"));
+        assert_eq!(m.alias_for_requested_token("opus"), Some("L"));
+        assert_eq!(m.alias_for_requested_token("claude-opus-5"), Some("L"));
+        // The capability words, which name no tier of the ladder.
+        assert_eq!(m.alias_for_requested_token("best"), Some("XL"));
+        assert_eq!(m.alias_for_requested_token("BEST"), Some("XL"));
+        assert_eq!(m.alias_for_requested_token("medium"), Some("M"));
+        // Nothing by that name — the caller is told, never defaulted.
+        assert_eq!(m.alias_for_requested_token("XXL"), None);
+        assert_eq!(m.alias_for_requested_token("strongest"), None);
+    }
+
+    /// An agent whose own ladder names a rung `high` means that rung by
+    /// it — the same precedence a task's `model:<token>` declaration has
+    /// over the capability word. Codex's configured reasoning-effort
+    /// menu is exactly this shape, so the tier spelling cannot lose to
+    /// the word.
+    #[test]
+    fn a_ladder_rung_named_like_a_capability_word_wins_the_token() {
+        let m = AgentModels {
+            tiers: vec![
+                ModelTier {
+                    alias: "high".into(),
+                    label: "Astra · high".into(),
+                    short: None,
+                    args: vec!["--model".into(), "gpt-6-astra".into()],
+                },
+                ModelTier {
+                    alias: "S".into(),
+                    label: "Luna".into(),
+                    short: None,
+                    args: vec!["--model".into(), "gpt-5.6-luna".into()],
+                },
+            ],
+            capability: CapabilityAliases {
+                high: Some("S".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(m.alias_for_requested_token("high"), Some("high"));
+        // Case does not hand the token back to the capability word: the
+        // rung's own match is case-insensitive too, so `High` is still
+        // that rung and never the `S` the map points `high` at.
+        assert_eq!(m.alias_for_requested_token("High"), Some("high"));
+        // A word no rung claims does route through the map.
+        assert_eq!(m.alias_for_requested_token("low"), None);
+        let mut mapped = m.clone();
+        mapped.capability.low = Some("S".into());
+        assert_eq!(mapped.alias_for_requested_token("low"), Some("S"));
+    }
+
+    /// The refusal has to name the menu: "unknown alias" alone leaves a
+    /// caller guessing at a ladder that differs per agent.
+    #[test]
+    fn requestable_tokens_name_the_ladder_and_the_mapped_words() {
+        let tokens = AgentModels::builtin("claude").unwrap().requestable_tokens();
+        assert_eq!(
+            tokens,
+            vec![
+                "S (claude-haiku-4-5)",
+                "M (claude-sonnet-5)",
+                "L (claude-opus-5)",
+                "XL (claude-fable-5-1)",
+                "best (→ XL)",
+                "high (→ L)",
+                "medium (→ M)",
+                "low (→ S)",
+            ]
+        );
+        // A menu that maps no capability word advertises none of them,
+        // rather than offering four words that resolve to nothing.
+        let ladder_only = AgentModels {
+            tiers: AgentModels::builtin("claude").unwrap().tiers,
+            ..Default::default()
+        };
+        assert!(
+            ladder_only
+                .requestable_tokens()
+                .iter()
+                .all(|t| !t.contains('→')),
+            "{:?}",
+            ladder_only.requestable_tokens()
+        );
     }
 
     /// #1598 refused to route *any* capability tier onto a Fable-class
@@ -678,6 +895,22 @@ impl AgentModels {
         self.tiers.iter().find(|t| t.alias == alias)
     }
 
+    /// The tier a bare spawn of this agent lands on — this menu's
+    /// `default` alias resolved in this menu. `None` when the default is
+    /// unset or names an alias the menu doesn't declare, which is what
+    /// [`Self::resolve_args`] already treats as "no args, let the agent
+    /// pick its own model".
+    ///
+    /// The one place that answers "which strength does this agent run
+    /// at". Callers used to each re-derive it and disagreed: one
+    /// second-guessed the alias against [`Self::builtin`] *after*
+    /// `Config::agent_models` had already folded the built-in menu in,
+    /// so a `replace: true` menu got labelled with a tier it
+    /// deliberately does not declare.
+    pub fn default_tier(&self) -> Option<&ModelTier> {
+        self.default.as_deref().and_then(|alias| self.tier(alias))
+    }
+
     /// The capability map this block declares: the deprecated `priority`
     /// key folded under the current `capability` one, which wins where
     /// both name the same tier (#1598). Config's menu merge reads this
@@ -717,6 +950,59 @@ impl AgentModels {
         by(|t| Some(t.alias.as_str()))
             .or_else(|| by(|t| Some(t.label.as_str())))
             .or_else(|| by(ModelTier::model_id))
+    }
+
+    /// The tier alias a **caller-supplied** model token names on this
+    /// menu: a tier alias, label or pinned model id
+    /// ([`Self::tier_for_token`]), or a `best` / `high` / `medium` /
+    /// `low` capability word routed through [`Self::alias_for_capability`].
+    /// `None` when this menu has nothing by that name — which the caller
+    /// must report rather than fall back on, since "spawn at the best
+    /// model" quietly running the default looks exactly like success
+    /// (#1911).
+    ///
+    /// The tier spelling is tried first, matching the precedence
+    /// [`resolve_model_requests`](crate::resolve_model_requests) gives a
+    /// task's declarations: an agent whose own ladder defines a rung
+    /// called `high` (Codex's reasoning-effort menu does) means that
+    /// rung by it, not the capability word.
+    ///
+    /// Accepting the capability words is what makes a tier requestable
+    /// by a caller that does not know this agent's ladder — `XXL` names
+    /// different models for `claude` and `codex`, while `best` is the
+    /// one question an orchestrator can ask of either.
+    pub fn alias_for_requested_token(&self, token: &str) -> Option<&str> {
+        let token = token.trim();
+        self.tier_for_token(token)
+            .map(|tier| tier.alias.as_str())
+            .or_else(|| {
+                crate::CapabilityTier::from_token(token)
+                    .and_then(|tier| self.alias_for_capability(tier))
+            })
+    }
+
+    /// Every token [`Self::alias_for_requested_token`] accepts, in menu
+    /// order: each tier's alias (with the model it pins, so the choice
+    /// is legible without a second lookup), then the capability words
+    /// this menu actually maps.
+    ///
+    /// Written for the refusal message, which has to name the menu — a
+    /// rejection that only says "unknown" leaves the caller guessing at
+    /// a ladder that differs per agent.
+    pub fn requestable_tokens(&self) -> Vec<String> {
+        let mut tokens: Vec<String> = self
+            .tiers
+            .iter()
+            .map(|tier| match tier.model_id() {
+                Some(id) => format!("{} ({id})", tier.alias),
+                None => tier.alias.clone(),
+            })
+            .collect();
+        tokens.extend(crate::CapabilityTier::ALL.into_iter().filter_map(|tier| {
+            self.alias_for_capability(tier)
+                .map(|alias| format!("{} (→ {alias})", tier.as_str()))
+        }));
+        tokens
     }
 
     /// The tier alias one declared [`ModelRequest`](crate::ModelRequest)
@@ -776,10 +1062,10 @@ impl AgentModels {
     }
 
     /// Aliases named by `default` or any `capability.*` that no tier in the
-    /// menu defines. Each is a dangling reference that resolves to no
-    /// args — the spawn silently keeps the agent's own hard-coded model
-    /// instead of the tier the config appears to request. Config load
-    /// surfaces these as warnings so the no-op is discoverable.
+    /// menu defines. Each is a dangling reference that resolves to no args;
+    /// adapters that require a Lazybox model pin refuse such a launch, while
+    /// other adapters may fall back to their own defaults. Config load
+    /// surfaces these as warnings so the broken selection is discoverable.
     ///
     /// Returns `(source, alias)` pairs where `source` is `"default"` or a
     /// `"capability.<tier>"` token, in a stable order (`default` first,
@@ -821,8 +1107,8 @@ impl AgentModels {
 
     /// Resolve the spawn args for a chosen `alias`, or for the
     /// configured `default` tier when `alias` is `None`. An unknown
-    /// alias (or an unset / dangling default) yields no args, so the
-    /// agent falls back to its own default model.
+    /// alias (or an unset / dangling default) yields no args; the launching
+    /// adapter decides whether that is allowed or must be refused.
     pub fn resolve_args(&self, alias: Option<&str>) -> Vec<String> {
         let want = alias.or(self.default.as_deref());
         want.and_then(|a| self.tier(a))
@@ -845,9 +1131,9 @@ impl AgentModels {
     }
 
     /// Built-in tier menu for a known agent id, or `None` for an agent
-    /// lazybox ships no model presets for. Only Claude ships presets —
-    /// its model flag (`--model`) takes stable aliases; Codex / Cursor
-    /// name their models differently and are left to per-agent YAML.
+    /// lazybox ships no model presets for. Claude and Codex both ship a
+    /// pinned default: a lazybox launch must never inherit whichever model
+    /// the provider CLI or account happens to choose that day.
     pub fn builtin(agent_id: &str) -> Option<AgentModels> {
         match agent_id {
             // Claude's default tier is pinned so a bare spawn always
@@ -912,6 +1198,63 @@ impl AgentModels {
                 // *inherited* one, so a user menu is never routed to a
                 // creative-class model it never named (#1598's guard,
                 // narrowed rather than dropped).
+                capability: CapabilityAliases {
+                    best: Some("XL".into()),
+                    high: Some("L".into()),
+                    medium: Some("M".into()),
+                    low: Some("S".into()),
+                },
+                deprecated_priority: CapabilityAliases::default(),
+                unknown: Default::default(),
+            }),
+            // Codex ships the same S/M/L/XL ladder as Claude, so "agent +
+            // strength" is expressible for both built-ins: a one-tier menu
+            // made the strength half of that choice a no-op, and left the
+            // `w S`/`w M` chords keyed to nothing for a Codex default agent.
+            //
+            // The ids are the four general coding models the installed Codex
+            // CLI's own embedded catalog declares, with that catalog's own
+            // descriptions deciding the rung: Luna "fast and affordable",
+            // Terra "balanced … for everyday work", Sol "latest frontier
+            // agentic coding model", Astra "our most capable model for
+            // complex, demanding work".
+            //
+            // `L` stays the default and `gpt-5.6-sol` is what it names,
+            // because the CLI's own migration table maps the id lazybox used
+            // to pin — `gpt-5.5` — onto exactly that: this is the successor
+            // of the pin, not a new opinion about which model to run. Astra
+            // is a rung above rather than the default; unlike Claude's XL it
+            // is a coding model, so nothing excludes it from a bare spawn and
+            // `best` routes to it.
+            "codex" => Some(AgentModels {
+                default: Some("L".into()),
+                replace: false,
+                tiers: vec![
+                    ModelTier {
+                        alias: "S".into(),
+                        label: "Luna".into(),
+                        short: Some("Lu".into()),
+                        args: vec!["--model".into(), "gpt-5.6-luna".into()],
+                    },
+                    ModelTier {
+                        alias: "M".into(),
+                        label: "Terra".into(),
+                        short: Some("Te".into()),
+                        args: vec!["--model".into(), "gpt-5.6-terra".into()],
+                    },
+                    ModelTier {
+                        alias: "L".into(),
+                        label: "Sol".into(),
+                        short: Some("So".into()),
+                        args: vec!["--model".into(), "gpt-5.6-sol".into()],
+                    },
+                    ModelTier {
+                        alias: "XL".into(),
+                        label: "Astra".into(),
+                        short: Some("As".into()),
+                        args: vec!["--model".into(), "gpt-6-astra".into()],
+                    },
+                ],
                 capability: CapabilityAliases {
                     best: Some("XL".into()),
                     high: Some("L".into()),

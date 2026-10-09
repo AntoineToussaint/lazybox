@@ -21,6 +21,8 @@
 //!                                  via the daemon socket (--issue/--pr/--ticket
 //!                                  <owner/repo#N|URL|KEY>; --name + --scratch
 //!                                  for repo-less scratch; --agent spawns into it)
+//!   lazybox workspace archived      list the workspaces `x x` archived; `workspace
+//!                                  unarchive <REF>` puts one back
 //!   lazybox sandbox ensure          provision a remote dev box (terraform);
 //!                                  wake/sleep/status/connect/destroy manage
 //!                                  its lifecycle (GCP; per-worktree handle)
@@ -49,6 +51,7 @@ mod auth_cli;
 mod build_guard;
 mod device_cli;
 mod gh_cli;
+mod mobile_launch;
 mod practice;
 mod relay_e2e;
 mod remote_box;
@@ -62,6 +65,7 @@ mod slack_prune;
 mod task_status_cli;
 #[cfg(test)]
 mod test_env;
+mod work_cli;
 
 // Test-only sandbox for this unit-test binary (#1539, #1751). The same
 // body lives in the crate's `tests/common/mod.rs` and in every other test
@@ -231,6 +235,42 @@ fn owned_embedded_notification_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Four restarts on 2026-09-29 could not be attributed because both ways
+    /// out of the process logged nothing: a signal kill and a `q q` quit were
+    /// distinguishable only by the keep-awake handoff line they *share*. Each
+    /// arm here is one of the three things the log now has to be able to say.
+    #[test]
+    fn every_way_the_run_loop_can_end_is_recorded() {
+        // A clean quit.
+        log_run_loop_exit::<(), anyhow::Error>("embedded", &Ok(Ok(())));
+        // The loop itself failed.
+        log_run_loop_exit::<(), anyhow::Error>(
+            "embedded",
+            &Ok(Err(anyhow::anyhow!("the terminal went away"))),
+        );
+        // The blocking task carrying the loop panicked.
+        log_run_loop_exit::<(), anyhow::Error>(
+            "attach",
+            &Err(anyhow::anyhow!("realm task panicked")),
+        );
+    }
+
+    /// `ppid` separates "our launcher went away first" — a closed terminal, a
+    /// killed `make run-release` — from being signalled directly, which is the
+    /// distinction the exit line exists to record. It is read before
+    /// `std::process::exit`, because afterwards nobody can ask.
+    #[cfg(unix)]
+    #[test]
+    fn the_parent_pid_is_readable_for_the_exit_line() {
+        let parent = parent_pid().expect("unix always answers getppid");
+        assert_ne!(parent, 0, "0 is not a pid; the exit line would be a lie");
+        assert_ne!(
+            parent,
+            std::process::id(),
+            "a process is never its own parent",
+        );
+    }
 
     /// Pin the contract: the default `GithubConfig::poll_interval` is
     /// the value `resolve_poll_interval` returns when the user has no
@@ -468,6 +508,7 @@ Getting started:
                               inbox where agents work and reply to you, with no
                               GitHub, no network, and nothing written to your
                               real ~/.lazybox; press every key with no consequence
+  lb -m                      mobile-friendly sessions (Ctrl-T opens Sessions)
   lazybox --test              try the UI on a throwaway seeded workspace, no GitHub
   lazybox --help, -h          show this help
   lazybox --version, -V       print the version
@@ -511,9 +552,16 @@ Remote & services:
     --issue|--pr|--ticket <R> (owner/repo#N, a GitHub URL, #N beside --repo, or a
                               Linear key. --name <name> --scratch instead for
                               repo-less scratch; --project <key> / --repo
-                              <owner/repo>, or inferred from cwd; --agent <id>
-                              spawns an agent into it; --socket <path> targets a
-                              non-default daemon)
+                              <owner/repo>, or inferred from --cwd <path>;
+                              --agent <id> spawns an agent into it; --socket
+                              <path> targets a non-default daemon. An argument
+                              this verb does not know is refused, never ignored)
+  lazybox workspace archived  list the workspaces `x x` archived, each with the
+                              keys its row absorbed (they have no row and appear
+                              in no mailbox, so this is the only CLI view of them)
+  lazybox workspace unarchive <REF>
+                              drop an archived record's tombstone so its row can
+                              return (--key <workspace-key> for a raw key)
   lazybox snippet export <key>
                               write a snippet out as a portable SKILL.md so the
                               workflow travels to any agent that reads the format
@@ -569,6 +617,39 @@ fn classify_top_level_fallback(first: Option<&str>) -> TopLevelFallback {
         Some("help") => TopLevelFallback::ShowHelp,
         Some(_) => TopLevelFallback::Unknown,
     }
+}
+
+/// The verbs that run a command and exit, rather than launching a UI. Kept in
+/// step with the dispatch `match` in [`main`] — every arm that does *not* take
+/// a `Preselect` belongs here.
+const NON_LAUNCH_SUBCOMMANDS: &[&str] = &[
+    "server",
+    "account",
+    "serve",
+    "slack",
+    "scan",
+    "worktree",
+    "workspace",
+    "task",
+    "log",
+    "device",
+    "auth",
+    "sandbox",
+];
+
+/// Does this argv launch a UI (so the launch flags `--fresh` / `--test` /
+/// `--demo` / `--mobile` / `--workspace` / `--session` are its own), or run a
+/// subcommand (so they are not)?
+///
+/// Those six configure a *launch* and mean nothing to a verb, but they used
+/// to be peeled off the whole argv before dispatch — so a verb never saw them
+/// and could not refuse them. `lazybox workspace create --issue X --fresh`
+/// deleted `state.db` on its way to creating the workspace and still reported
+/// success, and `… --test` booted the TUI instead of running the verb at all.
+/// Leaving them in a subcommand's argv is what lets that verb's own
+/// unknown-argument guard reject them.
+fn argv_launches_a_ui(first: Option<&str>) -> bool {
+    !first.is_some_and(|first| NON_LAUNCH_SUBCOMMANDS.contains(&first))
 }
 
 // The disallowed-methods allow covers the `Runtime::block_on` that
@@ -636,15 +717,35 @@ async fn main() -> anyhow::Result<()> {
         return notification_click_subcommand(&args[1..]).await;
     }
 
-    let fresh = take_flag(&mut args, "--fresh");
-    let test_mode = take_flag(&mut args, "--test");
-    let demo_mode = take_flag(&mut args, "--demo");
-    let preselect_workspace = take_value(&mut args, "--workspace");
-    let preselect_session = take_value(&mut args, "--session");
-    let preselect = preselect_workspace.map(|w| lazybox_tui::realm::model::Preselect {
-        workspace_key: lazybox_core::SessionKey::from(w),
-        session_id_raw: preselect_session,
-    });
+    // Only a launching argv owns the launch flags. A subcommand keeps them in
+    // its own args so it can refuse what it does not know — see
+    // `argv_launches_a_ui`.
+    let launching = argv_launches_a_ui(args.first().map(String::as_str));
+    // `&&` short-circuits, so a subcommand's argv keeps `-m` / `--mobile` for
+    // its own unknown-argument guard to reject, like the other launch flags.
+    // The `|` between the two spellings is deliberate: both must be stripped.
+    let mobile = launching && (take_flag(&mut args, "--mobile") | take_flag(&mut args, "-m"));
+    let fresh = launching && take_flag(&mut args, "--fresh");
+    let test_mode = launching && take_flag(&mut args, "--test");
+    let demo_mode = launching && take_flag(&mut args, "--demo");
+    let target = launching
+        .then(|| {
+            let workspace = take_value(&mut args, "--workspace");
+            let session = take_value(&mut args, "--session");
+            workspace.map(|w| lazybox_tui::realm::model::Preselect {
+                workspace_key: lazybox_core::SessionKey::from(w),
+                session_id_raw: session,
+            })
+        })
+        .flatten();
+    let preselect = UiLaunch {
+        target,
+        presentation: if mobile {
+            lazybox_tui::realm::presentation::Presentation::Mobile
+        } else {
+            lazybox_tui::realm::presentation::Presentation::Desktop
+        },
+    };
     if fresh {
         wipe_state_db();
         clear_persisted_setup();
@@ -665,6 +766,7 @@ async fn main() -> anyhow::Result<()> {
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("workspace") => workspace_subcommand(&args[1..]).await,
         Some("task") => task_status_cli::task_subcommand(&args[1..]).await,
+        Some("work") => work_cli::work_subcommand(&args[1..]).await,
         Some("log") => log_subcommand(&args[1..]).await,
         Some("device") => device_cli::device_subcommand(&args[1..]).await,
         Some("auth") => auth_cli::auth_subcommand(&args[1..]).await,
@@ -678,6 +780,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("--connect-relay") => run_connect_relay(&args[1..], preselect).await,
         other => match classify_top_level_fallback(other) {
+            TopLevelFallback::Launch if mobile => {
+                let socket = mobile_launch::ensure_daemon().await?;
+                run_remote(&socket, preselect).await
+            }
             TopLevelFallback::Launch => run_embedded_realm(preselect).await,
             TopLevelFallback::ShowHelp => {
                 println!("{HELP}");
@@ -833,17 +939,225 @@ fn terminal_selection_script(bundle_id: &str, terminal_tty: &str) -> Option<Stri
 /// into a strict parser.
 /// `lazybox workspace <verb>` — the agent-facing surface over the running
 /// daemon. Lets a spawned agent (or a script) drive lazybox itself, not just
-/// the repo. Today the only verb is `create`.
+/// the repo. Verbs: `create`, `archived`, `unarchive`.
+///
+/// Errors print to stdout before they are returned, for the reason
+/// [`run_workspace_create`] documents: this runs after `init_tracing`, so an
+/// `anyhow` message going out on stderr lands in the log file and the caller
+/// sees an exit code with no text. A mistyped verb and a bare `lazybox
+/// workspace` both used to print nothing at all.
 async fn workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
+    if let Err(error) = run_workspace_subcommand(args).await {
+        // One printer for the whole verb tree — a second wrapper around
+        // `create` would print every create failure twice. Name the verb so
+        // the line reads the same for `create` as it always has.
+        match args.first().map(String::as_str) {
+            Some(verb @ "create") => println!("lazybox workspace {verb}: {error:#}"),
+            _ => println!("lazybox workspace: {error:#}"),
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn run_workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
-        Some("create") => workspace_create_subcommand(&args[1..]).await,
+        Some("create") => run_workspace_create(&args[1..]).await,
+        Some("archived") => run_workspace_archived(&args[1..]).await,
+        Some("unarchive") => run_workspace_unarchive(&args[1..]).await,
         other => {
             anyhow::bail!(
-                "unknown `lazybox workspace` verb {:?}; usage: lazybox workspace create \
-                 (--issue|--pr|--ticket <owner/repo#N|URL|KEY> | --name <name> --scratch) \
-                 [--project <key> | --repo <owner/repo>] [--agent <id>] [--cwd <path>]",
+                "unknown `lazybox workspace` verb {:?}; usage: \
+                 {WORKSPACE_CREATE_USAGE}, {WORKSPACE_ARCHIVED_USAGE}, or \
+                 {WORKSPACE_UNARCHIVE_USAGE}",
                 other.unwrap_or("<none>"),
             );
+        }
+    }
+}
+
+const WORKSPACE_ARCHIVED_USAGE: &str = "lazybox workspace archived [--socket <path>]";
+
+const WORKSPACE_UNARCHIVE_USAGE: &str = "lazybox workspace unarchive \
+     (<owner/repo#N|URL|KEY> | --key <workspace-key>) [--repo <owner/repo>] \
+     [--socket <path>]";
+
+/// `lazybox workspace archived [--socket <path>]` — list the tombstones `x x`
+/// wrote (#1824).
+///
+/// An archived record has no row and appears in no mailbox: `x x` deletes the
+/// row, and the tombstone stops the next poll re-creating it. This is the CLI
+/// half of the archive browser (`x U`), and the only way to see the set from
+/// outside the TUI. Each line is a key, followed by the keys that row
+/// absorbed — a PR row stands in for the issues it closes, and an unarchive
+/// takes that whole set back out.
+async fn run_workspace_archived(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let socket_path = strict_value(&mut args, "--socket", WORKSPACE_ARCHIVED_USAGE)?
+        .map(PathBuf::from)
+        .unwrap_or_else(lifecycle::socket_path);
+    reject_unknown_arguments(&mut args, "archived", WORKSPACE_ARCHIVED_USAGE)?;
+    let mut client = connect_subscribed(&socket_path).await?;
+    client
+        .send(lazybox_ipc::Command::ListArchivedWorkspaces)
+        .map_err(|e| anyhow::anyhow!("send ListArchivedWorkspaces: {e}"))?;
+    let records = await_archived_set(&mut client).await?;
+    if records.is_empty() {
+        println!("Nothing archived.");
+        return Ok(());
+    }
+    for record in &records {
+        match record.absorbed.as_slice() {
+            [] => println!("{}", record.key),
+            absorbed => println!("{}  + {}", record.key, absorbed.join(", ")),
+        }
+    }
+    Ok(())
+}
+
+/// `lazybox workspace unarchive (<REF> | --key <workspace-key>) [--repo
+/// <owner/repo>] [--socket <path>]` — drop an archived record's tombstone so
+/// its row can come back (#1824).
+///
+/// Takes the record the way every other surface does (`owner/repo#N`, a
+/// GitHub URL, `#N` beside `--repo`, a Linear identifier) — the shape an
+/// agent that just hit "archived in lazybox" already holds — or `--key` for a
+/// raw workspace key as `workspace archived` prints it.
+///
+/// Removing the tombstone is what lets the record be materialized again; the
+/// row itself returns on the next poll, or immediately from a following
+/// `workspace create --issue <REF>`.
+async fn run_workspace_unarchive(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let explicit_key = strict_value(&mut args, "--key", WORKSPACE_UNARCHIVE_USAGE)?;
+    let repo = strict_value(&mut args, "--repo", WORKSPACE_UNARCHIVE_USAGE)?;
+    let socket_path = strict_value(&mut args, "--socket", WORKSPACE_UNARCHIVE_USAGE)?
+        .map(PathBuf::from)
+        .unwrap_or_else(lifecycle::socket_path);
+    // The reference is positional, so take it before the unknown-argument
+    // check — which then reports a mistyped flag rather than letting it read
+    // as the record.
+    let reference = args
+        .iter()
+        .position(|a| !a.starts_with("--") && !a.trim().is_empty())
+        .map(|pos| args.remove(pos).trim().to_string());
+    reject_unknown_arguments(&mut args, "unarchive", WORKSPACE_UNARCHIVE_USAGE)?;
+    let key = match (explicit_key, reference) {
+        (Some(key), _) => key.trim().to_string(),
+        (None, Some(reference)) => {
+            let anchor = lazybox_core::task_ref::parse_task_ref(&reference, repo.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not read {reference:?} as a tracker record — pass `owner/repo#N`, \
+                         a GitHub issue/PR URL, `#N` alongside --repo, a Linear identifier like \
+                         `ENG-45`, or --key <workspace-key> as `workspace archived` prints it; \
+                         usage: {WORKSPACE_UNARCHIVE_USAGE}"
+                    )
+                })?;
+            lazybox_core::workspace_key_for_id(&anchor)
+        }
+        (None, None) => anyhow::bail!(
+            "workspace unarchive needs a tracker record or --key; usage: \
+             {WORKSPACE_UNARCHIVE_USAGE}",
+        ),
+    };
+
+    let mut client = connect_subscribed(&socket_path).await?;
+    let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+    client
+        .send(lazybox_ipc::Command::UnarchiveWorkspace {
+            key: key.clone(),
+            client_request_id: Some(client_request_id.clone()),
+        })
+        .map_err(|e| anyhow::anyhow!("send UnarchiveWorkspace: {e}"))?;
+    await_correlated_ack(&mut client, &client_request_id, Duration::from_secs(10)).await?;
+    println!(
+        "Restored {key} — its row returns on the next poll; `lazybox workspace create` on the \
+         record brings it back now."
+    );
+    Ok(())
+}
+
+/// One flag of an archive verb, taken strictly: a `--flag` with nothing
+/// usable after it is refused rather than silently defaulted (the reason
+/// [`take_value_strict`] exists — a dropped `--socket` talks to the wrong
+/// daemon while reporting success).
+fn strict_value(args: &mut Vec<String>, flag: &str, usage: &str) -> anyhow::Result<Option<String>> {
+    match take_value_strict(args, flag) {
+        FlagValue::Absent => Ok(None),
+        FlagValue::Value(value) => Ok(Some(value)),
+        FlagValue::Dangling => Err(anyhow::anyhow!("{flag} needs a value; usage: {usage}")),
+    }
+}
+
+/// Refuse whatever this verb did not consume. Same contract as
+/// `workspace create`: a typo accepted in silence is how `--sockett` looks
+/// exactly like a command that reached the daemon you meant. An empty argv
+/// element carries no instruction, so it is dropped rather than refused.
+fn reject_unknown_arguments(args: &mut Vec<String>, verb: &str, usage: &str) -> anyhow::Result<()> {
+    args.retain(|arg| !arg.trim().is_empty());
+    if args.is_empty() {
+        return Ok(());
+    }
+    let leftovers: Vec<String> = args.iter().map(|arg| format!("{arg:?}")).collect();
+    anyhow::bail!(
+        "unknown workspace {verb} argument(s): {}; usage: {usage}",
+        leftovers.join(", "),
+    )
+}
+
+/// Connect to the daemon and wait out the post-`Subscribe` snapshot, so a
+/// correlated reply can't race ahead of the live stream.
+async fn connect_subscribed(socket_path: &std::path::Path) -> anyhow::Result<lazybox_ipc::Client> {
+    let (mut client, _peer) = socket::connect(socket_path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "connect to daemon at {}: {e} (is lazybox running?)",
+            socket_path.display(),
+        )
+    })?;
+    client
+        .send(lazybox_ipc::Command::Subscribe)
+        .map_err(|e| anyhow::anyhow!("subscribe to daemon: {e}"))?;
+    await_workspace_snapshot(&mut client).await?;
+    Ok(client)
+}
+
+/// Wait for the daemon's archived-set broadcast.
+async fn await_archived_set(
+    client: &mut lazybox_ipc::Client,
+) -> anyhow::Result<Vec<lazybox_ipc::ArchivedWorkspaceRecord>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::ArchivedWorkspaces { records })) => return Ok(records),
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("daemon closed the connection before answering"),
+            Err(_) => anyhow::bail!("timed out waiting for the archived set"),
+        }
+    }
+}
+
+/// Wait for the `CommandCompleted` / `CommandFailed` pair a correlated
+/// command answers with, so the CLI never prints success for a write the
+/// daemon refused.
+async fn await_correlated_ack(
+    client: &mut lazybox_ipc::Client,
+    client_request_id: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::CommandCompleted {
+                client_request_id: id,
+            })) if id == client_request_id => return Ok(()),
+            Ok(Some(lazybox_ipc::Event::CommandFailed {
+                client_request_id: id,
+                message,
+            })) if id == client_request_id => anyhow::bail!("{message}"),
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("daemon closed the connection before answering"),
+            Err(_) => anyhow::bail!("timed out waiting for the daemon to answer"),
         }
     }
 }
@@ -1002,6 +1316,38 @@ fn enclosing_repo_root(cwd: &std::path::Path) -> Option<PathBuf> {
         .map(std::path::Path::to_path_buf)
 }
 
+/// The one spelling of `workspace create`'s usage. Every place that prints it
+/// reads this: the unknown-verb refusal, the unknown-argument refusal, the
+/// valueless-flag refusal, and — pinned by
+/// `help_and_usage_agree_on_the_workspace_create_flags` — the flag list in
+/// [`HELP`]. Three hand-maintained copies had already drifted (the verb
+/// refusal omitted `--socket`, which the other two carried), and a usage line
+/// that under-reports a flag is worse now that an unlisted flag is a hard
+/// error: it sends the caller into a refusal with no way out.
+const WORKSPACE_CREATE_USAGE: &str = "lazybox workspace create \
+     (--issue|--pr|--ticket <owner/repo#N|URL|KEY> | --name <name> --scratch) \
+     [--project <key> | --repo <owner/repo>] [--agent <id>] [--cwd <path>] \
+     [--socket <path>]. To pick a model tier, put a `model:<token>` label on \
+     the record (a scratch workspace has none, so it takes the agent's \
+     default) rather than passing a flag";
+
+/// One flag of `workspace create`, taken with the strict parser so a `--flag`
+/// with no value is refused rather than silently defaulted.
+fn workspace_create_value(args: &mut Vec<String>, flag: &str) -> anyhow::Result<Option<String>> {
+    match take_value_strict(args, flag) {
+        FlagValue::Absent => Ok(None),
+        FlagValue::Value(value) => Ok(Some(value)),
+        FlagValue::Dangling => Err(workspace_create_needs_a_value(flag)),
+    }
+}
+
+/// A known flag was given with nothing after it. Refusing beats defaulting:
+/// a dropped `--agent` spawns no agent while reporting success, and a dropped
+/// `--socket` silently retargets the command at the default daemon.
+fn workspace_create_needs_a_value(flag: &str) -> anyhow::Error {
+    anyhow::anyhow!("{flag} needs a value; usage: {WORKSPACE_CREATE_USAGE}")
+}
+
 /// `lazybox workspace create (--issue <ref> | --pr <ref> | --ticket <KEY> |
 /// --name <name> --scratch) [--project <key> | --repo <owner/repo>] [--agent
 /// <id>] [--cwd <path>]` — attach to a tracker record's workspace, or create a
@@ -1025,20 +1371,60 @@ fn enclosing_repo_root(cwd: &std::path::Path) -> Option<PathBuf> {
 /// worktree just needs the record. Unlike `hook-ingest`, a failure here is
 /// surfaced (non-zero exit): the caller asked for a workspace and deserves to
 /// know if the daemon wasn't reachable or the record couldn't be resolved.
-async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
+///
+/// That failure reaches the caller on *stdout*, printed by
+/// [`workspace_subcommand`]: `init_tracing` redirects this process's stderr
+/// into the log file, so a returned `Err` alone would never be seen — the
+/// same trap `lazybox log` and `auth_cli` already work around. An agent that
+/// mistypes `--agent` must see why nothing happened, not silence.
+async fn run_workspace_create(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
-    let name = take_value(&mut args, "--name");
-    let record = take_value(&mut args, "--issue")
-        .or_else(|| take_value(&mut args, "--pr"))
-        .or_else(|| take_value(&mut args, "--ticket"));
-    let project = take_value(&mut args, "--project");
-    let repo = take_value(&mut args, "--repo");
-    let agent = take_value(&mut args, "--agent");
+    let name = workspace_create_value(&mut args, "--name")?;
+    // Lazy on purpose: with `--issue` present, `--pr` is left in `args` and
+    // the unknown-argument check below reports it rather than dropping it.
+    let mut record = None;
+    for flag in ["--issue", "--pr", "--ticket"] {
+        match take_value_strict(&mut args, flag) {
+            FlagValue::Value(value) => {
+                record = Some(value);
+                break;
+            }
+            FlagValue::Dangling => return Err(workspace_create_needs_a_value(flag)),
+            FlagValue::Absent => {}
+        }
+    }
+    let project = workspace_create_value(&mut args, "--project")?;
+    let repo = workspace_create_value(&mut args, "--repo")?;
+    let agent = workspace_create_value(&mut args, "--agent")?;
     let scratch = take_flag(&mut args, "--scratch");
-    let cwd = take_value(&mut args, "--cwd").map(PathBuf::from);
-    let socket_path = take_value(&mut args, "--socket")
+    let cwd = workspace_create_value(&mut args, "--cwd")?.map(PathBuf::from);
+    let socket_path = workspace_create_value(&mut args, "--socket")?
         .map(PathBuf::from)
         .unwrap_or_else(lifecycle::socket_path);
+
+    // Every flag this verb knows has been taken by now. Anything left is a
+    // typo or a flag that does not exist here, and accepting it silently is
+    // how a spawn that ignored `--tier` looks exactly like one that honored
+    // it. The hook path stays tolerant on purpose (a build-skewed daemon may
+    // pass a flag this binary predates); a human- or agent-typed command does
+    // not get that latitude.
+    //
+    // This runs *before* the record/name checks: a misspelled `--issu X`, or
+    // a bare `owner/repo#N` with no flag at all, otherwise tripped "needs a
+    // tracker record" — an error that never mentioned the thing that was
+    // actually wrong with the command.
+    //
+    // An empty argv element carries no instruction to honor or ignore, so it
+    // is dropped rather than refused: a wrapper passing a quoted-but-unset
+    // `"$EXTRA"` must keep working.
+    args.retain(|arg| !arg.trim().is_empty());
+    if !args.is_empty() {
+        let leftovers: Vec<String> = args.iter().map(|arg| format!("{arg:?}")).collect();
+        anyhow::bail!(
+            "unknown workspace create argument(s): {}; usage: {WORKSPACE_CREATE_USAGE}",
+            leftovers.join(", "),
+        );
+    }
 
     if record.is_some() && name.is_some() {
         anyhow::bail!(
@@ -1538,6 +1924,56 @@ async fn resolve_project_key(
     Some(key)
 }
 
+/// What [`take_value_strict`] found for one flag.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FlagValue {
+    /// The flag is not in `args`.
+    Absent,
+    /// The flag is there with a value, both now removed from `args`.
+    Value(String),
+    /// The flag is there with nothing usable after it — it ends `args`, or
+    /// the next token is another flag. Removed from `args`; the caller must
+    /// refuse, not substitute a default.
+    Dangling,
+}
+
+/// `--key value` / `--key=value` parser for a verb that refuses what it does
+/// not understand.
+///
+/// [`take_value`] returns `None` both when a flag is absent and when it is
+/// present with no value, and a caller cannot tell those apart — so
+/// `workspace create --issue X --agent` dropped `--agent` in exact silence
+/// and spawned no agent, and `--socket` last fell back to the *default*
+/// socket and talked to the wrong daemon. A trailing `--flag` also leaves
+/// nothing behind for an unknown-argument check to catch, because the flag
+/// itself was consumed. Reporting `Dangling` is what closes that.
+///
+/// The next token starting with `--` counts as no value for the same reason:
+/// `--name --scratch` otherwise parses as a workspace literally named
+/// `"--scratch"` with `--scratch` unset. No flag on this verb takes a value
+/// that begins with `--`.
+///
+/// [`take_value`] keeps its tolerant behaviour for every other caller; the
+/// hook path in particular must never harden (see `parse_hook_correlation`).
+pub(crate) fn take_value_strict(args: &mut Vec<String>, flag: &str) -> FlagValue {
+    let prefix = format!("{flag}=");
+    if let Some(pos) = args.iter().position(|a| a == flag) {
+        args.remove(pos);
+        match args.get(pos) {
+            Some(value) if !value.starts_with("--") => {
+                let value = args.remove(pos);
+                FlagValue::Value(value)
+            }
+            _ => FlagValue::Dangling,
+        }
+    } else if let Some(pos) = args.iter().position(|a| a.starts_with(&prefix)) {
+        let raw = args.remove(pos);
+        FlagValue::Value(raw[prefix.len()..].to_string())
+    } else {
+        FlagValue::Absent
+    }
+}
+
 /// `--key value` and `--key=value` parser. Removes both the flag and
 /// its value from `args`.
 pub(crate) fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
@@ -1556,11 +1992,17 @@ pub(crate) fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
     None
 }
 
+/// UI options stay local to the attaching client, including over SSH/relay.
+struct UiLaunch {
+    target: Option<lazybox_tui::realm::model::Preselect>,
+    presentation: lazybox_tui::realm::presentation::Presentation,
+}
+
 /// `lazybox --test` boots against a throwaway tempdir repo + one
 /// pre-seeded workspace. No setup screen, no provider polling, no
 /// disk writes. The fixture (which owns the TempDir) is held in
 /// scope for the whole TUI session — drop = `rm -rf` the tempdir.
-async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> anyhow::Result<()> {
+async fn run_test(preselect: UiLaunch) -> anyhow::Result<()> {
     let fixture = test_mode::TestFixture::new_with_seeded_session()?;
     eprintln!("--test repo at {}", fixture.repo.path().display());
 
@@ -1581,8 +2023,9 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
     spawn_terminal_restore_on_signal(None);
     let snippets = fixture.snippets.clone();
     tokio::task::spawn_blocking(move || {
-        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
-        if let Some(p) = preselect {
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?
+            .with_presentation(preselect.presentation);
+        if let Some(p) = preselect.target {
             model = model.with_preselect(p);
         }
         lazybox_tui::realm::model::run_loop_with_model(model)
@@ -1604,7 +2047,7 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
 /// and the bus → client relay), so this is the production event path fed
 /// synthetic events, not a bypass. See `scenario.rs` for the harness and its
 /// documented interface gaps.
-async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> anyhow::Result<()> {
+async fn run_demo(preselect: UiLaunch) -> anyhow::Result<()> {
     let fixture = scenario::DemoFixture::seed()?;
     let repos: std::collections::BTreeSet<&str> =
         fixture.workspaces.iter().map(|w| w.repo.as_str()).collect();
@@ -1627,9 +2070,7 @@ async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
 /// throwaway `LAZYBOX_HOME` so nothing touches the real profile, driven by the
 /// reactor instead of a script (so the world responds to what the user does),
 /// and marked with the permanent practice banner.
-async fn run_practice(
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
-) -> anyhow::Result<()> {
+async fn run_practice(preselect: UiLaunch) -> anyhow::Result<()> {
     // Enter the sandbox BEFORE seeding or booting: from here every
     // `LAZYBOX_HOME`-derived path — including the client's own config writes —
     // resolves inside the temp dir, and is deleted when `_sandbox` drops.
@@ -1658,7 +2099,7 @@ async fn boot_scenario_world(
     fixture: scenario::DemoFixture,
     steps: Vec<scenario::Step>,
     mode: ScenarioMode,
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
+    preselect: UiLaunch,
 ) -> anyhow::Result<()> {
     let _ = std::env::set_current_dir(fixture.repo.path());
 
@@ -1708,8 +2149,9 @@ async fn boot_scenario_world(
     let snippets = fixture.snippets.clone();
     let practice = mode == ScenarioMode::Reactive;
     tokio::task::spawn_blocking(move || {
-        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
-        if let Some(p) = preselect {
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?
+            .with_presentation(preselect.presentation);
+        if let Some(p) = preselect.target {
             model = model.with_preselect(p);
         }
         if practice {
@@ -1749,7 +2191,21 @@ struct DaemonDrain {
 /// 5s drain — because this is a kill, not a quit.
 fn spawn_terminal_restore_on_signal(drain: Option<DaemonDrain>) {
     tokio::spawn(async move {
-        wait_for_exit_signal().await;
+        let signal = wait_for_exit_signal().await;
+        // Logged before the restore and the drains below, because those are
+        // exactly what can hang: an exit that leaves no record is an exit
+        // nobody can diagnose, and this path used to leave none at all — a
+        // kill and a `q q` quit were indistinguishable in the log, both
+        // reaching it only through the keep-awake handoff they share.
+        // `ppid == 1` means our launcher went away first (a closed terminal,
+        // a killed `make`), which is a different story from being signalled
+        // directly; it is recorded here because after `exit` nobody can ask.
+        tracing::warn!(
+            signal,
+            pid = std::process::id(),
+            ppid = parent_pid(),
+            "exit: killed by a signal — restoring the terminal, then draining"
+        );
         lazybox_tui::realm::model::restore_host_terminal();
         if let Some(mut drain) = drain {
             let _ = drain.trigger.send(true);
@@ -1764,13 +2220,51 @@ fn spawn_terminal_restore_on_signal(drain: Option<DaemonDrain>) {
         if !lazybox_config::Config::flush_pending_saves(Duration::from_secs(2)) {
             tracing::warn!("signal exit: pending config saves did not flush within the bound");
         }
+        // `exit` skips destructors, so the keep-awake inhibitor's drop-time
+        // handoff never runs: leave the bounded hold behind explicitly, or
+        // a restart hands the machine to idle sleep with agents still
+        // working in tmux.
+        lazybox_server::keep_awake::hand_off_before_exit();
         // 128 + SIGTERM(15); a conventional signal-exit status.
         std::process::exit(143);
     });
 }
 
+/// Record that the run loop returned, and whether it returned cleanly. Pairs
+/// with the signal path's line so the log always says *which* of the two ways
+/// out was taken — the question four restarts on 2026-09-29 could not answer.
+fn log_run_loop_exit<T, E: std::fmt::Display>(mode: &str, result: &anyhow::Result<Result<T, E>>) {
+    match result {
+        Ok(Ok(_)) => tracing::info!(mode, "exit: the run loop ended — quit requested"),
+        Ok(Err(error)) => {
+            tracing::error!(mode, %error, "exit: the run loop ended with an error")
+        }
+        Err(error) => tracing::error!(mode, %error, "exit: the run loop task panicked"),
+    }
+}
+
+/// Our parent's pid, or `None` where the platform will not say. `1` means
+/// the launcher already exited and we were re-parented to init.
+fn parent_pid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        Some(std::os::unix::process::parent_id())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Waits for the signal that should end the process, and names it. The name
+/// is the whole point: the three signals arrive from very different places —
+/// SIGHUP from a terminal going away, SIGINT from a Ctrl-C that reached the
+/// process group, SIGTERM from something deliberately killing us — and
+/// without it a restart is unattributable. The *sender* is not available:
+/// tokio's handler does not carry `siginfo`, so a `si_pid` would mean owning
+/// `sigaction` here and fighting tokio for the handler.
 #[cfg(unix)]
-async fn wait_for_exit_signal() {
+async fn wait_for_exit_signal() -> &'static str {
     use tokio::signal::unix::{SignalKind, signal};
     // Degrade per-signal instead of `expect` (2026-08-19 audit, L7):
     // this runs inside a spawned task, so a panicked install (fd
@@ -1802,15 +2296,16 @@ async fn wait_for_exit_signal() {
         }
     }
     tokio::select! {
-        _ = recv_or_pend(&mut term) => {},
-        _ = recv_or_pend(&mut hup) => {},
-        _ = recv_or_pend(&mut int) => {},
+        _ = recv_or_pend(&mut term) => "SIGTERM",
+        _ = recv_or_pend(&mut hup) => "SIGHUP",
+        _ = recv_or_pend(&mut int) => "SIGINT",
     }
 }
 
 #[cfg(windows)]
-async fn wait_for_exit_signal() {
+async fn wait_for_exit_signal() -> &'static str {
     let _ = tokio::signal::ctrl_c().await;
+    "CTRL_C"
 }
 
 /// Remove a flag from `args` if present. Returns `true` if it was
@@ -1915,10 +2410,7 @@ async fn bring_up_tunnel(
 /// broken tunnel fails within this window rather than hanging the launch.
 const TUNNEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 
-async fn run_remote(
-    socket_path: &std::path::Path,
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
-) -> anyhow::Result<()> {
+async fn run_remote(socket_path: &std::path::Path, preselect: UiLaunch) -> anyhow::Result<()> {
     let config = lazybox_config::Config::load().ok();
 
     // A configured `remote.tunnel` replaces the operator-run `autossh` of
@@ -1943,7 +2435,12 @@ async fn run_remote(
     // remote `--connect` client that was a fresh, unrelated database. The
     // store here only backs the build guard's release-check cache, which is
     // a bounded, throwaway optimization; a failed open just skips it.
-    let update_check = tokio::spawn(async {
+    let check_updates =
+        preselect.presentation != lazybox_tui::realm::presentation::Presentation::Mobile;
+    let update_check = tokio::spawn(async move {
+        if !check_updates {
+            return None;
+        }
         let open_store = tokio::task::spawn_blocking(lazybox_server::open_store);
         let store = match tokio::time::timeout(Duration::from_millis(500), open_store).await {
             Ok(Ok(Ok(store))) => Some(store),
@@ -2001,7 +2498,7 @@ async fn run_realm_client(
     config: Option<lazybox_config::Config>,
     notify_socket: Option<PathBuf>,
     available_update: Option<lazybox_tui::build_guard::AvailableUpdate>,
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
+    preselect: UiLaunch,
 ) -> anyhow::Result<()> {
     spawn_terminal_restore_on_signal(None);
     // The attach client owns the same client-side config the embedded
@@ -2021,19 +2518,39 @@ async fn run_realm_client(
     let realm_result = tokio::task::spawn_blocking(move || {
         let snippets =
             lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref());
-        let mut model = lazybox_tui::realm::Model::new(client, snippets)?.with_remote();
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?
+            .with_presentation(preselect.presentation)
+            .with_remote();
         model.apply_client_config(&user_config);
+        if preselect.presentation == lazybox_tui::realm::presentation::Presentation::Mobile {
+            // Offer subscribed repos immediately, including ones with no inbox
+            // items yet. A config that exists but cannot be read or parsed is
+            // an `Err`, never "no setup" — see `load_from_yaml`, whose whole
+            // point is that collapsing the two sent a returning user through
+            // the wizard. Nothing here decides first run, so the right move is
+            // to skip the pre-cache and say why, not to cache an empty setup.
+            match lazybox_tui::setup_flow::load_from_yaml(
+                &lazybox_tui::setup_flow::config_yaml_path(),
+            ) {
+                Ok(Some(setup)) => model.cache_persisted_setup(setup),
+                Ok(None) => (),
+                Err(e) => tracing::warn!("mobile: not pre-caching repositories — {e}"),
+            }
+        }
         model.note_daemon_build(&daemon.build);
-        if let Some(update) = available_update {
+        if preselect.presentation == lazybox_tui::realm::presentation::Presentation::Desktop
+            && let Some(update) = available_update
+        {
             model.show_update_if_new(update);
         }
-        if let Some(p) = preselect {
+        if let Some(p) = preselect.target {
             model = model.with_preselect(p);
         }
         lazybox_tui::realm::model::run_loop_with_model(model)
     })
     .await
     .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"));
+    log_run_loop_exit("attach", &realm_result);
     // Keystroke-persisted config (star/pin/collapse/splitter) rides an
     // ordered background worker; flush it at attach-client teardown just
     // like the embedded quit path does (#1211, #1244).
@@ -2047,10 +2564,7 @@ async fn run_realm_client(
 /// attach a TUI to a box reached through a rendezvous relay. Connects
 /// through the relay, runs the E2E handshake pinned to the box's channel
 /// key, and drives the daemon over the encrypted, ciphertext-only tunnel.
-async fn run_connect_relay(
-    args: &[String],
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
-) -> anyhow::Result<()> {
+async fn run_connect_relay(args: &[String], preselect: UiLaunch) -> anyhow::Result<()> {
     let mut rest = args.to_vec();
     let smoke = take_flag(&mut rest, "--smoke");
     let relay_addr = take_value(&mut rest, "--relay")
@@ -2121,7 +2635,7 @@ async fn run_remote_relay(
     relay_addr: String,
     box_id: String,
     box_key_hex: String,
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
+    preselect: UiLaunch,
 ) -> anyhow::Result<()> {
     let box_key = relay_e2e::parse_box_key(&box_key_hex)?;
     let config = lazybox_config::Config::load().ok();
@@ -2158,9 +2672,7 @@ async fn run_remote_relay(
 /// Realm-based default boot path. Spawns the daemon, runs detection
 /// if no setup exists (kicks the wizard), kicks the polling loop on
 /// completion, runs the realm UI on a blocking task.
-async fn run_embedded_realm(
-    preselect: Option<lazybox_tui::realm::model::Preselect>,
-) -> anyhow::Result<()> {
+async fn run_embedded_realm(preselect: UiLaunch) -> anyhow::Result<()> {
     let (client, server) = channel::pair();
     let config = server_config_from_user().await?;
     // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
@@ -2272,7 +2784,7 @@ async fn run_embedded_realm(
     //   2. No persisted setup → run detection, hand the wizard to
     //      the realm `Model`, and wire the on-complete hook to fire
     //      polling once the user finishes.
-    let persisted = persisted_setup(&*config.store);
+    let persisted = persisted_setup(&*config.store)?;
     let returning_sources: Vec<String> = persisted
         .as_ref()
         .map(|p| p.enabled_providers.iter().cloned().collect())
@@ -2286,19 +2798,11 @@ async fn run_embedded_realm(
     // a `spawn_blocking` task. Both calls are read-only + cheap-ish
     // (sub-second on a warm cache).
     let setup_report = setup_detect::detect_all().await;
-    // Scope-source discovery does network IO (GitHub credential +
-    // client build). Bounded so a stalled network can't hold the UI
-    // hostage pre-paint; the wizard degrades to no scope suggestions.
-    let setup_sources = std::sync::Arc::new(
-        match tokio::time::timeout(Duration::from_secs(10), build_scope_sources()).await {
-            Ok(sources) => sources,
-            Err(_) => {
-                tracing::warn!("build_scope_sources timed out after 10s — continuing without");
-                Vec::new()
-            }
-        },
-    );
-    let needs_wizard = persisted_setup(&*config.store).is_none();
+    // No network here: each source authenticates when the picker first
+    // asks, so neither a slow launch nor a bad GitHub minute can leave
+    // the session without repo editing.
+    let setup_sources = std::sync::Arc::new(build_scope_sources());
+    let needs_wizard = persisted.is_none();
     let wizard_seed = if needs_wizard {
         Some((setup_report.clone(), setup_sources.clone()))
     } else {
@@ -2345,7 +2849,8 @@ async fn run_embedded_realm(
     let realm_result = tokio::task::spawn_blocking(move || {
         let snippets =
             lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref());
-        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?
+            .with_presentation(preselect.presentation);
         // Attach the lazy `r`-spawn box (Design A: the client holds a
         // connection per remote daemon; here one whose far end is the
         // box worker). Its presence is what makes the `r <agent>` chords
@@ -2387,7 +2892,7 @@ async fn run_embedded_realm(
         let detector: lazybox_tui::realm::SetupDetector =
             std::sync::Arc::new(|| Box::pin(setup_detect::detect_all()));
         model = model.with_setup_detector(detector);
-        if let Some(p) = preselect {
+        if let Some(p) = preselect.target {
             model = model.with_preselect(p);
         }
         // Cache so the in-session `,` reopens the wizard without
@@ -2448,6 +2953,11 @@ async fn run_embedded_realm(
     })
     .await
     .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"));
+    // The counterpart to the signal path's line: reaching here means the run
+    // loop itself ended — a `q q` quit, or an error out of the loop. Without
+    // both lines, every restart in the log looked the same, because the only
+    // trace either path left was the keep-awake handoff they share.
+    log_run_loop_exit("embedded", &realm_result);
     // Tear the embedded socket service down the same way the server
     // subcommand does on SIGTERM: `SocketService::run` removes the
     // socket + pid file on its way out, so the next start doesn't
@@ -2513,26 +3023,36 @@ async fn run_embedded_realm(
 
 /// Build the scope sources used by the setup wizard. GitHub today;
 /// Linear ships without a scope-discovery API so the wizard skips it.
-async fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
-    let mut sources: Vec<Box<dyn lazybox_core::ScopeSource>> = Vec::new();
+///
+/// Nothing here touches the network: the GitHub source resolves its
+/// credential and client when the picker first asks, so a launch that
+/// hits a slow or rate-limited GitHub does not strip the session of
+/// repo editing (see [`lazybox_gh::GhScopes::lazy`]).
+fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
     let host = lazybox_config::Config::load()
         .unwrap_or_default()
         .github_host();
-    if let Ok(cred) = lazybox_gh::credential_chain(host.as_deref())
-        .resolve(&lazybox_gh::credential_scope(host.as_deref()))
-        .await
-        && let Ok(client) =
-            lazybox_gh::GhClient::from_credential_with_host(cred, host.as_deref()).await
-    {
-        sources.push(Box::new(lazybox_gh::GhScopes::new(std::sync::Arc::new(
-            client,
-        ))));
-    }
-    sources
+    vec![Box::new(lazybox_gh::GhScopes::lazy(host))]
 }
 
-fn persisted_setup(store: &dyn lazybox_store::Store) -> Option<lazybox_core::PersistedSetup> {
-    setup_persist::load_persisted(store)
+/// The persisted setup, or an error that stops the launch.
+///
+/// A `config.yaml` that exists but does not parse must never be read as
+/// "no setup": the first-run wizard it would open ends by moving the file
+/// aside and writing a fresh one, and — having loaded no subscriptions to
+/// compare against — skips the unsubscribe confirm, so the rescope sweep
+/// deletes the workspaces of every repo the user doesn't re-tick. Stop
+/// and name the problem instead; the file is left exactly as it is.
+fn persisted_setup(
+    store: &dyn lazybox_store::Store,
+) -> anyhow::Result<Option<lazybox_core::PersistedSetup>> {
+    setup_persist::load_persisted(store).map_err(|error| {
+        anyhow::anyhow!(
+            "{error}\n\nlazybox did not start, and did not touch the file: running first-time \
+             setup over it would replace your settings and drop your repo subscriptions. \
+             Fix the error above (or move the file aside to start fresh), then relaunch."
+        )
+    })
 }
 
 /// Read the optional `editors:` list from `~/.lazybox/config.yaml`.
@@ -3216,6 +3736,144 @@ mod argv_tests {
         let mut a = args(&["--workspace", "foo"]);
         assert!(!take_flag(&mut a, "--fresh"));
         assert_eq!(a, args(&["--workspace", "foo"]));
+    }
+
+    #[test]
+    fn take_value_strict_separates_absent_from_valueless() {
+        // The distinction `take_value` cannot express, and the whole reason
+        // this parser exists: a trailing `--agent` used to read as "no agent
+        // asked for" and spawn nothing while reporting success.
+        let mut a = args(&["--issue", "o/r#7", "--agent"]);
+        assert_eq!(
+            take_value_strict(&mut a, "--issue"),
+            FlagValue::Value("o/r#7".to_string())
+        );
+        assert_eq!(take_value_strict(&mut a, "--agent"), FlagValue::Dangling);
+        assert_eq!(take_value_strict(&mut a, "--socket"), FlagValue::Absent);
+        assert!(a.is_empty(), "a dangling flag is still consumed: {a:?}");
+    }
+
+    #[test]
+    fn take_value_strict_refuses_a_following_flag_as_a_value() {
+        // `--name --scratch` parsed as a workspace literally named
+        // "--scratch", with `--scratch` itself never set.
+        let mut a = args(&["--name", "--scratch"]);
+        assert_eq!(take_value_strict(&mut a, "--name"), FlagValue::Dangling);
+        assert_eq!(
+            a,
+            args(&["--scratch"]),
+            "the next flag survives for its own take"
+        );
+        assert!(take_flag(&mut a, "--scratch"));
+    }
+
+    #[test]
+    fn take_value_strict_still_reads_the_equals_form() {
+        // `--name=--weird` is unambiguous, so the `--` rule must not reject
+        // it: the value is spelled inside the same token.
+        let mut a = args(&["--name=--weird", "--repo=o/r"]);
+        assert_eq!(
+            take_value_strict(&mut a, "--name"),
+            FlagValue::Value("--weird".to_string())
+        );
+        assert_eq!(
+            take_value_strict(&mut a, "--repo"),
+            FlagValue::Value("o/r".to_string())
+        );
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn launch_flags_belong_to_a_launch_not_to_a_subcommand() {
+        // `--fresh` wipes state.db and `--test` boots a throwaway TUI. Peeled
+        // off a subcommand's argv they were unreachable by that verb's own
+        // refusal, so `workspace create --issue X --fresh` deleted the state
+        // DB and still went on to create the workspace.
+        assert!(argv_launches_a_ui(None), "bare `lazybox` launches");
+        assert!(argv_launches_a_ui(Some("--fresh")));
+        assert!(argv_launches_a_ui(Some("practice")));
+        assert!(argv_launches_a_ui(Some("--connect")));
+        for verb in NON_LAUNCH_SUBCOMMANDS {
+            assert!(
+                !argv_launches_a_ui(Some(verb)),
+                "`{verb}` runs and exits, so the launch flags are not its to eat"
+            );
+        }
+    }
+
+    #[test]
+    fn help_and_usage_agree_on_the_workspace_create_flags() {
+        // Three hand-kept copies of this usage had already drifted apart (the
+        // unknown-verb refusal omitted `--socket`). Now that an unlisted flag
+        // is a hard error, a usage line that under-reports one sends the
+        // caller into a refusal with no way out.
+        for flag in [
+            "--issue",
+            "--pr",
+            "--ticket",
+            "--name",
+            "--scratch",
+            "--project",
+            "--repo",
+            "--agent",
+            "--cwd",
+            "--socket",
+        ] {
+            assert!(
+                WORKSPACE_CREATE_USAGE.contains(flag),
+                "usage must name `{flag}`: {WORKSPACE_CREATE_USAGE}"
+            );
+            assert!(
+                HELP.contains(flag),
+                "`lazybox --help` must name `{flag}` too, or the refusal points nowhere"
+            );
+        }
+    }
+
+    #[test]
+    fn the_archive_verbs_refuse_what_they_do_not_understand() {
+        // Same contract as `workspace create` (#1875): a mistyped flag
+        // accepted in silence is how `--sockett` looks exactly like a command
+        // that reached the daemon you meant, and a dangling `--key` would
+        // unarchive nothing while reporting success.
+        let mut leftovers = args(&["--sockett", "/tmp/s"]);
+        let refusal =
+            reject_unknown_arguments(&mut leftovers, "archived", WORKSPACE_ARCHIVED_USAGE)
+                .expect_err("an unknown flag must be refused, not ignored")
+                .to_string();
+        assert!(refusal.contains("--sockett"), "{refusal}");
+        assert!(refusal.contains(WORKSPACE_ARCHIVED_USAGE), "{refusal}");
+
+        // An empty argv element carries no instruction to honor or ignore, so
+        // a wrapper passing a quoted-but-unset "$EXTRA" keeps working.
+        let mut blank = args(&["", "  "]);
+        assert!(
+            reject_unknown_arguments(&mut blank, "unarchive", WORKSPACE_UNARCHIVE_USAGE).is_ok()
+        );
+
+        let mut dangling = args(&["--key"]);
+        let refusal = strict_value(&mut dangling, "--key", WORKSPACE_UNARCHIVE_USAGE)
+            .expect_err("a flag with no value must be refused, never defaulted")
+            .to_string();
+        assert!(refusal.contains("--key needs a value"), "{refusal}");
+    }
+
+    #[test]
+    fn help_and_usage_agree_on_the_archive_verb_flags() {
+        assert!(
+            WORKSPACE_ARCHIVED_USAGE.contains("--socket"),
+            "usage must name `--socket`: {WORKSPACE_ARCHIVED_USAGE}"
+        );
+        for flag in ["--key", "--repo", "--socket"] {
+            assert!(
+                WORKSPACE_UNARCHIVE_USAGE.contains(flag),
+                "usage must name `{flag}`: {WORKSPACE_UNARCHIVE_USAGE}"
+            );
+        }
+        // The help screen has to name both verbs, or the refusal above points
+        // the caller at a command they cannot look up.
+        assert!(HELP.contains("workspace archived"), "{HELP}");
+        assert!(HELP.contains("workspace unarchive"), "{HELP}");
     }
 
     #[test]

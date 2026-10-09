@@ -46,8 +46,9 @@ pub use handlers::{
     handle_fetch_pr_details, handle_fetch_repo_labels, handle_fetch_repo_merge_history,
     handle_fetch_requestable_reviewers, handle_inspect_workspace_diff, handle_inspect_worktrees,
     handle_mark_ready, handle_merge_pr, handle_request_reviewers, handle_scan_checkouts,
-    handle_set_assignees, handle_set_labels, handle_sync_workspace, handle_update_branch,
-    post_reply, prefetch_top_pr_details, remove_merged_workspace,
+    handle_set_assignees, handle_set_labels, handle_submit_pull_request_review,
+    handle_sync_workspace, handle_update_branch, post_reply, prefetch_top_pr_details,
+    remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 pub(crate) use sources::dispatch_action;
@@ -1242,6 +1243,17 @@ impl FetchMode {
             FetchMode::Hot => "hot-targets",
         }
     }
+
+    /// Whether a tick that returned nothing deserves the "check your
+    /// filters and scopes" warning. Only an exhaustive sweep does: an
+    /// incremental or hot tick returns only what CHANGED, so zero rows is
+    /// its normal answer on a quiet minute. Warning on those buried the
+    /// log (753 of 827 such warnings in 28h were routine hot ticks) and
+    /// pointed at Settings when the real cause of a stalled inbox was
+    /// elsewhere.
+    pub fn empty_result_is_suspicious(self) -> bool {
+        matches!(self, FetchMode::Full)
+    }
 }
 
 /// Anything that can produce a flat list of `Task`s. Implementations
@@ -1562,6 +1574,12 @@ pub struct TickState {
     /// daemon raises one user-visible "discovery behind" advisory; a manual
     /// refresh or a tick that finally admits the sweep resets it.
     pub(crate) full_sweep_deferral_streak: u32,
+    /// When the current deferral episode began — the first tick the
+    /// governor refused a due sweep. The advisory reports the wall-clock
+    /// stall from this rather than from the streak: the governor interval
+    /// widens and narrows with engagement, so a tick count is not a
+    /// duration. Cleared with the streak.
+    pub(crate) full_sweep_deferral_since: Option<std::time::Instant>,
     /// Whether the "discovery behind" advisory has already been broadcast
     /// for the current deferral episode, so the notice fires once when the
     /// stall sets in rather than every tick. Cleared when a sweep is
@@ -1599,6 +1617,7 @@ impl Default for TickState {
             implicit_gh_scopes: None,
             linear_schedule: Default::default(),
             full_sweep_deferral_streak: Default::default(),
+            full_sweep_deferral_since: None,
             discovery_behind_notified: Default::default(),
             gh_app_coverage: None,
             gh_app_gap_notified: None,
@@ -1826,6 +1845,23 @@ pub struct RemovalPromptMemory {
     /// heals on its own. Cleared wholesale on client (re)connect so a
     /// fresh subscriber is prompted on the next tick, not in 5 min.
     pub(crate) prompted: std::collections::HashMap<String, std::time::Instant>,
+    /// Terminal-state workspaces whose cleanup the removal gate would
+    /// refuse, mapped to the refusal detail that blocks them — the
+    /// paths and reasons, exactly as the refusal words them.
+    ///
+    /// This is a *state* key, not a "we already asked" flag, and the
+    /// difference is the whole point (#1867). Prompting for a removal
+    /// the gate then refuses left nothing behind, so every sweep
+    /// re-offered it and re-raised the red refusal; suppressing on a
+    /// boolean instead would outlive the user fixing the checkout and
+    /// strand a workspace that had become cleanable. Keyed on the
+    /// detail, the suppression lifts the moment the checkout's blocking
+    /// state changes — including to "nothing blocks it", which is when
+    /// the real prompt fires again.
+    ///
+    /// Per-process like `prompted`: a restarted daemon re-announces
+    /// once, which is the same self-heal contract.
+    pub(crate) blocked: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2337,7 +2373,7 @@ pub async fn tick_with_state(
                 // Shift-R. We still log loudly for diagnostics, and the
                 // `PollCompleted { count: 0 }` below lets the TUI show a
                 // calm "✓ sync ok — 0 tasks" notice instead.
-                if count == 0 {
+                if count == 0 && mode.empty_result_is_suspicious() {
                     tracing::warn!(
                         source = source.name(),
                         "poll returned 0 tasks — if unexpected, check `,` Settings: filter roles \
@@ -3488,6 +3524,11 @@ async fn run_one_tick_with_notifications(
     // the store, not poll state, and must run even when providers
     // errored (the merged state is already persisted locally).
     reprompt_unresolved_removals(config).await;
+    // Level-triggered too: any external merge still owing a cost record
+    // whose settle window has passed. Covers the in-memory recorder that
+    // never woke — a daemon restart inside the window, or a provider that
+    // could not be built at the time.
+    handlers::sweep_pending_merge_costs(config).await;
     // Keep every "track main" workspace (issue #535) fast-forwarded to
     // its base branch. Its own pass over the store, gated on the
     // per-workspace arm — decoupled from the provider round-robin so a
@@ -3969,13 +4010,11 @@ async fn sync_one_tracked_workspace(
 /// the reprompt sweep stops asking — across restarts, not just this
 /// session (issue #499). The row stays until removed explicitly.
 pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
-    config
-        .poll
-        .removal_prompts
-        .lock()
-        .await
-        .prompted
-        .remove(key.as_str());
+    {
+        let mut prompts = config.poll.removal_prompts.lock().await;
+        prompts.prompted.remove(key.as_str());
+        prompts.blocked.remove(key.as_str());
+    }
     let outcome = apply_and_commit(config, key, |ws| {
         ws.cleanup_prompt = lazybox_core::CleanupPrompt::Declined;
     })
@@ -3993,7 +4032,13 @@ pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
 /// waiting out `REMOVAL_REPROMPT_AFTER`. A prompt the reconnecting
 /// client never saw shouldn't be throttled as if it had been.
 pub async fn mark_removal_prompts_for_replay(config: &ServerConfig) {
-    config.poll.removal_prompts.lock().await.prompted.clear();
+    let mut prompts = config.poll.removal_prompts.lock().await;
+    prompts.prompted.clear();
+    // The parked-cleanup notices go with them: a client that never saw
+    // "this merged workspace is being kept because it has local work"
+    // should hear it once on connect, for the same reason it should see
+    // a prompt it missed.
+    prompts.blocked.clear();
 }
 
 /// If `workspace`'s PR closes issues that lazybox tracks as their own
@@ -4522,11 +4567,16 @@ async fn commit_merge(
         })
         .collect();
     let post_commit_events = issue_merge_events(&pr_key, pending);
+    // The absorbed rows' declared blockers move onto the PR in this same
+    // transaction: the blocker follows the work, and a crash cannot leave one
+    // keyed to the issue row the batch deletes (#1793).
+    let blocker_mutations = crate::epics::absorb_declared_mutations(config, &deletes, &pr_key);
     match commit_workspace_move(
         config,
         vec![(pr_key.clone(), pr_ws)],
         deletes.clone(),
         terminal_moves,
+        blocker_mutations,
         post_commit_events,
         workspace_guards,
     )
@@ -4946,6 +4996,7 @@ pub async fn handle_adopt_sessions(
         Vec::new(),
         vec![(source_session_key, target_session_key)],
         Vec::new(),
+        Vec::new(),
         workspace_guards,
     )
     .await
@@ -5033,6 +5084,7 @@ pub(crate) async fn transfer_owned_worktree_session(
         ],
         Vec::new(),
         vec![(source_session_key, target_session_key)],
+        Vec::new(),
         Vec::new(),
         workspace_guards,
     )
@@ -6580,6 +6632,51 @@ mod rescope_collapse_tests {
         );
     }
 
+    /// Regression (#1806): retirement must not depend on the reconcile
+    /// sweep. The windowed rotation can't read the ABSENCE of a row — only
+    /// a reconcile carries that authority — but it does positively observe
+    /// a close, because a windowed member query drops `is:open` and a close
+    /// bumps `updatedAt`. That observation must retire the row on its own,
+    /// with no `PolledScope` authority anywhere in the tick, so an inbox
+    /// whose reconcile is budget-deferred still drains.
+    #[tokio::test]
+    async fn a_closed_issue_retires_on_observation_without_any_reconcile() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let open_issue = gh_task(
+            "o/r#60",
+            "https://github.com/o/r/issues/60",
+            TaskState::Open,
+            vec![],
+        );
+        let issue_ws = Workspace::from_task(open_issue.clone(), Utc::now());
+        let issue_key = issue_ws.key.clone();
+        seed(&store, &issue_ws);
+
+        // What a windowed rotation returns once the issue closes upstream.
+        let closed_issue = gh_task(
+            "o/r#60",
+            "https://github.com/o/r/issues/60",
+            TaskState::Closed,
+            vec![],
+        );
+        upsert_into_workspace_key(&config, &issue_key, closed_issue).await;
+
+        assert!(
+            load_workspace(&config, &issue_key).is_none(),
+            "a session-less closed issue must retire on the tick that observes it"
+        );
+
+        // And the rescope pass of that same tick carries no retirement
+        // authority at all — the rotation is windowed, so the row above was
+        // reaped by the observation, not by a sweep.
+        assert_eq!(
+            repo_first_polled_scope(false, true, &["o/r".to_string()], &["o/r".to_string()]),
+            PolledScope::Repos(Vec::new()),
+        );
+    }
+
     /// The reprompt sweep's candidate filter: merged PR workspaces
     /// qualify with OR without sessions (issue #499); open work doesn't.
     #[tokio::test]
@@ -7163,6 +7260,111 @@ mod rescope_collapse_tests {
 
         let after = load_workspace(&config, &key).expect("workspace survives");
         assert_eq!(after.notes, "keep me across polls");
+    }
+
+    // ---- TODO auto-check: driven by the OBSERVED terminal state -------------
+
+    async fn todo_with_item_linked_to(
+        config: &ServerConfig,
+        name: &str,
+        task: &TaskId,
+    ) -> WorkspaceKey {
+        let key = crate::workspace::save_hopper(
+            config,
+            vec![lazybox_ipc::HopperEntryDraft {
+                workspace_key: None,
+                name: name.into(),
+            }],
+        )
+        .expect("create todo")
+        .remove(0);
+        let items = vec![lazybox_core::TodoItem {
+            id: "item-1".into(),
+            parent: None,
+            text: "land the work".into(),
+            done_at: None,
+            canceled_at: None,
+            link: Some(lazybox_core::TodoLink::Task(task.clone())),
+            auto_checked: false,
+        }];
+        crate::workspace::save_todo_items(config, &key, items)
+            .await
+            .expect("save items");
+        key
+    }
+
+    fn ticked(config: &ServerConfig, todo: &WorkspaceKey) -> bool {
+        let workspace = load_workspace(config, todo).expect("todo row");
+        let item = &workspace.todo_items[0];
+        item.is_done() && item.auto_checked
+    }
+
+    /// A merged PR lazybox holds NO workspace for still ticks its linked TODO
+    /// item. That branch returns `Unchanged` before any cleanup decision is
+    /// reached, and lazybox's own merged-workspace cleanup deletes the PR row as
+    /// its default behaviour — so "no workspace for a merged PR" is the ordinary
+    /// case for a checklist item, not a corner one.
+    #[tokio::test]
+    async fn a_merged_pr_with_no_workspace_still_checks_off_its_todo_item() {
+        let config = ServerConfig::in_memory();
+        let merged = TaskId {
+            source: "github".into(),
+            key: "o/r#1890".into(),
+        };
+        let todo = todo_with_item_linked_to(&config, "Release", &merged).await;
+
+        let outcome = upsert_into_workspace_key(
+            &config,
+            &WorkspaceKey::new("github:o/r#1890"),
+            gh_task(
+                "o/r#1890",
+                "https://github.com/o/r/pull/1890",
+                TaskState::Merged,
+                vec![],
+            ),
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, CommitOutcome::Unchanged),
+            "there is no workspace for this PR, so there is nothing to upsert"
+        );
+        assert!(
+            ticked(&config, &todo),
+            "the linked item must tick off even though the upsert had no row to touch"
+        );
+    }
+
+    /// And when this box never saw the open->merged edge. The row already
+    /// records the merge, so `merged_transition_pr_number` declines on every
+    /// later observation; an item written after the fact must still tick, or it
+    /// stays open forever with nothing left to look again.
+    #[tokio::test]
+    async fn a_todo_item_added_after_the_merge_landed_still_checks_off() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github:o/r#77");
+        let task = |state| gh_task("o/r#77", "https://github.com/o/r/pull/77", state, vec![]);
+        // The PR exists, then merges: the transition is observed and consumed.
+        upsert_into_workspace_key(&config, &key, task(TaskState::Open)).await;
+        upsert_into_workspace_key(&config, &key, task(TaskState::Merged)).await;
+
+        // Only now does the checklist item appear.
+        let merged = TaskId {
+            source: "github".into(),
+            key: "o/r#77".into(),
+        };
+        let todo = todo_with_item_linked_to(&config, "Coordination", &merged).await;
+        assert!(
+            !ticked(&config, &todo),
+            "nothing has re-observed the PR yet"
+        );
+
+        // A later observation of the same merged PR is not a transition.
+        upsert_into_workspace_key(&config, &key, task(TaskState::Merged)).await;
+        assert!(
+            ticked(&config, &todo),
+            "a missed transition must not strand the item unchecked"
+        );
     }
 }
 
@@ -8566,5 +8768,17 @@ mod track_main_sweep_tests {
             !tmp.path().join("base").join("repos").exists(),
             "no repo should be cloned for a session-less tracked workspace"
         );
+    }
+}
+
+#[cfg(test)]
+mod empty_poll_warning_tests {
+    use super::FetchMode;
+
+    #[test]
+    fn only_an_exhaustive_sweep_warns_on_an_empty_result() {
+        assert!(FetchMode::Full.empty_result_is_suspicious());
+        assert!(!FetchMode::Incremental.empty_result_is_suspicious());
+        assert!(!FetchMode::Hot.empty_result_is_suspicious());
     }
 }

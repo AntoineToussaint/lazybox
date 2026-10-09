@@ -457,15 +457,30 @@ jobs:
     # license policy, and source allowlists. Config lives in
     # `deny.toml` at the repo root. No Rust toolchain or build of the
     # workspace needed — cargo-deny only reads Cargo.lock.
+    #
+    # Installed as a prebuilt binary rather than run through
+    # `EmbarkStudios/cargo-deny-action`, which is a Docker action: it builds
+    # from `rust:1.85.0-alpine3.20` on Docker Hub, and an UNAUTHENTICATED pull
+    # from a GitHub runner is rate-limited per IP. On a busy day that returns
+    # `429 Too Many Requests` (and 504s under load) and the job fails having
+    # never read Cargo.lock at all — a red check that says nothing about the
+    # dependencies it exists to gate. Reruns do not help, because the limit is
+    # on the runner's address and not the attempt.
+    #
+    # `taiki-e/install-action` is already how this workflow installs
+    # `cargo-nextest`; it fetches a release binary from GitHub, so this job now
+    # depends only on infrastructure the rest of CI already depends on.
     name: deny
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: taiki-e/install-action@v2
         with:
-          command: check advisories bans licenses sources
+          tool: cargo-deny
+      - name: Check advisories, bans, licenses and sources
+        run: cargo deny check advisories bans licenses sources
 
   typos:
     name: typos

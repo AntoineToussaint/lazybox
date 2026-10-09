@@ -231,6 +231,8 @@ mod terminal_commands;
 mod terminal_io;
 #[cfg(test)]
 mod test_env;
+pub mod work_calls;
+pub mod work_store;
 mod working_claims;
 mod working_watchdog;
 pub mod workspace;
@@ -1370,11 +1372,13 @@ impl Server {
                         lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::SetTrackMain { .. } => "SetTrackMain",
                         lazybox_ipc::Command::QueryTaskStatus { .. } => "QueryTaskStatus",
+                        lazybox_ipc::Command::WorkCall { .. } => "WorkCall",
                         lazybox_ipc::Command::GhAdmit { .. } => "GhAdmit",
                         lazybox_ipc::Command::GhCompleted { .. } => "GhCompleted",
                         lazybox_ipc::Command::SearchAgentOutput { .. } => "SearchAgentOutput",
                         lazybox_ipc::Command::ListArchivedWorkspaces => "ListArchivedWorkspaces",
                         lazybox_ipc::Command::UnarchiveWorkspace { .. } => "UnarchiveWorkspace",
+                        lazybox_ipc::Command::SaveTodoItems { .. } => "SaveTodoItems",
                         lazybox_ipc::Command::SetMetered { .. } => "SetMetered",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
                         lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
@@ -1415,6 +1419,9 @@ impl Server {
                         lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
                         lazybox_ipc::Command::InspectWorkspaceDiff { .. } => {
                             "InspectWorkspaceDiff"
+                        }
+                        lazybox_ipc::Command::SubmitPullRequestReview { .. } => {
+                            "SubmitPullRequestReview"
                         }
                         lazybox_ipc::Command::ScanCheckouts { .. } => "ScanCheckouts",
                         lazybox_ipc::Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
@@ -2789,7 +2796,7 @@ pub async fn dispatch_command(
                     .bus
                     .send(lazybox_ipc::Event::provider_error_permanent(
                         "hopper",
-                        format!("Hopper was not saved: {error}"),
+                        format!("the TODO list was not saved: {error}"),
                     ));
             }
         }
@@ -2810,6 +2817,20 @@ pub async fn dispatch_command(
             canceled,
         } => {
             workspace::set_hopper_canceled(config, &workspace_key, canceled).await;
+        }
+        lazybox_ipc::Command::SaveTodoItems {
+            workspace_key,
+            items,
+        } => {
+            if let Err(error) = workspace::save_todo_items(config, &workspace_key, items).await {
+                tracing::error!(error = %error, "save todo items failed");
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::provider_error_permanent(
+                        "todo",
+                        format!("the TODO checklist was not saved: {error}"),
+                    ));
+            }
         }
         lazybox_ipc::Command::Snooze {
             session_key,
@@ -2960,6 +2981,19 @@ pub async fn dispatch_command(
             // outright — let a loaded daemon lose the reply and report a
             // timeout for an answer it computed correctly.
             let _ = tx.send(lazybox_ipc::Event::TaskStatus {
+                client_request_id,
+                result,
+            });
+        }
+        lazybox_ipc::Command::WorkCall {
+            request,
+            client_request_id,
+        } => {
+            let result = work_calls::call(config, request).await;
+            // Same channel choice as the status lookup above, for the same
+            // reasons: request/response on the asking connection, never the
+            // bus a lagging subscriber drops events from.
+            let _ = tx.send(lazybox_ipc::Event::WorkReport {
                 client_request_id,
                 result,
             });
@@ -3168,6 +3202,23 @@ pub async fn dispatch_command(
             target,
         } => {
             polling::handle_inspect_workspace_diff(config, workspace_key, target).await;
+        }
+        lazybox_ipc::Command::SubmitPullRequestReview {
+            workspace_key,
+            head_sha,
+            summary,
+            verdict,
+            comments,
+        } => {
+            polling::handle_submit_pull_request_review(
+                config,
+                workspace_key,
+                head_sha,
+                summary,
+                verdict,
+                comments,
+            )
+            .await;
         }
         lazybox_ipc::Command::ScanCheckouts { roots } => {
             polling::handle_scan_checkouts(config, roots).await;

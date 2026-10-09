@@ -6,5 +6,11 @@
 .DS_Store
 /tmp/
 vendor/
+# insta's pending-snapshot scratch files. A run with a failing snapshot test
+# writes `.<file>.pending-snap` next to the source, and `cargo insta accept`
+# removes it — but an interrupted or merely-observed failure leaves one behind,
+# untracked and easy to `git add -A`. 071f158c4 committed one; #1900 had to
+# delete it again.
+*.pending-snap
 # Local Claude Code state (chat memory, agent task logs).
 .claude/

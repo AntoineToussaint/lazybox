@@ -79,10 +79,10 @@ pub async fn report(
     let held_here = crate::working_claims::locally_held_claims(config);
     let now = Utc::now();
 
-    let mut workspaces: Vec<WorkspaceStatus> = matches
-        .into_iter()
-        .map(|workspace| workspace_status(config, workspace, id, &runtimes, &held_here, now))
-        .collect();
+    let mut workspaces: Vec<WorkspaceStatus> = Vec::with_capacity(matches.len());
+    for workspace in matches {
+        workspaces.push(workspace_status(config, workspace, id, &runtimes, &held_here, now).await);
+    }
     // Stable order so repeated queries read the same way.
     workspaces.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
 
@@ -114,7 +114,7 @@ pub async fn report(
     })
 }
 
-fn workspace_status(
+async fn workspace_status(
     config: &ServerConfig,
     workspace: Workspace,
     matched: &TaskId,
@@ -141,9 +141,10 @@ fn workspace_status(
             .filter(|task| headline.is_none_or(|head| head.id != task.id))
             .map(tracker_facts),
         role: workspace.effective_role(),
-        claim: matched_task
-            .map(|task| claim_facts(task, held_here, now))
-            .unwrap_or_default(),
+        claim: match matched_task {
+            Some(task) => claim_facts(config, task, held_here, now).await,
+            None => Default::default(),
+        },
         blocker: crate::epics::load_declared(config, workspace.key.as_str())
             .ok()
             .flatten()
@@ -211,24 +212,41 @@ fn tracker_facts(task: &Task) -> TrackerFacts {
     }
 }
 
-/// Split the record's claim labels into live and lapsed, marking each with
-/// whether *this* daemon is the one renewing it. An active claim nothing local
+/// Split the record's claims into live and lapsed, marking each with whether
+/// *this* daemon is the one renewing it. An active claim nothing local
 /// accounts for is the honest shape of "held by a worker we cannot observe".
-fn claim_facts(
+///
+/// This is the **decision point** that pays for the claim's identity (#1922).
+/// Presence is the `working` label and arrives free in the poll payload, but
+/// the label alone names no holder — so when it is attached, this resolves the
+/// holder from the sticky claim comment: one `Cold` REST read, and only for a
+/// record that actually carries the label. Never on a poll tick.
+///
+/// Two reasons the fetch is skipped, each a deliberate saving rather than an
+/// omission:
+///
+/// - A legacy `lazybox:w:` label already carries its own holder and expiry in
+///   its name, so there is nothing left to look up.
+/// - A lease this box is itself renewing is already known locally, and the
+///   local record is the better evidence anyway: a renewal that landed here
+///   and was refused upstream leaves the two sides one expiry apart (#1870).
+async fn claim_facts(
+    config: &ServerConfig,
     task: &Task,
     held_here: &HashSet<(String, String)>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> ClaimFacts {
-    let mut facts = ClaimFacts {
-        unqualified: task.has_label(lazybox_core::WORKING_LABEL_NAME),
-        ..ClaimFacts::default()
-    };
+    let mut facts = ClaimFacts::default();
     for claim in task.qualified_working_claims() {
         let holder = ClaimHolder {
             device: claim.device.clone(),
             session: claim.session.clone(),
             expires_at: claim.expires_at,
             verified_locally: held_here.contains(&(claim.device.clone(), claim.session.clone())),
+            agent: None,
+            model: None,
+            started_at: None,
+            workspace: None,
         };
         if claim.is_active_at(now) {
             facts.active.push(holder);
@@ -236,7 +254,61 @@ fn claim_facts(
             facts.expired.push(holder);
         }
     }
+    if !task.has_stable_working_claim() {
+        return facts;
+    }
+    match stable_claim_holder(config, task, held_here).await {
+        Some(holder) => {
+            if holder.expires_at > now {
+                facts.active.push(holder);
+            } else {
+                facts.expired.push(holder);
+            }
+        }
+        // The label stands with nothing of ours behind it — or nothing we
+        // could read. Reported as unbacked, never resolved into a holder:
+        // `ClaimFacts::unbacked_label` documents why that distinction has to
+        // survive all the way to the caller.
+        None => facts.unbacked_label = true,
+    }
     facts
+}
+
+/// Resolve the stable label's holder from lazybox's own claim comment.
+async fn stable_claim_holder(
+    config: &ServerConfig,
+    task: &Task,
+    held_here: &HashSet<(String, String)>,
+) -> Option<ClaimHolder> {
+    let repo = task.repo.as_deref()?;
+    let client = crate::polling::resolve_gh_client_result(config)
+        .await
+        .ok()?;
+    let note = client
+        .read_working_claim_note(&task.id, repo)
+        .await
+        .inspect_err(|error| {
+            tracing::debug!(
+                task = %task.id,
+                %error,
+                "could not read the claim comment; reporting the label as unbacked"
+            );
+        })
+        .ok()??;
+    // A released note is a record of finished work, not a claim — surface it
+    // as lapsed by handing back its own release time as the expiry, so the
+    // verdict never reads "claimed elsewhere" for work the holder said is over.
+    let expires_at = note.released_at.unwrap_or(note.expires_at);
+    Some(ClaimHolder {
+        verified_locally: held_here.contains(&(note.device.clone(), note.session.clone())),
+        device: note.device,
+        session: note.session,
+        expires_at,
+        agent: note.agent,
+        model: note.model,
+        started_at: Some(note.started_at),
+        workspace: note.workspace,
+    })
 }
 
 #[cfg(test)]
@@ -288,6 +360,260 @@ mod tests {
                 workspace_json: Some(serde_json::to_string(workspace).expect("encode")),
             })
             .expect("save");
+    }
+
+    /// A canned comment list served over one connection per request, with
+    /// every request recorded — enough to drive the claim-comment read.
+    async fn spawn_comment_server(
+        bodies: Vec<&'static str>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut served = 0usize;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    continue;
+                };
+                let body = bodies[served.min(bodies.len() - 1)];
+                served += 1;
+                let requests = requests.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let read = sock.read(&mut buf).await.unwrap_or(0);
+                    requests
+                        .lock()
+                        .expect("record")
+                        .push(String::from_utf8_lossy(&buf[..read]).into_owned());
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn comment_json(id: u64, login: &str, body: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "node_id": "IC_1",
+            "url": "https://api.github.test/c",
+            "html_url": "https://api.github.test/c",
+            "body": body,
+            "user": {
+                "login": login,
+                "id": 1,
+                "node_id": "U_1",
+                "avatar_url": "https://example.invalid/a",
+                "gravatar_id": "",
+                "url": "https://example.invalid/u",
+                "html_url": "https://example.invalid/u",
+                "followers_url": "https://example.invalid/u",
+                "following_url": "https://example.invalid/u",
+                "gists_url": "https://example.invalid/u",
+                "starred_url": "https://example.invalid/u",
+                "subscriptions_url": "https://example.invalid/u",
+                "organizations_url": "https://example.invalid/u",
+                "repos_url": "https://example.invalid/u",
+                "events_url": "https://example.invalid/u",
+                "received_events_url": "https://example.invalid/u",
+                "type": "User",
+                "site_admin": false,
+                "name": null,
+                "patch_url": null,
+            },
+            "created_at": "2026-08-18T12:00:00Z",
+        })
+    }
+
+    fn remote_claim_note() -> lazybox_core::WorkingClaimNote {
+        let mut note = lazybox_core::WorkingClaimNote::new(
+            "fedcba9876543210fedc",
+            "aaaaaaaaaa",
+            Utc::now() - chrono::Duration::hours(2),
+            Utc::now() + chrono::Duration::minutes(30),
+        );
+        note.agent = Some("codex".into());
+        note.model = Some("GPT-5".into());
+        note.workspace = Some("github-o-r-77".into());
+        note
+    }
+
+    /// Seed a workspace whose record carries the stable `working` label, with
+    /// `bodies` standing in for what GitHub returns for its comments.
+    async fn claimed_workspace(
+        bodies: Vec<&'static str>,
+    ) -> (ServerConfig, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let config = ServerConfig::in_memory();
+        let mut claimed = task("o/r", 77, lazybox_core::TaskKind::Issue);
+        claimed
+            .labels
+            .push(lazybox_core::Label::new(lazybox_core::WORKING_LABEL_NAME));
+        save(&config, &Workspace::from_task(claimed, Utc::now()));
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri = spawn_comment_server(bodies, requests.clone()).await;
+        config.poll.cache_gh_client(
+            lazybox_gh::GhClient::stub_with_base_uri_for_tests(&base_uri).expect("stub client"),
+        );
+        (config, requests)
+    }
+
+    /// The decision-point read (#1922). The `working` label is presence and
+    /// arrives free in the poll payload; the holder comes from lazybox's own
+    /// claim comment, fetched here and nowhere on the poll path.
+    #[tokio::test]
+    async fn a_stable_claim_resolves_its_holder_from_the_claim_comment() {
+        let body = Box::leak(
+            serde_json::json!([comment_json(
+                9,
+                lazybox_gh::GhClient::stub_login_for_tests(),
+                &remote_claim_note().render()
+            )])
+            .to_string()
+            .into_boxed_str(),
+        );
+        let (config, requests) = claimed_workspace(vec![body]).await;
+
+        let report = report(&config, &id("o/r", 77)).await.expect("report");
+        let claim = &report.workspaces[0].claim;
+        assert!(
+            !claim.unbacked_label,
+            "a claim lazybox authored is backed, not unbacked"
+        );
+        assert_eq!(claim.active.len(), 1, "{claim:?}");
+        let held = &claim.active[0];
+        assert_eq!(held.device, "fedcba9876543210fedc");
+        assert_eq!(held.agent.as_deref(), Some("codex"));
+        assert_eq!(held.model.as_deref(), Some("GPT-5"));
+        assert_eq!(held.workspace.as_deref(), Some("github-o-r-77"));
+        assert!(held.started_at.is_some(), "the comment dates the claim");
+        assert!(
+            !held.verified_locally,
+            "no local claim row accounts for this lease"
+        );
+        assert_eq!(
+            report.verdict.state,
+            WorkState::ClaimedElsewhere,
+            "{:?}",
+            report.verdict
+        );
+        // The cost of the whole answer.
+        assert_eq!(
+            requests.lock().expect("record").len(),
+            1,
+            "one comment read, and only because the label was there"
+        );
+    }
+
+    /// The #1600 property at the layer that acts on it. Only writers can
+    /// label; anyone can comment. A perfectly-formed claim note from any
+    /// other login must not resolve into a holder — otherwise a drive-by
+    /// comment invents a worker, and `task_status` reports work nobody is
+    /// doing.
+    #[tokio::test]
+    async fn a_forged_claim_comment_leaves_the_label_unbacked() {
+        let body = Box::leak(
+            serde_json::json!([comment_json(
+                9,
+                "someone-else",
+                &remote_claim_note().render()
+            )])
+            .to_string()
+            .into_boxed_str(),
+        );
+        let (config, _requests) = claimed_workspace(vec![body]).await;
+
+        let report = report(&config, &id("o/r", 77)).await.expect("report");
+        let claim = &report.workspaces[0].claim;
+        assert!(
+            claim.active.is_empty() && claim.expired.is_empty(),
+            "a forged note must produce NO holder: {claim:?}"
+        );
+        assert!(
+            claim.unbacked_label,
+            "the label stands, so it is reported — as unbacked"
+        );
+        assert_eq!(report.verdict.state, WorkState::Unknown);
+        assert!(
+            report
+                .verdict
+                .reason
+                .contains("no lazybox-authored claim comment"),
+            "{}",
+            report.verdict.reason
+        );
+    }
+
+    /// A released note is a record of finished work. Reporting it as an active
+    /// claim would say "claimed elsewhere" about a task the holder has
+    /// explicitly let go.
+    #[tokio::test]
+    async fn a_released_claim_comment_reads_as_lapsed_not_as_held() {
+        let mut note = remote_claim_note();
+        note.released_at = Some(Utc::now() - chrono::Duration::minutes(5));
+        let body = Box::leak(
+            serde_json::json!([comment_json(
+                9,
+                lazybox_gh::GhClient::stub_login_for_tests(),
+                &note.render()
+            )])
+            .to_string()
+            .into_boxed_str(),
+        );
+        let (config, _requests) = claimed_workspace(vec![body]).await;
+
+        let report = report(&config, &id("o/r", 77)).await.expect("report");
+        let claim = &report.workspaces[0].claim;
+        assert!(claim.active.is_empty(), "{claim:?}");
+        assert_eq!(claim.expired.len(), 1, "{claim:?}");
+        assert_ne!(report.verdict.state, WorkState::ClaimedElsewhere);
+    }
+
+    /// The saving that keeps the read off the hot path: a record with no
+    /// `working` label costs nothing, and a legacy label already carries its
+    /// own holder in its name so there is nothing left to look up.
+    #[tokio::test]
+    async fn an_unclaimed_or_legacy_claimed_record_never_reaches_github() {
+        let config = ServerConfig::in_memory();
+        let mut legacy = task("o/r", 78, lazybox_core::TaskKind::Issue);
+        let label = lazybox_core::qualified_working_claim_label(
+            "0123456789abcdef0123456789abcdef",
+            uuid::Uuid::from_u128(7),
+            Utc::now() + chrono::Duration::minutes(30),
+        )
+        .expect("a well-formed box id yields a label");
+        legacy.labels.push(lazybox_core::Label::new(&label));
+        save(&config, &Workspace::from_task(legacy, Utc::now()));
+        save(
+            &config,
+            &Workspace::from_task(task("o/r", 79, lazybox_core::TaskKind::Issue), Utc::now()),
+        );
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri = spawn_comment_server(vec!["[]"], requests.clone()).await;
+        config.poll.cache_gh_client(
+            lazybox_gh::GhClient::stub_with_base_uri_for_tests(&base_uri).expect("stub client"),
+        );
+
+        let legacy_report = report(&config, &id("o/r", 78)).await.expect("report");
+        assert_eq!(legacy_report.workspaces[0].claim.active.len(), 1);
+        assert!(!legacy_report.workspaces[0].claim.unbacked_label);
+        let plain = report(&config, &id("o/r", 79)).await.expect("report");
+        assert!(plain.workspaces[0].claim.is_empty());
+
+        assert!(
+            requests.lock().expect("record").is_empty(),
+            "neither shape may spend a GitHub request: {:?}",
+            requests.lock().expect("record")
+        );
     }
 
     #[tokio::test]

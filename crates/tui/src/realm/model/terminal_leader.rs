@@ -64,6 +64,19 @@ pub(super) enum LeaderCmd {
     SplitHorizontal,
     /// `]]<arrow>` — move tile focus (cycles tabs in Tabs mode).
     MoveTile(TileDirection),
+    /// `]]Shift-<arrow>` — move the divider between the focused tile
+    /// and its neighbour in that direction (#1920). The shifted twin of
+    /// [`Self::MoveTile`]: the bare arrow walks to the neighbouring
+    /// tile, the shifted one moves the line between them — the pairing
+    /// tmux uses (prefix + arrow to select, + a modifier to resize).
+    ///
+    /// It lives under the leader rather than on a bare `Shift-<arrow>`
+    /// because that chord is deliberately dead inside the terminal pane
+    /// — `handle_pane_key` gates the splitter nudges on
+    /// `focus != Terminals` so a shell can still bind them — and `]]`
+    /// is this codebase's existing answer to "this keystroke is for
+    /// lazybox, not for the program in the PTY".
+    ResizeTile(TileDirection),
     /// `]]x` — close the focused terminal (the focused tile in Splits,
     /// the active tab in Tabs).
     CloseTerminal,
@@ -213,8 +226,8 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
     FixedCommandSpec {
         key: 'H',
         command: LeaderCmd::OpenHopper,
-        menu_label: "hopper",
-        reference: "Open the personal Hopper editor",
+        menu_label: "todo",
+        reference: "Open your TODO list",
         sidebar: false,
     },
     FixedCommandSpec {
@@ -263,14 +276,21 @@ impl LeaderCmd {
                 .find(|spec| spec.key == canonical)
                 .map(|spec| spec.command);
         }
-        if !modifiers.is_empty() {
-            return None;
-        }
-        match code {
-            Key::Left => Some(Self::MoveTile(TileDirection::Left)),
-            Key::Right => Some(Self::MoveTile(TileDirection::Right)),
-            Key::Up => Some(Self::MoveTile(TileDirection::Up)),
-            Key::Down => Some(Self::MoveTile(TileDirection::Down)),
+        // A bare arrow walks to the neighbouring tile; the SHIFTED
+        // arrow moves the divider between them (#1920). Every other
+        // modifier stays a cancel: CONTROL / ALT / SUPER belong to the
+        // inner program's vocabulary, and a leader that quietly
+        // swallowed them would make `]]` a trap rather than an escape.
+        let dir = match code {
+            Key::Left => Some(TileDirection::Left),
+            Key::Right => Some(TileDirection::Right),
+            Key::Up => Some(TileDirection::Up),
+            Key::Down => Some(TileDirection::Down),
+            _ => None,
+        };
+        match dir {
+            Some(dir) if modifiers.is_empty() => Some(Self::MoveTile(dir)),
+            Some(dir) if modifiers == KeyModifiers::SHIFT => Some(Self::ResizeTile(dir)),
             _ => None,
         }
     }
@@ -387,6 +407,11 @@ impl LeaderCmd {
                 rows.push((
                     "←↓↑→".to_string(),
                     "Move tile focus; Left/Right cycles tabs in Tabs mode".to_string(),
+                ));
+                rows.push((
+                    "Shift-←↓↑→".to_string(),
+                    "Move the divider between the focused tile and its neighbour that way, by `ui.split_step_percent` — the keyboard half of dragging that divider with the mouse"
+                        .to_string(),
                 ));
             }
         }
@@ -532,8 +557,17 @@ mod tests {
         );
     }
 
+    /// A bare arrow selects the neighbouring tile and the SHIFTED arrow
+    /// moves the divider between them (#1920) — the tmux pairing. This
+    /// test previously asserted that *every* modified arrow was a
+    /// cancel; that was written when no modified-arrow command existed,
+    /// and its stated reason (keeping a future lowercase command from
+    /// silently gaining a shifted alias) is about letters, where a
+    /// shifted press is a different character. An arrow has no such
+    /// ambiguity, so `Shift` there is a distinct chord rather than an
+    /// accident. Every OTHER modifier must still cancel.
     #[test]
-    fn arrows_resolve_to_tile_moves_only_unmodified() {
+    fn a_bare_arrow_selects_a_tile_and_a_shifted_one_resizes() {
         for (key, dir) in [
             (Key::Left, TileDirection::Left),
             (Key::Right, TileDirection::Right),
@@ -542,13 +576,44 @@ mod tests {
         ] {
             match LeaderCmd::from_key(key, KeyModifiers::NONE) {
                 Some(LeaderCmd::MoveTile(d)) => assert_eq!(d, dir),
-                _ => panic!("{key:?} must resolve to MoveTile"),
+                other => panic!("{key:?} must resolve to MoveTile, got {other:?}"),
             }
-            assert!(
-                LeaderCmd::from_key(key, KeyModifiers::SHIFT).is_none(),
-                "modified arrows are not leader commands",
-            );
+            match LeaderCmd::from_key(key, KeyModifiers::SHIFT) {
+                Some(LeaderCmd::ResizeTile(d)) => assert_eq!(d, dir),
+                other => panic!("Shift-{key:?} must resolve to ResizeTile, got {other:?}"),
+            }
+            // CONTROL / ALT belong to the inner program's vocabulary,
+            // so the leader must keep handing those back rather than
+            // eating them — including when SHIFT rides along, which
+            // must not be mistaken for the bare resize chord.
+            for modifier in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+            ] {
+                assert!(
+                    LeaderCmd::from_key(key, modifier).is_none(),
+                    "{modifier:?}-{key:?} is not a leader command",
+                );
+            }
         }
+    }
+
+    /// The generated website reference carries the shifted-arrow family
+    /// explicitly, because it has a runtime operand (a direction) and so
+    /// cannot come from the fixed-character table.
+    #[test]
+    fn the_reference_documents_the_resize_arrows() {
+        let rows = LeaderCmd::reference_rows();
+        let row = rows
+            .iter()
+            .find(|(key, _)| key.starts_with("Shift-"))
+            .expect("the reference lists the resize arrows");
+        assert!(
+            row.1.contains("divider"),
+            "the resize row must say what it moves: {row:?}",
+        );
     }
 
     /// `|` reaches us with SHIFT set on most hosts; letters must NOT

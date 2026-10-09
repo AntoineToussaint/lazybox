@@ -10,6 +10,7 @@ import type { Session } from "./Session";
 import type { SnippetDeliveryLog } from "./SnippetDeliveryLog";
 import type { SnoozeWake } from "./SnoozeWake";
 import type { Task } from "./Task";
+import type { TodoItem } from "./TodoItem";
 import type { WorkspaceKey } from "./WorkspaceKey";
 
 /**
@@ -53,6 +54,11 @@ floating: FloatingWorkspaceKind | null,
  * project workspaces are local too, but do not belong in the Hopper.
  */
 hopper: HopperMeta | null,
+/**
+ * The TODO's checklist, in display order (nesting via
+ * [`TodoItem::parent`]). Empty for any workspace that is not a TODO.
+ */
+todo_items: Array<TodoItem>,
 /**
  * When `Some`, this is a **linked (no-worktree) checkout**: the
  * workspace points directly at an existing clone on disk (a

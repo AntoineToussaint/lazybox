@@ -525,6 +525,7 @@ impl<T: TerminalAdapter> Model<T> {
                             created_at: workspace.created_at,
                             completed_at: meta.completed_at,
                             canceled_at: meta.canceled_at,
+                            items: workspace.todo_items.clone(),
                         },
                     )
                 })
@@ -554,7 +555,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         type ProjectRow = (lazybox_core::ProjectKey, String);
-        let modal = Choice::single("Use which repo for this Hopper item?", projects)
+        let modal = Choice::single("Use which repo for this TODO?", projects)
             .title("Choose repo")
             .label(|(_, name): &ProjectRow| name.clone())
             .payload_for(|(key, _): &ProjectRow| ChoicePayload::Project(key.clone()));
@@ -949,7 +950,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// multi-select `Choice` over every filter, grouped by axis
     /// (State / Role / Kind), each row carrying its match count and
     /// pre-checked when already active. Space toggles, Enter replaces
-    /// the sidebar's active set (an empty submit clears all filters).
+    /// the sidebar's active set (an empty submit clears all filters),
+    /// and typing narrows the list by label or alias — a row ticked
+    /// before it was typed out of view is still applied.
     pub(crate) fn mount_filter_menu(&mut self) {
         use crate::components::sidebar::FilterEntry;
         use crate::realm::components::choice::Choice;
@@ -977,6 +980,12 @@ impl<T: TerminalAdapter> Model<T> {
         // resolve to the wrong predicate (#512).
         .payload_for(|e: &FilterEntry| ChoicePayload::Filter(e.clone()))
         .with_selected_by(move |e: &FilterEntry| active.contains_entry(e))
+        // Typing narrows the menu, matching each row's label *and* its
+        // alias list — so the pre-rename `rate-limited` still reaches
+        // `needs-recovery` (#1914). The matching lives on `FilterEntry`
+        // rather than here so it reads the predicate's own vocabulary
+        // instead of the formatted `label (count)` string above.
+        .with_search(|e: &FilterEntry, q: &str| e.matches_search(q))
         .allow_empty(true);
         self.mount_modal(Id::FilterMenu, modal);
     }
@@ -1535,6 +1544,11 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_modal(Id::SandboxInput, modal);
             }
             SandboxStage::AutoConnect => {
+                // A wizard preference step, not a destructive confirm: No is
+                // the *recommended answer*, and the copy is written around it
+                // being the default. `ui.confirm_default` governs destructive
+                // prompts, so neither of its axes owns this one (#1921) — Yes
+                // here would have every launch spin up a billable box.
                 let modal = Confirm::new(
                     "Auto-connect to the box at launch? No keeps it asleep until you press Shift-C.",
                 )
@@ -2303,18 +2317,21 @@ impl<T: TerminalAdapter> Model<T> {
     /// Mount the confirm gate for the Error Inbox `c` (clear-all).
     /// Stacks on top of the open inbox; `Msg::Confirmed(true)` (handled
     /// in `handle_confirmed` under `Id::ErrorInboxClearConfirm`) sends
-    /// `Command::ClearErrors`. Default No — an irreversible wipe should
-    /// never ride a reflexive Enter.
+    /// `Command::ClearErrors`. Reached only by `c` inside the open inbox,
+    /// so it sits on the `destructive_shortcut` axis (#1921): `c` is the
+    /// clear, and what it loses is a log of error classes the next failure
+    /// re-records — not work.
     pub(super) fn mount_error_inbox_clear_confirm(&mut self) {
-        use crate::realm::components::confirm::Confirm;
+        use crate::realm::components::confirm::{Confirm, ConfirmSource};
 
         if matches!(self.modal_stack.last(), Some(Id::ErrorInboxClearConfirm)) {
             return;
         }
-        let modal = Confirm::new(
+        let modal = Confirm::from_source(
             "Clear the entire durable Error Inbox? This permanently deletes every recorded error class.",
-        )
-        .default_no();
+            ConfirmSource::Shortcut,
+            self.ui_defaults.confirm_default,
+        );
         self.mount_modal(Id::ErrorInboxClearConfirm, modal);
     }
 
@@ -2801,7 +2818,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// `Msg::Confirmed` / `Msg::ModalDismissed` arms.
     pub(super) fn maybe_mount_next_removal_prompt(&mut self) {
         use super::RemovalReason;
-        use crate::realm::components::confirm::{Confirm, ConfirmStyle};
+        use crate::realm::components::confirm::{Confirm, ConfirmSource, ConfirmStyle};
 
         if !self.modal_stack.is_empty() {
             return;
@@ -2836,11 +2853,16 @@ impl<T: TerminalAdapter> Model<T> {
         //
         // With nothing running it still defaults to Yes: the worktree is
         // reconstructible and the row is already gone from the user's
-        // scope. With a live terminal it does not. Nobody asked for this
-        // prompt — a provider event raised it — and Yes kills a running
-        // agent mid-turn, which is not recoverable by re-cloning. #1899:
-        // four workspaces with live agents, two holding embargoed work,
-        // were archived in 13 seconds by one Enter per queued modal.
+        // scope, so there is no safety question for a policy to answer.
+        // With a live terminal there is. Nobody asked for this prompt — a
+        // provider event raised it — and Yes kills a running agent
+        // mid-turn, which is not recoverable by re-cloning. #1899: four
+        // workspaces with live agents, two holding embargoed work, were
+        // archived in 13 seconds by one Enter per queued modal. That makes
+        // this the one prompt in the TUI on the `event` axis (#1921), and
+        // `ui.confirm_default.event` — `no` as shipped — is what decides
+        // it, so a user who wants the old speed back sets `event: yes`
+        // rather than patching this function.
         //
         // Yes on any of these three is an explicit removal the daemon
         // may not refuse, so the prompt has to name what it destroys.
@@ -2858,13 +2880,18 @@ impl<T: TerminalAdapter> Model<T> {
         // prompt waited would otherwise face a Yes default. The live client
         // count closes that window.
         let session_key: lazybox_core::SessionKey = (&prompt.workspace_key).into();
-        let guarded =
-            prompt.terminal_count > 0 || self.terminals.terminal_count_for(&session_key) > 0;
-        let style = if guarded {
-            ConfirmStyle::Guarded
+        let live = prompt.terminal_count > 0 || self.terminals.terminal_count_for(&session_key) > 0;
+        let style = if live {
+            ConfirmStyle::destructive_on(ConfirmSource::Event, self.ui_defaults.confirm_default)
         } else {
             ConfirmStyle::Destructive
         };
+        // The guard is "this prompt's No must not decide", which is true
+        // exactly when the default sits on No — so read it off the resolved
+        // style rather than from `live`. Under `event: yes` the user has
+        // asked for a Yes default here, which makes their No a deliberate
+        // answer that may pin the keep.
+        let guarded = matches!(style, ConfirmStyle::Guarded);
         self.arm_removal_risk_preflight_for(
             lazybox_ipc::RemovalTarget::Workspace(session_key),
             &copy,
@@ -2992,7 +3019,7 @@ impl<T: TerminalAdapter> Model<T> {
         targets: Vec<super::ActionConfirmTarget>,
         override_prompt: Option<String>,
     ) {
-        use crate::realm::components::confirm::{Confirm, ConfirmStyle};
+        use crate::realm::components::confirm::{Confirm, ConfirmSource, ConfirmStyle};
         use lazybox_tui_core::action::ActionDef;
         // Override wins so callers can render context-sensitive copy
         // (e.g. "Delete project X with 3 workspaces" vs. the generic
@@ -3004,13 +3031,18 @@ impl<T: TerminalAdapter> Model<T> {
                 .unwrap_or("Confirm action?")
                 .to_string()
         });
-        let destructive = !def.confirm_is_benign_gate();
-        // A chord-initiated confirm never takes the No guard: the chord is
-        // itself the intent (#525).
-        let style = if destructive {
-            ConfirmStyle::Destructive
-        } else {
+        // Every catalog confirm is reached by a chord, so the destructive
+        // ones sit on the `destructive_shortcut` axis (#1921): the chord is
+        // itself the intent, and a cautious user who sets
+        // `destructive_shortcut: no` moves archive / merge / delete / close /
+        // reset to a No default in one config line instead of a patch.
+        let style = if def.confirm_is_benign_gate() {
+            // A benign awareness gate (the on-main spawn) destroys nothing,
+            // so it keeps the neutral chrome and affirms regardless of the
+            // destructive knob — there is no danger for it to guard.
             ConfirmStyle::Benign
+        } else {
+            ConfirmStyle::destructive_on(ConfirmSource::Shortcut, self.ui_defaults.confirm_default)
         };
         // Ask the daemon what this delete would destroy, so the one
         // confirm it costs can say so. Armed before the mount, and only
@@ -3018,11 +3050,9 @@ impl<T: TerminalAdapter> Model<T> {
         // per row and amend the prompt N times.
         self.arm_removal_risk_preflight(&action, &targets, &prompt, style);
         self.set_modal_flow(ModalFlow::ActionConfirm { action, targets });
-        // Every confirm defaults to Yes now — the chord/event is itself
-        // the intent, so Enter completes it. A benign awareness gate (the
-        // on-main spawn) destroys nothing and stays neutral; a genuinely
-        // destructive action (archive / merge / delete / close / reset)
-        // wears the warning coloring so the danger shows before Enter.
+        // A genuinely destructive action wears the warning coloring either
+        // way, so the danger shows before Enter whichever side the axis
+        // put the default on.
         self.mount_modal(Id::ActionConfirm, Confirm::styled(&prompt, style));
     }
 
@@ -3177,15 +3207,17 @@ impl<T: TerminalAdapter> Model<T> {
     /// to cover the whole batch, matching how the other destructive bulk
     /// actions confirm the full set at once. A *different* modal still wins
     /// (the row stays actionable, so `g m` re-triggers it). Mounts async like
-    /// [`Self::mount_conflict_resolve`]. `default_no()` — an out-of-order
-    /// merge is not the safe default, so a buffered Enter can't force it.
+    /// [`Self::mount_conflict_resolve`]. `g m` is behind it, so it sits on
+    /// the `destructive_shortcut` axis (#1921): the refusal arrives async,
+    /// but the merge the user asked for is what it is answering.
     pub(super) fn mount_merge_held_confirm(
         &mut self,
         workspace: &lazybox_core::WorkspaceKey,
         pr_label: &str,
         held_names: &str,
     ) {
-        use crate::realm::components::confirm::Confirm;
+        use crate::realm::components::confirm::{Confirm, ConfirmSource};
+        let defaults = self.ui_defaults.confirm_default;
         let session_key = lazybox_core::SessionKey::from(workspace);
         if self.sidebar.workspace_by_key(&session_key).is_none() {
             return;
@@ -3199,7 +3231,10 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 let prompt = Self::merge_held_prompt(&held, held_names);
                 self.set_modal_flow(ModalFlow::MergeHeldConfirm { held });
-                self.mount_modal(Id::MergeHeldConfirm, Confirm::new(prompt).default_no());
+                self.mount_modal(
+                    Id::MergeHeldConfirm,
+                    Confirm::from_source(prompt, ConfirmSource::Shortcut, defaults),
+                );
                 self.redraw = true;
             }
             return;
@@ -3216,7 +3251,10 @@ impl<T: TerminalAdapter> Model<T> {
         let held = vec![(workspace.clone(), pr_label.to_string())];
         let prompt = Self::merge_held_prompt(&held, held_names);
         self.set_modal_flow(ModalFlow::MergeHeldConfirm { held });
-        self.mount_modal(Id::MergeHeldConfirm, Confirm::new(prompt).default_no());
+        self.mount_modal(
+            Id::MergeHeldConfirm,
+            Confirm::from_source(prompt, ConfirmSource::Shortcut, defaults),
+        );
     }
 
     /// Copy for the held-merge override confirm. A single held PR names its
@@ -3274,7 +3312,12 @@ impl<T: TerminalAdapter> Model<T> {
         // `skill_root` is the resolved destination for a `scaffold_skill`
         // proposal; it rides into `ModalFlow` so apply writes exactly
         // where this preview said, regardless of later selection changes.
-        let (preview, default_yes, skill_root) = match &intent {
+        // `benign` is "this writes nothing a re-run cannot undo": a brand-new
+        // snippet key, a config edit, a scaffold that refuses to overwrite.
+        // False means the apply clobbers something already there, and the user
+        // reached this preview with a chord — so that one goes on the
+        // `destructive_shortcut` axis (#1921).
+        let (preview, benign, skill_root) = match &intent {
             HelpActionIntent::AddSnippet {
                 key,
                 category,
@@ -3308,8 +3351,6 @@ impl<T: TerminalAdapter> Model<T> {
                 preview.push_str(&format!(
                     "\n\nApplied live — send it with ]]s{key}, no restart."
                 ));
-                // Default Yes for a brand-new key (the user asked for it);
-                // No when it would overwrite an existing snippet.
                 (preview, !replaces, None)
             }
             HelpActionIntent::EditConfig { key, value } => {
@@ -3361,17 +3402,20 @@ impl<T: TerminalAdapter> Model<T> {
                     return;
                 }
                 let preview = skill_scaffold_preview(&root, name, description.trim(), body);
-                // Default Yes — the user asked for it, and the scaffold
-                // refuses (never overwrites) if the skill already exists.
+                // Benign — the scaffold refuses (never overwrites) if the
+                // skill already exists, so Yes cannot clobber anything.
                 (preview, true, Some(root.path().to_path_buf()))
             }
         };
         self.set_modal_flow(ModalFlow::HelpAction { intent, skill_root });
-        let modal = Confirm::new(preview);
-        let modal = if default_yes {
-            modal.default_yes()
+        let modal = if benign {
+            Confirm::new(preview).default_yes()
         } else {
-            modal.default_no()
+            Confirm::from_source(
+                preview,
+                crate::realm::components::confirm::ConfirmSource::Shortcut,
+                self.ui_defaults.confirm_default,
+            )
         };
         self.mount_modal(Id::HelpActionConfirm, modal);
     }
@@ -3510,11 +3554,11 @@ impl<T: TerminalAdapter> Model<T> {
             format!("Delete worktree {} ?", target.path.display())
         };
         // Deletes a worktree off disk (overriding safety when dirty) —
-        // irreversible, uncommitted/unpushed work is lost. This keeps a
-        // hard No floor rather than following
-        // `confirm_default.destructive_shortcut` (#525): the disk-loss
-        // risk warrants caution beyond the general shortcut policy, and
-        // No is never less safe than that knob would ask for.
+        // irreversible, uncommitted/unpushed work is lost. A deliberate
+        // `default_no()` floor, NOT the `destructive_shortcut` axis
+        // (#525, #1921): the disk-loss risk warrants caution beyond the
+        // general shortcut policy, and No is never less safe than that
+        // knob would ask for.
         let modal = Confirm::new(&prompt).default_no();
         self.set_modal_flow(ModalFlow::InspectConfirm { target });
         self.mount_modal(Id::InspectConfirm, modal);
@@ -3622,9 +3666,9 @@ impl<T: TerminalAdapter> Model<T> {
     pub(super) fn mount_clean_worktrees_confirm(&mut self) {
         use crate::realm::components::confirm::Confirm;
         // Bulk-wipes worktrees off disk — irreversible. Like the
-        // per-worktree inspector delete, this keeps a hard No floor
-        // instead of following `confirm_default.destructive_shortcut`
-        // (#525): a mis-hit here could wipe many trees at once.
+        // per-worktree inspector delete, a deliberate `default_no()`
+        // floor instead of the `destructive_shortcut` axis (#525, #1921):
+        // a mis-hit here could wipe many trees at once.
         let modal = Confirm::new(
             "Wipe every worktree whose session has no live terminal? \
              PR / issue rows stay; active sessions are skipped.",
@@ -4722,14 +4766,20 @@ impl<T: TerminalAdapter> Model<T> {
             // The checklist stays mounted underneath: declining must land
             // the user back on the recovery modal with `a adopt` still
             // reachable, not on an empty screen with the spawn dead.
-            self.mount_modal(
-                Id::WorktreeRecreateConfirm,
-                Confirm::new(format!(
+            // Chord-raised (the spawn that hit the wrong branch), so the
+            // `destructive_shortcut` axis decides (#1921) rather than a bare
+            // `destructive()`. Under the shipped `yes` this is unchanged; the
+            // point is that a user who turns the destructive chords down gets
+            // this one too, instead of the axis having a silent exception.
+            let modal = Confirm::from_source(
+                format!(
                     "Preserve {target} aside as .bak-N and start a fresh worktree? \
                      Uncommitted work stays in the .bak copy."
-                ))
-                .destructive(),
+                ),
+                crate::realm::components::confirm::ConfirmSource::Shortcut,
+                self.ui_defaults.confirm_default,
             );
+            self.mount_modal(Id::WorktreeRecreateConfirm, modal);
             return;
         }
         self.force_dismiss_worktree_progress();

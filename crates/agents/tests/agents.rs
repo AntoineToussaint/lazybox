@@ -118,6 +118,31 @@ fn auth_failure_detection_accepts_provider_errors_and_rejects_chat_prose() {
             .detect_auth_failure(include_bytes!("fixtures/codex_auth_rejected.bin"))
             .is_some()
     );
+    // #1847, the exact pane the six `". run"` literals all missed. The
+    // fixture is the incident block from the issue, extracted byte-for-byte
+    // rather than retyped: the defect WAS a hand-written string, so a
+    // hand-written string is the one thing that cannot prove it fixed. Its
+    // separator is a MIDDLE DOT (U+00B7) and its imperative is "Please run",
+    // neither of which appeared in any pattern — and the `✻ Worked for 13m
+    // 42s · done` line under it is why this read as a finished turn.
+    assert!(
+        claude
+            .detect_auth_failure(include_bytes!("fixtures/claude_signed_out_middle_dot.bin"))
+            .is_some()
+    );
+    // The same banner QUOTED — an agent in this repo reporting on #1847,
+    // which is a thing that actually happens here (it happened while this
+    // test was written). Inside a fence and with the prose never opening a
+    // line with the state, it must stay silent: the line-anchoring is what
+    // buys the separator-agnostic match, so this pins the half that makes
+    // the other half safe.
+    assert!(
+        claude
+            .detect_auth_failure(include_bytes!(
+                "fixtures/claude_signed_out_quoted_negative.bin"
+            ))
+            .is_none()
+    );
     assert!(
         claude
             .detect_auth_failure(include_bytes!("fixtures/claude_auth_chat_negative.bin"))

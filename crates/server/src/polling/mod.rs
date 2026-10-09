@@ -45,8 +45,9 @@ pub use handlers::{
     handle_fetch_pr_details, handle_fetch_repo_labels, handle_fetch_repo_merge_history,
     handle_fetch_requestable_reviewers, handle_inspect_workspace_diff, handle_inspect_worktrees,
     handle_mark_ready, handle_merge_pr, handle_request_reviewers, handle_scan_checkouts,
-    handle_set_assignees, handle_set_labels, handle_sync_workspace, handle_update_branch,
-    post_reply, prefetch_top_pr_details, remove_merged_workspace,
+    handle_set_assignees, handle_set_labels, handle_submit_pull_request_review,
+    handle_sync_workspace, handle_update_branch, post_reply, prefetch_top_pr_details,
+    remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 pub(crate) use sources::dispatch_action;
@@ -7253,6 +7254,111 @@ mod rescope_collapse_tests {
 
         let after = load_workspace(&config, &key).expect("workspace survives");
         assert_eq!(after.notes, "keep me across polls");
+    }
+
+    // ---- TODO auto-check: driven by the OBSERVED terminal state -------------
+
+    async fn todo_with_item_linked_to(
+        config: &ServerConfig,
+        name: &str,
+        task: &TaskId,
+    ) -> WorkspaceKey {
+        let key = crate::workspace::save_hopper(
+            config,
+            vec![lazybox_ipc::HopperEntryDraft {
+                workspace_key: None,
+                name: name.into(),
+            }],
+        )
+        .expect("create todo")
+        .remove(0);
+        let items = vec![lazybox_core::TodoItem {
+            id: "item-1".into(),
+            parent: None,
+            text: "land the work".into(),
+            done_at: None,
+            canceled_at: None,
+            link: Some(lazybox_core::TodoLink::Task(task.clone())),
+            auto_checked: false,
+        }];
+        crate::workspace::save_todo_items(config, &key, items)
+            .await
+            .expect("save items");
+        key
+    }
+
+    fn ticked(config: &ServerConfig, todo: &WorkspaceKey) -> bool {
+        let workspace = load_workspace(config, todo).expect("todo row");
+        let item = &workspace.todo_items[0];
+        item.is_done() && item.auto_checked
+    }
+
+    /// A merged PR lazybox holds NO workspace for still ticks its linked TODO
+    /// item. That branch returns `Unchanged` before any cleanup decision is
+    /// reached, and lazybox's own merged-workspace cleanup deletes the PR row as
+    /// its default behaviour — so "no workspace for a merged PR" is the ordinary
+    /// case for a checklist item, not a corner one.
+    #[tokio::test]
+    async fn a_merged_pr_with_no_workspace_still_checks_off_its_todo_item() {
+        let config = ServerConfig::in_memory();
+        let merged = TaskId {
+            source: "github".into(),
+            key: "o/r#1890".into(),
+        };
+        let todo = todo_with_item_linked_to(&config, "Release", &merged).await;
+
+        let outcome = upsert_into_workspace_key(
+            &config,
+            &WorkspaceKey::new("github:o/r#1890"),
+            gh_task(
+                "o/r#1890",
+                "https://github.com/o/r/pull/1890",
+                TaskState::Merged,
+                vec![],
+            ),
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, CommitOutcome::Unchanged),
+            "there is no workspace for this PR, so there is nothing to upsert"
+        );
+        assert!(
+            ticked(&config, &todo),
+            "the linked item must tick off even though the upsert had no row to touch"
+        );
+    }
+
+    /// And when this box never saw the open->merged edge. The row already
+    /// records the merge, so `merged_transition_pr_number` declines on every
+    /// later observation; an item written after the fact must still tick, or it
+    /// stays open forever with nothing left to look again.
+    #[tokio::test]
+    async fn a_todo_item_added_after_the_merge_landed_still_checks_off() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github:o/r#77");
+        let task = |state| gh_task("o/r#77", "https://github.com/o/r/pull/77", state, vec![]);
+        // The PR exists, then merges: the transition is observed and consumed.
+        upsert_into_workspace_key(&config, &key, task(TaskState::Open)).await;
+        upsert_into_workspace_key(&config, &key, task(TaskState::Merged)).await;
+
+        // Only now does the checklist item appear.
+        let merged = TaskId {
+            source: "github".into(),
+            key: "o/r#77".into(),
+        };
+        let todo = todo_with_item_linked_to(&config, "Coordination", &merged).await;
+        assert!(
+            !ticked(&config, &todo),
+            "nothing has re-observed the PR yet"
+        );
+
+        // A later observation of the same merged PR is not a transition.
+        upsert_into_workspace_key(&config, &key, task(TaskState::Merged)).await;
+        assert!(
+            ticked(&config, &todo),
+            "a missed transition must not strand the item unchecked"
+        );
     }
 }
 

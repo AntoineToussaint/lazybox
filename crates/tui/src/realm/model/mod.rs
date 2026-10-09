@@ -1343,6 +1343,20 @@ pub(crate) enum EditorFormStage {
     AwaitCommand { id: String, display: Option<String> },
 }
 
+/// What a signed-out pane remembers about its own failure, so an action
+/// taken long after the daemon reported it can still route the user back to
+/// sign-in with the provider named (#1847).
+#[derive(Debug, Clone)]
+pub(crate) struct AuthFailedPane {
+    pub display_name: String,
+    /// Other running sessions of this agent at the moment the failure was
+    /// detected. Carried for the prompt's copy only — it describes the
+    /// present, and the prompt is careful to promise a policy rather than a
+    /// headcount, because an interactive login takes minutes and the fleet
+    /// moves underneath it.
+    pub other_session_count: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AgentAuthPrompt {
     pub terminal_id: lazybox_ipc::TerminalId,
@@ -1396,6 +1410,13 @@ pub enum Msg {
         canceled: bool,
     },
     HopperDeleteRequested(lazybox_core::WorkspaceKey),
+    /// A TODO's checklist changed in the editor: save the whole list.
+    TodoItemsChanged {
+        workspace_key: lazybox_core::WorkspaceKey,
+        items: Vec<lazybox_core::TodoItem>,
+    },
+    /// Open what a TODO item links to.
+    TodoLinkOpened(lazybox_core::TodoLink),
     /// A picker (`Choice`, jump/snippet picker, settings palette)
     /// resolved. Each entry is the *typed value* of a picked row —
     /// never a bare positional index into a parallel "shadow Vec" —
@@ -1565,6 +1586,22 @@ pub enum Msg {
         target: lazybox_ipc::WorkspaceDiffTarget,
         agent_terminal_ids: Vec<lazybox_ipc::TerminalId>,
         comments: Vec<crate::realm::components::diff_review::DiffReviewComment>,
+    },
+    /// `p` in the review modal — read the other source. `showing` is
+    /// what is on screen now; the model owns which checkout the local
+    /// side resolves to, so the component never has to.
+    DiffReviewSourceSwitched {
+        workspace_key: lazybox_core::WorkspaceKey,
+        showing: lazybox_ipc::WorkspaceDiffTarget,
+    },
+    /// The review modal's drafted comments, submitted to GitHub as one
+    /// pending review on the PR they were read from.
+    DiffReviewPosted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        head_sha: String,
+        summary: String,
+        verdict: lazybox_ipc::ReviewVerdictDto,
+        comments: Vec<lazybox_ipc::ReviewCommentDto>,
     },
     /// Sidebar / Right / Terminals routes — kept in case a future
     /// pane goes through tuirealm. Today panes drain themselves
@@ -2311,7 +2348,15 @@ pub struct Model<T: TerminalAdapter> {
     /// the same conversation, continue — is exactly what that action already
     /// does for a rate-limited agent. Without this set the one action that
     /// unsticks them can't see them.
-    auth_failed_terminals: std::collections::HashSet<lazybox_ipc::TerminalId>,
+    ///
+    /// Keyed to what the re-auth prompt needs rather than a bare set
+    /// (#1847): `Shift-K` must *re-offer* sign-in for a pane it refuses to
+    /// inject `continue` into, and a modal that can't name the provider is
+    /// not an offer. The queue itself is drained the moment its modal
+    /// mounts, and the user may well have dismissed that modal minutes ago
+    /// — so the details have to live with the standing record, not with the
+    /// prompt that already went by.
+    auth_failed_terminals: std::collections::HashMap<lazybox_ipc::TerminalId, AuthFailedPane>,
     /// Terminals with a `]]R` restart already sent and not yet answered by
     /// the daemon's replacement pane.
     ///
@@ -3147,7 +3192,7 @@ impl<T: TerminalAdapter> Model<T> {
             modal_flow: None,
             pending_hopper_action: None,
             auth_prompt_queue: std::collections::VecDeque::new(),
-            auth_failed_terminals: std::collections::HashSet::new(),
+            auth_failed_terminals: std::collections::HashMap::new(),
             restart_in_flight: std::collections::HashSet::new(),
             conversion: None,
             last_reply_body: None,
@@ -8598,6 +8643,35 @@ impl<T: TerminalAdapter> Model<T> {
                     self.dispatch_diff_review(workspace_key, target, agent_terminal_ids, comments);
                 self.dispatch_cmds(commands);
             }
+            Msg::DiffReviewSourceSwitched {
+                workspace_key,
+                showing,
+            } => self.switch_diff_review_source(workspace_key, showing),
+            Msg::DiffReviewPosted {
+                workspace_key,
+                head_sha,
+                summary,
+                verdict,
+                comments,
+            } => {
+                let count = comments.len();
+                self.dispatch_cmds(vec![IpcCommand::SubmitPullRequestReview {
+                    workspace_key,
+                    head_sha,
+                    summary,
+                    verdict,
+                    comments,
+                }]);
+                // The viewer stays mounted until GitHub answers. It is
+                // the only place the drafted comments exist, so closing
+                // it here turned every refusal — a stale `commit_id`, a
+                // 403, a 502 — into an unrecoverable loss of everything
+                // the reviewer had written.
+                self.flash_info(format!(
+                    "submitting {count} comment{} as one review…",
+                    if count == 1 { "" } else { "s" }
+                ));
+            }
             Msg::OpenSnippetsFile => {
                 // `e` in the browser: drop the modal, then open the YAML
                 // so the editor takes over a clean screen.
@@ -8639,7 +8713,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
                     self.pop_modal();
                     self.dispatch_cmds(vec![IpcCommand::SaveHopper { entries }]);
-                    self.flash_info("Hopper saved");
+                    self.flash_info("TODO saved");
                 }
             }
             Msg::HopperCompletionRequested {
@@ -8652,9 +8726,9 @@ impl<T: TerminalAdapter> Model<T> {
                         completed,
                     }]);
                     self.flash_info(if completed {
-                        "Hopper item completed"
+                        "TODO completed"
                     } else {
-                        "Hopper item reopened"
+                        "TODO reopened"
                     });
                 }
             }
@@ -8668,11 +8742,40 @@ impl<T: TerminalAdapter> Model<T> {
                         canceled,
                     }]);
                     self.flash_info(if canceled {
-                        "Hopper item canceled"
+                        "TODO canceled"
                     } else {
-                        "Hopper item reopened"
+                        "TODO reopened"
                     });
                 }
+            }
+            Msg::TodoItemsChanged {
+                workspace_key,
+                items,
+            } => {
+                self.dispatch_cmds(vec![IpcCommand::SaveTodoItems {
+                    workspace_key,
+                    items,
+                }]);
+            }
+            Msg::TodoLinkOpened(link) => {
+                // Leave the TODO for what the item points at, the way the
+                // header's blocker links do.
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.pop_modal();
+                }
+                match link {
+                    lazybox_core::TodoLink::Task(task) => self.open_task_reference(&task),
+                    lazybox_core::TodoLink::Workspace(key) => {
+                        let key: lazybox_core::SessionKey = (&key).into();
+                        if self.sidebar.focus_workspace_key(&key) {
+                            self.sync_panes();
+                        } else {
+                            self.flash_hint("that workspace is not in the inbox");
+                        }
+                    }
+                    lazybox_core::TodoLink::Url(url) => self.open_external_url(&url),
+                }
+                self.redraw = true;
             }
             Msg::HopperDeleteRequested(workspace_key) => {
                 if matches!(self.modal_stack.last(), Some(Id::Hopper)) {

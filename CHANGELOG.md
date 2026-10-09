@@ -6,6 +6,206 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Added
+
+- **A unit of work with an id, a lifecycle and a result** (#1908, #1935, #1936,
+  #1937). Asking another agent for something used to mean pasting text into its
+  terminal and being told only that the text landed; whatever came back had to
+  be scraped off its scrollback, and nothing survived the session that asked.
+  Work is now a row: it carries who asked, who owns it, what "done" means, and
+  the result when it is done — with a provenance history, so a disagreement
+  about its state is answerable after the fact rather than a matter of opinion.
+
+  A handoff delivers the brief through the one delivery path and reports back
+  `delivered` / `queued` / `refused`, and **a refused delivery is not a refused
+  assignment**: handing work to a workspace whose agent is not running still
+  records it, and the owner finds it waiting when it starts. Completing work
+  someone else asked for tells them, so nobody polls.
+
+  Tracker records are **links**, never the work's identity, so an issue→PR fold
+  rewrites a link and the id is untouched. A unit of work linked to a PR
+  completes itself when that PR merges, on the same event that ticks a TODO
+  checklist. Work on a plan rolls up `done/total` over the whole tree, and a
+  plan whose tasks span repos is the member list a local epic projects onto.
+
+  Through MCP: `create_work`, `my_work`, `update_work`, `work_status`.
+- **`lazybox work` — the same four verbs from a shell** (#1936), so Codex,
+  Cursor and any session started with `--strict-mcp-config` are no longer
+  locked out. They could previously neither be handed tracked work nor report a
+  result. `lazybox work mine | new | set | done | status`, with the workspace
+  taken from the session and `--workspace` to act on another; exit `2` means
+  the call was wrong and `1` means the store could not be read, so a script can
+  tell a retry that will never work from one that might. Reference:
+  [`docs/reference/cli.md`](https://lazybox.ai/docs/reference/cli/).
+
+### Fixed
+
+- **Work whose agent is gone no longer reads as work in flight.** An agent that
+  exits before reporting leaves its task neither done nor abandoned; it is now
+  failed, with the cause in its history. Deliberately on a delay rather than on
+  the exit itself: `Shift-K`, auto-fix and credit recovery all stop an agent and
+  start a replacement, so failing the instant a terminal went away would have
+  failed the work of every agent lazybox itself restarted.
+- **A result is never reported back to whoever filed it** (#1936) — work a
+  session files for itself and finishes itself would otherwise have had its own
+  summary pasted back into its own session.
+- **A tracker link survives being copied** (#1937). A link printed as
+  `github:owner/repo#7` did not read back as the same link, silently producing
+  a second one that looked right — and because the auto-check on merge matches
+  a link exactly, the row carrying it was never ticked off. Both spellings now
+  mean one link.
+
+## [0.1.20] - 2026-10-05
+
+The Hopper becomes **TODO**, scrollback stops corrupting itself while an agent
+writes, a logged-out agent is finally recognised as logged out, and a PR's diff
+is readable without checking it out.
+
+**0.1.19 was prepared but never published** — the version was bumped and its
+notes written, but no tag was ever cut, so the newest release remains 0.1.18.
+Installing 0.1.20 therefore brings the 0.1.19 changes too; read both sections
+if you are coming from 0.1.18.
+
+### Added
+
+- **TODO replaces the Hopper** (#1898, design in #1889). A TODO now carries a
+  checklist whose items nest, link to real work — an issue, a PR, a workspace,
+  a URL — and **tick themselves off when that work lands**, marked so an
+  automatic tick is distinguishable from one you made. Progress shows per line
+  and at the top; a canceled item leaves the count rather than failing it, and
+  an item with live children is a heading whose completion is its children's.
+- **Read a PR's diff without checking it out** (#1808, #1821). The review modal
+  takes the PR itself as a second source, so an inbox PR nobody has worked
+  locally opens on what is actually being merged — including by clicking the
+  `+N −M · files changed` line, which used to refuse with "this workspace has
+  no worktree to review". `p` switches sources, the header names the one you
+  are reading, and a checkout that has drifted says so with counts. On the PR
+  source, `Shift-S` posts your inline comments as **one** GitHub review pinned
+  to the commit you read, so a push landing mid-review cannot re-anchor them.
+- **The divider between an agent and its logs can be moved** (#1920, #1925),
+  by dragging it or with `]]Shift-<arrow>`. The ratio is per session, so each
+  workspace remembers its own split, and it works for any number of tiles
+  rather than just two.
+- **An agent can spawn a workspace at a chosen model tier** (#1911, #1913).
+  `start_workspace` and `spawn_worker` take `model` — a tier on that agent's
+  own menu, or a capability word like `best` — so "start this and use the
+  strongest model" is expressible instead of requiring a global default or a
+  keypress afterwards. An unknown tier is refused with the valid ones listed,
+  never silently run at the default.
+- **The filter menu has typeahead, and filters answer to their older names**
+  (#1914, #1916). Typing `rate-limited` now reaches `needs-recovery`, which it
+  was renamed to when the predicate grew past rate limits. The same audit found
+  real gaps elsewhere: `in-progress` silently excluded in-review work,
+  `ci-failing` hid mixed CI, and `conflict` did not match `conflicting`.
+
+### Changed
+
+- **"An agent is working on this" is now one stable `working` label plus one
+  sticky comment**, instead of a `lazybox:w:<device>:<session>:<expiry>` label
+  minted per claim (#1922). The old shape grew a repository's label namespace
+  by one unreadable name per task, forever, and a human reading the thread saw
+  nothing. Now the label carries presence — free in the poll payload, so
+  "is this claimed?" still costs no GitHub request on any tick — and a comment
+  marked `<!-- lazybox:claim -->` carries the holder, agent, model, start time
+  and expiry, **edited in place** on every heartbeat, so a four-hour claim
+  leaves one comment rather than sixteen. A steady-state heartbeat now costs
+  one GitHub request instead of two.
+
+  The comment counts as a claim only when lazybox itself authored it: anyone
+  can paste the marker, but only a repository writer can attach the label, so
+  the author check is what gives the comment half the same trust the label
+  half has. A `working` label with no lazybox-authored comment behind it is
+  reported by `lazybox task status` as exactly that — no holder, no expiry —
+  and is never detached, since `working` may be a label a human or another
+  tool owns.
+
+  Claims held by a box on an older build keep being honoured, and each holder
+  retires its own per-claim label on its next heartbeat — after attaching the
+  stable one, so nothing reads as free in between. `role:<…>` labels are
+  unchanged.
+- **Confirm prompts follow `ui.confirm_default`, by axis** (#1921, and #1899
+  before it). A prompt you opened with a chord defaults to **Yes** again — the
+  chord is the intent — while one the daemon pushed at you unasked defaults to
+  **No**. The two config fields that already existed for this,
+  `destructive_shortcut` and `event`, were read by nobody; they are live now, so
+  the policy is one config line rather than eight call sites. Four prompts keep
+  a hard No floor regardless, including the rescope that deletes workspaces
+  (its chord asked to save a repo filter, not to delete anything) and the
+  sandbox auto-connect wizard step (Yes bills a remote box at every launch).
+- **A PR's cost is reported where policy allows it** (#1917). Cost reporting is
+  gated per repository — public repositories default to publishing nothing —
+  and a withheld report was previously invisible at every site, so it looked
+  like a broken feature rather than a configuration choice. A withheld figure
+  is now logged, and a report that was *lost* no longer closes the cost slice
+  as though it had been published.
+
+### Fixed
+
+- **Scrollback no longer corrupts or duplicates itself while you read it**
+  (#1909, #1910). Scrolling up while an agent wrote could show the block you
+  were reading **twice**, the second copy cut mid-word, while the view slid
+  under you. A delivered output batch is a coalesced run, so a batch straddling
+  a deep-scrollback capture could not be split and was re-fed whole — landing
+  the repeat *below* your anchor. Such a batch now declines the capture, and the
+  viewport pin has one owner across writes. This closes a lineage of partial
+  fixes going back through #1547 and #909.
+- **A logged-out agent is recognised as logged out** (#1847, #1915). Claude
+  prints `Not logged in · Please run /login` with a middle dot, and every
+  detection pattern required a period, so a session that lost its credential
+  mid-run was reported as having **finished**. The banner is now read
+  structurally rather than matched as a literal, so a rewording will not defeat
+  it. `Shift-K` also no longer types `continue` into a signed-out pane and
+  claims to have resumed it: those panes are held back, counted honestly in the
+  notice, and routed to re-authentication. This is the workflow of hitting a
+  usage limit, logging out, and logging back in on another subscription.
+- **A log window refuses typed input** (#1920, #1925). Keystrokes used to reach
+  the logged command's stdin, and `Enter` emitted the signal that tells agent
+  detection a turn may be starting. Scrolling, searching and copying are
+  unaffected.
+- **lazybox records why it exited** (#1902), so an exit through the shared
+  signal path is no longer indistinguishable from a crash, and a recovered
+  agent no longer waits on a GitHub write.
+- A delivery handle read twice panicked and stranded agent-to-agent questions
+  (#1901).
+
+### Performance
+
+- **The terminal hot paths have budgets, and CI enforces them** (#1918, #1919,
+  #1923). A fix for the scrollback bug had added a per-write call the binding
+  documents as expensive; measuring it showed it costs ~5 ns at any scrollback
+  depth, so it was never the cause of a slowdown — but nothing in CI could have
+  told us either way. The feed, render, keystroke and tick paths are now gated
+  on **counted work** rather than wall clock, which is unusable as a gate on a
+  loaded machine: a following-the-tail feed must read no scrollbar, a painted
+  frame one per tile, a keystroke exactly one write and no VT work.
+
+### Upgrade notes
+
+- **Coming from 0.1.18?** You are also picking up everything in the 0.1.19
+  section below, which was never released on its own — notably the Linux
+  shared-library fix that stopped `lazybox` starting on a stock Ubuntu.
+- **The persisted workspace schema moves to v15** (`todo_items`). A 0.1.20
+  build reads older rows cleanly. A **downgrade** to 0.1.19 or earlier will
+  *refuse* to read any row 0.1.20 has written, by design — an older build
+  preserves such a row untouched rather than rewriting it and dropping the
+  fields it does not know about — so those workspaces will be reported as
+  present-but-unreadable until you upgrade again. Nothing is lost.
+- **No protocol-version change** (still 4), so a 0.1.20 client and a 0.1.19
+  daemon still connect. The capabilities added here — posting a PR review,
+  the claim comment — need the 0.1.20 daemon.
+- **Claims change shape on GitHub.** A claim held by a box on an older build is
+  still honoured, and each holder retires its own per-claim label on its next
+  heartbeat, so no task reads as unclaimed in between. If you have tooling that
+  matches `lazybox:w:` label names, point it at the `working` label instead.
+- **Cost reporting is per repository and public repositories default to off.**
+  If you expected a cost figure on a public repository's PRs and saw none, that
+  is the default, not a failure: set `providers.github.pr_trailers.repos` for
+  that repository.
+
+### Install
+
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
+
 ## [0.1.19] - 2026-09-28
 
 A patch release: the Linux build starts again on a stock distro, and two

@@ -30,6 +30,7 @@ pub mod port_forward;
 pub mod socket;
 pub mod task_status;
 pub mod transport;
+pub mod work;
 
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
@@ -1091,7 +1092,9 @@ pub struct WorktreeInspectionDto {
     pub is_safe_to_delete: bool,
 }
 
-/// Wire-friendly projection of a combined staged/unstaged worktree diff.
+/// Wire-friendly projection of one reviewable diff — a checkout's
+/// combined staged/unstaged changes, or a pull request's diff against
+/// its merge base.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct WorkspaceDiffDto {
@@ -1099,14 +1102,95 @@ pub struct WorkspaceDiffDto {
     pub stat: Vec<String>,
     pub files: Vec<DiffFileDto>,
     pub truncated: bool,
+    /// The commit a pull request's diff was read at; `None` for a local
+    /// diff. A review raised from this document pins its comments to
+    /// this commit, so a push landing mid-review cannot re-anchor them
+    /// onto lines the reviewer never saw.
+    pub head_sha: Option<String>,
+    /// How the workspace's local checkout stands against the pull
+    /// request this diff was read from. `None` for a local diff, and
+    /// for a PR diff whose workspace has no checkout to compare.
+    pub divergence: Option<WorkspaceDiffDivergenceDto>,
 }
 
-/// Exact checkout whose local changes should be reviewed.
+/// How far the local checkout has drifted from the pull request whose
+/// diff is on screen — the reason a reviewer can read one document and
+/// merge another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct WorkspaceDiffDivergenceDto {
+    /// Files with uncommitted changes in the checkout, or `None` when
+    /// git could not say. Never `Some(0)` for a checkout that was not
+    /// read: a warning that reports an unreadable worktree as clean is
+    /// worse than no warning.
+    pub dirty_files: Option<u32>,
+    pub commits: CommitComparisonDto,
+}
+
+/// Where the checkout's `HEAD` stands relative to the pull request's
+/// head commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum CommitComparisonDto {
+    Counted(CommitSpreadDto),
+    /// The PR's head commit is not in the checkout — usually because it
+    /// was never fetched, which is the ordinary case when reviewing
+    /// someone else's branch. Not a count, and not "in sync".
+    ReferenceAbsent,
+    /// The comparison could not be made.
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct CommitSpreadDto {
+    /// Commits the checkout holds that the pull request does not.
+    pub local_only: u32,
+    /// Commits the pull request holds that the checkout does not.
+    pub pr_only: u32,
+}
+
+/// What a submitted review says about the pull request as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum ReviewVerdictDto {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+/// One inline comment in a submitted review, anchored the way GitHub
+/// anchors them: a path, a line number in the PR's diff, and which side
+/// of that diff the line sits on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ReviewCommentDto {
+    pub path: String,
+    pub line: u32,
+    pub side: DiffSideDto,
+    pub body: String,
+}
+
+/// Which side of a diff a line belongs to — `Left` is the pre-image
+/// (a deleted or context line's old number), `Right` the post-image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum DiffSideDto {
+    Left,
+    Right,
+}
+
+/// Which document `Command::InspectWorkspaceDiff` should read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum WorkspaceDiffTarget {
     Session(lazybox_core::SessionId),
     LinkedCheckout,
+    /// The workspace's pull request as GitHub renders it: its diff
+    /// against the merge base, carrying other people's commits and
+    /// missing unpushed local work. The only source a review comment
+    /// can anchor to.
+    PullRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1895,11 +1979,32 @@ pub enum Command {
     /// Read-only — no deletes happen until the TUI follows up with
     /// per-row `DeleteOrphanedWorktree` calls.
     InspectWorktrees,
-    /// Read the focused checkout and reply
+    /// Read the diff `target` names and reply
     /// with `Event::WorkspaceDiffInspected`.
     InspectWorkspaceDiff {
         workspace_key: lazybox_core::WorkspaceKey,
         target: WorkspaceDiffTarget,
+    },
+    /// Submit the reviewer's drafted inline comments to the workspace's
+    /// pull request as **one** review — a single
+    /// `POST /repos/{o}/{r}/pulls/{n}/reviews` carrying every comment,
+    /// not N standalone comments. Replies with
+    /// `Event::PullRequestReviewSubmitted`.
+    ///
+    /// Each comment anchors to a `(path, line, side)` in the PR's own
+    /// diff, which is why only `WorkspaceDiffTarget::PullRequest` can
+    /// raise this: a line that exists solely in a local worktree has no
+    /// counterpart on GitHub.
+    SubmitPullRequestReview {
+        workspace_key: lazybox_core::WorkspaceKey,
+        /// The commit whose diff the reviewer actually read, carried
+        /// from `WorkspaceDiffDto::head_sha`.
+        head_sha: String,
+        /// The review's own body. GitHub requires one for a `Comment`
+        /// or `RequestChanges` verdict.
+        summary: String,
+        verdict: ReviewVerdictDto,
+        comments: Vec<ReviewCommentDto>,
     },
     /// Walk the configured dev roots (`scan.roots`, or `roots` when the
     /// user pointed the scan at an explicit folder) and reply with
@@ -2442,6 +2547,31 @@ pub enum Command {
         key: String,
         /// Correlates [`Event::CommandCompleted`] / [`Event::CommandFailed`]
         /// for a caller that needs to know the tombstone is really gone.
+        client_request_id: Option<String>,
+    },
+    /// Replace a TODO's checklist with `items`, in order. The whole list
+    /// travels, so a save is one write and one `WorkspaceUpserted`. Every item
+    /// carries an id the CLIENT minted (`TodoItem::new_id`), unique within the
+    /// list — the daemon refuses an empty or duplicated one. Client-minted
+    /// because an id the daemon invents cannot be named as a `parent` by a
+    /// sibling in the same request, which made a new subtree unexpressible in
+    /// one save. Appended last (bincode is ordinal-sensitive).
+    SaveTodoItems {
+        workspace_key: lazybox_core::WorkspaceKey,
+        items: Vec<lazybox_core::TodoItem>,
+    },
+    /// Read or move the task/plan store (#1935). One command for every verb,
+    /// because the CLI twin and the MCP tools must reach the same code: a
+    /// second path would diverge the first time either was edited, which is
+    /// the lesson [`Command::QueryTaskStatus`] already carries.
+    ///
+    /// The answer comes back as [`Event::WorkReport`] correlated by
+    /// `client_request_id`. The acting party rides inside
+    /// [`work::WorkRequest`] rather than being inferred here, so provenance
+    /// comes from the channel that knows it. Appended last (bincode is
+    /// ordinal-sensitive).
+    WorkCall {
+        request: work::WorkRequest,
         client_request_id: Option<String>,
     },
 }
@@ -3411,13 +3541,22 @@ pub enum Event {
         error: Option<String>,
     },
     /// `Command::InspectWorkspaceDiff` finished. `diff` is absent when
-    /// the workspace/target disappeared or git could not read it.
+    /// the workspace/target disappeared, git could not read it, or the
+    /// pull request's diff could not be fetched.
     WorkspaceDiffInspected {
         workspace_key: lazybox_core::WorkspaceKey,
         target: WorkspaceDiffTarget,
-        /// Live agent terminals rooted in the inspected checkout.
+        /// Live agent terminals rooted in the workspace's checkout.
         agent_terminal_ids: Vec<TerminalId>,
         diff: Option<WorkspaceDiffDto>,
+        error: Option<String>,
+    },
+    /// `Command::SubmitPullRequestReview` finished. `url` is the posted
+    /// review on success; `error` carries GitHub's refusal otherwise.
+    PullRequestReviewSubmitted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        comments: u32,
+        url: Option<String>,
         error: Option<String>,
     },
     /// `Command::ScanCheckouts` finished. `checkouts` is every on-disk
@@ -4052,6 +4191,24 @@ pub enum Event {
     /// refreshes (#1824). Appended last (bincode is ordinal-sensitive).
     ArchivedWorkspaces {
         records: Vec<ArchivedWorkspaceRecord>,
+    },
+    /// Reply to [`Command::WorkCall`] (#1935): what the task/plan store says,
+    /// or why it could not say it.
+    ///
+    /// Sent on the asking connection rather than the bus. The reply belongs to
+    /// one invocation, and a lagging subscriber's dropped event would leave a
+    /// `lazybox work` command hanging for its whole timeout —
+    /// [`Event::GhShimReply`] made the same call for the same reason.
+    ///
+    /// `Err` means the call could not be *answered*: a malformed request, or a
+    /// store the daemon could not read. Work that does not exist, a plan with
+    /// nothing on it and a refused transition are all successful reports whose
+    /// content says so, because a caller must never have to read "there is no
+    /// such work" out of a failure. Appended last (bincode is
+    /// ordinal-sensitive).
+    WorkReport {
+        client_request_id: Option<String>,
+        result: Result<work::WorkReport, work::WorkError>,
     },
 }
 

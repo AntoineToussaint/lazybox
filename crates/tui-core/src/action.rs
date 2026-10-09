@@ -1197,8 +1197,8 @@ impl ActionDef {
             ActionKind::OpenHopper => &Self {
                 kind: ActionKind::OpenHopper,
                 default_keys: "Shift-H",
-                label: "hopper",
-                describe: "Open the personal Hopper editor. Active items are editable lines; Tab opens dated completion and cancellation history.",
+                label: "todo",
+                describe: "Open your TODO list — the personal cross-project juggler. Each line is a TODO you can start work on; `l` opens its checklist of nested items, each of which can link to an issue, PR or URL and checks itself off when that lands. Tab opens dated completion and cancellation history.",
                 section: Section::Global,
             },
             ActionKind::DismissNotice => &Self {
@@ -1345,21 +1345,21 @@ impl ActionDef {
                 kind: ActionKind::JumpPrevGroup,
                 default_keys: "{",
                 label: "prev group",
-                describe: "Move the cursor to the previous group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502).",
+                describe: "Move the cursor to the previous group header (Space / repo / Focused / TODO) so a long inbox can be crossed a group at a time (#1502).",
                 section: Section::Sidebar,
             },
             ActionKind::JumpNextGroup => &Self {
                 kind: ActionKind::JumpNextGroup,
                 default_keys: "}",
                 label: "next group",
-                describe: "Move the cursor to the next group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502).",
+                describe: "Move the cursor to the next group header (Space / repo / Focused / TODO) so a long inbox can be crossed a group at a time (#1502).",
                 section: Section::Sidebar,
             },
             ActionKind::ResumeRateLimited => &Self {
                 kind: ActionKind::ResumeRateLimited,
                 default_keys: "Shift-K",
                 label: "resume stopped agents",
-                describe: "Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike. An agent whose account is still limited simply parks again and says so. If you switched Claude account / API key, `a R` (restart stopped agents) also swaps in the fresh credentials: a running process never re-reads them.",
+                describe: "Resume every stopped agent at once — a settle-gated 'continue' injected into each one: the rate-limit blocked (⧗), the parked-on-auto-continue (☾) and the stopped-on-an-error (↯) alike — except an agent whose login has died, which is held back and offered sign-in instead, because 'continue' cannot move a logged-out agent and the notice would otherwise claim a recovery that did not happen. An agent whose account is still limited simply parks again and says so. If you switched Claude account / API key, `a R` (restart stopped agents) also swaps in the fresh credentials: a running process never re-reads them.",
                 section: Section::Global,
             },
             ActionKind::RestartRateLimited => &Self {
@@ -1534,7 +1534,7 @@ impl ActionDef {
                 kind: ActionKind::ViewDiff,
                 default_keys: "g v",
                 label: "review diff",
-                describe: "Review the worktree's staged, unstaged, and untracked changes in a full-screen viewer — file tree beside side-by-side hunks, `t` and `s` toggle either; search or annotate lines and send the draft to the running agent.",
+                describe: "Review a diff in a full-screen viewer — file tree beside side-by-side hunks, `t` and `s` toggle either. Opens on the PR's diff when the workspace has one and the worktree's otherwise; `p` switches, and the header names the source and any drift between them. Annotate lines with `c`, then `Shift-S` submits them to GitHub as one review on the PR source, or sends them to the running agent on the local one.",
                 section: Section::Workspace,
             },
             ActionKind::NewWorkspace => &Self {

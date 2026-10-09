@@ -228,7 +228,7 @@ pub struct McpRuntime {
     /// "already has a running agent" check and the spawn itself are several
     /// awaits apart, so without this two siblings starting the same record
     /// both saw it free and both spawned — the double-spawn the `working` /
-    /// `lazybox:w:…` claim labels exist to prevent.
+    /// `working` claim exists to prevent.
     starting: parking_lot::Mutex<std::collections::HashSet<lazybox_core::WorkspaceKey>>,
 }
 
@@ -458,6 +458,88 @@ struct NotifySessionArgs {
     /// the target's composer for its operator to review and send (`false`).
     #[serde(default = "default_notify_submit")]
     submit: bool,
+}
+
+/// A `create_work` request: mint a unit of work, optionally assign it to a
+/// sibling and deliver its brief in the same call.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CreateWorkArgs {
+    /// One line naming the work.
+    title: String,
+    /// Objective · done-criteria · boundaries · output shape. This is what
+    /// gets delivered when `owner` is a sibling workspace.
+    #[serde(default)]
+    brief: String,
+    /// Workspace key of the agent that will do it (from `list_sessions`).
+    /// Omit to leave it unassigned — unassigned is the absence of an owner,
+    /// not a party of its own.
+    #[serde(default)]
+    owner: Option<String>,
+    /// Deliver the brief into the owner's session now (the default when an
+    /// `owner` is given). `false` records the assignment without poking it,
+    /// for work queued behind something else.
+    #[serde(default)]
+    deliver: Option<bool>,
+    /// The plan (TODO tree) this belongs to, as returned by `work_status`.
+    #[serde(default)]
+    plan: Option<String>,
+    /// The work id this nests under — a sub-TODO.
+    #[serde(default)]
+    parent: Option<String>,
+    /// Records this work points at: `owner/repo#N`, a URL, or a workspace
+    /// key. Tracker records are LINKS, never the work's identity, so an
+    /// issue→PR fold rewrites a link and the id is untouched.
+    #[serde(default)]
+    links: Vec<String>,
+}
+
+/// An `update_work` request: move a unit of work, and report its result when
+/// the move is to `completed`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct UpdateWorkArgs {
+    /// The work id (a uuid, from `create_work` / `my_work`).
+    id: String,
+    /// `underway`, `awaiting-answer`, `held`, `completed`, `failed` or
+    /// `canceled`. A task already in a terminal state refuses every further
+    /// move, and the refusal says so rather than being dropped.
+    lifecycle: String,
+    /// The question, for `awaiting-answer`; the blocker, for `held`; the
+    /// cause, for `failed`.
+    #[serde(default)]
+    detail: Option<String>,
+    /// Required for `completed`: what was done, for the requester to read
+    /// instead of scraping your scrollback.
+    #[serde(default)]
+    summary: Option<String>,
+    /// Artifacts you wrote into `.lazybox/artifacts/`, by file name. Carried
+    /// by reference, so a result costs the requester bytes, not a transcript.
+    #[serde(default)]
+    artifacts: Vec<String>,
+}
+
+/// A `my_work` request.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct MyWorkArgs {
+    /// Include work already finished (default false — the open list is what
+    /// you act on).
+    #[serde(default)]
+    include_done: bool,
+}
+
+/// A `lazybox_guide` request.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct LazyboxGuideArgs {
+    /// The topic to read. Omit for the index.
+    #[serde(default)]
+    topic: Option<String>,
+}
+
+/// A `work_status` request.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct WorkStatusArgs {
+    /// A plan id. Omit for every plan, each with its roll-up.
+    #[serde(default)]
+    plan: Option<String>,
 }
 
 /// An `answer_session` request: keystrokes into a sibling that is waiting
@@ -2451,6 +2533,145 @@ impl LazyboxMcp {
         Ok(json_result(
             self.poll_request_payload(&caller, &args.request_id, now_ms)
                 .await?,
+        ))
+    }
+
+    #[tool(
+        description = "How any part of lazybox works, on demand — call this instead of guessing, and instead of carrying it all in every session's opening context. `topic` is one of: `coordination` (notes, notify, ask, answer between sibling sessions), `work` (handing work over with a lifecycle and getting a result back), `epics` (cross-repo status, the ready queue, blockers), `records` (reading issues and PRs without spending the shared GitHub budget), `labels` (the GitHub labels that are live coordination state and must never be stripped), `artifacts` (writing a document lazybox renders in its own reader), `spawning` (handing work to a new agent and picking its model tier). Omit `topic`, or pass one that is not listed, and you get the index — so one call always lands somewhere."
+    )]
+    async fn lazybox_guide(
+        &self,
+        Parameters(args): Parameters<LazyboxGuideArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        // An unknown topic returns the index rather than an error: the caller
+        // asked a reasonable question with the wrong word, and an error would
+        // cost it a turn to learn what the words are.
+        let text = match args
+            .topic
+            .as_deref()
+            .and_then(lazybox_agents::guide::Topic::parse)
+        {
+            Some(topic) => format!("{}\n", topic.body()),
+            None => lazybox_agents::guide::index(),
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    }
+
+    /// The four work verbs all route through `crate::work_calls`, which the
+    /// `lazybox work …` CLI also calls over `Command::WorkCall`. A tool here
+    /// is an adapter: resolve the caller from its bearer, hand the typed
+    /// request over, and render the typed report as JSON. Nothing about a work
+    /// row is shaped in this file, so the two surfaces cannot drift.
+    async fn work_call(
+        &self,
+        request: lazybox_ipc::work::WorkRequest,
+    ) -> Result<serde_json::Value, McpError> {
+        let report = crate::work_calls::call(&self.config, request)
+            .await
+            .map_err(|error| match error {
+                lazybox_ipc::work::WorkError::BadRequest(message) => {
+                    McpError::invalid_request(message, None)
+                }
+                lazybox_ipc::work::WorkError::Unavailable(message) => {
+                    McpError::internal_error(format!("work store: {message}"), None)
+                }
+            })?;
+        serde_json::to_value(&report)
+            .map_err(|error| McpError::internal_error(format!("encode report: {error}"), None))
+    }
+
+    #[tool(
+        description = "Mint a unit of work with an immutable id — and, with an `owner`, hand it to that sibling in the same call. This is the tracked form of a handoff: `notify_session` pokes a session and reports only that the text landed, while work created here has a lifecycle, a requester, a result and a provenance history, so \"what did I ask for and what came back\" is answerable after the session that asked is gone. Tracker records go in `links` (`owner/repo#N`), never in the id, so an issue→PR fold rewrites a link and the id is untouched. Returns the work row plus a delivery receipt (`delivered` / `queued` / `refused`); a refused delivery still leaves the work assigned and visible in the owner's `my_work`."
+    )]
+    async fn create_work(
+        &self,
+        Parameters(args): Parameters<CreateWorkArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Create {
+                requester: caller,
+                title: args.title.clone(),
+                brief: args.brief.clone(),
+                owner: args
+                    .owner
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(SessionKey::from),
+                // Delivering is the default when the work is assigned: an
+                // agent that hands work over and has to remember a second flag
+                // to actually send it has handed over nothing.
+                deliver: args.deliver.unwrap_or_else(|| {
+                    args.owner
+                        .as_deref()
+                        .is_some_and(|key| !key.trim().is_empty())
+                }),
+                plan: args.plan.clone(),
+                parent: args.parent.clone(),
+                links: args.links.clone(),
+            })
+            .await?,
+        ))
+    }
+
+    #[tool(
+        description = "The work this session owns, the work it asked of others, and the work it filed that nobody owns yet — \"what is on my plate\", \"what am I still waiting on\" and \"what have I queued\" as three separate lists, because conflating them misreports who is on the hook. Open work only unless `include_done` is true. Ownership is matched on the WORKSPACE, so your work survives a respawn (Shift-K, auto-fix and credit recovery all mint a new session id). Read this before starting something: a task already `underway` under your workspace is work someone handed you."
+    )]
+    async fn my_work(
+        &self,
+        Parameters(args): Parameters<MyWorkArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Mine {
+                workspace: caller,
+                include_done: args.include_done,
+            })
+            .await?,
+        ))
+    }
+
+    #[tool(
+        description = "Move a unit of work, and report its result. `lifecycle`: `underway` when you start, `awaiting-answer` or `held` with `detail` when you cannot proceed, `completed` with a `summary` (and any `artifacts` you wrote into .lazybox/artifacts/) when it is done, or `failed` / `canceled`. A terminal state refuses every further move and the refusal is returned as an error, so a late report from a replaced session cannot overwrite a finished result. Completing work someone else requested delivers a short notice to them — the requester does not poll."
+    )]
+    async fn update_work(
+        &self,
+        Parameters(args): Parameters<UpdateWorkArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Update {
+                by: caller,
+                id: args.id.clone(),
+                lifecycle: args.lifecycle.clone(),
+                detail: args.detail.clone(),
+                summary: args.summary.clone(),
+                artifacts: args.artifacts.clone(),
+            })
+            .await?,
+        ))
+    }
+
+    #[tool(
+        description = "A plan's rolled-up progress (done/total over the whole tree, canceled items excluded), the workspaces its tasks point at, and its tasks. Omit `plan` for every plan plus the open work on none. A plan whose tasks span repos is the member list a local epic projects onto, so this answers \"where does this stand\" without re-deriving it from the individual PRs."
+    )]
+    async fn work_status(
+        &self,
+        Parameters(args): Parameters<WorkStatusArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Status {
+                plan: args.plan.clone(),
+            })
+            .await?,
         ))
     }
 
@@ -4917,6 +5138,131 @@ mod tests {
     use super::*;
     use crate::backend::SessionBackend;
 
+    /// The MCP tools are adapters over `crate::work_calls`; the one piece of
+    /// logic that lives only here is the `deliver` default, so it is the piece
+    /// that needs pinning. Everything else about a work row is tested where it
+    /// is shaped.
+    #[tokio::test]
+    async fn assigning_work_through_the_tool_delivers_it_by_default() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let payload = handler
+            .work_call(lazybox_ipc::work::WorkRequest::Create {
+                requester: SessionKey::from("github:acme/widget#1"),
+                title: "do this".into(),
+                brief: String::new(),
+                owner: Some(SessionKey::from("github:acme/other#2")),
+                deliver: true,
+                plan: None,
+                parent: None,
+                links: Vec::new(),
+            })
+            .await
+            .expect("payload");
+        // No agent is running there, so the honest answer is a refusal that
+        // still leaves the work assigned — and it must survive the JSON hop.
+        assert!(
+            payload["One"]["delivery"]["Refused"]["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no running agent"),
+            "{payload}"
+        );
+        assert_eq!(payload["One"]["work"]["lifecycle"], "pending");
+    }
+
+    #[tokio::test]
+    async fn a_work_bad_request_is_a_protocol_error_not_an_error_result() {
+        // A caller's mistake has to reach the agent as an error it can read
+        // and correct, not as a successful tool result it might act on.
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let error = handler
+            .work_call(lazybox_ipc::work::WorkRequest::Create {
+                requester: SessionKey::from("a"),
+                title: "   ".into(),
+                brief: String::new(),
+                owner: None,
+                deliver: false,
+                plan: None,
+                parent: None,
+                links: Vec::new(),
+            })
+            .await
+            .expect_err("refused");
+        assert!(error.to_string().contains("title"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn my_work_through_the_tool_carries_the_three_lists_as_json() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let payload = handler
+            .work_call(lazybox_ipc::work::WorkRequest::Mine {
+                workspace: SessionKey::from("github:acme/widget#1"),
+                include_done: false,
+            })
+            .await
+            .expect("payload");
+        for list in ["mine", "waiting_on_others", "unassigned"] {
+            assert!(
+                payload["Mine"][list].is_array(),
+                "{list} missing from the JSON: {payload}"
+            );
+        }
+    }
+
+    /// The guard that would have caught #1935 and #1936: four tools shipped
+    /// whose existence no agent-facing text mentioned, because the briefing
+    /// was at 7030 of a 7050-byte cap and there was no room. Now a tool that
+    /// no guide topic names fails here instead of shipping unannounced.
+    #[test]
+    fn every_mcp_tool_is_named_by_the_briefing_or_a_guide_topic() {
+        let source = include_str!("mcp.rs");
+        // Every `#[tool(...)]` attribute is followed by the `async fn` it
+        // decorates; splitting on the attribute is enough and avoids any
+        // index arithmetic over a file full of em dashes.
+        let names: Vec<String> = source
+            .split("#[tool(")
+            .skip(1)
+            .filter_map(|chunk| {
+                let at = chunk.find("async fn ")? + "async fn ".len();
+                let name = chunk[at..].split(['(', '<', ' ']).next()?.trim();
+                // A valid identifier only: the split can otherwise pick up a
+                // fragment from a description that happens to contain the
+                // words, and a phantom name would fail this test forever.
+                let valid = !name.is_empty()
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && name.starts_with(|c: char| c.is_ascii_lowercase());
+                valid.then(|| name.to_string())
+            })
+            .collect();
+        assert!(
+            names.len() >= 25,
+            "the tool scrape found only {} names; it has stopped working: {names:?}",
+            names.len()
+        );
+
+        let briefing = lazybox_agents::session_context::lazybox_mcp_coordination_context();
+        let guide: String = lazybox_agents::guide::Topic::ALL
+            .into_iter()
+            .map(|topic| topic.body())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut unannounced: Vec<&str> = Vec::new();
+        for name in &names {
+            let needle = format!("`{name}`");
+            // `lazybox_guide` itself is named by the briefing's pointer, and a
+            // tool named in either tier is discoverable in one call.
+            if !briefing.contains(&needle) && !guide.contains(&needle) && name != "lazybox_guide" {
+                unannounced.push(name);
+            }
+        }
+        assert!(
+            unannounced.is_empty(),
+            "these tools exist and no agent is ever told so — name them in a \
+             `lazybox_guide` topic (crates/agents/src/guide.rs) or, if an agent must \
+             know unprompted, in the briefing: {unannounced:?}"
+        );
+    }
+
     #[test]
     fn parse_bearer_strips_scheme_and_whitespace() {
         assert_eq!(parse_bearer("Bearer abc123"), Some("abc123"));
@@ -5927,7 +6273,7 @@ mod tests {
     /// The "already has a running agent" check and `handle_spawn` are
     /// several awaits apart (`attach_to_record`, `record_started`), so both
     /// callers read the record free and both spawned — the double-spawn the
-    /// `working` / `lazybox:w:…` claim labels exist to prevent. The claim is
+    /// `working` claim exists to prevent. The claim is
     /// taken before the check and held through the spawn.
     #[tokio::test]
     async fn two_callers_starting_one_record_do_not_both_spawn() {

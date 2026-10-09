@@ -912,6 +912,16 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         self.flush_dispatched_cmds(cmds);
+        // A keystroke the pane dropped for a reason the user cannot see
+        // — typing into a read-only log window (#1920). The pane has no
+        // footer of its own, so it hands the words back here. Drained
+        // on every key so a refusal can never outlive its keystroke.
+        if let Some(message) = self.terminals.take_input_refusal() {
+            self.flash(
+                message,
+                crate::realm::components::footer::NoticeSeverity::Retryable,
+            );
+        }
         // A `d` on an overflowing description preview asks to read the
         // whole thing in the reader modal (#448) — the pane can't mount
         // it, so drain the request here.
@@ -955,27 +965,10 @@ impl<T: TerminalAdapter> Model<T> {
                     .workspace_by_key(session_key)
                     .filter(|workspace| workspace.is_claimed())
                     .map(|workspace| {
-                        let Some(task) = workspace.primary_task() else {
-                            return (
-                                session_key.to_string(),
-                                (session_key.to_string(), vec!["unknown owner".into()]),
-                            );
-                        };
-                        let mut owners = task
-                            .active_qualified_working_claims(chrono::Utc::now())
-                            .into_iter()
-                            .map(|claim| {
-                                format!(
-                                    "device {}/session {}",
-                                    &claim.device[..8],
-                                    &claim.session[..6]
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        if task.has_label(lazybox_core::WORKING_LABEL_NAME) {
-                            owners.push("legacy claim (unknown owner)".into());
-                        }
-                        (session_key.to_string(), (task.title.clone(), owners))
+                        (
+                            session_key.to_string(),
+                            claim_owners(workspace, session_key),
+                        )
                     }),
                 IpcCommand::StartAgentRun {
                     session_key,
@@ -986,27 +979,10 @@ impl<T: TerminalAdapter> Model<T> {
                     .workspace_by_key(session_key)
                     .filter(|workspace| workspace.is_claimed())
                     .map(|workspace| {
-                        let Some(task) = workspace.primary_task() else {
-                            return (
-                                session_key.to_string(),
-                                (session_key.to_string(), vec!["unknown owner".into()]),
-                            );
-                        };
-                        let mut owners = task
-                            .active_qualified_working_claims(chrono::Utc::now())
-                            .into_iter()
-                            .map(|claim| {
-                                format!(
-                                    "device {}/session {}",
-                                    &claim.device[..8],
-                                    &claim.session[..6]
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        if task.has_label(lazybox_core::WORKING_LABEL_NAME) {
-                            owners.push("legacy claim (unknown owner)".into());
-                        }
-                        (session_key.to_string(), (task.title.clone(), owners))
+                        (
+                            session_key.to_string(),
+                            claim_owners(workspace, session_key),
+                        )
                     }),
                 _ => None,
             })
@@ -1033,10 +1009,18 @@ impl<T: TerminalAdapter> Model<T> {
                 )
             };
             self.set_modal_flow(super::ModalFlow::ClaimedSpawnConfirm { commands: planned });
-            self.mount_modal(
-                super::Id::ClaimedSpawnConfirm,
-                crate::realm::components::confirm::Confirm::new(prompt).default_no(),
+            // The spawn chord is behind this prompt, so it sits on the
+            // `destructive_shortcut` axis (#1921). It destroys nothing at
+            // all — a second agent on a claimed task is a coordination
+            // warning, undone by stopping it — so a No default here was the
+            // clearest case of #1900's overreach: the user pressed the key
+            // and the prompt exists only to name who else is on the row.
+            let modal = crate::realm::components::confirm::Confirm::from_source(
+                prompt,
+                crate::realm::components::confirm::ConfirmSource::Shortcut,
+                self.ui_defaults.confirm_default,
             );
+            self.mount_modal(super::Id::ClaimedSpawnConfirm, modal);
             return;
         }
         self.note_spawn_feedback(&cmds);
@@ -1101,6 +1085,28 @@ impl<T: TerminalAdapter> Model<T> {
                     role: None,
                 });
             }
+        }
+    }
+
+    /// `]]Shift-<arrow>` — move the divider between the focused tile and
+    /// its neighbour that way (#1920), by `ui.split_step_percent`: the
+    /// same step the sidebar and activity splitters nudge by, so one tap
+    /// means the same amount of movement everywhere.
+    ///
+    /// Flashes when there is no such divider, because otherwise this is
+    /// the "key does nothing" failure: in Tabs mode, or on a lone
+    /// terminal, there is no line to move and nothing on screen says so.
+    pub(super) fn resize_focused_tile_divider(
+        &mut self,
+        dir: lazybox_core::TileDirection,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        let step = self.ui_defaults.split_step_percent;
+        match self.terminals.resize_focused_divider(dir, step, cmds) {
+            Some(_) => self.redraw = true,
+            None => self.flash_info(
+                "no divider that way — `]]|` / `]]-` split the pane first, and `]]t` turns tabs into tiles",
+            ),
         }
     }
 
@@ -1234,6 +1240,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::SplitHorizontal => self.terminals.split_tile(PendingSplit::Horizontal, cmds),
             LeaderCmd::MoveTile(dir) if self.focus_multi_pane_active() => self.move_focus_pane(dir),
             LeaderCmd::MoveTile(dir) => self.terminals.move_tile_focus(dir, cmds),
+            LeaderCmd::ResizeTile(dir) => self.resize_focused_tile_divider(dir, cmds),
             LeaderCmd::CloseTerminal => self.terminals.close_focused_tile(cmds),
             LeaderCmd::ZoomTile if self.focus_multi_pane_active() => self.toggle_focus_pane_zoom(),
             LeaderCmd::ZoomTile => self.toggle_terminal_zoom(),
@@ -2468,6 +2475,21 @@ impl<T: TerminalAdapter> Model<T> {
                     self.layout.active_drag = Some(target);
                     return;
                 }
+                // Same rule one level in: a divider between two tiles of
+                // the terminal stack resizes, it never refocuses the
+                // tile or types into it (#1920). Checked after the two
+                // pane splitters, because their lines bound this pane
+                // and an overlap at the seam belongs to the outer one.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && rect_contains(right_bottom_rect, m.column, m.row)
+                    && let Some(path) = self.terminals.hit_test_tile_divider(m.column, m.row)
+                {
+                    self.terminals.begin_divider_drag(path.clone());
+                    self.layout.active_drag =
+                        Some(crate::realm::layout::DragTarget::TileDivider(path));
+                    self.redraw = true;
+                    return;
+                }
                 // Move focus to the clicked pane BEFORE any
                 // terminal-specific handling. The selection and
                 // mouse-forwarding logic below keys off `self.focus`, so
@@ -2818,8 +2840,14 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::Drag(_) => {
-                if let Some(target) = self.layout.active_drag {
-                    if self.layout.update_drag(target, m.column, m.row) {
+                if let Some(target) = self.layout.active_drag.clone() {
+                    let changed = match &target {
+                        crate::realm::layout::DragTarget::TileDivider(path) => {
+                            self.terminals.drag_tile_divider(path, m.column, m.row)
+                        }
+                        other => self.layout.update_drag(other, m.column, m.row),
+                    };
+                    if changed {
                         self.redraw = true;
                     }
                     return;
@@ -2829,9 +2857,28 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::Up(button) => {
-                let was_drag = self.layout.active_drag.take().is_some();
-                if was_drag {
-                    self.layout.persist();
+                // A finished splitter drag saves where the user left
+                // the divider. Which store depends on which divider:
+                // the two pane splitters are `ui:` percentages, while a
+                // tile divider's ratio lives in the session's tile tree
+                // and goes through the daemon — so each persists its
+                // own and neither rewrites the other's.
+                //
+                // Either way it happens ONCE, at the end of the
+                // gesture, not per pointer motion: a
+                // `Command::SetSessionLayout` per motion would put the
+                // daemon's workspace writer on the mouse (#1920).
+                match self.layout.active_drag.take() {
+                    Some(crate::realm::layout::DragTarget::TileDivider(_)) => {
+                        let mut cmds: Vec<IpcCommand> = Vec::new();
+                        self.terminals.persist_session_layout(&mut cmds);
+                        self.flush_dispatched_cmds(cmds);
+                    }
+                    Some(_) => self.layout.persist(),
+                    None => {}
+                }
+                if self.terminals.end_divider_drag() {
+                    self.redraw = true;
                 }
                 let mut click_no_drag_at: Option<(u16, u16)> = None;
                 if let Some(drag) = self.terminal_drag.take() {
@@ -3609,4 +3656,45 @@ mod popup_nav_tests {
         assert_eq!(single_menu_char("←→"), None);
         assert_eq!(single_menu_char(""), None);
     }
+}
+
+/// The claim owners to name in the "already claimed, start anyway?" prompt,
+/// with the workspace's title.
+///
+/// The client reads claims from the poll payload alone, which is the point:
+/// presence is a label and costs nothing (#1922). A stable `working` label
+/// therefore names no holder here — the holder lives in the claim comment,
+/// which only a decision point on the daemon side fetches — so the prompt says
+/// that plainly and points at the command that will answer it, rather than
+/// inventing an owner or implying there isn't one. A claim from a box on an
+/// older build still carries its holder in the label name, so it is still
+/// named.
+fn claim_owners(
+    workspace: &lazybox_core::Workspace,
+    session_key: &lazybox_core::SessionKey,
+) -> (String, Vec<String>) {
+    let Some(task) = workspace.primary_task() else {
+        return (session_key.to_string(), vec!["unknown owner".into()]);
+    };
+    let mut owners = task
+        .active_qualified_working_claims(chrono::Utc::now())
+        .into_iter()
+        .map(|claim| {
+            format!(
+                "device {}/session {}",
+                &claim.device[..8],
+                &claim.session[..6]
+            )
+        })
+        .collect::<Vec<_>>();
+    if task.has_stable_working_claim() {
+        owners.push(format!(
+            "a lazybox agent (`lazybox task status {}` names it)",
+            task.id.key
+        ));
+    }
+    if owners.is_empty() {
+        owners.push("unknown owner".into());
+    }
+    (task.title.clone(), owners)
 }

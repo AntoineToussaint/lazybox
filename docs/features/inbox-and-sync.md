@@ -55,21 +55,42 @@ one PR, its linked issues, merged activity, and zero-or-more terminal
 **Status:** beta — the crash journeys (dead-holder release, live-holder
 heartbeat, foreign-expired cleanup) are covered by automated tests against the
 mock backend; the multi-box checklist below is a manual acceptance pass.
-**Crate(s):** `core` (claim label codec), `gh-provider` (qualified label mutation), `server` (durability + heartbeat), `tui-core` / `tui` (filter, guard, glyph)
+**Crate(s):** `core` (claim-note codec), `gh-provider` (label + sticky comment), `server` (durability + heartbeat), `tui-core` / `tui` (filter, guard, glyph)
 **Config / flags:** —
 **Key bindings:** `f` filter (`claimed`), any agent-spawn action invokes the guard
 
 ### What it does
 
-Every writable agent publishes its own GitHub label in the form
-`lazybox:w:<device>:<claim-session>:<expiry>`. The device token comes from the
-box's stable Ed25519 identity. Multiple machines and sessions can therefore
-claim the same task at once without sharing a bit that either machine could
-clear on the other's behalf. The sidebar aggregates all live claims into the
-`⚑` claim glyph in the status column: a single active owner renders as
-`⚑ dddd/ssss` (device/session prefixes), several as `⚑×N`, and a claim with
-no active qualified owner (legacy label, or an expired-but-preserved lease)
-stays the bare glyph. The spawn guard lists full device/session provenance.
+Every writable agent says "I am working on this" upstream in two halves
+(#1922):
+
+- **One stable `working` label.** It rides free in the inbox poll payload, so
+  "is this claimed?" costs no GitHub request on any tick, and attaching it
+  needs repository write access — which is what makes a claim trustworthy at
+  all.
+- **One sticky comment**, marked `<!-- lazybox:claim -->`, naming the holder,
+  the agent and model, when the work started, when the claim was last renewed,
+  and when it lapses. It is **edited in place** on every heartbeat, so a
+  four-hour claim leaves one comment, not sixteen, and a human reading the
+  thread sees a sentence rather than nothing.
+
+The holder token comes from the box's stable Ed25519 identity, and the comment
+counts as a claim **only when lazybox itself authored it** — anyone can paste
+the marker, but only a writer can attach the label, so the author check is
+what gives the comment half the same trust the label half has.
+
+Read the label for presence; the comment is fetched only at a decision point
+(`lazybox task status`, or the sweep that retires a lapsed claim), never on a
+poll tick. The predecessor encoded the whole lease in the label *name*
+(`lazybox:w:<device>:<claim-session>:<expiry>`), which grew the repository's
+label namespace by one name per task forever and told a human nothing; such a
+label is still honoured when it comes from a box on an older build.
+
+Multiple machines and sessions can still claim one task at once. The sidebar
+renders a claim as the claim glyph in the status column, with a `×N` suffix
+when several owners genuinely hold it. The spawn guard names the owners it
+can — a legacy label carries them in its own name, and for the stable label it
+points at `lazybox task status`, which fetches the comment and answers.
 
 The claim never blocks anything: spawning onto a claimed task asks one
 confirmation naming the owners and then proceeds — advise, never forbid.
@@ -214,18 +235,30 @@ the latest state per provider. (`OpenSyncStatus` in
 
 ### What it does
 Opens a multi-select **filter menu** over three predicate axes — state
-(with-agent, CI-failing, conflict, unread, asking, review-requested,
-auto-merge, **blocked**, **ready**, **in-flight**), role (author / reviewer /
-assignee / mentioned), and kind (PR / issue) — each shown with a live match
-count. Filters combine AND-across-axes / OR-within-axis and render as removable
-chips in the sidebar header. `blocked` / `ready` key off the dependency edges
-below. `in-flight` is what you are juggling right now: an agent there is
-working, waiting on you or just finished, or within the last hour you marked it
-read or your own PR / issue moved.
+(with-agent, CI-failing, conflict, unread, asking, **needs-recovery**,
+review-requested, auto-merge, **blocked**, **ready**, **in-flight**), role
+(author / reviewer / assignee / mentioned), and kind (PR / issue) — each shown
+with a live match count. Filters combine AND-across-axes / OR-within-axis and
+render as removable chips in the sidebar header. `blocked` / `ready` key off the
+dependency edges below. `in-flight` is what you are juggling right now: an agent
+there is working, waiting on you or just finished, or within the last hour you
+marked it read or your own PR / issue moved. `needs-recovery` is every stopped
+agent shape the two recovery actions restart — rate-limited (`⧗`), parked (`☾`)
+and stalled (`↯`).
 
 ### How to use it
 Press `f`, toggle the predicates you want, confirm. Active filters show as
 header chips (removable). Filters compose with `/` search.
+
+**Typing narrows the menu.** The list is 30+ rows across seven axes, so printable
+keys filter it as you type (Backspace trims, Esc still cancels) — matching each
+row's label *and* its search aliases, so a predicate whose label has since moved
+is still reachable by the word you reach for: `rate-limited` finds
+`needs-recovery`, `in-review` finds `in-progress`, `conflicting` finds
+`conflict`. A row you ticked before typing is still applied on Enter. The alias
+table is `Filter::search_aliases` (`crates/tui-core/src/inbox/filter.rs`), and a
+renamed label records its old name there — the rename itself is usually right;
+losing the old word is what costs the capability its discoverability (#1914).
 
 ### How it works (brief)
 `OpenFilterMenu` (`crates/tui-core/src/action.rs`) mounts the multi-select;
@@ -235,6 +268,7 @@ fetch filters).
 
 ### Test checklist
 - [ ] `f` opens the menu with per-predicate match counts.
+- [ ] Typing `rate-limited` in the menu narrows it to the `needs-recovery` row.
 - [ ] Toggling `reviewer` hides PRs you only author.
 - [ ] Predicates across axes combine with AND; within an axis with OR.
 - [ ] Active filters render as removable header chips.

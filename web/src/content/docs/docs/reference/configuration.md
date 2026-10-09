@@ -178,9 +178,9 @@ ui:
   theme: Lazybox Dark        # written back by the `t` theme picker
   terminal_new_layout: split # ordinary new terminals: split | tabs (`]]t` toggles)
   activity_pane_default: full # right pane start mode: full | summary | hidden (`Shift-P` cycles)
-  confirm_default:           # which Confirm button Enter highlights, by source
-    destructive_shortcut: yes # a destructive chord (x x, g m, …): the chord is the intent
-    event: no                # an unsolicited prompt (merged-PR removal): don't destroy on a stray Enter
+  confirm_default:           # which Confirm button Enter highlights, by axis
+    destructive_shortcut: yes # you pressed a destructive chord (x x, g m, c): the chord is the intent
+    event: no                # lazybox pushed the prompt (a row is leaving, its agent is live)
   # Remap any catalog action. Keys are snake_case action ids; values are
   # key-spec strings. Unset actions keep their default binding.
   action_keys:
@@ -509,8 +509,19 @@ default keymap.
 | `auto_wait_on_limit` | bool | `false` | Auto-press "Wait" when a Claude agent hits its usage / monthly limit, so N agents hitting the cap at once don't each need a manual visit — re-auth with another account and then `Shift-K` to resume them. Re-read on every transition. |
 | `show_agent_model` | bool | `true` | Show each running agent's model + reasoning effort next to its sidebar badge (`C Opus`, `X gpt-5.5 · xhigh`) and on its terminal tab. Set `false` to keep the sidebar compact. |
 | `credit_recovery_prompt` | string | built-in | Prompt submitted after a credit chooser has cleared and the provider composer is ready (the `Ctrl-k` recover-credit flow). |
-| `confirm_default.destructive_shortcut` | `yes` \| `no` | `yes` | Which button `Enter` highlights on a Confirm modal raised by a destructive chord (`x x` archive, `g m` merge, …). The chord is the intent, so `Enter` confirms; set `no` to require an explicit arrow-then-Enter. |
-| `confirm_default.event` | `yes` \| `no` | `no` | Which button `Enter` highlights on a Confirm modal raised unsolicited by a provider event (a merged-PR "remove this workspace?"). Defaults to `no` so a stray `Enter` can't destroy a workspace you didn't ask about. |
+| `confirm_default.destructive_shortcut` | `yes` \| `no` | `yes` | Which button `Enter` highlights on a destructive Confirm modal **you opened with a chord** — `x x` archive, `g m` merge (and its out-of-order override), `c` clear the Error Inbox, the spawn key onto a claimed task, applying a snippet over one that already exists, preserving a checkout aside to rebuild its worktree. The chord is the intent, so `Enter` confirms; set `no` to require an explicit `←`/Tab (or `y`) first on all of them at once. |
+| `confirm_default.event` | `yes` \| `no` | `no` | Which button `Enter` highlights on a destructive Confirm modal **lazybox pushed at you**, with no keystroke behind it: the "remove this workspace?" prompt over a row whose agent is still running. Defaults to `no` — a stray `Enter` there kills a live agent and deletes its worktree, which no re-clone undoes. Set `yes` if you want `Enter` to complete it; that also makes `No` there a decision that stops the prompt coming back, rather than a defer. |
+
+A prompt only follows these keys when it is both destructive *and* on one of
+the two axes. Four are deliberately on neither, and stay on `No` whatever you
+set: the Settings → Clean worktrees bulk wipe, the worktree inspector's
+delete of a dirty checkout, the "delete these workspaces" gate when you un-tick a repo in setup
+(the chord there is *save my filter*, and the deletion is a consequence of
+it), and the sandbox wizard's auto-connect-at-launch step, where `No` is the
+recommended answer rather than a guard. A removal prompt with nothing running
+is on neither axis either, and affirms: its worktree is reconstructible and
+the row has already left your scope. Benign gates — the on-main spawn
+awareness prompt — destroy nothing and always affirm.
 
 Duration values take a unit suffix (`30s`, `15m`, `4h`, `365d`).
 

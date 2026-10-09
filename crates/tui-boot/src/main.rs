@@ -65,6 +65,7 @@ mod slack_prune;
 mod task_status_cli;
 #[cfg(test)]
 mod test_env;
+mod work_cli;
 
 // Test-only sandbox for this unit-test binary (#1539, #1751). The same
 // body lives in the crate's `tests/common/mod.rs` and in every other test
@@ -765,6 +766,7 @@ async fn main() -> anyhow::Result<()> {
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("workspace") => workspace_subcommand(&args[1..]).await,
         Some("task") => task_status_cli::task_subcommand(&args[1..]).await,
+        Some("work") => work_cli::work_subcommand(&args[1..]).await,
         Some("log") => log_subcommand(&args[1..]).await,
         Some("device") => device_cli::device_subcommand(&args[1..]).await,
         Some("auth") => auth_cli::auth_subcommand(&args[1..]).await,

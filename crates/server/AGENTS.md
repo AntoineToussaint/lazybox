@@ -105,14 +105,48 @@ contract. They organize work; implementation stays on the tracker record.
 (merge-on-green) both wire merge and trailers. A change made in one of them
 half-lands; put it in the provider, or change both.
 
+**But lazybox usually does not perform the merge.** Since GitHub-native
+auto-merge shipped (#1596 via #1607), GitHub writes the merge commit; `gh pr
+merge` and the web UI never let lazybox write it. So the *common* path for
+cost is the out-of-band recorder — `handlers::record_external_merge_trailers`,
+gated in `polling/upsert.rs` on the `TerminalCleanup::MergedPr` transition,
+with a durable `pending-merge-cost:` intent and a poll-tick sweep behind it.
+A merged PR with no stored workspace returns before that gate, so there is
+nothing to record against. Test the external path explicitly: covering only
+lazybox's own merge covers the rare case, which is how #1917 shipped inert.
+
 Cost trailers (`pr_trailers.rs`, format contract in
 `lazybox_core::pr_trailers`) are permanent and public, which is why
-`providers.github.pr_trailers` gates them. Three invariants the code exists to
-hold: `commitBody` *replaces* GitHub's default squash log, so the default is
-read back and appended to — a body that cannot be resolved merges with **no**
-trailer rather than a truncated log; an unmetered PR gets no `Lazybox-Cost`
-line at all, never `$0.00`; and cost is billed per PR, not per workspace (the
-`meter-cost-mark:` watermark is stamped at merge).
+`providers.github.pr_trailers` gates them.
+
+**Measuring is not publishing, and public repos default to `off`.** A commit
+trailer cannot be deleted without rewriting history, so per-PR spend on a repo
+the world can clone is opt-in per repo (`repos: { owner/name: full }`);
+`private` defaults to `full`. A workspace therefore measures a real cost and
+correctly publishes nothing — which is a *decision*, and it must be said out
+loud. #1917 was 25 merges of exactly this with no log, no event and no UI
+anywhere, indistinguishable from a broken feature.
+
+Four invariants the code exists to hold:
+
+- `commitBody` *replaces* GitHub's default squash log, so the default is read
+  back and appended to — a body that cannot be resolved merges with **no**
+  trailer rather than a truncated log.
+- An unmetered PR gets no `Lazybox-Cost` line at all, never `$0.00`:
+  "free" and "not metered" must stay distinguishable.
+- Cost is billed per PR, not per workspace — the `meter-cost-mark:` watermark
+  is stamped at merge, and the issue→PR fold carries the issue-phase total
+  onto the PR key (`client_kv::move_session_cost`, which *deletes* its source
+  row, so a surviving source row proves the fold never ran).
+- **Only a settled record may stamp the watermark.** The watermark claims
+  "this figure has been dealt with", so `TrailerOutcome` decides, not the
+  merge: `InCommit`/`InComment` landed and close the slice; `Nothing` is a
+  deliberate policy withholding and closes it too (leaving it would roll this
+  PR's spend onto the next one); `Dropped` was measured, permitted and
+  **lost**, so it stays owed; and a reconciled merge wrote nothing lazybox
+  passed. Both merge sites stamped before testing the outcome and silently
+  retired real money — the guard lives in `pr_trailers::mark_merge_reported`
+  so one place covers both.
 
 ## GitHub-native auto-merge is gated on coverage
 
@@ -132,8 +166,8 @@ lazybox armed it.
 not a wrapper around repo actions. Spawned sessions get a per-session bearer
 and a loopback `rmcp` endpoint (identity is the connection) exposing
 `whoami` / `list_sessions` / `read_session`, the `post_note` / `read_notes`
-blackboard, `notify_session`, `task_status`, the epic tools, and
-`spawn_worker`. Agents drive `git` and `gh` directly; adding an approval layer
+blackboard, `notify_session`, `task_status`, the epic tools, the work-store
+verbs (below) and `spawn_worker`. Agents drive `git` and `gh` directly; adding an approval layer
 around those is a design change, not a fix. Design:
 [`docs/mcp-coordination.md`](../../docs/mcp-coordination.md).
 
@@ -158,13 +192,108 @@ declares.
 the row. The report keeps tracker lifecycle, working-claim, session
 (`SessionRunState`) and agent turn (`AgentState`) as separate facts because
 none implies another: a finished turn is not a finished task, an unexpired
-`lazybox:w:` claim is not a running process, and a live terminal that has not
+claim is not a running process, and a live terminal that has not
 reported a state is `unknown`, not idle. It is read-only — it must never reach
 for `workspace::attach::attach_to_record`, which materializes a workspace from
 the provider — and `Err` is reserved for status that could not be *established*,
 so a failed lookup can never read as "no worker". The same derivation backs
 `lazybox task status <ref>` over `Command::QueryTaskStatus`, which is the
 documented fallback for a session that gets no MCP tools.
+
+## The work store: declared intent, not observed liveness
+
+`work_store.rs` persists `lazybox_core::work` — the task/plan rows
+`docs/agent-coordination-v2.md` names as the shared plan — under the `work:`
+and `plan:` kv prefixes. **`work_calls.rs` is the one implementation of the
+four verbs**, and both surfaces are adapters over it: the `create_work` /
+`my_work` / `update_work` / `work_status` MCP tools in `mcp.rs`, and
+`lazybox work …` over `Command::WorkCall` for agents with no MCP at all. A row
+is shaped in `work_calls` and nowhere else, so a field added to it appears on
+both surfaces without a second edit — `task_status` made the same arrangement
+for the same reason, and the failure it avoids is a shell and an agent being
+told different things about the same record.
+
+A handoff made through these verbs is a row with a requester, a lifecycle, a
+result and a provenance history, which is what `notify_session` cannot be:
+that reports only that text landed.
+
+**`Lifecycle` is the third state enum here and must not be confused with the
+other two.** `AgentState` is liveness *observed* from the PTY and the hooks;
+`lazybox_core::TaskState` is the *tracker record's* state, owned by the
+provider; `Lifecycle` is what whoever owns the work *declares*. They disagree
+routinely and neither is wrong when they do — an agent at a permission prompt
+is `InputNeeded` while its task is legitimately `Underway`. So a `Lifecycle`
+never moves on an `AgentState` change alone.
+
+**The exception is a sweep, not a hook, and that is the whole design.** Work
+whose agent is gone has to fail, or it reads as in flight forever to whoever
+is waiting. But `AgentState::Exited` is the wrong trigger: `Shift-K`,
+auto-fix, `a c` and credit recovery all tear a terminal down and spawn a
+replacement, so failing on teardown would fail the work of every agent lazybox
+itself restarted. `sweep_stranded` instead fails `Underway` work whose owner
+workspace has had no live agent for `STRANDED_GRACE`, once a minute. If you
+are tempted to move this onto the exit path, that is the regression.
+
+A result is never reported back to whoever filed it. The guard is on the
+**acting party**, not on ownership: work a session files for itself and
+finishes itself is usually *unassigned*, so an owner-based check misses it and
+pastes an agent's own summary back into its own session.
+
+Two other things follow the store's rules rather than their own: multi-row
+writes go through `Store::apply_batch`, because a half-applied roll-up makes a
+progress bar disagree with the tasks it counts; and auto-check on merge rides
+`workspace::check_todo_items_linked_to`, the one call site #1898 already had,
+so the per-workspace checklist and the plan rows cannot disagree about
+whether a record landed. The `todo_items` field is **not** yet folded into
+these rows — the TUI's TODO list still reads it.
+
+## Working claims: a label for presence, a comment for identity
+
+`working_claims.rs` owns "an agent is working on this". It is two upstream
+facts (#1922) and a durable local record that keeps them converged:
+
+- the one stable `working` label — **presence**, read free from the poll
+  payload by `Task::has_working_claim()`;
+- one sticky comment per record — **identity**: holder, agent, model, started,
+  last heartbeat, expiry, edited in place every 15 minutes.
+
+The local `WorkingClaimRecord` (a `terminal-working-claim:<holder>` kv row) is
+keyed by HOLDER, never by the upstream text, and remembers the comment id. That
+id is what makes a steady-state heartbeat **one** request: the in-place comment
+edit. Whether to spend a second on the label is answered by
+`stable_label_attached`, which reads the persisted row — so a label that never
+moved costs nothing, and one a human stripped is re-attached. The predecessor
+minted a `lazybox:w:<device>:<session>:<expiry>` label per claim and spent two
+requests renaming it to its new expiry every heartbeat.
+
+Three consequences worth knowing before you touch this:
+
+**Presence is now binary, so a lapsed claim is not free to spot.** The expiry
+used to be readable from the label name on any tick. It now lives in the
+comment, so `retire_lapsed_stable_claims` (on the 15-minute maintenance tick,
+one `Cold` comment read per record whose label no local lease accounts for) is
+what retires one. Until it runs, a lapsed claim still reads as claimed — the
+conservative direction, which over-blocks a spawn rather than letting the fleet
+double-spawn. A label with **no** comment of ours behind it is left strictly
+alone: `working` is an ordinary word that a human or another tool may own, and
+`task_status` reports it as unbacked rather than resolving it into a holder.
+
+**The label is shared, so a release has to look before it detaches.** Two
+boxes meant two labels before, so "release mine, leave the racing machine's
+alone" was true by construction. `release_working_claim` now reads the standing
+comment first and hands back `SupersededBy` when it names a different live
+lease, touching nothing.
+
+**The migration order is load-bearing.** A record carrying a pre-#1922
+`legacy_label` (read through serde's old `label` field name) attaches the
+stable label *first*, then retires the per-claim one. The other order leaves
+the record momentarily unclaimed, which is exactly the double-spawn window the
+claim exists to close.
+
+`ClaimRelease::WorkspaceLockHeld` is unchanged and still required from workspace
+removal — `project_synced_claim` takes the workspace's non-reentrant lock, and
+the phantom-workspace hang after #1533/#1534 was a release parking on the lock
+its own caller held.
 
 ## Two GitHub clients: who authors, who polls
 

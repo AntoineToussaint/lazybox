@@ -13,6 +13,25 @@
 //! every terminal (old behavior); `feed_visible` parses one terminal and
 //! buffers raw bytes for the other K-1 (current behavior for hidden
 //! terminals). The divergence as K grows is the cost the fix removes.
+//!
+//! # The `anchor/*` group: the #1918 cost, isolated
+//!
+//! `TerminalVt::feed` is private, so the client's own shape is reproduced
+//! here at the binding level, which is where the whole of the difference
+//! lives — a write plus or minus one `scrollbar()` derivation:
+//!
+//! - `anchor/following_tail` — what `feed` does now while the viewport
+//!   follows the live tail: `vt_write`, nothing else.
+//! - `anchor/every_write` — what #1910 did: `vt_write` then `scrollbar()`,
+//!   on every chunk, with the viewport at the bottom.
+//! - `anchor/parked` — what `feed` still does while PARKED, which is the
+//!   case #1910's invariant actually needs: `vt_write` then `scrollbar()`
+//!   with the viewport pinned mid-scrollback, where the binding's warning
+//!   about "arbitrary pins are expensive" applies.
+//!
+//! The gap between `following_tail` and `every_write` is the regression
+//! #1918 reported; the gap between `every_write` and `parked` is why the
+//! binding's warning says "depending on where the viewport is".
 
 use std::hint::black_box;
 
@@ -51,6 +70,78 @@ fn new_parser() -> vt::Terminal<'static, 'static> {
         max_scrollback_bytes: None,
     })
     .expect("libghostty-vt init")
+}
+
+/// Deep enough scrollback that a parked pin is a long way from the live
+/// bottom — the state the binding calls expensive.
+fn parser_with_history(lines: usize) -> vt::Terminal<'static, 'static> {
+    let mut t = new_parser();
+    let mut payload = String::new();
+    for i in 0..lines {
+        payload.push_str(&format!("history line {i}\r\n"));
+    }
+    t.vt_write(payload.as_bytes());
+    t
+}
+
+/// The per-chunk anchor cost: `feed`'s shape with and without the
+/// scrollbar derivation #1910 added and #1918 removed.
+fn bench_anchor(c: &mut Criterion) {
+    let corpus = chatty_corpus();
+
+    let mut group = c.benchmark_group("anchor");
+
+    // Current behaviour on the typing path: a write and nothing else.
+    group.bench_function("following_tail", |b| {
+        b.iter_batched(
+            || parser_with_history(2_000),
+            |mut t| {
+                for chunk in &corpus {
+                    t.vt_write(black_box(chunk));
+                }
+                t
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // #1910's behaviour: the derivation on every write, viewport at the
+    // live bottom (the cheap end of the binding's warning).
+    group.bench_function("every_write", |b| {
+        b.iter_batched(
+            || parser_with_history(2_000),
+            |mut t| {
+                for chunk in &corpus {
+                    t.vt_write(black_box(chunk));
+                    black_box(t.scrollbar().ok());
+                }
+                t
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // What a PARKED viewport still pays, and must: an arbitrary pin, the
+    // case the binding's warning is actually about.
+    group.bench_function("parked", |b| {
+        b.iter_batched(
+            || {
+                let mut t = parser_with_history(2_000);
+                t.scroll_viewport(vt::terminal::ScrollViewport::Delta(-500));
+                t
+            },
+            |mut t| {
+                for chunk in &corpus {
+                    t.vt_write(black_box(chunk));
+                    black_box(t.scrollbar().ok());
+                }
+                t
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
 }
 
 fn bench_feed(c: &mut Criterion) {
@@ -95,5 +186,5 @@ fn bench_feed(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_feed);
+criterion_group!(benches, bench_feed, bench_anchor);
 criterion_main!(benches);

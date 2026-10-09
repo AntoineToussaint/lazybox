@@ -916,6 +916,46 @@ const LIMIT_TRANSCRIPT: &str = "\x1b[33m⏳ Claude usage limit reached.\x1b[0m\r
 mod tests {
     use super::*;
 
+    /// Run an async test body on a thread with a deep stack.
+    ///
+    /// The `Stage::Backed` tests drive the real daemon — spawn, dispatch,
+    /// recovery — so their poll chain is deep, and in a **debug** build each
+    /// frame is 2-5x its release size. Measured by bisecting `RUST_MIN_STACK`
+    /// against the built test binary, they sit at 1.5-1.9 MiB of libtest's
+    /// 2 MiB thread stack; Linux's fatter frames cross it where macOS still
+    /// fits, which is why the overflow was Linux-only and macOS could not
+    /// reproduce it.
+    ///
+    /// Shaving bytes does not fix this, because the requirement is chain
+    /// DEPTH and not one fat frame: the futures are small (`dispatch_command`
+    /// ~27 KiB), and `Box::pin`-ing a handler moves bytes to the heap without
+    /// shortening the chain — deleting an arm outright left the requirement
+    /// unchanged. So give the body a stack that fits it instead, which takes
+    /// this test from needing ~1.8 MiB to passing at 128 KiB of libtest
+    /// stack.
+    ///
+    /// The body's panic is re-raised on the test thread: a wrapper that
+    /// swallowed a failed assertion would be worse than a red test.
+    fn on_a_deep_stack<F, Fut>(body: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let handle = std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("current-thread runtime for the deep-stack body")
+                    .block_on(body())
+            })
+            .expect("spawn the deep-stack test thread");
+        if let Err(panic) = handle.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     #[test]
     fn fixture_seeds_multiple_owners_for_spaces() {
         let fx = DemoFixture::seed().expect("fixture builds");
@@ -977,8 +1017,12 @@ mod tests {
         assert_eq!(seen, vec![1, 2, 3], "contiguous per-terminal seqs from 1");
     }
 
-    #[tokio::test]
-    async fn backed_stage_terminal_is_durable_and_typeable() {
+    #[test]
+    fn backed_stage_terminal_is_durable_and_typeable() {
+        on_a_deep_stack(backed_stage_terminal_is_durable_and_typeable_body);
+    }
+
+    async fn backed_stage_terminal_is_durable_and_typeable_body() {
         // The whole point of Tier 2: a demo terminal spawned via the real
         // daemon path is (a) registered in the terminal registry — so a
         // recovery Snapshot includes it — and (b) input-accepting — a Write

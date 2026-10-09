@@ -381,6 +381,13 @@ fn all_commands() -> Vec<Command> {
             default_repo: Some("o/r".into()),
             client_request_id: Some("req-1".into()),
         },
+        Command::WorkCall {
+            request: lazybox_ipc::work::WorkRequest::Mine {
+                workspace: key.clone(),
+                include_done: false,
+            },
+            client_request_id: Some("req-work".into()),
+        },
         Command::SetMetered {
             session_key: key.clone(),
             enabled: true,
@@ -487,6 +494,22 @@ fn all_commands() -> Vec<Command> {
         Command::InspectWorkspaceDiff {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             target: lazybox_ipc::WorkspaceDiffTarget::Session(sample_session_id(21)),
+        },
+        Command::InspectWorkspaceDiff {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            target: lazybox_ipc::WorkspaceDiffTarget::PullRequest,
+        },
+        Command::SubmitPullRequestReview {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            head_sha: "0ff1ce0ff1ce0ff1ce0ff1ce0ff1ce0ff1ce0ff1".into(),
+            summary: "one nit".into(),
+            verdict: lazybox_ipc::ReviewVerdictDto::RequestChanges,
+            comments: vec![lazybox_ipc::ReviewCommentDto {
+                path: "src/lib.rs".into(),
+                line: 12,
+                side: lazybox_ipc::DiffSideDto::Right,
+                body: "this drops the error".into(),
+            }],
         },
         Command::KeepMergedWorkspace { session_key: key },
         Command::FetchScrollback {
@@ -670,6 +693,21 @@ fn all_commands() -> Vec<Command> {
         Command::UnarchiveWorkspace {
             key: "github-o-r-42".into(),
             client_request_id: Some("unarchive-1".into()),
+        },
+        Command::SaveTodoItems {
+            workspace_key: lazybox_core::WorkspaceKey::new("morning-plan"),
+            items: vec![lazybox_core::TodoItem {
+                id: "todo-item-1".into(),
+                parent: None,
+                text: "ship 0.1.18".into(),
+                done_at: None,
+                canceled_at: None,
+                link: Some(lazybox_core::TodoLink::Task(lazybox_core::TaskId {
+                    source: "github".into(),
+                    key: "o/r#1890".into(),
+                })),
+                auto_checked: false,
+            }],
         },
         Command::Shutdown,
     ]
@@ -1212,6 +1250,8 @@ fn all_events() -> Vec<Event> {
                 status: vec![" M src/lib.rs".into()],
                 stat: vec![" src/lib.rs | 1 +".into()],
                 truncated: false,
+                head_sha: None,
+                divergence: None,
                 files: vec![lazybox_ipc::DiffFileDto {
                     old_path: Some("src/lib.rs".into()),
                     path: "src/lib.rs".into(),
@@ -1229,6 +1269,34 @@ fn all_events() -> Vec<Event> {
                     }],
                 }],
             }),
+            error: None,
+        },
+        Event::WorkspaceDiffInspected {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            target: lazybox_ipc::WorkspaceDiffTarget::PullRequest,
+            agent_terminal_ids: vec![],
+            diff: Some(lazybox_ipc::WorkspaceDiffDto {
+                status: vec![],
+                stat: vec![" src/lib.rs | +1 -0".into()],
+                truncated: false,
+                head_sha: Some("0ff1ce0ff1ce0ff1ce0ff1ce0ff1ce0ff1ce0ff1".into()),
+                divergence: Some(lazybox_ipc::WorkspaceDiffDivergenceDto {
+                    dirty_files: Some(2),
+                    commits: lazybox_ipc::CommitComparisonDto::Counted(
+                        lazybox_ipc::CommitSpreadDto {
+                            local_only: 1,
+                            pr_only: 0,
+                        },
+                    ),
+                }),
+                files: vec![],
+            }),
+            error: None,
+        },
+        Event::PullRequestReviewSubmitted {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            comments: 3,
+            url: Some("https://github.com/o/r/pull/2#pullrequestreview-1".into()),
             error: None,
         },
         Event::CheckoutsDiscovered { checkouts: vec![] },
@@ -1591,6 +1659,33 @@ fn all_events() -> Vec<Event> {
                 absorbed: vec!["github-o-r-40".into()],
             }],
         },
+        Event::WorkReport {
+            client_request_id: Some("req-work".into()),
+            result: Ok(lazybox_ipc::work::WorkReport::Mine {
+                workspace: "github:o/r#1".into(),
+                mine: vec![lazybox_ipc::work::WorkRow {
+                    id: "1b4e28ba-2fa1-11d2-883f-0016d3cca427".into(),
+                    title: "wire the store".into(),
+                    brief: "objective · done · bounds".into(),
+                    lifecycle: "underway".into(),
+                    detail: None,
+                    owner: Some("github:o/r#1".into()),
+                    requester: Some("human".into()),
+                    plan: None,
+                    parent: None,
+                    links: vec!["ws:github:o/r#1".into(), "o/r#7".into()],
+                    result: None,
+                    events: 2,
+                    last_event: Some(lazybox_ipc::work::WorkEventView {
+                        at: "2026-10-08T18:00:00Z".into(),
+                        by: Some("human".into()),
+                        change: "pending → underway".into(),
+                    }),
+                }],
+                waiting_on_others: Vec::new(),
+                unassigned: Vec::new(),
+            }),
+        },
     ]
 }
 
@@ -1631,6 +1726,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
         Command::SetTrackMain { .. } => "SetTrackMain",
         Command::QueryTaskStatus { .. } => "QueryTaskStatus",
+        Command::WorkCall { .. } => "WorkCall",
         Command::SetMetered { .. } => "SetMetered",
         Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
         Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
@@ -1656,6 +1752,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::CleanWorktrees => "CleanWorktrees",
         Command::InspectWorktrees => "InspectWorktrees",
         Command::InspectWorkspaceDiff { .. } => "InspectWorkspaceDiff",
+        Command::SubmitPullRequestReview { .. } => "SubmitPullRequestReview",
         Command::ScanCheckouts { .. } => "ScanCheckouts",
         Command::ImportLocalCheckout { .. } => "ImportLocalCheckout",
         Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
@@ -1709,6 +1806,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SearchAgentOutput { .. } => "SearchAgentOutput",
         Command::ListArchivedWorkspaces => "ListArchivedWorkspaces",
         Command::UnarchiveWorkspace { .. } => "UnarchiveWorkspace",
+        Command::SaveTodoItems { .. } => "SaveTodoItems",
     }
 }
 
@@ -1776,6 +1874,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::RemovalRisksInspected { .. } => "RemovalRisksInspected",
         Event::WorktreesInspected { .. } => "WorktreesInspected",
         Event::WorkspaceDiffInspected { .. } => "WorkspaceDiffInspected",
+        Event::PullRequestReviewSubmitted { .. } => "PullRequestReviewSubmitted",
         Event::CheckoutsDiscovered { .. } => "CheckoutsDiscovered",
         Event::OrphanedWorktreeDeleted { .. } => "OrphanedWorktreeDeleted",
         Event::AgentRunStarted { .. } => "AgentRunStarted",
@@ -1835,6 +1934,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentOutputMatches { .. } => "AgentOutputMatches",
         Event::WorkspaceArtifacts { .. } => "WorkspaceArtifacts",
         Event::ArchivedWorkspaces { .. } => "ArchivedWorkspaces",
+        Event::WorkReport { .. } => "WorkReport",
     }
 }
 
@@ -1846,12 +1946,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        110,
+        113,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        116,
+        118,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

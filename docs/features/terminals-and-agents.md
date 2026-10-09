@@ -160,6 +160,31 @@ only an explicit "not logged in" as a refusal, so a status command that cannot
 answer (an old build, a wrapper script) never strands a conversation you did in
 fact sign back into.
 
+#### A dead login is not a usage limit
+
+The two look alike — both leave an agent stopped mid-work — but only one of them
+can be fixed by typing `continue`. A rate-limited agent acts on the keystroke and
+reports back; a logged-out one can do nothing until it is signed in again. So
+`Shift-K` (resume stopped agents) **holds back** any pane whose login has died,
+offers it sign-in instead, and counts only the agents it actually resumed in its
+notice. `a R` (restart stopped agents) takes those panes too, because a restart
+is what picks up a credential a running process will never re-read.
+
+This matters most on the path that produces both at once: you hit a usage limit,
+log out, and log back in on a different subscription. The agents are now *logged
+out*, while their limit reading is sticky — so they sit in the resume target set
+holding a credential that died underneath them.
+
+Detection of that state reads Claude's signed-out banner as a rendered cell —
+a logged-out state opening a line, a login directive (`/login`, `claude auth
+login`) after it — rather than as whole literal sentences. Before #1847 it was
+six literals that each required a period (`not logged in. run /login`) where
+Claude ships `Not logged in · Please run /login`, so every one of them missed a
+real logout by the width of a separator and the agent was reported as having
+finished its turn. The state marker is accepted only at a line start and never
+inside a fenced block, which is what keeps an agent *quoting* the banner — a
+routine event in this repository — from tripping it.
+
 #### Migrating off the per-workspace Codex homes
 
 Builds between #1376 and #1656 gave each workspace its own Codex home under
@@ -581,7 +606,7 @@ What it exists to keep apart — the facts the manual hunt conflated:
 | Fact | Read from | What it does *not* mean |
 |---|---|---|
 | tracker lifecycle | the cached provider `Task` (stamped with its poll time) | — |
-| working-claim | the `lazybox:w:` label's own expiry, plus whether *this* box holds it | an active claim is **not** a running process |
+| working-claim | the claim comment's own expiry (the `working` label is presence only), plus whether *this* box holds it | an active claim is **not** a running process |
 | session | the persisted `SessionRunState` | a retained worktree is **not** an agent turn |
 | agent turn | the live `AgentState` of a running PTY | a turn ending is **not** task completion |
 | review / CI | the PR's own check + review state | — |
@@ -789,6 +814,8 @@ leaving, splitting, scrolling, and copying.
 - `Tab` cycles focus only before you've typed in the current visit; after the first keystroke it routes to the PTY (autocomplete).
 - `Ctrl-c` is forwarded as SIGINT.
 - `]]` then `|`/`\` (split vertical), `-` (split horizontal), arrows (move tile focus / cycle tabs), `x` (close the focused terminal). `Ctrl-w` is not a lazybox prefix — it reaches the inner program (readline word-erase).
+- `]]Shift-arrow` moves the divider between the focused tile and its neighbour that way, by `ui.split_step_percent` — the keyboard half of dragging that divider with the mouse. The divider follows the arrow from either tile, and the position is saved with that workspace's layout. A bare `Shift-arrow` inside a terminal stays the shell's.
+- A **log window takes no typed input.** A `lazybox log` runner is `tail -F`, which never reads stdin, so lazybox refuses keystrokes there rather than writing to a reader that does not exist; typing leaves a footer notice saying so. Scrollback, wheel scrolling, drag-select and copy are unaffected.
 - By default a second terminal in a workspace opens side-by-side (a split tile). Set `ui.terminal_new_layout: tabs` to have ordinary `s`/agent spawns stack behind the tab strip instead — the existing tile keeps its full size. Explicit `]]|` / `]]-` splits are unaffected.
 - `]]t` toggles that default live (split ⇄ tabs), persisting it to `ui.terminal_new_layout` so it survives restart; the `]]` popup's `t` row shows the current setting. The change affects the *next* spawn, not terminals already open.
 - Mouse wheel always scrolls lazybox's local history (3 rows/notch), including

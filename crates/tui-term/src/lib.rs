@@ -4,6 +4,7 @@
 
 mod ghostty_widget;
 mod session;
+pub mod vt_budget;
 
 pub use ghostty_widget::GhosttyTerminal;
 pub use portable_pty::PtySize;

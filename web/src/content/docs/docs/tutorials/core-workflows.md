@@ -179,9 +179,11 @@ sessions**. Keep it controlled by navigating outcomes instead of terminals:
 4. From inside a terminal, use `` ]]` `` for the same cross-repository picker.
 5. Multi-select rows with `v`, then use `Shift-B` to broadcast one snippet or
    instruction across the selected live sessions.
-6. Open the **Hopper** with `Shift-H` (or `]]H` from inside a terminal) — a
-   persistent scratch list where each line is its own workspace, so a stream of
-   "do this next" items each become a place you can jump to and run an agent.
+6. Open your **TODO** list with `Shift-H` (or `]]H` from inside a terminal) — a
+   persistent list where each line is its own workspace, so a stream of "do this
+   next" items each become a place you can jump to and run an agent. `l` on a
+   line opens its checklist: nested items with progress, each able to link to an
+   issue, PR or URL and check itself off when that lands.
 7. In focus mode, `]]v` cycles the layout Single → SplitV → SplitH → 2×2 Grid
    over your starred workspaces, so several live agents stay on screen at once;
    the choice persists as `ui.focus_layout`.

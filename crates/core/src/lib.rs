@@ -33,6 +33,7 @@ pub mod task_record;
 pub mod task_ref;
 pub mod time;
 pub mod work;
+mod working_claim;
 mod workspace;
 
 pub use agent::{AgentConfig, AgentModels, CapabilityAliases, ModelChoice, ModelTier};
@@ -95,12 +96,13 @@ pub use task_record::{
     RECORD_LIST_BODY_PREVIEW_BYTES, RecordComment, RecordKind, TASK_FILE_RELATIVE_PATH, TaskRecord,
     WORKSPACE_RECORD_FILE_SCHEMA, WorkspaceRecordFile, sub_issue_ids,
 };
+pub use working_claim::{WORKING_CLAIM_COMMENT_MARKER, WorkingClaimNote};
 pub use workspace::{
     CleanupPrompt, FloatingWorkspaceKind, HopperMeta, MAX_ACTIVITY_ITEMS, ROLE_LABEL_PREFIX, Role,
     SENT_SNIPPETS_MAX, Session as WorkspaceSession, SessionId, SessionKind, SessionLayout,
-    SessionRunState, SnippetDeliveryLog, SnoozeWake, TileDirection, TileTree, WOKE_WINDOW,
-    WORKING_CLAIM_HEARTBEAT_SECS, WORKING_CLAIM_LABEL_PREFIX, WORKING_CLAIM_TTL_SECS,
-    WORKING_LABEL_NAME, WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceDecodeError, WorkspaceKey,
-    project_key_for_task, snooze_wake_due, workspace_key_for, workspace_key_for_id,
-    workspace_project_key,
+    SessionRunState, SnippetDeliveryLog, SnoozeWake, TILE_RATIO_MAX, TILE_RATIO_MIN, TileAxis,
+    TileDirection, TileTree, TodoItem, TodoLink, WOKE_WINDOW, WORKING_CLAIM_HEARTBEAT_SECS,
+    WORKING_CLAIM_LABEL_PREFIX, WORKING_CLAIM_TTL_SECS, WORKING_LABEL_NAME,
+    WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceDecodeError, WorkspaceKey, project_key_for_task,
+    snooze_wake_due, workspace_key_for, workspace_key_for_id, workspace_project_key,
 };

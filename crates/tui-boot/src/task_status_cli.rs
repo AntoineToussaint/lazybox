@@ -268,24 +268,52 @@ fn render_sessions(out: &mut String, workspace: &WorkspaceStatus) {
 fn render_claim(out: &mut String, claim: &ClaimFacts) {
     for held in &claim.active {
         out.push_str(&format!(
-            "  claim      active until {} — {}\n",
+            "  claim      active until {} — {}{}\n",
             held.expires_at.to_rfc3339(),
             if held.verified_locally {
                 "held by this box"
             } else {
                 "held elsewhere; not proof of a running worker"
             },
+            claim_holder_detail(held),
         ));
     }
     for held in &claim.expired {
         out.push_str(&format!(
-            "  claim      EXPIRED {} — lapsed, not a running worker\n",
+            "  claim      EXPIRED {} — lapsed, not a running worker{}\n",
             held.expires_at.to_rfc3339(),
+            claim_holder_detail(held),
         ));
     }
-    if claim.unqualified {
-        out.push_str("  claim      bare `working` label — no holder, no expiry\n");
+    if claim.unbacked_label {
+        out.push_str(
+            "  claim      `working` label with no lazybox claim comment behind it — \
+             no holder, no expiry\n",
+        );
     }
+}
+
+/// What the holder said about itself in its claim comment, when it said
+/// anything. Appended rather than printed on its own line so a legacy label
+/// claim — which carries none of this — renders exactly as it did before.
+fn claim_holder_detail(held: &lazybox_ipc::task_status::ClaimHolder) -> String {
+    let mut parts = Vec::new();
+    match (held.agent.as_deref(), held.model.as_deref()) {
+        (Some(agent), Some(model)) => parts.push(format!("{agent} ({model})")),
+        (Some(agent), None) => parts.push(agent.to_string()),
+        (None, Some(model)) => parts.push(model.to_string()),
+        (None, None) => {}
+    }
+    if let Some(started) = held.started_at {
+        parts.push(format!("started {}", started.to_rfc3339()));
+    }
+    if let Some(workspace) = &held.workspace {
+        parts.push(format!("in {workspace}"));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!(" [{}]", parts.join(", "))
 }
 
 #[cfg(test)]
@@ -360,18 +388,26 @@ mod tests {
         assert!(text.contains("turn Done"), "{text}");
     }
 
+    fn holder(expires_at: chrono::DateTime<chrono::Utc>) -> lazybox_ipc::task_status::ClaimHolder {
+        lazybox_ipc::task_status::ClaimHolder {
+            device: "0123456789abcdef0123".into(),
+            session: "0123456789".into(),
+            expires_at,
+            verified_locally: false,
+            agent: None,
+            model: None,
+            started_at: None,
+            workspace: None,
+        }
+    }
+
     #[test]
     fn a_remote_claim_is_rendered_as_unproven() {
         let mut workspace = workspace();
         workspace
             .claim
             .active
-            .push(lazybox_ipc::task_status::ClaimHolder {
-                device: "0123456789abcdef0123".into(),
-                session: "0123456789".into(),
-                expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
-                verified_locally: false,
-            });
+            .push(holder(chrono::Utc::now() + chrono::Duration::minutes(30)));
         let text = render(&report(WorkState::ClaimedElsewhere, vec![workspace]));
         assert!(
             text.contains("not proof of a running worker"),
@@ -385,14 +421,56 @@ mod tests {
         workspace
             .claim
             .expired
-            .push(lazybox_ipc::task_status::ClaimHolder {
-                device: "0123456789abcdef0123".into(),
-                session: "0123456789".into(),
-                expires_at: chrono::Utc::now() - chrono::Duration::hours(2),
-                verified_locally: false,
-            });
+            .push(holder(chrono::Utc::now() - chrono::Duration::hours(2)));
         let text = render(&report(WorkState::AgentExited, vec![workspace]));
         assert!(text.contains("EXPIRED"), "{text}");
+    }
+
+    /// What the claim comment adds over a bare label: the agent, the model,
+    /// when the work started, and whose workspace it is in. A legacy label
+    /// claim carries none of it and must still render as it always did.
+    #[test]
+    fn a_claim_comments_holder_detail_is_rendered_and_is_optional() {
+        let started = chrono::Utc::now() - chrono::Duration::hours(4);
+        let mut rich = holder(chrono::Utc::now() + chrono::Duration::minutes(30));
+        rich.agent = Some("claude".into());
+        rich.model = Some("Opus 5".into());
+        rich.started_at = Some(started);
+        rich.workspace = Some("github-o-r-151".into());
+        let mut detailed = workspace();
+        detailed.claim.active.push(rich);
+        let text = render(&report(WorkState::ClaimedElsewhere, vec![detailed]));
+        assert!(text.contains("claude (Opus 5)"), "{text}");
+        assert!(
+            text.contains(&format!("started {}", started.to_rfc3339())),
+            "{text}"
+        );
+        assert!(text.contains("in github-o-r-151"), "{text}");
+
+        let mut bare = workspace();
+        bare.claim
+            .active
+            .push(holder(chrono::Utc::now() + chrono::Duration::minutes(30)));
+        let text = render(&report(WorkState::ClaimedElsewhere, vec![bare]));
+        assert!(
+            !text.contains('['),
+            "a holder that said nothing about itself adds no empty bracket: {text}"
+        );
+    }
+
+    /// A `working` label nothing of ours backs must say exactly that. Reading
+    /// it as a holder would block a spawn on a label a human may own; reading
+    /// it as free would double-spawn.
+    #[test]
+    fn an_unbacked_working_label_is_named_as_unbacked() {
+        let mut workspace = workspace();
+        workspace.claim.unbacked_label = true;
+        let text = render(&report(WorkState::Unknown, vec![workspace]));
+        assert!(
+            text.contains("no lazybox claim comment behind it"),
+            "{text}"
+        );
+        assert!(text.contains("no holder, no expiry"), "{text}");
     }
 
     /// A query for the issue must show the PR that took over its row.

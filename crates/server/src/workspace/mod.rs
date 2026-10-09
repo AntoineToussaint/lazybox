@@ -215,6 +215,176 @@ mod hopper_tests {
         .expect("decode hopper workspace")
     }
 
+    fn item(
+        id: &str,
+        parent: Option<&str>,
+        link: Option<lazybox_core::TodoLink>,
+    ) -> lazybox_core::TodoItem {
+        lazybox_core::TodoItem {
+            id: id.into(),
+            parent: parent.map(Into::into),
+            text: format!("item {id}"),
+            done_at: None,
+            canceled_at: None,
+            link,
+            auto_checked: false,
+        }
+    }
+
+    fn one_todo(config: &ServerConfig, name: &str) -> WorkspaceKey {
+        save_hopper(
+            config,
+            vec![HopperEntryDraft {
+                workspace_key: None,
+                name: name.into(),
+            }],
+        )
+        .expect("create todo")
+        .remove(0)
+    }
+
+    /// A whole new subtree — parent and child, both new — saves in ONE call,
+    /// keeping its order and nesting, and the TODO gains no workspace per item.
+    /// Server-side minting could not express this: the child had no id to name
+    /// as its `parent` at send time.
+    #[tokio::test]
+    async fn save_todo_items_persists_a_new_subtree_in_one_call() {
+        let config = ServerConfig::in_memory();
+        let todo = one_todo(&config, "Ship 0.1.18");
+        let parent = lazybox_core::TodoItem::new_id();
+        save_todo_items(
+            &config,
+            &todo,
+            vec![
+                item(&parent, None, None),
+                item("child", Some(&parent), None),
+            ],
+        )
+        .await
+        .expect("saved");
+        let saved = load(&config, &todo).todo_items;
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].id, parent, "the client's id is kept verbatim");
+        assert_eq!(
+            saved[1].parent.as_deref(),
+            Some(parent.as_str()),
+            "a new child nests under its new parent"
+        );
+        assert_eq!(
+            config.store.list_workspaces().unwrap().len(),
+            1,
+            "items are not workspaces"
+        );
+    }
+
+    /// An id-less or duplicated item is refused, and the refusal writes
+    /// nothing: the map the parent walk uses is keyed by id, so a duplicate
+    /// would persist two rows sharing one id.
+    #[tokio::test]
+    async fn save_todo_items_refuses_missing_and_duplicate_ids() {
+        let config = ServerConfig::in_memory();
+        let todo = one_todo(&config, "Plan");
+        assert_eq!(
+            save_todo_items(&config, &todo, vec![item("", None, None)]).await,
+            Err(SaveTodoItemsError::MissingId),
+        );
+        assert_eq!(
+            save_todo_items(
+                &config,
+                &todo,
+                vec![item("dup", None, None), item("dup", None, None)]
+            )
+            .await,
+            Err(SaveTodoItemsError::DuplicateId("dup".into())),
+        );
+        assert!(
+            load(&config, &todo).todo_items.is_empty(),
+            "a refused save writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_todo_items_rejects_bad_trees_and_non_todo_rows() {
+        let config = ServerConfig::in_memory();
+        let todo = one_todo(&config, "Plan");
+        assert!(matches!(
+            save_todo_items(&config, &todo, vec![item("a", Some("ghost"), None)]).await,
+            Err(SaveTodoItemsError::UnknownParent { .. })
+        ));
+        assert!(matches!(
+            save_todo_items(
+                &config,
+                &todo,
+                vec![item("a", Some("b"), None), item("b", Some("a"), None)]
+            )
+            .await,
+            Err(SaveTodoItemsError::Cycle(_))
+        ));
+        let plain = WorkspaceKey::new("not-a-todo");
+        let ws = Workspace::empty(plain.clone(), "main", Utc::now());
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: plain.as_str().into(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+        assert_eq!(
+            save_todo_items(&config, &plain, vec![item("a", None, None)]).await,
+            Err(SaveTodoItemsError::NotTodo("not-a-todo".into()))
+        );
+    }
+
+    /// A task landing ticks off the open items linked to it in every TODO,
+    /// and nothing else.
+    #[tokio::test]
+    async fn a_landed_task_checks_off_linked_items_across_todos() {
+        let config = ServerConfig::in_memory();
+        let merged = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "o/r#1890".into(),
+        };
+        let other = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "o/r#7".into(),
+        };
+        let first = one_todo(&config, "Release");
+        let second = one_todo(&config, "Coordination");
+        save_todo_items(
+            &config,
+            &first,
+            vec![
+                item(
+                    "a",
+                    None,
+                    Some(lazybox_core::TodoLink::Task(merged.clone())),
+                ),
+                item("b", None, Some(lazybox_core::TodoLink::Task(other))),
+            ],
+        )
+        .await
+        .unwrap();
+        save_todo_items(
+            &config,
+            &second,
+            vec![item(
+                "c",
+                None,
+                Some(lazybox_core::TodoLink::Task(merged.clone())),
+            )],
+        )
+        .await
+        .unwrap();
+
+        check_todo_items_linked_to(&config, &merged).await;
+
+        let first_items = load(&config, &first).todo_items;
+        assert!(first_items[0].is_done() && first_items[0].auto_checked);
+        assert!(!first_items[1].is_done());
+        assert!(load(&config, &second).todo_items[0].is_done());
+    }
+
     #[test]
     fn save_hopper_creates_then_renames_and_reorders_stable_workspaces() {
         let config = ServerConfig::in_memory();
@@ -771,6 +941,171 @@ pub async fn set_hopper_canceled(config: &ServerConfig, key: &WorkspaceKey, canc
     }
     workspace.hopper = Some(hopper);
     commit_upsert_offloaded_reported(config, key, workspace, "set hopper cancellation").await;
+}
+
+/// Why a TODO checklist was not saved.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SaveTodoItemsError {
+    #[error("no workspace {0}")]
+    Missing(String),
+    #[error("{0} is not a TODO")]
+    NotTodo(String),
+    #[error("item {item} nests under {parent}, which is not in the list")]
+    UnknownParent { item: String, parent: String },
+    #[error("item {0} nests under itself")]
+    Cycle(String),
+    #[error("an item arrived with no id — clients mint ids with TodoItem::new_id")]
+    MissingId,
+    #[error("item id {0} appears twice")]
+    DuplicateId(String),
+}
+
+/// Replace a TODO's checklist with `items`, in their order. The client
+/// sends the whole list — one write, one `WorkspaceUpserted`, no partial
+/// state. Every item carries an id its client minted
+/// ([`lazybox_core::TodoItem::new_id`]), unique within the list, and every
+/// `parent` must name an item in the list, without cycles.
+///
+/// Ids are the client's because the daemon cannot mint them without breaking
+/// nesting: an item whose id the daemon invents cannot be named as a `parent`
+/// by a sibling in the SAME request, since the client had no id to write
+/// there. Minting server-side made a new subtree unexpressible in one save.
+pub async fn save_todo_items(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    items: Vec<lazybox_core::TodoItem>,
+) -> Result<(), SaveTodoItemsError> {
+    validate_todo_tree(&items)?;
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return Err(SaveTodoItemsError::Missing(key.as_str().into()));
+    };
+    if workspace.hopper.is_none() {
+        return Err(SaveTodoItemsError::NotTodo(key.as_str().into()));
+    }
+    workspace.todo_items = items;
+    commit_upsert_offloaded_reported(config, key, workspace, "save todo items").await;
+    Ok(())
+}
+
+/// Every parent is in the list, and following parents never loops.
+fn validate_todo_tree(items: &[lazybox_core::TodoItem]) -> Result<(), SaveTodoItemsError> {
+    // Ids first, because the `parents` map below is KEYED by id: two items
+    // sharing one collapse into a single entry, the walk still passes, and both
+    // rows persist with the same id — whereupon a `parent` naming it resolves to
+    // whichever the map kept, and every id-keyed check, edit and delete hits the
+    // wrong row. `TodoItem::id` promises it is minted once and never reused, and
+    // this is the only structural guard on a client-supplied whole-list replace.
+    let mut ids = std::collections::HashSet::with_capacity(items.len());
+    for item in items {
+        if item.id.is_empty() {
+            return Err(SaveTodoItemsError::MissingId);
+        }
+        if !ids.insert(item.id.as_str()) {
+            return Err(SaveTodoItemsError::DuplicateId(item.id.clone()));
+        }
+    }
+    let parents: std::collections::HashMap<&str, Option<&str>> = items
+        .iter()
+        .map(|i| (i.id.as_str(), i.parent.as_deref()))
+        .collect();
+    for item in items {
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = item.parent.as_deref();
+        while let Some(parent) = cursor {
+            if !seen.insert(parent) || parent == item.id {
+                return Err(SaveTodoItemsError::Cycle(item.id.clone()));
+            }
+            let Some(next) = parents.get(parent) else {
+                return Err(SaveTodoItemsError::UnknownParent {
+                    item: item.id.clone(),
+                    parent: parent.into(),
+                });
+            };
+            cursor = *next;
+        }
+    }
+    Ok(())
+}
+
+/// Tick off every open TODO item linked to `task`, which just merged (a
+/// PR) or closed (an issue). Scans the TODO rows once, then re-reads and
+/// commits each one that has something to check under its own lock, so a
+/// concurrent edit of the checklist is never overwritten with a stale copy.
+pub async fn check_todo_items_linked_to(config: &ServerConfig, task: &lazybox_core::TaskId) {
+    let store = config.store.clone();
+    let wanted = task.clone();
+    let keys = tokio::task::spawn_blocking(move || {
+        store
+            .list_workspaces()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|record| {
+                let ws = Workspace::decode_persisted(record.workspace_json.as_deref()?).ok()?;
+                let open_link = ws.todo_items.iter().any(|item| {
+                    !item.is_done()
+                        && !item.is_canceled()
+                        && matches!(&item.link, Some(lazybox_core::TodoLink::Task(id)) if *id == wanted)
+                });
+                open_link.then_some(ws.key)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    for key in keys {
+        let _ws_guard = config.lock_workspace(key.as_str()).await;
+        let Some(mut workspace) = load_workspace_offloaded(config, &key).await else {
+            continue;
+        };
+        if workspace.check_items_linked_to(task, Utc::now()) > 0 {
+            tracing::info!(
+                workspace_key = %key.as_str(),
+                task = %task.key,
+                "todo: checked off the items linked to a task that landed"
+            );
+            commit_upsert_offloaded_reported(config, &key, workspace, "auto-check todo items")
+                .await;
+        }
+    }
+    check_work_linked_to(config, task).await;
+}
+
+/// The same auto-check over the task/plan store's rows (#1908): a unit of work
+/// whose tracker link just landed is completed, with `lazybox` as the party
+/// that moved it.
+///
+/// It rides the one call site above rather than a second seam of its own, so
+/// the two checklists can never disagree about whether a task landed —
+/// `Workspace::todo_items` is the per-workspace checklist #1898 shipped and
+/// these are the plan rows phases 3–5 subscribe to, and until the fold that
+/// merges them both must tick on the same event.
+async fn check_work_linked_to(config: &ServerConfig, task: &lazybox_core::TaskId) {
+    let store = config.store.clone();
+    let link = lazybox_core::work::Link::Tracker(task.clone());
+    let now = Utc::now();
+    let moved = tokio::task::spawn_blocking(move || {
+        crate::work_store::complete_linked_to(
+            &*store,
+            &link,
+            lazybox_core::work::Party::Lazybox,
+            now,
+        )
+    })
+    .await;
+    match moved {
+        Ok(Ok(moved)) if !moved.is_empty() => tracing::info!(
+            task = %task.key,
+            moved = moved.len(),
+            "work: completed the units of work linked to a task that landed"
+        ),
+        // Nothing linked, or a store that cannot batch. Neither is worth a
+        // warning on every landed task; the rows stay open and the next
+        // observation retries, exactly like the checklist above.
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => tracing::debug!(task = %task.key, %error, "work: auto-check skipped"),
+        Err(error) => tracing::warn!(task = %task.key, %error, "work: auto-check panicked"),
+    }
 }
 
 /// Record a snippet delivery against a workspace (issue #463): the

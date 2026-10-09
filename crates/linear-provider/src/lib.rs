@@ -551,6 +551,19 @@ impl LinearClient {
     }
 }
 
+/// Narrow a requested assignee set to what a Linear issue can actually
+/// hold: exactly one, the LAST login picked.
+///
+/// The picker lists the existing assignee first, so a user who ticks a
+/// new name on top of it means "reassign to the one I picked", not "keep
+/// both" — and Linear has no second slot to keep them in anyway. The
+/// daemon records intent through this too, so what a row shows while the
+/// write is in flight is what the write will actually do rather than an
+/// impossible two-assignee state that only self-corrects on the next poll.
+pub fn narrow_assignees(logins: &[String]) -> Vec<String> {
+    logins.last().cloned().into_iter().collect()
+}
+
 impl TaskProvider for LinearClient {
     fn name(&self) -> &str {
         "linear"
@@ -601,19 +614,16 @@ impl TaskProvider for LinearClient {
     }
 
     /// Replace the Linear issue's assignee. `logins` are Linear
-    /// display names (what the picker offers). Linear issues hold a
-    /// single assignee, so the LAST login wins — the picker lists the
-    /// existing assignee first, so a user who *adds* a name (leaving
-    /// the current one checked) still reassigns to the one they picked
-    /// rather than silently keeping the old one. An empty set clears
-    /// the assignee.
+    /// display names (what the picker offers), narrowed by
+    /// [`narrow_assignees`] to the one Linear can hold. An empty set
+    /// clears the assignee.
     async fn set_assignees(
         &self,
         workspace: &lazybox_core::Workspace,
         logins: &[String],
     ) -> Result<(), ProviderError> {
         let issue_id = self.issue_id_for(workspace)?;
-        let assignee_id = match logins.last() {
+        let assignee_id = match narrow_assignees(logins).first() {
             Some(login) => Some(
                 self.resolve_user_id(login)
                     .await
@@ -703,6 +713,19 @@ mod tests {
             ProviderError::from(err),
             ProviderError::Retryable { .. }
         ));
+    }
+
+    /// Linear holds one assignee; the narrowing is what keeps recorded
+    /// intent and the actual write in step.
+    #[test]
+    fn narrow_assignees_keeps_only_the_last_login() {
+        let picked = ["Alice".to_string(), "Bob".to_string()];
+        assert_eq!(narrow_assignees(&picked), vec!["Bob".to_string()]);
+        assert!(narrow_assignees(&[]).is_empty(), "an empty set clears");
+        assert_eq!(
+            narrow_assignees(&["Solo".to_string()]),
+            vec!["Solo".to_string()]
+        );
     }
 
     #[test]

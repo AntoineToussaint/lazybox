@@ -1,40 +1,37 @@
-//! Optimistic mutations + rollback (#476).
+//! Optimistic workspace removal + rollback (#476).
 //!
-//! Every mutating action should feel instant: apply the change to local
-//! state on the keystroke, let the daemon round-trip run in the
-//! background, and reconcile — or roll back — when the result arrives.
-//! This module is the shared machinery each action funnels through so
-//! none of them hand-rolls apply → send → reconcile / rollback.
+//! Archiving or deleting a row should feel instant: take it out of the
+//! sidebar on the keystroke, let the daemon round-trip run in the
+//! background, and re-insert it if the daemon refuses.
 //!
-//! An [`OptimisticMutation`] captures enough to do both halves:
-//! - **reconcile** on the daemon's success echo (`WorkspaceUpserted` /
-//!   `WorkspaceRemoved` / `ProjectRemoved` naming the key) — drop the
-//!   entry, the daemon's copy is now authoritative;
-//! - **roll back** on the matching failure `ProviderError` — restore the
-//!   prior rows so a rejected mutation never leaves a lie on screen.
+//! This is **local lifecycle only**. Provider field edits (reviewers,
+//! assignees, labels, workflow state) used to live here too, correlated
+//! by the daemon's `emit_err` source string. They no longer do: the
+//! daemon owns in-flight provider intent in `lazybox_core::ProviderOps`
+//! and broadcasts the row with the user's intent already laid over the
+//! last observation (#1736). Two owners of the same fields is exactly
+//! what that state machine exists to remove — a client rollback keyed on
+//! a source string could not tell a failure belonging to the edit on
+//! screen from one belonging to an edit the user had already replaced.
 //!
-//! Correlation rides existing events (no new IPC variant): chip edits
-//! match the daemon's `emit_err` source (`"reviewers"` / `"assignees"` /
-//! `"labels"`), and removals match a delete-failure `"store"` (archive /
-//! db) or `"terminal"` (a backing agent that couldn't be stopped, so the
-//! daemon preserves the workspace) error whose message names the removed
-//! key — the daemon embeds `workspace {key}` / `project {key}` in each.
+//! Correlation rides existing events (no new IPC variant): a removal
+//! matches a delete-failure `"store"` (archive / db) or `"terminal"` (a
+//! backing agent that couldn't be stopped, so the daemon preserves the
+//! workspace) error whose message names the removed key — the daemon
+//! embeds `workspace {key}` / `project {key}` in each.
 
 use super::Model;
 use tuirealm::terminal::TerminalAdapter;
 
-/// A locally-applied optimistic mutation awaiting the daemon's echo.
+/// A locally-applied optimistic removal awaiting the daemon's echo.
 pub(super) struct OptimisticMutation {
-    /// The `emit_err` source that reverts this entry: `"reviewers"` /
-    /// `"assignees"` / `"labels"` for chip edits, `"store"` for row /
-    /// project removals.
+    /// The `emit_err` source that reverts this entry.
     source: &'static str,
     /// The workspace (or project) key. Reconciled against the success
-    /// echo and — for removals — matched against the failure message,
-    /// which names the key.
+    /// echo and matched against the failure message, which names the key.
     key: String,
-    /// Prior rows to restore on rollback: the edited workspace (chip
-    /// edits) or the removed workspace(s) (removals / project cascade).
+    /// Prior rows to restore on rollback — the removed workspace, or a
+    /// project's whole cascade.
     workspaces: Vec<lazybox_core::Workspace>,
     /// Prior project to restore on rollback — set only for a project
     /// removal, whose header vanished alongside its child workspaces.
@@ -86,68 +83,12 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
-    /// Apply an optimistic chip edit to a workspace's task and stash the
-    /// prior workspace for rollback. `edit` mutates a clone of the live
-    /// workspace (typically its PR's / issue's reviewer / assignee /
-    /// label set); the prior copy reverts a rejected round-trip.
-    /// Reconciled by the next `WorkspaceUpserted`.
-    pub(super) fn optimistic_chip_edit(
-        &mut self,
-        workspace_key: &lazybox_core::WorkspaceKey,
-        source: &'static str,
-        edit: impl FnOnce(&mut lazybox_core::Workspace),
-    ) {
-        let session_key: lazybox_core::SessionKey = workspace_key.into();
-        let Some(prior) = self.sidebar.workspace_by_key(&session_key).cloned() else {
-            return;
-        };
-        let mut next = prior.clone();
-        edit(&mut next);
-        self.sidebar.restore_workspace(next);
-        self.pending_mutations.push(OptimisticMutation {
-            source,
-            key: workspace_key.as_str().to_string(),
-            workspaces: vec![prior],
-            project: None,
-        });
-        self.redraw = true;
-    }
-
     /// Drop any optimistic mutation the daemon has now reconciled — the
     /// success echo (`WorkspaceUpserted` / `WorkspaceRemoved` /
     /// `ProjectRemoved`) for `key` means the daemon's copy is
     /// authoritative, so the rollback stash is no longer needed.
     pub(super) fn reconcile_optimistic(&mut self, key: &str) {
         self.pending_mutations.retain(|m| m.key != key);
-    }
-
-    /// Reconcile only the optimistic *edits* for `key`.
-    ///
-    /// `WorkspaceUpserted` is the success echo for a chip edit, never for
-    /// a removal — a removal's echo is `WorkspaceRemoved`. A poll reply
-    /// still in flight when the user archived the row would otherwise
-    /// discard the removal's rollback stash, so a delete the daemon then
-    /// refuses (the worktree safety gate preserving uncommitted work)
-    /// would have nothing left to restore and would pass silently.
-    pub(super) fn reconcile_optimistic_edit(&mut self, key: &str) {
-        self.pending_mutations
-            .retain(|m| m.key != key || m.source == "store");
-    }
-
-    /// Roll back the oldest optimistic chip edit for `source` when its
-    /// round-trip was rejected (`ProviderError` with that source).
-    /// Returns true when one was reverted so the caller can flash.
-    pub(super) fn rollback_optimistic_chip(&mut self, source: &str) -> bool {
-        let Some(pos) = self
-            .pending_mutations
-            .iter()
-            .position(|m| m.source == source)
-        else {
-            return false;
-        };
-        let mutation = self.pending_mutations.remove(pos);
-        self.apply_rollback(mutation);
-        true
     }
 
     /// Roll back an optimistic removal whose delete failed. The daemon's

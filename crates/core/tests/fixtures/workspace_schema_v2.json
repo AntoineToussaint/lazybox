@@ -1,5 +1,5 @@
 {
-  "schema": 15,
+  "schema": 16,
   "key": "github-acme-widget-7",
   "project_key": "github-acme-widget",
   "local": true,
@@ -412,6 +412,11 @@
       "state_label": null
     }
   ],
+  "provider_ops": {
+    "next_id": 0,
+    "generations": {},
+    "pending": []
+  },
   "activity": [
     {
       "author": "ci",

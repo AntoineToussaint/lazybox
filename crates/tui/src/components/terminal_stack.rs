@@ -1189,6 +1189,29 @@ impl UsageBadge {
     }
 }
 
+/// What [`TerminalStack::close_terminal`] did with a close request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseOutcome {
+    /// The slot was already exited, so it was removed locally with no command.
+    Removed,
+    /// `Close` was sent; the row disappears when `TerminalExited` arrives.
+    Requested,
+    /// A `Close` was already outstanding for this terminal, and was re-sent.
+    Retried,
+    /// No such terminal — nothing to close.
+    Unknown,
+}
+
+/// Read-only terminal metadata for compact client-side session lists.
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalSummary {
+    pub id: TerminalId,
+    pub session_key: SessionKey,
+    pub kind: TerminalKind,
+    pub state: lazybox_ipc::AgentState,
+    pub exited: bool,
+}
+
 struct TerminalSlot {
     session_key: SessionKey,
     kind: TerminalKind,
@@ -2728,6 +2751,22 @@ impl TerminalStack {
         self.active_tab_idx
     }
 
+    pub(crate) fn terminal_summaries(&self) -> Vec<TerminalSummary> {
+        let mut rows: Vec<_> = self
+            .terminals
+            .iter()
+            .map(|(id, slot)| TerminalSummary {
+                id: *id,
+                session_key: slot.session_key.clone(),
+                kind: slot.kind.clone(),
+                state: slot.agent_state,
+                exited: slot.exited.is_some(),
+            })
+            .collect();
+        rows.sort_by_key(|row| row.id.0);
+        rows
+    }
+
     pub fn terminal_count(&self) -> usize {
         self.terminals.len()
     }
@@ -3472,6 +3511,123 @@ impl TerminalStack {
         ))
     }
 
+    /// Screen-row budget for one clipboard snapshot.
+    ///
+    /// A pane retains up to `terminal.scrollback_lines` rows (50_000 by
+    /// default — see [`client_scrollback_lines`]), and both halves of the
+    /// copy picker walk the window cell by cell through libghostty. Scanning
+    /// all of it cost 374ms on the render thread and produced 11_039
+    /// candidate rows on a 50_001-row x 120-col pane (measured, release).
+    /// A clipboard picker only ever wants the recent end of a session, so the
+    /// window is bounded here rather than at the caller: nothing downstream
+    /// can re-widen it.
+    const COPY_SNAPSHOT_ROWS: usize = 4_000;
+
+    /// The window one clipboard snapshot covers: its first screen row, and
+    /// how many logical lines it holds.
+    ///
+    /// Both halves of the picker number positions from line 0 of *this*
+    /// window — [`Self::copy_lines`] by dropping the formatter lines above it,
+    /// [`Self::positioned_links`] by starting its scan at the row — so a
+    /// block and a link on the same line sort together. The two agree while
+    /// one formatter line is one unwrapped row, which is the same equivalence
+    /// the cursor calculation below already rests on; `trim: true` can drop
+    /// trailing blank lines, which skews the *ordering* of interleaved items
+    /// by those few lines and never the text that gets copied.
+    fn copy_window(&mut self, id: TerminalId) -> Option<(u32, usize)> {
+        let slot = self.terminals.get_mut(&id)?;
+        slot.flush_pending();
+        let terminal = &slot.vt.terminal;
+        let total = terminal.total_rows().ok()?;
+        if total == 0 {
+            return Some((0, 0));
+        }
+        let last = (total - 1) as u32;
+        let wrapped = |y: u32| {
+            terminal
+                .grid_ref(vt::terminal::Point::Screen(vt::terminal::PointCoordinate {
+                    x: 0,
+                    y,
+                }))
+                .ok()
+                .and_then(|grid| grid.row().ok())
+                .and_then(|row| row.is_wrapped().ok())
+                .unwrap_or(false)
+        };
+        let mut start = total.saturating_sub(Self::COPY_SNAPSHOT_ROWS) as u32;
+        // Never begin mid-line: when the row above the window is soft-wrapped,
+        // this row continues text the window cannot see, so step forward to
+        // the next line boundary instead of copying a fragment.
+        while start > 0 && start < last && wrapped(start - 1) {
+            start += 1;
+        }
+        // One logical line per unwrapped row, plus a trailing partial line
+        // when the window ends mid-wrap — the same rule `positioned_links`
+        // flushes on, so the two line counts cannot disagree.
+        let mut lines = (start..=last).filter(|y| !wrapped(*y)).count();
+        if wrapped(last) {
+            lines += 1;
+        }
+        Some((start, lines))
+    }
+
+    /// Snapshot loaded terminal text for a line-range clipboard picker.
+    /// Soft wraps are joined; hard line breaks, blank lines and leading
+    /// indentation are retained. The cursor starts at the current viewport.
+    /// No viewport or PTY state is changed. Trailing screen padding is trimmed.
+    /// Bounded to the `copy_window` tail of the history, not the whole
+    /// retained scrollback.
+    pub fn copy_lines(&mut self, id: TerminalId) -> Option<(Vec<String>, usize)> {
+        let (_, budget) = self.copy_window(id)?;
+        self.copy_lines_within(id, budget)
+    }
+
+    fn copy_lines_within(&mut self, id: TerminalId, budget: usize) -> Option<(Vec<String>, usize)> {
+        let slot = self.terminals.get_mut(&id)?;
+        slot.flush_pending();
+        let terminal = &slot.vt.terminal;
+        let offset = terminal.scrollbar().ok()?.offset;
+        let mut cursor = 0usize;
+        for y in 0..offset {
+            let row = terminal
+                .grid_ref(vt::terminal::Point::Screen(vt::terminal::PointCoordinate {
+                    x: 0,
+                    y: y as u32,
+                }))
+                .ok()?
+                .row()
+                .ok()?;
+            if !row.is_wrapped().unwrap_or(false) {
+                cursor += 1;
+            }
+        }
+        let mut formatter = vt::fmt::Formatter::new(
+            terminal,
+            vt::fmt::FormatterOptions {
+                format: vt::fmt::Format::Plain,
+                trim: true,
+                unwrap: true,
+                selection: None,
+            },
+        )
+        .ok()?;
+        let bytes = formatter.format_alloc(None).ok()?;
+        let text = String::from_utf8_lossy(&bytes);
+        let mut lines: Vec<String> = text
+            .trim_end_matches('\n')
+            .split('\n')
+            .map(str::to_owned)
+            .collect();
+        // Keep the window's tail and renumber into it, so a block's index and
+        // a link's logical line are positions in the same snapshot.
+        let skipped = lines.len().saturating_sub(budget);
+        lines.drain(..skipped);
+        let cursor = cursor
+            .saturating_sub(skipped)
+            .min(lines.len().saturating_sub(1));
+        Some((lines, cursor))
+    }
+
     /// Plain-text dump of a terminal's whole visible grid — every row
     /// top to bottom, trailing spaces trimmed, pure box-drawing border
     /// rows dropped, and blank rows dropped off both ends. Seeds an
@@ -3788,46 +3944,157 @@ impl TerminalStack {
     /// sidebar `]]u` scans the cursor workspace's terminal, which may not
     /// be the focused tile (#871).
     pub fn urls_for(&mut self, id: TerminalId) -> Option<Vec<String>> {
+        Some(
+            self.positioned_links(id, None)?
+                .into_iter()
+                .map(|(url, _)| url)
+                .collect(),
+        )
+    }
+
+    /// Ceiling on candidates handed to the copy picker. The picker resolves
+    /// rows by single letters, so an unbounded list is unreachable past its
+    /// first pages as well as slow to build; the caller tells the user how
+    /// many of the total it is showing.
+    pub(crate) const COPY_ITEM_LIMIT: usize = 200;
+
+    /// Newest-first links and code/text blocks from the snapshot window, with
+    /// the total number of candidates found so the caller can say what it cut.
+    pub(crate) fn copy_items(
+        &mut self,
+        id: TerminalId,
+    ) -> Option<(Vec<super::copy_text::CopyItem>, usize)> {
+        use super::copy_text::{CopyItem, blocks, newest_first};
+        let (start, budget) = self.copy_window(id)?;
+        let (lines, _) = self.copy_lines_within(id, budget)?;
+        let mut items = blocks(&lines);
+        items.extend(
+            self.positioned_links(id, Some(start))?
+                .into_iter()
+                .map(|(url, line)| (line, CopyItem::Link(url))),
+        );
+        let mut items = newest_first(items);
+        let found = items.len();
+        items.truncate(Self::COPY_ITEM_LIMIT);
+        Some((items, found))
+    }
+
+    /// `history_from` scans whole logical lines from that screen row to the
+    /// live end (the copy picker's snapshot window); `None` reads only the
+    /// logical lines intersecting the viewport (the `]]u` URL picker).
+    fn positioned_links(
+        &mut self,
+        id: TerminalId,
+        history_from: Option<u32>,
+    ) -> Option<Vec<(String, usize)>> {
         let slot = self.terminals.get_mut(&id)?;
         // Reflect every byte received, not just what arrived on screen —
         // mirrors `visible_text` / `target_at`.
         slot.flush_pending();
-        // A snapshot-read failure is not "no terminal" — the terminal is
-        // right here, we just couldn't extract its grid. Report it as an
-        // empty scan so the caller says "no URLs", not "no terminal".
-        let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) else {
+        let terminal = &slot.vt.terminal;
+        let (Ok(scrollbar), Ok(cols), Ok(total)) =
+            (terminal.scrollbar(), terminal.cols(), terminal.total_rows())
+        else {
             return Some(Vec::new());
         };
-        let Ok(mut row_iter) = slot.vt.row_iter.update(&snapshot) else {
+        if total == 0 || cols == 0 {
             return Some(Vec::new());
-        };
-        let mut rows: Vec<(String, bool)> = Vec::new();
-        while let Some(r) = row_iter.next() {
-            let wrapped = r
-                .raw_row()
-                .ok()
-                .and_then(|raw| raw.is_wrapped().ok())
-                .unwrap_or(false);
-            let (text, _) = row_text_and_starts(&mut slot.vt.cell_iter, r);
-            rows.push((text, wrapped));
         }
-        let mut urls: Vec<String> = Vec::new();
-        let mut i = 0;
-        while i < rows.len() {
-            // Fold this row and any it wraps into one logical line.
-            let mut line = rows[i].0.clone();
-            while rows[i].1 && i + 1 < rows.len() {
-                i += 1;
-                line.push_str(&rows[i].0);
-            }
-            i += 1;
-            for url in scan_urls(&line) {
-                // Keep the URL at its LATEST position: drop any earlier
-                // sighting before re-appending, so recency ordering holds.
-                if let Some(prev) = urls.iter().position(|u| u == url) {
-                    urls.remove(prev);
+        let point = |x, y| vt::terminal::Point::Screen(vt::terminal::PointCoordinate { x, y });
+        let row_at = |y| terminal.grid_ref(point(0, y)).ok()?.row().ok();
+        let mut start = scrollbar.offset as u32;
+        let mut end = (scrollbar.offset + scrollbar.len)
+            .saturating_sub(1)
+            .min((total - 1) as u64) as u32;
+        // Read the WHOLE logical lines intersecting the viewport. A link may
+        // begin in scrollback or continue below the visible bottom. Never
+        // move/resize the viewport just to reconstruct it.
+        while start > 0 && row_at(start).is_some_and(|r| r.is_wrap_continuation().unwrap_or(false))
+        {
+            start -= 1;
+        }
+        while (end as usize) + 1 < total
+            && row_at(end).is_some_and(|r| r.is_wrapped().unwrap_or(false))
+        {
+            end += 1;
+        }
+        if let Some(from) = history_from {
+            start = from.min((total - 1) as u32);
+            end = (total - 1) as u32;
+        }
+        let mut logical_line = 0;
+        let mut urls: Vec<(String, usize)> = Vec::new();
+        let mut line = String::new();
+        let mut explicit = Vec::new();
+        let mut chars = vec!['\0'; 8];
+        // One buffer for the whole scan: a fresh 256-byte Vec per cell made
+        // every hyperlink row allocate `cols` times.
+        let mut uri_buf = vec![0u8; 256];
+        for row in start..=end {
+            let Some(raw_row) = row_at(row) else {
+                continue;
+            };
+            let has_links = raw_row.has_hyperlink().unwrap_or(false);
+            for col in 0..cols {
+                let Ok(cell) = terminal.grid_ref(point(col, row)) else {
+                    continue;
+                };
+                if has_links
+                    && let Some(uri) = hyperlink_uri_from_grid(&cell, &mut uri_buf)
+                    && (uri.starts_with("https://") || uri.starts_with("http://"))
+                {
+                    // Explicit web hyperlinks override URL-shaped display
+                    // labels. A target we cannot offer (file://, vscode://)
+                    // falls through instead, so its visible label still
+                    // reaches `scan_urls` the way it did before OSC 8 was
+                    // read here at all.
+                    line.push(' ');
+                    if !explicit.contains(&uri) {
+                        explicit.push(uri);
+                    }
+                    continue;
                 }
-                urls.push(url.to_string());
+                if matches!(
+                    cell.cell().and_then(|c| c.wide()),
+                    Ok(vt::screen::CellWide::SpacerHead | vt::screen::CellWide::SpacerTail)
+                ) {
+                    continue;
+                }
+                loop {
+                    match cell.graphemes(&mut chars) {
+                        Ok(0) => {
+                            line.push(' ');
+                            break;
+                        }
+                        Ok(n) => {
+                            line.extend(&chars[..n]);
+                            break;
+                        }
+                        Err(vt::error::Error::OutOfSpace { required })
+                            if required > chars.len() =>
+                        {
+                            chars.resize(required, '\0')
+                        }
+                        Err(_) => {
+                            line.push(' ');
+                            break;
+                        }
+                    }
+                }
+            }
+            if !raw_row.is_wrapped().unwrap_or(false) || row == end {
+                for url in scan_urls(&line)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .chain(explicit.drain(..))
+                {
+                    if let Some(prev) = urls.iter().position(|(u, _)| u == &url) {
+                        urls.remove(prev);
+                    }
+                    urls.push((url, logical_line));
+                }
+                line.clear();
+                logical_line += 1;
             }
         }
         Some(urls)
@@ -6003,6 +6270,7 @@ impl TerminalStack {
     }
 
     fn drop_slot(&mut self, terminal_id: TerminalId) {
+        let keep_focus = self.focused_terminal_id().filter(|id| *id != terminal_id);
         // Removing a tile from the active grid reshuffles focus (the
         // collapse below re-points `focused` at the removed tile's
         // sibling) and can drop the tree back to Tabs — so a live zoom can
@@ -6067,6 +6335,22 @@ impl TerminalStack {
             }
         }
         self.clamp_active_tab();
+        // Removing an unfocused sibling must not change which surviving
+        // terminal the user is reading. Both tab indices and split paths can
+        // shift during pruning; restore by identity without expanding a pane.
+        if let Some(id) = keep_focus
+            && let Some(index) = self.visible_terminals().iter().position(|t| *t == id)
+        {
+            self.active_tab_idx = index;
+            match &mut self.layout {
+                lazybox_core::SessionLayout::Tabs { active } => *active = index,
+                lazybox_core::SessionLayout::Splits { tree, focused } => {
+                    if let Some(path) = tree.path_to(id.0) {
+                        *focused = path;
+                    }
+                }
+            }
+        }
         self.auto_collapse_on_emptiness();
     }
 
@@ -6240,6 +6524,40 @@ impl TerminalStack {
         } else {
             cmds.push(Command::ResumeAgent { terminal_id });
         }
+    }
+
+    /// Close a specific terminal without retargeting the active workspace/tile.
+    /// The exit event prunes live panes; already exited panes are removed locally.
+    ///
+    /// Reports what it did, because a live pane's row only disappears when the
+    /// daemon's `TerminalExited` comes back: if that event is lost (daemon
+    /// restart, dropped connection, a dropped `Close`) the id stays in
+    /// `closing` and the caller must be able to say so instead of closing its
+    /// confirmation over an untouched row.
+    pub(crate) fn close_terminal(
+        &mut self,
+        id: TerminalId,
+        cmds: &mut Vec<Command>,
+    ) -> CloseOutcome {
+        if !self.terminals.contains_key(&id) {
+            return CloseOutcome::Unknown;
+        }
+        if self.closing.contains(&id) {
+            // Re-send rather than drop the request: `Close` on a terminal the
+            // daemon has already torn down is a no-op, so a retry costs one
+            // command and recovers the case where the first one never landed.
+            cmds.push(Command::Close {
+                terminal_id: id,
+                client_request_id: None,
+            });
+            return CloseOutcome::Retried;
+        }
+        if self.queue_terminal_teardown(id, cmds) {
+            self.drop_slot(id);
+            self.persist_layout(cmds);
+            return CloseOutcome::Removed;
+        }
+        CloseOutcome::Requested
     }
 
     /// Close the focused terminal (`]]x`). In Splits, collapses the
@@ -7593,9 +7911,17 @@ fn hyperlink_uri_at(
         y: row as u32,
     });
     let grid_ref = terminal.grid_ref(point).ok()?;
-    let mut buf = vec![0u8; 256];
+    hyperlink_uri_from_grid(&grid_ref, &mut vec![0u8; 256])
+}
+
+/// `buf` is the caller's scratch space, reused across cells: a per-cell
+/// allocation here is paid `cols` times for every row carrying a hyperlink.
+fn hyperlink_uri_from_grid(
+    grid_ref: &vt::screen::GridRef<'_>,
+    buf: &mut Vec<u8>,
+) -> Option<String> {
     loop {
-        match grid_ref.hyperlink_uri(&mut buf) {
+        match grid_ref.hyperlink_uri(buf) {
             Ok(0) => return None,
             Ok(n) => return String::from_utf8(buf[..n].to_vec()).ok(),
             Err(vt::error::Error::OutOfSpace { required }) if required > buf.len() => {
@@ -9836,6 +10162,141 @@ mod selection_offset_tests {
     }
 
     #[test]
+    fn copy_items_order_mixed_links_and_scripts_by_latest_logical_line() {
+        use crate::components::copy_text::CopyItem;
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            SessionKey::new("copy"),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 4);
+        let script = "echo 'a long shell argument which wraps across terminal rows'\n\necho done";
+        let source = format!(
+            "https://old.example\n```bash\n{script}\n```\n\x1b]8;;https://hidden.example\x1b\\Open report\x1b]8;;\x1b\\\n  echo newest\n"
+        );
+        slot.vt.feed(source.replace('\n', "\r\n").as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        assert_eq!(
+            stack.copy_items(TerminalId(1)),
+            Some((
+                vec![
+                    CopyItem::Block("  echo newest".into()),
+                    CopyItem::Link("https://hidden.example".into()),
+                    CopyItem::Block(script.into()),
+                    CopyItem::Link("https://old.example".into())
+                ],
+                4
+            ))
+        );
+    }
+
+    #[test]
+    fn copy_snapshot_is_bounded_by_its_window_not_the_retained_history() {
+        // The picker used to walk every retained row cell by cell and hand
+        // back every candidate: 374ms and 11_039 rows on a 50_001-row pane.
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            SessionKey::new("deep"),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(120, 40);
+        let deep: String = (0..20_000)
+            .map(|i| {
+                if i % 3 == 0 {
+                    format!(
+                        "  indented candidate {i}
+"
+                    )
+                } else {
+                    format!(
+                        "see https://example.com/path/{i}
+"
+                    )
+                }
+            })
+            .collect();
+        slot.vt.feed(deep.as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        let total = stack.terminals[&TerminalId(1)]
+            .vt
+            .terminal
+            .total_rows()
+            .unwrap();
+        assert!(total > TerminalStack::COPY_SNAPSHOT_ROWS, "{total} rows");
+        let (start, budget) = stack.copy_window(TerminalId(1)).unwrap();
+        assert!(
+            start as usize >= total - TerminalStack::COPY_SNAPSHOT_ROWS - 1,
+            "scan starts at {start} of {total}"
+        );
+        assert!(
+            budget <= TerminalStack::COPY_SNAPSHOT_ROWS,
+            "window holds {budget} lines"
+        );
+        let (lines, cursor) = stack.copy_lines(TerminalId(1)).unwrap();
+        assert_eq!(lines.len(), budget);
+        assert!(cursor < lines.len());
+        // The snapshot is the recent end of the session, renumbered into it.
+        assert!(
+            lines.last().unwrap().contains("19999"),
+            "{:?}",
+            lines.last()
+        );
+        let (items, found) = stack.copy_items(TerminalId(1)).unwrap();
+        assert!(found > TerminalStack::COPY_ITEM_LIMIT, "{found} candidates");
+        assert_eq!(items.len(), TerminalStack::COPY_ITEM_LIMIT);
+    }
+
+    #[test]
+    fn copy_lines_preserves_multiline_script_across_soft_wraps_and_history() {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            SessionKey::new("copy"),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 4);
+        let script = "#!/bin/sh\ncat <<'EOF'\n  日本語 é and a long argument that wraps\n\nEOF\nprintf '%s\\n' done";
+        slot.vt.feed(script.replace('\n', "\r\n").as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        let before = stack.terminals[&TerminalId(1)]
+            .vt
+            .terminal
+            .scrollbar()
+            .unwrap()
+            .offset;
+        let (lines, cursor) = stack.copy_lines(TerminalId(1)).unwrap();
+        assert_eq!(lines.join("\n"), script);
+        assert!(cursor > 0);
+        assert_eq!(
+            stack.terminals[&TerminalId(1)]
+                .vt
+                .terminal
+                .scrollbar()
+                .unwrap()
+                .offset,
+            before
+        );
+        assert!(stack.copy_lines(TerminalId(999)).is_none());
+    }
+
+    #[test]
     fn focused_urls_collects_scans_and_dedups_including_wrapped() {
         let sk = SessionKey::new("session");
         let mut stack = TerminalStack::new(PaneId::new(0));
@@ -9867,6 +10328,156 @@ mod selection_offset_tests {
                 "https://b.example.com/a/long/wrapping/path".to_string(),
             ]),
         );
+    }
+
+    #[test]
+    fn focused_urls_preserves_osc8_targets_and_ignores_their_display_labels() {
+        let sk = SessionKey::new("links");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 12);
+        let url = format!(
+            "https://example.com/{}?a=1&b=2#section",
+            "long-path/".repeat(30)
+        );
+        slot.vt.feed(
+            format!("\x1b]8;;{url}\x1b\\https://different.example/label\x1b]8;;\x1b\\\r\n")
+                .as_bytes(),
+        );
+        slot.vt.feed(b"https://plain.example/wrapped/path\r\n");
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        assert_eq!(
+            stack.focused_urls(),
+            Some(vec![url, "https://plain.example/wrapped/path".into()])
+        );
+    }
+
+    #[test]
+    fn a_non_web_osc8_target_leaves_its_url_shaped_label_scannable() {
+        // Reading OSC 8 made every hyperlink cell blank, then kept the target
+        // only when it was http(s) — so a `file://` link whose label is a URL
+        // lost both, where scanning the glyphs alone used to find it.
+        let sk = SessionKey::new("mixed-links");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(60, 6);
+        slot.vt.feed(
+            b"\x1b]8;;file:///Users/x/report.html\x1b\\https://docs.example/page\x1b]8;;\x1b\\\r\n",
+        );
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        assert_eq!(
+            stack.focused_urls(),
+            Some(vec!["https://docs.example/page".into()]),
+            "a rejected target must not take the label with it"
+        );
+    }
+
+    #[test]
+    fn an_unfocused_siblings_exit_leaves_the_focused_terminal_alone() {
+        // Pruning a slot reshuffles both tab indices and split paths, so the
+        // user's pane used to move when an unrelated terminal exited.
+        for split in [false, true] {
+            let sk = SessionKey::new("siblings");
+            let mut stack = TerminalStack::new(PaneId::new(0));
+            for id in [7, 8, 9] {
+                let slot = TerminalStack::make_slot(
+                    sk.clone(),
+                    TerminalKind::Shell,
+                    0,
+                    false,
+                    false,
+                    None,
+                    Vec::new(),
+                    String::new(),
+                );
+                stack.insert_slot_for_test(TerminalId(id), slot);
+            }
+            stack.set_active_session(Some(sk));
+            if split {
+                stack.set_layout(lazybox_core::SessionLayout::Splits {
+                    tree: lazybox_core::TileTree::VSplit {
+                        top: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 7 }),
+                        bottom: Box::new(lazybox_core::TileTree::VSplit {
+                            top: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 8 }),
+                            bottom: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 9 }),
+                            ratio: 50,
+                        }),
+                        ratio: 50,
+                    },
+                    focused: vec![1, 1],
+                });
+            }
+            stack.focus_terminal(TerminalId(9));
+            assert_eq!(stack.focused_terminal_id(), Some(TerminalId(9)));
+            stack.drop_slot(TerminalId(7));
+            assert_eq!(
+                stack.focused_terminal_id(),
+                Some(TerminalId(9)),
+                "split={split}: focus followed the pruning instead of the user"
+            );
+        }
+    }
+
+    #[test]
+    fn focused_urls_reconstructs_links_across_both_viewport_edges_without_scrolling() {
+        let sk = SessionKey::new("long-link");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            Vec::new(),
+            String::new(),
+        );
+        slot.vt.ensure_size(20, 4);
+        let url = format!("https://example.com/{}?x=1&y=2#end", "segment/".repeat(30));
+        slot.vt.feed(format!("界 é {url}\r\nnext\r\n").as_bytes());
+        stack.insert_slot_for_test(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        for top in [false, true] {
+            if top {
+                let _ = stack.scroll_to_top();
+            }
+            let before = stack.terminals[&TerminalId(1)]
+                .vt
+                .terminal
+                .scrollbar()
+                .unwrap()
+                .offset;
+            assert_eq!(stack.focused_urls(), Some(vec![url.clone()]));
+            assert_eq!(
+                stack.terminals[&TerminalId(1)]
+                    .vt
+                    .terminal
+                    .scrollbar()
+                    .unwrap()
+                    .offset,
+                before
+            );
+        }
     }
 
     #[test]

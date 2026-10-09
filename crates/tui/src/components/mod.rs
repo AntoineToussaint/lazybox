@@ -4,6 +4,7 @@
 
 pub mod activity_feed;
 pub mod comment_render;
+pub(crate) mod copy_text;
 pub mod icons;
 pub mod markdown_doc;
 pub mod repo_overview;

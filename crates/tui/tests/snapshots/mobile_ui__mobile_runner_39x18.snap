@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/mobile_ui.rs
+expression: out
+---
+╭ New session · run ──────────────────╮
+│team/repo · choose what to run       │
+│                                     │
+│▸     claude (default)               │
+│      codex                          │
+│      Shell                          │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│                                     │
+│j/k move  Enter pick                 │
+│h info  Esc back                     │
+╰─────────────────────────────────────╯

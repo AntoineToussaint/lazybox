@@ -9,7 +9,7 @@ use std::time::Duration;
 /// Liveness bound on the helper: parse args, dial one socket, send one frame,
 /// exit. Far above what that costs, because the bound is there to turn a hung
 /// helper into a named failure — not to measure the box.
-const HELPER_EXIT_BUDGET: Duration = Duration::from_secs(30);
+const HELPER_EXIT_BUDGET: Duration = common::CLI_EXEC_BUDGET;
 
 /// Run the binary once outside any timed section. The first exec of a
 /// freshly built debug `lazybox` (~200 MB) pages it in from a cold cache —

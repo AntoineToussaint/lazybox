@@ -5,7 +5,6 @@ mod common;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use lazybox_entitlement::{AccountId, Entitlement, EntitlementError, EntitlementGate};
 use lazybox_identity::BoxIdentity;
@@ -74,7 +73,7 @@ async fn smoke_script_reuses_a_pre_enrolled_box_identity() {
     )
     .unwrap();
     let output = tokio::time::timeout(
-        Duration::from_secs(30),
+        common::CLI_EXEC_BUDGET,
         tokio::process::Command::new("bash")
             .arg(delayed_script)
             .arg(relay_addr)

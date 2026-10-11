@@ -96,6 +96,75 @@ fn every_binary_that_execs_the_lazybox_binary_gets_the_cold_exec_budget() {
     );
 }
 
+/// The runner's budget is only half of it: the test's own bound must not
+/// undercut it.
+///
+/// #1942 gave every `tui-boot` binary that execs the ~213 MB `lazybox` debug
+/// build a 60s `slow-timeout`, for a cold exec measured at 13s on a loaded
+/// box. `workspace_create` kept a bare `Duration::from_secs(10)` on its own
+/// wait and so killed itself at ~10.4s with `cli exits: Elapsed(())` while
+/// its siblings in the same binary passed at 11.0s — the granted budget never
+/// got a chance to apply, and the failure reads exactly like a flake (#1944).
+///
+/// Every wait on an exec'd child in those tests therefore goes through
+/// `common::CLI_EXEC_BUDGET`, which this pins from both ends: above the cold
+/// exec, and below the runner period so the in-test bound fires first and the
+/// failure names its cause instead of becoming a bare `TIMED OUT`.
+#[test]
+fn no_exec_test_undercuts_the_cold_exec_budget() {
+    let root = workspace_root();
+    let tests_dir = root.join("crates/tui-boot/tests");
+    let mut literal_bounds: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&tests_dir).expect("read crates/tui-boot/tests") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read test source");
+        if !source.contains("CARGO_BIN_EXE_lazybox") {
+            continue;
+        }
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+        // A wait on the exec'd child, bounded by a literal rather than the
+        // shared budget. Waits on in-test tasks (`, server)`) are a different
+        // thing and keep their own short bounds.
+        for (number, line) in source.lines().enumerate() {
+            if line.contains(", child)") && line.contains("Duration::from_") {
+                literal_bounds.push(format!("{name}:{} {}", number + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        literal_bounds.is_empty(),
+        "these waits on an exec'd `lazybox` bound themselves with a literal instead of          `common::CLI_EXEC_BUDGET`, so they can fire before the cold-exec budget in          .config/nextest.toml applies: {literal_bounds:#?}"
+    );
+
+    // And the shared budget itself must sit inside the runner's period.
+    let nextest = read(".config/nextest.toml");
+    let cold_exec_period = nextest
+        .split("binary(notification_click)")
+        .nth(1)
+        .and_then(|rest| rest.split("period = \"").nth(1))
+        .and_then(|rest| rest.split('s').next())
+        .and_then(|secs| secs.parse::<u64>().ok())
+        .expect("the cold-exec override still declares a period");
+    let budget = std::fs::read_to_string(root.join("crates/tui-boot/tests/common/mod.rs"))
+        .expect("read common/mod.rs")
+        .split("CLI_EXEC_BUDGET: std::time::Duration = std::time::Duration::from_secs(")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .and_then(|secs| secs.parse::<u64>().ok())
+        .expect("CLI_EXEC_BUDGET still declares a whole number of seconds");
+    assert!(
+        budget < cold_exec_period,
+        "CLI_EXEC_BUDGET ({budget}s) must stay below the runner's cold-exec period          ({cold_exec_period}s) so a hang fails by name rather than by SIGKILL"
+    );
+    assert!(
+        budget >= 30,
+        "CLI_EXEC_BUDGET ({budget}s) is below the 13s cold exec measured on a loaded box          plus the work under test; that is the bound #1944 found killing its own tests"
+    );
+}
+
 #[test]
 fn the_loaded_lane_runs_under_its_own_profile() {
     let nextest = read(".config/nextest.toml");

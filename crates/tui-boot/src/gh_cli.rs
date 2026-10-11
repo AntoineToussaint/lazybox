@@ -47,6 +47,65 @@ const ADMIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// pins that ordering.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// Above this much time spent on lazybox's *own* coordination — not on `gh` —
+/// the shim says where that time went, once, on stderr.
+///
+/// A healthy call adds milliseconds, so the line never appears in normal
+/// operation. It exists because when a landing script stalled for ~30 minutes
+/// on one `gh` call (#1944), nothing could say which phase held it: the shim
+/// reported no timings, so dialling a wedged daemon, waiting out a throttle
+/// and sitting inside `gh` itself were indistinguishable after the fact. Each
+/// has a different fix, and guessing between them cost a day.
+const SLOW_CALL_REPORT: Duration = Duration::from_secs(5);
+
+/// Set to `1` to print the timings for every call, however fast.
+const TIMING_ENV: &str = "LAZYBOX_GH_SHIM_TIMING";
+
+/// Where one `gh` invocation spent its wall clock.
+#[derive(Default)]
+struct Phases {
+    dial: Duration,
+    admit: Duration,
+    gh: Duration,
+    report: Duration,
+}
+
+impl Phases {
+    /// What lazybox added. `gh`'s own runtime is the agent's work, not the
+    /// shim's to account for — and it is deliberately unbounded, since the
+    /// shim may not cut short a clone, a pager or a prompt.
+    fn overhead(&self) -> Duration {
+        self.dial + self.admit + self.report
+    }
+
+    /// Whether this call is worth a line. Pure, so the rule is testable
+    /// without reading stderr or mutating the environment.
+    fn should_report(&self, forced: bool) -> bool {
+        forced || self.overhead() >= SLOW_CALL_REPORT
+    }
+
+    /// One line, to stderr, naming the phase that cost the time.
+    ///
+    /// Operands only, never raw argv: a flag's value can be a token, and
+    /// [`operands`] already drops those.
+    fn report_if_slow(&self, args: &[String]) {
+        let forced = std::env::var(TIMING_ENV).is_ok_and(|value| value.trim() == "1");
+        if !self.should_report(forced) {
+            return;
+        }
+        let what = operands(args).join(" ");
+        eprintln!(
+            "lazybox gh: {what}: dial {:.1}s, admit {:.1}s, gh {:.1}s, report {:.1}s \
+             ({:.1}s of it lazybox's). Bypass with `gh.real` or {SHIM_OPT_OUT_ENV}=0.",
+            self.dial.as_secs_f64(),
+            self.admit.as_secs_f64(),
+            self.gh.as_secs_f64(),
+            self.report.as_secs_f64(),
+            self.overhead().as_secs_f64(),
+        );
+    }
+}
+
 /// Total time the shim will spend waiting out throttles before giving up and
 /// telling the agent why. A quota throttle resolves in seconds, so this is
 /// really the bound on a *reserve* throttle, which can otherwise be "come back
@@ -110,9 +169,15 @@ pub async fn gh_subcommand(args: &[String]) -> ! {
     }
     let kind = call.kind.unwrap_or(GhCallKind::Other);
 
+    let mut phases = Phases::default();
+    let dial_started = std::time::Instant::now();
     let mut client = connect().await;
+    phases.dial = dial_started.elapsed();
     if let Some(client) = client.as_mut() {
-        match admit(client, kind, call.read_key.as_deref()).await {
+        let admit_started = std::time::Instant::now();
+        let admission = admit(client, kind, call.read_key.as_deref()).await;
+        phases.admit = admit_started.elapsed();
+        match admission {
             Admission::Cached(stdout) => {
                 // Flushed explicitly: `process::exit` runs no destructors, and
                 // a block-buffered stdout (which is every piped agent call)
@@ -121,6 +186,7 @@ pub async fn gh_subcommand(args: &[String]) -> ! {
                 let mut out = std::io::stdout().lock();
                 let _ = out.write_all(stdout.as_bytes());
                 let _ = out.flush();
+                phases.report_if_slow(args);
                 std::process::exit(0);
             }
             Admission::Refused { reason, wait_secs } => {
@@ -131,6 +197,7 @@ pub async fn gh_subcommand(args: &[String]) -> ! {
                     "lazybox gh: {reason}. Retry in {wait_secs}s, or bypass lazybox with \
                      `gh.real` / {SHIM_OPT_OUT_ENV}=0."
                 );
+                phases.report_if_slow(args);
                 std::process::exit(1);
             }
             Admission::Allowed => {}
@@ -141,15 +208,20 @@ pub async fn gh_subcommand(args: &[String]) -> ! {
     // `gh`'s stdio exactly as the agent would have had it — prompts, pagers,
     // progress and colour included — because the shim's promise is that an
     // invocation it does not serve is an invocation it does not change.
+    let gh_started = std::time::Instant::now();
     let (code, stdout) = if call.read_key.is_some() {
         run_capturing(&real, args)
     } else {
         (run_inherit(&real, args), None)
     };
+    phases.gh = gh_started.elapsed();
 
     if let Some(client) = client.as_mut() {
+        let report_started = std::time::Instant::now();
         report(client, code, &call, stdout.as_deref()).await;
+        phases.report = report_started.elapsed();
     }
+    phases.report_if_slow(args);
     std::process::exit(code);
 }
 
@@ -1062,5 +1134,64 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert!(!is_help_request(&argv));
+    }
+
+    /// A slow `gh` is not a slow shim.
+    ///
+    /// `gh`'s own runtime is deliberately unbounded — the shim may not cut
+    /// short a clone, a pager or a prompt — so a 20-minute `gh clone` must not
+    /// print a diagnostic blaming lazybox. Only lazybox's own phases count.
+    #[test]
+    fn a_slow_gh_is_not_reported_as_shim_overhead() {
+        let phases = Phases {
+            gh: Duration::from_secs(1800),
+            ..Phases::default()
+        };
+        assert!(!phases.should_report(false));
+        assert_eq!(phases.overhead(), Duration::ZERO);
+        // Explicitly asked for, it still prints.
+        assert!(phases.should_report(true));
+    }
+
+    /// Time lazybox spent is reported, wherever in the round trip it went.
+    #[test]
+    fn coordination_time_is_reported_whichever_phase_held_it() {
+        for phases in [
+            Phases {
+                dial: SLOW_CALL_REPORT,
+                ..Phases::default()
+            },
+            Phases {
+                admit: SLOW_CALL_REPORT,
+                ..Phases::default()
+            },
+            Phases {
+                report: SLOW_CALL_REPORT,
+                ..Phases::default()
+            },
+        ] {
+            assert!(
+                phases.should_report(false),
+                "overhead of {:?} went unreported",
+                phases.overhead(),
+            );
+        }
+        assert!(
+            !Phases::default().should_report(false),
+            "a fast call stays quiet"
+        );
+    }
+
+    /// The threshold must sit below what one call can legitimately wait, or a
+    /// call that spends its whole budget coordinating still says nothing —
+    /// which is the state that made the reported stall undiagnosable.
+    #[test]
+    fn the_threshold_is_reachable_within_the_shim_s_own_bounds() {
+        assert!(
+            SLOW_CALL_REPORT < CONNECT_TIMEOUT + ADMIT_TIMEOUT,
+            "SLOW_CALL_REPORT ({SLOW_CALL_REPORT:?}) is above the dial + admission bounds \
+             ({CONNECT_TIMEOUT:?} + {ADMIT_TIMEOUT:?}), so a maximally slow round trip would \
+             never report itself"
+        );
     }
 }

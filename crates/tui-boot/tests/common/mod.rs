@@ -19,6 +19,26 @@
 //! that needs a home of its own still pins one per test under a lock; the
 //! ctor is the floor beneath it, never the real profile.
 
+/// Liveness bound for a test that waits on an exec of the `lazybox` binary.
+///
+/// The bound exists to turn a hung child into a named failure, not to measure
+/// the box. The first exec of a ~213 MB debug build pages it in from a cold
+/// cache — 13s measured on a loaded box against 20ms once warm — so a bound
+/// sized for the work under test is a bound that fails on the build.
+///
+/// It must stay BELOW the cold-exec period in `.config/nextest.toml` (60s,
+/// #1942) and above the cold exec itself. Below, so this bound fires first and
+/// the failure names its cause (`cli exits: Elapsed`) instead of the runner
+/// SIGKILLing the process into a bare `TIMED OUT`. Above the exec, so the
+/// budget #1942 granted can actually apply: `workspace_create` kept a bare
+/// 10s here and killed itself at ~10.4s on a box where its siblings passed at
+/// 11.0s, which reads exactly like a flake and was treated as one (#1944).
+/// `no_exec_test_undercuts_the_cold_exec_budget` pins both ends.
+/// Not every binary that links this module execs the binary, so the ones that
+/// do not would otherwise fail on an unused constant.
+#[allow(dead_code)]
+pub const CLI_EXEC_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+
 /// Unique per process run (pid + start nanos) so a recycled pid can never
 /// make a later run read a stale sandbox.
 fn install() {

@@ -103,6 +103,13 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 # symptoms grows one entry per painful afternoon;
 # `every_binary_that_execs_the_lazybox_binary_gets_the_cold_exec_budget`
 # pins this filter against the binaries that actually exec it.
+#
+# This period is only half the budget: a test's OWN bound on the exec fires
+# first if it is shorter, and then this one never applies. `workspace_create`
+# kept a bare 10s and killed itself at ~10.4s where its siblings passed at
+# 11.0s. Those waits now share `common::CLI_EXEC_BUDGET` (45s), kept below
+# this period so a hang fails by name rather than by SIGKILL;
+# `no_exec_test_undercuts_the_cold_exec_budget` pins both ends.
 filter = 'binary(notification_click) or binary(hosted_relay_script) or binary(hook_ingest) or binary(workspace_create)'
 slow-timeout = { period = "60s", terminate-after = 1 }
 

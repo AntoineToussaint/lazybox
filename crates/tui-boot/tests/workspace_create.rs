@@ -168,7 +168,7 @@ async fn workspace_create_infers_project_from_cwd_and_reports_the_daemon_key() {
         temp.path().join("home"),
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -238,7 +238,7 @@ async fn workspace_create_uses_explicit_project_without_a_checkout() {
         temp.path().join("home"),
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -295,7 +295,7 @@ async fn workspace_create_rejects_an_unknown_agent_without_connecting() {
         temp.path().join("home"),
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -354,7 +354,7 @@ async fn workspace_create_refuses_a_flag_it_does_not_know() {
         temp.path().join("home"),
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -413,7 +413,7 @@ async fn workspace_create_refuses_a_launch_flag_and_leaves_the_state_db_alone() 
         home.clone(),
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -469,7 +469,7 @@ async fn workspace_create_refuses_a_known_flag_with_no_value() {
         temp.path().join("home"),
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -519,7 +519,7 @@ async fn workspace_create_names_a_misspelled_record_flag() {
         temp.path().join("home"),
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -567,7 +567,7 @@ async fn workspace_create_ignores_an_empty_argument() {
         temp.path().join("home"),
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -599,7 +599,7 @@ async fn workspace_verb_errors_reach_the_caller_on_stdout() {
 
     for argv in [vec!["nosuchverb", "--issue", "acme/widget#7"], vec![]] {
         let child = run_workspace(binary, &argv, temp.path().join("home"));
-        let output = tokio::time::timeout(Duration::from_secs(10), child)
+        let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
             .await
             .expect("cli exits")
             .expect("cli task");
@@ -643,7 +643,7 @@ async fn workspace_create_issue_anchors_the_command_on_the_record() {
         temp.path().join("home"),
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -701,7 +701,7 @@ async fn workspace_create_resolves_a_bare_number_against_repo() {
         temp.path().join("home"),
     );
 
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -744,7 +744,7 @@ async fn workspace_create_rejects_an_unreadable_record_without_connecting() {
         ],
         temp.path().join("home"),
     );
-    let output = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(common::CLI_EXEC_BUDGET, child)
         .await
         .expect("cli exits")
         .expect("cli task");
@@ -764,7 +764,7 @@ async fn workspace_create_needs_a_record_or_a_name() {
     let temp = tempfile::tempdir().expect("tempdir");
     let socket_path = temp.path().join("daemon.sock");
     let output = tokio::time::timeout(
-        Duration::from_secs(10),
+        common::CLI_EXEC_BUDGET,
         run_workspace_create(
             env!("CARGO_BIN_EXE_lazybox"),
             &[

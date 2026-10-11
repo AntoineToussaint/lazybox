@@ -419,6 +419,14 @@ the real binary, and asks the daemon before it spends
   their own cap. "Degrades toward plain `gh`" is only true if no step can wait
   forever: the connect had no bound at all, and an unattended landing script
   sat on one `gh` call for ~30 minutes (#1944).
+- **A slow call says where the time went.** Above 5s of lazybox's *own*
+  phases — dial, admission (throttle waits included), completion ack, but never
+  `gh`'s own runtime — the shim prints one stderr line naming each phase, and
+  `LAZYBOX_GH_SHIM_TIMING=1` forces it for every call. A healthy call adds
+  milliseconds, so the line is absent in normal operation. Without it, dialling
+  a wedged daemon, waiting out a reserve throttle and sitting inside `gh` were
+  indistinguishable after the fact, and they have different fixes. It reports
+  operands only, never raw argv, because a flag's value can be a token.
 - **`--help` and `--version` past `gh` are `gh`'s, not lazybox's.** The argv
   scan in `main.rs` stops at a passthrough subcommand (`own_args`), and
   `classify` keeps a help request off the daemon path entirely — it reaches no

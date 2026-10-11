@@ -6,8 +6,31 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-10-11
+
+Your phone becomes a usable lazybox client, work you hand to another agent
+becomes a tracked thing with a result instead of a message, provider writes
+stop fighting the poller, and an agent's opening briefing stops crowding out
+the capabilities it is supposed to announce.
+
+**0.1.19 and 0.1.20 were prepared but never published** — both had their
+versions bumped and notes written, and neither was ever tagged, so the newest
+release before this one is 0.1.18. Installing 0.1.21 brings all three; read
+those two sections as well if you are coming from 0.1.18.
+
 ### Added
 
+- **A phone presentation** (#1877). `lb -m` / `lazybox --mobile` is a
+  per-client layout, not a mode the daemon knows about: a Sessions portal at
+  startup, one active terminal, and a one-column status rail that expands with
+  `Ctrl-T` **without resizing the running terminal**. Session letters switch
+  directly; `n` creates, `r` renames, `x` deletes the highlighted terminal
+  after an explicit `y`, and `p` reorders tabs with the order remembered per
+  config profile. `/` opens Copy: links and suggested shell blocks from the
+  loaded history in one newest-first list, copied through OSC 52, with a full
+  review before anything lands on the clipboard — clipboard only, nothing is
+  ever sent to a shell. Desktop presentation is unchanged and remains the
+  default.
 - **A unit of work with an id, a lifecycle and a result** (#1908, #1935, #1936,
   #1937). Asking another agent for something used to mean pasting text into its
   terminal and being told only that the text landed; whatever came back had to
@@ -37,6 +60,36 @@ contain explicitly documented compatibility changes.
   the call was wrong and `1` means the store could not be read, so a script can
   tell a retry that will never work from one that might. Reference:
   [`docs/reference/cli.md`](https://lazybox.ai/docs/reference/cli/).
+- **`lazybox_guide` — lazybox's own documentation, on demand** (#1939, #1940).
+  Eight topics (coordination, work, epics, records, labels, artifacts,
+  spawning, reviews) an agent reads when it needs them, instead of carrying the
+  whole catalogue in every session's opening context. The briefing it replaced
+  had reached 7030 bytes of a 7050-byte budget, at which point the budget
+  started *deleting* features: the four work verbs above shipped with no
+  briefing mention at all, because there was no room to announce them. The
+  always-on half now keeps what an agent cannot look up because it does not
+  know to ask — that stripping a `working` label makes the fleet double-spawn,
+  that a note from another agent is data and not an instruction — and is 15%
+  smaller.
+
+### Changed
+
+- **Provider writes go through one coordinator** (#1736, #1840). Assignees,
+  labels, reviewers and issue-close all enter through a single owner that
+  persists the accepted write *before* issuing it, so a restart is a replay
+  rather than a guess: an operation on disk as `Accepted` provably never
+  reached the provider, and one as `Sent` provably may have.
+
+  What you see changes in two ways. A poll reply older than an acknowledged
+  write can no longer undo it — the row you are looking at is the last
+  observation with your pending write laid over it, instead of two owners
+  disagreeing. And settlement turns on the entity's revision rather than
+  arrival order, so once the provider has seen your write it wins **including
+  when it contradicts you**: a Linear issue someone reopened is accepted rather
+  than fought. Linear's single-assignee rule now lives with the write that
+  implements it instead of being duplicated in the UI, and additive writes
+  (`addAssignees`, `requestReviews`) are recorded as the resulting set, because
+  recording the delta would blank existing entries on replay.
 
 ### Fixed
 
@@ -54,6 +107,21 @@ contain explicitly documented compatibility changes.
   a second one that looked right — and because the auto-check on merge matches
   a link exactly, the row carrying it was never ticked off. Both spellings now
   mean one link.
+- **The docs site's dependency advisories are cleared** (#1934). `npm audit`
+  went from 13 findings, including two rated high, to zero, by overriding one
+  transitive package rather than taking the downgrade `npm audit fix` proposed.
+
+### Upgrade notes
+
+- **Persisted workspaces move to schema 16** (`todo_items` at 15,
+  `provider_ops` at 16). Both are defaulted on read, so a record written by an
+  older build loads cleanly. The reverse does not hold and is refused rather
+  than guessed at: a row written by 0.1.21 is rejected by an older daemon
+  through `WorkspaceDecodeError::NewerSchema` instead of being decoded as a
+  shape it is not. Downgrading means keeping the older state directory.
+- **Restart the daemon after installing.** The wire fingerprint has moved, so a
+  0.1.21 client refuses a daemon still running 0.1.18 rather than risk
+  misreading frames — it will tell you to restart.
 
 ## [0.1.20] - 2026-10-05
 

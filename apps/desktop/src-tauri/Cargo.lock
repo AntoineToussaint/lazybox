@@ -2393,7 +2393,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lazybox-agents"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "fs2",
  "lazybox-ipc",
@@ -2403,7 +2403,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-auth"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "libc",
  "thiserror 2.0.21",
@@ -2413,7 +2413,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-config"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "fs2",
@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-core"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "serde",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-gh"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "futures",
@@ -2494,7 +2494,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-git-ops"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "lazybox-core",
  "libc",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-identity"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -2522,7 +2522,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-ipc"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "base64 0.23.1",
  "bincode",
@@ -2537,7 +2537,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-jira"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "lazybox-core",
@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-linear"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "lazybox-auth",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-server"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "bytes",
  "chrono",
@@ -2604,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-slack"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "futures",
  "lazybox-auth",
@@ -2619,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-store"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "lazybox-core",
@@ -2632,7 +2632,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-tui-core"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "lazybox-agents",

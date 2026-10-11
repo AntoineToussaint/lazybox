@@ -1873,7 +1873,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lazybox-agents"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "fs2",
  "lazybox-ipc",
@@ -1883,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-auth"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "libc",
  "thiserror 2.0.21",
@@ -1893,7 +1893,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-config"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "fs2",
@@ -1908,7 +1908,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-core"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "bincode",
  "chrono",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-e2e-channel"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "snow",
  "thiserror 2.0.21",
@@ -1933,7 +1933,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-entitlement"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "bytes",
  "http-body-util",
@@ -1948,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-gh"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "futures",
@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-git-ops"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "ctor",
  "lazybox-core",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-identity"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -2002,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-ipc"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "base64 0.23.1",
  "bincode",
@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-jira"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "lazybox-core",
@@ -2035,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-linear"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "bytes",
  "chrono",
@@ -2054,7 +2054,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-relay"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "bincode",
  "bytes",
@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-sandbox"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "fs2",
@@ -2093,7 +2093,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-server"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "bincode",
  "bytes",
@@ -2138,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-slack"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "futures",
  "lazybox-auth",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-store"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "lazybox-core",
@@ -2166,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-tui"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-tui-boot"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-tui-core"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "ctor",
@@ -2257,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-tui-term"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "libghostty-vt",
  "portable-pty",
@@ -2274,7 +2274,7 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libghostty-vt"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "allocator-api2 0.4.0",
  "bitflags 2.13.2",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "libghostty-vt-sys"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "bindgen",
  "cc",

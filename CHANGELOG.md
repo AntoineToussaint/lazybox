@@ -72,6 +72,19 @@ those two sections as well if you are coming from 0.1.18.
   that a note from another agent is data and not an instruction — and is 15%
   smaller.
 
+- **Work handed to another agent is tracked without anyone remembering to**
+  (#1946). Recording a hand-off used to be a separate call an agent had to
+  make on top of making the hand-off, and the measured result was that nothing
+  was recorded at all while a single coordinating session drove 85 spawned
+  workspaces by re-sending briefs and reading scrollback. The spawn is the
+  hand-off, so the spawn records it: hand work to a workspace and it becomes a
+  row with a requester, an owner and a lifecycle, which `my_work` and
+  `work_status` answer for.
+
+  Only an agent-to-agent hand-off. A prompt you typed is already visible to
+  you, and lazybox's own spawns — auto-fix, a resume — replay the same brief on
+  every attempt, so recording those would add a row per retry. A respawn of the
+  same work is the same work, not a second unit of it.
 ### Changed
 
 - **Provider writes go through one coordinator** (#1736, #1840). Assignees,
@@ -107,6 +120,33 @@ those two sections as well if you are coming from 0.1.18.
   a second one that looked right — and because the auto-check on merge matches
   a link exactly, the row carrying it was never ticked off. Both spellings now
   mean one link.
+- **`gh --version` printed lazybox's version** (#1944). Agents reach `gh`
+  through a lazybox shim, and lazybox answered any `--help` or `--version`
+  past `gh` with its own — so `gh pr view --help` described lazybox, at exit
+  0. A human notices they are reading about the wrong tool; an agent scripts
+  against it. Flags past a passthrough subcommand now belong to the program
+  they were typed for, and a help request never reaches the daemon, so it no
+  longer spends a slot in the shared GitHub budget on a call that touches no
+  API.
+- **The shim's dial at the daemon had no timeout** (#1944). Every other wait it
+  makes was bounded, which is what "degrades toward plain `gh`" rests on, but
+  getting the connection in the first place could wait indefinitely. Bounded
+  now, and expiry runs `gh` unchanged like every other expiry here. This was
+  found while investigating a landing script that sat ~30 minutes on one `gh`
+  call; **that stall is still unexplained** — the shim's own waits cannot
+  produce half an hour, and the remaining unbounded wait is on `gh` itself,
+  which is deliberate, since the shim may not cut short a clone or a prompt.
+- **A slow `gh` now says where the time went** (#1945). Above 5s of lazybox's
+  own phases — dialling, admission, the completion ack, never `gh`'s own
+  runtime — the shim prints one line naming each, and
+  `LAZYBOX_GH_SHIM_TIMING=1` forces it. Previously a stall could not be
+  attributed to a wedged daemon, a reserve throttle, or `gh` itself, and each
+  has a different fix.
+- **Tests that exec the lazybox binary stopped killing themselves under load**
+  (#1945). 0.1.20 gave them a longer runner budget for the cold exec of a
+  ~213 MB debug build; their own internal bound stayed at 10s and fired first,
+  so the budget never applied and the failure read as a flake. One shared
+  bound now, with a guard that fails on a shorter one reintroduced anywhere.
 - **The docs site's dependency advisories are cleared** (#1934). `npm audit`
   went from 13 findings, including two rated high, to zero, by overriding one
   transitive package rather than taking the downgrade `npm audit fix` proposed.

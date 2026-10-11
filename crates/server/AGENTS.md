@@ -413,6 +413,19 @@ the real binary, and asks the daemon before it spends
   check covers that but not a hand-edited script; `SHIM_DEPTH_ENV` identifies
   nothing and so bounds recursion whatever else missed. A `gh` extension calls
   `gh` again, which is why the depth cap is 4 and not 1.
+- **Every wait on the daemon is bounded, and expiry runs plain `gh`.** Getting
+  a connection (6s, above the 5s handshake it contains), the admission answer
+  (10s), the completion ack (10s) and the total throttle wait (90s) each have
+  their own cap. "Degrades toward plain `gh`" is only true if no step can wait
+  forever: the connect had no bound at all, and an unattended landing script
+  sat on one `gh` call for ~30 minutes (#1944).
+- **`--help` and `--version` past `gh` are `gh`'s, not lazybox's.** The argv
+  scan in `main.rs` stops at a passthrough subcommand (`own_args`), and
+  `classify` keeps a help request off the daemon path entirely — it reaches no
+  API, so admitting or caching it would spend budget accounting on nothing.
+  Before that, `gh --version` printed lazybox's version and
+  `gh pr view --help` lazybox's help: a human notices they are reading about
+  the wrong tool, an agent scripts against it.
 - **The shim is dispatched before `init_tracing()`** (`tui-boot/src/main.rs`).
   Tracing redirects OS stderr into the log file, and the shim runs `gh` with
   inherited stdio — on the wrong side of that call, `gh`'s own errors go to

@@ -32,6 +32,21 @@ use std::time::Duration;
 /// which is strictly better than stalling the agent behind a wedged daemon.
 const ADMIT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long to wait to *get* a connection to ask on, as opposed to
+/// [`ADMIT_TIMEOUT`], which bounds the daemon's answer once connected.
+///
+/// [`lazybox_ipc::socket::connect`] bounds its handshake
+/// ([`lazybox_ipc::socket::HANDSHAKE_TIMEOUT`], 5s) but not the connect
+/// underneath it, and a socket whose listener exists without accepting — a
+/// daemon mid-restart, which is precisely when a long script is most likely
+/// to be running — left this call with no bound at all. A `gh` that hangs is
+/// worse for the session than a `gh` that runs unadmitted, which is this
+/// module's whole premise, so the wait is capped and expiry falls through to
+/// plain `gh`. Above the handshake bound it contains, so the cap only ever
+/// bites on the unbounded part; `the_connect_bound_outlasts_the_handshake_it_contains`
+/// pins that ordering.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+
 /// Total time the shim will spend waiting out throttles before giving up and
 /// telling the agent why. A quota throttle resolves in seconds, so this is
 /// really the bound on a *reserve* throttle, which can otherwise be "come back
@@ -223,6 +238,23 @@ const MUTATIONS: &[(&str, &str, GhChangeKind)] = &[
 /// onto a different issue. A boolean flag immediately before the record
 /// (`gh pr close --delete-branch 7`) costs the shim the reference instead,
 /// which is the safe direction — the poll sweep still reconciles it.
+/// `true` when the invocation asks `gh` to describe itself — `gh --help`,
+/// `gh pr view --help`, `gh --version` — rather than to reach the API.
+///
+/// A flag *value* is not a flag, by the same rule [`operands`] applies:
+/// `gh issue create --title --help` asks for an issue, absurdly titled.
+fn is_help_request(args: &[String]) -> bool {
+    let mut after_flag = false;
+    for arg in args {
+        let is_flag = arg.starts_with('-');
+        if is_flag && !after_flag && matches!(arg.as_str(), "-h" | "--help" | "--version") {
+            return true;
+        }
+        after_flag = is_flag && !arg.contains('=');
+    }
+    false
+}
+
 fn operands(args: &[String]) -> Vec<&str> {
     let mut out = Vec::new();
     let mut after_flag = false;
@@ -237,6 +269,14 @@ fn operands(args: &[String]) -> Vec<&str> {
 }
 
 fn classify(args: &[String]) -> Call {
+    if is_help_request(args) {
+        // `gh` describing itself reaches no API, so there is nothing here to
+        // admit, pace or cache. Routing it through the daemon would spend a
+        // budget slot on a call that costs GitHub nothing, and would make
+        // `gh --help` answer differently depending on whether lazybox
+        // happened to be running.
+        return Call::default();
+    }
     let positional = operands(args);
     let Some(&group) = positional.first() else {
         // Bare `gh` prints its own help.
@@ -517,9 +557,25 @@ enum Admission {
 }
 
 async fn connect() -> Option<lazybox_ipc::Client> {
-    let (client, _peer) = lazybox_ipc::socket::connect(&lifecycle::socket_path())
-        .await
-        .ok()?;
+    connect_within(
+        CONNECT_TIMEOUT,
+        lazybox_ipc::socket::connect(&lifecycle::socket_path()),
+    )
+    .await
+}
+
+/// The bound itself, over whatever future dials the daemon.
+///
+/// Split out so a test can hand it a dial that never resolves — the condition
+/// this exists for, and one no portable test can provoke from a real socket,
+/// since a full backlog blocks on one platform and is refused on another.
+async fn connect_within<F>(within: Duration, dial: F) -> Option<lazybox_ipc::Client>
+where
+    F: std::future::Future<
+            Output = std::io::Result<(lazybox_ipc::Client, lazybox_ipc::socket::PeerInfo)>,
+        >,
+{
+    let (client, _peer) = tokio::time::timeout(within, dial).await.ok()?.ok()?;
     Some(client)
 }
 
@@ -924,5 +980,87 @@ mod tests {
         ] {
             assert_eq!(normalize_remote(url), "acme/widget", "{url}");
         }
+    }
+
+    /// A dial that never resolves must not hold the agent's `gh` call open.
+    ///
+    /// This is the reported stall (#1944) reduced to the one property that was
+    /// missing:
+    /// before the bound, a daemon that neither accepted nor refused left the
+    /// shim waiting indefinitely, and a landing script sat for ~30 minutes on
+    /// a `gh` that CI had already answered. With no bound this test does not
+    /// fail by assertion — it hangs, and the runner's own deadline reports it,
+    /// which is the same shape as the bug.
+    #[tokio::test]
+    async fn the_shim_stops_waiting_for_a_daemon_that_never_answers_the_dial() {
+        let started = std::time::Instant::now();
+        let client = connect_within(Duration::from_millis(50), std::future::pending()).await;
+        assert!(
+            client.is_none(),
+            "an unanswered dial must degrade to running `gh` unadmitted, not produce a client",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the dial was not bounded: waited {:?}",
+            started.elapsed(),
+        );
+    }
+
+    /// The cap must stay above the handshake it contains.
+    ///
+    /// `socket::connect` is a connect plus a handshake, and only the connect
+    /// is unbounded. A cap at or below `HANDSHAKE_TIMEOUT` would start
+    /// cutting off healthy-but-slow handshakes — turning a bound on a hang
+    /// into a quiet loss of the fleet's read cache on a loaded box.
+    #[test]
+    fn the_connect_bound_outlasts_the_handshake_it_contains() {
+        assert!(
+            CONNECT_TIMEOUT > lazybox_ipc::socket::HANDSHAKE_TIMEOUT,
+            "CONNECT_TIMEOUT ({CONNECT_TIMEOUT:?}) must exceed HANDSHAKE_TIMEOUT ({:?})",
+            lazybox_ipc::socket::HANDSHAKE_TIMEOUT,
+        );
+    }
+
+    /// `gh` describing itself must stay off the daemon path entirely.
+    ///
+    /// These reach no API, so admitting, pacing or caching them spends the
+    /// fleet's shared budget accounting on nothing — and `gh pr view --help`
+    /// classifies as a `pr view` read on its operands alone, which is how it
+    /// would otherwise have got there once `--help` stopped being swallowed
+    /// by lazybox's own argv scan (#1944).
+    #[test]
+    fn describing_gh_itself_never_reaches_the_daemon() {
+        for line in [
+            vec!["--help"],
+            vec!["-h"],
+            vec!["--version"],
+            vec!["pr", "view", "--help"],
+            vec!["pr", "update-branch", "--help"],
+            vec!["api", "--help", "repos/acme/widget"],
+        ] {
+            let argv: Vec<String> = line.iter().map(|s| s.to_string()).collect();
+            let call = classify(&argv);
+            assert!(
+                call.kind.is_none(),
+                "`gh {}` was classified as {:?} instead of passing straight through",
+                line.join(" "),
+                call.kind,
+            );
+            assert!(
+                call.read_key.is_none(),
+                "`gh {}` was cached",
+                line.join(" ")
+            );
+        }
+    }
+
+    /// A flag's value is not a flag: this stays a real invocation.
+    #[test]
+    fn a_help_shaped_flag_value_is_not_a_help_request() {
+        let argv: Vec<String> = ["issue", "create", "--title", "--help"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!is_help_request(&argv));
     }
 }

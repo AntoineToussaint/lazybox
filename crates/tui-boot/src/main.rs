@@ -580,15 +580,46 @@ OAuth, no `gh` needed); set LINEAR_API_KEY for Linear.
 Logs go to /tmp/lazybox.log (RUST_LOG=lazybox=debug for verbose). State lives in
 ~/.lazybox/v2/state.db. Docs: https://lazybox.ai/docs/";
 
-/// `-h` / `--help` anywhere in argv. Help is always available regardless of
-/// the rest of the command line, per clig.dev discoverability.
-fn wants_help(args: &[String]) -> bool {
-    args.iter().any(|a| a == "-h" || a == "--help")
+/// The subcommand, if any, that hands the rest of the command line to another
+/// program.
+///
+/// Only the *first* argument can open a passthrough, which is the rule the
+/// dispatcher in `main` already applied — stated once here so the two readers
+/// cannot drift. `lazybox log --title gh` names a window, not a boundary.
+fn passthrough(args: &[String]) -> Option<&str> {
+    match args.first().map(String::as_str) {
+        Some(name @ "gh") => Some(name),
+        _ => None,
+    }
 }
 
-/// `-V` / `--version` anywhere in argv.
+/// The arguments that are lazybox's own: none at all, once a passthrough
+/// subcommand has claimed the line.
+///
+/// Past that boundary the flags belong to the other program. Reading them
+/// anyway is how `gh pr view --help` came to print lazybox's help instead of
+/// `gh`'s, and `gh --version` lazybox's version: a human notices they are
+/// reading about the wrong tool, an agent takes the page at its word and
+/// scripts against it.
+fn own_args(args: &[String]) -> &[String] {
+    if passthrough(args).is_some() {
+        return &[];
+    }
+    args
+}
+
+/// `-h` / `--help` anywhere in lazybox's own argv. Help is available
+/// regardless of the rest of *lazybox's* command line, per clig.dev
+/// discoverability — but a passthrough's `--help` is the other program's, and
+/// answering it here would be answering a question about a different tool.
+fn wants_help(args: &[String]) -> bool {
+    own_args(args).iter().any(|a| a == "-h" || a == "--help")
+}
+
+/// `-V` / `--version` anywhere in lazybox's own argv. Bounded by
+/// [`own_args`], for the reason given there.
 fn wants_version(args: &[String]) -> bool {
-    args.iter().any(|a| a == "-V" || a == "--version")
+    own_args(args).iter().any(|a| a == "-V" || a == "--version")
 }
 
 /// What a leftover first argument means once the known subcommands and the
@@ -696,7 +727,7 @@ async fn main() -> anyhow::Result<()> {
     // non-zero exit and no message. The shim's own refusals (quota, depth
     // guard, no `gh` on PATH) are lost the same way. Dispatched here, beside
     // `snippet`, for exactly the reason documented there.
-    if matches!(args.first().map(String::as_str), Some("gh")) {
+    if matches!(passthrough(&args), Some("gh")) {
         gh_cli::gh_subcommand(&args[1..]).await;
     }
 
@@ -3722,6 +3753,75 @@ mod argv_tests {
             "the gh shim is dispatched after init_tracing(), so gh's own stderr \
              is redirected into the log file and never reaches the agent",
         );
+    }
+
+    /// `--help` past a passthrough subcommand belongs to the other program.
+    ///
+    /// `gh pr view --help` printed lazybox's help and `gh --version`
+    /// lazybox's version (#1944), because the scan read the whole command
+    /// line. The caller is a script or an agent that asked `gh` a question;
+    /// answering with a page about lazybox is a wrong answer delivered at
+    /// exit 0, which is the kind an agent acts on.
+    #[test]
+    fn a_passthrough_owns_its_own_help_and_version() {
+        for line in [
+            vec!["gh", "--help"],
+            vec!["gh", "-h"],
+            vec!["gh", "--version"],
+            vec!["gh", "-V"],
+            vec!["gh", "pr", "view", "--help"],
+            vec!["gh", "pr", "update-branch", "--help"],
+            vec!["gh", "api", "--help", "repos/acme/widget"],
+        ] {
+            let argv = args(&line);
+            assert!(
+                !wants_help(&argv),
+                "lazybox answered {line:?} with its own help",
+            );
+            assert!(
+                !wants_version(&argv),
+                "lazybox answered {line:?} with its own version",
+            );
+        }
+    }
+
+    /// The boundary must not cost lazybox its own help.
+    #[test]
+    fn lazybox_still_answers_for_its_own_command_line() {
+        for line in [
+            vec!["--help"],
+            vec!["-h"],
+            vec!["log", "--help"],
+            vec!["work", "mine", "--help"],
+            // `gh` as a flag *value* is not a boundary: only a first argument
+            // opens one, which is the rule the dispatcher applies.
+            vec!["log", "--title", "gh", "--help"],
+        ] {
+            let argv = args(&line);
+            assert!(
+                wants_help(&argv),
+                "lazybox dropped its own help for {line:?}"
+            );
+        }
+        for line in [vec!["--version"], vec!["-V"], vec!["log", "--version"]] {
+            let argv = args(&line);
+            assert!(
+                wants_version(&argv),
+                "lazybox dropped its own version for {line:?}",
+            );
+        }
+    }
+
+    /// Only the first argument opens a passthrough — the same rule the
+    /// dispatcher in `main` applies, which is why both read `passthrough`.
+    #[test]
+    fn only_a_leading_subcommand_opens_a_passthrough() {
+        assert_eq!(passthrough(&args(&["gh", "pr", "view"])), Some("gh"));
+        assert_eq!(passthrough(&args(&["gh"])), Some("gh"));
+        assert_eq!(passthrough(&args(&["log", "--title", "gh"])), None);
+        assert_eq!(passthrough(&args(&[])), None);
+        assert!(own_args(&args(&["gh", "--help"])).is_empty());
+        assert_eq!(own_args(&args(&["log", "--help"])).len(), 2);
     }
 
     #[test]

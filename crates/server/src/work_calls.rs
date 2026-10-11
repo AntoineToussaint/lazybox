@@ -260,6 +260,110 @@ async fn create(config: &ServerConfig, args: CreateArgs) -> Result<WorkReport, W
     })
 }
 
+/// Longest title taken from a brief. Long enough to identify the work in a
+/// roll-up, short enough that a list of them reads as a list.
+const TITLE_FROM_BRIEF_CHARS: usize = 72;
+
+/// A title for work nobody titled: the brief's first meaningful line.
+///
+/// Truncated on a CHARACTER boundary — a brief is agent-written prose and
+/// slicing bytes through a multi-byte character panics.
+fn title_from_brief(brief: &str) -> String {
+    let line = brief
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("untitled work");
+    let mut out: String = line.chars().take(TITLE_FROM_BRIEF_CHARS).collect();
+    if line.chars().count() > TITLE_FROM_BRIEF_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+/// Record a hand-off between agents as tracked work, from the one place every
+/// spawn passes through.
+///
+/// Why this exists: a coordinator that spawned 85 workspaces in a day had only
+/// liveness (`list_sessions`) and a 40-line scrollback tail (`read_session`) to
+/// learn anything about them, and neither distinguishes "the turn ended" from
+/// "the task is done". So it re-sent the same brief, polled scrollback, and
+/// kept its own state in files — while `create_work` sat at zero callers,
+/// because tracking the hand-off was a step an agent had to remember on top of
+/// making it. Nobody remembers. The spawn itself is the hand-off, so the spawn
+/// records it.
+///
+/// Deliberately only for an agent-to-agent hand-off
+/// ([`lazybox_ipc::PromptSource::Agent`]). A spawn the user typed is already
+/// visible to the user who typed it, and lazybox's own spawns (auto-fix, a
+/// resume) repeat the same brief on every retry — recording those would mint a
+/// row per attempt. Both are their own decision, not this one.
+///
+/// Best-effort by construction: this must never fail a spawn that otherwise
+/// worked. A failure is logged and the agent still starts.
+pub async fn record_handoff(
+    config: &ServerConfig,
+    owner: &SessionKey,
+    requester: &SessionKey,
+    brief: &str,
+) {
+    if owner == requester {
+        return;
+    }
+    let brief = brief.trim();
+    if brief.is_empty() {
+        return;
+    }
+    let title = title_from_brief(brief);
+
+    // A respawn into the same workspace with the same brief is the same work,
+    // not a second unit of it. Cheap because spawns are rare and the store
+    // read is one pass.
+    let existing =
+        crate::store_blocking(&config.store, |store| crate::work_store::all_tasks(store)).await;
+    if let Ok((tasks, _skipped)) = existing {
+        let owner_workspace = WorkspaceKey::new(owner.as_str());
+        let already = tasks.iter().any(|task| {
+            !task.lifecycle.is_terminal()
+                && task.title == title
+                && matches!(&task.owner, Some(Party::Agent { workspace, .. }) if *workspace == owner_workspace)
+        });
+        if already {
+            tracing::debug!(
+                owner = %owner.as_str(),
+                "work: hand-off already tracked, not minting a second unit"
+            );
+            return;
+        }
+    }
+
+    // `deliver: false` — the brief IS this spawn's initial prompt, already on
+    // its way. Delivering it again would hand the agent the same task twice.
+    let args = CreateArgs {
+        requester: requester.clone(),
+        title,
+        brief: brief.to_string(),
+        owner: Some(owner.clone()),
+        deliver: false,
+        plan: None,
+        parent: None,
+        links: Vec::new(),
+    };
+    match create(config, args).await {
+        Ok(_) => tracing::info!(
+            from = %requester.as_str(),
+            owner = %owner.as_str(),
+            "work: recorded an agent-to-agent hand-off as tracked work"
+        ),
+        Err(error) => tracing::warn!(
+            from = %requester.as_str(),
+            owner = %owner.as_str(),
+            %error,
+            "work: could not record the hand-off; the spawn itself is unaffected"
+        ),
+    }
+}
+
 async fn update(config: &ServerConfig, args: UpdateArgs) -> Result<WorkReport, WorkError> {
     let id = parse_work_id(&args.id)?;
     let mut task = crate::store_blocking(&config.store, move |store| {
@@ -1323,5 +1427,84 @@ mod tests {
             super::call(&config, WorkRequest::Status { plan: None }).await,
             Ok(WorkReport::Status { .. })
         ));
+    }
+
+    #[test]
+    fn a_title_comes_from_the_briefs_first_meaningful_line() {
+        assert_eq!(
+            title_from_brief("\n\n  Fix the carrier seam  \nthen rerun"),
+            "Fix the carrier seam"
+        );
+        assert_eq!(title_from_brief(""), "untitled work");
+        assert_eq!(title_from_brief("   \n  "), "untitled work");
+    }
+
+    /// A brief is agent-written prose. Slicing bytes through a multi-byte
+    /// character panics, and this ran on every tracked hand-off.
+    #[test]
+    fn a_long_title_truncates_on_a_character_boundary() {
+        let brief = "é".repeat(200);
+        let title = title_from_brief(&brief);
+        assert_eq!(title.chars().count(), TITLE_FROM_BRIEF_CHARS + 1, "{title}");
+        assert!(title.ends_with('…'));
+        // The real property: it is valid UTF-8 that round-trips.
+        assert_eq!(
+            title,
+            String::from_utf8(title.clone().into_bytes()).unwrap()
+        );
+    }
+
+    /// The spawn records the hand-off, and a respawn does not mint a second
+    /// unit of the same work.
+    ///
+    /// A workspace is respawned often — a resume, a model change, a crash —
+    /// and each one replays the brief. One row per attempt would make the
+    /// roll-up it exists for unreadable.
+    #[tokio::test]
+    async fn a_handoff_is_recorded_once_however_many_times_it_respawns() {
+        let config = ServerConfig::in_memory();
+        let coordinator = SessionKey::new("coordinator-1");
+        let worker = SessionKey::new("github-acme-widget-953");
+
+        for _ in 0..3 {
+            record_handoff(
+                &config,
+                &worker,
+                &coordinator,
+                "Land the carrier seam\nthen rerun",
+            )
+            .await;
+        }
+
+        let (tasks, skipped) =
+            crate::store_blocking(&config.store, |store| crate::work_store::all_tasks(store))
+                .await
+                .expect("read the work store");
+        assert_eq!(skipped, 0);
+        assert_eq!(tasks.len(), 1, "a respawn minted a second unit: {tasks:#?}");
+        let task = &tasks[0];
+        assert_eq!(task.title, "Land the carrier seam");
+        assert_eq!(task.requester, party(&coordinator));
+        assert_eq!(task.owner, Some(party(&worker)));
+        // The owner's workspace is a link, so a roll-up has its member list.
+        assert!(
+            task.links
+                .contains(&Link::Workspace(WorkspaceKey::new(worker.as_str()))),
+            "the hand-off did not link the workspace it was handed to: {:?}",
+            task.links
+        );
+    }
+
+    /// Work handed to oneself is not a hand-off.
+    #[tokio::test]
+    async fn a_session_handing_work_to_itself_records_nothing() {
+        let config = ServerConfig::in_memory();
+        let me = SessionKey::new("coordinator-1");
+        record_handoff(&config, &me, &me, "do my own work").await;
+        let (tasks, _) =
+            crate::store_blocking(&config.store, |store| crate::work_store::all_tasks(store))
+                .await
+                .expect("read the work store");
+        assert!(tasks.is_empty(), "{tasks:#?}");
     }
 }

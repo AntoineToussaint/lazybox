@@ -1410,7 +1410,47 @@ pub async fn handle_spawn(
     } else {
         None
     };
-    handle_spawn_inner(config, session_key, session_id, kind, options).await
+    // Captured before `options` moves: the hand-off this spawn carries, if it
+    // is one agent handing work to another. Recorded only once the spawn is
+    // observable, so a failed provisioning does not leave a work row claiming
+    // somebody is on it.
+    let handoff = handoff_in(&options);
+    let terminal = handle_spawn_inner(config, session_key.clone(), session_id, kind, options).await;
+    if let (Some((requester, brief)), Some(_)) = (handoff, terminal.as_ref()) {
+        // Boxed to break a STATIC cycle, not a real one: `create` can reach
+        // `deliver_brief`, which can spawn, so the compiler sees
+        // handle_spawn -> record_handoff -> ... -> handle_spawn. The hand-off
+        // record is written with `deliver: false` (the brief is already this
+        // spawn's prompt), so that arm is never taken at run time.
+        Box::pin(crate::work_calls::record_handoff(
+            config,
+            &session_key,
+            &requester,
+            &brief,
+        ))
+        .await;
+    }
+    terminal
+}
+
+/// The agent-to-agent hand-off a spawn carries: who handed it over, and the
+/// brief they handed.
+///
+/// `None` for everything else. A prompt the user typed is already visible to
+/// the user who typed it, and lazybox's own spawns repeat their brief on every
+/// retry, so recording those would mint a work row per attempt — see
+/// [`crate::work_calls::record_handoff`].
+fn handoff_in(options: &SpawnOptions) -> Option<(SessionKey, String)> {
+    let brief = options.initial_prompt.as_ref()?.trim();
+    if brief.is_empty() {
+        return None;
+    }
+    match options.prompt_from.as_ref()? {
+        lazybox_ipc::PromptSource::Agent { from } if !from.trim().is_empty() => {
+            Some((SessionKey::new(from.trim()), brief.to_string()))
+        }
+        _ => None,
+    }
 }
 
 /// The worktree path a spawn for this workspace resolves to, mirroring
@@ -26479,5 +26519,70 @@ mod tests {
         let spec = bringup("true", Some("false"));
         let outcome = execute_worktree_bringup(dir.path(), &spec, &[], |_| {}).await;
         assert!(matches!(outcome, BringupOutcome::NotReady(_)));
+    }
+
+    /// Only an agent-to-agent hand-off is tracked work.
+    ///
+    /// A prompt the user typed is already visible to the user who typed it,
+    /// and lazybox's own spawns (auto-fix, a resume) hand the SAME brief over
+    /// again on every attempt — tracking those would mint a work row per
+    /// retry, which is the noise that makes a roll-up useless.
+    #[test]
+    fn only_an_agent_to_agent_spawn_is_a_tracked_handoff() {
+        let with = |prompt: Option<&str>, from: Option<lazybox_ipc::PromptSource>| SpawnOptions {
+            initial_prompt: prompt.map(str::to_string),
+            prompt_from: from,
+            ..Default::default()
+        };
+        let agent = |from: &str| {
+            Some(lazybox_ipc::PromptSource::Agent {
+                from: from.to_string(),
+            })
+        };
+
+        let got = handoff_in(&with(Some("land the carrier seam"), agent("coordinator-1")));
+        assert_eq!(
+            got,
+            Some((
+                SessionKey::new("coordinator-1"),
+                "land the carrier seam".to_string()
+            ))
+        );
+
+        for (label, options) in [
+            (
+                "typed by the user",
+                with(Some("do the thing"), Some(lazybox_ipc::PromptSource::Typed)),
+            ),
+            (
+                "lazybox's own retry",
+                with(
+                    Some("fix CI"),
+                    Some(lazybox_ipc::PromptSource::Lazybox {
+                        reason: "auto-fix".into(),
+                    }),
+                ),
+            ),
+            (
+                "a snippet",
+                with(
+                    Some("review this"),
+                    Some(lazybox_ipc::PromptSource::Snippet {
+                        key: "rev".into(),
+                        category: String::new(),
+                    }),
+                ),
+            ),
+            ("no prompt at all", with(None, agent("coordinator-1"))),
+            ("an empty brief", with(Some("   "), agent("coordinator-1"))),
+            ("an anonymous agent", with(Some("do it"), agent("  "))),
+            ("no provenance", with(Some("do it"), None)),
+        ] {
+            assert_eq!(
+                handoff_in(&options),
+                None,
+                "{label} was tracked as a hand-off"
+            );
+        }
     }
 }

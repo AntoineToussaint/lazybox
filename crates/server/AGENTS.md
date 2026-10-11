@@ -232,6 +232,25 @@ A handoff made through these verbs is a row with a requester, a lifecycle, a
 result and a provenance history, which is what `notify_session` cannot be:
 that reports only that text landed.
 
+**The spawn records the hand-off; nobody has to remember to.** Calling
+`create_work` beside a spawn was a step an agent had to take on top of making
+the hand-off, and the measured result was zero callers while one coordinator
+drove 85 spawned workspaces by re-sending briefs and reading scrollback. So
+`handle_spawn` — the one path every spawn passes through — calls
+`work_calls::record_handoff` once the spawn is observable, and the row exists
+without anyone opting in.
+
+Three boundaries hold that in place. It fires **only** for
+`PromptSource::Agent`: a prompt the user typed is already visible to the user
+who typed it, and lazybox's own spawns (auto-fix, a resume) replay the same
+brief on every attempt, so tracking those would mint a row per retry and make
+the roll-up unreadable. It is **idempotent per workspace and title**, because a
+workspace is respawned often and each respawn replays the brief. And it is
+**best-effort**: a store failure is logged and the agent still starts, because
+a spawn that worked must not fail over its own bookkeeping. The record carries
+`deliver: false` — the brief is already this spawn's initial prompt, so
+delivering it again would hand the agent the same task twice.
+
 **`Lifecycle` is the third state enum here and must not be confused with the
 other two.** `AgentState` is liveness *observed* from the PTY and the hooks;
 `lazybox_core::TaskState` is the *tracker record's* state, owned by the

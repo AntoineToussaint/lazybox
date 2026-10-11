@@ -42,6 +42,60 @@ fn profile_period_secs(nextest: &str, profile: &str) -> u64 {
         .unwrap_or_else(|| panic!("{header} declares a slow-timeout period in whole seconds"))
 }
 
+/// A `tui-boot` test that execs the built `lazybox` binary pays a cold-cache
+/// page-in of a ~213 MB debug build — measured 13s on a loaded box against a
+/// 10s default — so the wall clock is a property of the build, not of the
+/// behaviour under test.
+///
+/// The override for that used to name `notification_click` alone while three
+/// sibling binaries carried the same cost on the default budget.
+/// `hosted_relay_script` was rediagnosed four times in one day (7.1s idle,
+/// 9.7s at load 22, timing out above that, on clean `main` so it looked like
+/// nobody's diff) before it blocked a release gate. This pins the filter to
+/// the cause: every test binary that execs the binary gets the budget, so the
+/// list cannot fall behind a new one.
+#[test]
+fn every_binary_that_execs_the_lazybox_binary_gets_the_cold_exec_budget() {
+    let root = workspace_root();
+    let tests_dir = root.join("crates/tui-boot/tests");
+    let mut execs: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&tests_dir).expect("read crates/tui-boot/tests") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read test source");
+        if source.contains("CARGO_BIN_EXE_lazybox") {
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("test binary name")
+                .to_string();
+            execs.push(name);
+        }
+    }
+    assert!(
+        !execs.is_empty(),
+        "no tui-boot test execs CARGO_BIN_EXE_lazybox any more; this guard has stopped working"
+    );
+
+    let nextest = read(".config/nextest.toml");
+    let covered: Vec<&String> = execs
+        .iter()
+        .filter(|name| nextest.contains(&format!("binary({name})")))
+        .collect();
+    let missing: Vec<&String> = execs
+        .iter()
+        .filter(|name| !nextest.contains(&format!("binary({name})")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these tui-boot test binaries exec the ~213 MB `lazybox` debug binary and would be \
+         killed by the 10s default on a loaded box — add them to the cold-exec override in \
+         .config/nextest.toml: {missing:?} (already covered: {covered:?})"
+    );
+}
+
 #[test]
 fn the_loaded_lane_runs_under_its_own_profile() {
     let nextest = read(".config/nextest.toml");

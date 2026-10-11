@@ -86,12 +86,24 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 
 [[profile.default.overrides]]
 # These tests exec the freshly built `lazybox` binary. The first exec of a
-# ~200 MB debug build after a rebuild pages it in from a cold cache (measured
+# ~213 MB debug build after a rebuild pages it in from a cold cache (measured
 # 13s on a loaded box, 20ms once warm), so the wall clock is a property of
 # the build and the page cache, not of the one-frame socket round-trip under
 # test. The tests warm the binary outside their own liveness bound; this
 # period keeps the cold exec itself inside the runner's budget.
-filter = 'binary(notification_click)'
+#
+# Scoped to the CAUSE rather than to the binaries that have tripped so far.
+# `notification_click` was listed alone, and the other three `tui-boot` test
+# binaries that exec `CARGO_BIN_EXE_lazybox` kept the 10s default while
+# carrying the identical cost: `hosted_relay_script` measured 7.1s idle,
+# 9.7s at load 22 and timed out above that — on clean `main`, so it read as
+# nobody's diff and was rediagnosed four times in one day before it finally
+# blocked a release gate. `hook_ingest` timed out the same afternoon and
+# `workspace_create` execs the binary thirteen times. A per-binary list of
+# symptoms grows one entry per painful afternoon;
+# `every_binary_that_execs_the_lazybox_binary_gets_the_cold_exec_budget`
+# pins this filter against the binaries that actually exec it.
+filter = 'binary(notification_click) or binary(hosted_relay_script) or binary(hook_ingest) or binary(workspace_create)'
 slow-timeout = { period = "60s", terminate-after = 1 }
 
 [profile.ci]

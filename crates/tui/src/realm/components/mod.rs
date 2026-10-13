@@ -48,4 +48,5 @@ pub mod sync_status;
 pub mod terminals;
 pub mod textarea;
 pub mod which_key;
+pub mod work_rollup;
 pub mod worktree_progress;

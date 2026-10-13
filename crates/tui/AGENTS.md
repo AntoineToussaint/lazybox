@@ -27,6 +27,16 @@ state that lives here is state the daemon cannot recover after a reconnect.
   delegate render and key dispatch to their inherent methods. Put logic in the
   domain struct, where it can be tested without a realm.
 - **Modals** are `AppComponent`s mounted on `Model::modal_stack`.
+- **A modal that asks the daemon a question renders a loading state first,
+  and gates its repaint.** `mount_*` puts the modal up and the dispatch arm
+  pairs it with the command, so the view and the request are armed together;
+  the reply handler drops anything that is not this view's answer. What
+  identifies "this view's" depends on the reply: the merge-history ledger
+  keys on its repo (`merge_history_repo`), the `E w` work rollup on the
+  `client_request_id` it minted (`work_rollup_request`) — which is what it
+  takes to share a connection with the `lazybox work` CLI, whose replies ride
+  the same event. Without that gate a late reply repaints the view with the
+  answer to a question the user has already closed.
 - **Two picker shapes, and only two.** `Choice<T>` (`realm/components/choice.rs`)
   is the single- or multi-select with axis sections and typed payloads; opt in to
   filter-as-you-type with `.with_search(|item, query| …)`, which hands the

@@ -2646,6 +2646,171 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Open the cross-workspace work rollup (`E w`) in its loading state
+    /// and mint the correlation id for the `Command::WorkCall` the caller
+    /// pairs with it. Returns the id so the dispatch arm can put it on the
+    /// command — the modal and the request are armed together, because a
+    /// view waiting on a reply nobody asked for never repaints.
+    ///
+    /// Not idempotent-guarded like the epic readouts: re-pressing `E w`
+    /// re-reads the store, which is the point of a view over live work.
+    pub(super) fn mount_work_rollup(&mut self) -> String {
+        use crate::realm::components::work_rollup::WorkRollup;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        self.work_rollup_request = Some(id.clone());
+        self.mount_modal(Id::WorkRollup, WorkRollup::loading());
+        id
+    }
+
+    /// Repaint the open work rollup with the daemon's reply.
+    ///
+    /// Dropped unless the rollup is the top modal AND the reply carries
+    /// the correlation id of the call that armed it. Both halves matter:
+    /// `Event::WorkReport` is request/response on this connection, so a
+    /// reply can arrive after the view was closed and reopened, and the
+    /// id is the only thing that tells those two apart.
+    ///
+    /// A `WorkReport` that is not a `Status` is not this view's answer —
+    /// the same connection carries `Mine` and `One` replies — so it is
+    /// ignored rather than rendered as an empty store.
+    pub(super) fn update_work_rollup(
+        &mut self,
+        client_request_id: Option<&str>,
+        result: &Result<lazybox_ipc::work::WorkReport, lazybox_ipc::work::WorkError>,
+    ) {
+        use crate::realm::components::work_rollup::WorkRollup;
+
+        if self.modal_stack.last() != Some(&Id::WorkRollup) {
+            return;
+        }
+        if self.work_rollup_request.as_deref() != client_request_id {
+            return;
+        }
+        let (entries, undecodable, error) = match result {
+            Ok(lazybox_ipc::work::WorkReport::Status {
+                plans,
+                unplanned,
+                undecodable_rows,
+            }) => (
+                self.work_rollup_entries(plans, unplanned),
+                *undecodable_rows,
+                None,
+            ),
+            // Another verb's reply on the same connection. Leave the
+            // loading state up: the answer to this view's question may
+            // still be behind it.
+            Ok(_) => return,
+            Err(error) => (Vec::new(), 0, Some(error.to_string())),
+        };
+        // The request is answered either way; a second reply for the same
+        // id would be a daemon bug, and disarming here keeps a late
+        // duplicate from re-flattening a cursor the user has moved.
+        self.work_rollup_request = None;
+        self.mount_modal(
+            Id::WorkRollup,
+            WorkRollup::resolved(entries, undecodable, error),
+        );
+    }
+
+    /// Flatten the store's reply into the modal's rows: each plan as a
+    /// header carrying its roll-up and member count, its tasks beneath,
+    /// then the unplanned bucket.
+    ///
+    /// Plans with nothing on them are kept — an empty plan is unstarted,
+    /// not absent, and dropping it would hide a plan somebody filed and
+    /// nobody has started. A plan whose every task is done sorts last, so
+    /// the open work is what the top of the view shows.
+    pub(super) fn work_rollup_entries(
+        &self,
+        plans: &[lazybox_ipc::work::PlanRow],
+        unplanned: &[lazybox_ipc::work::WorkRow],
+    ) -> Vec<crate::realm::components::work_rollup::WorkRollupEntry> {
+        use crate::realm::components::work_rollup::{HeaderCount, WorkRollupEntry};
+
+        let mut ordered: Vec<&lazybox_ipc::work::PlanRow> = plans.iter().collect();
+        // Stable within each group: `sort_by_key` keeps the store's own
+        // order for plans that are equally complete, so the view does not
+        // reshuffle between reads.
+        ordered.sort_by_key(|plan| plan.is_complete());
+
+        let mut entries = Vec::new();
+        for plan in ordered {
+            let title = if plan.title.trim().is_empty() {
+                plan.plan.clone()
+            } else {
+                plan.title.clone()
+            };
+            entries.push(WorkRollupEntry::Header {
+                title,
+                is_plan: true,
+                // A plan carries every task on it, terminal ones
+                // included, so this fraction is the real one.
+                count: HeaderCount::Fraction(plan.done, plan.total),
+                members: plan.members.len(),
+            });
+            entries.extend(plan.tasks.iter().map(|t| self.work_task_row(t)));
+        }
+        if !unplanned.is_empty() {
+            // Counted, because this is where the fleet's tracked work
+            // actually lands: a spawn-recorded hand-off carries no plan,
+            // so a bucket with no count at all would leave the common
+            // case the one section that cannot be read at a glance.
+            //
+            // An OPEN count, not a fraction: `work_status` filters
+            // terminal rows out of `unplanned`, so the rows that arrived
+            // are all still open and a `done/total` over them would
+            // report `0/N` forever.
+            let members = unplanned
+                .iter()
+                .filter_map(|t| t.owner.as_deref())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            entries.push(WorkRollupEntry::Header {
+                title: "on no plan".to_string(),
+                is_plan: false,
+                count: HeaderCount::Open(unplanned.len()),
+                members,
+            });
+            entries.extend(unplanned.iter().map(|t| self.work_task_row(t)));
+        }
+        entries
+    }
+
+    /// Project one stored row, resolving its owner to a jump target.
+    ///
+    /// The owner is a *label* on the wire — a workspace key, or `human` /
+    /// `lazybox` for the two parties that are not workspaces — so the
+    /// jump is offered only when it resolves to a workspace this client
+    /// actually has. That keeps `Enter` from flashing "workspace is gone"
+    /// at a row owned by a person.
+    fn work_task_row(
+        &self,
+        row: &lazybox_ipc::work::WorkRow,
+    ) -> crate::realm::components::work_rollup::WorkRollupEntry {
+        use crate::realm::components::work_rollup::{WorkLifeKind, WorkRollupEntry, WorkTaskRow};
+
+        let owner = row.owner.clone().unwrap_or_default();
+        let jump = (!owner.is_empty())
+            .then(|| lazybox_core::SessionKey::new(owner.clone()))
+            .filter(|key| self.sidebar.workspace_by_key(key).is_some());
+        // Who asked, when that is somebody else. A row whose requester
+        // is its own owner is work a workspace filed for itself, and
+        // repeating the key would just make the line longer.
+        let requester = row
+            .requester
+            .clone()
+            .filter(|from| *from != owner && !from.trim().is_empty());
+        WorkRollupEntry::Task(WorkTaskRow {
+            kind: WorkLifeKind::from_label(&row.lifecycle),
+            title: row.title.clone(),
+            owner,
+            requester,
+            detail: row.detail.clone(),
+            jump,
+        })
+    }
+
     /// `i` in the Error Inbox — open a pre-filled GitHub *new issue*
     /// form in the browser, deriving the repo from the error's
     /// workspace key. Pre-filling the form (rather than creating the

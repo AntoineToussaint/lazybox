@@ -347,12 +347,13 @@ on the next poll — or immediately from a following `workspace create --issue
 
 The task/plan store from a shell — **the supported surface for an agent that
 cannot receive MCP tools** (Codex, Cursor, `--strict-mcp-config`). Every
-subcommand reaches the same daemon code as the `create_work` / `my_work` /
-`update_work` / `work_status` MCP tools, so a shell and an agent are never told
-different things about the same row.
+subcommand reaches the same daemon code as the `create_plan` / `create_work` /
+`my_work` / `update_work` / `work_status` MCP tools, so a shell and an agent are
+never told different things about the same row.
 
 ```bash
 lazybox work mine                                  # what you own, are owed, have queued
+lazybox work plan "Ship the sync slice"            # mint a plan, print its id
 lazybox work new "Fix the flaky clone test" \
   --brief "Objective: ... Done when: ..." --to github:acme/widget#42
 lazybox work set <id> underway
@@ -364,6 +365,7 @@ lazybox work status --json
 | Command / option | Effect |
 | --- | --- |
 | `work mine [--all]` | Three lists: work you own, work a sibling owes you, work you filed that nobody owns. `--all` includes finished work |
+| `work plan <title>` | Mint a plan to group work onto, and print its id. `--plan` names a plan that already exists, so this is how the first one comes into being |
 | `work new <title>` | Mint a unit of work and print its id |
 | `--brief <text>` | Objective, done-criteria, boundaries, output shape. Delivered to the owner's session |
 | `--to <workspace>` | Assign it, and hand the brief over now |
@@ -374,13 +376,21 @@ lazybox work status --json
 | `--detail <text>` | The question for `awaiting-answer`, the blocker for `held`, the cause for `failed`. Required for the first two |
 | `work done <id> --summary <text>` | Complete it. The summary is required: it is what the requester reads instead of your scrollback |
 | `--artifact <name>` | Repeatable. A file you wrote into `.lazybox/artifacts/`, carried by reference |
-| `work status [--plan <id>]` | A plan's `done/total` roll-up, the workspaces it spans, and the open work on no plan |
+| `work status [--plan <id>]` | A plan's `done/total` roll-up, the workspaces it spans, and the open work on no plan. The TUI reads the same answer at `E w` |
 | `--workspace <key>` | Act as this workspace instead of the current session |
 | `--json` / `--socket <path>` | Structured output; daemon socket to use |
 
 The workspace comes from `LAZYBOX_SESSION_KEY`, which lazybox injects into
 every session's PTY at spawn, so inside a session these commands need no
 arguments. Pass `--workspace` to act on another row.
+
+A plan is **optional grouping, not a container**: membership is the `--plan`
+on each unit of work, so work handed over without one is tracked just the same
+and simply answers individually rather than as a roll-up. `work status` keeps
+that work in its own section. Note the asymmetry there, which is the store's
+and not the renderer's: a plan reports `done/total` over *every* task on it,
+while the work on no plan is listed **open rows only** — a finished unit of
+work outside a plan drops out of that section rather than being counted in it.
 
 A **unit of work is not a tracker record**. It carries an immutable id for its
 whole life and points at issues, PRs and workspaces through `--link`, so an

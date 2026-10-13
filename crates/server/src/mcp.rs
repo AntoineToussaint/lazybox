@@ -534,6 +534,14 @@ struct LazyboxGuideArgs {
     topic: Option<String>,
 }
 
+/// A `create_plan` request.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CreatePlanArgs {
+    /// What the plan is for, in a few words — it labels every roll-up of
+    /// it.
+    title: String,
+}
+
 /// A `work_status` request.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct WorkStatusArgs {
@@ -2653,6 +2661,24 @@ impl LazyboxMcp {
                 detail: args.detail.clone(),
                 summary: args.summary.clone(),
                 artifacts: args.artifacts.clone(),
+            })
+            .await?,
+        ))
+    }
+
+    #[tool(
+        description = "Mint a plan to group work onto, and get back its id plus its (empty) roll-up. `create_work`'s `plan` has to name a plan that already exists — a mistyped id must not quietly open a second plan nobody is tracking — so this is how the first one comes into being. Use it when work spans several workspaces and you want one roll-up over them; work handed over without a plan is still tracked, it just answers individually rather than as a group."
+    )]
+    async fn create_plan(
+        &self,
+        Parameters(args): Parameters<CreatePlanArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(
+            self.work_call(lazybox_ipc::work::WorkRequest::Plan {
+                requester: caller,
+                title: args.title.clone(),
             })
             .await?,
         ))

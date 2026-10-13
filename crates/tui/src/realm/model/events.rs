@@ -1068,6 +1068,22 @@ impl<T: TerminalAdapter> Model<T> {
             self.sidebar.set_epic_snapshot(snapshot.clone());
             self.refresh_open_epic_modal(&key);
         }
+        // Work-store reply (#1935) — repaint the open `E w` rollup with
+        // the store's answer. Request/response on this connection, so this
+        // is the one event here that exists because *this client asked*:
+        // `update_work_rollup` drops it unless the rollup is open and the
+        // correlation id matches the call that armed it, which is also what
+        // keeps a `lazybox work` reply on a shared connection from
+        // repainting the view. Returns either way — the event carries no
+        // workspace, poll or indicator state for the fan-out below.
+        if let IpcEvent::WorkReport {
+            client_request_id,
+            result,
+        } = &event
+        {
+            self.update_work_rollup(client_request_id.as_deref(), result);
+            return;
+        }
         // Open agent-to-agent requests (#1653): the daemon owns the count
         // and pushes it here (seeded on connect, refreshed on every ask,
         // reply, and turn-end capture). The sidebar keeps it for the row's
@@ -1473,9 +1489,12 @@ impl<T: TerminalAdapter> Model<T> {
                 // on the asking connection, so this never reaches a TUI client.
                 // The arm exists because `Event` is one shared exhaustive enum.
                 | IpcEvent::TaskStatus { .. }
-                // Same for the `gh` shim's admission/ack replies (#1801) and
-                // the work store's (#1935).
+                // Same for the `gh` shim's admission/ack replies (#1801).
                 | IpcEvent::GhShimReply { .. }
+                // The work store's reply (#1935) DOES reach this client —
+                // the `E w` rollup asks on this connection — but it is
+                // consumed earlier in this function and carries no
+                // poll/indicator semantics of its own.
                 | IpcEvent::WorkReport { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
@@ -2670,9 +2689,11 @@ impl<T: TerminalAdapter> Model<T> {
             // on the asking connection, so this never reaches a TUI client.
             // The arm exists because `Event` is one shared exhaustive enum.
             | IpcEvent::TaskStatus { .. }
-            // Same for the `gh` shim's admission/ack replies (#1801) and
-            // the work store's (#1935).
+            // Same for the `gh` shim's admission/ack replies (#1801).
             | IpcEvent::GhShimReply { .. }
+            // The work store's reply (#1935) DOES reach this client — the
+            // `E w` rollup asks on this connection — but it is consumed
+            // earlier in this function and is not a provider poll.
             | IpcEvent::WorkReport { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
@@ -3055,9 +3076,12 @@ impl<T: TerminalAdapter> Model<T> {
                 // on the asking connection, so this never reaches a TUI client.
                 // The arm exists because `Event` is one shared exhaustive enum.
                 | IpcEvent::TaskStatus { .. }
-                // Same for the `gh` shim's admission/ack replies (#1801) and
-                // the work store's (#1935).
+                // Same for the `gh` shim's admission/ack replies (#1801).
                 | IpcEvent::GhShimReply { .. }
+                // The work store's reply (#1935) DOES reach this client —
+                // the `E w` rollup asks on this connection — but it is
+                // consumed earlier in this function and carries no
+                // poll/indicator semantics of its own.
                 | IpcEvent::WorkReport { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }

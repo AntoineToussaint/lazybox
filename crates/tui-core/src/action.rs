@@ -475,6 +475,14 @@ pub enum Action {
     /// columns, `j/k`/`h/l` navigate, `Enter` jumps to the highlighted
     /// member, `Esc` closes.
     EpicGraph,
+    /// Open the cross-workspace work rollup (`E w`): the work store's
+    /// plans with their `done/total` roll-up and the tasks under them,
+    /// each with its lifecycle, owner, and the question / blocker /
+    /// failure that holds it. Read-only; `Enter` on a row jumps to the
+    /// owning workspace. Reads the store live, so it answers for work
+    /// recorded by any surface — the MCP tools, the `lazybox work` CLI,
+    /// or an agent-to-agent spawn, which records its own hand-off.
+    WorkRollup,
     ToggleEpicAutoDispatch,
     ToggleEpicAutoReview,
     ToggleEpicMergeInOrder,
@@ -718,6 +726,7 @@ pub enum ActionKind {
     JumpToBlocked,
     EpicMergeOrder,
     EpicGraph,
+    WorkRollup,
     ToggleEpicAutoDispatch,
     ToggleEpicAutoReview,
     ToggleEpicMergeInOrder,
@@ -782,6 +791,7 @@ impl ActionKind {
         Self::JumpToBlocked,
         Self::EpicMergeOrder,
         Self::EpicGraph,
+        Self::WorkRollup,
         Self::ToggleEpicAutoDispatch,
         Self::ToggleEpicAutoReview,
         Self::ToggleEpicMergeInOrder,
@@ -1051,6 +1061,7 @@ impl Action {
             Action::JumpToBlocked => ActionKind::JumpToBlocked,
             Action::EpicMergeOrder => ActionKind::EpicMergeOrder,
             Action::EpicGraph => ActionKind::EpicGraph,
+            Action::WorkRollup => ActionKind::WorkRollup,
             Action::ToggleEpicAutoDispatch => ActionKind::ToggleEpicAutoDispatch,
             Action::ToggleEpicAutoReview => ActionKind::ToggleEpicAutoReview,
             Action::ToggleEpicMergeInOrder => ActionKind::ToggleEpicMergeInOrder,
@@ -1297,6 +1308,13 @@ impl ActionDef {
                 default_keys: "E g",
                 label: "graph view",
                 describe: "Open the full-screen dependency graph for the focused workspace's epic (#1524): waves laid out as columns with the typed edges between them (solid for a blocking dependency, dashed for a merge-after-only edge). j/k move within a wave, h/l across; Enter jumps to the highlighted member, Esc closes.",
+                section: Section::Global,
+            },
+            ActionKind::WorkRollup => &Self {
+                kind: ActionKind::WorkRollup,
+                default_keys: "E w",
+                label: "work rollup",
+                describe: "Open the cross-workspace work rollup: every plan in the work store with its done/total roll-up and the workspaces it spans, each task under it marked completed / underway / asking / held / failed, and an asking, held or failed row naming the question, blocker or cause. Read-only; Enter on a row jumps to the owning workspace. The store fills itself — a spawn into another workspace records its own hand-off — so this answers \"where does this multi-workspace effort stand?\" without anyone having to file the work by hand.",
                 section: Section::Global,
             },
             ActionKind::ToggleEpicAutoDispatch => &Self {
@@ -2650,6 +2668,7 @@ impl ActionKind {
             ActionKind::JumpToBlocked => "jump_to_blocked",
             ActionKind::EpicMergeOrder => "epic_merge_order",
             ActionKind::EpicGraph => "epic_graph",
+            ActionKind::WorkRollup => "work_rollup",
             ActionKind::ToggleEpicAutoDispatch => "toggle_epic_auto_dispatch",
             ActionKind::ToggleEpicAutoReview => "toggle_epic_auto_review",
             ActionKind::ToggleEpicMergeInOrder => "toggle_epic_merge_in_order",
@@ -2930,6 +2949,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::JumpToBlocked
         | ActionKind::EpicMergeOrder
         | ActionKind::EpicGraph
+        | ActionKind::WorkRollup
         | ActionKind::SetRole
         | ActionKind::SpawnPlanner
         | ActionKind::SpawnCoordinator
@@ -3762,6 +3782,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToBlocked
         | ActionKind::EpicMergeOrder
         | ActionKind::EpicGraph
+        | ActionKind::WorkRollup
         | ActionKind::JumpPrevGroup
         | ActionKind::JumpNextGroup
         | ActionKind::ResumeRateLimited

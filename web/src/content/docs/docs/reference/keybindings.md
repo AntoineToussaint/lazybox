@@ -265,6 +265,7 @@ The strength rows carry the agent whose menu the model name was read from (here,
 | `E j` | next blocked |
 | `E m` | merge order |
 | `E g` | graph view |
+| `E w` | work rollup |
 | `E A` | auto-dispatch |
 | `E R` | auto-review |
 | `E M` | merge in order |

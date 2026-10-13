@@ -174,7 +174,11 @@ workspace is work someone handed you.\n\
 `completed` with a `summary` when it is done. The summary is what the \
 requester reads INSTEAD OF your scrollback, so write it for someone who never \
 saw this session.\n\
-  - `work_status` rolls a plan up and names the workspaces it spans.\n\
+  - `create_plan` mints a plan to group work onto: it takes a `title` and \
+returns the plan's id, which `create_work`'s `plan` then names. Reach for one \
+when work spans several workspaces and you want a single roll-up over them.\n\
+  - `work_status` rolls a plan up and names the workspaces it spans. The \
+user reads the same answer at `E w`.\n\
 \n\
 A terminal state refuses every further move, so a task you finished cannot be \
 reopened or re-completed — that is what stops a replaced session's late report \
@@ -185,7 +189,7 @@ so an issue becoming a PR rewrites a link and the id is untouched. A unit of \
 work linked to a PR completes itself when that PR merges.\n\
 \n\
 Without MCP tools the same verbs are `lazybox work mine | new | set | done | \
-status`.";
+plan | status`.";
 
 const EPICS: &str = "\
 Cross-repo epics. The daemon derives an epic's state, so ANSWER FROM THESE \

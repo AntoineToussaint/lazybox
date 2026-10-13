@@ -2446,6 +2446,18 @@ impl<T: TerminalAdapter> Model<T> {
             Action::EpicGraph => {
                 self.mount_epic_graph();
             }
+            Action::WorkRollup => {
+                // The mount arms the correlation id and the command carries
+                // it, so the reply can only repaint the view that asked.
+                // `include_done` has no place here: `Status` reports a
+                // plan's done count as part of its roll-up, so a finished
+                // task is already represented by the fraction.
+                let client_request_id = self.mount_work_rollup();
+                cmds.push(IpcCommand::WorkCall {
+                    request: lazybox_ipc::work::WorkRequest::Status { plan: None },
+                    client_request_id: Some(client_request_id),
+                });
+            }
             Action::ToggleEpicAutoDispatch
             | Action::ToggleEpicAutoReview
             | Action::ToggleEpicMergeInOrder => {

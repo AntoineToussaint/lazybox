@@ -89,6 +89,7 @@ pub async fn call(config: &ServerConfig, request: WorkRequest) -> Result<WorkRep
             .await
         }
         WorkRequest::Status { plan } => status(config, plan.as_deref()).await,
+        WorkRequest::Plan { requester, title } => new_plan(config, &requester, &title).await,
     }
 }
 
@@ -434,6 +435,56 @@ async fn update(config: &ServerConfig, args: UpdateArgs) -> Result<WorkReport, W
         work: Box::new(row(&task)),
         delivery: None,
         requester_notified: Some(requester_notified),
+    })
+}
+
+/// Mint a plan and answer with its freshly-empty roll-up (#1948).
+///
+/// `Create`'s `plan` has to name an existing plan — a typo must not
+/// silently become a new plan nobody meant to open — and before this
+/// nothing created one, so the whole grouping was unreachable from every
+/// caller. Reported as a one-plan [`WorkReport::Status`] rather than
+/// through a report variant of its own: the caller needs the id, and a
+/// roll-up is already the shape that carries it, so every renderer that
+/// can print a plan prints this without a second arm.
+///
+/// `requester` is recorded in the log, not on the row: a `Plan` carries
+/// only what its tasks cannot, and every task on it already names the
+/// party that filed it.
+async fn new_plan(
+    config: &ServerConfig,
+    requester: &SessionKey,
+    title: &str,
+) -> Result<WorkReport, WorkError> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(WorkError::BadRequest(
+            "a plan needs a title — it is what every roll-up is labelled with".to_string(),
+        ));
+    }
+    let plan = lazybox_core::work::Plan::new(title);
+    let saved = plan.clone();
+    crate::store_blocking(&config.store, move |store| {
+        crate::work_store::save_plan(store, &saved)
+    })
+    .await
+    .map_err(unavailable)?;
+    tracing::info!(
+        plan = %plan.id,
+        by = %requester.as_str(),
+        "work: minted a plan"
+    );
+    Ok(WorkReport::Status {
+        plans: vec![PlanRow {
+            plan: plan.id.to_string(),
+            title: plan.title,
+            done: 0,
+            total: 0,
+            members: Vec::new(),
+            tasks: Vec::new(),
+        }],
+        unplanned: Vec::new(),
+        undecodable_rows: 0,
     })
 }
 
@@ -1031,6 +1082,71 @@ mod tests {
                 "{raw} is not stable under a second round trip"
             );
         }
+    }
+
+    /// A plan has to be mintable, or `create`'s `plan` can never name one
+    /// and `status` can only ever answer with an empty plan list. This is
+    /// the regression test for exactly that: every surface could *refer*
+    /// to a plan and none could make one.
+    #[tokio::test]
+    async fn a_plan_can_be_minted_and_then_named_by_work() {
+        let config = ServerConfig::in_memory();
+
+        // Nothing to begin with.
+        let WorkReport::Status { plans, .. } = super::status(&config, None).await.expect("status")
+        else {
+            panic!("status");
+        };
+        assert!(plans.is_empty(), "no plan exists before one is minted");
+
+        let WorkReport::Status { plans, .. } = super::new_plan(&config, &key("a"), "ship it")
+            .await
+            .expect("minted")
+        else {
+            panic!("a mint answers with the plan");
+        };
+        let [minted] = plans.as_slice() else {
+            panic!("exactly the new plan: {plans:?}");
+        };
+        assert_eq!(minted.title, "ship it");
+        // Empty, and NOT complete — an unstarted plan must not read as a
+        // finished one.
+        assert_eq!((minted.done, minted.total), (0, 0));
+        assert!(!minted.is_complete());
+
+        // The id it answered with is the one `create` accepts, which is the
+        // whole point: before this, every `plan:` was rejected.
+        let mut args = create("a", "a task on it");
+        args.plan = Some(minted.plan.clone());
+        let (task, _, _) = one(super::create(&config, args).await.expect("created"));
+        assert_eq!(task.plan.as_deref(), Some(minted.plan.as_str()));
+
+        // And the roll-up now counts it.
+        let WorkReport::Status { plans, .. } = super::status(&config, Some(&minted.plan))
+            .await
+            .expect("status")
+        else {
+            panic!("status");
+        };
+        let [rolled] = plans.as_slice() else {
+            panic!("one plan: {plans:?}");
+        };
+        assert_eq!((rolled.done, rolled.total), (0, 1));
+        assert_eq!(rolled.tasks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_plan_with_no_title_is_refused_rather_than_minted_unlabelled() {
+        let config = ServerConfig::in_memory();
+        assert!(
+            super::new_plan(&config, &key("a"), "   ").await.is_err(),
+            "a title is what every roll-up of the plan is labelled with",
+        );
+        let WorkReport::Status { plans, .. } = super::status(&config, None).await.expect("status")
+        else {
+            panic!("status");
+        };
+        assert!(plans.is_empty(), "the refusal minted nothing");
     }
 
     #[test]

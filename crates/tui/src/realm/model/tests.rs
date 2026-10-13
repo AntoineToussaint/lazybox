@@ -786,6 +786,259 @@ mod effects_tests {
         );
     }
 
+    /// Build one `WorkRow` for the rollup tests.
+    fn work_row(
+        id: &str,
+        title: &str,
+        lifecycle: &str,
+        owner: Option<&str>,
+        detail: Option<&str>,
+    ) -> lazybox_ipc::work::WorkRow {
+        lazybox_ipc::work::WorkRow {
+            id: id.to_string(),
+            title: title.to_string(),
+            brief: String::new(),
+            lifecycle: lifecycle.to_string(),
+            detail: detail.map(str::to_string),
+            owner: owner.map(str::to_string),
+            requester: None,
+            plan: None,
+            parent: None,
+            links: Vec::new(),
+            result: None,
+            events: 1,
+            last_event: None,
+        }
+    }
+
+    /// `E w` mounts the rollup in its loading state and fires the store
+    /// read; the correlated reply then repaints the still-open view.
+    #[test]
+    fn work_rollup_mounts_loading_reads_the_store_and_repaints_on_reply() {
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let commands = model.dispatch_action(&Action::WorkRollup);
+        let request_id = match commands.as_slice() {
+            [
+                IpcCommand::WorkCall {
+                    request: lazybox_ipc::work::WorkRequest::Status { plan: None },
+                    client_request_id: Some(id),
+                },
+            ] => id.clone(),
+            other => panic!("dispatch reads every plan from the store: {other:?}"),
+        };
+        assert_eq!(model.modal_stack.last(), Some(&Id::WorkRollup));
+
+        // A reply carrying somebody else's correlation id — the `lazybox
+        // work` CLI's own call, or a since-reopened view's earlier one — is
+        // dropped rather than repainting with an answer to another question.
+        model.redraw = false;
+        model.handle_daemon_event(lazybox_ipc::Event::WorkReport {
+            client_request_id: Some("someone-else".into()),
+            result: Ok(lazybox_ipc::work::WorkReport::Status {
+                plans: Vec::new(),
+                unplanned: Vec::new(),
+                undecodable_rows: 0,
+            }),
+        });
+        assert!(
+            !model.redraw,
+            "a reply for a different request must be dropped"
+        );
+
+        // So is a reply for a different verb on the same connection: the
+        // answer to this view's question may still be behind it.
+        model.handle_daemon_event(lazybox_ipc::Event::WorkReport {
+            client_request_id: Some(request_id.clone()),
+            result: Ok(lazybox_ipc::work::WorkReport::Mine {
+                workspace: "ws".into(),
+                mine: Vec::new(),
+                waiting_on_others: Vec::new(),
+                unassigned: Vec::new(),
+            }),
+        });
+        assert!(!model.redraw, "a `Mine` reply is not this view's answer");
+
+        // The correlated `Status` reply repaints it.
+        model.handle_daemon_event(lazybox_ipc::Event::WorkReport {
+            client_request_id: Some(request_id),
+            result: Ok(lazybox_ipc::work::WorkReport::Status {
+                plans: vec![lazybox_ipc::work::PlanRow {
+                    plan: "p1".into(),
+                    title: "shim hardening".into(),
+                    done: 1,
+                    total: 2,
+                    members: vec!["a".into(), "b".into()],
+                    tasks: vec![
+                        work_row("w1", "bound the dial", "completed", Some("a"), None),
+                        work_row("w2", "the view", "held", Some("b"), Some("needs w1")),
+                    ],
+                }],
+                unplanned: Vec::new(),
+                undecodable_rows: 0,
+            }),
+        });
+        assert_eq!(model.modal_stack.last(), Some(&Id::WorkRollup));
+        assert!(model.redraw, "the correlated reply repaints the rollup");
+        // The request is answered, so a late duplicate can't re-flatten a
+        // cursor the user has since moved.
+        assert!(model.work_rollup_request.is_none());
+    }
+
+    /// A work reply that lands while the rollup is closed is dropped
+    /// rather than force-opening a modal over whatever is on screen.
+    #[test]
+    fn work_report_is_dropped_when_the_rollup_is_closed() {
+        let mut model = build_model();
+        assert!(model.modal_stack.is_empty());
+        model.handle_daemon_event(lazybox_ipc::Event::WorkReport {
+            client_request_id: Some("anything".into()),
+            result: Ok(lazybox_ipc::work::WorkReport::Status {
+                plans: Vec::new(),
+                unplanned: Vec::new(),
+                undecodable_rows: 0,
+            }),
+        });
+        assert!(
+            model.modal_stack.is_empty(),
+            "a reply must not open the rollup on its own"
+        );
+    }
+
+    /// A store that could not be read says why, and the view stays open
+    /// to say it.
+    #[test]
+    fn work_rollup_shows_a_read_failure_rather_than_an_empty_store() {
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let commands = model.dispatch_action(&Action::WorkRollup);
+        let request_id = match commands.as_slice() {
+            [
+                IpcCommand::WorkCall {
+                    client_request_id: Some(id),
+                    ..
+                },
+            ] => id.clone(),
+            other => panic!("expected a work call: {other:?}"),
+        };
+        model.handle_daemon_event(lazybox_ipc::Event::WorkReport {
+            client_request_id: Some(request_id),
+            result: Err(lazybox_ipc::work::WorkError::Unavailable("locked".into())),
+        });
+        assert_eq!(
+            model.modal_stack.last(),
+            Some(&Id::WorkRollup),
+            "the view stays open to report the failure"
+        );
+    }
+
+    /// The projection: plans with open work sort above finished ones, the
+    /// unplanned bucket comes last, and an owner that is not a workspace
+    /// this client has gets no jump target.
+    #[test]
+    fn work_rollup_entries_order_open_plans_first_and_resolve_jumps() {
+        use crate::realm::components::work_rollup::WorkRollupEntry;
+
+        let mut model = build_model();
+        // One real workspace, so exactly one owner resolves.
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let now = chrono::Utc::now();
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            lazybox_core::Workspace::empty(workspace_key.clone(), "ws", now),
+        )));
+
+        let plan = |name: &str, done: usize, total: usize, owner: Option<&str>| {
+            lazybox_ipc::work::PlanRow {
+                plan: name.to_string(),
+                title: name.to_string(),
+                done,
+                total,
+                members: vec!["m".into()],
+                tasks: vec![work_row("w", "a task", "underway", owner, None)],
+            }
+        };
+        let entries = model.work_rollup_entries(
+            &[
+                plan("finished", 2, 2, Some("github:o/r#1")),
+                plan("open", 0, 2, Some("human")),
+                // An empty plan is unstarted, not absent: it must still
+                // appear, or a plan nobody has started is invisible.
+                lazybox_ipc::work::PlanRow {
+                    plan: "empty".into(),
+                    title: "empty".into(),
+                    done: 0,
+                    total: 0,
+                    members: Vec::new(),
+                    tasks: Vec::new(),
+                },
+            ],
+            &[work_row("u", "loose end", "pending", None, None)],
+        );
+
+        // The bucket of unplanned work is counted like a plan — this is
+        // where a spawn-recorded hand-off lands, so it must be readable
+        // at a glance rather than an uncounted leftover.
+        let bucket = entries
+            .iter()
+            .find_map(|e| match e {
+                WorkRollupEntry::Header {
+                    title,
+                    is_plan: false,
+                    count,
+                    members,
+                } => Some((title.clone(), *count, *members)),
+                _ => None,
+            })
+            .expect("the unplanned bucket");
+        // An OPEN count, never a fraction: `work_status` drops terminal
+        // rows from `unplanned`, so a denominator taken from what arrived
+        // would read `0/N` however much had actually finished.
+        assert_eq!(
+            bucket,
+            (
+                "on no plan".to_string(),
+                crate::realm::components::work_rollup::HeaderCount::Open(1),
+                0
+            ),
+            "one open row, owned by nobody",
+        );
+
+        let headers: Vec<String> = entries
+            .iter()
+            .filter_map(|e| match e {
+                WorkRollupEntry::Header { title, .. } => Some(title.clone()),
+                WorkRollupEntry::Task(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            headers,
+            vec![
+                "open".to_string(),
+                "empty".to_string(),
+                "finished".to_string(),
+                "on no plan".to_string()
+            ],
+            "open work first, the finished plan after it, unplanned last",
+        );
+
+        let jumps: Vec<bool> = entries
+            .iter()
+            .filter_map(|e| match e {
+                WorkRollupEntry::Task(task) => Some(task.jump.is_some()),
+                WorkRollupEntry::Header { .. } => None,
+            })
+            .collect();
+        // In rendered order: `open`'s human-owned task, `finished`'s task
+        // on the one live workspace, then the unassigned loose end.
+        assert_eq!(
+            jumps,
+            vec![false, true, false],
+            "only an owner that resolves to a live workspace gets a jump",
+        );
+    }
+
     #[test]
     fn view_diff_uses_the_workspace_default_session_when_no_session_row_is_selected() {
         use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
@@ -9756,6 +10009,9 @@ mod stale_input_tests {
                 // read-only overlays; a stale Enter needn't jump.
                 | Id::MergeOrder
                 | Id::EpicGraph
+                // The work rollup (`E w`) is the same shape: read-only,
+                // and its one immediate key is a reversible jump.
+                | Id::WorkRollup
                 | Id::PrChat => false,
             }
         };
@@ -9847,6 +10103,7 @@ mod stale_input_tests {
             Id::PrChat,
             Id::MergeOrder,
             Id::EpicGraph,
+            Id::WorkRollup,
         ] {
             assert_eq!(
                 id.retains_stale_keys(),

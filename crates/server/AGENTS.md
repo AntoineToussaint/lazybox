@@ -220,9 +220,10 @@ documented fallback for a session that gets no MCP tools.
 `work_store.rs` persists `lazybox_core::work` — the task/plan rows
 `docs/agent-coordination-v2.md` names as the shared plan — under the `work:`
 and `plan:` kv prefixes. **`work_calls.rs` is the one implementation of the
-four verbs**, and both surfaces are adapters over it: the `create_work` /
-`my_work` / `update_work` / `work_status` MCP tools in `mcp.rs`, and
-`lazybox work …` over `Command::WorkCall` for agents with no MCP at all. A row
+verbs**, and both surfaces are adapters over it: the `create_plan` /
+`create_work` / `my_work` / `update_work` / `work_status` MCP tools in
+`mcp.rs`, and `lazybox work …` over `Command::WorkCall` for agents with no MCP
+at all. A row
 is shaped in `work_calls` and nowhere else, so a field added to it appears on
 both surfaces without a second edit — `task_status` made the same arrangement
 for the same reason, and the failure it avoids is a shell and an agent being
@@ -231,6 +232,25 @@ told different things about the same record.
 A handoff made through these verbs is a row with a requester, a lifecycle, a
 result and a provenance history, which is what `notify_session` cannot be:
 that reports only that text landed.
+
+**Nothing could create a plan until `new_plan`.** `create` validates its
+`plan` against an existing one on purpose — a typo must not open a second plan
+nobody is tracking — but `save_plan` had no production caller, so every
+`plan:` was refused and `status` could only answer `plans: []`. The grouping
+the store is built around was unreachable from every surface. If you add a
+field that one verb validates against another verb's output, check that
+something actually produces it.
+
+**The TUI reads it at `E w`.** `WorkRequest::Status { plan: None }` over the
+same command answers the whole store, and the client renders it as plans with
+their roll-up and the tasks under them. That reply is request/response on the
+asking connection — not the broadcast bus — so a third surface asking a
+question gets its own answer and a lagging subscriber cannot lose it; the
+client correlates on `client_request_id` because the same event carries every
+verb's reply. Note what the view's shape follows from: `record_handoff` files
+with `plan: None`, so a spawn-recorded hand-off lands in the unplanned bucket,
+and that bucket therefore carries a roll-up of its own rather than being a
+footnote under the plans.
 
 **The spawn records the hand-off; nobody has to remember to.** Calling
 `create_work` beside a spawn was a step an agent had to take on top of making

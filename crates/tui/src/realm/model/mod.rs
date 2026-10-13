@@ -599,6 +599,15 @@ pub enum Id {
     /// `Esc` closes. The layout is a pure `tui_core::epic_graph::layout`
     /// so it is unit-testable; this modal renders + navigates it.
     EpicGraph,
+    /// Cross-workspace work readout (`E w`, #1948). The viewing half of
+    /// the work store (#1935): plans with their `done/total` roll-up and the tasks
+    /// under them, each with its lifecycle glyph, owner and — for an
+    /// asking / held / failed row — the question, blocker or cause.
+    /// `Enter` jumps to the owning workspace when the owner resolves to
+    /// one. Mounting fires a `Command::WorkCall` and shows a loading state
+    /// until the correlated `Event::WorkReport` repaints it
+    /// (`mount_work_rollup` / `update_work_rollup`).
+    WorkRollup,
 }
 
 impl Id {
@@ -628,6 +637,7 @@ impl Id {
                 | Id::SnippetBrowser
                 | Id::MergeHistory
                 | Id::MergeOrder
+                | Id::WorkRollup
         )
     }
 
@@ -1551,8 +1561,8 @@ pub enum Msg {
         body: String,
     },
     /// `Enter` on a row of the merge-order (`E m`) or DAG (`E g`) modal
-    /// (#1524) — close the modal and jump to that member's workspace,
-    /// via `Model::jump_to_workspace_key`.
+    /// (#1524), or of the work rollup (`E w`) — close the modal and jump
+    /// to that row's workspace, via `Model::jump_to_workspace_key`.
     EpicJumpToWorkspace(lazybox_core::SessionKey),
     /// A detail-pane key in the repo issue browser (`g i`, #1436) — read
     /// the highlighted issue's full body, or dispatch a label / reply /
@@ -2396,6 +2406,14 @@ pub struct Model<T: TerminalAdapter> {
     /// since-reopened repo (or an out-of-order pair) can't repaint the
     /// ledger with the wrong repo's merges. `None` when no ledger is open.
     merge_history_repo: Option<String>,
+    /// Correlation id of the `Command::WorkCall` behind the open work
+    /// rollup (`E w`). `Event::WorkReport` carries the id back, so this
+    /// gates `update_work_rollup`: a reply for an earlier open (or for
+    /// the `lazybox work` CLI's own call, which rides the same event on
+    /// its own connection) is dropped rather than repainting the view
+    /// with an answer to a different question. `None` when no rollup is
+    /// waiting on a reply.
+    work_rollup_request: Option<String>,
     /// Workspace whose requestable-reviewer set we've asked the daemon
     /// for (`g r` → `Command::FetchRequestableReviewers`), waiting on
     /// the async `Event::RequestableReviewers` reply to mount the
@@ -3198,6 +3216,7 @@ impl<T: TerminalAdapter> Model<T> {
             last_reply_body: None,
             awaiting_repo_labels: None,
             merge_history_repo: None,
+            work_rollup_request: None,
             awaiting_requestable_reviewers: None,
             awaiting_assignable_users: None,
             pending_diff_session: None,

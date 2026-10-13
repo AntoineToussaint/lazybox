@@ -85,6 +85,34 @@ those two sections as well if you are coming from 0.1.18.
   you, and lazybox's own spawns — auto-fix, a resume — replay the same brief on
   every attempt, so recording those would add a row per retry. A respawn of the
   same work is the same work, not a second unit of it.
+
+- **`E w` — one screen for work spread across workspaces**. The store above
+  fills itself, so now there is somewhere to read it: plans with their
+  `done/total` roll-up and the workspaces they span, the tasks under each one
+  marked completed / underway / asking / held / failed, and an asking, held or
+  failed row naming the question, the blocker or the cause. Each row says who
+  owns it and who asked for it — the half of a hand-off that used to be
+  recoverable only by reading somebody else's scrollback — and `Enter` jumps
+  to the owning workspace.
+
+  Work recorded by a spawn is filed against no plan, so the bucket of
+  unplanned work is counted in its own right rather than sitting under the
+  plans as a footnote: for a fleet that hands work around without filing
+  plans, that bucket *is* the view. It is counted as **open rows**, not as a
+  fraction — `work_status` drops finished work from that section, so a
+  `done/total` over what arrives would read `0/N` however much had landed. An
+  empty plan stays listed, because a plan nobody has started is not a plan
+  that does not exist, and rows this build cannot decode are counted on
+  screen instead of silently making the list shorter.
+
+- **A plan can now be created at all** — `create_plan` as an MCP tool and
+  `lazybox work plan <title>` from a shell. `create_work`'s `plan` has always
+  required a plan that already exists, deliberately, so that a mistyped id
+  cannot quietly open a second plan nobody is tracking — but nothing on any
+  surface created one. Every `plan:` was therefore rejected and `work_status`
+  could only ever answer with an empty plan list, which made the store's one
+  mechanism for grouping work across workspaces unreachable from every caller
+  that might have used it.
 ### Changed
 
 - **Provider writes go through one coordinator** (#1736, #1840). Assignees,

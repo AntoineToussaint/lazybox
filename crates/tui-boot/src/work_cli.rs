@@ -33,6 +33,7 @@ lazybox work <command>
   set <id> <lifecycle> [--detail <text>]  underway | awaiting-answer | held | canceled | failed
   done <id> --summary <text> [--artifact <name>]...
                                           complete it, with the result
+  plan <title> [--json]                   mint a plan to group work onto
   status [--plan <id>] [--json]           a plan's roll-up and the workspaces it spans
 
 Common: [--workspace <key>] [--socket <path>] [--json]
@@ -54,6 +55,7 @@ pub async fn work_subcommand(args: &[String]) -> anyhow::Result<()> {
         Some("new") => run(&args[1..], Verb::New).await,
         Some("set") => run(&args[1..], Verb::Set).await,
         Some("done") => run(&args[1..], Verb::Done).await,
+        Some("plan") => run(&args[1..], Verb::Plan).await,
         Some("status") => run(&args[1..], Verb::Status).await,
         _ => {
             println!("{USAGE}");
@@ -70,6 +72,7 @@ enum Verb {
     Set,
     Done,
     Status,
+    Plan,
 }
 
 async fn run(args: &[String], verb: Verb) -> anyhow::Result<()> {
@@ -110,6 +113,16 @@ async fn run(args: &[String], verb: Verb) -> anyhow::Result<()> {
             include_done: all,
         },
         Verb::Status => WorkRequest::Status { plan },
+        Verb::Plan => {
+            let Some(title) = positional.first().cloned() else {
+                println!("lazybox work plan: name the plan\n\n{USAGE}");
+                std::process::exit(2);
+            };
+            WorkRequest::Plan {
+                requester: self_key(workspace.as_deref()),
+                title,
+            }
+        }
         Verb::New => {
             let Some(title) = positional.first().cloned() else {
                 println!("lazybox work new: name the work\n\n{USAGE}");

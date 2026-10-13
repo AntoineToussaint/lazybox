@@ -475,7 +475,7 @@ pub enum Action {
     /// columns, `j/k`/`h/l` navigate, `Enter` jumps to the highlighted
     /// member, `Esc` closes.
     EpicGraph,
-    /// Open the cross-workspace work rollup (`E w`): the work store's
+    /// Open the cross-workspace work rollup (`E w`, #1948): the work store's
     /// plans with their `done/total` roll-up and the tasks under them,
     /// each with its lifecycle, owner, and the question / blocker /
     /// failure that holds it. Read-only; `Enter` on a row jumps to the

@@ -438,7 +438,7 @@ async fn update(config: &ServerConfig, args: UpdateArgs) -> Result<WorkReport, W
     })
 }
 
-/// Mint a plan and answer with its freshly-empty roll-up.
+/// Mint a plan and answer with its freshly-empty roll-up (#1948).
 ///
 /// `Create`'s `plan` has to name an existing plan — a typo must not
 /// silently become a new plan nobody meant to open — and before this

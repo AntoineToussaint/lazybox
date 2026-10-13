@@ -57,7 +57,7 @@ pub enum WorkRequest {
     },
     /// A plan's roll-up, or every plan when `plan` is `None`.
     Status { plan: Option<String> },
-    /// Mint a plan, so work can be grouped onto one.
+    /// Mint a plan, so work can be grouped onto one (#1948).
     ///
     /// Appended last (bincode is ordinal-sensitive). This exists because
     /// [`Self::Create`]'s `plan` must name a plan that already exists —

@@ -1,4 +1,4 @@
-//! `WorkRollup` — the cross-workspace work readout (`E w`).
+//! `WorkRollup` — the cross-workspace work readout (`E w`, #1948).
 //!
 //! The viewing half of the work store (#1935): one screen answering "how
 //! does this multi-workspace effort stand?" from the store the MCP tools

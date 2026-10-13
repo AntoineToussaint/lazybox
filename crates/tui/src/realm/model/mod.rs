@@ -599,8 +599,8 @@ pub enum Id {
     /// `Esc` closes. The layout is a pure `tui_core::epic_graph::layout`
     /// so it is unit-testable; this modal renders + navigates it.
     EpicGraph,
-    /// Cross-workspace work readout (`E w`). The viewing half of the work
-    /// store (#1935): plans with their `done/total` roll-up and the tasks
+    /// Cross-workspace work readout (`E w`, #1948). The viewing half of
+    /// the work store (#1935): plans with their `done/total` roll-up and the tasks
     /// under them, each with its lifecycle glyph, owner and — for an
     /// asking / held / failed row — the question, blocker or cause.
     /// `Enter` jumps to the owning workspace when the owner resolves to

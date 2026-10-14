@@ -106,6 +106,21 @@ those two sections as well if you are coming from 0.1.18.
 
 ### Fixed
 
+- **Scrolling back works in a pane whose program repaints in place**.
+  Codex draws its transcript inside the viewport and never lets a line scroll
+  off, and the retained history lazybox scrolls through is precisely what
+  *scrolled off* a pane — so there was nothing to scroll through, in lazybox's
+  own grid or in the tmux history behind it, however long the session had run.
+  Measured across this box: 0 retained lines on 29 of 44 Codex panes, against
+  up to 48,556 for Claude Code panes in the same server at the same
+  `history-limit`. The wheel was a silent no-op for the life of such a session.
+  A scroll lazybox cannot serve is now forwarded to the program, which holds
+  the only copy of its own transcript and scrolls it on Page Up / Page Down.
+  The condition is observed per pane — more than a screenful written, and no
+  history in either grid — never a property of which agent is running, so a
+  pane that scrolls off normally keeps scrolling lazybox's history and a quiet
+  shell prompt is left alone. Such a transcript still lives only inside the
+  program and is gone when it exits; nothing in lazybox or tmux ever saw it.
 - **Work whose agent is gone no longer reads as work in flight.** An agent that
   exits before reporting leaves its task neither done nor abandoned; it is now
   failed, with the cause in its history. Deliberately on a delay rather than on

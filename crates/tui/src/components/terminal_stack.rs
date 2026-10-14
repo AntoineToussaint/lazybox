@@ -930,6 +930,14 @@ pub struct TerminalStack {
     /// `history-limit` lines the whole time (#393). Drained by the key /
     /// wheel handlers into an outgoing command.
     pending_scrollback_fetch: Option<TerminalId>,
+    /// A scroll the host could not serve, to be forwarded to the
+    /// application that owns the pane's viewport (`(terminal, delta)`).
+    /// Armed by `scroll_terminal` when the local grid has no history,
+    /// the backend has reported none either, and the pane has been
+    /// repainting in place ([`TerminalSlot::owns_viewport`]) — drained
+    /// by the key / wheel handlers into a `Command::Write` of the
+    /// application's own scroll keys.
+    pending_viewport_scroll: Option<(TerminalId, isize)>,
 }
 
 /// Records that a terminal's process has exited. Agent terminals keep
@@ -1395,7 +1403,36 @@ struct TerminalSlot {
     /// [`Self::apply_scrollback`] re-feeds the part of this the capture
     /// does not cover. `None` when no fetch is outstanding.
     scrollback_catchup: Option<ScrollbackCatchup>,
+    /// Output bytes parsed into this pane's grid from the LIVE stream.
+    /// Not counted for a capture rebuild or a ring resync — those
+    /// re-feed bytes already counted, and the question this answers is
+    /// how much the program has written, not how often lazybox parsed
+    /// it. Half of [`Self::owns_viewport`].
+    live_bytes_fed: u64,
+    /// The backend answered a `Command::FetchScrollback` for this pane
+    /// and the capture carried no history to adopt. The other half of
+    /// [`Self::owns_viewport`] — and the fact that makes that judgement
+    /// an observation instead of a guess, because it is the backend's
+    /// own grid reporting that nothing has ever scrolled off this pane
+    ///.
+    backend_scrollback_empty: bool,
 }
+
+/// `CSI 5 ~` / `CSI 6 ~` — Page Up / Page Down, forwarded to an
+/// application that owns its pane's viewport so a scroll the host
+/// cannot serve still scrolls something.
+///
+/// Page keys rather than arrows: an arrow reaches a composer or a list
+/// selection in most full-screen programs, while the page keys are what
+/// they bind to scrolling the view itself. Codex's own shortcut table
+/// reads `pgup / pgdn — Scroll` and its `pager` action group binds
+/// `page_up` / `page_down`; Claude Code's pane scrolls off normally and
+/// so never reaches this path at all. This is the same translation
+/// xterm performs under `alternateScroll` for an app that has taken the
+/// screen, and the sequences are the unambiguous DEC ones rather than
+/// anything terminfo-dependent.
+const PAGE_UP: &[u8] = b"\x1b[5~";
+const PAGE_DOWN: &[u8] = b"\x1b[6~";
 
 /// Minimum spacing between two deep-scrollback re-fetches for the same
 /// terminal while its output keeps flowing.
@@ -1504,6 +1541,39 @@ impl TerminalSlot {
     fn end_scrollback_visit(&mut self) {
         self.deep_scrollback_requested = false;
         self.scrollback_catchup = None;
+    }
+
+    /// Whether the APPLICATION owns this pane's viewport — so a scroll
+    /// lazybox cannot serve belongs to it rather than to nobody.
+    ///
+    /// Observed per pane at runtime, never declared by an agent. Which
+    /// program is running is not the question and must not become it:
+    /// the same binary scrolls normally or not depending only on how it
+    /// writes. Two facts, both read off this pane:
+    ///
+    /// 1. it has written more than a screenful of output, and
+    /// 2. neither grid has any history — the local one is empty
+    ///    (the caller's `NoScrollback`) and the backend has told us its
+    ///    own is too ([`Self::backend_scrollback_empty`]).
+    ///
+    /// Together those say the output went somewhere other than off the
+    /// top of the pane: the program is repainting inside the viewport
+    /// and holds the only copy of its transcript. An app whose output
+    /// scrolls off normally fails (2) — tmux retained it. A quiet shell
+    /// at a prompt fails (1), which is what keeps a wheel notch there
+    /// from being forwarded to readline as a Page Up.
+    ///
+    /// Measured: all 44 Codex panes on this box retain 0–1,275 lines,
+    /// against up to 48,556 for Claude Code panes in the same tmux
+    /// server at the same `history-limit`.
+    fn owns_viewport(&self) -> bool {
+        if self.exited.is_some() || !self.backend_scrollback_empty {
+            return false;
+        }
+        let screenful = u64::from(self.vt.cols) * u64::from(self.vt.rows);
+        // An unsized grid cannot establish the threshold, so it cannot
+        // establish ownership either.
+        screenful > 0 && self.live_bytes_fed > screenful
     }
 
     /// Append one char to the composing buffer when it fits within
@@ -2168,6 +2238,7 @@ impl TerminalStack {
             dead_on_arrival: DEFAULT_DEAD_ON_ARRIVAL,
             terminal_new_layout: lazybox_config::NewTerminalLayout::default(),
             pending_scrollback_fetch: None,
+            pending_viewport_scroll: None,
         }
     }
 
@@ -4149,14 +4220,32 @@ impl TerminalStack {
         // Deep-scrollback fetch, one per scrollback visit (#393): the
         // local grid was fed from the live byte stream, whose in-place
         // redraws leave almost no scrollback, while the daemon backend
-        // (tmux) has retained the full pane history the whole time —
-        // the same history a restart already seeds from. Arm on the
-        // first upward scroll — even when the local grid has nothing to
-        // move into yet (`NoScrollback`), which is exactly the case the
-        // fetch exists for — but only for live terminals (an exited
-        // pane's backend session is gone). The key / wheel handlers
-        // drain the armed id into `Command::FetchScrollback` and the
-        // reply rebuilds the grid via `apply_scrollback`.
+        // (tmux) has usually retained the full pane history — the same
+        // history a restart already seeds from. Arm on the first upward
+        // scroll — even when the local grid has nothing to move into yet
+        // (`NoScrollback`), which is exactly the case the fetch exists
+        // for — but only for live terminals (an exited pane's backend
+        // session is gone). The key / wheel handlers drain the armed id
+        // into `Command::FetchScrollback` and the reply rebuilds the
+        // grid via `apply_scrollback`.
+        //
+        // "Usually" is load-bearing, and it used to read "the whole
+        // time". tmux records what scrolls OFF a pane, so a
+        // program that repaints inside the viewport and never emits a
+        // newline leaves it with nothing to retain, however long the
+        // session runs — measured at 0 lines on 29 of 44 Codex panes
+        // against up to 48,556 for Claude Code in the same server. For
+        // those panes this fetch answers with an empty capture forever
+        // and the whole deep-scrollback path has no source; the scroll
+        // is forwarded to the program below instead, which holds the
+        // only copy of its own transcript.
+        // A scroll with nowhere to go is not a no-op to be swallowed:
+        // when the application owns the viewport it is the only thing
+        // holding the transcript, and the only thing that can scroll it
+        //. The condition is read off the pane, so this stays
+        // agnostic about which program is running — see
+        // `TerminalSlot::owns_viewport`.
+        let forward = matches!(outcome, ScrollOutcome::NoScrollback) && slot.owns_viewport();
         if delta < 0 {
             if slot.exited.is_none() && slot.wants_scrollback_fetch() {
                 slot.arm_scrollback_fetch();
@@ -4164,6 +4253,9 @@ impl TerminalStack {
             }
         } else if delta > 0 && at_live_bottom(outcome) {
             slot.end_scrollback_visit();
+        }
+        if forward {
+            self.pending_viewport_scroll = Some((id, delta));
         }
         outcome
     }
@@ -4178,6 +4270,25 @@ impl TerminalStack {
     fn drain_scrollback_fetch(&mut self, cmds: &mut Vec<Command>) {
         if let Some(terminal_id) = self.take_scrollback_fetch() {
             cmds.push(Command::FetchScrollback { terminal_id });
+        }
+    }
+
+    /// Take the scroll the host could not serve, already encoded as the
+    /// keys the application scrolls with. The caller ships it as a
+    /// `Command::Write` with [`TerminalInputIntent::View`] — pointer-ish
+    /// traffic that repaints a full-screen program without asking the
+    /// agent to work, which is exactly what this is, so a wheel notch
+    /// can never read as the start of a turn.
+    pub fn take_viewport_scroll(&mut self) -> Option<(TerminalId, Vec<u8>)> {
+        let (terminal_id, delta) = self.pending_viewport_scroll.take()?;
+        let keys = if delta < 0 { PAGE_UP } else { PAGE_DOWN };
+        Some((terminal_id, keys.to_vec()))
+    }
+
+    /// Drain the forwarded scroll into an outgoing write.
+    fn drain_viewport_scroll(&mut self, cmds: &mut Vec<Command>) {
+        if let Some((terminal_id, bytes)) = self.take_viewport_scroll() {
+            Self::push_write(cmds, terminal_id, bytes, TerminalInputIntent::View);
         }
     }
 
@@ -4331,6 +4442,11 @@ impl TerminalStack {
         if let Some(catchup) = slot.scrollback_catchup.as_mut() {
             catchup.record(first_seq, seq, cols, rows, bytes);
         }
+        // How much the program has written, for `owns_viewport`. This is
+        // the one live-output path; the capture rebuild and the ring
+        // resync deliberately do not count, being re-parses of bytes
+        // already counted here.
+        slot.live_bytes_fed = slot.live_bytes_fed.saturating_add(bytes.len() as u64);
         slot.last_seq = seq;
     }
 
@@ -4484,12 +4600,17 @@ impl TerminalStack {
     /// from the moment the fetch was armed, and the ones the watermark
     /// does not cover are re-fed on top of the rebuilt grid (#1798).
     fn apply_scrollback(&mut self, id: TerminalId, replay: &[u8], seq: u64) {
-        if replay.is_empty() {
-            return;
-        }
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
+        // Nothing to adopt — and that emptiness is itself the backend's
+        // answer about this pane, which `owns_viewport` reads.
+        // A raw-PTY pane answers this way too, and it has no history by
+        // construction, so the conclusion holds there as well.
+        if replay.is_empty() {
+            slot.backend_scrollback_empty = true;
+            return;
+        }
         let catchup = slot.scrollback_catchup.take();
         // A batch went unrecorded, so what survives is a stream with a
         // hole and re-feeding it would corrupt the grid. The local grid
@@ -4549,6 +4670,14 @@ impl TerminalStack {
         scratch.feed(replay);
         let rebuilt_total = scratch.scrollbar().ok().map(|b| b.total).unwrap_or(0);
         let capture_has_history = rebuilt_total > u64::from(slot.vt.rows);
+        // The backend's grid is the authority on whether this pane has
+        // ever scrolled a line off. A capture of ~one screenful says it
+        // has not: there is nothing to adopt now and nothing to fetch
+        // later, so a scroll here can only belong to the application
+        //. Recomputed on every reply, so a pane that starts
+        // repainting in place and later streams normally stops being
+        // judged by a stale verdict.
+        slot.backend_scrollback_empty = !capture_has_history;
         if rebuilt_total <= current_total && !(capture_has_history && slot.scrollback_stale) {
             return;
         }
@@ -4653,6 +4782,8 @@ impl TerminalStack {
             resync_retry_at: None,
             resync_retry_backoff: RESYNC_RETRY_INITIAL,
             vt,
+            live_bytes_fed: 0,
+            backend_scrollback_empty: false,
             recent: Vec::new(),
             osc52_carry: Vec::new(),
             agent_state: lazybox_ipc::AgentState::Idle,
@@ -5000,10 +5131,12 @@ impl TerminalStack {
                 KeyCode::PageUp => {
                     let _outcome = self.scroll_active(-STEP);
                     self.drain_scrollback_fetch(cmds);
+                    self.drain_viewport_scroll(cmds);
                     return PaneOutcome::Consumed;
                 }
                 KeyCode::PageDown => {
                     let _outcome = self.scroll_active(STEP);
+                    self.drain_viewport_scroll(cmds);
                     return PaneOutcome::Consumed;
                 }
                 KeyCode::Home => {
@@ -11377,6 +11510,208 @@ mod deep_scrollback_tests {
             replay,
             seq: capture_seq,
         });
+    }
+
+    /// Drive a pane that REPAINTS IN PLACE: cursor home, overwrite the
+    /// row, never emit a newline. Thousands of bytes of output and not
+    /// one line scrolls off the top — the shape measured on every Codex
+    /// pane on this box, and the shape that makes tmux's
+    /// retained history empty however long the session has run.
+    fn repaint_in_place(stack: &mut TerminalStack, id: TerminalId, repaints: u64) {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"\x1b[H");
+        payload.extend(std::iter::repeat_n(b'x', 60));
+        payload.extend_from_slice(b"\x1b[K");
+        for seq in 1..=repaints {
+            feed(stack, id, &payload, seq, seq);
+        }
+    }
+
+    /// The pane holds the only copy of its transcript, so the notch that
+    /// lazybox cannot serve is handed to the program instead of being
+    /// swallowed. Without the fix the wheel is a silent no-op
+    /// for the whole life of the session: `NoScrollback` locally, an
+    /// empty capture from the backend, and nothing forwarded.
+    #[test]
+    fn a_scroll_the_host_cannot_serve_reaches_the_application() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        repaint_in_place(&mut stack, id, 80);
+        assert!(
+            matches!(stack.scroll_active(-3), ScrollOutcome::NoScrollback),
+            "a pane that repaints in place has no local history to scroll"
+        );
+
+        // The first notch of a visit only arms the fetch: until the
+        // backend has answered, "no history anywhere" is not yet a fact.
+        assert_eq!(stack.take_scrollback_fetch(), Some(id), "fetch armed");
+        assert_eq!(
+            stack.take_viewport_scroll(),
+            None,
+            "nothing is forwarded while the backend's answer is outstanding"
+        );
+
+        // The backend answers with nothing — it never had anything.
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: Vec::new(),
+            seq: 80,
+        });
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(
+            stack.take_viewport_scroll(),
+            Some((id, b"\x1b[5~".to_vec())),
+            "with both grids empty the scroll belongs to the application"
+        );
+    }
+
+    /// Downward, the same pane gets Page Down.
+    #[test]
+    fn a_forwarded_scroll_keeps_its_direction() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        repaint_in_place(&mut stack, id, 80);
+        let _ = stack.scroll_active(-3);
+        let _ = stack.take_scrollback_fetch();
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: Vec::new(),
+            seq: 80,
+        });
+
+        let _ = stack.scroll_active(3);
+        assert_eq!(
+            stack.take_viewport_scroll(),
+            Some((id, b"\x1b[6~".to_vec())),
+            "downward forwards Page Down"
+        );
+    }
+
+    /// The gate that keeps this from reaching a shell. A quiet prompt
+    /// also has no history in either grid, but it has not written a
+    /// screenful either — it is not repainting in place, it simply has
+    /// nothing to show. Forwarding there would hand a Page Up to
+    /// readline, which in a common zsh setup recalls a command: a new
+    /// bug in place of the fixed one.
+    #[test]
+    fn a_quiet_prompt_keeps_the_scroll_to_itself() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"$ ", 1, 1);
+        let _ = stack.scroll_active(-3);
+        let _ = stack.take_scrollback_fetch();
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: Vec::new(),
+            seq: 1,
+        });
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(
+            stack.take_viewport_scroll(),
+            None,
+            "under a screenful of output is not evidence of an app-owned viewport"
+        );
+    }
+
+    /// A pane whose output scrolls off normally never reaches this path:
+    /// the local grid serves the scroll, and the backend's capture
+    /// carries real history. This is the Claude Code / shell shape, and
+    /// it must keep scrolling lazybox's own history.
+    #[test]
+    fn a_pane_whose_output_scrolls_off_is_never_forwarded_a_scroll() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        let mut lines = Vec::new();
+        for n in 0..200 {
+            lines.extend_from_slice(format!("transcript line {n}\r\n").as_bytes());
+        }
+        feed(&mut stack, id, &lines, 1, 1);
+
+        assert!(
+            matches!(stack.scroll_active(-3), ScrollOutcome::Moved { .. }),
+            "output that scrolled off is local history and scrolls locally"
+        );
+        assert_eq!(
+            stack.take_viewport_scroll(),
+            None,
+            "a pane with history of its own keeps the wheel"
+        );
+    }
+
+    /// The verdict is re-derived from every reply, never latched. A pane
+    /// that repainted in place and then started streaming normally has
+    /// real history again, and the wheel goes back to lazybox.
+    #[test]
+    fn a_capture_with_real_history_revokes_the_forward() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        repaint_in_place(&mut stack, id, 80);
+        let _ = stack.scroll_active(-3);
+        let _ = stack.take_scrollback_fetch();
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: Vec::new(),
+            seq: 80,
+        });
+        let _ = stack.scroll_active(-3);
+        assert!(
+            stack.take_viewport_scroll().is_some(),
+            "precondition: the empty capture made this an app-owned viewport"
+        );
+
+        // Now the backend reports a pane with history after all.
+        let mut deep = Vec::new();
+        for n in 0..200 {
+            deep.extend_from_slice(format!("retained line {n}\r\n").as_bytes());
+        }
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep,
+            seq: 81,
+        });
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(
+            stack.take_viewport_scroll(),
+            None,
+            "history exists again, so the scroll is lazybox's to serve"
+        );
+    }
+
+    /// An exited pane has nothing to forward to — the program that held
+    /// the transcript is gone, and a write would go to a closed PTY.
+    #[test]
+    fn an_exited_pane_forwards_nothing() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        repaint_in_place(&mut stack, id, 80);
+        let _ = stack.scroll_active(-3);
+        let _ = stack.take_scrollback_fetch();
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: Vec::new(),
+            seq: 80,
+        });
+        stack.terminals.get_mut(&id).expect("slot").exited = Some(TerminalExit {
+            code: Some(0),
+            dead_on_arrival: false,
+            last_output: None,
+        });
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(
+            stack.take_viewport_scroll(),
+            None,
+            "no program left to scroll"
+        );
     }
 
     /// The trigger fires even when the local grid has NO scrollback yet

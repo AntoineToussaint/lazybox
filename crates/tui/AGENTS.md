@@ -169,6 +169,41 @@ mount. `the_tick_phase_does_not_load_the_config` discovers the `tick_*`
 family from `run_loop_step` itself and audits each body, so a tick added
 later is covered without anyone remembering to.
 
+## A scroll the host cannot serve belongs to the application
+
+The deep-scrollback path (`#393`) assumed tmux had retained the full pane
+history the whole time. It records what scrolls **off** a pane, so for a
+program that repaints inside the viewport and never emits a newline it
+retains nothing — measured at 0 lines on 29 of 44 Codex panes against up to
+48,556 for Claude Code in the same tmux server at the same `history-limit`.
+Both grids are then empty forever and the wheel was a silent no-op for the
+life of the session.
+
+So `scroll_terminal` forwards such a scroll to the program as Page Up /
+Page Down, with `TerminalInputIntent::View` — the intent that already exists
+for traffic repainting a full-screen program without asking the agent to
+work, so a wheel notch can never read as the start of a turn.
+
+The condition is **observed per pane**, in `TerminalSlot::owns_viewport`:
+more than a screenful of live output written, *and* no history in the local
+grid, *and* the backend has answered a fetch reporting none of its own. It is
+never a property of which agent is running — the same binary scrolls normally
+or not depending only on how it writes, so keying on identity would be
+`AGENTS.md`'s "never hardcode what the system resolves" in miniature. Both
+halves are load-bearing: drop the screenful and a quiet shell prompt (no
+history either, because it has shown nothing) starts handing Page Up to
+readline, which in a common zsh setup recalls a command.
+
+The first upward scroll of a session is still swallowed: until the fetch
+comes back, "no history anywhere" is not a fact. The verdict is re-derived
+from every reply, so a pane that repaints in place and later streams
+normally gets the wheel back.
+
+What this does **not** do is give such a pane history. Nothing in lazybox or
+tmux ever saw the transcript, so it dies with the program. Recording it would
+mean keeping the PTY stream itself rather than relying on what tmux happened
+to catch.
+
 ## A capture never replaces output it predates
 
 `apply_scrollback` swaps the whole grid for the daemon's tmux capture, and

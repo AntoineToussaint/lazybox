@@ -277,7 +277,13 @@ fn generate(frontmatter: &str) -> String {
          - Click any pane to focus it; drag a splitter to resize.\n\
          - Right-click a sidebar row for the context menu; right-click a URL / path / `#N` \
            reference inside a terminal to open it.\n\
-         - The wheel scrolls the pane under the cursor (terminal scrollback included).\n\
+         - The wheel scrolls the pane under the cursor (terminal scrollback \
+           included). When a pane has no scrollback anywhere \u{2014} some \
+           full-screen agents, Codex among them, repaint their transcript in place \
+           and so never let a line scroll off for the terminal to keep \u{2014} the \
+           scroll is forwarded to the program as Page Up / Page Down, which is how \
+           that agent scrolls its own view. Such a pane's history lives only inside \
+           the program and is gone when it exits.\n\
          - The mouse-capture toggle (`F8` / `Alt-s` / `Ctrl-Alt-s`) hands the mouse back to \
            the host terminal for native text selection.\n",
     );

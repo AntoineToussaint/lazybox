@@ -175,7 +175,8 @@ The deep-scrollback path (`#393`) assumed tmux had retained the full pane
 history the whole time. It records what scrolls **off** a pane, so for a
 program that repaints inside the viewport and never emits a newline it
 retains nothing — measured at 0 lines on 29 of 44 Codex panes against up to
-48,556 for Claude Code in the same tmux server at the same `history-limit`.
+48,556 for Claude Code in the same tmux server at the same `history-limit`
+(#1949).
 Both grids are then empty forever and the wheel was a silent no-op for the
 life of the session.
 

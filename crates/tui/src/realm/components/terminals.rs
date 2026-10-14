@@ -470,7 +470,7 @@ impl Terminals {
 
     /// Take the scroll the host could not serve, encoded as the keys the
     /// application scrolls with. The orchestrator ships it as a
-    /// `Command::Write` with `TerminalInputIntent::View`.
+    /// `Command::Write` with `TerminalInputIntent::View` (#1949).
     pub fn take_viewport_scroll(&mut self) -> Option<(TerminalId, Vec<u8>)> {
         self.inner.take_viewport_scroll()
     }

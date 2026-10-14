@@ -106,7 +106,7 @@ those two sections as well if you are coming from 0.1.18.
 
 ### Fixed
 
-- **Scrolling back works in a pane whose program repaints in place**.
+- **Scrolling back works in a pane whose program repaints in place** (#1949).
   Codex draws its transcript inside the viewport and never lets a line scroll
   off, and the retained history lazybox scrolls through is precisely what
   *scrolled off* a pane — so there was nothing to scroll through, in lazybox's

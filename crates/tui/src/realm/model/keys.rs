@@ -3008,7 +3008,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // history anywhere, where the application holds the only
                 // copy of its own transcript and the host would
                 // otherwise swallow the notch; `scroll_terminal` arms
-                // that case off observed pane state.
+                // that case off observed pane state (#1949).
                 const LOCAL_WHEEL_STEP: isize = 3;
                 let delta = if raw_up {
                     -LOCAL_WHEEL_STEP
@@ -3025,7 +3025,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 // ... and when that fetch has already come back empty on
                 // a pane that repaints in place, the notch goes to the
-                // program instead of nowhere.
+                // program instead of nowhere (#1949).
                 if let Some((terminal_id, bytes)) = self.terminals.take_viewport_scroll() {
                     for cmd in IpcCommand::write_chunked(
                         terminal_id,

@@ -936,7 +936,7 @@ pub struct TerminalStack {
     /// the backend has reported none either, and the pane has been
     /// repainting in place ([`TerminalSlot::owns_viewport`]) — drained
     /// by the key / wheel handlers into a `Command::Write` of the
-    /// application's own scroll keys.
+    /// application's own scroll keys (#1949).
     pending_viewport_scroll: Option<(TerminalId, isize)>,
 }
 
@@ -1414,13 +1414,13 @@ struct TerminalSlot {
     /// [`Self::owns_viewport`] — and the fact that makes that judgement
     /// an observation instead of a guess, because it is the backend's
     /// own grid reporting that nothing has ever scrolled off this pane
-    ///.
+    /// (#1949).
     backend_scrollback_empty: bool,
 }
 
 /// `CSI 5 ~` / `CSI 6 ~` — Page Up / Page Down, forwarded to an
 /// application that owns its pane's viewport so a scroll the host
-/// cannot serve still scrolls something.
+/// cannot serve still scrolls something (#1949).
 ///
 /// Page keys rather than arrows: an arrow reaches a composer or a list
 /// selection in most full-screen programs, while the page keys are what
@@ -1565,7 +1565,7 @@ impl TerminalSlot {
     ///
     /// Measured: all 44 Codex panes on this box retain 0–1,275 lines,
     /// against up to 48,556 for Claude Code panes in the same tmux
-    /// server at the same `history-limit`.
+    /// server at the same `history-limit` (#1949).
     fn owns_viewport(&self) -> bool {
         if self.exited.is_some() || !self.backend_scrollback_empty {
             return false;
@@ -4230,7 +4230,7 @@ impl TerminalStack {
         // grid via `apply_scrollback`.
         //
         // "Usually" is load-bearing, and it used to read "the whole
-        // time". tmux records what scrolls OFF a pane, so a
+        // time" (#1949). tmux records what scrolls OFF a pane, so a
         // program that repaints inside the viewport and never emits a
         // newline leaves it with nothing to retain, however long the
         // session runs — measured at 0 lines on 29 of 44 Codex panes
@@ -4242,7 +4242,7 @@ impl TerminalStack {
         // A scroll with nowhere to go is not a no-op to be swallowed:
         // when the application owns the viewport it is the only thing
         // holding the transcript, and the only thing that can scroll it
-        //. The condition is read off the pane, so this stays
+        // (#1949). The condition is read off the pane, so this stays
         // agnostic about which program is running — see
         // `TerminalSlot::owns_viewport`.
         let forward = matches!(outcome, ScrollOutcome::NoScrollback) && slot.owns_viewport();
@@ -4604,7 +4604,7 @@ impl TerminalStack {
             return;
         };
         // Nothing to adopt — and that emptiness is itself the backend's
-        // answer about this pane, which `owns_viewport` reads.
+        // answer about this pane, which `owns_viewport` reads (#1949).
         // A raw-PTY pane answers this way too, and it has no history by
         // construction, so the conclusion holds there as well.
         if replay.is_empty() {
@@ -4674,7 +4674,7 @@ impl TerminalStack {
         // ever scrolled a line off. A capture of ~one screenful says it
         // has not: there is nothing to adopt now and nothing to fetch
         // later, so a scroll here can only belong to the application
-        //. Recomputed on every reply, so a pane that starts
+        // (#1949). Recomputed on every reply, so a pane that starts
         // repainting in place and later streams normally stops being
         // judged by a stale verdict.
         slot.backend_scrollback_empty = !capture_has_history;
@@ -11515,7 +11515,7 @@ mod deep_scrollback_tests {
     /// Drive a pane that REPAINTS IN PLACE: cursor home, overwrite the
     /// row, never emit a newline. Thousands of bytes of output and not
     /// one line scrolls off the top — the shape measured on every Codex
-    /// pane on this box, and the shape that makes tmux's
+    /// pane on this box (#1949), and the shape that makes tmux's
     /// retained history empty however long the session has run.
     fn repaint_in_place(stack: &mut TerminalStack, id: TerminalId, repaints: u64) {
         let mut payload = Vec::new();
@@ -11529,7 +11529,7 @@ mod deep_scrollback_tests {
 
     /// The pane holds the only copy of its transcript, so the notch that
     /// lazybox cannot serve is handed to the program instead of being
-    /// swallowed. Without the fix the wheel is a silent no-op
+    /// swallowed (#1949). Without the fix the wheel is a silent no-op
     /// for the whole life of the session: `NoScrollback` locally, an
     /// empty capture from the backend, and nothing forwarded.
     #[test]

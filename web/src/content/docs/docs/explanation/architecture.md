@@ -80,7 +80,11 @@ recent screen contents replay instantly instead of starting blank.
 Replay uses sequence numbers and gap resynchronization, while all terminal
 input and scroll mutations pass through one ordered owner. The client therefore
 reaches the same screen and scrollback state after a reconnect as a fresh
-attach. Process exit is a first-class lifecycle event carrying the exit code:
+attach. Scrolling past what the client holds fetches the backend's retained
+history, which is what *scrolled off* the pane — a program that repaints its
+output inside the viewport leaves none, and a scroll in such a pane is
+forwarded to the program instead, since it holds the only copy of its own
+transcript. Process exit is a first-class lifecycle event carrying the exit code:
 clean agent exits can close automatically, while crashes and failed starts keep
 their final screen visible without deleting the workspace.
 

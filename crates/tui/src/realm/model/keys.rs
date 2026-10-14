@@ -3000,10 +3000,15 @@ impl<T: TerminalAdapter> Model<T> {
                 else {
                     return;
                 };
-                // The wheel always belongs to lazybox's terminal
-                // history. Agent screen modes and mouse tracking only
-                // affect rendering and clicks; neither can redirect a
-                // scroll into an app that may ignore it.
+                // The wheel belongs to lazybox's terminal history
+                // wherever there IS any. Agent screen modes and mouse
+                // tracking do not redirect it — they describe rendering
+                // and clicks, and an app that ignores a scroll must not
+                // be handed one. The single exception is a pane with no
+                // history anywhere, where the application holds the only
+                // copy of its own transcript and the host would
+                // otherwise swallow the notch; `scroll_terminal` arms
+                // that case off observed pane state (#1949).
                 const LOCAL_WHEEL_STEP: isize = 3;
                 let delta = if raw_up {
                     -LOCAL_WHEEL_STEP
@@ -3017,6 +3022,18 @@ impl<T: TerminalAdapter> Model<T> {
                 // as deep as a restarted one (#393).
                 if let Some(terminal_id) = self.terminals.take_scrollback_fetch() {
                     self.send_cmd(IpcCommand::FetchScrollback { terminal_id });
+                }
+                // ... and when that fetch has already come back empty on
+                // a pane that repaints in place, the notch goes to the
+                // program instead of nowhere (#1949).
+                if let Some((terminal_id, bytes)) = self.terminals.take_viewport_scroll() {
+                    for cmd in IpcCommand::write_chunked(
+                        terminal_id,
+                        bytes,
+                        lazybox_ipc::TerminalInputIntent::View,
+                    ) {
+                        self.send_cmd(cmd);
+                    }
                 }
                 self.redraw = true;
             }

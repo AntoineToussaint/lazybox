@@ -468,6 +468,13 @@ impl Terminals {
         self.inner.take_scrollback_fetch()
     }
 
+    /// Take the scroll the host could not serve, encoded as the keys the
+    /// application scrolls with. The orchestrator ships it as a
+    /// `Command::Write` with `TerminalInputIntent::View` (#1949).
+    pub fn take_viewport_scroll(&mut self) -> Option<(TerminalId, Vec<u8>)> {
+        self.inner.take_viewport_scroll()
+    }
+
     /// Scroll the focused terminal's viewport by `delta` rows. Used by
     /// the edge drag-selection auto-scroll (#432).
     pub fn scroll_active(

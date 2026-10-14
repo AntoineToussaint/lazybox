@@ -36,6 +36,21 @@ ignore = [
     # unmaintained status rather than an exploitable flaw, and no safe upgrade
     # exists; replacing the codec requires an explicitly versioned migration.
     "RUSTSEC-2025-0141",
+    # `unsafe-libyaml` is a c2rust machine translation of libyaml, archived
+    # read-only by its owner on 2024-03-25 at 0.2.11. It reaches us only
+    # through `serde_yaml` 0.9.34+deprecated — itself deprecated — which
+    # parses `~/.lazybox/config.yaml`, the sandbox profiles and the TUI's
+    # theme files (`lazybox-config`, `lazybox-sandbox`, `lazybox-tui`).
+    # RUSTSEC-2024-0449 reports unmaintained status, not an exploitable
+    # flaw, and RustSec states outright that no safe upgrade exists; the
+    # forks (`serde_yaml_ng`) depend on the same translated C. Removing
+    # this means moving every config-parse path onto another YAML parser,
+    # which is its own change with its own compatibility surface — the
+    # inputs are local files the user owns, not untrusted network data.
+    # Unblock: migrate `serde_yaml` -> a maintained parser across those
+    # three crates. The nightly `deny-yanked` job keeps a lens on this
+    # list out-of-band (.github/workflows/nightly.yml).
+    "RUSTSEC-2024-0449",
 ]
 
 # ── licenses ──────────────────────────────────────────────────────────

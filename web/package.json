@@ -13,11 +13,11 @@
     "lighthouse": "node scripts/lighthouse.mjs"
   },
   "dependencies": {
-    "@astrojs/check": "^0.9.10",
-    "@astrojs/markdown-remark": "7.3.1",
+    "@astrojs/check": "^0.9.12",
+    "@astrojs/markdown-remark": "7.3.5",
     "@astrojs/sitemap": "^3.7.4",
-    "@astrojs/starlight": "^0.42.5",
-    "astro": "^7.3.8",
+    "@astrojs/starlight": "^0.42.8",
+    "astro": "^7.4.4",
     "typescript": "^6.0.3"
   },
   "overrides": {
@@ -29,6 +29,6 @@
     "postcss-selector-parser": "^7.1.6"
   },
   "devDependencies": {
-    "lighthouse": "13.5.0"
+    "lighthouse": "13.6.0"
   }
 }

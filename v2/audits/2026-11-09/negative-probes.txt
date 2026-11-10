@@ -1,0 +1,10 @@
+Candidate digest: 998d06e2effb4b98902b39b856639bb6cff41e4e14be5f889ab82ed12e84cc18
+--- FAIL: TestAuditDependencyRejectsRolledBackAcceptedCommit (1.09s)
+    audit_dependency_test.go:113: AUDIT: dependent worker launched after its accepted prerequisite commit was removed from the checkout
+FAIL
+FAIL	github.com/AntoineToussaint/lazybox/v2/internal/runner	1.543s
+--- FAIL: TestAuditAgentCredentialCannotApprovePlan (0.16s)
+    audit_authority_test.go:64: AUDIT: shared agent credential approved plan through authenticated RPC; task status=ready
+FAIL
+FAIL	github.com/AntoineToussaint/lazybox/v2/internal/transport	0.672s
+FAIL

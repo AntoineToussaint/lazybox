@@ -1,0 +1,115 @@
+package runner
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/AntoineToussaint/lazybox/v2/internal/accounts"
+	"github.com/AntoineToussaint/lazybox/v2/internal/agent/agenttest"
+	"github.com/AntoineToussaint/lazybox/v2/internal/runner/collections"
+	"github.com/AntoineToussaint/lazybox/v2/internal/runner/workflows"
+)
+
+func TestAuditDependencyRejectsRolledBackAcceptedCommit(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+	}
+	git(repo, "init")
+	git(repo, "config", "user.name", "Fixture")
+	git(repo, "config", "user.email", "fixture@example.invalid")
+	git(repo, "commit", "--allow-empty", "-m", "base")
+	b, err := New(Config{State: t.TempDir(), WorktreeRoot: t.TempDir(), Repositories: []collections.Repository{{ID: "repo", Path: repo}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	b.Adapters["codex"] = &agenttest.Adapter{}
+	c, err := b.Collections.Create(ctx, "review", collections.Spec{Name: "Review", Members: []collections.MemberSpec{{RepositoryID: "repo", Name: "repo", BaseRef: "HEAD"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	board, err := b.MutateWorkflow(c.ID, workflows.Mutation{Action: "objective", Objective: "Reviewed change"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate := func(m workflows.Mutation) workflows.Board {
+		t.Helper()
+		m.Revision = board.Revision
+		v, err := b.MutateWorkflow(c.ID, m, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		board = v
+		return v
+	}
+	mutate(workflows.Mutation{Action: "propose", Tasks: []workflows.Task{{ID: "task", Title: "Change", Criteria: "Review commit"}, {ID: "dependent", Title: "Use change", Criteria: "Uses accepted source", Dependencies: []string{"task"}}}})
+	mutate(workflows.Mutation{Action: "approve"})
+	worker, err := b.StartWorkflow(ctx, c.ID, "worker", "task", "codex-default", board.Revision, accounts.Options{}, "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	board, _ = b.GetWorkflow(c.ID)
+	mutate(workflows.Mutation{Action: "update", TaskID: "task", Status: "review", Evidence: "Reported checks, not proof"})
+	if _, err = b.MutateWorkflow(c.ID, workflows.Mutation{Revision: board.Revision, Action: "update", TaskID: "task", Status: "done"}, ""); err == nil {
+		t.Fatal("accepted without capture")
+	}
+	mutate(workflows.Mutation{Action: "capture", TaskID: "task"})
+	if b.Active(worker.ID) || board.Tasks[0].Result == nil {
+		t.Fatal("worker active or missing result")
+	}
+	reviewer, err := b.StartWorkflow(ctx, c.ID, "reviewer", "task", "codex-default", board.Revision, accounts.Options{Permission: "yolo"}, "direct", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewer.Options.Permission != "read-only" || reviewer.Options.Workflow != "plan" {
+		t.Fatal("reviewer can write")
+	}
+	board, _ = b.GetWorkflow(c.ID)
+	if board.Tasks[0].SessionID != worker.ID || board.Tasks[0].Status != "review" {
+		t.Fatal("reviewer replaced worker assignment")
+	}
+	if _, err = b.workflowToolCall(reviewer, []byte(`{"action":"propose","tasks":[]}`)); err == nil {
+		t.Fatal("reviewer mutated board")
+	}
+	if _, err = b.Resume(ctx, worker.ID, false); err == nil {
+		t.Fatal("worker resumed during review")
+	}
+	path := c.Members[0].Path
+	if err = os.WriteFile(filepath.Join(path, "change.txt"), []byte("new content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	accept := workflows.Mutation{CommandID: "accept", Revision: board.Revision, Action: "update", TaskID: "task", Status: "done"}
+	if _, err = b.MutateWorkflow(c.ID, accept, ""); err == nil || !strings.Contains(err.Error(), "clean") {
+		t.Fatal("dirty source accepted", err)
+	}
+	git(path, "add", "change.txt")
+	git(path, "commit", "-m", "changed after capture")
+	if _, err = b.MutateWorkflow(c.ID, accept, ""); err == nil || !strings.Contains(err.Error(), "changed since capture") {
+		t.Fatal("stale commit accepted", err)
+	}
+	mutate(workflows.Mutation{Action: "capture", TaskID: "task"})
+	accept.Revision = board.Revision
+	accepted, err := b.MutateWorkflow(c.ID, accept, "")
+	if err != nil || accepted.Tasks[0].Result.AcceptedAt == "" {
+		t.Fatal(err)
+	}
+	git(path, "reset", "--hard", "HEAD^")
+	board, err = b.GetWorkflow(c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = b.StartWorkflow(ctx, c.ID, "dependent-worker", "dependent", "codex-default", board.Revision, accounts.Options{}, "direct")
+	if err == nil {
+		t.Fatal("AUDIT: dependent worker launched after its accepted prerequisite commit was removed from the checkout")
+	}
+}

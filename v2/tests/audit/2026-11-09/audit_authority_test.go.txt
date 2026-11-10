@@ -1,0 +1,66 @@
+package transport
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/AntoineToussaint/lazybox/v2/internal/accounts"
+	"github.com/AntoineToussaint/lazybox/v2/internal/runner/collections"
+	"github.com/AntoineToussaint/lazybox/v2/internal/runner/workflows"
+	pb "github.com/AntoineToussaint/lazybox/v2/pkg/gen"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/test/bufconn"
+)
+
+// This is intentionally a failing acceptance probe against the staged candidate.
+// The credential represents the same Runner token exposed through endpoint.json.
+func TestAuditAgentCredentialCannotApprovePlan(t *testing.T) {
+	s, fake := collectionService(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := s.Bench.Collections.Create(ctx, "audit", collections.Spec{Name: "Audit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.Bench.MutateWorkflow(c.ID, workflows.Mutation{Action: "objective", Objective: "Review authority"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Bench.StartWorkflow(ctx, c.ID, "planner", "", "claude-default", b.Revision, accounts.Options{}, "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = s.Bench.GetWorkflow(c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = s.Bench.MutateWorkflow(c.ID, workflows.Mutation{Revision: b.Revision, Action: "propose", Tasks: []workflows.Task{{ID: "work", Title: "Work", Criteria: "Verified"}}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := json.Marshal(workflows.Mutation{Revision: b.Revision, Action: "approve"})
+	if _, err = fake.Session.Open.Tools(ctx, "lazybox_workflow", request); err == nil {
+		t.Fatal("precondition: scoped tool unexpectedly approved")
+	}
+	server := grpc.NewServer(LocalAuthority("audit-shared-runner-token")...)
+	pb.RegisterRunnerServiceServer(server, s)
+	listener := bufconn.Listen(1 << 20)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	defer listener.Close()
+	conn, err := grpc.NewClient("passthrough:///audit", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	agentContext := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer audit-shared-runner-token")
+	result, err := pb.NewRunnerServiceClient(conn).MutateWorkflow(agentContext, &pb.MutateWorkflowRequest{CollectionId: c.ID, Revision: b.Revision, Action: "approve"})
+	if err == nil {
+		t.Fatalf("AUDIT: shared agent credential approved plan through authenticated RPC; task status=%s", result.Tasks[0].Status)
+	}
+}

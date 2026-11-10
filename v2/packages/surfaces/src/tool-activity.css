@@ -1,0 +1,50 @@
+.tool-activity-toolbar{flex:none;padding:3px 18px;border-bottom:1px solid var(--line,#34343d)}
+.tool-activity-toolbar>button{font-size:11px;padding:4px 7px;color:#b1b2bf;background:transparent;border:0}
+.tool-activity-toolbar>button>span{font-variant-numeric:tabular-nums;margin-left:4px}
+.tool-activity-dialog{width:min(860px,calc(100vw - 32px));height:min(720px,85dvh);max-height:85dvh;padding:0;overflow:hidden}
+.tool-activity-dialog[open]{display:flex;flex-direction:column}
+.tool-activity-dialog>header{flex:none;margin:0;padding:22px 24px 16px;border-bottom:0}
+.tool-activity-dialog>header h2{font-size:18px;margin:0;font-weight:600;letter-spacing:-.3px}
+.tool-activity-dialog>header p{font-size:11px;color:#8f919e;margin:5px 0 0;font-weight:400}
+.activity-controls{padding:0 24px 12px;flex:none}
+.activity-controls>input{width:100%;font-size:12px;min-height:34px;padding:8px 10px;margin:0 0 12px}
+.activity-filters{display:flex;gap:5px}
+.activity-filters>button{font-size:11px;padding:5px 9px;border:1px solid transparent;border-radius:5px;background:transparent;color:#9699a7;font-weight:400}
+.activity-filters>button[aria-pressed=true]{background:#30313a;border-color:#42434e;color:#e0e1e9}
+.activity-note{padding:0 24px 10px;margin:0;color:#9497a5;font-size:11px;line-height:1.5;flex:none}
+.activity-column-head{display:grid;grid-template-columns:minmax(0,1fr) 84px 64px;gap:14px;padding:8px 24px 8px 64px;color:#747885;font-size:10px;flex:none;border-block:1px solid #30323b}
+.activity-column-head>span:not(:first-child){text-align:right}
+.tool-call-list{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:0 16px}
+.tool-call{border-bottom:1px solid #2d2f38}
+.tool-call>summary{display:grid;grid-template-columns:10px 14px minmax(0,1fr) 84px 64px;align-items:center;gap:10px;cursor:pointer;padding:11px 8px;list-style:none;font-size:12px;border-radius:4px}
+.tool-call>summary:hover{background:#272930}
+.tool-call>summary::-webkit-details-marker{display:none}
+.tool-call>summary:before{content:'›';color:#757986}
+.tool-call[open]>summary:before{transform:rotate(90deg)}
+.tool-call-heading{display:flex;flex-direction:column;gap:4px;min-width:0}
+.tool-call-heading strong{font-size:12px;font-weight:500;color:#d5d7e0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:18px}
+.tool-call-heading small{font-size:10px;color:#858997;line-height:13px}
+.tool-state{color:#707581;font-size:12px;text-align:center}
+.tool-state.completed{color:#88ad98}.tool-state.failed{color:#e2a39f}.tool-state.running{color:#c2b3e9}
+.tool-time,.tool-duration{text-align:right;color:#8e93a1;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tool-duration{color:#c0c4d1}
+.tool-call-details{padding:0 8px 14px 42px}
+.tool-call-details .code-block{margin:6px 0 10px;border:1px solid #30323b;border-radius:6px}
+.tool-call-details .code-block header{padding:7px 10px;font-size:10px;background:#24262e}
+.tool-call-details .code-block pre{margin:0;padding:10px 12px;background:#17191f;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font:11px/1.65 var(--font-mono)}
+.tool-call-details .code-block pre code{font:inherit}
+.tool-call-details .code-block button{font-size:10px;padding:2px 4px}
+.tool-raw-input{color:#8e93a1;font-size:11px;margin:8px 0 14px}
+.tool-empty{color:#8e93a1;font-size:12px;line-height:1.6;padding:8px 0}
+.tool-call-list>.tool-empty{padding:18px 8px}
+.tool-agent-detail{display:block;color:#8e93a1;font-size:10px;margin:8px 0}
+.activity-more{display:block;margin:10px auto;font-size:11px}
+.tool-activity-dialog>footer{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex:none;padding:12px 24px;border-top:1px solid #30323b;color:#787e8c;font-size:10px}
+.available-tools{font-size:10px;max-width:60%;margin:0;color:#9499a8}
+.available-tools summary{cursor:pointer}
+.available-tools ul{columns:2;list-style:none;padding:0;font:10px/1.6 var(--font-mono);max-height:100px;overflow:auto}
+.available-tools li{overflow-wrap:anywhere}
+.agent-inspection-bar{display:flex;align-items:center;flex:none;border-bottom:1px solid #30303a}
+.agent-inspection-bar .telemetry-panel.compact{border:0;min-width:0}
+.agent-inspection-bar .tool-activity-toolbar{border:0;margin-left:auto;padding-right:20px}
+@media(max-width:560px){.tool-activity-dialog>header{padding:16px}.activity-controls{padding:0 16px 10px}.activity-note{padding-inline:16px}.tool-call-list{padding:0 8px}.tool-call>summary{grid-template-columns:8px 12px minmax(0,1fr) 46px;gap:6px}.tool-time{display:none}.activity-column-head{grid-template-columns:minmax(0,1fr) 46px;padding-inline:48px 16px}.activity-column-head>span:nth-child(2){display:none}.tool-call-details{padding-left:22px}.tool-activity-dialog>footer{padding:10px 16px}.tool-call-heading strong{font-size:11px}}

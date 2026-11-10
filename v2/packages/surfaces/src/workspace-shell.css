@@ -1,0 +1,104 @@
+/* Workspace chrome owns its scale and state palette. Feature content remains scoped. */
+.workspace-shell {
+  --canvas:#1b1c21; --sidebar:#15161b; --line:#2a2b32;
+  --text:#e6e6ed; --muted:#9698a4; --accent:#b6acd4;
+  --nav-hover:#1f2027; --nav-selected:#25262e;
+  --control-height:32px; --control-radius:6px; --space-unit:4px;
+  -webkit-font-smoothing:antialiased;
+}
+.workspace-shell .workspace-header{height:48px;min-height:48px;gap:24px;padding:0 16px;background:var(--sidebar);overflow:visible}
+.workspace-shell .workspace-brand{min-width:118px;font-size:14px;letter-spacing:-.25px}
+.workspace-shell .workspace-header>nav{min-width:0;overflow-x:auto;scrollbar-width:none;flex:1;height:100%}
+.workspace-shell .workspace-header>nav button{font-size:12px;padding:0 12px;white-space:nowrap}
+.workspace-shell .workspace-header>nav .selected{background:transparent!important;color:var(--text)!important;border-bottom-color:var(--accent)!important}
+.workspace-shell .workspace-header-actions{gap:6px;margin-left:auto}
+.workspace-shell .toolbar-action{display:flex;align-items:center;justify-content:center;gap:7px;height:var(--control-height);padding:0 10px;white-space:nowrap;font-size:12px;border-radius:var(--control-radius)}
+.workspace-shell .new-conversation-action{background:#2c2a35;color:#e4ddf5;border-color:#3e394c}
+.workspace-shell .new-conversation-action:hover{background:#383240}
+.workspace-shell .workspace-header .runner-indicator{font-size:10px;margin:0 6px;color:var(--muted)}
+.workspace-header-actions>.workspace-actions>summary{display:flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border-radius:6px}
+.workspace-shell .workspace-context{height:42px;min-height:42px;flex-wrap:nowrap;gap:16px;padding:0 16px;background:#191a1f}
+.workspace-shell .collection-breadcrumb{flex:1;min-width:0;gap:8px}
+.workspace-shell .collection-breadcrumb>svg{color:var(--muted);flex:none}
+.workspace-shell .collection-breadcrumb label{min-width:0;max-width:280px;flex:0 1 auto}
+.workspace-shell .collection-breadcrumb select{font-size:12px;width:100%;text-overflow:ellipsis;max-width:100%;font-weight:550}
+.workspace-shell .workspace-repositories-link{font-size:11px;white-space:nowrap;color:var(--muted);padding:5px 8px}
+.workspace-shell .session-switcher{flex:0 1 220px;min-width:0}
+.workspace-shell .session-switcher select{width:100%;text-overflow:ellipsis}
+.workspace-shell .collection-panel{padding:16px 10px}
+.workspace-shell .explorer-heading{padding:0 8px;margin-bottom:12px;font-size:10px;letter-spacing:.8px}
+.workspace-shell .workspace-row,.workspace-shell .conversation-row{border-radius:6px}
+.workspace-shell .workspace-row:has(.workspace-link[aria-current]),.workspace-shell .conversation-row:has(.conversation-link[aria-current]){background:var(--nav-selected);box-shadow:inset 2px 0 var(--accent)}
+.workspace-shell .workspace-row:not(:has([aria-current])):hover,.workspace-shell .conversation-row:not(:has([aria-current])):hover,.workspace-shell .history-shortcut:hover{background:var(--nav-hover)}
+.workspace-shell .workspace-label strong{color:var(--text);font-size:13px;font-weight:550}
+.workspace-shell .workspace-repo-names{color:var(--muted);font-size:11px;line-height:16px}
+.workspace-shell .history-shortcut{margin-top:16px;border-top:1px solid var(--line);border-radius:0;padding-top:12px;padding-bottom:12px}
+.workspace-shell .new-session-dialog{width:min(520px,calc(100vw - 32px));padding:24px;background:#202127;border-color:#383941}
+.workspace-shell .new-session-dialog>header{margin-bottom:12px}
+.workspace-shell .new-session-dialog>header>strong{font-size:18px;letter-spacing:-.3px}
+.workspace-shell .new-session-dialog .quick-start-option{display:block;margin:0 0 8px auto;padding:6px 0;color:var(--accent);font-size:12px}
+.workspace-shell .new-session-dialog .session-setup{padding:8px 0}
+.workspace-shell .new-session-dialog .session-setup>.eyebrow,.workspace-shell .new-session-dialog .session-setup>h2,.workspace-shell .new-session-dialog .session-setup>p{display:none}
+.workspace-shell .mobile-navigation-button,.mobile-panel-switcher{display:none!important}
+.workspace-navigator{margin:0;inset:0 auto 0 0;width:min(340px,calc(100vw - 32px));height:100dvh;max-height:100dvh;max-width:none;box-sizing:border-box;padding:0;border:0;border-right:1px solid var(--line);background:var(--sidebar);color:var(--text);box-shadow:12px 0 48px #0005}
+.workspace-navigator[open]{display:flex;flex-direction:column}
+.workspace-navigator::backdrop{background:#08090da0}
+.workspace-navigator>header{display:flex;align-items:center;justify-content:space-between;min-height:48px;padding:0 16px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+.workspace-navigator>header>button{width:36px;height:36px;font-size:22px;padding:0}
+.workspace-navigator .collection-panel{flex:1;min-height:0;overscroll-behavior:contain}
+@media(min-width:761px) and (max-width:1100px){
+  .workspace-shell .workspace-header{gap:14px}.workspace-shell .workspace-brand{min-width:88px}
+  .workspace-shell .workspace-header .runner-indicator{display:none}
+}
+@media(max-width:760px){
+  .workspace-shell .workspace-header{gap:6px;padding:0 8px;flex-shrink:0}
+  .workspace-shell .mobile-navigation-button{display:inline-flex!important;width:36px;height:36px}
+  .workspace-shell .workspace-brand,.workspace-shell .workspace-header .runner-indicator{display:none}
+  .workspace-shell .workspace-header>nav{flex:1;flex-shrink:1;min-width:0}
+  .workspace-shell .workspace-header>nav button{padding:0 10px}
+  .workspace-shell .workspace-header-actions{gap:2px}
+  .workspace-shell .toolbar-action{width:36px;height:36px;padding:0}
+  .workspace-shell .toolbar-action>span{display:none}
+  .workspace-shell .workspace-context{height:40px;min-height:40px;padding:0 12px}
+  .workspace-shell .collection-breadcrumb{width:100%}
+  .workspace-shell .collection-breadcrumb label{flex:1;max-width:none}
+  .workspace-shell .session-switcher{display:none}
+  .workspace-shell .mobile-panel-switcher{display:flex!important;gap:4px;padding:4px 10px;border-bottom:1px solid var(--line);overflow:auto;flex:none}
+  .workspace-shell .mobile-panel-switcher button{padding:5px 9px;font-size:11px;white-space:nowrap}
+  .workspace-shell .mobile-panel-switcher [aria-pressed=true]{background:var(--nav-selected);color:var(--text)}
+  .workspace-shell:not(.layout-editing) .page-layout{overflow:hidden;display:flex;flex-direction:column;min-height:0}
+  .workspace-shell:not(.layout-editing) .page-layout .layout-split,.workspace-shell:not(.layout-editing) .page-layout .layout-cell{display:contents}
+  .workspace-shell:not(.layout-editing) .page-layout .workspace-panel{display:none}
+  .workspace-shell:not(.layout-editing) .page-layout .workspace-panel[data-mobile-active=true]{display:flex;flex:1;min-height:0;height:100%;border:0}
+  .workspace-shell .embedded-chat .messages{padding:16px;min-height:0}
+  .workspace-shell .embedded-chat .message p{font-size:14px;line-height:1.65}
+  .workspace-shell .embedded-chat .composer{margin:0 10px max(10px,env(safe-area-inset-bottom));padding:10px;border-radius:10px}
+  .workspace-shell .embedded-chat .composer textarea{font-size:16px;min-height:42px;resize:none;max-height:25dvh}
+  .workspace-shell .embedded-chat .keyboard-hint{display:none}
+  .workspace-shell .embedded-chat .chat-heading{padding:12px 16px}
+  .workspace-shell .new-session-dialog{padding:20px;max-height:calc(100dvh - 24px)}
+  .workspace-shell .new-session-dialog input,.workspace-shell .new-session-dialog select{font-size:16px}
+  .workspace-shell.layout-editing .page-layout{overflow:auto}
+  .workspace-shell.layout-editing .mobile-panel-switcher{display:none!important}
+}
+
+/* A single focus treatment for shell controls; the composer owns its focus ring. */
+.workspace-shell button:focus-visible,.workspace-shell summary:focus-visible,.workspace-shell select:focus-visible,.workspace-shell input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.workspace-shell .embedded-chat .composer:focus-within{border-color:var(--accent);box-shadow:0 0 0 1px #b6acd433}
+.workspace-shell .embedded-chat .composer textarea:focus-visible{outline:none}
+.workspace-shell .embedded-chat .composer .send-button{margin-left:auto}
+@media(max-width:760px){
+  .workspace-shell .action-popover>button{min-height:40px}
+  .workspace-shell .workspace-navigator .workspace-actions>summary,.workspace-shell .workspace-navigator .workspace-new-conversation{width:32px;height:32px}
+  .workspace-shell .workspace-navigator .workspace-new-conversation{right:38px}
+  .workspace-shell .workspace-navigator .workspace-link{padding-right:76px}
+  .workspace-shell .draggable-dialog footer button{min-height:40px}
+}
+
+.workspace-shell .new-session-dialog .embedded-chat{height:auto;flex:none;background:transparent}
+.workspace-shell .new-session-dialog .open-form{margin-top:8px}
+.workspace-shell .new-session-dialog .session-setup>small{margin-top:16px;line-height:1.6}
+.workspace-shell .new-session-dialog .conversation-scope{font-size:12px;color:var(--muted);line-height:1.6;margin:0 0 8px}
+.workspace-shell .new-session-dialog .conversation-scope strong{font-weight:500;color:var(--text)}
+.workspace-shell .new-session-dialog select{appearance:none;min-height:40px;padding:8px 30px 8px 10px;background-image:linear-gradient(45deg,transparent 50%,#9698a4 50%),linear-gradient(135deg,#9698a4 50%,transparent 50%);background-position:calc(100% - 15px) 50%,calc(100% - 10px) 50%;background-size:5px 5px;background-repeat:no-repeat}
+.workspace-shell .new-session-dialog .open-form>.primary{min-height:40px}

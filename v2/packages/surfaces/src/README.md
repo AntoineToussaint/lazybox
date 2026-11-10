@@ -1,0 +1,7 @@
+# React surfaces
+
+`AgentWindow` is the public component: give it a resolved Runner connection and optionally an initial agent (Claude by default), working directory, or existing session ID. It owns authentication, discovery, session startup/attachment, event subscriptions, messages and generic file uploads (including native image input), request cards, interruption, and a command-output drawer. Drop files anywhere in an active chat to add them to the draft; dropping does not send. The picker and drops share Runner-advertised limits and the same byte-upload path. Folders are rejected. `make test-attachments` checks embedded, detached, and standalone composers with fake RPC. Enter sends; Shift+Enter inserts a line; IME confirmation does not send. Unmounting disconnects readers without stopping execution. The host owns URL persistence and native window creation through optional callbacks. See [usage](../../../RUNNING.md#reusable-agent-window).
+
+Work graph, previews, review, and native desktop surfaces remain future work.
+
+Conversation navigation uses creation time with a stable ID tie-breaker. Choosing a row only changes the view; it does not refresh the Runner catalog or reorder conversations. A detached chat appears as a compact return control instead of reserving a blank pane. Older Runners expose live conversations, with an explicit notice that saved history requires a Runner update.

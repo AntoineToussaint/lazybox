@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "policyFiles": ["Makefile", "scripts/release-gates.mjs"],
+  "gates": [
+    { "id": "core", "scope": "core", "command": "make", "args": ["check"], "timeoutMs": 1800000, "covers": ["test:client", "test:worker"] },
+    { "id": "desktop", "scope": "native", "command": "make", "args": ["check-desktop"], "timeoutMs": 3600000, "covers": [] },
+    { "id": "startup", "scope": "ui", "script": "test:startup" },
+    { "id": "repositories", "scope": "ui", "script": "test:repositories" },
+    { "id": "repository-picker", "scope": "ui", "script": "test:repository-picker" },
+    { "id": "github", "scope": "ui", "script": "test:github" },
+    { "id": "github-token", "scope": "ui", "script": "test:github-token" },
+    { "id": "workspace", "scope": "ui", "script": "test:workspace" },
+    { "id": "settings", "scope": "ui", "script": "test:settings" },
+    { "id": "dialogs", "scope": "ui", "script": "test:dialogs" },
+    { "id": "attachments", "scope": "ui", "script": "test:attachments" },
+    { "id": "empty-workspace", "scope": "ui", "script": "test:empty-workspace" },
+    { "id": "telemetry", "scope": "ui", "script": "test:telemetry" },
+    { "id": "agent-settings", "scope": "ui", "script": "test:agent-settings" },
+    { "id": "activity-review", "scope": "ui", "script": "test:activity-review" },
+    { "id": "activity-presentation", "scope": "ui", "script": "test:activity-presentation" },
+    { "id": "rich-activity", "scope": "ui", "script": "test:rich-activity" },
+    { "id": "workspace-actions", "scope": "ui", "script": "test:workspace-actions" },
+    { "id": "stabilization", "scope": "ui", "script": "test:stabilization" },
+    { "id": "editor-navigation", "scope": "ui", "script": "test:editor-navigation" },
+    { "id": "chat-scroll", "scope": "ui", "script": "test:chat-scroll" },
+    { "id": "sidebar-polish", "scope": "ui", "script": "test:sidebar-polish" },
+    { "id": "resume-continuity", "scope": "ui", "script": "test:resume-continuity" },
+    { "id": "navigation-snippets", "scope": "ui", "script": "test:navigation-snippets" },
+    { "id": "dogfood", "scope": "ui", "script": "test:dogfood" },
+    { "id": "responsive-shell", "scope": "ui", "script": "test:responsive-shell" }
+  ],
+  "external": [
+    { "script": "test:browser", "reason": "Requires an explicitly selected live Runner and provider authorization; not a deterministic fixture." }
+  ],
+  "aliases": [
+    { "script": "test:unified-repositories", "target": "test:repository-picker" }
+  ]
+}

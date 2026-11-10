@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target": "ES2023", "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext", "moduleResolution": "Bundler", "jsx": "react-jsx",
+    "strict": true, "noEmit": true, "skipLibCheck": true,
+    "types": ["node"], "allowImportingTsExtensions": true
+  },
+  "include": ["apps/web/src", "apps/desktop/src", "packages/*/src", "workers/claude-sdk/src", "tests/browser", "apps/web/vite.config.ts", "apps/desktop/vite.config.ts", "playwright.config.ts"]
+}

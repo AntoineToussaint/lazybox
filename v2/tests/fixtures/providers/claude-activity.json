@@ -1,0 +1,11 @@
+[
+ {"type":"system","subtype":"init","session_id":"fixture-session","tools":["Read","Bash"]},
+ {"type":"system","subtype":"status","status":"requesting"},
+ {"type":"system","subtype":"status","status":null},
+ {"type":"assistant","message":{"id":"message-1","model":"fixture-model","content":[{"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"/fixture/README.md"}}]}},
+ {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"read-1","content":"# Fixture README"}]}},
+ {"type":"system","subtype":"status","status":"compacting"},
+ {"type":"system","subtype":"compact_boundary"},
+ {"type":"system","subtype":"status","status":"requesting"},
+ {"type":"result","is_error":false,"subtype":"success","uuid":"fixture-result"}
+]

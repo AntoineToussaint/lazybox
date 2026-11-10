@@ -1,0 +1,17 @@
+{
+  "name": "@lazybox/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@lazybox/client-core": "0.0.0",
+    "@lazybox/platform": "0.0.0",
+    "@lazybox/surfaces": "0.0.0",
+    "@tauri-apps/api": "2.12.1",
+    "@tauri-apps/plugin-http": "2.8.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": { "@tauri-apps/cli": "2.12.1" },
+  "scripts": { "build": "vite build && tauri build --debug --bundles app", "build:ui": "vite build" }
+}

@@ -53,4 +53,8 @@ extend-exclude = [
     # Binary PTY captures: raw terminal byte streams (ANSI cursor moves
     # concatenated with text, e.g. `␛[3;3HThe` → "Hthe") are not prose.
     "**/*.bin",
+    # protoc-gen-es output for the V2 protocol (`make -C v2 generate`): it
+    # embeds the descriptor as base64, whose fragments ("IZ", "Nwo") read as
+    # typos. The source of truth is the .proto, which is still checked.
+    "v2/packages/protocol/src/gen/**",
 ]

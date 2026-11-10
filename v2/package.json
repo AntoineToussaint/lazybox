@@ -1,0 +1,63 @@
+{
+  "name": "@lazybox/v2",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.19.1",
+  "engines": {
+    "node": ">=24",
+    "npm": ">=11"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "workers/*"
+  ],
+  "scripts": {
+    "check:workspaces": "npm ls --workspaces --all",
+    "typecheck": "tsc --noEmit",
+    "build:web": "npm run build -w @lazybox/web",
+    "dev:web": "npm run dev -w @lazybox/web",
+    "build:worker": "tsc -p workers/claude-sdk",
+    "test:browser": "node --import tsx scripts/test-browser.mjs",
+    "test:client": "node --import tsx --test scripts/client-state.test.ts scripts/workspace-model.test.ts scripts/transcript.test.ts scripts/repository-catalog.test.ts scripts/keyboard.test.ts scripts/activity-replay.test.ts scripts/diagnostic-recording.test.ts",
+    "test:worker": "node --import tsx --test workers/claude-sdk/src/*.test.ts",
+    "test:startup": "node scripts/test-startup.mjs",
+    "test:workspace": "node scripts/test-workspace.mjs",
+    "test:github": "node scripts/test-github.mjs",
+    "test:attachments": "node scripts/test-attachments.mjs",
+    "test:settings": "node scripts/test-settings.mjs",
+    "test:empty-workspace": "node scripts/test-empty-workspace.mjs",
+    "test:repositories": "node scripts/test-repository-discovery.mjs",
+    "test:github-token": "node scripts/test-github-token.mjs",
+    "test:repository-picker": "node scripts/test-unified-repositories.mjs",
+    "test:dialogs": "node scripts/test-dialogs.mjs",
+    "test:telemetry": "node scripts/test-telemetry.mjs",
+    "test:agent-settings": "node scripts/test-agent-settings.mjs",
+    "test:activity-review": "node --import tsx scripts/test-activity-review.mjs",
+    "test:rich-activity": "node scripts/test-rich-activity.mjs",
+    "test:workspace-actions": "node scripts/test-workspace-actions.mjs",
+    "test:stabilization": "node scripts/test-stabilization.mjs",
+    "test:editor-navigation": "node scripts/test-editor-navigation.mjs",
+    "test:chat-scroll": "node scripts/test-chat-scroll.mjs",
+    "test:sidebar-polish": "node scripts/test-sidebar-polish.mjs",
+    "test:resume-continuity": "node scripts/test-resume-continuity.mjs",
+    "test:unified-repositories": "node scripts/test-unified-repositories.mjs",
+    "test:navigation-snippets": "node scripts/test-navigation-snippets.mjs",
+    "test:activity-presentation": "node scripts/test-activity-presentation.mjs",
+    "test:dogfood": "node scripts/test-dogfood.mjs",
+    "test:responsive-shell": "node scripts/test-responsive-shell.mjs"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "1.75.0",
+    "@bufbuild/protoc-gen-es": "2.16.0",
+    "@playwright/test": "1.64.1",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.5"
+  }
+}

@@ -1,0 +1,31 @@
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.busy=true;session.agents=[{id:'root',status:'running'}];
+const request={type:'approval',requestId:'approval-1',text:'Bash',providerDataJson:Buffer.from(JSON.stringify({tool:'Bash',input:{command:'ls && git log --oneline -5',description:'List repository contents and recent commits'},toolUseId:'tool-1'})).toString('base64')};session.pending=[request];session.status='waiting_approval';
+const channel=fixture.openEvents(session.id);channel.push(request);
+const server=await createServer({configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});let browser;
+try{
+ await server.listen();browser=await (process.env.TEST_WEBKIT?webkit:chromium).launch({headless:true});const page=await browser.newPage({viewport:{width:1450,height:1050}});page.setDefaultTimeout(15000);const errors=[];page.on('pageerror',e=>errors.push(String(e)));await page.addInitScript(()=>{window.__copies=[];Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{window.__copies.push(text)}}});});
+ await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
+ await expect(page.getByRole('button',{name:'Monitor',exact:true})).toHaveCount(0);
+ const card=page.locator('.request');await expect(card).toContainText('List repository contents and recent commits');await expect(card.getByLabel('Command',{exact:true})).toContainText('ls && git log');
+ await expect(card.locator('.request-metadata')).not.toHaveAttribute('open','');await card.getByRole('button',{name:'Allow once',exact:true}).click();
+ session.pending=[];session.status='running';channel.push({type:'request_resolved',requestId:'approval-1'});channel.push({type:'activity',status:'tool',name:'Bash'});
+ await expect(page.locator('.live-activity')).toHaveText('Running Bash…');
+ channel.push({type:'activity',status:'thinking'});await expect(page.locator('.live-activity')).toHaveText('Thinking…');
+ channel.push({type:'message_delta',text:'First streamed chunk'});await expect(page.locator('.message.message_delta')).toContainText('First streamed chunk');
+ assert.equal(channel.clients.size,1,'stream closed or resubscribed before completion');
+ channel.push({type:'message_delta',text:' — second chunk'});await expect(page.locator('.message.message_delta')).toContainText('First streamed chunk — second chunk');
+ channel.push({type:'turn_ended',status:'completed'});session.busy=false;session.status='done';await expect(page.locator('.live-activity')).toHaveCount(0);
+ channel.push({type:'operation_accepted',text:'Show structured output'});
+ channel.push({type:'message_delta',text:'# Repository overview\n\n**Ready** to work.\n\n| Repo | State |\n|---|---|\n| api | Ready |\n\n```json\n{\n  "ready": true,\n  "count": 2\n}\n```\n\n```mermaid\nflowchart LR\n  Workspace --> API\n  Workspace --> Web\n```\n\n<script>window.__bad=1</script>\n\n[bad](javascript:alert(1))'});
+ await expect(page.getByRole('heading',{name:'Repository overview'})).toBeVisible();await expect(page.locator('.rich-content table')).toContainText('api');await expect(page.locator('.hljs-attr')).toContainText(['"ready"','"count"']);
+ await expect(page.getByRole('img',{name:'Mermaid diagram'})).toBeVisible();await expect.poll(()=>page.getByRole('img',{name:'Mermaid diagram'}).evaluate(img=>img.complete&&img.naturalWidth>0)).toBe(true);
+ assert.equal(await page.evaluate(()=>window.__bad),undefined);await expect(page.locator('a[href^="javascript:"]')).toHaveCount(0);
+ const json=page.locator('.code-block').filter({has:page.locator('header span',{hasText:'json'})});await json.getByRole('button',{name:'Copy code'}).click();assert.match((await page.evaluate(()=>window.__copies)).at(-1),/"ready": true/);
+ await mkdir('.cache',{recursive:true});await page.screenshot({path:'.cache/rich-content-activity.png',fullPage:true});
+ channel.push({type:'operation_accepted',text:'Invalid diagram'});channel.push({type:'message_delta',text:'```mermaid\ninvalid definitely not diagram\n```'});await expect(page.getByText('Diagram preview unavailable. Check the Mermaid source.')).toBeVisible();
+ await page.getByLabel('Actions for Alpha feature',{exact:true}).click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();
+ const deletion=page.getByRole('dialog',{name:'Delete workspace',exact:true});await expect(deletion.getByRole('button',{name:'Delete workspace',exact:true})).toBeDisabled();
+ await deletion.getByLabel(/Stop .* active session/).check();await deletion.getByLabel('Discard these workspace files permanently').check();await deletion.getByRole('button',{name:'Delete workspace',exact:true}).click();await expect(deletion).toHaveCount(0);await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).not.toContainText('Alpha feature');assert.equal(fixture.library.length,2);
+ assert.deepEqual(errors,[]);console.log('PASS: progressive Connect frames before completion, approval/tool/thinking phases, Markdown tables, highlighted JSON/copy, Mermaid rendering/fallback, inert HTML, focused workspace navigation and explicit cleanup UI. Fixture only.');
+}finally{await browser?.close();await server.close();await fixture.close();}

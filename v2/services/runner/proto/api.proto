@@ -1,0 +1,552 @@
+syntax = "proto3";
+package lazybox.bench.v1;
+
+option go_package = "github.com/AntoineToussaint/lazybox/v2/pkg/gen;gen";
+
+service RunnerService {
+  rpc ListSnippets(InfoRequest) returns (SnippetCatalog);
+  rpc GetRepositoryCatalog(GetRepositoryCatalogRequest) returns (RepositoryCatalog);
+  rpc PrepareWorkspace(PrepareWorkspaceRequest) returns (stream WorkspacePreparation);
+  rpc Version(VersionRequest) returns (VersionResponse);
+  rpc GetRunnerSettings(InfoRequest) returns (RunnerSettings);
+  rpc SaveRunnerSettings(RunnerSettings) returns (RunnerSettings);
+  rpc SetModelPrice(SetModelPriceRequest) returns (RunnerSettings);
+  rpc Info(InfoRequest) returns (InfoResponse);
+  rpc GetTelemetry(TelemetryRequest) returns (TelemetryReport);
+  rpc RenameCollection(RenameCollectionRequest) returns (CollectionResponse);
+  rpc AddSubscription(AddSubscriptionRequest) returns (SubscriptionEnrollment);
+  rpc GetSubscriptionEnrollment(SubscriptionEnrollmentRequest) returns (SubscriptionEnrollment);
+  rpc CancelSubscriptionEnrollment(SubscriptionEnrollmentRequest) returns (SubscriptionEnrollment);
+  rpc RefreshSubscription(RefreshSubscriptionRequest) returns (Profile);
+  rpc GetGitHubConnection(GetGitHubConnectionRequest) returns (GitHubConnection);
+  rpc ConfigureGitHubApp(ConfigureGitHubAppRequest) returns (GitHubConnection);
+  rpc ConnectGitHubPersonalToken(ConnectGitHubPersonalTokenRequest) returns (GitHubConnection);
+  rpc ListRepositoryDiscovery(ListRepositoryDiscoveryRequest) returns (RepositoryDiscovery);
+  rpc ScanRepositoryRoot(ScanRepositoryRootRequest) returns (RepositoryDiscovery);
+  rpc BeginGitHubSignIn(BeginGitHubSignInRequest) returns (GitHubSignIn);
+  rpc GetGitHubSignIn(GitHubSignInRequest) returns (GitHubSignIn);
+  rpc CancelGitHubSignIn(GitHubSignInRequest) returns (GitHubSignIn);
+  rpc DisconnectGitHub(GetGitHubConnectionRequest) returns (GitHubConnection);
+  rpc ListGitHubInstallations(ListGitHubInstallationsRequest) returns (ListGitHubInstallationsResponse);
+  rpc ListGitHubRepositories(ListGitHubRepositoriesRequest) returns (ListGitHubRepositoriesResponse);
+  rpc ImportGitHubRepository(ImportGitHubRepositoryRequest) returns (ImportGitHubRepositoryResponse);
+  rpc ListGitHubItems(ListGitHubItemsRequest) returns (ListGitHubItemsResponse);
+  rpc AddLocalRepository(AddLocalRepositoryRequest) returns (AddLocalRepositoryResponse);
+  rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
+  rpc RemoveRepository(RemoveRepositoryRequest) returns (RepositoryDiscovery);
+  rpc CreateCollection(CreateCollectionRequest) returns (CollectionResponse);
+  rpc AddCollectionRepositories(AddCollectionRepositoriesRequest) returns (CollectionResponse);
+  rpc GetCollection(CollectionRequest) returns (CollectionResponse);
+  rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
+  rpc ArchiveCollection(CollectionRequest) returns (CollectionResponse);
+  rpc ReconcileCollection(ReconcileCollectionRequest) returns (CollectionResponse);
+  rpc OpenSession(OpenSessionRequest) returns (SessionResponse);
+  rpc OpenAssistant(OpenAssistantRequest) returns (SessionResponse);
+  rpc RenameConversation(RenameConversationRequest) returns (SessionResponse);
+  rpc ListWorkspaceChanges(WorkspaceChangesRequest) returns (WorkspaceChanges);
+  rpc ReadWorkspaceDiff(WorkspaceDiffRequest) returns (WorkspaceDiff);
+  rpc ReadWorkspaceFile(WorkspaceFileRequest) returns (WorkspaceFile);
+  rpc SaveWorkspaceFile(SaveWorkspaceFileRequest) returns (WorkspaceFile);
+  rpc ListHistory(ListHistoryRequest) returns (ListHistoryResponse);
+  rpc ResumeSession(ResumeSessionRequest) returns (SessionResponse);
+  rpc GetSession(SessionRequest) returns (SessionResponse);
+  rpc Apply(ApplyRequest) returns (Receipt);
+  rpc CloseSession(SessionRequest) returns (SessionResponse);
+  rpc StopSessionResources(SessionRequest) returns (SessionResponse);
+  rpc DeleteConversation(DeleteConversationRequest) returns (DeleteConversationResponse);
+  rpc PreviewWorkspaceDeletion(CollectionRequest) returns (WorkspaceDeletionPreview);
+  rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (CollectionResponse);
+  rpc ContinueSession(ContinueSessionRequest) returns (SessionResponse);
+  rpc WatchEvents(WatchEventsRequest) returns (stream JournalEvent);
+  rpc StartCommand(StartCommandRequest) returns (CommandStatus);
+  rpc RegisterPipe(RegisterPipeRequest) returns (CommandStatus);
+  rpc Publish(PublishRequest) returns (CommandStatus);
+  rpc FinishPipe(FinishPipeRequest) returns (CommandStatus);
+  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+  rpc ReadCommand(ReadCommandRequest) returns (ReadCommandResponse);
+  rpc WaitCommand(CommandRequest) returns (CommandStatus);
+  rpc CancelCommand(CommandRequest) returns (CommandStatus);
+  rpc WatchOutput(WatchOutputRequest) returns (stream OutputEvent);
+}
+
+message InfoRequest {}
+message ModelPrice {
+ string provider = 1; string model = 2; int64 input = 3; int64 output = 4; int64 cache_read = 5;
+ int64 cache_write5m = 6; int64 cache_write1h = 7; int64 max_input = 8; string version = 9; bool custom = 10;
+}
+message RunnerSettings { uint64 revision = 1; string naming = 2; string permission = 3; string context = 4; string claude_context = 5; string codex_context = 6; repeated ModelPrice prices = 7; string suggested_name = 8; }
+message SetModelPriceRequest { uint64 revision = 1; ModelPrice price = 2; bool remove = 3; }
+message RenameCollectionRequest { string collection_id = 1; string name = 2; }
+message TelemetryRequest { string workspace = 1; string execution = 2; string conversation = 3; }
+message TelemetryScope { string workspace = 1; string conversation = 2; string execution = 3; string profile = 4; string provider = 5; string attempt = 6; }
+message TokenCounts { optional int64 input = 1; optional int64 output = 2; optional int64 cache_read = 3; optional int64 cache_write5m = 4; optional int64 cache_write1h = 5; }
+message ContextDetail { string name = 1; optional int64 tokens = 2; }
+message ContextCategory { string name = 1; optional int64 tokens = 2; bool included = 3; string kind = 4; repeated ContextDetail details = 5; }
+message ContextSnapshot {
+ TelemetryScope scope = 1; string agent = 2; string model = 3; optional int64 used = 4; optional int64 capacity = 5;
+ optional int64 reserve = 6; string source = 7; repeated ContextCategory categories = 8; string observed_at = 9;
+}
+message UsageRecord {
+ string id = 1; TelemetryScope scope = 2; string agent = 3; string parent = 4; string model = 5; string source = 6;
+ string response_id = 7; string status = 8; TokenCounts tokens = 9; optional int64 nanos = 10; string price_version = 11;
+ string reason = 12; string tier = 13; string observed_at = 14;
+}
+message UsageGroup {
+ TelemetryScope scope = 1; string agent = 2; string model = 3; string source = 4; TokenCounts tokens = 5;
+ optional int64 nanos = 6; int64 records = 7; int64 unpriced = 8; int64 incomplete = 9;
+}
+message TelemetryReport { repeated UsageGroup groups = 1; repeated ContextSnapshot contexts = 2; repeated UsageRecord recent = 3; }
+message AddSubscriptionRequest {
+  string request_key = 1;
+  string provider = 2;
+  string label = 3;
+  // Secret input: never retained in ordinary metadata or logs.
+  string subscription_token = 4;
+}
+message SubscriptionEnrollmentRequest {
+  string enrollment_id = 1;
+  string request_key = 2;
+  string provider = 3;
+}
+message RefreshSubscriptionRequest { string profile_id = 1; }
+message SubscriptionEnrollment {
+  string id = 1;
+  string state = 2;
+  string profile_id = 3;
+  string provider = 4;
+  string label = 5;
+  string sign_in_url = 6;
+  string user_code = 7;
+  string error = 8;
+}
+message UsageWindow {
+  string name = 1;
+  double used_percent = 2;
+  int64 reset_at = 3;
+  int64 duration_minutes = 4;
+}
+message Profile {
+  string id = 1;
+  string provider = 2;
+  string isolation = 3;
+  AccountObservation availability = 4;
+  string label = 5;
+  bool managed = 6;
+}
+message Gateway {
+  string id = 1;
+  string provider = 2;
+}
+message InfoResponse {
+  repeated Profile profiles = 1;
+  repeated Gateway gateways = 2;
+  repeated Session sessions = 3;
+  string default_model = 4;
+  string default_permission = 5;
+  AttachmentLimits attachment_limits = 6;
+  repeated SubscriptionEnrollment pending_enrollments = 7;
+  bool shared_subscriptions = 8;
+}
+message AttachmentLimits {
+  uint32 max_files = 1;
+  uint64 max_file_bytes = 2;
+  uint64 max_message_bytes = 3;
+}
+message RunnerOptions {
+  string model = 1;
+  string permission = 2;
+  string gateway_id = 3;
+  string workflow = 4;
+  repeated string rotation_profile_ids = 5;
+  string instructions = 6;
+}
+message OpenSessionRequest {
+  string profile_id = 1;
+  string cwd = 2;
+  string resume_reference = 3;
+  RunnerOptions options = 4;
+  string collection_id = 5;
+  // Allocate a persistent, repo-less directory on the Runner. Exclusive with cwd, collection and resume.
+  bool empty_workspace = 6;
+}
+message OpenAssistantRequest {
+  string profile_id = 1;
+  string purpose = 2;
+  string context = 3;
+  RunnerOptions options = 4;
+  string collection_id = 5;
+}
+message AccountObservation {
+  string state = 1;
+  string reason = 2;
+  int64 reset_at = 3;
+  int64 retry_after_seconds = 4;
+  repeated UsageWindow windows = 5;
+  string plan = 6;
+  int64 observed_at_unix_millis = 7;
+  string email = 8;
+}
+message AgentActivity {
+  string id = 1;
+  string parent_id = 2;
+  string native_id = 3;
+  string name = 4;
+  string kind = 5;
+  // starting, ready, running, waiting_input, waiting_approval, done,
+  // interrupted, failed, stopped, unknown, or switching_profile.
+  string status = 6;
+  string last_turn_status = 7;
+  int64 updated_at_unix_millis = 8;
+}
+message ListHistoryRequest { uint32 limit = 1; uint32 offset = 2; optional string collection_id = 3; string search = 4; }
+message RenameConversationRequest { string session_id = 1; string title = 2; }
+message WorkspaceChangesRequest { string collection_id = 1; }
+message ChangedFile { string path = 1; string original_path = 2; string index_status = 3; string worktree_status = 4; }
+message RepositoryChanges { string member = 1; string branch = 2; string head = 3; repeated ChangedFile files = 4; string error = 5; bool truncated = 6; }
+message WorkspaceChanges { repeated RepositoryChanges repositories = 1; }
+message WorkspaceDiffRequest { string collection_id = 1; string member = 2; string path = 3; bool staged = 4; }
+message WorkspaceDiff { string text = 1; bool truncated = 2; bool binary = 3; }
+message ListHistoryResponse { repeated Session sessions = 1; bool has_more = 2; }
+message ResumeSessionRequest {
+  string session_id = 1;
+  // Explicit reconciliation after an unclean shutdown, never inferred by a client.
+  bool processes_stopped = 2;
+}
+message SessionRequest {
+  string session_id = 1;
+}
+message Capabilities {
+  bool images = 1;
+  bool questions = 2;
+  bool approvals = 3;
+  bool steer = 4;
+  bool resume = 5;
+  bool pending_resume = 6;
+  string profile_isolation = 7;
+  bool files = 8;
+  bool subagents = 9;
+}
+message AgentEvent {
+  string type = 1;
+  string session_reference = 2;
+  string turn_id = 3;
+  string request_id = 4;
+  string operation_id = 5;
+  string text = 6;
+  string status = 7;
+  bytes provider_data_json = 8;
+  string agent_id = 9;
+  string parent_agent_id = 10;
+  string name = 11;
+  string agent_kind = 12;
+  string native_id = 13;
+  AccountObservation account = 14;
+}
+message Session {
+  string id = 1;
+  string profile_id = 2;
+  string provider_reference = 3;
+  string gateway_id = 4;
+  bool busy = 5;
+  bool closed = 6;
+  string fault = 7;
+  uint32 queued = 8;
+  Capabilities capabilities = 9;
+  repeated AgentEvent pending = 10;
+  string work_id = 11;
+  string previous_execution_id = 12;
+  string collection_id = 13;
+  string working_directory = 14;
+  string status = 15;
+  repeated AgentActivity agents = 16;
+  AccountObservation account = 17;
+  bool activity_truncated = 18;
+  string purpose = 19;
+  repeated string rotation_profile_ids = 20;
+  string conversation_id = 21;
+  string title = 22;
+  bool historical = 23;
+  bool recovery_required = 24;
+  string resume_blocked = 25;
+  int64 created_at_unix_millis = 26;
+  string successor_execution_id = 27;
+  string provider = 28;
+  string model = 29;
+  bool model_reported = 30;
+}
+
+message Repository {
+  string id = 1;
+  string path = 2;
+  string name = 3;
+  string source_url = 4;
+  int64 github_id = 5;
+  string git_identity = 6;
+}
+message AddLocalRepositoryRequest { string path = 1; string name = 2; }
+message AddLocalRepositoryResponse { Repository repository = 1; }
+message ListRepositoriesRequest {}
+message ListRepositoriesResponse { repeated Repository repositories = 1; }
+message WorktreeSpec {
+  string name = 1;
+  string repository_id = 2;
+  string base_ref = 3;
+  string branch = 4;
+}
+message CollectionSpec {
+  string name = 1;
+  string work_id = 2;
+  repeated WorktreeSpec members = 3;
+}
+message CollectionWorktree {
+  WorktreeSpec spec = 1;
+  string path = 2;
+  string base_commit = 3;
+  bool ready = 4;
+}
+message Collection {
+  string id = 1;
+  string name = 2;
+  string work_id = 3;
+  string root = 4;
+  string state = 5;
+  string error = 6;
+  repeated CollectionWorktree members = 7;
+  string owner_execution_id = 8;
+  bool ownership_uncertain = 9;
+  repeated string owner_execution_ids = 10;
+}
+message CreateCollectionRequest {
+  string request_key = 1;
+  CollectionSpec spec = 2;
+}
+message AddCollectionRepositoriesRequest {
+  string collection_id = 1;
+  string request_key = 2;
+  repeated WorktreeSpec members = 3;
+}
+message CollectionRequest { string collection_id = 1; }
+message CollectionResponse { Collection collection = 1; }
+message ListCollectionsRequest {}
+message ListCollectionsResponse { repeated Collection collections = 1; }
+message ReconcileCollectionRequest {
+  string collection_id = 1;
+  string expected_owner_execution_id = 2;
+  bool processes_stopped = 3;
+  string reason = 4;
+}
+message SessionResponse {
+  Session session = 1;
+}
+message Image {
+  string media_type = 1;
+  string base64_data = 2;
+}
+message Message {
+  string text = 1;
+  repeated Image images = 2;
+  repeated FileAttachment attachments = 3;
+}
+message FileAttachment {
+  string name = 1;
+  string media_type = 2;
+  bytes data = 3;
+}
+message Interrupt {}
+message Answers {
+  repeated string values = 1;
+}
+message Answer {
+  string request_id = 1;
+  map<string, Answers> answers = 2;
+}
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  DECISION_ACCEPT = 1;
+  DECISION_DECLINE = 2;
+  DECISION_CANCEL = 3;
+}
+message Approval {
+  string request_id = 1;
+  Decision decision = 2;
+}
+message ApplyRequest {
+  string session_id = 1;
+  string operation_id = 2;
+  oneof operation {
+    Message message = 3;
+    Message steer = 4;
+    Interrupt interrupt = 5;
+    Answer answer = 6;
+    Approval approval = 7;
+  }
+}
+message Receipt {
+  string operation_id = 1;
+  string delivery = 2;
+  string provider_id = 3;
+  string error = 4;
+}
+message WatchEventsRequest {
+  string session_id = 1;
+  uint64 after = 2;
+  bool include_previous = 3;
+}
+message JournalEvent {
+  uint64 cursor = 1;
+  string captured_at = 2;
+  AgentEvent event = 3;
+  Receipt receipt = 4;
+  bytes metadata_json = 5;
+}
+message Checkpoint {
+  string objective = 1;
+  repeated string criteria = 2;
+  repeated string decisions = 3;
+  repeated string outstanding = 4;
+  repeated string results = 5;
+  repeated string source_revisions = 6;
+  string working_tree_state = 7;
+  repeated string command_ids = 8;
+  repeated string service_references = 9;
+  repeated string omitted_context = 10;
+}
+message ContinueSessionRequest {
+  string session_id = 1;
+  string profile_id = 2;
+  string mode = 3;
+  string reason = 4;
+  Checkpoint checkpoint = 5;
+}
+message CommandRequest {
+  string command_id = 1;
+}
+message StartCommandRequest {
+  string session_id = 1;
+  string title = 2;
+  repeated string argv = 3;
+}
+message RegisterPipeRequest {
+  string session_id = 1;
+  string title = 2;
+}
+message PublishRequest {
+  string command_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+}
+message FinishPipeRequest {
+  string command_id = 1;
+  string capture_error = 2;
+}
+message CommandStatus {
+  string id = 1;
+  string session_id = 2;
+  string title = 3;
+  string mode = 4;
+  uint64 offset = 5;
+  bool done = 6;
+  optional int32 exit_code = 7;
+  string signal = 8;
+  string capture_error = 9;
+  repeated string argv = 10;
+}
+message ListCommandsRequest {
+  string session_id = 1;
+}
+message ListCommandsResponse {
+  repeated CommandStatus commands = 1;
+}
+message ReadCommandRequest {
+  string command_id = 1;
+  uint64 offset = 2;
+  uint32 limit = 3;
+}
+message ReadCommandResponse {
+  bytes data = 1;
+  CommandStatus status = 2;
+  uint64 next_offset = 3;
+}
+message WatchOutputRequest {
+  string command_id = 1;
+  uint64 after = 2;
+}
+message OutputEvent {
+  uint64 cursor = 1;
+  string captured_at = 2;
+  string type = 3;
+  string channel = 4;
+  uint64 offset = 5;
+  bytes data = 6;
+  CommandStatus status = 7;
+}
+
+message VersionRequest {}
+message VersionResponse {
+  string version = 1;
+}
+
+// Credentials are submitted explicitly and retained only on the Runner.
+// Connection responses never contain credentials.
+message GetGitHubConnectionRequest {}
+message ListRepositoryDiscoveryRequest {}
+message ScanRepositoryRootRequest { string path = 1; }
+message DiscoveredRepository { string path = 1; string name = 2; string git_identity = 3; }
+message RepositorySearchRoot { string path = 1; int64 scanned_at = 2; bool truncated = 3; uint32 skipped = 4; repeated DiscoveredRepository repositories = 5; }
+message RepositoryDiscovery { repeated RepositorySearchRoot roots = 1; }
+message ConnectGitHubPersonalTokenRequest { string token = 1; }
+message ConfigureGitHubAppRequest { string client_id = 1; string slug = 2; }
+message GitHubConnection {
+ string state = 1; string client_id = 2; string app_slug = 3; string login = 4;
+ int64 user_id = 5; int64 expires_at = 6; string error = 7; GitHubSignIn pending_sign_in = 8;
+ string auth_method = 9;
+}
+message BeginGitHubSignInRequest { string request_key = 1; }
+message GitHubSignInRequest { string id = 1; }
+message GitHubSignIn { string id = 1; string state = 2; string user_code = 3; string sign_in_url = 4; int64 expires_at = 5; string error = 6; }
+message ListGitHubInstallationsRequest { uint32 page = 1; }
+message GitHubInstallation { int64 id = 1; string account = 2; string repository_selection = 3; }
+message ListGitHubInstallationsResponse { repeated GitHubInstallation installations = 1; bool has_more = 2; }
+message ListGitHubRepositoriesRequest { int64 installation_id = 1; uint32 page = 2; }
+message GitHubRepository { int64 id = 1; string name = 2; string full_name = 3; bool private = 4; string default_branch = 5; string html_url = 6; bool archived = 7; string registered_id = 8; }
+message ListGitHubRepositoriesResponse { repeated GitHubRepository repositories = 1; bool has_more = 2; }
+message ImportGitHubRepositoryRequest { int64 repository_id = 1; }
+message ImportGitHubRepositoryResponse { Repository repository = 1; }
+message ListGitHubItemsRequest { int64 repository_id = 1; uint32 page = 2; }
+message GitHubItem { int64 id = 1; int64 number = 2; string kind = 3; string title = 4; string state = 5; string html_url = 6; string author = 7; string updated_at = 8; }
+message ListGitHubItemsResponse { repeated GitHubItem items = 1; bool has_more = 2; }
+
+message WorkspaceDeletionPreview {
+  repeated string active_session_ids = 1;
+  repeated string dirty_repositories = 2;
+  bool files_outside_repositories = 3;
+  string blocked = 4;
+}
+message DeleteWorkspaceRequest {
+  string collection_id = 1;
+  string confirm_name = 2;
+  bool discard_changes = 3;
+  bool stop_sessions = 4;
+}
+
+// References are resolved inside the owned workspace on the Runner, never on the client.
+message WorkspaceFileRequest { string collection_id = 1; string path = 2; }
+message WorkspaceDirectoryEntry { string name = 1; string path = 2; bool directory = 3; }
+message WorkspaceFile { string path = 1; string text = 2; bool truncated = 3; bool binary = 4; string version = 5; bool directory = 6; repeated WorkspaceDirectoryEntry entries = 7; }
+
+message SaveWorkspaceFileRequest { string collection_id = 1; string path = 2; string text = 3; string expected_version = 4; }
+
+message DeleteConversationRequest { string session_id = 1; bool stop_sessions = 2; }
+message DeleteConversationResponse {}
+
+message RemoveRepositoryRequest { string repository_id = 1; string git_identity = 2; }
+
+message GetRepositoryCatalogRequest { bool refresh = 1; }
+message RepositoryCatalogEntry { string identity = 1; string name = 2; string repository_id = 3; }
+message RepositoryCatalogSource { string id = 1; string state = 2; string detail = 3; int64 updated_at = 4; }
+message RepositoryCatalog { repeated RepositoryCatalogEntry entries = 1; repeated RepositoryCatalogSource sources = 2; uint32 refresh_seconds = 3; }
+message PrepareWorkspaceRequest { string request_key = 1; string collection_id = 2; string name = 3; repeated string repository_identities = 4; }
+message WorkspacePreparation { string identity = 1; string message = 2; Collection collection = 3; }
+
+message Snippet { string key = 1; string category = 2; string description = 3; string body = 4; string origin = 5; repeated string next = 6; }
+message SnippetCatalog { repeated Snippet snippets = 1; }

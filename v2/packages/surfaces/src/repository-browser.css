@@ -1,0 +1,278 @@
+.repository-browser {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+.repository-browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.repository-browser-toolbar input {
+  flex: 1 1 230px;
+  min-width: 120px;
+  font-size: 13px;
+  padding: 10px 12px;
+}
+.repository-browser-toolbar button {
+  font-size: 11px;
+  padding: 7px 10px;
+}
+.repository-browser-results {
+  max-height: 32dvh;
+  overscroll-behavior: contain;
+  min-height: 100px;
+  overflow: auto;
+  border: 1px solid #363740;
+  border-radius: 8px;
+  background: #1b1c22;
+}
+.repository-browser-results h3 {
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: #9596a3;
+  padding: 12px 14px 5px;
+  margin: 0;
+}
+.repository-browser-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  min-height: 40px;
+}
+.repository-browser-row:hover {
+  background: #282932;
+}
+.workspace-shell .repository-browser-row > label {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  flex-direction: row;
+  gap: 10px;
+  cursor: pointer;
+  padding: 7px 0;
+  font-size: 12px;
+  color: #dddde5;
+  min-width: 0;
+}
+.repository-browser-row input[type="checkbox"],
+.empty-workspace-choice input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  flex: none;
+  accent-color: #afa1ce;
+}
+.repository-browser-row span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.repository-browser-row small {
+  white-space: nowrap;
+}
+.repository-browser-row > button {
+  font-size: 11px;
+}
+.repository-browser-empty {
+  padding: 24px 16px;
+  color: #a5a5b2;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.repository-browser-empty p {
+  margin: 6px 0 12px;
+}
+.repository-catalog-notice {
+  font-size: 11px;
+  line-height: 1.6;
+  color: #b0acbc;
+  margin: 0;
+}
+.repository-catalog-notice button {
+  font-size: 11px;
+  padding: 2px 5px;
+  text-decoration: underline;
+}
+.repository-sources {
+  border: 1px solid #373841;
+  border-radius: 8px;
+  padding: 16px;
+  max-height: 45dvh;
+  overflow: auto;
+}
+.repository-sources .github-settings {
+  padding: 0;
+}
+.repository-sources h2 {
+  font-size: 15px;
+}
+.repository-sources .subscriptions-heading {
+  margin: 0 0 10px;
+}
+.local-discovery {
+  border-top: 1px solid #383942;
+  padding-top: 16px;
+  margin-top: 16px;
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+}
+.local-discovery p {
+  color: #989aa6;
+}
+.repository-selection {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-height: 76px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 2px;
+}
+.repository-selection button {
+  font-size: 11px;
+  padding: 4px 8px;
+  background: #2a2933;
+  border: 1px solid #47434f;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.workspace-repository-dialog.unified-workspace-dialog {
+  width: min(620px, calc(100vw - 32px));
+  padding: 20px;
+  font-family: var(--font-ui);
+  background: #1e1f25;
+  border-color: #383940;
+}
+.workspace-repository-dialog.unified-workspace-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  max-height: calc(100dvh - 32px);
+}
+.unified-workspace-dialog > header,
+.unified-workspace-dialog > footer,
+.unified-workspace-dialog > .workspace-create-details,
+.unified-workspace-dialog > .workspace-preparation,
+.unified-workspace-dialog > .error {
+  flex: none;
+}
+.unified-workspace-dialog > .error {
+  max-height: 20dvh;
+  overflow: auto;
+}
+.workspace-picker-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 3px;
+  margin: -3px;
+}
+.unified-workspace-dialog h2 {
+  font-size: 19px;
+  line-height: 25px;
+  font-weight: 600;
+  letter-spacing: -.3px;
+  overflow-wrap: anywhere;
+}
+.unified-workspace-dialog > header p {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #999ba7;
+  margin-top: 8px;
+}
+.unified-workspace-dialog > header {
+  align-items: flex-start;
+}
+.unified-workspace-dialog > header button {
+  font-size: 18px;
+  padding: 0 4px;
+}
+.workspace-create-details {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+.workspace-create-details > label {
+  font-size: 12px;
+}
+.workspace-create-details input {
+  font-size: 13px;
+}
+.workspace-create-details .empty-workspace-choice {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #999ba7;
+}
+.unified-workspace-dialog footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #34353e;
+  flex-wrap: wrap;
+}
+.unified-workspace-dialog footer > span {
+  flex: 1;
+  font-size: 11px;
+  color: #999ba7;
+}
+.unified-workspace-dialog footer button {
+  font-size: 12px;
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+.workspace-preparation {
+  font-size: 12px;
+  color: #b9b0d2;
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  background: #25242e;
+  border-radius: 6px;
+}
+.repository-browser input:focus-visible,
+.unified-workspace-dialog input:focus-visible {
+  outline: 2px solid #a59bbd;
+  outline-offset: 2px;
+}
+
+.workspace-preparation progress { width: 100%; height: 4px; accent-color: #aca0cf; }
+.repository-browser-results > [role=status] { padding: 16px; font-size: 12px; color: #999ba7; }
+.repository-browser-empty button { margin: 4px 8px 0 0; }
+.workspace-shell .workspace-repositories-dialog { font-size: 13px; }
+.workspace-repositories-dialog header > div { min-width: 0; }
+.workspace-repositories-dialog header small { color: #999ba7; font-size: 11px; }
+.workspace-repositories-dialog h2 { font-size: 19px; line-height: 1.35; overflow-wrap: anywhere; margin-top: 4px; }
+.workspace-repositories-dialog .workspace-repository-list li > div { min-width: 0; }
+.workspace-repository-list strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.workspace-repository-list small { font-size: 11px; color: #999ba7; overflow-wrap: anywhere; }
+.workspace-repository-list svg { flex: none; }
+.workspace-repositories-dialog > .primary { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; padding: 8px 12px; }
+.workspace-repositories-dialog .source-details { font-size: 11px; margin-top: 20px; overflow-wrap: anywhere; }
+.repository-details-error { padding: 12px; background: #30272a; border: 1px solid #514044; border-radius: 7px; font-size: 12px; }
+.repository-details-error p { margin: 0 0 8px; line-height: 1.5; overflow-wrap: anywhere; }
+.repository-details-error details { margin-top: 10px; }
+@media (max-width: 600px) {
+  .workspace-repository-dialog.unified-workspace-dialog { padding: 16px; }
+  .workspace-shell .repository-browser-toolbar input,
+  .workspace-shell .workspace-create-details input:not([type=checkbox]),
+  .workspace-shell .local-discovery input { font-size: 16px; }
+  .repository-browser-toolbar button, .unified-workspace-dialog footer button { min-height: 40px; }
+  .unified-workspace-dialog footer > span { flex: 1 0 100%; }
+  .unified-workspace-dialog footer { justify-content: flex-end; gap: 8px; }
+  .repository-selection { max-height: 66px; }
+  .workspace-create-details { gap: 8px; margin-top: 12px; }
+  .workspace-shell .repository-selection button { background: #2a2834; border: 1px solid #3d394c; padding: 4px 7px; }
+  .repository-selection button { min-height: 32px; }
+}

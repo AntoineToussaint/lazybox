@@ -1,0 +1,10 @@
+version: v2
+modules:
+  - path: services/runner/proto
+# Codefly's canonical service source is proto/api.proto; the wire namespace is
+# versioned independently of that source path.
+lint:
+  use: [STANDARD]
+  except: [RPC_REQUEST_RESPONSE_UNIQUE, RPC_REQUEST_STANDARD_NAME, RPC_RESPONSE_STANDARD_NAME, PACKAGE_DIRECTORY_MATCH]
+breaking:
+  use: [FILE]

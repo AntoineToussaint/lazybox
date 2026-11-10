@@ -1,0 +1,33 @@
+import {createServer} from 'vite';
+import react from '@vitejs/plugin-react';
+import {chromium,webkit,expect} from '@playwright/test';
+import {fileURLToPath} from 'node:url';
+import assert from 'node:assert/strict';
+import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+const fixture=await startRunnerFixture();
+const server=await createServer({configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
+let browser;
+try{
+ await server.listen();browser=await (process.env.TEST_WEBKIT?webkit:chromium).launch({headless:true});const page=await browser.newPage({viewport:{width:1500,height:1100}});page.setDefaultTimeout(10000);
+ const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ await page.route('**/GetTelemetry',route=>route.fulfill({json:{groups:[{scope:{workspace:'alpha',execution:'alpha-session',profile:'Account one'},source:'gateway',model:'fixture',records:'2',unpriced:'1',incomplete:'1',nanos:'12300000',tokens:{input:'1200',cacheRead:'800',output:'100'}}],contexts:[{scope:{execution:'alpha-session'},agent:'root',used:'80000',capacity:'1000000',reserve:'33000',source:'sdk_summary_estimate',observedAt:'2026-11-02T12:00:00Z',categories:[{name:'messages',tokens:'24500',kind:'used',included:true},{name:'system_tools',tokens:'20600',kind:'used',included:true},{name:'mcp_tools',tokens:'16800',kind:'used',included:true},{name:'system_prompt',tokens:'11500',kind:'used',included:true},{name:'skills',tokens:'6600',kind:'used',included:true},{name:'mcp_tools_deferred',tokens:'50000',kind:'deferred',included:false}]}]}}));
+ await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`);
+ await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');await page.getByRole('combobox',{name:'Session',exact:true}).selectOption('alpha-session');
+ const trigger=page.getByRole('button',{name:'Context and token cost'});await expect(trigger).toContainText('8%');
+ const messagesBefore=await page.locator('.messages').boundingBox();await trigger.click();
+ const panel=page.locator('.context-popover');await expect(panel).toBeVisible();
+ assert.deepEqual(await page.locator('.messages').boundingBox(),messagesBefore,'context should not displace conversation');
+ await expect(panel).toContainText('80K');await expect(panel).toContainText('1M');
+ await expect(panel.locator('.context-deferred')).toContainText('Outside context');await expect(panel.getByRole('meter')).toHaveAttribute('aria-valuenow','80000');
+ await expect(panel.locator('.context-meter>span').first()).toHaveAttribute('style',/width: 2.45%;/);
+ await page.screenshot({path:'.cache/telemetry-context.png'});
+ await panel.locator('.token-cost>summary').click();
+ await expect(panel).toContainText('API-equivalent');await expect(panel).toContainText('1 unpriced');
+ await page.keyboard.press('Escape');await expect(panel).not.toBeVisible();await expect(trigger).toBeFocused();
+ await page.setViewportSize({width:420,height:850});await trigger.click();await expect(panel).toBeVisible();const bounds=await panel.boundingBox();assert.ok(bounds.x>=0&&bounds.x+bounds.width<=420);await page.screenshot({path:'.cache/telemetry-context-narrow.png'});await page.keyboard.press('Escape');await page.setViewportSize({width:1500,height:1100});
+ await page.route('**/Info',route=>route.fulfill({status:503,json:{code:'unavailable',message:'Fixture Runner restarting'}}));
+ await expect(page.getByText('Runner disconnected.',{exact:true})).toBeVisible({timeout:10000});await expect(page.getByRole('button',{name:'Retry now',exact:true})).toBeVisible();
+ await expect(page.getByText('Could not load saved conversations.',{exact:true})).toHaveCount(0);
+ await page.unroute('**/Info');await page.getByRole('button',{name:'Retry now',exact:true}).click();await expect(page.getByText('Runner disconnected.',{exact:true})).toHaveCount(0);
+ assert.deepEqual(errors,[]);assert.equal(fixture.mutations.length,0);console.log('PASS: normalized context, deferred counts, partial pricing, disconnect/retry recovery. Fixture only.');
+}finally{await browser?.close();await server.close();await fixture.close();}

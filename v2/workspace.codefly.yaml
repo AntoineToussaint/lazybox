@@ -1,0 +1,4 @@
+name: lazybox-v2
+layout: flat
+services:
+    - name: runner

@@ -1,0 +1,4 @@
+# Plugin registry — list active plugins here, each a package exposing
+# `func New() framework.Plugin`. The codefly agent regenerates registry_gen.go
+# from this file during Sync, in this order.
+plugins: []

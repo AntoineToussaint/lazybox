@@ -1,0 +1,55 @@
+.draggable-dialog { padding:24px; border:1px solid #45444f; border-radius:12px; background:#202127; color:#e4e3ed; box-shadow:0 24px 80px #0009; }
+.draggable-dialog > [data-dialog-drag-handle] { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:12px; }
+.draggable-dialog > [data-dialog-drag-handle] > button { margin-left:auto; flex-shrink:0; }
+.draggable-dialog[open] { position:fixed; box-sizing:border-box; max-width:calc(100vw - 16px); max-height:min(85dvh, calc(100dvh - 16px)); overflow:auto; }
+.draggable-dialog::backdrop { background:#08090c40; }
+.draggable-dialog [data-dialog-drag-handle] { cursor:grab; user-select:none; touch-action:none; }
+.draggable-dialog [data-dialog-drag-handle]:focus-visible { outline:2px solid #b8a6e7; outline-offset:4px; border-radius:4px; }
+.draggable-dialog [data-dialog-drag-handle] button { cursor:pointer; }
+.draggable-dialog.dialog-dragging, .draggable-dialog.dialog-dragging [data-dialog-drag-handle] { cursor:grabbing; }
+
+.delete-conversation-dialog{width:min(440px,calc(100vw - 32px));padding:24px;border:1px solid #3a3b45;border-radius:12px;background:#202127}
+.delete-conversation-dialog>[data-dialog-drag-handle]{margin-bottom:18px}
+.delete-conversation-dialog h2{font-size:18px;font-weight:600;letter-spacing:-.3px}
+.delete-conversation-dialog>[data-dialog-drag-handle]>button{width:28px;height:28px;padding:0;border:0;background:transparent;color:#9395a1}
+.delete-conversation-dialog p{font-size:12px;line-height:1.6;margin:0 0 12px;color:#b6b7c2}
+.delete-conversation-dialog .deletion-subject{font-size:13px;font-weight:500;color:#e0e0e8;overflow-wrap:anywhere}
+.delete-conversation-dialog .deletion-note{font-size:11px;color:#9496a3}
+.delete-conversation-dialog footer{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}
+.delete-conversation-dialog footer button{padding:8px 12px;font-size:12px;border-radius:6px;line-height:18px}
+.delete-conversation-dialog footer .danger{background:#783f49;border:1px solid #92505c;color:#fff}
+.delete-conversation-dialog footer .danger:hover{background:#8b4854}
+
+.draggable-dialog button:focus-visible{outline:2px solid #a59bbd;outline-offset:2px}
+
+.snippet-picker{width:min(760px,calc(100vw - 32px));font-family:var(--font-ui)}
+.snippet-browser{display:grid;grid-template-columns:240px minmax(0,1fr);height:360px;max-height:50dvh;margin:16px 0;border:1px solid #34353e;border-radius:7px;overflow:hidden}
+.snippet-browser>[role=listbox]{overflow:auto;border-right:1px solid #34353e;padding:4px}
+.snippet-browser [role=option]{display:flex;flex-direction:column;align-items:flex-start;gap:4px;width:100%;padding:10px;text-align:left;white-space:normal;font-size:12px}
+.snippet-browser [aria-selected=true]{background:#302b40;color:#e4dcff}
+.snippet-browser [role=option] span{font-size:11px;color:#b1b2bd}.snippet-browser small{font-size:10px;color:#9395a2}
+.snippet-preview{overflow:auto;padding:16px;font-size:12px;line-height:1.6}.snippet-preview>small{display:block;margin-bottom:12px}
+.snippet-picker footer{display:flex;align-items:center;gap:8px}.snippet-picker footer small{flex:1;font-size:11px}.snippet-picker footer button{font-size:12px}
+@media(max-width:600px){.snippet-browser{grid-template-columns:1fr;height:auto}.snippet-browser>[role=listbox]{max-height:160px}.snippet-preview{max-height:200px}}
+
+/* Destructive workspace actions: compact subject, explicit exceptional risks. */
+.delete-workspace-dialog{width:min(440px,calc(100vw - 32px));padding:24px;border-color:#3a3b45;font-family:var(--font-ui);font-size:13px}
+.delete-workspace-dialog>[data-dialog-drag-handle]{margin-bottom:20px}
+.delete-workspace-dialog h2{margin:0;font-size:18px;line-height:24px;font-weight:600;letter-spacing:-.3px}
+.delete-workspace-dialog>[data-dialog-drag-handle]>button{width:28px;height:28px;padding:0;border:0;background:transparent;color:#9395a1;font-size:20px}
+.delete-workspace-dialog .deletion-subject{display:flex;align-items:baseline;gap:12px;margin-bottom:16px;overflow-wrap:anywhere}
+.delete-workspace-dialog .deletion-subject strong{flex:1;min-width:0;font-size:14px;font-weight:550}
+.delete-workspace-dialog .deletion-subject span{flex:none;color:#9395a1;font-size:12px}
+.delete-workspace-dialog p{margin:0 0 8px;font-size:13px;line-height:1.55;color:#c0c1cb}
+.delete-workspace-dialog .deletion-note{font-size:12px;color:#9698a5}
+.delete-workspace-dialog .deletion-warning{padding:12px;margin:14px 0 0;background:#30272a;border:1px solid #514044;border-radius:7px;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.delete-workspace-dialog .deletion-warning>strong{font-size:12px;color:#e6bcba}
+.delete-workspace-dialog .deletion-warning p{font-size:12px;margin:5px 0 12px}
+.delete-workspace-dialog .cleanup-choice{display:flex;flex-direction:row;align-items:flex-start;gap:8px;font-size:12px;line-height:18px;color:#d8cdd0;cursor:pointer}
+.delete-workspace-dialog .cleanup-choice input{width:15px;height:15px;flex:none;margin:2px 0;accent-color:#be8b90}
+.delete-workspace-dialog footer{display:flex;justify-content:flex-end;gap:8px;margin-top:24px}
+.delete-workspace-dialog footer button{padding:8px 12px;font-size:12px;line-height:18px;border-radius:6px}
+.delete-workspace-dialog footer button.danger{background:#813f48;border:1px solid #98515a;color:#fff}
+.delete-workspace-dialog footer button.danger:hover:not(:disabled){background:#934b55}
+
+.workspace-shell.dialog-layer{display:contents}

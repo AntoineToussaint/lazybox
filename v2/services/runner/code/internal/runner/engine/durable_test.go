@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/AntoineToussaint/lazybox/v2/internal/agent"
 	"github.com/AntoineToussaint/lazybox/v2/internal/agent/agenttest"
@@ -30,7 +31,10 @@ func (s *store) capture(snapshot Snapshot, _ json.RawMessage) error {
 func (s *store) attach(a Attachment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A fresh value, as a record read back from its file would be: an omitted
+	// (emptied) queue must not keep the previous one.
 	data, _ := json.Marshal(a)
+	s.attachment = Attachment{}
 	return json.Unmarshal(data, &s.attachment)
 }
 func (s *store) saved() (Snapshot, Attachment) {
@@ -283,6 +287,7 @@ func TestAdoptionPassesTheRecordedConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = applied(t, native)
+	await(t, e, "receipt")
 	native.Events <- agent.Event{Type: "turn_started", SessionID: "native-ref", Cursor: 1}
 	native.Events <- agent.Event{Type: "message_delta", Text: "Building ", Cursor: 2}
 	native.Events <- agent.Event{Type: "message_delta", Text: "a sub-agent aside", AgentID: "child", Cursor: 3}
@@ -300,6 +305,69 @@ func TestAdoptionPassesTheRecordedConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := a.Session.Open.Host.Attach.Transcript; got != "\nUSER: build it\nBuilding now." {
+		t.Fatalf("transcript: %q", got)
+	}
+}
+
+// The user's decision is journaled with the response, so a request redelivered
+// after a restart can be answered as the user answered it.
+func TestAdoptionPassesTheRecordedDecision(t *testing.T) {
+	e, native, st, path := durableEngine(t)
+	ctx := contextFor(t)
+	native.Events <- agent.Event{Type: "turn_started", SessionID: "native-ref", Cursor: 1}
+	native.Events <- agent.Event{Type: "approval", RequestID: "r1", Cursor: 2}
+	await(t, e, "approval")
+	if _, err := e.Apply(ctx, agent.Operation{ID: "no", Kind: agent.Approve, RequestID: "r1", Decision: "decline"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = applied(t, native)
+	if err := e.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	_, a, err := adopt(t, path, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Session.Open.Host.Attach.Responded["r1"]; got.Kind != agent.Approve || got.Decision != "decline" {
+		t.Fatalf("recorded response: %+v", got)
+	}
+}
+
+// A message queued during a reply joins the rebuilt conversation where it was
+// delivered, after that reply, as it did in the live one.
+func TestAdoptedConversationPlacesMessagesWhereTheyWereDelivered(t *testing.T) {
+	e, native, st, path := durableEngine(t)
+	ctx := contextFor(t)
+	if _, err := e.Apply(ctx, agent.Operation{ID: "first", Kind: agent.Message, Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = applied(t, native)
+	await(t, e, "receipt")
+	native.Events <- agent.Event{Type: "turn_started", SessionID: "native-ref", Cursor: 1}
+	native.Events <- agent.Event{Type: "message_delta", Text: "part one ", Cursor: 2}
+	await(t, e, "message_delta")
+	if _, err := e.Apply(ctx, agent.Operation{ID: "second", Kind: agent.Message, Text: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	native.Events <- agent.Event{Type: "message_delta", Text: "part two.", Cursor: 3}
+	native.Events <- agent.Event{Type: "turn_ended", Status: "completed", Cursor: 4}
+	_ = applied(t, native) // The queued message is delivered after the turn.
+	for end := time.Now().Add(5 * time.Second); journalTypes(t, e)["receipt"] < 2; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("second message never delivered")
+		}
+	}
+	native.Events <- agent.Event{Type: "turn_started", Cursor: 5}
+	native.Events <- agent.Event{Type: "approval", RequestID: "r1", Cursor: 6}
+	await(t, e, "approval")
+	if err := e.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	_, a, err := adopt(t, path, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Session.Open.Host.Attach.Transcript; got != "\nUSER: first\npart one part two.\nUSER: second\n" {
 		t.Fatalf("transcript: %q", got)
 	}
 }

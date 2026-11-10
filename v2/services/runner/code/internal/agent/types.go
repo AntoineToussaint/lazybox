@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 var ErrUnsupported = errors.New("operation unsupported by adapter")
@@ -53,9 +54,12 @@ type Attachment struct {
 	Reference string
 	// Cursor is the highest transport cursor durably recorded in the journal.
 	Cursor uint64
-	// Responded holds request IDs the user already answered. A redelivered
-	// request in this set may have had effects whose outcome is now unknown.
-	Responded map[string]bool
+	// Responded holds the user's recorded response (Kind, Decision, Answers)
+	// to each request answered before the restart. The host redelivers such a
+	// request only if the reply never reached the agent, so an adapter can
+	// answer it again, except where acting on it may already have had effects.
+	// A response recorded before decisions were journaled has an empty Decision.
+	Responded map[string]Operation
 	// Transcript is the conversation as the journal recorded it, oldest first:
 	// each user message the agent was given or may have been given (accepted
 	// and no longer queued) as "\nUSER: <prompt>\n", followed by the root
@@ -63,6 +67,17 @@ type Attachment struct {
 	// precede the end of the reply it was queued behind. A layer that hands the
 	// conversation to a new native session rebuilds its excerpt from it.
 	Transcript string
+	// Replayed counts, by ReplayKey, the events of a line the previous Runner
+	// recorded only in part. They are in the journal and the Transcript
+	// already; the host replays the whole line, and these must not count twice.
+	Replayed map[string]int
+}
+
+// ReplayKey identifies an event derived from a native line by what the
+// provider said, not by its position among the line's events, which can
+// differ when the line is processed again by a fresh adapter.
+func ReplayKey(ev Event) string {
+	return fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s", ev.Cursor, ev.Type, ev.RequestID, ev.Status, ev.Name, ev.Text, ev.TurnID, ev.NativeID)
 }
 
 // Durable sessions can be re-attached by a later Runner. The state is opaque,

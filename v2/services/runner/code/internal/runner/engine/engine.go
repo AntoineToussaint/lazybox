@@ -235,7 +235,16 @@ func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, 
 		e.state.Title = string(title)
 	}
 	// Do not retain image bytes or credentials in journal events.
-	if !e.appendLocked(map[string]any{"type": "operation_accepted", "operationId": op.ID, "kind": op.Kind, "text": op.Text, "imageCount": len(op.Images), "requestId": op.RequestID, "data": map[string]any{"files": op.Files}}) {
+	record := map[string]any{"type": "operation_accepted", "operationId": op.ID, "kind": op.Kind, "text": op.Text, "imageCount": len(op.Images), "requestId": op.RequestID, "data": map[string]any{"files": op.Files}}
+	// A response's decision and answers are journaled so a request redelivered
+	// after a restart can be answered as the user did.
+	if op.Decision != "" {
+		record["decision"] = op.Decision
+	}
+	if len(op.Answers) > 0 {
+		record["answers"] = op.Answers
+	}
+	if !e.appendLocked(record) {
 		e.mu.Unlock()
 		return r, errors.New("journal unavailable")
 	}
@@ -354,7 +363,7 @@ func (e *Engine) receive() {
 			return
 		}
 		e.mu.Lock()
-		if key := replayKey(ev); ev.Cursor != 0 && e.replayed[key] > 0 {
+		if key := agent.ReplayKey(ev); ev.Cursor != 0 && e.replayed[key] > 0 {
 			e.replayed[key]--
 			e.endReplayLocked(ev)
 			e.mu.Unlock()

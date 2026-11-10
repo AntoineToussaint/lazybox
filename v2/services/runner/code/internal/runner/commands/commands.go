@@ -190,9 +190,8 @@ func ID() string { return rand.Text() }
 
 func (m *Manager) Register(spec Spec) (*Command, error) { return m.register(spec, nil) }
 
-func (m *Manager) register(spec Spec, host *sessionhost.Client) (*Command, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// admitLocked refuses a command the registry cannot take now.
+func (m *Manager) admitLocked() error {
 	active := 0
 	for _, c := range m.items {
 		state := c.Status()
@@ -201,7 +200,16 @@ func (m *Manager) register(spec Spec, host *sessionhost.Client) (*Command, error
 		}
 	}
 	if m.closed || active >= m.maxLive {
-		return nil, errors.New("command registry closed or capacity exhausted")
+		return errors.New("command registry closed or capacity exhausted")
+	}
+	return nil
+}
+
+func (m *Manager) register(spec Spec, host *sessionhost.Client) (*Command, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.admitLocked(); err != nil {
+		return nil, err
 	}
 	if spec.SessionID == "" || len(spec.Title) > 256 {
 		return nil, errors.New("session and bounded title required")
@@ -369,11 +377,7 @@ func (m *Manager) Start(spec Spec) (*Command, error) {
 	}
 	go func() {
 		outcome, err := guard.Wait()
-		var code *int
-		if outcome.Started || outcome.Cancelled {
-			code = &outcome.ExitCode
-		}
-		c.finish(code, outcome.Signal, err)
+		c.finish(exitCode(outcome), outcome.Signal, err)
 	}()
 	return c, nil
 }
@@ -381,6 +385,13 @@ func (m *Manager) Start(spec Spec) (*Command, error) {
 // startHosted records the command with its host before the host runs anything,
 // so a Runner that dies at any point leaves a record its successor can adopt.
 func (m *Manager) startHosted(spec Spec) (*Command, error) {
+	// Refuse before launching a host that registration would then refuse.
+	m.mu.Lock()
+	err := m.admitLocked()
+	m.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	host, launchErr := sessionhost.Launch(ctx, m.hostRoot, sessionhost.Options{})
@@ -465,11 +476,13 @@ func (c *Command) follow(host *sessionhost.Client) {
 			if err != nil {
 				c.mu.Lock()
 				detaching := c.detaching
-				if errors.Is(err, sessionhost.ErrSuperseded) {
-					// Another Runner adopted the command: it owns the journal now.
-					c.detaching, detaching = true, true
-				}
+				superseded := errors.Is(err, sessionhost.ErrSuperseded)
 				c.mu.Unlock()
+				if superseded {
+					// Another Runner adopted the command: it owns the journal now.
+					c.handOver()
+					return
+				}
 				if !detaching {
 					// The host vanished: nothing confirms the command's group stopped.
 					c.finish(nil, "", processguard.ErrCleanupUnconfirmed)
@@ -477,15 +490,11 @@ func (c *Command) follow(host *sessionhost.Client) {
 				return
 			}
 			if exit != nil {
-				var code *int
-				if exit.Outcome.Started || exit.Outcome.Cancelled {
-					code = &exit.Outcome.ExitCode
-				}
 				var cause error
 				if exit.Outcome.Error != "" {
 					cause = errors.New(exit.Outcome.Error)
 				}
-				c.finish(code, exit.Outcome.Signal, cause)
+				c.finish(exitCode(processguard.Outcome(exit.Outcome)), exit.Outcome.Signal, cause)
 				_ = host.Release()
 				_ = host.Detach()
 				return
@@ -523,6 +532,29 @@ func (c *Command) record(channel string, data []byte, seq uint64) error {
 	return nil
 }
 
+// exitCode is the program's own exit status, if it ran.
+func exitCode(o processguard.Outcome) *int {
+	if o.Started || o.Cancelled {
+		return &o.ExitCode
+	}
+	return nil
+}
+
+// handOver ends this Runner's interest in a command another Runner adopted.
+// The other Runner owns the journal now, so nothing is written to it; the
+// command just stops counting here and waiting on it returns.
+func (c *Command) handOver() {
+	c.once.Do(func() {
+		c.mu.Lock()
+		c.detaching = true
+		c.status.Done = true
+		c.status.Error = "command is owned by another Runner"
+		c.mu.Unlock()
+		_ = c.spool.Close()
+		close(c.finished)
+	})
+}
+
 // detach leaves a hosted command running for the next Runner.
 func (c *Command) detach() {
 	c.mu.Lock()
@@ -539,23 +571,24 @@ func (c *Command) detach() {
 
 func (c *Command) Cancel() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.status.Done {
-		if c.status.CleanupUnconfirmed() {
-			return processguard.ErrCleanupUnconfirmed
-		}
+	done, unconfirmed, detaching := c.status.Done, c.status.CleanupUnconfirmed(), c.detaching
+	host, process := c.host, c.process
+	c.mu.Unlock()
+	// Stopping happens outside the lock: a host write can wait on the network,
+	// and Status, List and capture must not wait with it.
+	switch {
+	case done && unconfirmed:
+		return processguard.ErrCleanupUnconfirmed
+	case done:
 		return nil
-	}
-	if c.detaching {
+	case detaching:
 		return errors.New("command is owned by another Runner")
-	}
-	if c.host != nil {
-		return c.host.Terminate()
-	}
-	if c.process == nil {
+	case host != nil:
+		return host.Terminate()
+	case process == nil:
 		return errors.New("pipe capture has no owned process")
 	}
-	return c.process.Stop()
+	return process.Stop()
 }
 func (c *Command) Wait(ctx context.Context) (Status, error) {
 	select {

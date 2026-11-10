@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/v2/internal/processguard"
+	"github.com/AntoineToussaint/lazybox/v2/internal/redact"
 	"github.com/AntoineToussaint/lazybox/v2/internal/sessionhost"
 )
 
@@ -77,7 +78,7 @@ func Attach(ctx context.Context, root, id string, ack uint64) (*Process, error) 
 // hosted wraps a host connection. ack is the cursor already recorded, set
 // before the reader starts.
 func hosted(ctx context.Context, root string, c *sessionhost.Client, ack uint64) *Process {
-	p := &Process{host: c, hostRoot: root, commit: ack, pending: map[string]chan Message{}, events: make(chan Message, 256), done: make(chan struct{}), exited: make(chan struct{}), stderr: &diagnostics{}}
+	p := &Process{host: c, hostRoot: root, commit: ack, pending: map[string]chan Message{}, events: make(chan Message, 256), done: make(chan struct{}), exited: make(chan struct{}), stderr: &redact.Tail{}}
 	go p.readHosted()
 	go func() {
 		select {

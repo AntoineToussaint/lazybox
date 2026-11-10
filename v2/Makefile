@@ -141,7 +141,7 @@ list-release-gates:
 	node scripts/release-gates.mjs list release
 test-real-dogfood: build-worker
 	cd $(GO_ROOT) && LAZYBOX_V2_REAL=1 LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -timeout 6m -v ./tests/integration -run '^TestRealDogfoodContinuity$$'
-OUTLIVE_PACKAGES := ./internal/sessionhost ./internal/processguard ./internal/agent/... ./internal/runner ./internal/runner/commands ./internal/runner/engine ./internal/runner/rotation ./internal/runner/adapters/...
+OUTLIVE_PACKAGES := ./internal/sessionhost ./internal/redact ./internal/processguard ./internal/agent/... ./internal/runner ./internal/runner/commands ./internal/runner/engine ./internal/runner/rotation ./internal/runner/adapters/...
 # Session hosts are re-executed test binaries, so they run with the race
 # detector too; their reports would go to host.log, which a host deletes on
 # exit. GORACE sends every process's reports to RACE_LOGS instead.

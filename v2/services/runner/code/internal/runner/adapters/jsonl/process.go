@@ -11,11 +11,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/v2/internal/processguard"
+	"github.com/AntoineToussaint/lazybox/v2/internal/redact"
 	"github.com/AntoineToussaint/lazybox/v2/internal/sessionhost"
 )
 
@@ -45,7 +45,7 @@ type Process struct {
 	err     error
 	exitErr error
 	once    sync.Once
-	stderr  *diagnostics
+	stderr  *redact.Tail
 	// host is set when a detached session host owns the native process.
 	host     *sessionhost.Client
 	hostRoot string
@@ -64,37 +64,6 @@ type Process struct {
 	releaseOnce sync.Once
 }
 
-// Keep bounded startup diagnostics while redacting credential values from the
-// resolved child environment. The child's stderr never shares the JSON pipe.
-type diagnostics struct {
-	mu      sync.Mutex
-	data    []byte
-	secrets []string
-}
-
-func (d *diagnostics) Write(data []byte) (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	n := len(data)
-	if n > 8192 {
-		data = data[n-8192:]
-	}
-	d.data = append(d.data, data...)
-	if len(d.data) > 8192 {
-		d.data = d.data[len(d.data)-8192:]
-	}
-	return n, nil
-}
-func (d *diagnostics) text() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	text := strings.TrimSpace(string(d.data))
-	for _, secret := range d.secrets {
-		text = strings.ReplaceAll(text, secret, "[redacted]")
-	}
-	return text
-}
-
 func Start(ctx context.Context, binary string, args, env []string, cwd string) (*Process, error) {
 	cmd := exec.Command(binary, args...)
 	cmd.Env = env
@@ -111,14 +80,10 @@ func Start(ctx context.Context, binary string, args, env []string, cwd string) (
 		return nil, err
 	}
 	cmd.Stdout = output
-	diagnostic := &diagnostics{}
-	for _, entry := range env {
-		name, value, ok := strings.Cut(entry, "=")
-		upper := strings.ToUpper(name)
-		if ok && value != "" && (strings.Contains(upper, "KEY") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD")) {
-			diagnostic.secrets = append(diagnostic.secrets, value)
-		}
-	}
+	// Bounded startup diagnostics, with credential values from the resolved
+	// child environment removed. The child's stderr never shares the JSON pipe.
+	diagnostic := &redact.Tail{}
+	diagnostic.Redact(env)
 	cmd.Stderr = diagnostic
 	guard, err := processguard.Start(cmd)
 	output.Close()
@@ -199,7 +164,7 @@ func (p *Process) stop(err error) {
 	p.once.Do(func() {
 		p.mu.Lock()
 		p.err = err
-		if text := p.stderr.text(); text != "" {
+		if text := p.stderr.Text(); text != "" {
 			p.err = fmt.Errorf("%w; adapter stderr: %s", err, text)
 		}
 		p.mu.Unlock()

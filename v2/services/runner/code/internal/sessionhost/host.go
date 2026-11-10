@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/v2/internal/processguard"
+	"github.com/AntoineToussaint/lazybox/v2/internal/redact"
 )
 
 // Re-exec the importing binary in host mode before its normal entry point, the
@@ -78,6 +79,10 @@ type host struct {
 	// unattached is when the last client went away (or the host started).
 	unattached time.Time
 	stdin      io.WriteCloser
+	// input is what the Runner sent for the agent's stdin, written by feed so
+	// an agent that stops reading never blocks the control connection.
+	input      [][]byte
+	inputReady chan struct{}
 	guard      *processguard.Guard
 	agent      int
 	spawned    bool
@@ -85,7 +90,7 @@ type host struct {
 	readDone bool
 	exited   bool
 	outcome  Outcome
-	stderr   *tail
+	stderr   *redact.Tail
 	released bool
 	stopping bool
 	upstream *url.URL
@@ -102,11 +107,12 @@ type conn struct {
 	once    sync.Once
 }
 
-func (c *conn) send(f frame) error { return c.sendWithin(f, 30*time.Second) }
-func (c *conn) sendWithin(f frame, d time.Duration) error {
+// send blocks while the Runner is not reading: that is backpressure, not a
+// failure. A Runner that died has its socket closed by the kernel, and a newer
+// Runner attaching closes this connection, so a blocked send always ends.
+func (c *conn) send(f frame) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_ = c.c.SetWriteDeadline(time.Now().Add(d))
 	return c.enc.Encode(f)
 }
 func (c *conn) close() { c.once.Do(func() { close(c.done); _ = c.c.Close() }) }
@@ -124,7 +130,7 @@ func serve() int {
 	if cfg.OrphanAfter <= 0 {
 		cfg.OrphanAfter = DefaultOrphanAfter
 	}
-	h := &host{cfg: cfg, open: map[string]entry{}, answered: map[string]bool{}, stderr: &tail{}, unattached: time.Now()}
+	h := &host{cfg: cfg, open: map[string]entry{}, answered: map[string]bool{}, stderr: &redact.Tail{}, unattached: time.Now(), inputReady: make(chan struct{}, 1)}
 	h.cond = sync.NewCond(&h.mu)
 	control, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -148,20 +154,16 @@ func serve() int {
 	signal.Notify(terminated, syscall.SIGTERM)
 	go func() { <-terminated; h.terminate() }()
 	go h.watchdog()
+	// The watchdog ends the process, removing the host's files first.
 	for {
 		c, err := control.Accept()
 		if err != nil {
-			return 1
+			// Out of descriptors, for example: the agent must not die of it.
+			time.Sleep(100 * time.Millisecond)
+			continue
 		}
 		go h.handle(c)
-		h.mu.Lock()
-		finished := h.finished()
-		h.mu.Unlock()
-		if finished {
-			break
-		}
 	}
-	return 0
 }
 
 // finished reports whether the host has nothing left to keep alive.
@@ -208,6 +210,30 @@ func (h *host) watchdog() {
 	}
 }
 
+// helloLimit bounds what a connection may send before authenticating.
+const helloLimit = 64 << 10
+
+// capped limits reads to n bytes until uncap; a negative n is no limit.
+type capped struct {
+	r io.Reader
+	n int64
+}
+
+func (c *capped) Read(p []byte) (int, error) {
+	if c.n == 0 {
+		return 0, errors.New("session host: hello too large")
+	}
+	if c.n > 0 && int64(len(p)) > c.n {
+		p = p[:c.n]
+	}
+	k, err := c.r.Read(p)
+	if c.n > 0 {
+		c.n -= int64(k)
+	}
+	return k, err
+}
+func (c *capped) uncap() { c.n = -1 }
+
 // abandon stops the program for good and lets the host exit, discarding what
 // it still holds: nobody will collect it. Releasing also frees a reader blocked
 // on a full buffer, which would otherwise keep the host alive forever.
@@ -222,12 +248,15 @@ func (h *host) abandon() {
 func (h *host) handle(raw net.Conn) {
 	c := &conn{c: raw, enc: json.NewEncoder(raw), done: make(chan struct{})}
 	defer c.close()
-	dec := json.NewDecoder(bufio.NewReaderSize(raw, 64<<10))
+	// Nothing unauthenticated may make the host buffer more than a hello.
+	in := &capped{r: raw, n: helloLimit}
+	dec := json.NewDecoder(bufio.NewReaderSize(in, 64<<10))
 	_ = raw.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var hello frame
 	if err := dec.Decode(&hello); err != nil || (hello.Op != "hello" && hello.Op != "probe") || subtle.ConstantTimeCompare([]byte(hello.Token), []byte(h.cfg.Token)) != 1 {
 		return
 	}
+	in.uncap()
 	if hello.Op == "probe" {
 		// Inspection only: never supersedes the attached client.
 		h.mu.Lock()
@@ -238,36 +267,51 @@ func (h *host) handle(raw net.Conn) {
 	}
 	_ = raw.SetReadDeadline(time.Time{})
 	if hello.Protocol != Protocol {
+		// Every client speaks the version in this host's record, so terminate
+		// and release stay possible across releases; anything else is refused.
 		_ = c.send(frame{Op: "error", Protocol: Protocol, Text: ErrIncompatible.Error()})
-		// Keep the connection for version-stable terminate/release.
+		return
 	}
 	h.mu.Lock()
 	if old := h.client; old != nil {
 		// A newer Runner supersedes an old or half-open one. Tell the old one,
-		// so it stands down rather than reporting a lost host.
-		go func() { _ = old.sendWithin(frame{Op: "superseded"}, 2*time.Second); old.close() }()
+		// so it stands down rather than reporting a lost host; a Runner too busy
+		// to read the notice loses its connection anyway.
+		go func() {
+			told := make(chan struct{})
+			go func() { _ = old.send(frame{Op: "superseded"}); close(told) }()
+			select {
+			case <-told:
+			case <-time.After(2 * time.Second):
+			}
+			old.close()
+		}()
 	}
 	h.client = c
 	h.ackLocked(hello.Ack)
 	replay, cursor, sent := h.replayLocked(), h.acked, h.sent
-	welcome := frame{Op: "welcome", Protocol: Protocol, PID: os.Getpid(), AgentPID: h.agent, Proxy: h.proxy, Spawned: h.spawned, Exited: h.exited, Next: h.next + 1}
+	welcome := frame{Op: "welcome", Protocol: Protocol, AgentPID: h.agent, Proxy: h.proxy, Spawned: h.spawned, Exited: h.exited}
 	h.cond.Broadcast()
 	h.mu.Unlock()
-	if hello.Protocol == Protocol {
-		if c.send(welcome) != nil {
-			h.drop(c)
-			return
-		}
-		go h.pump(c, replay, cursor, sent)
+	if c.send(welcome) != nil {
+		h.drop(c)
+		return
 	}
+	go h.pump(c, replay, cursor, sent)
 	for {
 		var f frame
 		if err := dec.Decode(&f); err != nil {
 			h.drop(c)
 			return
 		}
-		if hello.Protocol != Protocol && f.Op != "terminate" && f.Op != "release" {
-			continue
+		h.mu.Lock()
+		current := h.client == c
+		h.mu.Unlock()
+		if !current {
+			// Superseded: its acknowledgements, proxy upstream and requests
+			// belong to a Runner that no longer owns this host.
+			h.drop(c)
+			return
 		}
 		switch f.Op {
 		case "spawn":
@@ -368,7 +412,7 @@ func (h *host) pump(c *conn, replay []frame, cursor, sent uint64) {
 		var exit *frame
 		if h.exited && h.readDone && !exitSent && !h.hasAfterLocked(cursor) {
 			outcome := h.outcome
-			exit = &frame{Op: "exit", Outcome: &outcome, Text: h.stderr.text()}
+			exit = &frame{Op: "exit", Outcome: &outcome, Text: h.stderr.Text()}
 		}
 		h.mu.Unlock()
 		for _, f := range batch {
@@ -443,10 +487,28 @@ func (h *host) write(line json.RawMessage) {
 		h.mu.Unlock()
 	}
 	h.mu.Lock()
-	stdin := h.stdin
+	if h.stdin != nil {
+		h.input = append(h.input, append(append([]byte(nil), line...), '\n'))
+	}
 	h.mu.Unlock()
-	if stdin != nil {
-		_, _ = stdin.Write(append(append([]byte(nil), line...), '\n'))
+	select {
+	case h.inputReady <- struct{}{}:
+	default:
+	}
+}
+
+// feed writes queued input to the agent's stdin, in order, for the host's life.
+// Once stdin is closed the writes fail and the input is dropped, as it would be
+// for a local pipe.
+func (h *host) feed(stdin io.Writer) {
+	for range h.inputReady {
+		h.mu.Lock()
+		lines := h.input
+		h.input = nil
+		h.mu.Unlock()
+		for _, line := range lines {
+			_, _ = stdin.Write(line)
+		}
 	}
 }
 
@@ -505,7 +567,7 @@ func (h *host) spawn(spec *Spec) error {
 			return fail(err)
 		}
 		cmd.Stdout = w
-		h.stderr.redact(spec.Env)
+		h.stderr.Redact(spec.Env)
 		cmd.Stderr = h.stderr
 		readers = append(readers, func() { h.readLines(r) })
 	}
@@ -524,6 +586,9 @@ func (h *host) spawn(spec *Spec) error {
 		return err
 	}
 	h.stdin, h.guard, h.spawned = in, guard, true
+	if in != nil {
+		go h.feed(in)
+	}
 	if cmd.Process != nil {
 		h.agent = cmd.Process.Pid
 	}
@@ -679,45 +744,4 @@ func (h *host) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	proxy.ServeHTTP(w, r)
-}
-
-// tail keeps bounded, redacted agent stderr for exit diagnostics.
-type tail struct {
-	mu      sync.Mutex
-	data    []byte
-	secrets []string
-}
-
-func (t *tail) redact(env []string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for _, entry := range env {
-		name, value, ok := strings.Cut(entry, "=")
-		upper := strings.ToUpper(name)
-		if ok && value != "" && (strings.Contains(upper, "KEY") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD")) {
-			t.secrets = append(t.secrets, value)
-		}
-	}
-}
-func (t *tail) Write(data []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	n := len(data)
-	if n > 8192 {
-		data = data[n-8192:]
-	}
-	t.data = append(t.data, data...)
-	if len(t.data) > 8192 {
-		t.data = t.data[len(t.data)-8192:]
-	}
-	return n, nil
-}
-func (t *tail) text() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	text := strings.TrimSpace(string(t.data))
-	for _, secret := range t.secrets {
-		text = strings.ReplaceAll(text, secret, "[redacted]")
-	}
-	return text
 }

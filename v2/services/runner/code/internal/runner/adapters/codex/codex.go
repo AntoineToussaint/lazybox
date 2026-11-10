@@ -32,8 +32,8 @@ type session struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	tools           func(context.Context, string, json.RawMessage) (string, error)
-	// responded: request IDs the user answered before a Runner restart.
-	responded map[string]bool
+	// responded: the user's responses to requests answered before a Runner restart.
+	responded map[string]agent.Operation
 }
 
 // GatewayArgs deliberately selects an HTTP Responses provider. Setting only
@@ -391,29 +391,34 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 			r.Delivery = "submitted"
 			return r, nil
 		}
-		var response any
-		if op.Kind == agent.Answer {
-			answers := map[string]any{}
-			for k, v := range op.Answers {
-				answers[k] = map[string]any{"answers": v}
-			}
-			response = map[string]any{"answers": answers}
-		} else {
-			if p.message.Method == "item/permissions/requestApproval" {
-				if op.Decision == "accept" {
-					return r, errors.New("permission-subset grants require a supported explicit grant UI")
-				}
-				response = map[string]any{"permissions": map[string]any{}}
-			} else {
-				response = map[string]any{"decision": op.Decision}
-			}
+		response, err := nativeResponse(p.message.Method, op)
+		if err != nil {
+			return r, err
 		}
-		err := s.p.Reply(p.message.ID, response)
+		err = s.p.Reply(p.message.ID, response)
 		r.Delivery = "submitted"
 		return r, err
 	default:
 		return r, agent.ErrUnsupported
 	}
+}
+
+// nativeResponse is the app-server reply to a native approval or question.
+func nativeResponse(method string, op agent.Operation) (any, error) {
+	if op.Kind == agent.Answer {
+		answers := map[string]any{}
+		for k, v := range op.Answers {
+			answers[k] = map[string]any{"answers": v}
+		}
+		return map[string]any{"answers": answers}, nil
+	}
+	if method == "item/permissions/requestApproval" {
+		if op.Decision == "accept" {
+			return nil, errors.New("permission-subset grants require a supported explicit grant UI")
+		}
+		return map[string]any{"permissions": map[string]any{}}, nil
+	}
+	return map[string]any{"decision": op.Decision}, nil
 }
 
 func requestID(raw json.RawMessage) string {
@@ -493,6 +498,10 @@ func (s *session) read() {
 				id := requestID(m.ID)
 				ev.RequestID = id
 				ev.Data = m.Params
+				// Redelivered after the user answered: the reply never reached
+				// the app-server.
+				response, answered := s.responded[id]
+				answered = answered && m.Redelivered
 				switch m.Method {
 				case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval":
 					ev.Type = "approval"
@@ -504,14 +513,19 @@ func (s *session) read() {
 						_ = s.p.Reject(m.ID, "unknown dynamic tool")
 						return true
 					}
-					if m.Redelivered && s.responded[id] && agent.ToolReplaySafe(p.Tool, p.Arguments) {
-						// Answered before the restart, and only inspects a command
-						// that outlived the Runner: run it again.
+					switch {
+					case !answered:
+					case response.Decision != "" && response.Decision != "accept":
+						// Declined: nothing ran, so the decline is simply repeated.
+						go s.replyTool(m.ID, id, "Command declined", false)
+						return true
+					case agent.ToolReplaySafe(p.Tool, p.Arguments):
+						// Only inspects a command that outlived the Runner: run it again.
 						go s.runTool(m.ID, id, p.Tool, p.Arguments)
 						return true
-					}
-					if m.Redelivered && s.responded[id] {
-						// Approved before the restart: the command may already have run.
+					default:
+						// Approved (or recorded without its decision): the command
+						// may already have run.
 						_ = s.p.Reply(m.ID, map[string]any{"success": false, "contentItems": []any{map[string]string{"type": "inputText", "text": toolOutcomeUnknown}}})
 						emit(agent.Event{Type: "request_resolved", RequestID: id, Status: "outcome_unknown_after_restart"})
 						return true
@@ -522,6 +536,13 @@ func (s *session) read() {
 					_ = s.p.Reject(m.ID, "unsupported server request")
 					emit(agent.Event{Type: "unsupported_request", Text: m.Method, Data: m.Params})
 					return true
+				}
+				if answered && p.Tool == "" && (response.Kind == agent.Answer || response.Decision != "") {
+					// The app-server acts only once it has the reply, so the
+					// user's recorded response is given again rather than asked anew.
+					if reply, err := nativeResponse(m.Method, response); err == nil && s.p.Reply(m.ID, reply) == nil {
+						return true
+					}
 				}
 				s.mu.Lock()
 				s.requests[id] = pending{message: m, tool: p.Tool, args: p.Arguments}

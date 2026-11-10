@@ -33,7 +33,8 @@ func fixtureAppServer() {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Result struct {
-				Success      bool `json:"success"`
+				Decision     string `json:"decision"`
+				Success      bool   `json:"success"`
 				ContentItems []struct {
 					Text string `json:"text"`
 				} `json:"contentItems"`
@@ -50,8 +51,16 @@ func fixtureAppServer() {
 		case "turn/start":
 			send(map[string]any{"id": m.ID, "result": map[string]any{"turn": map[string]string{"id": "turn-1"}}})
 			send(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-1", "turn": map[string]string{"id": "turn-1"}}})
+			if os.Getenv("FIXTURE_NATIVE_APPROVAL") != "" {
+				send(map[string]any{"id": 42, "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": "thread-1", "turnId": "turn-1", "command": "rm -rf build"}})
+				continue
+			}
 			send(map[string]any{"id": 41, "method": "item/tool/call", "params": map[string]any{"threadId": "thread-1", "turnId": "turn-1", "tool": "lazybox_command", "arguments": toolArguments()}})
 		case "":
+			if string(m.ID) == "42" {
+				send(map[string]any{"method": "item/agentMessage/delta", "params": map[string]any{"threadId": "thread-1", "delta": "decision=" + m.Result.Decision}})
+				send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread-1", "turn": map[string]string{"id": "turn-1", "status": "completed"}}})
+			}
 			if string(m.ID) == "41" {
 				text := ""
 				if len(m.Result.ContentItems) > 0 {
@@ -147,7 +156,7 @@ func TestRedeliveredApprovedCommandIsNeverRunTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	again, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Tools: tools, Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: state, Reference: "thread-1", Cursor: approval.Cursor, Responded: map[string]bool{"n:41": true}}}})
+	again, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Tools: tools, Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: state, Reference: "thread-1", Cursor: approval.Cursor, Responded: map[string]agent.Operation{"n:41": {Kind: agent.Approve, RequestID: "n:41", Decision: "accept"}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +240,7 @@ func TestRedeliveredApprovedWaitRunsAgain(t *testing.T) {
 	state := first.(agent.Durable).DurableState()
 	_ = first.(agent.Detacher).Detach()
 
-	again, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Tools: tools, Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: state, Reference: "thread-1", Cursor: approval.Cursor, Responded: map[string]bool{"n:41": true}}}})
+	again, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Tools: tools, Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: state, Reference: "thread-1", Cursor: approval.Cursor, Responded: map[string]agent.Operation{"n:41": {Kind: agent.Approve, RequestID: "n:41", Decision: "accept"}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,5 +277,86 @@ func TestEventsFromOneLineAreMarkedPartialUntilTheLast(t *testing.T) {
 	}
 	if !failure.Partial || ended.Partial {
 		t.Fatalf("partial marks: failure %v, turn_ended %v", failure.Partial, ended.Partial)
+	}
+}
+
+// A decline whose reply never reached the app-server is repeated after the
+// restart: nothing ran, so there is nothing unknown about it.
+func TestRedeliveredDeclinedCallIsDeclinedAgain(t *testing.T) {
+	root := fixtureRoot(t)
+	self, _ := os.Executable()
+	runs := make(chan string, 4)
+	tools := func(ctx context.Context, name string, args json.RawMessage) (string, error) {
+		runs <- string(args)
+		return "ran", nil
+	}
+	first, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Tools: tools, Host: &agent.Hosting{Root: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = first.Apply(context.Background(), agent.Operation{ID: "go", Kind: agent.Message, Text: "deploy"})
+	approval := receive(t, first, "approval")
+	first.(agent.Committer).Commit(approval)
+	state := first.(agent.Durable).DurableState()
+	// The Runner recorded the decline and died before its reply was written.
+	_ = first.(agent.Detacher).Detach()
+
+	declined := map[string]agent.Operation{"n:41": {Kind: agent.Approve, RequestID: "n:41", Decision: "decline"}}
+	again, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Tools: tools, Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: state, Reference: "thread-1", Cursor: approval.Cursor, Responded: declined}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if reply := receive(t, again, "message_delta"); reply.Text != "success=false Command declined" {
+		t.Fatalf("redelivered declined call: %q", reply.Text)
+	}
+	select {
+	case args := <-runs:
+		t.Fatalf("a declined command ran after the restart: %s", args)
+	default:
+	}
+}
+
+// A native approval the user answered, whose reply never reached the
+// app-server, is answered again with the recorded decision, not asked again.
+func TestRedeliveredAnsweredApprovalIsAnsweredAgain(t *testing.T) {
+	t.Setenv("FIXTURE_NATIVE_APPROVAL", "1")
+	root := fixtureRoot(t)
+	self, _ := os.Executable()
+	first, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Host: &agent.Hosting{Root: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = first.Apply(context.Background(), agent.Operation{ID: "go", Kind: agent.Message, Text: "clean"})
+	approval := receive(t, first, "approval")
+	if approval.RequestID != "n:42" {
+		t.Fatalf("native approval: %+v", approval)
+	}
+	first.(agent.Committer).Commit(approval)
+	state := first.(agent.Durable).DurableState()
+	_ = first.(agent.Detacher).Detach()
+
+	answered := map[string]agent.Operation{"n:42": {Kind: agent.Approve, RequestID: "n:42", Decision: "decline"}}
+	again, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: state, Reference: "thread-1", Cursor: approval.Cursor, Responded: answered}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	for {
+		ev, err := again.Receive(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch ev.Type {
+		case "approval":
+			t.Fatal("an answered approval was asked again")
+		case "message_delta":
+			if ev.Text != "decision=decline" {
+				t.Fatalf("app-server got %q", ev.Text)
+			}
+			return
+		}
 	}
 }

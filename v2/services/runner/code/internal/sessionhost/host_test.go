@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -817,5 +818,100 @@ func TestOutputBeforeTheSpawnReplyIsKept(t *testing.T) {
 		if err != nil || m == nil || m.Seq != want {
 			t.Fatalf("want line %d, got %+v %v", want, m, err)
 		}
+	}
+}
+
+// An agent that stops reading its stdin while its output fills the buffer
+// must not stall the control connection: the Runner's acknowledgements still
+// get through and free the buffer, so the agent's output keeps flowing.
+func TestUnreadStdinDoesNotBlockAcknowledgements(t *testing.T) {
+	dir := root(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c, err := Launch(ctx, dir, Options{BufferLimit: 16 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `i=0; while [ $i -lt 2000 ]; do printf '{"method":"n","params":%d}\n' $i; i=$((i+1)); done; printf '{"method":"done"}\n'; exec sleep 300`
+	if err = c.Spawn(ctx, Spec{Path: "/bin/sh", Args: []string{"-c", script}, Env: os.Environ(), Cwd: os.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	// Far more than a pipe holds, to an agent that never reads it.
+	big := json.RawMessage(`"` + strings.Repeat("x", 100<<10) + `"`)
+	for range 4 {
+		if err = c.Send(big); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for {
+		m, exit, err := c.Next(ctx)
+		if err != nil || exit != nil {
+			t.Fatalf("output stalled behind unread stdin: %v %+v", err, exit)
+		}
+		if err = c.Ack(m.Seq); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(m.Line), `"done"`) {
+			return
+		}
+	}
+}
+
+// Before authenticating, a connection cannot make the host buffer more than a
+// hello: an oversized one is cut off at once, and the host keeps serving.
+func TestOversizedHelloIsRefusedAtOnce(t *testing.T) {
+	dir := root(t)
+	c, pid := started(t, dir)
+	record, err := ReadRecord(filepath.Join(dir, c.ID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(record.Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	go func() { _, _ = raw.Write([]byte(`{"op":"hello","token":"` + strings.Repeat("x", 1<<20))) }()
+	_ = raw.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err = raw.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("an oversized hello was still being read: %v", err)
+	}
+	if !alive(pid) {
+		t.Fatal("the agent died")
+	}
+	if _, err = Probe(deadline(t), dir, c.ID()); err != nil {
+		t.Fatalf("host stopped serving: %v", err)
+	}
+}
+
+// A client speaking another protocol version is refused without displacing
+// the Runner that is attached.
+func TestIncompatibleHelloDoesNotSupersede(t *testing.T) {
+	dir := root(t)
+	c, _ := started(t, dir)
+	record, err := ReadRecord(filepath.Join(dir, c.ID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(record.Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if err = json.NewEncoder(raw).Encode(frame{Op: "hello", Token: record.Token, Protocol: Protocol + 1}); err != nil {
+		t.Fatal(err)
+	}
+	var reply frame
+	_ = raw.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if err = json.NewDecoder(raw).Decode(&reply); err != nil || reply.Op != "error" {
+		t.Fatalf("incompatible hello: %+v %v", reply, err)
+	}
+	// The original Runner still owns the host: its requests are served and the
+	// output comes back to it.
+	if err = c.Send(json.RawMessage(`{"method":"echo","params":"still here"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if name, _ := method(t, next(t, c)); name != "echoed" {
+		t.Fatalf("the attached Runner was displaced: got %q", name)
 	}
 }

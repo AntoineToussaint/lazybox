@@ -73,6 +73,13 @@ func Launch(ctx context.Context, root string, opts Options) (*Client, error) {
 	if err := os.Mkdir(dir, 0700); err != nil {
 		return nil, err
 	}
+	// Until the host runs, nothing else will remove its directory.
+	started := false
+	defer func() {
+		if !started {
+			_ = os.RemoveAll(dir)
+		}
+	}()
 	binary, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -100,7 +107,7 @@ func Launch(ctx context.Context, root string, opts Options) (*Client, error) {
 		return nil, err
 	}
 	// The Runner never waits on its hosts; reap only if this one fails to start.
-	cleanup := func() { _ = cmd.Process.Kill(); _ = cmd.Wait(); _ = os.RemoveAll(dir) }
+	cleanup := func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }
 	token := rand.Text() + rand.Text()
 	if err = json.NewEncoder(stdin).Encode(launch{ID: id, Dir: dir, Token: token, BufferLimit: opts.BufferLimit, OrphanAfter: opts.OrphanAfter}); err != nil {
 		cleanup()
@@ -129,6 +136,7 @@ func Launch(ctx context.Context, root string, opts Options) (*Client, error) {
 		_ = syscall.Kill(record.PID, syscall.SIGKILL)
 		return nil, err
 	}
+	started = true
 	return c, nil
 }
 
@@ -346,6 +354,9 @@ func Hosts(root string) ([]string, error) {
 // Stop terminates a host's agent and waits for its exit, then releases the host.
 // It is version-stable: it also stops a host whose protocol this Runner cannot adopt.
 func Stop(ctx context.Context, root, id string) error {
+	if !validID.MatchString(id) {
+		return errors.New("invalid session host id")
+	}
 	dir := filepath.Join(root, id)
 	record, err := ReadRecord(dir)
 	if err != nil {
@@ -396,6 +407,9 @@ type Status struct {
 
 // Probe inspects a host without superseding the client attached to it.
 func Probe(ctx context.Context, root, id string) (Status, error) {
+	if !validID.MatchString(id) {
+		return Status{}, errors.New("invalid session host id")
+	}
 	record, err := ReadRecord(filepath.Join(root, id))
 	if err != nil {
 		return Status{}, err

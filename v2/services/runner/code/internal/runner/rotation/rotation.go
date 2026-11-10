@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,12 @@ type session struct {
 	done          chan struct{}
 	history       string
 	omitted       bool
+	// replayed counts, by agent.ReplayKey, root reply text already in the
+	// excerpt from the journal: the host replays its line whole after a
+	// re-attachment, and that text must not be remembered twice. It covers
+	// only that line: replayedAfter is the last line recorded whole.
+	replayed      map[string]int
+	replayedAfter uint64
 	caps          agent.Capabilities
 	// state mirrors attempt/profile/current for DurableState without s.mu,
 	// which is held across provider calls and whole rotations.
@@ -88,8 +95,11 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	}
 	var resumed durable
 	var transcript string
+	var replayed map[string]int
+	var replayedAfter uint64
 	if o.Host != nil && o.Host.Attach != nil {
 		transcript = o.Host.Attach.Transcript
+		replayed, replayedAfter = maps.Clone(o.Host.Attach.Replayed), o.Host.Attach.Cursor
 		if err := json.Unmarshal(o.Host.Attach.State, &resumed); err != nil || resumed.Profile == "" || len(resumed.Native) == 0 {
 			return nil, errors.New("rotation state missing for re-attachment")
 		}
@@ -113,11 +123,12 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 		inner := *o.Host.Attach
 		inner.State = resumed.Native
 		// Only this attempt's requests reach the native layer, unprefixed.
-		inner.Responded = map[string]bool{}
+		inner.Responded = map[string]agent.Operation{}
 		prefix := fmt.Sprintf("attempt-%d:", resumed.Attempt)
-		for id := range o.Host.Attach.Responded {
+		for id, response := range o.Host.Attach.Responded {
 			if native, ok := strings.CutPrefix(id, prefix); ok {
-				inner.Responded[native] = true
+				response.RequestID = native
+				inner.Responded[native] = response
 			}
 		}
 		hosting := *o.Host
@@ -141,7 +152,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	if settings, ok := native.(agent.RuntimeSettings); ok {
 		o.ProviderSettings = settings.SessionSettings()
 	}
-	s := &session{attempt: resumed.Attempt, adapter: a, current: native, open: o, profile: profile, ctx: life, cancel: cancel, attemptCancel: stop, events: make(chan agent.Event, 256), done: make(chan struct{}), caps: native.Capabilities()}
+	s := &session{attempt: resumed.Attempt, adapter: a, current: native, open: o, profile: profile, ctx: life, cancel: cancel, attemptCancel: stop, events: make(chan agent.Event, 256), done: make(chan struct{}), caps: native.Capabilities(), replayed: replayed, replayedAfter: replayedAfter}
 	if transcript != "" {
 		// A re-attached session rebuilds its handoff excerpt from the journal.
 		s.remember(transcript)
@@ -156,6 +167,25 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 }
 func (s *session) Reference() string                { s.mu.Lock(); defer s.mu.Unlock(); return s.current.Reference() }
 func (s *session) Capabilities() agent.Capabilities { return s.caps }
+
+// replayedEvent reports, and consumes, an event the journal recorded before
+// the restart (so the excerpt holds its text). The replay ends with the first
+// line completed after the last one recorded whole.
+func (s *session) replayedEvent(ev agent.Event) bool {
+	if s.replayed == nil {
+		return false
+	}
+	seen := false
+	if key := agent.ReplayKey(ev); s.replayed[key] > 0 {
+		s.replayed[key]--
+		seen = true
+	}
+	if !ev.Partial && ev.Cursor > s.replayedAfter {
+		s.replayed = nil
+	}
+	return seen
+}
+
 func (s *session) remember(text string) {
 	const limit = 128 << 10
 	if len(text) > limit {
@@ -236,11 +266,11 @@ func (s *session) run() {
 				return
 			}
 		}
-		if root && ev.Type == "message_delta" {
-			s.mu.Lock()
+		s.mu.Lock()
+		if replayed := s.replayedEvent(ev); root && ev.Type == "message_delta" && !replayed {
 			s.remember(ev.Text)
-			s.mu.Unlock()
 		}
+		s.mu.Unlock()
 		if root && ev.Type == "failure" && ev.Account != nil && rotatable(ev.Account.State) && len(s.adapter.Eligible) > 0 {
 			observed := ev
 			observed.Type = "capacity_observation"
@@ -323,6 +353,7 @@ func (s *session) rotate(reason string) error {
 		}
 		s.attempt++
 		s.current = native
+		s.replayed = nil // A new native session: its lines are not the replayed one.
 		s.attemptCancel = stop
 		s.profile = p
 		s.open = open

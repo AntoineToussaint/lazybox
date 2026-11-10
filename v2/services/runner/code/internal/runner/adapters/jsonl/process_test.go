@@ -25,11 +25,7 @@ func TestStartupFailureRetainsBoundedRedactedDiagnostics(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "startup failed") || strings.Contains(err.Error(), "credential-value") {
 		t.Fatalf("startup diagnostic: %v", err)
 	}
-	d := &diagnostics{}
-	_, _ = d.Write([]byte(strings.Repeat("x", 20000)))
-	if len(d.text()) != 8192 {
-		t.Fatal("stderr retained without a bound")
-	}
+	// The bound itself is internal/redact's to test.
 }
 
 func TestCallKeepsAcknowledgementSeparateFromServerRequest(t *testing.T) {

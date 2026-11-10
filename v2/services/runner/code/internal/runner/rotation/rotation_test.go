@@ -204,7 +204,7 @@ func TestReattachRestoresAttemptAndScopesRequests(t *testing.T) {
 		return o, nil
 	}}
 	saved := json.RawMessage(`{"attempt":2,"profile":"b","native":{"host":"h2"}}`)
-	s, err := adapter.Open(context.Background(), agent.Open{ID: "stable", Profile: "a", Host: &agent.Hosting{Root: "/hosts", Attach: &agent.Attachment{State: saved, Responded: map[string]bool{"attempt-2:current": true, "attempt-1:stale": true}}}})
+	s, err := adapter.Open(context.Background(), agent.Open{ID: "stable", Profile: "a", Host: &agent.Hosting{Root: "/hosts", Attach: &agent.Attachment{State: saved, Responded: map[string]agent.Operation{"attempt-2:current": {Kind: agent.Approve, RequestID: "attempt-2:current", Decision: "decline"}, "attempt-1:stale": {Kind: agent.Approve}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestReattachRestoresAttemptAndScopesRequests(t *testing.T) {
 	if open.Profile != "b" || open.Env[0] != "ACCOUNT=b" {
 		t.Fatalf("re-attached to the wrong account: %+v", open)
 	}
-	if responded := open.Host.Attach.Responded; len(responded) != 1 || !responded["current"] {
+	if responded := open.Host.Attach.Responded; len(responded) != 1 || responded["current"].RequestID != "current" || responded["current"].Decision != "decline" {
 		t.Fatalf("native responded set: %v", responded)
 	}
 	native.Session.Events <- agent.Event{Type: "approval", RequestID: "native-1", Cursor: 7}
@@ -260,5 +260,41 @@ func TestRotationAfterReattachHandsOverTheRecordedConversation(t *testing.T) {
 	handoff := <-next.Applied
 	if !strings.Contains(handoff.Text, "Finish the build") || !strings.Contains(handoff.Text, "build-1 is already running") {
 		t.Fatalf("handoff after a restart lost the conversation:\n%s", handoff.Text)
+	}
+}
+
+// Text of a line recorded in part before the restart is already in the
+// excerpt; when the host replays that line, the excerpt a later rotation hands
+// over holds it once.
+func TestReplayedReplyTextIsHandedOverOnce(t *testing.T) {
+	state, err := accounts.OpenState(filepath.Join(t.TempDir(), "availability.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := nativeAdapter{opened: make(chan *nativeSession, 8)}
+	adapter := Adapter{Native: native, Profiles: []accounts.Profile{{ID: "a", Provider: "claude", Isolation: "environment"}, {ID: "b", Provider: "claude", Isolation: "environment"}}, Eligible: []string{"a", "b"}, State: state, Resolve: func(p accounts.Profile, o agent.Open) (agent.Open, error) {
+		o.Env = []string{"ACCOUNT=" + p.ID}
+		return o, nil
+	}}
+	saved := json.RawMessage(`{"attempt":0,"profile":"a","native":{"host":"h1"}}`)
+	recorded := agent.Event{Type: "message_delta", Text: "Halfway-unique-phrase. ", Cursor: 8, Partial: true}
+	attach := &agent.Attachment{State: saved, Cursor: 7, Transcript: "\nUSER: Go\n" + recorded.Text, Replayed: map[string]int{agent.ReplayKey(recorded): 1}}
+	s, err := adapter.Open(context.Background(), agent.Open{ID: "stable", Profile: "a", Cwd: t.TempDir(), Host: &agent.Hosting{Root: "/hosts", Attach: attach}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	adopted := <-native.opened
+	// The host replays line 8 whole: the recorded delta, then the rest.
+	adopted.Events <- recorded
+	adopted.Events <- agent.Event{Type: "message_delta", Text: "Done.", Cursor: 8}
+	receive(t, s, "message_delta")
+	receive(t, s, "message_delta")
+	adopted.Events <- agent.Event{Type: "failure", Status: "exhausted", Account: &agent.AccountObservation{State: "exhausted", ResetAt: time.Now().Add(time.Hour).Unix()}}
+	receive(t, s, "profile_changed")
+	next := <-native.opened
+	handoff := <-next.Applied
+	if n := strings.Count(handoff.Text, "Halfway-unique-phrase"); n != 1 || !strings.Contains(handoff.Text, "Done.") {
+		t.Fatalf("replayed text handed over %d times:\n%s", n, handoff.Text)
 	}
 }

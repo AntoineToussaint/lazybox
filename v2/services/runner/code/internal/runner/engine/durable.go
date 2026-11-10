@@ -149,10 +149,10 @@ func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *j
 	if err != nil {
 		return nil, err
 	}
-	responded := map[string]bool{}
-	for id := range scan.responded {
+	responded := map[string]agent.Operation{}
+	for id, response := range scan.responded {
 		if _, pending := saved.Pending[id]; pending {
-			responded[id] = true
+			responded[id] = response
 		}
 	}
 	if open.Host == nil {
@@ -163,7 +163,8 @@ func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *j
 		queued[op.ID] = true
 	}
 	// A queued message has not reached the agent yet; it joins the transcript
-	// when it is delivered.
+	// when it is delivered. (One accepted but not queued, without a receipt,
+	// may have reached it: the previous Runner died while delivering it.)
 	var transcript strings.Builder
 	for _, u := range scan.said {
 		if u.operation == "" || !queued[u.operation] {
@@ -171,7 +172,11 @@ func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *j
 		}
 	}
 	hosting := *open.Host
-	hosting.Attach = &agent.Attachment{State: record.Provider, Reference: saved.Reference, Cursor: scan.cursor, Responded: responded, Transcript: transcript.String()}
+	replayed := make(map[string]int, len(scan.partial))
+	for key, n := range scan.partial {
+		replayed[key] = n
+	}
+	hosting.Attach = &agent.Attachment{State: record.Provider, Reference: saved.Reference, Cursor: scan.cursor, Responded: responded, Transcript: transcript.String(), Replayed: replayed}
 	open.Host = &hosting
 	life, cancel := context.WithCancel(ctx)
 	s, err := adapter.Open(life, open)
@@ -219,15 +224,18 @@ type journalScan struct {
 	// cursor is the last native line whose every event is recorded.
 	cursor uint64
 	// partial counts the recorded events of a line recorded only in part,
-	// by replayKey: the line is replayed and these must not be recorded twice.
+	// by agent.ReplayKey: the line is replayed and these must not be recorded twice.
 	partial   map[string]int
 	order     []string
 	kinds     map[string]agent.Kind
 	receipts  map[string]agent.Receipt
-	responded map[string]bool
-	// said is the conversation in journal order: user messages and the root
-	// agent's reply text.
+	responded map[string]agent.Operation
+	// said is the conversation in the order the agent saw it: each user
+	// message where it was delivered, and the root agent's reply text.
 	said []utterance
+	// awaiting indexes the user messages in said whose delivery is not
+	// recorded yet: they stay where they were accepted until their receipt.
+	awaiting map[string]int
 }
 
 type utterance struct {
@@ -235,11 +243,35 @@ type utterance struct {
 	text      string
 }
 
+// delivered places a user message where its receipt shows the agent got it,
+// as the live conversation does, or drops one the agent never got. An unknown
+// outcome leaves it where it was accepted.
+func (s *journalScan) delivered(r agent.Receipt) {
+	i, ok := s.awaiting[r.ID]
+	if !ok {
+		return
+	}
+	switch r.Delivery {
+	case "unknown_after_runner_restart":
+		return
+	case "failed", "canceled_before_delivery":
+		s.said[i].text = ""
+	default:
+		if r.Error != "" {
+			s.said[i].text = ""
+			break
+		}
+		s.said = append(s.said, s.said[i])
+		s.said[i].text = ""
+	}
+	delete(s.awaiting, r.ID)
+}
+
 // scanJournal reads the execution's recorded facts. The transport cursor only
 // counts events from the current native attempt: a profile rotation starts a new
 // host whose cursors restart.
 func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, error) {
-	s := journalScan{kinds: map[string]agent.Kind{}, receipts: map[string]agent.Receipt{}, responded: map[string]bool{}}
+	s := journalScan{kinds: map[string]agent.Kind{}, receipts: map[string]agent.Receipt{}, responded: map[string]agent.Operation{}, awaiting: map[string]int{}}
 	partial := map[uint64]map[string]int{}
 	for i, n := uint64(0), spool.Count(); i < n; i++ {
 		r, err := spool.Next(ctx, i)
@@ -248,9 +280,11 @@ func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, erro
 		}
 		var v struct {
 			agent.Event
-			OperationID string        `json:"operationId"`
-			Kind        agent.Kind    `json:"kind"`
-			Receipt     agent.Receipt `json:"receipt"`
+			OperationID string              `json:"operationId"`
+			Kind        agent.Kind          `json:"kind"`
+			Receipt     agent.Receipt       `json:"receipt"`
+			Decision    string              `json:"decision"`
+			Answers     map[string][]string `json:"answers"`
 			Operation   struct {
 				Files []agent.File `json:"files"`
 			} `json:"data"`
@@ -268,20 +302,24 @@ func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, erro
 			}
 			s.kinds[v.OperationID] = v.Kind
 			if (v.Kind == agent.Answer || v.Kind == agent.Approve) && v.RequestID != "" {
-				s.responded[v.RequestID] = true
+				s.responded[v.RequestID] = agent.Operation{Kind: v.Kind, RequestID: v.RequestID, Decision: v.Decision, Answers: v.Answers}
 			}
 			if v.Kind == agent.Message || v.Kind == agent.Steer {
 				s.said = append(s.said, utterance{operation: v.OperationID, text: "\nUSER: " + agent.Prompt(agent.Operation{Text: v.Text, Files: v.Operation.Files}) + "\n"})
+				s.awaiting[v.OperationID] = len(s.said) - 1
 			}
 		case "message_delta":
 			if v.AgentID == "" || v.AgentID == "root" {
 				s.said = append(s.said, utterance{text: v.Text})
 			}
 		case "receipt":
-			if v.Receipt.ID != "" {
-				s.receipts[v.Receipt.ID] = v.Receipt
-			} else if v.OperationID != "" {
-				s.receipts[v.OperationID] = agent.Receipt{ID: v.OperationID, Delivery: v.Status}
+			r := v.Receipt
+			if r.ID == "" && v.OperationID != "" {
+				r = agent.Receipt{ID: v.OperationID, Delivery: v.Status}
+			}
+			if r.ID != "" {
+				s.receipts[r.ID] = r
+				s.delivered(r)
 			}
 		case "request_resolved":
 			delete(s.responded, v.RequestID)
@@ -292,7 +330,7 @@ func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, erro
 			if partial[v.Cursor] == nil {
 				partial[v.Cursor] = map[string]int{}
 			}
-			partial[v.Cursor][replayKey(v.Event)]++
+			partial[v.Cursor][agent.ReplayKey(v.Event)]++
 		case v.Cursor > s.cursor:
 			s.cursor = v.Cursor
 		}
@@ -306,11 +344,4 @@ func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, erro
 		}
 	}
 	return s, nil
-}
-
-// replayKey identifies an event derived from a native line by what the provider
-// said, not by its position among the line's events, which can differ when
-// the line is processed again by a fresh adapter.
-func replayKey(ev agent.Event) string {
-	return fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s", ev.Cursor, ev.Type, ev.RequestID, ev.Status, ev.Name, ev.Text, ev.TurnID, ev.NativeID)
 }

@@ -35,7 +35,9 @@ A host runs its program in one of two modes:
 Agent hosts live under `<state>/hosts/<id>/`, command hosts under
 `<state>/command-hosts/<id>/` (both 0700). The private `host.json` (0600) carries
 the loopback port and a random token; there are no fixed ports or paths. Working
-and Dev have separate state, so separate hosts.
+and Dev have separate state, so separate hosts. A host reads at most 64 KiB from
+a connection before it has authenticated, and refuses a client that does not
+speak the version in its record without displacing the attached Runner.
 
 ## Delivery contract
 
@@ -59,9 +61,19 @@ and Dev have separate state, so separate hosts.
   - a redelivered `start` or `cancel` is answered with an explicit "outcome
     unknown" error, recorded as `outcome_unknown_after_restart`, and shown in
     the conversation;
+  - a declined command is declined again: nothing ran;
+  - a native approval or question the user answered (its reply never reached
+    the agent, or the host would not replay it) is answered again with the
+    user's response, which the journal records with its decision and answers;
   - an unanswered approval simply stays pending (recorded once, not twice).
 - While no Runner is attached the host keeps reading until a 64 MiB buffer is
   full, then stops: the program blocks on its own output instead of losing it.
+  A Runner that is slow to read gets the same backpressure; only its process
+  dying, or a newer Runner attaching, ends its connection.
+- Only the attached Runner's operations count. A connection a newer Runner
+  superseded is closed at its next operation, which is not applied.
+- The Runner's input to an agent is queued and written by its own goroutine, so
+  an agent that stops reading stdin never holds up acknowledgements.
 - After the program exits, the Runner releases the host only once it has
   recorded the last output it received. A Runner that dies in between leaves
   that output and the exit for the next one.
@@ -218,7 +230,17 @@ directory, in `hosts/` and `command-hosts/`.
   `TestOutputBeforeTheSpawnReplyIsKept`,
   `TestFailedOpenLeavesAdoptedCommandsRunning`,
   `TestCloseDuringAHostedStartStopsTheCommand`,
-  `TestReplayDeduplicationEndsWithTheReplayedLine`.
+  `TestReplayDeduplicationEndsWithTheReplayedLine`,
+  `TestUnreadStdinDoesNotBlockAcknowledgements`,
+  `TestOversizedHelloIsRefusedAtOnce`,
+  `TestIncompatibleHelloDoesNotSupersede`,
+  `TestCommandAdoptedElsewhereEndsHereWithoutStopping`,
+  `TestRedeliveredDeclinedCallIsDeclinedAgain`,
+  `TestRedeliveredAnsweredApprovalIsAnsweredAgain`,
+  `TestAdoptionPassesTheRecordedDecision`,
+  `TestAdoptedConversationPlacesMessagesWhereTheyWereDelivered`,
+  `TestReplayedReplyTextIsHandedOverOnce`, and in `internal/redact`
+  `TestSecretCutByTheWindowDoesNotLeak`.
 - Redelivery, backpressure, proxy re-pointing, token authentication, the
   version window, stream mode, orphan limit, terminate-kills-descendants, and
   exit while detached: `internal/sessionhost`.
@@ -243,19 +265,16 @@ Live:
 - A Dev hot reload, live.
 - A machine reboot still ends every agent and command. Native resume remains
   the fallback there.
+- The call in `work.go` that sweeps a crashed predecessor's agent hosts when
+  `LAZYBOX_V2_KEEP_AGENTS` is not set: the sweep itself is tested, the Codefly
+  service wiring is not.
 
-**Known gaps** (found in review, not fixed yet):
-- A user's *decline* is not journaled with its approval, so a declined
-  `lazybox_command` call redelivered after a restart is handled as answered:
-  `read`/`wait` run, and `start`/`cancel` are reported as outcome unknown.
-- A Runner that stops consuming output for 30 seconds is disconnected by its
-  hosts as if it had died; the agent keeps running unattached.
-- A superseded connection's operations (an acknowledgement, a proxy upstream)
-  are still applied until it closes, which can take seconds.
-- Writing to an agent's stdin runs on the control connection's reader, so an
-  agent that stops reading stdin delays that connection's acknowledgements.
-- The unauthenticated hello has no size limit before the token check, and a
-  failing `Accept` ends the host.
-- A message the agent received is placed in the rebuilt conversation where it
-  was accepted, not where it was delivered, and text replayed through a
-  rotation can repeat in the excerpt it hands over.
+**Fixed without a regression test**, because no test could fail on the old
+behaviour quickly or reliably:
+- a slow Runner is no longer disconnected (the old limit was 30 seconds);
+- a superseded connection's operations are no longer applied (the old window
+  was the moment before its connection closed);
+- the host retries a failed `Accept` instead of exiting (needs descriptor
+  exhaustion);
+- a command is refused before its host is launched when the registry is full,
+  and `Cancel` no longer holds the command's lock across a host write.

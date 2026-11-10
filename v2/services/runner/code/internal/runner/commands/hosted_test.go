@@ -320,3 +320,39 @@ func TestCloseDuringAHostedStartStopsTheCommand(t *testing.T) {
 		t.Fatalf("command %d still running after Close", pid)
 	}
 }
+
+// When another Runner adopts a command, this Runner stops tracking it: waiting
+// on it returns at once, it frees its capacity, and closing this Runner does
+// not stop what the other one now owns.
+func TestCommandAdoptedElsewhereEndsHereWithoutStopping(t *testing.T) {
+	f := newHosted(t)
+	first := f.open(t)
+	c, err := first.Start(Spec{SessionID: "s", Title: "build", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", f.script()}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := c.Status().ID
+	waitFor(t, "first output never recorded", func() bool { return c.Status().Offset > 0 })
+	second := f.open(t) // Adopts the command, superseding the first Runner.
+	defer second.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	state, err := c.Wait(ctx)
+	if err != nil || !strings.Contains(state.Error, "another Runner") {
+		t.Fatalf("the superseded Runner kept waiting on a command it no longer owns: %+v %v", state, err)
+	}
+	if err = first.Close(); err != nil {
+		t.Fatalf("closing the superseded Runner: %v", err)
+	}
+	if err = os.WriteFile(f.gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	adopted, err := second.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := finished(t, adopted)
+	if final.ExitCode == nil || *final.ExitCode != 4 || final.Error != "" {
+		t.Fatalf("the superseded Runner stopped a command it no longer owns: %+v", final)
+	}
+}

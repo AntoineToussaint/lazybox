@@ -91,13 +91,11 @@ type frame struct {
 	Ack      uint64 `json:"ack,omitempty"`
 	Protocol int    `json:"protocol,omitempty"`
 	// welcome
-	PID      int    `json:"pid,omitempty"`
 	AgentPID int    `json:"agentPid,omitempty"`
 	Proxy    string `json:"proxy,omitempty"`
 	Spawned  bool   `json:"spawned,omitempty"`
 	Exited   bool   `json:"exited,omitempty"`
 	Attached bool   `json:"attached,omitempty"`
-	Next     uint64 `json:"next,omitempty"`
 	// spawn
 	Spec *Spec `json:"spec,omitempty"`
 	// send / msg

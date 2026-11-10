@@ -354,6 +354,64 @@ func TestAdoptStopsHostsNoExecutionClaims(t *testing.T) {
 	}
 }
 
+// A Runner that does not adopt still stops the agent a crashed predecessor
+// left in its host, and leaves a command it re-attached alone.
+func TestRunnerThatDoesNotAdoptStopsAPredecessorsAgents(t *testing.T) {
+	state := t.TempDir()
+	cleanupHosts(t, state)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	orphan, err := sessionhost.Launch(ctx, filepath.Join(state, "hosts"), sessionhost.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = orphan.Spawn(ctx, sessionhost.Spec{Path: "/bin/sleep", Args: []string{"300"}, Cwd: state}); err != nil {
+		t.Fatal(err)
+	}
+	pid := orphan.AgentPID()
+	_ = orphan.Detach()
+	b := fixtureBench(t, state)
+	defer b.Close()
+	if err = b.StopUnclaimedHosts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stoppedEventually(t, pid)
+}
+
+// A host the sweep cannot reach for a reason other than its absence (here an
+// interrupted startup) is left alone: only a gone host's record is forgotten.
+func TestOrphanSweepLeavesAHostItCouldNotProbe(t *testing.T) {
+	state := t.TempDir()
+	cleanupHosts(t, state)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	root := filepath.Join(state, "hosts")
+	host, err := sessionhost.Launch(ctx, root, sessionhost.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = host.Spawn(ctx, sessionhost.Spec{Path: "/bin/sleep", Args: []string{"300"}, Cwd: state}); err != nil {
+		t.Fatal(err)
+	}
+	pid := host.AgentPID()
+	defer host.Detach()
+	b := fixtureBench(t, state)
+	defer b.Close()
+	interrupted, stop := context.WithCancel(ctx)
+	stop()
+	if err = b.stopOrphanHosts(interrupted); err == nil {
+		t.Fatal("an unreachable host was not reported")
+	}
+	// The host notices a deleted directory within about two seconds.
+	time.Sleep(2500 * time.Millisecond)
+	if _, err = os.Stat(filepath.Join(root, host.ID())); err != nil {
+		t.Fatalf("the sweep deleted a host it only failed to reach: %v", err)
+	}
+	if syscall.Kill(pid, 0) != nil {
+		t.Fatal("the sweep stopped a program it only failed to reach")
+	}
+}
+
 // A managed command an agent started keeps running across a graceful Runner
 // restart, and the next Runner owns it: it can read, wait for and cancel it.
 func TestGracefulDetachHandsRunningCommandsToTheNextRunner(t *testing.T) {

@@ -206,7 +206,9 @@ func (s *session) Receive(ctx context.Context) (agent.Event, error) {
 		if err = json.Unmarshal(m.Params, &ev); err != nil {
 			return ev, err
 		}
-		ev.Cursor = m.Seq
+		// One event per worker line: the line completes with it, whatever the
+		// worker's JSON said.
+		ev.Cursor, ev.Partial = m.Seq, false
 		if ev.SessionID != "" && (ev.AgentID == "" || ev.AgentID == "root") {
 			s.mu.Lock()
 			s.ref = ev.SessionID

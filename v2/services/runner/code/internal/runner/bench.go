@@ -197,7 +197,7 @@ func New(cfg Config) (*Bench, error) {
 	}
 	files, err := attachments.New(filepath.Join(cfg.State, "attachments"))
 	if err != nil {
-		_ = manager.Close()
+		_ = manager.Detach()
 		return nil, err
 	}
 	var groups *collections.Manager
@@ -207,12 +207,12 @@ func New(cfg Config) (*Bench, error) {
 		err = errors.New("repositories require an explicit worktreeRoot")
 	}
 	if err != nil {
-		_ = manager.Close()
+		_ = manager.Detach()
 		return nil, err
 	}
 	accountState, err := accounts.OpenState(filepath.Join(cfg.State, "accounts", "availability.json"))
 	if err != nil {
-		_ = manager.Close()
+		_ = manager.Detach()
 		if groups != nil {
 			_ = groups.Close()
 		}
@@ -223,7 +223,7 @@ func New(cfg Config) (*Bench, error) {
 		history, err = sessionstore.OpenSQLite(filepath.Join(cfg.State, "sessions.db"))
 	}
 	if err != nil {
-		manager.Close()
+		_ = manager.Detach()
 		if groups != nil {
 			groups.Close()
 		}
@@ -250,16 +250,16 @@ func New(cfg Config) (*Bench, error) {
 		}
 	}
 	if err != nil {
-		b.Close()
+		_ = b.Detach()
 		return nil, err
 	}
 	b.RepositoryCatalog, err = repositorycatalog.New(repositorycatalog.FileStore{Path: filepath.Join(cfg.State, "repository-catalog.json")})
 	if err != nil {
-		b.Close()
+		_ = b.Detach()
 		return nil, err
 	}
 	if err = b.importLegacy(); err != nil {
-		b.Close()
+		_ = b.Detach()
 		return nil, err
 	}
 	basePrices := telemetry.DefaultRates()
@@ -268,7 +268,7 @@ func New(cfg Config) (*Bench, error) {
 	}
 	b.Preferences, err = preferences.Open(filepath.Join(cfg.State, "runner-settings.json"), basePrices)
 	if err != nil {
-		b.Close()
+		_ = b.Detach()
 		return nil, err
 	}
 	b.Prices = b.Preferences
@@ -277,7 +277,7 @@ func New(cfg Config) (*Bench, error) {
 		b.Meter, err = telemetry.StartGateway(b.Telemetry, b.Prices, cfg.MeterUpstreams)
 	}
 	if err != nil {
-		b.Close()
+		_ = b.Detach()
 		return nil, err
 	}
 	return b, nil

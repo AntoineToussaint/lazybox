@@ -43,20 +43,23 @@ type Engine struct {
 	responses map[string]bool
 	// replayed holds events already recorded from a native line the previous
 	// Runner recorded only in part; the replayed line must not record them twice.
-	replayed  map[string]int
-	mu        sync.Mutex
-	opMu      sync.Mutex
-	provider  agent.Session
-	journal   *journal.Journal
-	ctx       context.Context
-	cancel    context.CancelFunc
-	state     Snapshot
-	queue     []agent.Operation
-	ops       map[string]accepted
-	done      chan struct{}
-	closeOnce sync.Once
-	closeErr  error
-	capture   func(Snapshot, json.RawMessage) error
+	replayed map[string]int
+	// replayedAfter is the last line the previous Runner recorded whole: the
+	// replay ends with the first complete line after it, or a new native session.
+	replayedAfter uint64
+	mu            sync.Mutex
+	opMu          sync.Mutex
+	provider      agent.Session
+	journal       *journal.Journal
+	ctx           context.Context
+	cancel        context.CancelFunc
+	state         Snapshot
+	queue         []agent.Operation
+	ops           map[string]accepted
+	done          chan struct{}
+	closeOnce     sync.Once
+	closeErr      error
+	capture       func(Snapshot, json.RawMessage) error
 	// durable records what a later Runner needs to re-attach; nil disables it.
 	durable     func(Attachment) error
 	lastDurable []byte
@@ -326,6 +329,15 @@ func (e *Engine) appendLocked(value any) bool {
 	return true
 }
 
+// endReplayLocked forgets what the previous Runner recorded of a line once
+// that line is complete, or once a profile switch starts a new native session
+// whose line numbers restart: a leftover must never match a new event.
+func (e *Engine) endReplayLocked(ev agent.Event) {
+	if e.replayed != nil && (ev.Type == "profile_changed" || (!ev.Partial && ev.Cursor > e.replayedAfter)) {
+		e.replayed = nil
+	}
+}
+
 func (e *Engine) receive() {
 	defer close(e.done)
 	for {
@@ -344,10 +356,12 @@ func (e *Engine) receive() {
 		e.mu.Lock()
 		if key := replayKey(ev); ev.Cursor != 0 && e.replayed[key] > 0 {
 			e.replayed[key]--
+			e.endReplayLocked(ev)
 			e.mu.Unlock()
 			e.commit(ev)
 			continue
 		}
+		e.endReplayLocked(ev)
 		rootEvent := ev.AgentID == "" || ev.AgentID == "root"
 		if ev.SessionID != "" && rootEvent {
 			e.state.Reference = ev.SessionID

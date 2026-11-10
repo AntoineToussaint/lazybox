@@ -42,9 +42,12 @@ type Client struct {
 	writeMu  sync.Mutex
 	enc      *json.Encoder
 	frames   chan frame
-	readErr  error
-	done     chan struct{}
-	once     sync.Once
+	// early holds output that arrived before Spawn's reply: a fast program can
+	// write before the host has answered. Next returns it first.
+	early   []frame
+	readErr error
+	done    chan struct{}
+	once    sync.Once
 }
 
 // Options tune a new host. Zero values select the defaults.
@@ -231,21 +234,26 @@ func (c *Client) Spawn(ctx context.Context, spec Spec) error {
 	if err := c.write(frame{Op: "spawn", Spec: &spec}); err != nil {
 		return err
 	}
-	select {
-	case f, ok := <-c.frames:
-		if !ok {
-			return fmt.Errorf("session host closed during spawn: %w", c.readErr)
+	for {
+		select {
+		case f, ok := <-c.frames:
+			if !ok {
+				return fmt.Errorf("session host closed during spawn: %w", c.readErr)
+			}
+			switch f.Op {
+			case "error":
+				return errors.New(f.Text)
+			case "spawned":
+				c.welcome.Spawned, c.welcome.AgentPID = true, f.AgentPID
+				return nil
+			case "msg", "exit":
+				c.early = append(c.early, f)
+			default:
+				return fmt.Errorf("unexpected session host reply %q", f.Op)
+			}
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		if f.Op == "error" {
-			return errors.New(f.Text)
-		}
-		if f.Op != "spawned" {
-			return fmt.Errorf("unexpected session host reply %q", f.Op)
-		}
-		c.welcome.Spawned, c.welcome.AgentPID = true, f.AgentPID
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
@@ -268,29 +276,43 @@ func (c *Client) Release() error { return c.write(frame{Op: "release"}) }
 // another Runner attached; io.EOF means the connection ended otherwise.
 func (c *Client) Next(ctx context.Context) (*Message, *Exit, error) {
 	for {
-		select {
-		case f, ok := <-c.frames:
-			if !ok {
-				if c.readErr != nil && !errors.Is(c.readErr, io.EOF) {
-					return nil, nil, c.readErr
-				}
-				return nil, nil, io.EOF
-			}
-			switch f.Op {
-			case "msg":
-				return &Message{Seq: f.Seq, Line: f.Line, Redelivered: f.Redelivered}, nil, nil
-			case "superseded":
-				return nil, nil, ErrSuperseded
-			case "exit":
-				exit := &Exit{Stderr: f.Text}
-				if f.Outcome != nil {
-					exit.Outcome = *f.Outcome
-				}
-				return nil, exit, nil
-			}
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
+		f, err := c.receive(ctx)
+		if err != nil {
+			return nil, nil, err
 		}
+		switch f.Op {
+		case "msg":
+			return &Message{Seq: f.Seq, Line: f.Line, Redelivered: f.Redelivered}, nil, nil
+		case "superseded":
+			return nil, nil, ErrSuperseded
+		case "exit":
+			exit := &Exit{Stderr: f.Text}
+			if f.Outcome != nil {
+				exit.Outcome = *f.Outcome
+			}
+			return nil, exit, nil
+		}
+	}
+}
+
+// receive returns output held back during Spawn, then the next frame.
+func (c *Client) receive(ctx context.Context) (frame, error) {
+	if len(c.early) > 0 {
+		f := c.early[0]
+		c.early = c.early[1:]
+		return f, nil
+	}
+	select {
+	case f, ok := <-c.frames:
+		if !ok {
+			if c.readErr != nil && !errors.Is(c.readErr, io.EOF) {
+				return frame{}, c.readErr
+			}
+			return frame{}, io.EOF
+		}
+		return f, nil
+	case <-ctx.Done():
+		return frame{}, ctx.Err()
 	}
 }
 

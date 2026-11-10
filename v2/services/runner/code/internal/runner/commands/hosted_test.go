@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -139,6 +140,46 @@ func TestHostedCommandOutlivesARunnerThatDetaches(t *testing.T) {
 	}
 }
 
+// A Runner whose registry fails to open (here an unreadable journal) leaves
+// the commands it had already re-attached running for the next Runner.
+func TestFailedOpenLeavesAdoptedCommandsRunning(t *testing.T) {
+	f := newHosted(t)
+	first := f.open(t)
+	c, err := first.Start(Spec{SessionID: "s", Title: "build", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", f.script()}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := c.Status().ID
+	waitFor(t, "first output never recorded", func() bool { return c.Status().Offset > 0 })
+	if err = first.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	// Sorted after the command's journal, so that command is adopted first.
+	corrupt := filepath.Join(f.dir, "~corrupt.jsonl")
+	if err = os.WriteFile(corrupt, []byte("not a journal\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = NewHosted(f.dir, 1<<20, 0, f.hosts); err == nil {
+		t.Fatal("an unreadable journal was accepted")
+	}
+	if err = os.Remove(corrupt); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(f.gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	next := f.open(t)
+	defer next.Close()
+	adopted, err := next.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := finished(t, adopted)
+	if state.ExitCode == nil || *state.ExitCode != 4 || state.Error != "" {
+		t.Fatalf("the failed open stopped an adopted command: %+v", state)
+	}
+}
+
 // A Runner killed outright (SIGKILL, its whole process group) never detached.
 // Its command keeps running and the next Runner still adopts it.
 func TestHostedCommandOutlivesARunnerKilledWithItsGroup(t *testing.T) {
@@ -245,5 +286,37 @@ func TestAdoptedCommandCanBeCancelled(t *testing.T) {
 	}
 	if state := finished(t, adopted); state.Signal == "" || state.CleanupUnconfirmed() {
 		t.Fatalf("cancelled adopted command: %+v", state)
+	}
+}
+
+// Closing the registry while a hosted command is between registration and
+// spawn still stops that command: shutdown waits for the start to finish.
+func TestCloseDuringAHostedStartStopsTheCommand(t *testing.T) {
+	f := newHosted(t)
+	m := f.open(t)
+	closed := make(chan error, 1)
+	beforeSpawn = func() {
+		go func() { closed <- m.Close() }()
+		waitFor(t, "shutdown never began", func() bool { m.mu.Lock(); defer m.mu.Unlock(); return m.closed })
+	}
+	t.Cleanup(func() { beforeSpawn = func() {} })
+	c, err := m.Start(Spec{SessionID: "s", Title: "serve", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", "echo $$; exec /bin/sleep 300"}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	waitFor(t, "command never reported its pid", func() bool {
+		data, _, _ := c.Read(context.Background(), 0, 0)
+		pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+		return pid > 0 || c.Status().Done
+	})
+	if err = <-closed; err != nil {
+		t.Fatalf("closing during a start: %v", err)
+	}
+	if !c.Status().Done {
+		t.Fatal("a command started during shutdown was left running")
+	}
+	if pid > 0 && syscall.Kill(pid, 0) == nil {
+		t.Fatalf("command %d still running after Close", pid)
 	}
 }

@@ -219,6 +219,11 @@ func (b *Bench) adopt(r sessionstore.Record) error {
 	return nil
 }
 
+// StopUnclaimedHosts stops every agent and command host this Runner is not
+// attached to, without adopting anything. A Runner whose agents stop with it
+// runs it at startup, so a crashed predecessor's agents do not keep running.
+func (b *Bench) StopUnclaimedHosts(ctx context.Context) error { return b.stopOrphanHosts(ctx) }
+
 // stopOrphanHosts stops hosts nothing attached to: agents no adopted execution
 // claimed and commands the command manager did not adopt. This Runner holds the
 // state lock, so no other Runner can be their client.
@@ -232,9 +237,15 @@ func (b *Bench) stopOrphanHosts(ctx context.Context) error {
 		}
 		for _, id := range ids {
 			status, err := sessionhost.Probe(ctx, root, id)
-			if err != nil {
-				// Unreachable: a stale record of a host that died with its machine.
+			if sessionhost.Gone(err) {
+				// A stale record of a host that died, for example with its machine.
 				_ = sessionhost.Forget(root, id)
+				continue
+			}
+			if err != nil {
+				// Slow or interrupted, not gone: deleting its directory would stop
+				// a program that may be live and adopted.
+				errs = append(errs, fmt.Errorf("probe session host %s: %w", id, err))
 				continue
 			}
 			if status.Attached {

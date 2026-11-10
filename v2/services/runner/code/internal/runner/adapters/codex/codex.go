@@ -430,7 +430,7 @@ func (s *session) read() {
 	// marked partial, so the line is acknowledged only once all are recorded.
 	var cursor uint64
 	var batch []agent.Event
-	emit := func(ev agent.Event) bool { ev.Cursor = cursor; batch = append(batch, ev); return true }
+	emit := func(ev agent.Event) { ev.Cursor = cursor; batch = append(batch, ev) }
 	flush := func() bool {
 		for i, ev := range batch {
 			ev.Partial = i < len(batch)-1
@@ -443,13 +443,13 @@ func (s *session) read() {
 		return true
 	}
 	phases := map[string]string{}
-	activity := func(ev agent.Event) bool {
+	activity := func(ev agent.Event) {
 		key := ev.Status + "/" + ev.Name
 		if phases[ev.AgentID] == key {
-			return true
+			return
 		}
 		phases[ev.AgentID] = key
-		return emit(ev)
+		emit(ev)
 	}
 	for {
 		m, err := s.p.Receive(s.ctx)
@@ -513,9 +513,7 @@ func (s *session) read() {
 					if m.Redelivered && s.responded[id] {
 						// Approved before the restart: the command may already have run.
 						_ = s.p.Reply(m.ID, map[string]any{"success": false, "contentItems": []any{map[string]string{"type": "inputText", "text": toolOutcomeUnknown}}})
-						if !emit(agent.Event{Type: "request_resolved", RequestID: id, Status: "outcome_unknown_after_restart"}) {
-							return false
-						}
+						emit(agent.Event{Type: "request_resolved", RequestID: id, Status: "outcome_unknown_after_restart"})
 						return true
 					}
 					ev.Type = "approval"
@@ -528,9 +526,7 @@ func (s *session) read() {
 				s.mu.Lock()
 				s.requests[id] = pending{message: m, tool: p.Tool, args: p.Arguments}
 				s.mu.Unlock()
-				if !emit(ev) {
-					return false
-				}
+				emit(ev)
 				return true
 			}
 			switch m.Method {
@@ -601,9 +597,7 @@ func (s *session) read() {
 				return true
 			case "item/started", "item/completed":
 				for _, activity := range collaborationEvents(m.Params, root) {
-					if !emit(activity) {
-						return false
-					}
+					emit(activity)
 				}
 				ev.Type = "tool_activity"
 				ev.Status = "running"
@@ -631,9 +625,7 @@ func (s *session) read() {
 							phase, name = "tool", detail.Item.Tool
 						}
 					}
-					if !activity(agent.Event{Type: "activity", AgentID: ev.AgentID, Status: phase, Name: name}) {
-						return false
-					}
+					activity(agent.Event{Type: "activity", AgentID: ev.AgentID, Status: phase, Name: name})
 				}
 				if len(ev.Data) == 0 {
 					return true
@@ -642,9 +634,7 @@ func (s *session) read() {
 				return true
 			}
 			if ev.Type == "activity" {
-				if !activity(ev) {
-					return false
-				}
+				activity(ev)
 				return true
 			}
 			if ev.Type == "message_delta" {
@@ -653,9 +643,7 @@ func (s *session) read() {
 			if ev.Type == "turn_ended" {
 				delete(phases, ev.AgentID)
 			}
-			if !emit(ev) {
-				return false
-			}
+			emit(ev)
 			return true
 		}()
 		if !flush() || !ok {

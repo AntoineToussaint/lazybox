@@ -62,6 +62,9 @@ and Dev have separate state, so separate hosts.
   - an unanswered approval simply stays pending (recorded once, not twice).
 - While no Runner is attached the host keeps reading until a 64 MiB buffer is
   full, then stops: the program blocks on its own output instead of losing it.
+- After the program exits, the Runner releases the host only once it has
+  recorded the last output it received. A Runner that dies in between leaves
+  that output and the exit for the next one.
 
 ## What a re-attaching Runner restores
 
@@ -94,14 +97,18 @@ notices in the conversation.
 - Opening the command registry re-attaches every unfinished command with a host.
   A command whose host is gone is reported as `command outcome unknown` (its
   host's exit killed its group); one whose host cannot be adopted is stopped.
+  A Runner that fails to start detaches from what it re-attached rather than
+  stopping it.
 - `Bench.Adopt` runs once at startup. It re-attaches every unclosed execution
   with an attachment record. Then it stops any agent or command host nobody
   attached: a program this Runner cannot supervise must not keep writing in a
-  workspace.
+  workspace. The record of a host it cannot reach is removed only if the host
+  is gone; a slow or interrupted probe is reported and the host left alone.
 - A newer client attaching to a host supersedes the old one and tells it so; the
   superseded Runner stands down and never stops a program it no longer owns.
 - A host whose program exited while no Runner was attached keeps the remaining
-  output and the exit status until a Runner collects them.
+  output and the exit status until a Runner collects them, or until the orphan
+  limit below.
 - A host left with no Runner attached for 24 hours (`DefaultOrphanAfter`) stops
   its program. A restart takes seconds; a day means its environment is no
   longer run, and the program would only spend quota or hold ports for no one.
@@ -110,7 +117,8 @@ notices in the conversation.
   exits. A host removes its directory when it exits.
 - `scripts/runner-command.mjs` sets `LAZYBOX_V2_KEEP_AGENTS=1` for Dev, Working
   and the Codefly service. Ephemeral test Runners keep the old contract: their
-  agents and commands stop with them.
+  agents and commands stop with them, and at startup they stop any agent host
+  a crashed predecessor left behind.
 
 ## Upgrades
 
@@ -138,10 +146,53 @@ install and upgrade:
 A daemon becomes worth its cost if hosts must be reachable without any Runner
 (for example a client attaching directly), which nothing needs today.
 
-## Evidence
+## Testing
 
-Deterministic tests with real processes:
-`go test ./internal/sessionhost ./internal/runner/... ./internal/processguard`.
+| Command (from the repository root) | What it runs | Accounts |
+| --- | --- | --- |
+| `make -C v2 test-outlive` | Every deterministic test below, with the race detector | none |
+| `make -C v2 test` | The whole Go suite, which includes them | none |
+| `make -C v2 test-real-outlive` | The live restart check with real agents | `claude` and `codex` logins; billable |
+
+The deterministic tests start real processes: a session host, a fake agent or
+a shell command, and a Runner that is itself a re-executed test binary, so it
+can be SIGKILLed together with its process group. No provider is called. To
+run one test while iterating, from `v2/services/runner/code`:
+
+```bash
+go test -race -count=1 ./internal/runner/commands -run TestHostedCommandOutlivesARunnerKilledWithItsGroup -v
+```
+
+`test-outlive` also collects data races found inside the session hosts, which
+are re-executed test binaries: their reports would otherwise go to a `host.log`
+deleted on exit. It fails if any process reported one.
+
+A test that fails can leave a host running. List them with
+`pgrep -fl lazybox-session-host-v1`. Each host stops itself once its
+directory, under the test's temporary directory, is gone.
+
+### By hand, in Dev
+
+1. `make -C v2 dev`, then start a conversation.
+2. Ask for something long that uses a command, for example: *Run
+   `sleep 90 && echo finished` with lazybox_command, wait for it, then tell me
+   what it printed.* Approve the command.
+3. While it waits, restart the Runner in any of these ways: save a Go file under
+   `v2/services/runner/code` (hot reload); Ctrl-C the launcher and run
+   `make -C v2 dev` again; or SIGKILL the Runner and run `make -C v2 dev`
+   again.
+4. Expect the following:
+   - `pgrep -fl lazybox-session-host-v1` shows the same agent host and command
+     host before and after the restart.
+   - The conversation shows a **Runner** notice.
+   - The turn finishes and the agent reports `finished`, with nothing resent.
+   - The command's output appears once.
+5. End the session. Its hosts disappear.
+
+Host directories and their `host.log` are under the environment's state
+directory, in `hosts/` and `command-hosts/`.
+
+### Evidence
 
 - `TestRunnerKilledMidTurnIsANoOpForTheAgent`: a Runner process blocked on an
   approval is SIGKILLed together with its process group. A new Runner adopts
@@ -158,6 +209,16 @@ Deterministic tests with real processes:
 - `TestRotationAfterReattachHandsOverTheRecordedConversation`: a rotation after
   a restart still hands over the conversation. Dropping the rebuilt excerpt
   makes it fail.
+- Review fixes, each failing without its fix:
+  `TestOrphanSweepLeavesAHostItCouldNotProbe`,
+  `TestRunnerThatDoesNotAdoptStopsAPredecessorsAgents`,
+  `TestExitedAgentHostKeepsOutputUntilRecorded`,
+  `TestReattachedRunnerUsesFreshRequestIDs`,
+  `TestOrphanedHostWithAFullBufferExits`,
+  `TestOutputBeforeTheSpawnReplyIsKept`,
+  `TestFailedOpenLeavesAdoptedCommandsRunning`,
+  `TestCloseDuringAHostedStartStopsTheCommand`,
+  `TestReplayDeduplicationEndsWithTheReplayedLine`.
 - Redelivery, backpressure, proxy re-pointing, token authentication, the
   version window, stream mode, orphan limit, terminate-kills-descendants, and
   exit while detached: `internal/sessionhost`.
@@ -182,3 +243,19 @@ Live:
 - A Dev hot reload, live.
 - A machine reboot still ends every agent and command. Native resume remains
   the fallback there.
+
+**Known gaps** (found in review, not fixed yet):
+- A user's *decline* is not journaled with its approval, so a declined
+  `lazybox_command` call redelivered after a restart is handled as answered:
+  `read`/`wait` run, and `start`/`cancel` are reported as outcome unknown.
+- A Runner that stops consuming output for 30 seconds is disconnected by its
+  hosts as if it had died; the agent keeps running unattached.
+- A superseded connection's operations (an acknowledgement, a proxy upstream)
+  are still applied until it closes, which can take seconds.
+- Writing to an agent's stdin runs on the control connection's reader, so an
+  agent that stops reading stdin delays that connection's acknowledgements.
+- The unauthenticated hello has no size limit before the token check, and a
+  failing `Accept` ends the host.
+- A message the agent received is placed in the rebuilt conversation where it
+  was accepted, not where it was delivered, and text replayed through a
+  rotation can repeat in the excerpt it hands over.

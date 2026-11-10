@@ -56,6 +56,12 @@ type Process struct {
 	closeHostErr  error
 	commitMu      sync.Mutex
 	commit        uint64
+	// delivered is the transport cursor of the last line handed to Receive.
+	// After the agent exits, the host is released only once commit reaches
+	// it: until then the host still holds output this Runner has not recorded.
+	delivered   uint64
+	exitSeen    bool
+	releaseOnce sync.Once
 }
 
 // Keep bounded startup diagnostics while redacting credential values from the

@@ -16,7 +16,7 @@ WORKSPACE_MANIFESTS := $(wildcard apps/*/package.json packages/*/package.json wo
 
 .PHONY: help deps generate check check-go check-workspaces build build-go build-worker build-web test test-real test-browser fmt fmt-check run web
 help:
-	@printf '%s\n' 'make dev        Build and run isolated Lazybox Dev' 'make stage      Validate and freeze a Working candidate' 'make promote RELEASE=<id>  Pin a candidate for the next Working launch' 'make working    Run the pinned Working installation' 'make run        Run the Codefly gRPC Runner with temporary ports' 'make desktop    Build and launch the native Tauri agent window' 'make web        Optional browser test client (prints its authenticated URL)' 'make check      Format, vet, typecheck, test, generated-code and workspace checks' 'make check-desktop Native Rust format, tests, and clippy' 'make test       Deterministic Go tests' 'make test-real  Explicit real-provider tests; requires existing provider login' 'make build      Compile the Runner, test CLI, SDK worker, and browser client'
+	@printf '%s\n' 'make dev        Build and run isolated Lazybox Dev' 'make stage      Validate and freeze a Working candidate' 'make promote RELEASE=<id>  Pin a candidate for the next Working launch' 'make working    Run the pinned Working installation' 'make run        Run the Codefly gRPC Runner with temporary ports' 'make desktop    Build and launch the native Tauri agent window' 'make web        Optional browser test client (prints its authenticated URL)' 'make check      Format, vet, typecheck, test, generated-code and workspace checks' 'make check-desktop Native Rust format, tests, and clippy' 'make test       Deterministic Go tests' 'make test-outlive  Race-checked tests that agents and commands outlive a Runner restart' 'make test-real  Explicit real-provider tests; requires existing provider login' 'make build      Compile the Runner, test CLI, SDK worker, and browser client'
 
 deps: node_modules/.package-lock.json
 node_modules/.package-lock.json: package.json package-lock.json $(WORKSPACE_MANIFESTS)
@@ -131,7 +131,7 @@ test-repositories: deps
 	npm run test:repositories
 	npm run test:repository-picker
 
-.PHONY: test-dogfood check-dogfood test-real-dogfood test-real-outlive
+.PHONY: test-dogfood check-dogfood test-real-dogfood test-outlive test-real-outlive
 test-dogfood: deps
 	npm run test:dogfood
 .PHONY: check-release list-release-gates
@@ -141,5 +141,14 @@ list-release-gates:
 	node scripts/release-gates.mjs list release
 test-real-dogfood: build-worker
 	cd $(GO_ROOT) && LAZYBOX_V2_REAL=1 LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -timeout 6m -v ./tests/integration -run '^TestRealDogfoodContinuity$$'
+OUTLIVE_PACKAGES := ./internal/sessionhost ./internal/processguard ./internal/agent/... ./internal/runner ./internal/runner/commands ./internal/runner/engine ./internal/runner/rotation ./internal/runner/adapters/...
+# Session hosts are re-executed test binaries, so they run with the race
+# detector too; their reports would go to host.log, which a host deletes on
+# exit. GORACE sends every process's reports to RACE_LOGS instead.
+RACE_LOGS := $(abspath .cache/race)
+test-outlive: build-worker
+	rm -rf $(RACE_LOGS) && mkdir -p $(RACE_LOGS)
+	cd $(GO_ROOT) && GORACE="log_path=$(RACE_LOGS)/race" LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -race -count=1 -timeout 6m $(OUTLIVE_PACKAGES); \
+	status=$$?; if ls $(RACE_LOGS)/race.* >/dev/null 2>&1; then cat $(RACE_LOGS)/race.*; echo 'data races reported (above)'; exit 1; fi; exit $$status
 test-real-outlive: build-worker
 	cd $(GO_ROOT) && LAZYBOX_V2_REAL=1 LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -timeout 14m -v ./tests/integration -run '^TestRealAgentOutlivesRunnerRestart$$'

@@ -76,7 +76,14 @@ type Manager struct {
 	hostRoot string
 	items    map[string]*Command
 	closed   bool
+	// starting counts hosted starts between registration and their first
+	// follow: shutdown waits for them, or it would see a command with no host
+	// yet and miss the program that starts a moment later.
+	starting sync.WaitGroup
 }
+
+// beforeSpawn is a test seam: it runs just before a hosted command spawns.
+var beforeSpawn = func() {}
 
 func New(dir string, perCommandBudget int64) (*Manager, error) {
 	return NewWithLimit(dir, perCommandBudget, 0)
@@ -92,7 +99,9 @@ func NewWithLimit(dir string, perCommandBudget int64, maxLive int) (*Manager, er
 // NewHosted runs every managed command in its own session host under hostRoot,
 // so a command outlives the Runner that started it. It re-attaches to the hosts
 // of commands a previous Runner left running and resumes their capture exactly
-// after the last chunk it recorded.
+// after the last chunk it recorded. If opening fails, the commands it had
+// already re-attached are detached again, never stopped: a Runner that cannot
+// start does not take running work down with it.
 func NewHosted(dir string, perCommandBudget int64, maxLive int, hostRoot string) (*Manager, error) {
 	if hostRoot != "" && !filepath.IsAbs(hostRoot) {
 		return nil, errors.New("command host root must be absolute")
@@ -120,7 +129,7 @@ func NewHosted(dir string, perCommandBudget int64, maxLive int, hostRoot string)
 		}
 		spool, err := journal.OpenExisting(filepath.Join(dir, entry.Name()), perCommandBudget)
 		if err != nil {
-			m.Close()
+			m.Detach()
 			return nil, err
 		}
 		var state Status
@@ -130,13 +139,13 @@ func NewHosted(dir string, perCommandBudget int64, maxLive int, hostRoot string)
 			record, err := spool.Next(context.Background(), cursor)
 			if err != nil {
 				spool.Dispose()
-				m.Close()
+				m.Detach()
 				return nil, err
 			}
 			var output Output
 			if err = json.Unmarshal(record.Value, &output); err != nil {
 				spool.Dispose()
-				m.Close()
+				m.Detach()
 				return nil, err
 			}
 			if output.Status != nil {
@@ -157,7 +166,7 @@ func NewHosted(dir string, perCommandBudget int64, maxLive int, hostRoot string)
 		if !state.Done && host != "" {
 			spool.Dispose()
 			if spool, err = journal.Open(filepath.Join(dir, entry.Name()), perCommandBudget); err != nil {
-				m.Close()
+				m.Detach()
 				return nil, err
 			}
 			c := &Command{spool: spool, status: state, finished: make(chan struct{}), hostID: host, hostRoot: hostRoot, seq: seq}
@@ -212,6 +221,9 @@ func (m *Manager) register(spec Spec, host *sessionhost.Client) (*Command, error
 	if _, err = spool.Append(Output{Type: "registered", Status: ptr(c.status), Host: c.hostID}); err != nil {
 		spool.Dispose()
 		return nil, err
+	}
+	if host != nil {
+		m.starting.Add(1) // Under m.mu with closed checked: shutdown cannot miss it.
 	}
 	m.items[id] = c
 	return c, nil
@@ -379,6 +391,9 @@ func (m *Manager) startHosted(spec Spec) (*Command, error) {
 		}
 		return nil, err
 	}
+	if host != nil {
+		defer m.starting.Done()
+	}
 	if launchErr != nil {
 		c.finish(nil, "", fmt.Errorf("start failed: %w", launchErr))
 		return c, nil
@@ -391,6 +406,7 @@ func (m *Manager) startHosted(spec Spec) (*Command, error) {
 		c.finish(nil, "", errors.New("runner closed before command start"))
 		return c, nil
 	}
+	beforeSpawn()
 	err = host.Spawn(ctx, sessionhost.Spec{Path: spec.Argv[0], Args: spec.Argv[1:], Env: spec.Env, Cwd: spec.Cwd, Stream: true})
 	if err != nil {
 		_ = sessionhost.Stop(ctx, m.hostRoot, host.ID())
@@ -607,6 +623,9 @@ func (m *Manager) Detach() error { return m.shutdown(true) }
 func (m *Manager) shutdown(detach bool) error {
 	m.mu.Lock()
 	m.closed = true
+	m.mu.Unlock()
+	m.starting.Wait()
+	m.mu.Lock()
 	items := make([]*Command, 0, len(m.items))
 	for _, c := range m.items {
 		items = append(items, c)

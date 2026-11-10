@@ -183,19 +183,20 @@ func (h *host) watchdog() {
 		if time.Since(checked) > 2*time.Second {
 			checked = time.Now()
 			if _, err := os.Stat(h.cfg.Dir); errors.Is(err, os.ErrNotExist) {
-				h.terminate()
-				h.mu.Lock()
-				h.released = true
-				h.cond.Broadcast()
-				h.mu.Unlock()
+				h.abandon()
 			}
 		}
 		h.mu.Lock()
 		done := h.finished() || (!h.spawned && h.client == nil && time.Since(start) > 30*time.Second)
-		orphaned := h.spawned && !h.stopping && h.client == nil && time.Since(h.unattached) > h.cfg.OrphanAfter
+		orphaned := !done && h.spawned && !h.stopping && h.client == nil && time.Since(h.unattached) > h.cfg.OrphanAfter
+		if orphaned {
+			// Claimed under the lock, so no later tick decides it again.
+			h.stopping = true
+		}
 		h.mu.Unlock()
 		if orphaned {
-			go h.terminate()
+			h.abandon()
+			continue
 		}
 		if done {
 			// Nothing here is needed once the host is gone; a Runner looking for
@@ -205,6 +206,17 @@ func (h *host) watchdog() {
 			os.Exit(0)
 		}
 	}
+}
+
+// abandon stops the program for good and lets the host exit, discarding what
+// it still holds: nobody will collect it. Releasing also frees a reader blocked
+// on a full buffer, which would otherwise keep the host alive forever.
+func (h *host) abandon() {
+	h.terminate()
+	h.mu.Lock()
+	h.released = true
+	h.cond.Broadcast()
+	h.mu.Unlock()
 }
 
 func (h *host) handle(raw net.Conn) {

@@ -346,6 +346,11 @@ provider requests in temporary two-repository fixtures, restarts the Runner and
 checks native conversation memory and metering persistence. It never enrolls an
 account, rewrites permission settings, or changes an existing project.
 
+`make -C v2 test-outlive` runs the deterministic, race-checked tests that agents
+and commands outlive a Runner restart, including a Runner SIGKILLed with its
+process group. They use real processes and need no account. How to check the
+same by hand in Dev is in [SESSION_HOSTS.md](SESSION_HOSTS.md#testing).
+
 `make -C v2 test-real-outlive` is the live check that a Runner restart is a
 no-op for an agent. It uses your existing `claude` and `codex` logins through the
 metered gateway: it detaches the Runner while a reply is streaming, starts a new

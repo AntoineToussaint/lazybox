@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/v2/internal/processguard"
@@ -49,7 +50,7 @@ func (h *Host) Start(ctx context.Context, binary string, args, env []string, cwd
 		h.Abandon()
 		return nil, err
 	}
-	return hosted(ctx, h.root, h.client), nil
+	return hosted(ctx, h.root, h.client, 0), nil
 }
 
 // Attach re-connects to a host started by an earlier Runner. ack is the highest
@@ -63,13 +64,20 @@ func Attach(ctx context.Context, root, id string, ack uint64) (*Process, error) 
 		_ = c.Detach()
 		return nil, errors.New("session host never started its agent")
 	}
-	p := hosted(ctx, root, c)
-	p.commit = ack
+	p := hosted(ctx, root, c, ack)
+	// The previous Runner's calls may still be answered on this host. Start
+	// this Runner's request IDs elsewhere, so a late reply to one of them is
+	// never taken for the answer to a new call.
+	p.mu.Lock()
+	p.next = rand.Uint64() >> 1
+	p.mu.Unlock()
 	return p, nil
 }
 
-func hosted(ctx context.Context, root string, c *sessionhost.Client) *Process {
-	p := &Process{host: c, hostRoot: root, pending: map[string]chan Message{}, events: make(chan Message, 256), done: make(chan struct{}), exited: make(chan struct{}), stderr: &diagnostics{}}
+// hosted wraps a host connection. ack is the cursor already recorded, set
+// before the reader starts.
+func hosted(ctx context.Context, root string, c *sessionhost.Client, ack uint64) *Process {
+	p := &Process{host: c, hostRoot: root, commit: ack, pending: map[string]chan Message{}, events: make(chan Message, 256), done: make(chan struct{}), exited: make(chan struct{}), stderr: &diagnostics{}}
 	go p.readHosted()
 	go func() {
 		select {
@@ -116,9 +124,14 @@ func (p *Process) readHosted() {
 			if exit.Stderr != "" {
 				reason = fmt.Errorf("%w; adapter stderr: %s", reason, exit.Stderr)
 			}
-			_ = p.host.Release()
 			p.stop(reason)
-			_ = p.host.Detach()
+			p.commitMu.Lock()
+			p.exitSeen = true
+			recorded := p.commit >= p.delivered
+			p.commitMu.Unlock()
+			if recorded {
+				p.release()
+			}
 			return
 		}
 		var msg Message
@@ -141,6 +154,9 @@ func (p *Process) readHosted() {
 			// A reply has no event; it is recorded once the next event commits.
 			continue
 		}
+		p.commitMu.Lock()
+		p.delivered = m.Seq
+		p.commitMu.Unlock()
 		// Unlike a local pipe, a hosted stream applies backpressure instead of
 		// failing: the host keeps the output until this Runner catches up.
 		select {
@@ -176,17 +192,32 @@ func (p *Process) SetUpstream(url string) error {
 
 // Commit acknowledges every line up to seq as durably recorded by the Runner,
 // letting the host release it. Cumulative and monotonic; zero is ignored.
+// Once the agent has exited and its last delivered line is recorded, the host
+// has nothing left to keep and is released.
 func (p *Process) Commit(seq uint64) {
 	if p.host == nil || seq == 0 {
 		return
 	}
 	p.commitMu.Lock()
-	defer p.commitMu.Unlock()
 	if seq <= p.commit {
+		p.commitMu.Unlock()
 		return
 	}
 	p.commit = seq
 	_ = p.host.Ack(seq)
+	done := p.exitSeen && seq >= p.delivered
+	p.commitMu.Unlock()
+	if done {
+		p.release()
+	}
+}
+
+// release lets the host of an exited agent go away and ends this connection.
+func (p *Process) release() {
+	p.releaseOnce.Do(func() {
+		_ = p.host.Release()
+		_ = p.host.Detach()
+	})
 }
 
 // Detach leaves a hosted agent running for a later Runner. It is an error for
@@ -217,6 +248,13 @@ func (p *Process) terminateHosted() error {
 	}
 	select {
 	case <-p.exited:
+		// Closing is the end of this Runner's interest, recorded or not.
+		p.commitMu.Lock()
+		exitSeen := p.exitSeen
+		p.commitMu.Unlock()
+		if exitSeen {
+			p.release()
+		}
 		return p.exitErr
 	default:
 	}
@@ -232,6 +270,15 @@ func (p *Process) terminateHosted() error {
 	case <-time.After(2 * time.Second):
 	}
 	if err != nil {
+		// The exit may have arrived while Stop ran: the host then went away
+		// on its own, and the exit this Process observed is the confirmation.
+		p.commitMu.Lock()
+		exitSeen := p.exitSeen
+		p.commitMu.Unlock()
+		if exitSeen {
+			p.release()
+			return p.exitErr
+		}
 		return fmt.Errorf("native exit remains unconfirmed: %w", err)
 	}
 	return nil

@@ -748,3 +748,74 @@ func TestOrphanedHostStopsItsProgram(t *testing.T) {
 		t.Fatal("the orphan limit stopped a program whose Runner is attached")
 	}
 }
+
+// An orphaned command whose output filled the buffer still stops and its host
+// exits: the reader blocked on the full buffer must not keep the host alive.
+func TestOrphanedHostWithAFullBufferExits(t *testing.T) {
+	dir := root(t)
+	ctx := deadline(t)
+	c, err := Launch(ctx, dir, Options{BufferLimit: 64 << 10, OrphanAfter: 500 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Spawn(ctx, streamSpec(`exec /usr/bin/yes`)); err != nil {
+		t.Fatal(err)
+	}
+	record, err := ReadRecord(filepath.Join(dir, c.ID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := c.AgentPID()
+	_ = c.Detach()
+	eventually(t, "orphaned program kept running", func() bool { return !alive(program) })
+	eventually(t, "orphaned host with a full buffer never exited", func() bool { return !alive(record.PID) })
+	if _, err = os.Stat(filepath.Join(dir, c.ID())); !os.IsNotExist(err) {
+		t.Fatalf("orphaned host kept its directory: %v", err)
+	}
+}
+
+// A fast program can write before the host has answered Spawn. That output
+// is neither an error nor lost: Next returns it first. A fake host forces the
+// order, which a real one only produces under unlucky scheduling.
+func TestOutputBeforeTheSpawnReplyIsKept(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		raw, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer raw.Close()
+		dec, enc := json.NewDecoder(raw), json.NewEncoder(raw)
+		var f frame
+		_ = dec.Decode(&f) // hello
+		_ = enc.Encode(frame{Op: "welcome", Protocol: Protocol})
+		_ = dec.Decode(&f) // spawn
+		_ = enc.Encode(frame{Op: "msg", Seq: 1, Line: json.RawMessage(`{"early":true}`)})
+		_ = enc.Encode(frame{Op: "spawned", AgentPID: 42})
+		_ = enc.Encode(frame{Op: "msg", Seq: 2, Line: json.RawMessage(`{"later":true}`)})
+		_, _ = io.Copy(io.Discard, raw)
+	}()
+	ctx := deadline(t)
+	record := Record{Protocol: Protocol, ID: "fake", Port: ln.Addr().(*net.TCPAddr).Port, Token: strings.Repeat("x", 32)}
+	c, err := dial(ctx, t.TempDir(), record, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Detach()
+	if err = c.Spawn(ctx, Spec{Path: "/bin/true"}); err != nil {
+		t.Fatalf("output before the spawn reply failed the spawn: %v", err)
+	}
+	if c.AgentPID() != 42 {
+		t.Fatalf("agent pid %d", c.AgentPID())
+	}
+	for _, want := range []uint64{1, 2} {
+		m, _, err := c.Next(ctx)
+		if err != nil || m == nil || m.Seq != want {
+			t.Fatalf("want line %d, got %+v %v", want, m, err)
+		}
+	}
+}

@@ -245,6 +245,35 @@ func TestLineRecordedInPartIsCompletedOnceAfterAdoption(t *testing.T) {
 	}
 }
 
+// What the previous Runner recorded of a line only deduplicates that line's
+// replay: once it completes, an identical event is new and is recorded.
+func TestReplayDeduplicationEndsWithTheReplayedLine(t *testing.T) {
+	e, native, st, path := durableEngine(t)
+	native.Events <- agent.Event{Type: "turn_started", SessionID: "native-ref", Cursor: 6}
+	native.Events <- agent.Event{Type: "activity", Status: "thinking", Cursor: 7, Partial: true}
+	await(t, e, "activity")
+	if err := e.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	next, a, err := adopt(t, path, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The replayed line 7 now yields different events: the recorded activity
+	// is not among them, so its entry is left over when the line completes.
+	a.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed", Cursor: 7}
+	await(t, next, "turn_ended")
+	// A new native session numbers its lines from 1 again (after a profile
+	// switch); an event identical to the leftover must still be recorded.
+	a.Session.Events <- agent.Event{Type: "profile_changed", Text: "other"}
+	a.Session.Events <- agent.Event{Type: "activity", Status: "thinking", Cursor: 7, Partial: true}
+	a.Session.Events <- agent.Event{Type: "message_delta", Text: "marker", Cursor: 7}
+	await(t, next, "message_delta")
+	if counts := journalTypes(t, next); counts["activity"] != 2 {
+		t.Fatalf("a new event matching a leftover replay entry was dropped: %v", counts)
+	}
+}
+
 // Adoption hands the layers above the conversation the journal recorded, minus
 // messages still queued (they join it when delivered).
 func TestAdoptionPassesTheRecordedConversation(t *testing.T) {

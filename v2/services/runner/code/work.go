@@ -84,7 +84,7 @@ func configureRunner(ctx context.Context, config *adapters.Configuration) (Clean
 	}
 	runnerID, err := bench.History.Identity(ctx)
 	if err != nil {
-		bench.Close()
+		_ = bench.Detach() // A failed start leaves adopted commands running.
 		lock.Close()
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func configureRunner(ctx context.Context, config *adapters.Configuration) (Clean
 		}
 	}
 	if err != nil {
-		bench.Close()
+		_ = bench.Detach() // A failed start leaves adopted commands running.
 		lock.Close()
 		return nil, err
 	}
@@ -118,6 +118,8 @@ func configureRunner(ctx context.Context, config *adapters.Configuration) (Clean
 		if err = bench.Adopt(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "V2 Runner: some live executions were not re-attached: %v\n", err)
 		}
+	} else if err = bench.StopUnclaimedHosts(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "V2 Runner: some agents of a previous Runner were not stopped: %v\n", err)
 	}
 	shutdown := bench.Close
 	if keepAgents {

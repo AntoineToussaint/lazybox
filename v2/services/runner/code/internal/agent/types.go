@@ -57,9 +57,11 @@ type Attachment struct {
 	// request in this set may have had effects whose outcome is now unknown.
 	Responded map[string]bool
 	// Transcript is the conversation as the journal recorded it, oldest first:
-	// each delivered user message as "\nUSER: <prompt>\n" followed by the root
-	// agent's reply text. A layer that hands the conversation to a new native
-	// session rebuilds its excerpt from it.
+	// each user message the agent was given or may have been given (accepted
+	// and no longer queued) as "\nUSER: <prompt>\n", followed by the root
+	// agent's reply text. A message is placed where it was accepted, which can
+	// precede the end of the reply it was queued behind. A layer that hands the
+	// conversation to a new native session rebuilds its excerpt from it.
 	Transcript string
 }
 

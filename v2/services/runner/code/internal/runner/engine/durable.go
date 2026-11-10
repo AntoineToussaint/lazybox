@@ -200,7 +200,7 @@ func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *j
 		// Fingerprints are not journaled; a retried ID returns its first receipt.
 		e.ops[id] = accepted{receipt: r, adopted: true}
 	}
-	e.replayed = scan.partial
+	e.replayed, e.replayedAfter = scan.partial, scan.cursor
 	ok := e.appendLocked(agent.Event{Type: "runner_reattached", Status: "native_process_adopted", Cursor: scan.cursor})
 	e.mu.Unlock()
 	if !ok {

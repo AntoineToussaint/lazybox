@@ -100,7 +100,7 @@ export function highlight(target: Target, options: { label?: string; hold?: numb
 // ---- The person -------------------------------------------------------------
 
 const KEY_LABELS: Record<string, string> = { Mod: '⌘', Meta: '⌘', Control: '⌃', Alt: '⌥', Shift: '⇧', Enter: '↵', Escape: 'esc', Backspace: '⌫', Tab: '⇥', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Space: 'space' };
-const playwrightKeys = (keys: string) => keys.split('+').map(k => k === 'Mod' ? 'ControlOrMeta' : k).join('+');
+const playwrightKeys = (keys: string) => keys.split('+').map(k => k === 'Mod' ? 'Meta' : k).join('+');
 
 /** Presses keys, shown on screen as keycaps: `press('Mod+K')`, `press('Enter')`, `press('j')`. */
 export function press(keys: string, options: { label?: string } = {}): Step {
@@ -114,7 +114,7 @@ export function press(keys: string, options: { label?: string } = {}): Step {
 }
 
 /** Clicks something, the pointer gliding there first. */
-export function click(target: Target, options: { button?: 'left' | 'right'; modifiers?: ('Alt' | 'Shift' | 'ControlOrMeta')[] } = {}): Step {
+export function click(target: Target, options: { button?: 'left' | 'right'; modifiers?: ('Alt' | 'Shift' | 'Meta')[] } = {}): Step {
   return step('person', `${options.button === 'right' ? 'right-click' : 'click'} ${target.describe}`, async ctx => {
     const locator = target.locate(ctx.page);
     await ctx.check(`${target.describe} is visible`, () => playwrightExpect(locator).toBeVisible({ timeout: ctx.timeout }));

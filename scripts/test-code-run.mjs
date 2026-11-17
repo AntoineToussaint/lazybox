@@ -9,7 +9,7 @@
 // conversation warns; inline commands offer the same from their menu; the
 // palette and ] ] r open the last block in the terminal. Fake Runner only.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.agents=[];session.status='ready';
@@ -184,7 +184,7 @@ try{
  const shellFocused=()=>expect(page.locator('.panel-terminal').getByTestId('terminal').locator('textarea')).toBeFocused();
  await shellFocused();
  await messages.click({position:{x:5,y:5}});
- await page.keyboard.press('ControlOrMeta+k');
+ await page.keyboard.press('Meta+k');
  const palette=page.getByRole('dialog',{name:'Command palette'});
  await palette.getByRole('combobox',{name:'Search commands'}).fill('>run the last command');
  await expect(palette.getByRole('option',{name:/Run the last command block as command output/})).toBeVisible();

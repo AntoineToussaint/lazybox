@@ -3,7 +3,7 @@
 // a Lazybox-managed command (last lines, more on request, the console), stops
 // that command or interrupts the turn (saying which), and carries the
 // sub-agents at work. Narrow layouts and reduced motion included.
-import {testViteCache} from './fixtures/vite-cache.mjs';import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {testViteCache} from './fixtures/vite-cache.mjs';import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 
 const f=await startRunnerFixture();
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');

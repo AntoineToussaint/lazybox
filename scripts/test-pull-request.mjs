@@ -4,7 +4,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {chromium,expect} from '@playwright/test';
+import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -41,7 +41,7 @@ try{
  channel.push({type:'message_delta',text:'Here it is:\n```lazybox-commit\nAdd the API contract\n\nKeeps the web client and the API in step.\n```'});
  await expect(message).toHaveValue('Add the API contract\n\nKeeps the web client and the API in step.');await expect(dialog).toContainText('Written by the agent');
  await dialog.getByRole('checkbox',{name:/new-view\.tsx/}).uncheck();await expect(dialog).toContainText('1 of 2 changed files');await mkdir('.cache',{recursive:true});await page.screenshot({path:'.cache/pull-request-commit.png'});
- await message.press('ControlOrMeta+Enter');await expect(dialog).toHaveCount(0);
+ await message.press('Meta+Enter');await expect(dialog).toHaveCount(0);
  const committed=fixture.mutations.find(m=>m.method==='CommitWorkspaceChanges').body;assert.deepEqual(committed.paths,['contract.ts']);assert.match(committed.message,/^Add the API contract/);
  await expect(changes.getByRole('status').filter({hasText:'Committed 1 file'})).toBeVisible();
 

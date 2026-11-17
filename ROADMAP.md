@@ -64,6 +64,11 @@ No R0–R4 outcome is marked complete by this audit.
 surveys the state of the art and proposes an Expo iPhone app, an end-to-end-encrypted
 relay and a phased Hub (V2 805, V2 806); its decisions are open.
 
+**Proposal, 2026-11-17:** [Runners on other computers](REMOTE_RUNNERS.md)
+designs the full Lazybox experience on a remote machine (a VM, a cloud box,
+a second Mac, a devcontainer): owner and device access, one `RunnerLink` over
+SSH, the tailnet, the relay or the Hub, the Linux Runner, and phases P0–P3.
+
 ## November 3 delivery review (historical)
 
 <a id="current-delivery-order--critical-review-2026-11-03"></a>

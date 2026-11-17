@@ -6,7 +6,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {webkit,chromium,expect} from '@playwright/test';
+import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -80,7 +80,7 @@ try{
  // 6. ⌘↵ opens the peeked item here, for real.
  await betaLink.press('Space');
  await expect(page.getByRole('dialog',{name:'Peek: Ship the release'})).toBeVisible();
- await page.keyboard.press('ControlOrMeta+Enter');
+ await page.keyboard.press('Meta+Enter');
  await expect(page.locator('.peek-dialog')).toHaveCount(0);
  await expect(betaLink).toHaveAttribute('aria-current','page');
 

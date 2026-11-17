@@ -112,6 +112,11 @@ client against fake Runners.
 
 ## Step 3: Runners on other machines (designed, not built)
 
+> **Superseded in scope by [Runners on other computers](REMOTE_RUNNERS.md)**
+> (proposal, 2026-11-17): owner access to your own remote machines over SSH,
+> the tailnet, a relay or the Hub, with per-client keys. The see-and-answer
+> mode below becomes its *device* access level.
+
 A remote Runner is reached through **its device gateway**, as a phone reaches
 it — never with its owner bearer, which must not leave its machine.
 

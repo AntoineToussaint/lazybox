@@ -5,7 +5,7 @@
 // inline as one quiet line each (grouped reads and edits, expandable, ANSI
 // output, errors visible, "Open full details"). Fake Runner only.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.busy=true;session.agents=[{id:'root',status:'running'}];
@@ -55,7 +55,7 @@ try{
  await card.getByRole('textbox',{name:'Your own answer to: What should the table be called?'}).fill('query_cache');
  await expect(card.getByRole('button',{name:'Send answer'})).toBeEnabled();
  await page.screenshot({path:'.cache/chat-decisions-question.png'});
- await page.keyboard.press('ControlOrMeta+Enter');
+ await page.keyboard.press('Meta+Enter');
  await expect.poll(()=>applied('answer')).toEqual([{requestId:'question-1',answers:{
   'Which database should the cache use?':{values:['SQLite']},'Which checks should run before merge?':{values:['Unit tests','E2E']},'What should the table be called?':{values:['query_cache']}}}]);
  // Answered: the card goes, one quiet line says what was answered.

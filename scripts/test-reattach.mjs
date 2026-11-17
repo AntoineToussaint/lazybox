@@ -13,7 +13,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {webkit,expect} from '@playwright/test';
+import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -79,7 +79,7 @@ async function scenario(browser,scheme){
  await expect(strip).toHaveCount(0);
  // ⇧⌘D in its window.
  popup=await popout();
- closed=popup.waitForEvent('close');await popup.locator('section.workspace-panel.panel-editor').click();await popup.keyboard.press('ControlOrMeta+Shift+d').catch(gone);await closed;
+ closed=popup.waitForEvent('close');await popup.locator('section.workspace-panel.panel-editor').click();await popup.keyboard.press('Meta+Shift+d').catch(gone);await closed;
  await expect.poll(()=>within(content('editor'),editorAt),{message:'⇧⌘D put it back where it was'}).toBe(true);
  // Closing its window puts it back too.
  popup=await popout();
@@ -102,7 +102,7 @@ async function scenario(browser,scheme){
  await expect.poll(()=>within(content('chat'),chatAt),{message:'the chat is back where it was'}).toBe(true);
  await expect(strip).toHaveCount(0);
  chatWindow=await detachChat();
- closed=chatWindow.waitForEvent('close');await chatWindow.getByRole('textbox',{name:'Message',exact:true}).click();await chatWindow.keyboard.press('ControlOrMeta+Shift+d').catch(gone);await closed;
+ closed=chatWindow.waitForEvent('close');await chatWindow.getByRole('textbox',{name:'Message',exact:true}).click();await chatWindow.keyboard.press('Meta+Shift+d').catch(gone);await closed;
  await expect.poll(()=>within(content('chat'),chatAt),{message:'⇧⌘D in the chat window put it back'}).toBe(true);
  chatWindow=await detachChat();
  closed=chatWindow.waitForEvent('close');await chatWindow.close();await closed;
@@ -133,7 +133,7 @@ async function scenario(browser,scheme){
  const palette=page.getByRole('dialog',{name:'Command palette'});
  popup=await popout();
  await page.bringToFront();
- await page.keyboard.press('ControlOrMeta+k');await expect(palette).toBeVisible();
+ await page.keyboard.press('Meta+k');await expect(palette).toBeVisible();
  await palette.getByRole('combobox',{name:'Search commands'}).fill('put back');
  await expect(palette.getByRole('option',{name:/Put Editor back in main window/})).toBeVisible();
  await expect(palette.getByRole('option',{name:/Put all windows back/})).toBeVisible();
@@ -141,7 +141,7 @@ async function scenario(browser,scheme){
  closed=popup.waitForEvent('close');await palette.getByRole('option',{name:/Put Editor back in main window/}).click();await closed;
  await expect.poll(()=>within(content('editor'),editorAlone),{message:'the palette put the editor back'}).toBe(true);
  await expect(strip.getByRole('listitem')).toHaveCount(1);
- await page.keyboard.press('ControlOrMeta+k');await expect(palette).toBeVisible();
+ await page.keyboard.press('Meta+k');await expect(palette).toBeVisible();
  await palette.getByRole('combobox',{name:'Search commands'}).fill('put all windows back');
  closed=chatWindow.waitForEvent('close');await palette.getByRole('option',{name:/Put all windows back/}).click();await closed;
  await expect.poll(()=>within(content('chat'),chatAt),{message:'the palette put the chat back'}).toBe(true);

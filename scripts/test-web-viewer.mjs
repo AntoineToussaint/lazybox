@@ -8,7 +8,7 @@
 // reload. Chromium; TEST_WEBKIT=1 runs WebKit.
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { chromium, webkit, expect } from '@playwright/test';
+import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -25,7 +25,7 @@ const nativeServer = await createServer({ ...testViteCache(import.meta.url), con
 // The dock tab of the nth Web panel.
 const webTabIn = (page, n) => page.locator('.dv-tab').filter({ has: page.locator('[data-kind="web"]') }).nth(n);
 const engine = process.env.TEST_WEBKIT ? webkit : chromium;
-const alt = process.platform === 'darwin' ? '⌥' : 'Alt';
+const alt = '⌥';
 let browser;
 try {
   await server.listen(); browser = await engine.launch({ headless: true });

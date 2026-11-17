@@ -8,7 +8,7 @@
 import { testViteCache } from './fixtures/vite-cache.mjs';
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { webkit, expect } from '@playwright/test';
+import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -51,7 +51,9 @@ try {
     used = 404000;
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    const errors = []; page.on('pageerror', e => errors.push(String(e)));
+    // Leaving a page cuts its in-flight polls, which WebKit reports as page errors ("access control checks") on the page being left: not failures. Anything else is.
+    const errors = []; let leaving = 0; page.on('pageerror', e => { const text = String(e); if (leaving && /access control checks/.test(text)) return; errors.push(text); });
+    const leave = async to => { leaving++; try { await page.goto(to); } finally { leaving--; } };
     let reads = 0;
     await page.route('**/GetTelemetry', route => { reads++; return route.fulfill({ json: telemetry() }); });
     await page.goto(url(session.id));
@@ -138,7 +140,7 @@ try {
 
     // A phone: the percentage alone.
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(url(session.id));
+    await leave(url(session.id));
     await expect(contextButton).toHaveText('91.2%');
     await expect.poll(() => shown(info)).toEqual({ agent: false, 'model-name': false, meter: false, percent: true });
     await composer.screenshot({ path: `.cache/composer-info-phone-${scheme}.png` });
@@ -151,7 +153,7 @@ try {
 
     // A conversation that has not started has nothing to say yet.
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(url('beta-session'));
+    await leave(url('beta-session'));
     await expect(page.locator('.panel-chat form.composer')).toBeVisible();
     await expect(page.locator('.panel-chat .composer-info')).toHaveCount(0);
     assert.deepEqual(errors, []);

@@ -4,7 +4,8 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { loadGateCatalog, selectGates, shardGates, runGateCatalog, validateReleaseReceipt, executeGate, summarizeGateReport } from './release-gates.mjs';
+import { loadGateCatalog, selectGates, shardGates, runGateCatalog, validateReleaseReceipt, executeGate, summarizeGateReport, changedFiles } from './release-gates.mjs';
+import { digestTree } from './environments.mjs';
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'lazybox-gates-'));
@@ -171,4 +172,19 @@ test('CI retries a failed UI gate once and reports it flaky; staging never retri
   assert.throws(() => validateReleaseReceipt(forged, catalog, 'source-digest'), /two/);
   const retried = structuredClone(release); retried.retryFlaky = true;
   assert.throws(() => validateReleaseReceipt(retried, catalog, 'source-digest'), /complete passing/);
+});
+
+test('a run the source changed under names the files that changed', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'lazybox-gates-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'docs')); await mkdir(join(root, '.cache'));
+  await writeFile(join(root, 'kept.md'), 'same'); await writeFile(join(root, 'docs/shot.png'), 'old');
+  const before = new Map(), after = new Map();
+  const first = await digestTree(root, undefined, before);
+  await writeFile(join(root, 'docs/shot.png'), 'new'); await writeFile(join(root, 'added.ts'), 'x'); await writeFile(join(root, '.cache/ignored.png'), 'x');
+  const second = await digestTree(root, undefined, after);
+  assert.notEqual(first, second);
+  assert.deepEqual(changedFiles(before, after), ['added.ts', 'docs/shot.png']);
+  const report = { profile: 'ui', status: 'failed', results: [{ id: 'one', status: 'passed', exitCode: 0, durationMs: 1 }], sourceChanged: ['docs/shot.png'] };
+  assert.match(summarizeGateReport(report), /source changed during the run[^]*`docs\/shot\.png`/);
 });

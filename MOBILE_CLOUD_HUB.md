@@ -7,6 +7,9 @@ the user can make. It amends nothing by itself: [D16](DECISIONS.md#remote-contro
 (tailnet transport) and C17 (the shared Hub lives outside this repository)
 remain in force until the user decides otherwise ([§6](#6-decisions-for-the-user)).
 
+Owner access to your own remote machines (SSH, tailnet, relay, the Hub as one
+more route) is designed in [Runners on other computers](REMOTE_RUNNERS.md).
+
 Read with [Remote](REMOTE.md) (the phone today), [Device experience](DEVICE_EXPERIENCE.md)
 (the intended phone/iPad/desktop flows and Hub contract), [Several Runners](MULTI_RUNNER.md),
 [Agents outlive the Runner](SESSION_HOSTS.md) and [Architecture](ARCHITECTURE.md).

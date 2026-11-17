@@ -7,7 +7,7 @@
 // welcome shows the same check. Fixture only: no agent runs.
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {chromium, expect} from '@playwright/test';
+import {chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';

@@ -8,7 +8,7 @@
 // ends as its findings count; the sidebar's row brings that tab to the front.
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {chromium,expect} from '@playwright/test';
+import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -31,7 +31,7 @@ try{
  const url=`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}#token=${fixture.token}`;
  const open=async()=>{const page=await browser.newPage({viewport:{width:1500,height:1000}});page.setDefaultTimeout(10000);page.on('pageerror',e=>errors.push(String(e)));await page.goto(url);await expect(page.locator('.messages:visible')).toContainText('REPLY_ONE');return page;};
  const errors=[];
- const mod=process.platform==='darwin'?'Meta':'Control';
+ const mod='Meta';
  let page=await open();
  const chat=()=>page.locator('section.panel-chat:visible');
  const tabs=()=>page.locator('[data-panel-tab]');

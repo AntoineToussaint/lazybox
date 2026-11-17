@@ -7,7 +7,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {chromium, devices, expect} from '@playwright/test';
+import {chromium, devices, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -78,7 +78,7 @@ try {
   await expect(page.getByRole('region', {name: 'Workspace changes'})).toBeVisible();
 
   // 3. The panel, from the palette: three groups and the mentions apart.
-  await page.keyboard.press('ControlOrMeta+k');
+  await page.keyboard.press('Meta+k');
   await page.keyboard.type('Show pull requests');
   await page.keyboard.press('Enter');
   const panel = page.locator('.pull-requests-panel');

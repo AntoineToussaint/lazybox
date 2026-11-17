@@ -6,7 +6,7 @@
 // line; Quiet is one line per turn. A conversation's own choice (⋯ menu,
 // palette, ] ] v) and the default (Settings → Chat) are remembered. Fake Runner only.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.busy=true;session.status='running';session.agents=[{id:'root',status:'running'}];
@@ -101,7 +101,7 @@ try{
 
  // ── Quiet, from the command palette: one line per turn, edits kept, the failure counted.
  await messages.click({position:{x:5,y:5}});
- await page.keyboard.press('ControlOrMeta+k');
+ await page.keyboard.press('Meta+k');
  const palette=page.getByRole('dialog',{name:'Command palette'});
  await palette.getByRole('combobox',{name:'Search commands'}).fill('>activity detail');
  await expect(palette.getByRole('option',{name:/Activity detail: Verbose/})).toHaveCount(0);

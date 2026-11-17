@@ -1,5 +1,5 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 const f=await startRunnerFixture(),channel=f.openEvents('alpha-session');Object.assign(f.sessions[0],{status:'running',busy:true,agents:[{id:'root',status:'running'}]});
 let clock=Date.now()-120000;
 function push(data,at){channel.events.push({cursor:String(channel.events.length+1),capturedAt:new Date(at).toISOString(),event:{type:'tool_activity',providerDataJson:Buffer.from(JSON.stringify(data)).toString('base64')}});}

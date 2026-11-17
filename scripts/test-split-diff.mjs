@@ -6,7 +6,7 @@
 // Viewed files that stay viewed across a reload until their diff changes.
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {chromium,expect} from '@playwright/test';
+import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -87,7 +87,7 @@ try{
  await diff.getByRole('button',{name:'Comment on line 3',exact:true}).click();
  let composer=changes.getByRole('form',{name:'Comment on line 3'});
  await composer.getByRole('textbox',{name:'Comment'}).fill('Return a typed error.');
- await composer.getByRole('textbox',{name:'Comment'}).press('ControlOrMeta+Enter');await expect(composer).toHaveCount(0);
+ await composer.getByRole('textbox',{name:'Comment'}).press('Meta+Enter');await expect(composer).toHaveCount(0);
  const adds=()=>fixture.mutations.filter(m=>m.method==='AddReviewComment').map(m=>m.body);
  assert.deepEqual((({side,startLine,snippet,view})=>({side,startLine,snippet,view}))(adds()[0]),{side:'new',startLine:3,snippet:['func Handle() error {'],view:'uncommitted'});
  await diff.getByRole('button',{name:'Comment on removed line 34'}).focus();await page.keyboard.press('Enter');

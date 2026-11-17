@@ -58,12 +58,11 @@ into parallel jobs:
 
 | Job | Runner | Runs |
 | --- | --- | --- |
-| `go` | macOS | `make fmt-check check-go`, `make test` at full parallelism, then `make test-outlive` (`-race`, `GOMAXPROCS=1`) |
+| `go` | macOS | `make fmt-check check-go`, `make test` at full parallelism, `make test-outlive` (`-race`, `GOMAXPROCS=1`), then the launcher's `make test-environments` |
 | `generated` | Linux | `make check-generated`: Codefly + Buf regeneration drift, `buf lint`, `buf breaking` |
 | `typescript` | Linux | `make check-workspaces`: typecheck, workspace links, `test:client`, `test:worker` |
-| `launcher` | macOS | `make test-environments` |
 | `desktop` | macOS | `make check-desktop` |
-| `ui` ×3 | macOS | every `scope: "ui"` gate, through this gate runner |
+| `ui` ×3 | Linux | every `scope: "ui"` gate, through this gate runner |
 | `typos` | Linux | spelling across the repository ([`typos.toml`](typos.toml)) |
 
 The UI matrix comes from this catalog, never a copy of it:
@@ -77,14 +76,15 @@ fails the first job, as it fails staging. A failed shard uploads the
 screenshots its suites saved (`.cache/*.png`, `/tmp/lazybox-*.png`) and its
 gate report. The suites drive Playwright as a library, so there are no traces.
 
-macOS is where the product's platform matters. The Runner does not compile for
+macOS runs only what cannot run elsewhere: the Runner does not compile for
 Linux today (`internal/processguard` calls `syscall.Getsid`, which Go defines
-only for darwin/BSD), the launcher and Working packaging refuse other hosts,
-Tauri embeds WKWebView, and the UI suites drive Playwright WebKit with layout
-and scroll assertions written on macOS. The repository is private, so macOS
-minutes are billed (at the macOS rate) against the account's included minutes;
-at most five macOS jobs run at once per account, so one of these six macOS jobs
-can queue behind the others.
+only for darwin/BSD), the launcher refuses other hosts, and Tauri embeds
+WKWebView. CI runs the UI gates on Linux: they drive Playwright against the
+fixture Runner, and the suites take their browsers from
+[`scripts/fixtures/playwright.mjs`](scripts/fixtures/playwright.mjs), whose
+pages report macOS off a Mac, so ⌘ stays ⌘ (the suites press `Meta`). Run
+`make stage` on a Mac before a release: it runs every gate there, the UI gates
+in macOS WebKit included.
 
 `generated` installs the Codefly CLI release that produced the committed output
 (pinned in the workflow, checksum-verified; v0.1.212 reproduces it byte for byte). `codefly sync` downloads the
@@ -125,8 +125,10 @@ existing launcher cleanup for its descendants. Cleanup failure cannot become a
 passing gate.
 
 The policy fingerprint includes npm script commands, the catalog, Makefile and
-gate runner implementation. Source mutation during checking fails the run.
-Receipts are local validation records, not signed attestations against a malicious
+gate runner implementation. Source mutation during checking fails the run,
+even when every gate passed; the run names the files that changed (the
+receipt's `sourceChanged`, the log, and the CI job summary). A gate writes only
+under `.cache` or a temporary directory. Receipts are local validation records, not signed attestations against a malicious
 operator with write access to the release store. External toolchain distributions
 still need P00/P02 version qualification and packaging.
 
@@ -176,7 +178,7 @@ absolute budgets apply only with `PERF_STRICT=1`, on a quiet machine.
 
 ### Flaky in CI
 
-GitHub's macOS runners are slower than a development machine (3 cores, a
+GitHub's runners are slower than a development machine (a few cores, a
 cold Vite dependency cache for every suite), and a UI suite that waits on the
 wrong signal fails there first. So that one such flake does not fail a pull
 request while staying in sight, CI's UI shards run the gate runner with

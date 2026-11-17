@@ -6,7 +6,7 @@
 import { testViteCache } from './fixtures/vite-cache.mjs';
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { webkit, expect } from '@playwright/test';
+import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';

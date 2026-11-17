@@ -4,7 +4,7 @@
 // never stealing focus, reopened from Help).
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {chromium,expect} from '@playwright/test';
+import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {mkdir} from 'node:fs/promises';

@@ -10,7 +10,7 @@
 // Screenshots, dark and light, in .cache/orchestration-{page,timeline,messages,leases}-*.png.
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { chromium, webkit, expect } from '@playwright/test';
+import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
@@ -61,7 +61,7 @@ async function run(scheme) {
   await expect(page.locator('.panel-chat').getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
 
   // ⌘K → the board opens as a page of its own, with room for its columns.
-  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+k' : 'Control+k');
+  await page.keyboard.press('Meta+k');
   await page.keyboard.type('missions board');
   await page.getByRole('option', { name: /Open the missions board/ }).click();
   const panel = page.getByRole('region', { name: 'Missions and tasks', exact: true });

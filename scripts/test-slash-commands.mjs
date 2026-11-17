@@ -5,7 +5,7 @@
 // an unknown /word asks before it is sent, a path is just a message, Vim
 // insert mode works, and ⌘K, the ⋯ menu and the header reach the same pickers.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 const f=await startRunnerFixture();
 const data=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const catalog={commands:[{name:'compact',description:'Clear history but keep a summary',argumentHint:'<instructions>',builtin:true},{name:'review-pr',description:'Review a pull request',argumentHint:'<number>'},{name:'init',description:'Initialize a CLAUDE.md',argumentHint:'',builtin:true},{name:'model',description:'native',argumentHint:''}],models:[{value:'claude-opus-5-5',displayName:'Opus 5.5',description:'Most capable'},{value:'claude-sonnet-5',displayName:'Sonnet 5',description:'Fast and capable'}]};
@@ -18,7 +18,7 @@ f.openEvents('beta-session');
 f.sessions.push({...structuredClone(f.sessions[1]),id:'codex-session',conversationId:'codex-conversation',title:'Codex refactor',provider:'codex',profileId:'codex-default',model:'gpt-6.1-sol',modelReported:true,busy:false,status:'ready',capabilities:{...f.sessions[1].capabilities,liveModel:true,resume:true,steer:true}});
 f.openEvents('codex-session').push({type:'command_catalog',providerDataJson:data({models:[{value:'gpt-6.1-sol',displayName:'GPT-6.1-Sol',description:'Workhorse'},{value:'gpt-6-astra',displayName:'GPT-6-Astra',description:'Frontier'},{value:'gpt-6-luna',displayName:'GPT-6-Luna',description:'Fast'},{value:'gpt-5.5',displayName:'GPT-5.5',description:'Legacy'}]})});
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,logLevel:'error',root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:f.url}}}});let browser;
-const mod=process.platform==='darwin'?'Meta':'Control';
+const mod='Meta';
 const applies=()=>f.mutations.filter(m=>m.method==='Apply');
 try{
  await server.listen();await mkdir('.cache',{recursive:true});browser=await webkit.launch();const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(15000);
@@ -127,7 +127,8 @@ try{
  await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe('/usr/local/bin is missing');
 
  // /detail and /help do the real thing.
- await page.keyboard.type('/detail verbose');await page.keyboard.press('Enter');
+ // The box takes no keys while the send above is in flight, and empties once it is answered: type after that.
+ await expect(message).toHaveValue('');await page.keyboard.type('/detail verbose');await page.keyboard.press('Enter');
  await expect(page.locator('.toast').filter({hasText:'Activity detail: Verbose'})).toBeVisible();
  await page.keyboard.type('/help');await page.keyboard.press('Enter');
  await expect(page.getByRole('dialog',{name:/Keyboard shortcuts/})).toBeVisible();
@@ -276,7 +277,7 @@ try{
  await page.keyboard.press('Escape');await expect(menu).toBeHidden();await expect(chip).toHaveText('INSERT','the first Esc only closes the menu');
  await page.keyboard.press('Escape');await expect(chip).toHaveText('NORMAL');
  await expect(menu).toBeHidden();
- await page.keyboard.press('i');await expect(chip).toHaveText('INSERT');await page.keyboard.press(`${mod}+a`);await page.keyboard.press('Backspace');await expect(message).toHaveValue('');
+ await page.keyboard.press('i');await expect(chip).toHaveText('INSERT');await page.keyboard.press('ControlOrMeta+a');await page.keyboard.press('Backspace');await expect(message).toHaveValue('');
  await page.keyboard.type('/permissions read');
  await expect(chat.getByRole('listbox',{name:'/permissions choices'}).getByRole('option',{selected:true})).toContainText('Read only');
  await page.keyboard.press('Enter');

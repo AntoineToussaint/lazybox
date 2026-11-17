@@ -1,7 +1,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {webkit,expect} from '@playwright/test';
+import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
@@ -26,9 +26,9 @@ try{
  await expect.poll(()=>fixture.calls.filter(call=>call.method==='WatchEvents'&&call.body.sessionId==='alpha-session').at(-1)?.body.after).toBe('1');
  await page.screenshot({path:'/tmp/lazybox-navigation-verified.png'});await page.getByRole('button',{name:'README',exact:true}).click({modifiers:['Alt']});const dialog=page.getByRole('dialog',{name:'File preview',exact:true});
  await expect(dialog).toContainText('A retained file.');assert.ok((await dialog.boundingBox()).height>700);
- await dialog.getByRole('button',{name:'Edit file',exact:true}).click();const editor=dialog.getByRole('textbox',{name:'File source editor',exact:true});await expect(editor).toBeVisible();await editor.focus();await page.keyboard.press('ControlOrMeta+a');await page.keyboard.insertText('edited from Monaco\n');
+ await dialog.getByRole('button',{name:'Edit file',exact:true}).click();const editor=dialog.getByRole('textbox',{name:'File source editor',exact:true});await expect(editor).toBeVisible();await editor.focus();await page.keyboard.press('Meta+a');await page.keyboard.insertText('edited from Monaco\n');
  await dialog.getByRole('button',{name:'Save',exact:true}).click();await expect(dialog).toContainText('Saved');assert.equal(fixture.workspaceFiles.get('alpha/api/README.md').text,'edited from Monaco\n');
- await editor.focus();await page.keyboard.press('ControlOrMeta+a');await page.keyboard.insertText('unsaved draft');fixture.workspaceFiles.get('alpha/api/README.md').version='changed-on-disk';
+ await editor.focus();await page.keyboard.press('Meta+a');await page.keyboard.insertText('unsaved draft');fixture.workspaceFiles.get('alpha/api/README.md').version='changed-on-disk';
  await dialog.getByRole('button',{name:'Save',exact:true}).click();await expect(dialog.getByRole('alert')).toContainText('File changed');await expect(dialog.locator('.view-lines')).toContainText('unsaved draft');
  await page.keyboard.press('Escape');await expect(dialog).toBeVisible();await expect(dialog.getByText('Discard your unsaved changes?')).toBeVisible();await dialog.getByRole('button',{name:'Keep editing'}).click();
  await dialog.getByRole('button',{name:'Maximize file window'}).click();assert.ok((await dialog.boundingBox()).width>1400);

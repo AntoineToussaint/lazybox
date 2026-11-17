@@ -1,5 +1,5 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.busy=true;session.agents=[{id:'root',status:'running'}];
 const request={type:'approval',requestId:'approval-1',text:'Bash',providerDataJson:Buffer.from(JSON.stringify({tool:'Bash',input:{command:'ls && git log --oneline -5',description:'List repository contents and recent commits'},toolUseId:'tool-1'})).toString('base64')};session.pending=[request];session.status='waiting_approval';
 const channel=fixture.openEvents(session.id);channel.push(request);

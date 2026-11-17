@@ -5,7 +5,7 @@
 // second window.
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {chromium,expect} from '@playwright/test';
+import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -59,7 +59,7 @@ try{
  await expect(diff.getByRole('row',{selected:true})).toHaveCount(2);
  await field.fill('Return the error instead of **logging** it.');
  await mkdir('.cache',{recursive:true});await page.screenshot({path:'.cache/review-compose.png'});
- await field.press('ControlOrMeta+Enter');await expect(composer).toHaveCount(0);
+ await field.press('Meta+Enter');await expect(composer).toHaveCount(0);
  const added=fixture.mutations.find(m=>m.method==='AddReviewComment').body;
  assert.deepEqual({member:added.member,path:added.path,side:added.side,startLine:added.startLine,snippet:added.snippet,view:added.view},
   {member:'api',path:'src/handler.go',side:'new',startLine:3,snippet:['func Handle() error {','\tlog.Print("handle")'],view:'uncommitted'});

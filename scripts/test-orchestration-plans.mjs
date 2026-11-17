@@ -10,7 +10,7 @@
 // Screenshots, dark and light, in .cache/orchestration-{plan,budget}-*.png.
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { chromium, webkit, expect } from '@playwright/test';
+import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
@@ -97,7 +97,7 @@ async function run(scheme) {
   await sheet.getByLabel('Agents at once').fill('2');
   await expect(sheet.getByRole('button', { name: 'Approve with $12 cap' })).toBeEnabled();
   await page.screenshot({ path: `${shots}orchestration-plan-${scheme}.png` });
-  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await page.keyboard.press('Meta+Enter');
   await expect(sheet).toHaveCount(0);
   const approved = updates().find(u => u.approvePlan);
   assert.equal(approved.approvePlan.planId, plan.id);

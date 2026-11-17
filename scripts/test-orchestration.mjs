@@ -10,7 +10,7 @@
 // Screenshots, dark and light, in .cache/orchestration-*.png.
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { chromium, webkit, expect } from '@playwright/test';
+import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';

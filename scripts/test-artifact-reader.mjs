@@ -14,7 +14,7 @@
 // (print to PDF is Chromium's).
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { chromium, expect } from '@playwright/test';
+import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdir, writeFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';

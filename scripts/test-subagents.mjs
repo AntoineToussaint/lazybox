@@ -3,7 +3,7 @@
 // inline cards with live current action, their own timelines, the tray beside
 // the composer, the tree, the panel (docked, floating, phone sheet), stopping
 // one, and the failed one in the parent's status line.
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 
 const f=await startRunnerFixture();
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');

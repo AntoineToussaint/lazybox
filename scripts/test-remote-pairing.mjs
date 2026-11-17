@@ -7,7 +7,7 @@
 // never calls an RPC off the device allowlist. Fake Runner; no agent runs.
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { webkit, chromium, devices, expect } from '@playwright/test';
+import { webkit, chromium, devices, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';

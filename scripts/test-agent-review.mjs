@@ -10,7 +10,7 @@
 // are test-review-from-chat.mjs's.
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {chromium,expect} from '@playwright/test';
+import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -46,7 +46,7 @@ try{
  browser=await chromium.launch({headless:true});
  let page=await browser.newPage({viewport:{width:1500,height:1000}});page.setDefaultTimeout(10000);
  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
- const mod=process.platform==='darwin'?'Meta':'Control';
+ const mod='Meta';
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}#token=${fixture.token}`);
  await expect(page.locator('.messages:visible')).toContainText('REPLY_ONE');
  await page.getByRole('button',{name:'Review changes',exact:true}).click();

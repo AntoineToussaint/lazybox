@@ -3,7 +3,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {webkit,expect} from '@playwright/test';
+import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -66,9 +66,9 @@ try{
 
  // Edit: the tab and the tree mark unsaved changes; Cmd/Ctrl+S saves through the Runner.
  await tabs(0).filter({hasText:'main.go'}).click();
- await source.focus();await page.keyboard.press('ControlOrMeta+a');await page.keyboard.insertText('package main // edited\n');
+ await source.focus();await page.keyboard.press('Meta+a');await page.keyboard.insertText('package main // edited\n');
  await expect(tabs(0).filter({hasText:'main.go'})).toHaveClass(/is-dirty/);await expect(tree.locator('[data-path="api/src/main.go"] .tree-dirty')).toHaveCount(1);
- await page.keyboard.press('ControlOrMeta+s');
+ await page.keyboard.press('Meta+s');
  await expect(tabs(0).filter({hasText:'main.go'})).not.toHaveClass(/is-dirty/);
  await expect.poll(()=>fixture.workspaceFiles.get('alpha/api/src/main.go').text).toBe('package main // edited\n');
  // Closing an unsaved file asks; Cancel keeps it, Discard closes it.
@@ -89,18 +89,18 @@ try{
  await expect(tabs(0)).toHaveText(before);
  // The editor's keys are its own only while it has the focus: from the Files tree, ⌘\ and ⌘⌥\ do not split it.
  await tree.locator('[data-path="api/src/routes.ts"]').focus();
- await page.keyboard.press('ControlOrMeta+Alt+Backslash');await page.keyboard.press('ControlOrMeta+Backslash');
+ await page.keyboard.press('Meta+Alt+Backslash');await page.keyboard.press('Meta+Backslash');
  await expect(editorPanel.locator('.editor-group')).toHaveCount(2);
  await page.keyboard.press('Escape');
  await tabs(1).nth(1).click();
- await page.keyboard.press('ControlOrMeta+Alt+Backslash');
+ await page.keyboard.press('Meta+Alt+Backslash');
  await expect(editorPanel.locator('.editor-group')).toHaveCount(3);await expect(editorPanel.locator('.editor-split.split-column')).toHaveCount(1);
  // Reorder within a group from the keyboard.
  await editorPanel.locator('.editor-group').nth(1).getByRole('tab').first().click();
- await page.keyboard.press('ControlOrMeta+Alt+Shift+ArrowRight');
+ await page.keyboard.press('Meta+Alt+Shift+ArrowRight');
  await expect(tabs(1).nth(1)).toHaveClass(/is-active/);
  const order=await tabs(1).allTextContents();
- await page.keyboard.press('ControlOrMeta+Alt+ArrowLeft');await expect(tabs(1).nth(0)).toHaveClass(/is-active/);
+ await page.keyboard.press('Meta+Alt+ArrowLeft');await expect(tabs(1).nth(0)).toHaveClass(/is-active/);
  await page.screenshot({path:'.cache/file-navigation-split.png'});
 
  // The arrangement survives a reload.
@@ -114,7 +114,7 @@ try{
 
  // Go to file: Cmd/Ctrl+P, fuzzy, recent files with no query, name:line.
  await page.locator('[data-agent-composer]:visible').first().focus();
- await page.keyboard.press('ControlOrMeta+p');
+ await page.keyboard.press('Meta+p');
  const finder=page.getByRole('dialog',{name:'Go to file'});await expect(finder).toBeVisible();
  await expect(finder).toContainText('Recently opened');
  await page.keyboard.type('rts');

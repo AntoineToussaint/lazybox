@@ -9,7 +9,7 @@
 import { testViteCache } from './fixtures/vite-cache.mjs';
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { chromium, expect } from '@playwright/test';
+import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -108,7 +108,7 @@ try {
   const viewer = page.getByRole('region', { name: 'Web page' }).first();
   await expect(viewer.getByRole('textbox', { name: 'Address', exact: true })).toHaveValue('http://localhost:57771/');
   // ⌘/Ctrl-click opens the browser instead.
-  const [tab] = await Promise.all([context.waitForEvent('page'), milestones.filter({ hasText: 'Local:' }).getByRole('link', { name: 'http://localhost:57771' }).click({ modifiers: ['ControlOrMeta'] })]);
+  const [tab] = await Promise.all([context.waitForEvent('page'), milestones.filter({ hasText: 'Local:' }).getByRole('link', { name: 'http://localhost:57771' }).click({ modifiers: ['Meta'] })]);
   await expect.poll(() => tab.url()).toMatch(/^http:\/\/localhost:57771\/?$/);
   await tab.close(); await page.bringToFront();
   await page.getByRole('tab', { name: 'Command output', exact: true }).click();

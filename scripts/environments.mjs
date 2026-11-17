@@ -30,7 +30,8 @@ const excluded = new Set(['.cache', '.codefly', 'node_modules', 'target', 'dist'
 export function includeSource(relativePath) {
   return !relativePath.split(/[\\/]/).some(part => excluded.has(part) || part === 'runner.config.json' || part === '.env' || part.startsWith('.env.') && part !== '.env.example' || part.endsWith('.log') || part.endsWith('.tsbuildinfo'));
 }
-export async function digestTree(root, filter = includeSource) {
+// `files`, when given, receives each file's own digest, so a caller can name what changed between two snapshots.
+export async function digestTree(root, filter = includeSource, files) {
   const hash = createHash('sha256');
   const walk = async path => {
     for (const name of (await readdir(path)).sort()) {
@@ -39,7 +40,7 @@ export async function digestTree(root, filter = includeSource) {
       const stat = await lstat(full);
       if (stat.isSymbolicLink()) throw new Error(`Source snapshot contains a symlink: ${rel}`);
       if (stat.isDirectory()) await walk(full);
-      else if (stat.isFile()) { hash.update(JSON.stringify([rel, stat.size, stat.mode & 0o111])); hash.update(await readFile(full)); }
+      else if (stat.isFile()) { const header = JSON.stringify([rel, stat.size, stat.mode & 0o111]), data = await readFile(full); hash.update(header); hash.update(data); files?.set(rel, createHash('sha256').update(header).update(data).digest('hex')); }
     }
   };
   await walk(root); return hash.digest('hex');

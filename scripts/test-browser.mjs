@@ -1,5 +1,5 @@
 import { createServer } from 'vite';
-import { chromium, expect } from '@playwright/test';
+import { chromium, expect } from './fixtures/playwright.mjs';
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';

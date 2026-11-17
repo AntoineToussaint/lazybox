@@ -1,7 +1,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
-import { webkit, expect } from "@playwright/test";
+import { webkit, expect } from "./fixtures/playwright.mjs";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { startRunnerFixture } from "./fixtures/runner-ui.mjs";
@@ -37,8 +37,12 @@ try {
     viewport: { width: 1280, height: 900 },
   });
   page.setDefaultTimeout(10000);
+  // Leaving a page (the reload, the goto below) cuts its in-flight polls, which WebKit
+  // reports as page errors ("access control checks") on the page being left: not failures. Anything else is.
   const errors = [];
-  page.on("pageerror", (e) => errors.push(String(e)));
+  let leaving = 0;
+  page.on("pageerror", (e) => { const text = String(e); if (leaving && /access control checks/.test(text)) return; errors.push(text); });
+  const leave = async (go) => { leaving++; try { await go(); } finally { leaving--; } };
   await page.goto(
     `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${f.token}`,
   );
@@ -103,7 +107,7 @@ try {
   const created = f.collections.find((c) => c.name === "Datasource work");
   assert.equal(created.members.length, 2);
   await page.waitForLoadState("networkidle");
-  await page.reload();
+  await leave(() => page.reload());
   const row = page
     .locator(".workspace-row")
     .filter({ hasText: "Datasource work" });
@@ -158,7 +162,7 @@ try {
   );
   await page.screenshot({ path: "/tmp/lazybox-unified-repositories.png" });
   // A long selection must not hide the primary action on small screens.
-  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${f.token}`);
+  await leave(() => page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${f.token}`));
   await page.route('**/GetRepositoryCatalog', route => route.fulfill({json:{
     entries:Array.from({length:20},(_,i)=>({identity:`github:large-team/service-with-a-long-name-${i}`,name:`large-team/service-with-a-long-name-${i}`})),
     sources:[{id:'github',state:'connected'}],refreshSeconds:300

@@ -13,7 +13,7 @@
 // ⌘↵ (Send now's key) sends the typed message now while the agent works, the
 // oldest queued one from an empty box, and is an ordinary send while idle.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 
 const f=await startRunnerFixture();
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
@@ -44,7 +44,7 @@ try{
  const chat=page.locator('.embedded-chat:visible').first(),composer=chat.getByRole('textbox',{name:'Message',exact:true});
  const strip=chat.getByRole('region',{name:'Queued messages'});
  // Send now's key, as the app shows it and as it is pressed.
- const mac=await page.evaluate(()=>/Mac|iPhone|iPad/.test(navigator.platform)),nowKey=mac?'⌘↵':'Ctrl+↵',sendNowKey='ControlOrMeta+Enter';
+ const mac=await page.evaluate(()=>/Mac|iPhone|iPad/.test(navigator.platform)),nowKey=mac?'⌘↵':'Ctrl+↵',sendNowKey='Meta+Enter';
  const hint=chat.locator('.composer .keyboard-hint');
 
  // ── Sent during a busy turn, the message waits, and the strip says why.

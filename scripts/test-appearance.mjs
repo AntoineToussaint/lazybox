@@ -7,7 +7,7 @@
 // and its mistakes are shown in Settings. Fixture only: no provider.
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { chromium, expect } from '@playwright/test';
+import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -210,7 +210,7 @@ try {
   await panel.getByRole('button', { name: 'Reset all' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   // The command palette switches light and dark from anywhere.
-  await page.keyboard.press('ControlOrMeta+k');
+  await page.keyboard.press('Meta+k');
   await page.keyboard.type('Switch between light and dark');
   await page.keyboard.press('Enter');
   await expect(page.locator('html')).toHaveAttribute('data-scheme', 'dark');

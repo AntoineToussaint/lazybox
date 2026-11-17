@@ -9,7 +9,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {webkit,expect} from '@playwright/test';
+import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -168,7 +168,7 @@ try{
  const editor=page.locator('section.workspace-panel.panel-editor');
  const source=editor.getByRole('textbox',{name:'File source editor'}).first();
  await expect(source).toBeVisible();
- await source.focus();await page.keyboard.press('ControlOrMeta+a');await page.keyboard.insertText('unsaved through a window\n');
+ await source.focus();await page.keyboard.press('Meta+a');await page.keyboard.insertText('unsaved through a window\n');
  await expect(editor.locator('.view-lines')).toContainText('unsaved through a window');
  await editor.evaluate(node=>{node.dataset.identity='editor';});
  await shot(page,'files-editor');

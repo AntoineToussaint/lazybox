@@ -8,7 +8,7 @@
 // shell panel; and Subscription rotation, the extension that turns automatic
 // switching on, with its warning for Claude.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 const f=await startRunnerFixture();
 // Someone for whom both changes matter, as the migration leaves them: switching was on (kept, through the
 // extension), and Claude subscriptions were saved in Lazybox (kept working: sign-in carried over on), one imported from a token.

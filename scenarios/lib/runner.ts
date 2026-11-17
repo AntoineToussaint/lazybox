@@ -8,7 +8,7 @@ import { basename, join } from 'node:path';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { createServer, type ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { chromium, devices, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { chromium, devices, type Browser, type BrowserContext, type Page } from '../../scripts/fixtures/playwright.mjs';
 import { startRunnerFixture, type RunnerFixture } from '../../scripts/fixtures/runner-ui.mjs';
 import { testViteCache } from '../../scripts/fixtures/vite-cache.mjs';
 import { ScenarioClock } from './clock.ts';

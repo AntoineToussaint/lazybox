@@ -19,7 +19,7 @@
 // Screenshots: .cache/remote-*.png at 390 px, dark and light.
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
-import { chromium, devices, expect } from '@playwright/test';
+import { chromium, devices, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';

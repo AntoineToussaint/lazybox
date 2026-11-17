@@ -151,6 +151,11 @@ export async function runGateCatalog(root, profile, { snapshot, execute = execut
   return report;
 }
 
+/** Paths added, removed or changed between two `digestTree` file maps, sorted. */
+export function changedFiles(before, after) {
+  return [...new Set([...before.keys(), ...after.keys()])].filter(path => before.get(path) !== after.get(path)).sort();
+}
+
 /** The run in Markdown for a CI job summary: the outcome, then every gate that failed or was flaky. */
 export function summarizeGateReport(report) {
   const flaky = report.results.filter(item => item.status === 'flaky'), failed = report.results.filter(item => item.status !== 'passed' && item.status !== 'flaky');
@@ -160,6 +165,7 @@ export function summarizeGateReport(report) {
     lines.push('', '| Gate | Result | Attempts |', '| --- | --- | --- |');
     for (const item of [...failed, ...flaky]) lines.push(`| \`${item.id}\` | ${item.status === 'flaky' ? 'flaky (passed on retry)' : item.status} | ${(item.attempts || [item]).map(a => `${a.status} (${Math.round(a.durationMs / 1000)} s)`).join(', ')} |`);
   }
+  if (report.sourceChanged) lines.push('', `The source changed during the run, so it failed whatever its gates did. A gate must not write the source tree (use \`.cache\` or a temporary directory): ${report.sourceChanged.slice(0, 20).map(path => `\`${path}\``).join(', ')}${report.sourceChanged.length > 20 ? ` and ${report.sourceChanged.length - 20} more` : ''}.`);
   if (flaky.length) lines.push('', 'A flaky gate failed once and passed when run again. It is a race until its cause is found: reproduce it with `make stress-ui` (RELEASE_GATES.md, "Flake detection").');
   return lines.join('\n') + '\n';
 }
@@ -193,24 +199,27 @@ async function main() {
     options[flag.slice(2)] = value;
   }
   const only = options.only?.split(',');
-  const { digestTree } = await import('./environments.mjs');
+  const { digestTree, includeSource } = await import('./environments.mjs');
+  // Each snapshot keeps its files' digests, so a run the source changed under names what changed.
+  const snapshots = [], snapshot = () => { const files = new Map(); snapshots.push(files); return digestTree(root, includeSource, files); };
   const controller = new AbortController(), cancel = () => controller.abort();
   process.on('SIGINT', cancel); process.on('SIGTERM', cancel);
   let report;
   try {
     const progress = ({ gate, phase, result }) => console.log(`[${gate.id}] ${phase === 'start' ? 'running' : phase === 'retry' ? `${result.status}; running it once more (--retry-flaky)` : result.status === 'flaky' ? 'flaky (passed on retry)' : result.status}`);
-    report = await runGateCatalog(root, profile, { only, retryFlaky: !!options['retry-flaky'], snapshot: () => digestTree(root), signal: controller.signal, onProgress: progress });
+    report = await runGateCatalog(root, profile, { only, retryFlaky: !!options['retry-flaky'], snapshot, signal: controller.signal, onProgress: progress });
+    if (report.sourceDigest !== report.finalSourceDigest) report.sourceChanged = changedFiles(snapshots[0], snapshots.at(-1));
     const path = resolve(options.report || join(root, '.cache', `gates-${profile}.json`));
     await mkdir(dirname(path), { recursive: true });
     const temporary = `${path}.${randomUUID()}`;
     await writeFile(temporary, JSON.stringify(report, null, 2), { mode: 0o600, flag: 'wx' });
     await rename(temporary, path);
     const flaky = report.results.filter(item => item.status === 'flaky').map(item => item.id);
-    console.log(`${report.status}: ${report.results.length} gates${flaky.length ? `, ${flaky.length} flaky (passed on retry): ${flaky.join(', ')}` : ''}. Receipt: ${path}`);
+    console.log(`${report.status}: ${report.results.length} gates${flaky.length ? `, ${flaky.length} flaky (passed on retry): ${flaky.join(', ')}` : ''}${report.sourceChanged ? ', the source changed during the run' : ''}. Receipt: ${path}`);
     // On GitHub Actions a flaky gate is a warning on the run, and every run a job summary.
     if (process.env.GITHUB_ACTIONS === 'true') for (const id of flaky) console.log(`::warning title=Flaky gate ${id}::${id} failed, then passed on retry. It is a race until its cause is found (RELEASE_GATES.md, "Flake detection").`);
     if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, summarizeGateReport(report));
-    if (report.sourceDigest !== report.finalSourceDigest) console.error('Source changed during validation; no release receipt admitted.');
+    if (report.sourceChanged) console.error(`Source changed during validation; no release receipt admitted. Changed: ${report.sourceChanged.join(', ') || '(the tree digest only)'}`);
     if (report.status !== 'passed') process.exitCode = 1;
   } finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }
 }

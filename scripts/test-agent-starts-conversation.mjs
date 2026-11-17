@@ -7,7 +7,7 @@
 // workspace in one click, links the brief artifact, and leads to the
 // Orchestrator grant. Fake Runner only.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from '@playwright/test';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];
@@ -76,7 +76,7 @@ try{
  await page.keyboard.press('Tab');
  await expect(card.getByRole('textbox',{name:'Brief'})).toBeFocused();
  await page.screenshot({path:'.cache/start-conversation-edit.png'});
- await page.keyboard.press(process.platform==='darwin'?'Meta+Enter':'Control+Enter');
+ await page.keyboard.press('Meta+Enter');
  await expect.poll(()=>mutations('AnswerConversationStart').at(-1)).toEqual({requestId:'start-docs',decision:'start',title:'Write the module docs'});
  await expect(card).toHaveCount(0);
  assert.equal(fixture.repositoryRequests.get('start-docs').title,'Write the module docs');

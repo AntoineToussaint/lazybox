@@ -8,7 +8,7 @@
 // loop's settings. The fixture plays both agents.
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {chromium,expect} from '@playwright/test';
+import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -193,7 +193,7 @@ try{
  await page.setViewportSize({width:1500,height:1000});
 
  // ---- Settings: between rounds, and the round limit -----------------------
- await page.keyboard.press(`${process.platform==='darwin'?'Meta':'Control'}+,`);
+ await page.keyboard.press('Meta+,');
  await page.getByRole('tab',{name:'Agents & workspaces'}).click();
  await page.getByRole('combobox',{name:'Between rounds'}).selectOption('auto');
  await page.getByRole('spinbutton',{name:'Rounds before it asks you'}).fill('5');

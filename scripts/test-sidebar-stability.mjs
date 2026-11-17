@@ -14,7 +14,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {webkit,expect} from '@playwright/test';
+import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -94,9 +94,9 @@ try{
  await chatTab.dblclick();
  await expect(sidebarGroup).toBeHidden();
  await p.locator('.page-layout .panel-chat').getByRole('textbox',{name:'Message',exact:true}).click();
- await p.keyboard.press('ControlOrMeta+2');await expect(p.getByRole('combobox',{name:'Workspace',exact:true})).toHaveValue('beta');
+ await p.keyboard.press('Meta+2');await expect(p.getByRole('combobox',{name:'Workspace',exact:true})).toHaveValue('beta');
  await check('after a maximized group');
- await p.keyboard.press('ControlOrMeta+1');await expect(p.getByRole('combobox',{name:'Workspace',exact:true})).toHaveValue('alpha');
+ await p.keyboard.press('Meta+1');await expect(p.getByRole('combobox',{name:'Workspace',exact:true})).toHaveValue('alpha');
  await check('back to the workspace that had a maximized group');
  // Window resizes, on pages of every kind.
  for(const [size,id] of [[{width:1100,height:800},'gamma'],[{width:1600,height:950},'eta'],[{width:900,height:700},'delta'],[{width:1440,height:900},'zeta']]){

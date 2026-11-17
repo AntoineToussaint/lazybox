@@ -8,7 +8,7 @@
 // edge, not Ctrl+click on a Mac; press, drag onto an item and release does.
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
-import {webkit,chromium,expect} from '@playwright/test';
+import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
@@ -99,7 +99,7 @@ try{
  {const reportLink=output.getByRole('link',{name:'https://example.com/report'});await expect(reportLink).toBeVisible();
   const b=await reportLink.boundingBox();await page.mouse.move(b.x+b.width/2,b.y+b.height/2);await page.mouse.down({button:'right'});await page.waitForTimeout(450);await page.mouse.up({button:'right'});
   await expect(item('Copy link')).toBeVisible();await nothingOpened('a slow right-click on a command output link');await close();
-  if(await page.evaluate(()=>/Mac|iPhone|iPad/.test(navigator.platform||navigator.userAgent))){await reportLink.click({modifiers:['Control']});await expect(item('Copy link')).toBeVisible();await nothingOpened('Ctrl+click on a command output link');await close();}}
+  if(process.platform==='darwin'){await reportLink.click({modifiers:['Control']});await expect(item('Copy link')).toBeVisible();await nothingOpened('Ctrl+click on a command output link');await close();}}
 
  // A web link.
  const exampleLink=agentMessage.getByRole('link',{name:'example'});
@@ -127,8 +127,9 @@ try{
   const target=await item('Copy link').boundingBox();await page.mouse.move(target.x+target.width/2,target.y+target.height/2,{steps:6});await page.mouse.up({button:'right'});
   await expect(menu).toHaveCount(0);await expect.poll(copied).toBe('https://example.com/guide');await nothingOpened('a drag onto Copy link');}
  // On a Mac, Ctrl+click is the right-click: the menu, never the link (WebKit
- // follows the menu with a click that has ctrlKey).
- const mac=await page.evaluate(()=>/Mac|iPhone|iPad/.test(navigator.platform||navigator.userAgent));
+ // follows the menu with a click that has ctrlKey). The browser does that on a
+ // Mac host only, whatever platform the page reports.
+ const mac=process.platform==='darwin';
  if(mac){
   await exampleLink.click({modifiers:['Control']});await expect(menu).toBeVisible();await expect(item('Open in your browser')).toBeVisible();
   await nothingOpened('Ctrl+click on a link');await close();
@@ -311,9 +312,10 @@ try{
  await agentMessage.locator('p').first().evaluate(node=>{const r=node.getBoundingClientRect();node.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'touch',isPrimary:true,clientX:r.x+4,clientY:r.y+6}));});
  await expect(menu).toBeVisible({timeout:2000});assert.equal((await labels())[0],'Quote in reply');await close();
 
- // A window too small for the link menu either way pins it over the pointer:
+ // A window too small for the link menu either way (each side of the pointer
+ // narrower than the menu, whatever the font) pins it over the pointer:
  // a slow right-click there still chooses nothing.
- await page.setViewportSize({width:460,height:250});
+ await page.setViewportSize({width:400,height:250});
  await page.evaluate(()=>{const a=document.createElement('a');a.href='https://example.com/pinned';a.target='_blank';a.textContent='pinned';a.id='pinned-link';a.style.cssText='position:fixed;left:200px;top:110px;z-index:2147483646;padding:2px 4px;background:Canvas';document.body.append(a);});
  {const b=await page.locator('#pinned-link').boundingBox(),x=b.x+b.width/2,y=b.y+b.height/2;
   await page.mouse.move(x,y);await page.mouse.down({button:'right'});await expect(menu).toBeVisible();

@@ -1,0 +1,64 @@
+/* Per-turn code checkpoints: a quiet marker after each turn, the revert
+   confirmation, a turn's changes, and the undo toast. */
+.turn-checkpoint{display:flex;align-items:center;gap:8px;margin:-4px 0 14px;min-height:22px;font-size:calc(11px * var(--code-scale));line-height:calc(16px * var(--code-scale));color:var(--text-faint);min-width:0}
+.turn-checkpoint-line{flex:0 0 14px;height:1px;background:var(--surface-selected)}
+.turn-checkpoint-line.end{flex:1 1 0}
+.turn-checkpoint-summary{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}
+.turn-checkpoint-menu{flex:none;opacity:.5;transition:opacity .12s}
+.turn-checkpoint:hover .turn-checkpoint-menu,.turn-checkpoint:focus-within .turn-checkpoint-menu,.turn-checkpoint-menu[open]{opacity:1}
+.turn-checkpoint-menu>summary{padding:0 5px!important;min-height:18px;border-radius:4px;color:var(--text-muted)}
+@media (hover:none){.turn-checkpoint-menu{opacity:1}}
+@media (prefers-reduced-motion:reduce){.turn-checkpoint-menu{transition:none}}
+.turn-checkpoint-warning{color:var(--warn)}
+.turn-checkpoint-actions{display:inline-flex;gap:2px;opacity:.55;transition:opacity .12s}
+.turn-checkpoint:hover .turn-checkpoint-actions,.turn-checkpoint:focus-within .turn-checkpoint-actions,.turn-checkpoint[data-reverted] .turn-checkpoint-actions{opacity:1}
+@media (hover:none){.turn-checkpoint-actions{opacity:1}}
+.turn-checkpoint button{display:inline-flex;align-items:center;gap:4px;width:auto;margin:0;padding:2px 7px!important;border:1px solid transparent;border-radius:5px;background:transparent;color:var(--text-subtle);font-size:calc(11px * var(--text-scale));line-height:calc(16px * var(--text-scale));cursor:pointer}
+.turn-checkpoint button:hover:not(:disabled),.turn-checkpoint button:focus-visible{background:var(--surface-hover);border-color:var(--line);color:var(--text)}
+.turn-checkpoint button:disabled{opacity:.45;cursor:default}
+.turn-checkpoint-reverted{display:inline-flex;align-items:center;gap:6px;padding:1px 2px 1px 8px;border:1px solid var(--accent-line);border-radius:999px;background:var(--accent-bg);color:var(--accent-soft)}
+.turn-checkpoint-reverted button{color:var(--accent-strong);border-radius:999px}
+
+.checkpoint-toast{position:sticky;bottom:12px;z-index:5;display:flex;align-items:center;gap:10px;width:fit-content;max-width:min(560px,100%);margin:8px auto 0;padding:9px 10px 9px 14px;border:1px solid var(--accent-line-subtle);border-radius:10px;background:var(--surface-raised);box-shadow:0 12px 34px color-mix(in srgb,var(--shadow) calc(60% * var(--shadow-strength)),transparent);color:var(--text);font-size:calc(12px * var(--text-scale));line-height:calc(18px * var(--text-scale))}
+.checkpoint-toast>div{min-width:0;overflow-wrap:anywhere}
+.checkpoint-toast details{margin-top:4px;color:var(--warn)}.checkpoint-toast summary{cursor:pointer}.checkpoint-toast ul{margin:4px 0 0;padding-left:16px;max-height:120px;overflow:auto}
+.checkpoint-toast button{flex:none;width:auto;margin:0;padding:5px 10px;border-radius:6px;font-size:calc(12px * var(--text-scale));line-height:calc(16px * var(--text-scale))}
+.checkpoint-toast button.primary{background:var(--accent-solid);border:1px solid var(--accent-solid-hover);color:var(--on-accent-solid)}
+.checkpoint-toast-close{padding:2px 6px!important;border:0!important;background:transparent!important;color:var(--text-muted)!important;font-size:calc(16px * var(--text-scale))!important}
+
+.revert-code-dialog{width:min(520px,calc(100vw - 32px));padding:24px;border-color:var(--line-strong);font-family:var(--font-ui);font-size:calc(13px * var(--text-scale))}
+.revert-code-dialog>[data-dialog-drag-handle]{margin-bottom:14px}
+.revert-code-dialog h2{margin:0;font-size:calc(18px * var(--text-scale));line-height:calc(24px * var(--text-scale));font-weight:600;letter-spacing:-.3px}
+.revert-code-dialog>[data-dialog-drag-handle]>button{width:28px;height:28px;padding:0;border:0;background:transparent;color:var(--text-muted);font-size:calc(20px * var(--text-scale))}
+.revert-code-dialog p{margin:0 0 10px;line-height:1.55;color:var(--text-secondary)}
+.revert-code-dialog .revert-prompt{color:var(--text);font-style:italic;overflow-wrap:anywhere}
+.revert-code-dialog .revert-note{font-size:calc(12px * var(--text-scale));color:var(--text-muted)}
+.revert-code-dialog .revert-warning{padding:10px 12px;margin:12px 0 0;background:var(--danger-bg);border:1px solid var(--danger-line-subtle);border-radius:7px;font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--danger-strong);overflow-wrap:anywhere}
+.revert-files{max-height:min(280px,40vh);overflow:auto;margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-sunken)}
+.revert-files>strong{display:block;margin-bottom:6px;font-size:calc(12px * var(--text-scale))}
+.revert-files h3{margin:10px 0 4px;font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)}
+.revert-files ul{margin:0;padding:0;list-style:none}
+.revert-files li{display:flex;gap:8px;align-items:baseline;padding:2px 0;font-size:calc(12px * var(--text-scale))}
+.revert-files code{overflow-wrap:anywhere;color:var(--text-soft)}
+.revert-action{flex:0 0 86px;font-size:calc(11px * var(--text-scale));color:var(--ok-soft)}.revert-action[data-status=D]{color:var(--danger-soft)}.revert-action[data-status=A]{color:var(--info-soft)}
+.revert-keeps{margin:0;padding-left:18px;font-size:calc(12px * var(--text-scale));line-height:1.55;color:var(--text-subtle)}
+.revert-keeps li+li{margin-top:3px}
+.revert-code-dialog footer{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
+.revert-code-dialog footer button{padding:8px 12px;font-size:calc(12px * var(--text-scale));line-height:calc(18px * var(--text-scale));border-radius:6px}
+.revert-code-dialog footer button.danger{background:var(--danger-solid);border:1px solid var(--danger-solid-hover);color:var(--on-danger-solid)}
+.revert-code-dialog footer button.danger:hover:not(:disabled){background:var(--danger-solid-hover)}
+
+.turn-changes{display:flex;flex-direction:column;min-height:0;height:100%;gap:8px}
+.turn-changes>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.turn-changes>header small{display:block;margin-top:3px;color:var(--text-muted);font-size:calc(12px * var(--text-scale));overflow-wrap:anywhere}
+.turn-changes>header button{width:auto;flex:none}
+.turn-lines{font-size:calc(11px * var(--text-scale));font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap}
+.turn-lines ins{color:var(--ok);text-decoration:none}.turn-lines del{color:var(--danger-soft);text-decoration:none}
+.turn-changes nav button .turn-lines{margin-left:auto}
+.turn-changes-dialog{width:min(1100px,calc(100vw - 32px));height:min(760px,calc(100vh - 48px));padding:18px;border-color:var(--line-strong);font-family:var(--font-ui);font-size:calc(13px * var(--text-scale));display:none;flex-direction:column}
+.turn-changes-dialog[open]{display:flex}
+.turn-changes-dialog>[data-dialog-drag-handle]{margin-bottom:10px}
+.turn-changes-dialog h2{margin:0;font-size:calc(16px * var(--text-scale))}
+.turn-changes-dialog>[data-dialog-drag-handle]>button{width:28px;height:28px;padding:0;border:0;background:transparent;color:var(--text-muted);font-size:calc(20px * var(--text-scale))}
+.turn-changes-dialog .turn-changes{flex:1}
+@media (max-width:640px){.turn-changes .changes-columns{grid-template-columns:1fr;grid-template-rows:minmax(120px,35%) 1fr}.turn-changes .diff-view{border-left:0;padding-left:0}}

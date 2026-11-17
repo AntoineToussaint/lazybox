@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lazybox:schema:workspace:v1",
+  "title": "Lazybox workspace runtime (.lazybox/workspace.yaml)",
+  "description": "What a new workspace of this repository sets up, runs and archives. Lazybox shows these scripts and runs them only after you approve this exact version. See WORKSPACE_RUNTIME.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": { "description": "Format version.", "const": 1 },
+    "setup": { "$ref": "#/$defs/script", "description": "Runs once in each new worktree, after the files are copied (npm ci, make deps, migrations)." },
+    "archive": { "$ref": "#/$defs/script", "description": "Runs before the workspace is deleted (drop a database, stop containers). Stopped after its timeout, 120 s by default." },
+    "files": {
+      "description": "Files to copy from the source checkout into each new worktree, for gitignored files a fresh checkout lacks (.env). Exact paths or patterns like config/*.local.json. Never overwrites a file the worktree already has.",
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "not": { "pattern": "(^/|(^|/)\\.\\.(/|$)|(^|/)\\.git(/|$))" } }
+    },
+    "env": { "$ref": "#/$defs/env", "description": "Variables for every script and action of this repository." },
+    "actions": {
+      "description": "Named run scripts, in the order shown. One may be the default that Run starts.",
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9._-]{0,39}$" },
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "string", "minLength": 1, "description": "The command to run." },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run"],
+            "properties": {
+              "run": { "type": "string", "minLength": 1, "maxLength": 16384, "description": "The command to run, in your login shell. $LAZYBOX_PORT is this action's port." },
+              "description": { "type": "string", "maxLength": 200 },
+              "cwd": { "$ref": "#/$defs/cwd" },
+              "env": { "$ref": "#/$defs/env" },
+              "default": { "type": "boolean", "description": "Run starts this action. At most one." },
+              "concurrent": { "type": "boolean", "default": true, "description": "false: starting it stops the same action in every other workspace of this repository." },
+              "url": { "type": "string", "pattern": "^https?://", "description": "Where it serves, on this machine, for Preview: http://localhost:$LAZYBOX_PORT." },
+              "port": { "type": "integer", "minimum": 0, "maximum": 9, "default": 0, "description": "Which port of the workspace's block is this action's $LAZYBOX_PORT." }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "cwd": { "type": "string", "description": "A folder inside the repository.", "not": { "pattern": "(^/|(^|/)\\.\\.(/|$))" } },
+    "env": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$", "not": { "pattern": "^LAZYBOX_" } },
+      "additionalProperties": { "type": "string", "maxLength": 4096 }
+    },
+    "script": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 16384 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run"],
+          "properties": {
+            "run": { "type": "string", "minLength": 1, "maxLength": 16384 },
+            "cwd": { "$ref": "#/$defs/cwd" },
+            "env": { "$ref": "#/$defs/env" },
+            "timeout": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Seconds before the script is stopped." }
+          }
+        }
+      ]
+    }
+  }
+}

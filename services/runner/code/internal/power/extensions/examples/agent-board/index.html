@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent board</title>
+<link rel="stylesheet" href="_lazybox/lazybox.css">
+<link rel="stylesheet" href="board.css">
+<script src="_lazybox/lazybox.js"></script>
+<script src="board.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <h1 class="summary" id="summary" aria-live="polite">Loading…</h1>
+  <span class="spacer"></span>
+  <button id="next" type="button" title="Show the next conversation that needs you (attention.next)">Next</button>
+  <button id="inbox" type="button" title="Open the inbox">Inbox</button>
+</header>
+<p class="notice" id="notice" role="status" hidden></p>
+<main id="board" class="board" aria-label="Conversations by what they need"></main>
+</body>
+</html>

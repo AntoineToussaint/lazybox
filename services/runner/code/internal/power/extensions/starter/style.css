@@ -1,0 +1,5 @@
+/* Styles live in files: the sandbox refuses inline styles and scripts. Use
+   the theme's tokens (var(--surface), var(--text-muted), var(--accent)…). */
+header { display: flex; align-items: baseline; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line-subtle); }
+#items { list-style: none; margin: 0; padding: 8px 12px; display: grid; gap: 6px; }
+#items li { padding: 6px 10px; border-radius: 6px; background: var(--surface-raised); border: 1px solid var(--line-subtle); }

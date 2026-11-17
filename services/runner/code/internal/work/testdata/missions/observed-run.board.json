@@ -1,0 +1,32 @@
+{
+ "mission": "m_observed",
+ "title": "Parser split",
+ "process": "solo-pair",
+ "seq": 14,
+ "ignored": 0,
+ "tasks": [
+  {
+   "id": "t_parse",
+   "status": "needs_you",
+   "trust": "observed",
+   "evidence_trust": "observed",
+   "gate": "reviewed",
+   "live": "idle",
+   "reason": "Reported done, waiting for you to accept · last run passed: go test ./... (exit 0)"
+  },
+  {
+   "id": "t_docs",
+   "status": "blocked",
+   "evidence_trust": "claimed",
+   "reason": "Waiting for “Split the parser”"
+  },
+  {
+   "id": "t_bench",
+   "status": "working",
+   "trust": "observed",
+   "evidence_trust": "claimed",
+   "live": "running",
+   "reason": "The agent is working: Bash"
+  }
+ ]
+}

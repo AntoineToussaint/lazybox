@@ -1,0 +1,113 @@
+/* Agent review: start one, follow it, triage its findings. */
+.review-with{display:inline-flex;align-items:stretch}
+.review-with>button{display:inline-flex;align-items:center;gap:6px}
+.review-with>button:has(+.review-with-more){border-top-right-radius:0;border-bottom-right-radius:0}
+.review-with .review-with-more>summary{display:flex;align-items:center;height:100%;padding:0 6px;border:1px solid var(--line-strong);border-left:0;border-radius:0 6px 6px 0;background:var(--surface-active);color:var(--text-soft);cursor:pointer;list-style:none}
+.review-with .review-with-more>summary::-webkit-details-marker{display:none}
+.review-with .review-with-more>summary:hover{background:var(--surface-selected)}
+.review-with .review-with-more>summary:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+/* The conversation header's Review button: quiet like the header's icons, a chevron for another reviewer.
+   In a slim panel it folds into the conversation's ⋯ menu, which always holds it (ReviewFromChat.tsx). */
+.chat-heading .chat-review{height:28px;margin-right:2px}
+.chat-heading .chat-review>.chat-review-button{height:28px;min-height:0;padding:0 8px 0 7px;gap:5px;border:1px solid transparent;border-radius:6px 0 0 6px;background:transparent;color:var(--text-subtle);font-size:calc(12px * var(--text-scale));white-space:nowrap}
+.chat-heading .chat-review>.chat-review-button:hover:not(:disabled),.chat-heading .chat-review>.chat-review-button:focus-visible{background:var(--surface-active);color:var(--text)}
+.chat-heading .chat-review .review-with-more>summary{height:28px;box-sizing:border-box;padding:0 5px;border:1px solid transparent;border-left:0;background:transparent;color:var(--text-muted)}
+.chat-heading .chat-review:hover>.chat-review-button,.chat-heading .chat-review:hover .review-with-more>summary{border-color:var(--line)}
+.chat-heading .chat-review .review-with-more>summary:hover{background:var(--surface-active);color:var(--text)}
+.chat-heading .chat-review .live-indicator{flex:none}
+/* Narrower, the title keeps its two lines: the button keeps its icon (its name is in its tooltip), then folds. */
+@container chat-heading (max-width:720px){.chat-heading .chat-review>.chat-review-button>span{display:none}.chat-heading .chat-review>.chat-review-button{padding:0 6px}}
+@container chat-heading (max-width:600px){.chat-heading .chat-review{display:none}}
+
+.review-severity{font:700 calc(10px * var(--text-scale))/1.6 var(--font-ui);letter-spacing:.04em;text-transform:uppercase;padding:1px 6px;border-radius:4px;white-space:nowrap;background:var(--surface-selected);color:var(--text-tertiary)}
+.review-severity.sev-blocker{background:var(--danger-bg-strong);color:var(--danger)}
+.review-severity.sev-major{background:var(--warn-bg-strong);color:var(--warn)}
+.review-severity.sev-minor{background:var(--info-bg);color:var(--info-soft)}
+.review-severity.sev-nit{background:var(--surface-selected);color:var(--text-subtle)}
+.review-chip.is-author{background:var(--surface-selected);color:var(--text-soft);text-transform:none;letter-spacing:0}
+.review-chip.is-proposed{background:var(--accent-bg);color:var(--accent-soft)}
+.review-chip.is-dismissed{background:var(--surface-selected);color:var(--text-subtle)}
+
+.review-thread.is-dismissed{opacity:.72}
+.review-thread.is-finding.sev-blocker{border-left:3px solid var(--danger)}
+.review-thread.is-finding.sev-major{border-left:3px solid var(--warn)}
+.review-finding-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.review-finding-head strong{font-size:calc(13px * var(--text-scale));color:var(--text)}
+.review-finding-actions{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px}
+.review-finding-actions button,.review-dismiss button{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;font-size:calc(12px * var(--text-scale));border-radius:6px;border:1px solid var(--line-strong);background:var(--surface-active);color:var(--text-soft);cursor:pointer;width:auto}
+.review-finding-actions button:hover,.review-dismiss button:hover{background:var(--surface-selected)}
+.review-finding-actions button.primary{background:var(--accent-solid);border-color:transparent;color:var(--on-accent-solid)}
+.review-finding-actions.is-compact{padding:0 0 2px 8px}
+.review-finding-actions.is-compact button{padding:2px 8px;font-size:calc(11px * var(--text-scale))}
+.review-dismiss{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:0 0 2px 8px}
+.review-dismiss input{flex:1;min-width:140px;padding:4px 8px;border-radius:6px;border:1px solid var(--line-strong);background:var(--bg);color:var(--text);font-size:calc(12px * var(--text-scale))}
+.review-dismiss button.danger{background:var(--danger-bg-strong);border-color:var(--danger-line);color:var(--text)}
+
+.review-tray-item{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.review-tray-title{color:var(--text);font-weight:600;line-height:1.4;overflow-wrap:anywhere}
+.review-tray li.is-dismissed .review-tray-body{text-decoration:line-through;text-decoration-color:var(--text-disabled)}
+.review-facets{display:flex;gap:8px;flex-wrap:wrap}
+.review-tray .review-facets label{display:inline-flex;flex-direction:row;align-items:center;gap:5px;margin:0;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.review-tray .review-facets select{width:auto;min-width:0;padding:2px 6px;font-size:calc(11px * var(--text-scale))}
+.review-runs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.review-runs li{display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px solid var(--line-subtle);border-radius:8px;background:var(--surface)}
+.review-runs li.is-focused{border-color:var(--accent-line)}
+.review-run-mark{display:inline-flex;width:16px;justify-content:center;color:var(--accent)}
+.review-runs li.is-failed .review-run-mark,.review-runs li.is-done .review-run-mark{color:var(--text-muted)}
+.review-tray .review-run-summary{flex:1;min-width:0;white-space:normal;justify-content:flex-start;text-align:left;border:0;background:transparent;padding:2px 4px;color:var(--text);overflow-wrap:anywhere}
+.review-tray .review-runs .review-icon{border:0;background:transparent;padding:3px;color:var(--text-muted)}
+
+.review-card{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--surface);font-size:calc(13px * var(--text-scale))}
+.review-card.is-running{border-color:var(--accent-line)}
+.review-card.has-blockers{border-color:var(--danger-line)}
+.review-card-icon{display:inline-flex;width:16px;justify-content:center;color:var(--text-muted)}
+.review-card.has-blockers .review-card-icon{color:var(--danger)}
+.review-card.is-done:not(.has-blockers) .review-card-icon{color:var(--ok)}
+.review-card-text{flex:1;min-width:12em;color:var(--text)}
+.review-card-counts{display:inline-flex;gap:4px}
+.review-card-actions{display:inline-flex;gap:6px}
+.review-card-actions button{padding:3px 10px;font-size:calc(12px * var(--text-scale));border-radius:6px;border:1px solid var(--line-strong);background:var(--surface-active);color:var(--text-soft);cursor:pointer;width:auto}
+.review-card-actions button:hover{background:var(--surface-selected)}
+.review-card-actions button.primary{background:var(--accent-solid);border-color:transparent;color:var(--on-accent-solid)}
+
+.review-start-error,.review-action-error{display:flex;align-items:center;gap:8px}
+.review-start-error button,.review-action-error button{border:0;background:transparent;color:inherit;cursor:pointer;width:auto;padding:0 4px}
+.review-action-error{position:fixed;right:16px;bottom:16px;z-index:40;max-width:min(440px,calc(100vw - 32px));padding:8px 12px;border-radius:8px;border:1px solid var(--danger-line);background:var(--surface);color:var(--danger);font-size:calc(12px * var(--text-scale));box-shadow:0 6px 20px color-mix(in srgb,var(--shadow) calc(30% * var(--shadow-strength)),transparent)}
+.settings-inline-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:4px 0}
+.settings-inline-actions small{color:var(--text-muted)}
+
+/* The review loop: where it is, its controls, its timeline. */
+.review-runs li{flex-direction:column;align-items:stretch;flex-shrink:0}
+/* Reviews stay at the top of the tray (.review-tray-top); many of them
+   scroll in their own band rather than crowd out the findings. */
+.review-tray .review-runs{flex:0 1 auto;overflow:auto;min-height:0;overscroll-behavior:contain}
+.review-tray .review-tray-list{min-height:120px}
+.review-run-head{display:flex;align-items:center;gap:6px;min-width:0}
+.review-runs li.needs-you{border-color:var(--warn)}
+.review-loop{display:flex;flex-direction:column;gap:4px;padding:0 2px 2px 6px}
+.review-loop-line{display:inline-flex;align-items:center;gap:5px;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.review-loop.needs-you .review-loop-line{color:var(--warn);font-weight:600}
+.review-loop-controls{display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+.review-tray .review-loop-controls button{flex:1 1 auto;justify-content:center;gap:4px;padding:2px 5px;font-size:calc(11px * var(--text-scale));white-space:nowrap}
+/* A narrow tray keeps the loop controls on one line: words over icons. */
+@container review-tray (max-width:232px){.review-tray .review-loop-controls button svg{display:none}}
+.review-tray .review-loop-controls select{flex:1 1 100%;width:auto;min-width:0;padding:2px 6px;font-size:calc(11px * var(--text-scale))}
+.review-timeline summary{cursor:pointer;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.review-timeline ol{list-style:none;margin:4px 0 0;padding:0 0 0 2px;display:flex;flex-direction:column;gap:3px;max-height:220px;overflow:auto;border-left:2px solid var(--line-subtle)}
+.review-timeline li{display:grid!important;grid-template-columns:auto auto 1fr;gap:6px;align-items:baseline;padding:0 0 0 8px!important;border:0!important;background:transparent!important;font-size:calc(11px * var(--text-scale));line-height:1.45}
+.review-timeline time{color:var(--text-disabled);font-variant-numeric:tabular-nums}
+.review-timeline b{color:var(--text-soft);font-weight:600}
+.review-timeline span{color:var(--text-tertiary);overflow-wrap:anywhere}
+.review-timeline li.is-escalated span,.review-timeline li.is-escalated b{color:var(--warn)}
+.review-timeline li.is-stopped span{color:var(--ok)}
+.review-card-loop{display:block;margin-top:2px;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.review-card-note{display:block;margin-top:2px;color:var(--text-faint);font-size:calc(11px * var(--text-scale))}
+.review-card.needs-you{border-color:var(--warn)}
+.review-card.needs-you .review-card-loop{color:var(--warn);font-weight:600}
+
+.review-exchange{display:flex;align-items:baseline;gap:6px;margin:4px 0;padding:4px 10px;border-left:2px solid var(--accent-line);color:var(--text-tertiary);font-size:calc(12px * var(--text-scale));line-height:1.5}
+.review-exchange b{color:var(--text-soft);font-weight:600;white-space:nowrap}
+.review-exchange span{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.review-alert{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0;padding:6px 10px;border:1px solid var(--warn);border-radius:8px;background:var(--warn-bg-strong);color:var(--text);font-size:calc(12px * var(--text-scale))}
+.review-alert span{flex:1;min-width:12em}
+.review-alert button{padding:3px 10px;border-radius:6px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text-soft);cursor:pointer;width:auto;font-size:calc(12px * var(--text-scale))}

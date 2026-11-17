@@ -1,0 +1,108 @@
+/* Work items (WorkItems.tsx): the issue a New task starts from, its picker,
+   the quoted item in a conversation, and the workspace header's origin chip.
+   Quiet: one line each until opened; nothing changes the sheet's width. */
+.item-state-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--text-faint)}
+.item-state-dot[data-tone=open]{background:var(--ok)}
+.item-state-dot[data-tone=progress]{background:var(--accent)}
+.item-state-dot[data-tone=done]{background:var(--attention-review,var(--accent-strong))}
+.item-state-dot[data-tone=closed]{background:var(--text-faint)}
+
+/* The sheet: a chip under the message, the context folded beneath it. */
+.item-source{display:flex;flex-direction:column;gap:6px;min-width:0}
+.item-source-chip{display:flex;align-items:center;gap:7px;min-width:0;padding:4px 4px 4px 8px;border:1px solid var(--accent-line);border-radius:8px;background:var(--accent-bg);font-size:calc(12px * var(--text-scale));color:var(--text)}
+.item-source[data-state=failed] .item-source-chip{border-color:var(--danger-line);background:var(--danger-bg)}
+.item-source-icon{display:inline-flex;color:var(--accent)}
+.item-source-key{flex:none;font:calc(12px * var(--code-scale)) var(--font-mono);color:var(--text)}
+.item-source-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-soft)}
+.item-source[data-state=loading] .item-source-title{color:var(--text-muted)}
+.item-source-provider{flex:none;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.item-source-chip button{display:inline-flex;align-items:center;gap:4px;flex:none;height:22px;padding:0 6px;border:0;border-radius:5px;background:transparent;color:var(--text-subtle);font-size:calc(11px * var(--text-scale))}
+.item-source-chip button:hover:not(:disabled){background:var(--surface-strong);color:var(--text)}
+.item-source-remove{width:22px;justify-content:center;padding:0!important}
+.item-source-error{margin:0;font-size:calc(12px * var(--text-scale));color:var(--danger);overflow-wrap:anywhere}
+.item-source-error span{color:var(--text-muted)}
+.item-source-error .link-button{margin:0!important;padding:0 4px!important}
+.item-source-preview{display:flex;flex-direction:column;gap:6px;min-width:0}
+.item-source-preview-bar{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;font-size:calc(12px * var(--text-scale))}
+.item-source-preview-bar small{color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.item-source-comments{display:inline-flex!important;flex-direction:row!important;align-items:center;gap:6px!important;color:var(--text-soft)}
+.item-source-comments input{width:auto;margin:0}
+.item-source-text{max-height:max(64px,min(200px,calc(100dvh - 600px)));margin:0;overflow:auto;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--surface-sunken);font:calc(11.5px * var(--code-scale))/1.5 var(--font-mono);color:var(--text-soft);white-space:pre-wrap;overflow-wrap:anywhere}
+.item-source-text:focus-visible{outline:2px solid var(--focus);outline-offset:0}
+
+.new-task-item{position:relative;display:flex;flex-direction:column;min-width:0}
+/* A short window: the preview gives up its height first, so the sheet's own
+   fields and its footer stay inside it (the sheet never grows past the window). */
+.new-task-sheet.draggable-dialog[open]:has(.item-source){max-height:calc(100dvh - 16px)}
+.new-task-sheet form{flex:1 1 auto}
+.new-task-sheet form>*{flex-shrink:0}
+.new-task-sheet form>.new-task-item{flex-shrink:1;min-height:0}
+.new-task-sheet form>.new-task-item:has(.item-source-preview){min-height:calc(116px * var(--text-scale))}
+.new-task-item .item-source-preview{overflow:hidden}
+.new-task-item>.item-source{flex:1 1 auto;min-height:0}
+.new-task-item .item-source-preview{flex:1 1 auto;min-height:0}
+.new-task-item .item-source-text{flex:1 1 auto;min-height:48px}
+/* With an issue the message is optional: the box gives the issue its room. */
+.new-task-sheet .new-task-prompt[data-item]{min-height:calc(56px * var(--text-scale))}
+/* The conversation shows what was sent at its own height. */
+.item-quoted .item-source-text{max-height:min(420px,50dvh)}
+.new-task-from{display:flex;align-items:center;gap:10px;min-height:22px;margin-top:-4px}
+.new-task-sheet .new-task-from .link-button{margin-left:0;display:inline-flex;align-items:center;gap:6px;color:var(--text-subtle)}
+.new-task-sheet .new-task-from .link-button:hover{color:var(--accent)}
+.new-task-from small{color:var(--text-faint);font-size:calc(11px * var(--text-scale))}
+.new-task-hint{margin:0;grid-column:2;font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.new-task-missing{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;grid-column:2;margin:0;font-size:calc(12px * var(--text-scale));color:var(--text-soft)}
+.new-task-sheet .new-task-missing .link-button{margin-left:0}
+
+.item-started{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:7px 10px;border:1px solid var(--warn-line);border-radius:8px;background:var(--warn-bg);font-size:calc(12px * var(--text-scale));color:var(--text)}
+.item-started>svg{color:var(--text-subtle)}
+.item-started>span{flex:1;min-width:0}
+.item-started strong{font:600 calc(12px * var(--code-scale)) var(--font-mono)}
+.item-started em{font-style:normal;font-weight:600}
+.item-started button{padding:4px 10px;font-size:calc(12px * var(--text-scale))}
+.item-started button:not(.link-button){border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--text)}
+.item-started button:not(.link-button):hover{background:var(--surface-active)}
+.new-task-sheet .item-started .link-button{margin-left:0}
+
+/* The picker, over the sheet below the message (it never moves the sheet). */
+.item-picker{position:absolute;z-index:45;left:0;right:0;top:calc(100% + 4px);display:flex;flex-direction:column;max-height:min(420px,56dvh);border:1px solid var(--line-strong);border-radius:10px;background:var(--surface-hover);box-shadow:0 14px 36px color-mix(in srgb,var(--shadow) calc(50% * var(--shadow-strength)),transparent);overflow:hidden}
+.item-picker-search{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);color:var(--text-muted)}
+.new-task-sheet .item-picker-search input{flex:1;min-width:0;padding:4px 0;border:0;background:transparent;box-shadow:none;font-size:calc(13px * var(--text-scale));color:var(--text)}
+.new-task-sheet .item-picker-search input:focus{outline:0}
+.item-picker-scopes{display:flex;align-items:center;gap:2px;padding:5px 8px;border-bottom:1px solid var(--line)}
+.item-picker-scopes button{padding:3px 9px;border:0;border-radius:999px;background:transparent;color:var(--text-subtle);font-size:calc(11.5px * var(--text-scale))}
+.item-picker-scopes button[aria-selected=true]{background:var(--accent-bg);color:var(--text)}
+.item-picker-scopes small{margin-left:auto;color:var(--text-faint);font-size:calc(11px * var(--text-scale))}
+.item-picker-list{flex:1;min-height:0;margin:0;padding:4px;overflow:auto;list-style:none}
+.item-picker-list li{display:grid;grid-template-columns:7px auto auto minmax(0,1fr) auto auto;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;font-size:calc(12.5px * var(--text-scale));color:var(--text-soft);cursor:pointer}
+.item-picker-list li.active{background:var(--accent-bg);color:var(--text)}
+.item-picker-repo{color:var(--text-muted);font-size:calc(11.5px * var(--text-scale))}
+.item-picker-number{font:calc(11.5px * var(--code-scale)) var(--font-mono);color:var(--text-subtle)}
+.item-picker-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item-picker-labels{display:flex;gap:4px;min-width:0;overflow:hidden}
+.item-picker-labels span{max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border:1px solid var(--line-strong);border-radius:999px;font-size:calc(10.5px * var(--text-scale));color:var(--text-subtle)}
+.item-picker-time{color:var(--text-muted);font-size:calc(11px * var(--text-scale));white-space:nowrap}
+.item-picker-list .item-picker-empty{display:block;color:var(--text-muted);cursor:default}
+.item-picker-keys{margin:0;padding:6px 12px;border-top:1px solid var(--line);font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.item-picker kbd{display:inline-block;margin-right:2px;padding:0 4px;border:1px solid var(--line-strong);border-radius:3px;background:var(--surface-sunken);font:calc(10px * var(--code-scale)) var(--font-mono);color:var(--text-secondary)}
+@media (max-width:620px){
+  .item-picker-list li{grid-template-columns:7px auto minmax(0,1fr) auto}
+  .item-picker-repo,.item-picker-labels{display:none}
+}
+
+/* A conversation's first message: the item it carries, folded to a chip. */
+.item-quoted{display:flex;flex-direction:column;gap:6px;margin-top:8px;min-width:0}
+.item-quoted-chip{display:inline-flex;align-items:center;gap:7px;align-self:flex-start;max-width:100%;padding:3px 4px 3px 9px;border:1px solid var(--line-strong);border-radius:999px;background:var(--surface-sunken);font-size:calc(12px * var(--text-scale));color:var(--text-soft)}
+.item-quoted-chip>svg{flex:none;color:var(--accent)}
+.item-quoted-key{flex:none;font:calc(12px * var(--code-scale)) var(--font-mono);color:var(--text)}
+.item-quoted-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item-quoted-chip small{flex:none;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.item-quoted-toggle{display:inline-flex;align-items:center;justify-content:center;flex:none;width:22px;height:22px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--text-subtle)}
+.item-quoted-toggle:hover{background:var(--surface-strong);color:var(--text)}
+
+/* The workspace header: where the work started. */
+.item-origin-chip{display:inline-flex;align-items:center;gap:5px;max-width:min(340px,36vw);height:24px;margin-right:4px;padding:0 8px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--text-subtle);font-size:calc(11.5px * var(--text-scale));text-decoration:none;white-space:nowrap}
+a.item-origin-chip:hover{border-color:var(--accent-line);background:var(--accent-bg);color:var(--text);text-decoration:none}
+.item-origin-chip>svg{flex:none;color:var(--accent)}
+.item-origin-key{flex:none;font:calc(11.5px * var(--code-scale)) var(--font-mono);color:var(--text-soft)}
+.item-origin-title{min-width:0;overflow:hidden;text-overflow:ellipsis}

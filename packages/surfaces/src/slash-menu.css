@@ -1,0 +1,33 @@
+/* The slash-command menu: above the message box, the context menu's surface. */
+.composer{position:relative}
+.slash-menu{position:absolute;left:8px;right:8px;bottom:calc(100% + 6px);z-index:30;display:flex;flex-direction:column;max-height:min(360px,55dvh);box-sizing:border-box;background:var(--surface-hover);color:var(--text);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 32px color-mix(in srgb,var(--shadow) calc(40% * var(--shadow-strength)),transparent),0 0 0 1px color-mix(in srgb,var(--shadow) calc(14% * var(--shadow-strength)),transparent);font:calc(12px * var(--text-scale))/calc(16px * var(--text-scale)) var(--font-ui,system-ui);overflow:hidden;animation:slash-menu-in .08s ease-out;user-select:none;-webkit-user-select:none}
+@keyframes slash-menu-in{from{opacity:0;transform:translateY(3px)}}
+@media (prefers-reduced-motion:reduce){.slash-menu{animation:none}}
+.slash-list{overflow:auto;padding:4px 5px;min-height:0}
+.slash-group-label{padding:7px 9px 3px;color:var(--text-faint);font-size:calc(10.5px * var(--text-scale));font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+.slash-group-label code{text-transform:none;letter-spacing:0;color:var(--text-soft);font-weight:600}
+.slash-menu>.slash-group-label{padding:8px 14px 2px;text-transform:none;letter-spacing:0;font-weight:400;font-size:calc(11.5px * var(--text-scale))}
+.slash-item{display:flex;align-items:center;gap:8px;min-height:28px;padding:4px 9px 4px 8px;border-radius:5px;cursor:default;white-space:nowrap}
+.slash-item[aria-selected=true]{background:var(--accent-bg-strong)}
+.slash-item[aria-disabled=true]{color:var(--text-faint)}
+.slash-item[aria-disabled=true][aria-selected=true]{background:var(--surface-selected)}
+.slash-icon{flex:none;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--text-subtle)}
+.slash-item[aria-selected=true] .slash-icon{color:var(--text-soft)}
+.slash-name{flex:none;font:600 calc(12px * var(--text-scale))/1.4 var(--font-mono,ui-monospace,monospace);color:inherit}
+.slash-name mark{background:none;color:var(--accent);font-weight:700}
+.slash-args{flex:none;font:calc(11.5px * var(--text-scale))/1.4 var(--font-mono,ui-monospace,monospace);color:var(--text-faint)}
+.slash-choice-label{flex:none;font-weight:500}
+.slash-badge{flex:none;padding:0 5px;border-radius:4px;background:var(--surface-active);color:var(--text-secondary);font-size:calc(10px * var(--text-scale));line-height:1.6}
+.slash-description{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--text-subtle);margin-left:4px}
+.slash-item[aria-disabled=true] .slash-description{font-style:italic}
+.slash-hint-row{display:flex;align-items:center;gap:8px;padding:9px 13px 6px;white-space:nowrap}
+.slash-footer{display:flex;align-items:center;gap:8px;padding:5px 9px 5px 13px;border-top:1px solid var(--surface-strong);color:var(--text-faint);font-size:calc(10.5px * var(--text-scale))}
+.slash-footer span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.slash-close{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;padding:0;border:0;border-radius:4px;background:none;color:var(--text-faint);cursor:pointer}
+.slash-close:hover{background:var(--surface-active);color:var(--text)}
+.slash-warning{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 6px;padding:6px 8px;border-radius:6px;background:var(--warn-bg);border:1px solid var(--warn-line-subtle);color:var(--text);font-size:calc(12px * var(--text-scale));line-height:1.4}
+.slash-warning span{flex:1 1 auto;min-width:0}
+.slash-warning button{padding:2px 8px;font-size:inherit}
+.slash-warning kbd{margin-left:4px;font:calc(10px * var(--code-scale))/1.4 var(--font-mono,ui-monospace,monospace);color:inherit;opacity:.7}
+.restart-model{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+@media (max-width:520px){.slash-description{display:none}.slash-item[aria-selected=true] .slash-description{display:block}}

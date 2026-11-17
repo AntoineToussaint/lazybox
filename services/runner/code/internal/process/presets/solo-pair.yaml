@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=process.schema.json
+version: 1
+name: solo-pair
+autonomy: 3                      # you review every PR
+budgets:
+  mission: {usd: 20}
+  task:    {usd: 10, retries: 1}
+  on_exhausted: escalate         # stop | escalate | warn
+wip: {workers: 1, writers_per_repo: 1}
+phases:
+  - {id: build,  exit: reported}
+  - {id: review, exit: reviewed}
+  - {id: merge,  exit: merged}
+gates:
+  reported: {kind: rule, when: "task.claims_evidence"}
+  reviewed: {kind: human, show: [diff, findings, evidence]}
+  merged:   {kind: check, when: "pr.checks_green && pr.merged"}
+roles:
+  worker:
+    provider: claude
+    model: default
+    permission: ask
+    scopes: [task.report, task.question, evidence.read]
+    instructions: {file: .lazybox/roles/worker.md}
+    budget: {turns: 80}
+    concurrency: 1
+  reviewer:
+    provider: codex
+    model: default
+    permission: read_only
+    context: [brief, diff, decisions]
+    scopes: [finding.file, evidence.read]
+    instructions: {snippet: deepreview}
+    triggers: [{on: gate.requested, if: "gate.id == 'reviewed'", mode: manual}]
+rules:
+  - {on: task.reported, do: {request_gate: reviewed}}
+  - {on: finding.filed, if: "finding.severity == 'blocker'", do: {send: worker, snippet: fixall}}
+  - {on: gate.passed, do: enter_next_phase}
+notifications:
+  - {on: [gate.requested, task.question, escalation.raised], to: [inbox, desktop]}
+snippets:
+  suggest: {build: [test, tdd], review: [deepreview], merge: [pr]}

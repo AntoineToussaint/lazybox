@@ -1,0 +1,50 @@
+/* Run on a shell block (code-runs.tsx): a quiet split button beside Copy, a
+   status line under the code, and the Run myself confirm card. */
+.code-block.is-runnable:focus-visible{outline:2px solid var(--focus,var(--accent));outline-offset:1px}
+.code-block-actions{display:inline-flex;align-items:center;gap:6px}
+.code-run{display:inline-flex;align-items:stretch}
+.code-block header .code-run button{display:inline-flex;align-items:center;gap:5px;border-color:var(--accent-line);color:var(--accent-strong);background:var(--accent-bg)}
+.code-block header .code-run button:hover{background:var(--surface-strong)}
+.code-block header .code-run .code-run-main{border-radius:6px 0 0 6px;font-weight:600}
+.code-block header .code-run .code-run-more{border-radius:0 6px 6px 0;border-left-width:0;padding:4px 6px!important}
+
+.code-run-footer{display:flex;flex-direction:column;gap:8px;padding:8px 12px;border-top:1px solid var(--line);background:var(--surface-sunken,var(--surface));font-size:calc(12px * var(--text-scale))}
+.code-run-footer:empty{display:none}
+.code-run-status{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;min-width:0}
+.code-run-status:empty{display:none}
+.code-run-self{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px}
+.code-run-chip{display:inline-flex;align-items:center;gap:6px;min-width:0;color:var(--text-muted)}
+.code-run-chip small{color:var(--text-faint);font-family:var(--font-mono)}
+.code-run-chip.tone-ok{color:var(--ok)}.code-run-chip.tone-failed{color:var(--danger)}.code-run-chip.tone-stopped{color:var(--warn-soft)}
+.code-run-chip.tone-running,.code-run-chip.tone-queued{color:var(--accent)}
+.code-run-dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:code-run-pulse 1.2s ease-in-out infinite}
+@keyframes code-run-pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.code-run-dot{animation:none}}
+.code-run-status button{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;font-size:calc(11px * var(--text-scale))}
+.code-run-status .code-run-link{background:transparent;border-color:transparent;color:var(--accent-strong);padding:3px 4px}
+.code-run-status .code-run-link:hover{background:var(--surface-hover)}
+.code-run-status .code-run-fix{border-color:var(--accent-line);color:var(--accent-strong);background:var(--accent-bg)}
+
+.code-run-confirm{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--accent-line);border-radius:8px;background:var(--surface);box-shadow:0 1px 0 var(--line)}
+.code-run-confirm-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}.code-run-confirm-head small{color:var(--text-muted)}
+.code-run-warning{display:flex;align-items:flex-start;gap:6px;margin:0;padding:6px 8px;border-radius:6px;background:var(--warn-bg);border:1px solid var(--warn-line-subtle,var(--warn-line));color:var(--text-soft)}
+.code-run-note{display:flex;align-items:flex-start;gap:6px;margin:0;padding:6px 8px;border-radius:6px;background:var(--accent-bg);border:1px solid var(--accent-line);color:var(--text-soft)}
+.code-run-note svg{flex:none;margin-top:2px;color:var(--accent-strong)}
+.code-run-warning.is-done{background:var(--ok-bg);border-color:var(--ok-line-subtle,var(--ok-line))}
+.code-run-warning svg{flex:none;margin-top:2px}
+.code-run-warning code{font-family:var(--font-mono);margin:0 2px}
+.code-run-field{display:grid;grid-template-columns:56px minmax(0,1fr);align-items:start;gap:8px}
+.code-run-field>span{color:var(--text-muted);padding-top:6px}
+.code-run-field textarea{width:100%;min-height:32px;resize:vertical;font-family:var(--font-mono);font-size:calc(12px * var(--code-scale,1));line-height:1.5;padding:6px 8px;border-radius:6px;border:1px solid var(--line-strong);background:var(--code-bg);color:var(--code-text,var(--text));white-space:pre;overflow:auto}
+.code-run-field select{width:100%;min-width:0;padding:5px 8px;border-radius:6px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text)}
+.code-run-error{margin:0;color:var(--danger)}
+.code-run-confirm-actions{display:flex;justify-content:flex-end;gap:8px}
+.code-run-confirm-actions button{padding:5px 12px;font-size:calc(12px * var(--text-scale))}
+.code-run-confirm-actions button[aria-disabled=true]{opacity:.55;cursor:not-allowed}
+.code-run-confirm kbd{margin-left:6px;font-size:.85em;opacity:.7;font-family:inherit}
+
+/* Inline commands someone ran from a message's prose. */
+.inline-runs{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.inline-run{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-sunken,var(--surface))}
+.inline-run-command{font-family:var(--font-mono);font-size:calc(12px * var(--code-scale,1));color:var(--code-text,var(--text));overflow-wrap:anywhere}
+@media (max-width:600px){.code-run-field{grid-template-columns:minmax(0,1fr)}.code-run-field>span{padding:0}}

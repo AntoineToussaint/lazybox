@@ -1,0 +1,81 @@
+# Homebrew cask for Lazybox, the desktop app with its Runner service.
+#
+# Rendered by scripts/release/build.mjs (__VERSION__ and __SHA256__ are
+# substituted; #{version} stays Ruby interpolation) and pushed to the
+# AntoineToussaint/homebrew-lazybox tap as Casks/lazybox-v2.rb by
+# .github/workflows/release.yml, beside V1's `lazybox` formula, which it
+# does not touch.
+#
+#   brew install --cask AntoineToussaint/lazybox/lazybox-v2
+cask "lazybox-v2" do
+  version "__VERSION__"
+  sha256 "__SHA256__"
+
+  url "https://github.com/AntoineToussaint/lazybox/releases/download/v2-v#{version}/Lazybox_#{version}_aarch64.dmg",
+      verified: "github.com/AntoineToussaint/lazybox/"
+  name "Lazybox"
+  desc "Run and supervise coding agents across your repositories"
+  homepage "https://github.com/AntoineToussaint/lazybox"
+
+  livecheck do
+    url "https://github.com/AntoineToussaint/lazybox/releases/download/v2-updates/latest.json"
+    strategy :json do |json|
+      json["version"]
+    end
+  end
+
+  # The app updates itself (Settings → About), restarting its Runner service
+  # without stopping running agents; `brew upgrade --greedy` also works.
+  auto_updates true
+  depends_on arch: :arm64
+  # The bundled Node needs macOS 13.5 (packaging/release.tauri.json says so
+  # to macOS); a cask names releases, so Ventura is the closest it can ask for.
+  depends_on macos: ">= :ventura"
+
+  app "Lazybox.app"
+
+  # No `binary` stanza: there is one command, `lazybox`, and the app links it
+  # on first launch (`lazybox link`, into /usr/local/bin or ~/.local/bin, with
+  # completions; `lazybox uninstall` takes it back). A `binary` named
+  # `lazybox` would fail the install wherever the older `lazybox` formula
+  # already owns Homebrew's bin/lazybox.
+  #
+  # No `conflicts_with` either: Homebrew accepts only `cask:` there, so
+  # `conflicts_with formula: "lazybox"` would make this cask fail to load.
+  # The older formula is named in the caveats, and setup and `lazybox doctor`
+  # detect it and offer `brew uninstall lazybox`.
+
+  # Removing the cask stops the Runner service; agents it ran stop by
+  # themselves within a day. `zap` also deletes conversations and settings.
+  uninstall launchctl: "ai.lazybox.runner",
+            delete:    [
+              "~/.config/lazybox/runners/lazybox.json",
+              "~/Library/LaunchAgents/ai.lazybox.runner.plist",
+            ]
+
+  zap trash: [
+    "~/Library/Application Support/ai.lazybox.app",
+    "~/Library/Application Support/Lazybox",
+    "~/Library/Caches/ai.lazybox.app",
+    "~/Library/Logs/Lazybox",
+    "~/Library/Saved Application State/ai.lazybox.app.savedState",
+    "~/Library/WebKit/ai.lazybox.app",
+  ]
+
+  caveats <<~EOS
+    Open Lazybox once: it sets up its background service (the Runner) and
+    puts the `lazybox` command on your PATH. `lazybox doctor` checks the
+    installation.
+
+    If an older Lazybox is installed from this tap's `lazybox` formula, it
+    comes first on your PATH, so `lazybox` in your terminal runs it. Remove
+    it with:
+      brew uninstall lazybox
+    Setup offers to do this for you, after showing you the command.
+
+    A release not yet signed by Apple (its title says "unsigned") does not
+    open the first time: open it once and choose Done, then System Settings
+    → Privacy & Security → Open Anyway, and open it again. Or run:
+      xattr -dr com.apple.quarantine /Applications/Lazybox.app
+  EOS
+end

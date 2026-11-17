@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lazybox:schema:actions:v1",
+  "title": "Lazybox actions and hooks",
+  "description": "Named actions the app offers in its menus, and hooks the Runner runs on events. See POWER.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "actions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/action" } },
+    "hooks": { "type": ["array", "null"], "maxItems": 50, "items": { "$ref": "#/$defs/hook" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,47}$" },
+    "duration": {
+      "description": "A duration such as 90s, 10m or 1h, or a number of seconds.",
+      "oneOf": [ { "type": "integer", "minimum": 1 }, { "type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$" } ]
+    },
+    "strings": { "oneOf": [ { "type": "string" }, { "type": "array", "items": { "type": "string" } } ] },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "steps"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "maxLength": 80 },
+        "description": { "type": "string", "maxLength": 500 },
+        "icon": { "type": "string", "maxLength": 32 },
+        "key": { "type": "string", "pattern": "^(?:[a-z0-9]|Shift\\+[a-z])$", "description": "One key after the ]] leader." },
+        "where": {
+          "oneOf": [
+            { "enum": ["palette", "menu", "conversation", "workspace"] },
+            { "type": "array", "items": { "enum": ["palette", "menu", "conversation", "workspace"] } }
+          ]
+        },
+        "confirm": { "type": "boolean" },
+        "steps": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "$ref": "#/$defs/step" } }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "name": { "type": "string", "maxLength": 80 },
+        "when": { "enum": ["always", "succeeded", "failed"] },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "send": {
+          "oneOf": [
+            { "type": "string" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "text": { "type": "string" },
+                "snippet": { "type": "string" },
+                "to": { "type": "string", "description": "current (default), new, or a conversation's id or title." },
+                "wait": { "type": "boolean", "description": "Also wait for the agent's turn to end." }
+              }
+            }
+          ]
+        },
+        "open": {
+          "oneOf": [
+            { "type": "string", "description": "A panel (changes, console, files, …) or an http(s) address." },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "panel": { "enum": ["chat", "console", "terminal", "assistant", "changes", "usage", "sessions", "missions", "pulls", "processes", "actions", "preview", "files", "editor", "artifacts", "settings", "inbox"] },
+                "url": { "type": "string", "pattern": "^https?://" },
+                "file": { "type": "string" },
+                "line": { "type": "integer", "minimum": 1 }
+              }
+            }
+          ]
+        },
+        "run": { "type": "string", "description": "A workspace action's key, as the Actions panel lists it." },
+        "command": { "type": "string", "description": "A shell command, run as a managed command of the conversation." },
+        "permission": { "enum": ["ask", "read-only", "yolo"] },
+        "wait": {
+          "oneOf": [
+            { "enum": ["idle", "needs-input"] },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": { "until": { "enum": ["idle", "needs-input"] }, "timeout": { "$ref": "#/$defs/duration" } }
+            }
+          ]
+        },
+        "do": {
+          "oneOf": [
+            { "$ref": "#/$defs/appAction" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["action"],
+              "properties": { "action": { "$ref": "#/$defs/appAction" }, "argument": { "type": "string", "description": "What the action takes (settings.open: a section)." } }
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        { "required": ["send"] }, { "required": ["open"] }, { "required": ["run"] },
+        { "required": ["command"] }, { "required": ["permission"] }, { "required": ["wait"] }, { "required": ["do"] }
+      ]
+    },
+    "appAction": { "type": "string", "description": "An action of the app, as lazybox do --list lists them." },
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "on"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "description": { "type": "string", "maxLength": 500 },
+        "on": {
+          "oneOf": [
+            { "$ref": "#/$defs/event" },
+            { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/event" } }
+          ]
+        },
+        "filter": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "workspace": { "$ref": "#/$defs/strings" },
+            "conversation": { "$ref": "#/$defs/strings" },
+            "repository": { "$ref": "#/$defs/strings" }
+          }
+        },
+        "run": { "$ref": "#/$defs/strings", "description": "A program and its arguments; nothing is passed through a shell." },
+        "shell": { "type": "string", "description": "A line for /bin/sh -c. Read event values from LAZYBOX_EVENT_* variables, quoted." },
+        "webhook": {
+          "oneOf": [
+            { "type": "string", "pattern": "^https?://" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["url"],
+              "properties": {
+                "url": { "type": "string", "pattern": "^https?://" },
+                "headers": { "type": "object", "additionalProperties": { "type": "string" } }
+              }
+            }
+          ]
+        },
+        "grants": { "type": "array", "items": { "enum": ["read", "respond", "start"] }, "uniqueItems": true },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "enabled": { "type": "boolean" }
+      },
+      "oneOf": [ { "required": ["run"] }, { "required": ["shell"] }, { "required": ["webhook"] } ]
+    },
+    "event": { "enum": ["agent.needs-input", "turn.done", "turn.failed", "pr.opened", "pr.checks-failed", "pr.checks-passed", "pr.changes-requested", "pr.approved", "pr.merged", "pr.closed", "pr.conflicts", "mission.accepted"] }
+  }
+}

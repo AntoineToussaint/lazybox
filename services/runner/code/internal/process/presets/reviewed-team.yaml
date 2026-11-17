@@ -1,0 +1,84 @@
+version: 1
+name: reviewed-team
+autonomy: 4
+budgets:
+  mission: {usd: 60, wall: 10h}
+  task:    {usd: 12, turns: 120, retries: 2}
+  on_exhausted: escalate
+wip: {workers: 3, writers_per_repo: 1, overlapping_paths: serial}
+phases:
+  - {id: plan,      exit: contract}
+  - {id: build,     exit: all_verified}
+  - {id: integrate, exit: merged}
+  - {id: accept,    exit: accepted}
+gates:
+  contract:     {kind: human, show: [brief, assertions, task_graph, budget]}
+  all_verified: {kind: rule,  when: "mission.assertions.all(a, a.verdict == 'pass')"}
+  merged:       {kind: check, when: "mission.prs.all(p, p.merged && p.checks_green)"}
+  accepted:     {kind: human, show: [contract_table, evidence, cost, diffstat]}
+roles:
+  coordinator:
+    provider: claude
+    model: strongest
+    effort: high
+    permission: read_only
+    scopes: [goal.*, task.create, task.assign, session.spawn:worker,
+             decision.record, decision.request, gate.request, evidence.read]
+    context: [brief, decisions, board]
+    instructions: {file: .lazybox/roles/coordinator.md}
+    triggers:
+      - {on: mission.created}
+      - {on: [task.question, task.blocked, verdict.recorded, escalation.raised]}
+    concurrency: 1
+    budget: {usd: 8}
+  worker:
+    provider: [claude, codex]    # round-robin across configured accounts
+    permission: yolo             # only inside its task worktree
+    scopes: [task.report, task.question, evidence.read, decision.read]
+    context: [task_brief, decisions, assertions_claimed]
+    instructions: {file: .lazybox/roles/worker.md}
+    concurrency: 3
+  verifier:
+    provider: other_than_worker
+    permission: read_only
+    scopes: [verdict.record, evidence.read]
+    context: [diff, assertions_claimed]   # never the worker transcript
+    instructions: {file: .lazybox/roles/verifier.md}
+    budget: {usd: 3, turns: 40}
+  reviewer:
+    provider: other_than_worker
+    permission: read_only
+    scopes: [finding.file]
+    instructions: {snippet: deepreview}
+  transition:
+    provider: claude
+    model: small
+    permission: read_only
+    scopes: [phase.propose, status.report, escalate, task.create:fix]
+    triggers:
+      - {on: timer, every: 30m}
+      - {on: attempt.ended}
+      - {on: budget.warning}
+      - {on: stall, after: 20m}       # no event for a live task
+rules:
+  - {on: task.reported, if: "task.evidence.exists(e, e.kind == 'run' && e.exit == 0)",
+     do: {start: verifier}}
+  - {on: task.reported, if: "!task.evidence.exists(e, e.kind == 'run')",
+     do: {send: worker, text: "Report rejected: run the tests with lazybox run."}}
+  - {on: verdict.recorded, if: "verdict.failed && task.retries_left > 0",
+     do: {create_task: fix, assign: worker}}
+  - {on: verdict.recorded, if: "task.assertions.all(a, a.verdict == 'pass')",
+     do: {start: reviewer}}
+  - {on: gate.passed, do: enter_next_phase}
+integration:
+  strategy: queue                # queue | pr_per_task | manual
+  order: dependency              # from merge_after edges
+  method: squash
+  after_each_merge: {exec: .lazybox/integration-check.sh}
+  on_failure: bisect
+notifications:
+  - {on: [gate.requested, decision.requested], to: [inbox, desktop], priority: high}
+  - {on: [escalation.raised, budget.exhausted], to: [inbox, desktop]}
+  - {on: status.reported, to: [inbox]}
+snippets:
+  suggest: {build: [test], integrate: [freshen, push]}

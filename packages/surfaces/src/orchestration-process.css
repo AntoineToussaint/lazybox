@@ -1,0 +1,19 @@
+.orchestration-process code { font-size: calc(11px * var(--code-scale)); padding: 1px 5px; border-radius: 4px; background: var(--surface-strong); color: var(--accent-strong); }
+.orchestration-process > h3 { font-size: calc(13px * var(--text-scale)); font-weight: 600; margin: 22px 0 10px; color: var(--text); }
+.process-scope { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 14px; }
+.process-scope label { display: flex; align-items: center; gap: 8px; font-size: calc(12px * var(--text-scale)); color: var(--text-tertiary); }
+.process-layers { display: flex; flex-wrap: wrap; gap: 6px; font-size: calc(11px * var(--text-scale)); color: var(--text-muted); margin: 0 0 10px; }
+.process-layers span + span::before { content: '← '; color: var(--text-disabled); }
+.process-verdict { font-size: calc(13px * var(--text-scale)); margin: 0 0 10px; }
+.process-verdict.tone-ok { color: var(--ok-soft); }
+.process-verdict.tone-bad, .process-issues .tone-bad { color: var(--danger-soft); }
+.process-issues .tone-warn { color: var(--warn-soft); }
+.process-issues { list-style: none; padding: 0; margin: 0 0 8px; display: flex; flex-direction: column; gap: 6px; font-size: calc(12px * var(--text-scale)); line-height: 1.5; }
+.process-phases { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); gap: 10px; counter-reset: phase; }
+.process-phases li { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: var(--surface-raised); border: 1px solid var(--line); border-radius: 8px; font-size: calc(12px * var(--text-scale)); color: var(--text-tertiary); counter-increment: phase; }
+.process-phases li strong::before { content: counter(phase) '. '; color: var(--text-faint); }
+.process-phases li strong { color: var(--text); font-size: calc(13px * var(--text-scale)); }
+.process-phases small { color: var(--text-muted); overflow-wrap: anywhere; }
+.process-role-body { display: flex; flex-direction: column; gap: 6px; padding: 0 14px 12px; font-size: calc(12px * var(--text-scale)); color: var(--text-tertiary); }
+.process-role-body ul { margin: 0; padding-left: 16px; }
+.process-scopes { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; }

@@ -1,0 +1,252 @@
+/*
+ * Settings: one scale for every tab. A sidebar of sections (a scrolling strip
+ * when narrow), then a content column of section headers, groups and rows.
+ * Tokens live here; tab stylesheets use them rather than their own colours.
+ */
+.settings-page{
+  --s-bg:var(--surface);--s-surface:var(--surface-raised);--s-surface-hover:var(--surface-hover);--s-raised:var(--surface-active);
+  --s-line:var(--line-subtle);--s-line-strong:var(--line-strong);
+  --s-text:var(--text);--s-text-2:var(--text-tertiary);--s-muted:var(--text-muted);--s-faint:var(--text-faint);
+  --s-accent:var(--accent);--s-accent-bg:var(--accent-bg);
+  --s-ok:var(--ok-soft);--s-warn:var(--warn-soft);--s-warn-bg:var(--warn-bg);--s-bad:var(--danger-soft);--s-bad-bg:var(--danger-bg);
+  --s-radius:8px;--s-control:32px;
+  flex:1;min-height:0;overflow:auto;background:var(--s-bg);color:var(--s-text);container-type:inline-size;container-name:settings;
+}
+.settings-layout{display:grid;grid-template-columns:var(--split-settings-nav,200px) minmax(0,1fr);gap:48px;max-width:1240px;margin:0 auto;padding:32px 32px 72px}
+.settings-sidebar{position:sticky;top:32px;align-self:start;min-width:0}
+.settings-sidebar h1{font-size:calc(20px * var(--text-scale));font-weight:600;letter-spacing:-.4px;margin:0 10px 18px;color:var(--s-text)}
+.settings-tabs{display:flex;flex-direction:column;gap:1px}
+.settings-nav-group{font-size:calc(11px * var(--text-scale));font-weight:500;color:var(--s-faint);padding:0 10px;margin:14px 0 4px}
+.settings-nav-group:first-child{margin-top:0}
+.settings-page .settings-tabs [role=tab]{display:flex;align-items:center;gap:10px;height:32px;padding:0 10px;border:0;border-radius:6px;background:transparent;color:var(--s-muted);font-size:calc(13px * var(--text-scale));text-align:left;white-space:nowrap}
+.settings-page .settings-tabs [role=tab] svg{flex:none;opacity:.85}
+.settings-page .settings-tabs [role=tab]:hover{background:var(--s-surface-hover);color:var(--s-text)}
+.settings-page .settings-tabs [role=tab][aria-selected=true]{background:var(--s-raised);color:var(--s-text);font-weight:500}
+.settings-page .settings-tabs [role=tab][aria-selected=true] svg{color:var(--s-accent);opacity:1}
+.settings-content{min-width:0;max-width:920px}
+.settings-page [hidden]{display:none!important}
+.settings-page :focus-visible{outline:2px solid var(--s-accent);outline-offset:2px}
+
+/* Narrow (a phone, or Settings in a narrow pane): a heading and a strip of sections. */
+@container settings (max-width:760px){
+  .settings-layout{grid-template-columns:minmax(0,1fr);gap:20px;padding:20px 16px 56px}
+  .settings-sidebar{position:static}
+  .settings-sidebar h1{margin:0 0 12px;font-size:calc(20px * var(--text-scale))}
+  .settings-tabs{flex-direction:row;gap:4px;overflow-x:auto;scrollbar-width:none;margin:0 -16px;padding:0 16px 10px;border-bottom:1px solid var(--s-line)}
+  .settings-tabs::-webkit-scrollbar{display:none}
+  .settings-nav-group{display:none}
+  .settings-page .settings-tabs [role=tab]{height:30px;padding:0 10px;flex:none}
+  .settings-page .settings-tabs [role=tab] svg{display:none}
+}
+
+/* Section header: a title, one sentence, and at most one primary action. */
+.settings-section-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px 24px;margin:0 0 20px;flex-wrap:wrap}
+.settings-section-header>div:first-child{min-width:0;flex:1 1 320px}
+.settings-section-header h2{font-size:calc(17px * var(--text-scale));font-weight:600;letter-spacing:-.3px;margin:0;color:var(--s-text)}
+.settings-section-header p{margin:6px 0 0;max-width:640px;font-size:calc(13px * var(--text-scale));line-height:1.55;color:var(--s-muted)}
+.settings-section-header p code{font-family:var(--font-mono);font-size:calc(11.5px * var(--code-scale));padding:1px 5px;border-radius:4px;background:var(--s-raised);color:var(--s-text-2);overflow-wrap:anywhere}
+.settings-section-actions{display:flex;gap:8px;flex:none}
+.settings-page .settings-section-actions button,.settings-page button.primary{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:var(--s-control);padding:0 14px;font-size:calc(13px * var(--text-scale));font-weight:600;border-radius:6px}
+
+/* Groups of rows on one surface; a row is label + description left, control right. */
+.settings-group{margin:0 0 24px}
+.settings-group-heading{margin:0 0 10px}
+.settings-group-heading h3{margin:0;font-size:calc(13px * var(--text-scale));font-weight:600;color:var(--s-text)}
+.settings-group-heading p{margin:4px 0 0;font-size:calc(12px * var(--text-scale));line-height:1.55;color:var(--s-muted);max-width:640px}
+.settings-group-body{border:1px solid var(--s-line);border-radius:var(--s-radius);background:var(--s-surface);container-type:inline-size;container-name:settings-group}
+.settings-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(200px,280px);gap:8px 24px;align-items:center;padding:14px 16px}
+.settings-row+.settings-row,.settings-group-body>*+.settings-row{border-top:1px solid var(--s-line)}
+.settings-row.is-stacked{grid-template-columns:minmax(0,1fr)}
+.settings-row-text{display:flex;flex-direction:column;gap:3px;min-width:0}
+.settings-row-text label,.settings-page .settings-row-text label,.settings-row-label{display:block;font-size:calc(13px * var(--text-scale));font-weight:500;color:var(--s-text);gap:0}
+.settings-row-text small{font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--s-muted)}
+.settings-row-control{min-width:0}
+.settings-page .settings-row-control select,.settings-page .settings-row-control input:not([type=checkbox]):not([type=radio]){width:100%;height:var(--s-control);padding:0 10px;font-size:calc(13px * var(--text-scale))}
+.settings-page .settings-row-control textarea{width:100%;min-height:72px;padding:10px 12px;font-size:calc(13px * var(--text-scale));line-height:1.5;resize:vertical}
+@container settings-group (max-width:560px){.settings-row{grid-template-columns:minmax(0,1fr)}}
+
+/* Notes, errors, saved and empty states: sentences, quiet unless something is wrong. */
+.settings-callout{display:flex;align-items:flex-start;gap:8px;margin:0;padding:10px 16px;border-top:1px solid var(--s-line);font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--s-text-2)}
+.settings-callout svg{flex:none;margin-top:1px}
+.settings-callout.tone-warn{color:var(--s-warn);background:var(--s-warn-bg)}
+.settings-callout:last-child{border-radius:0 0 var(--s-radius) var(--s-radius)}
+.settings-error{color:var(--s-bad);background:var(--s-bad-bg);border-radius:6px;padding:10px 12px;font-size:calc(12px * var(--text-scale));line-height:1.5;margin:0 0 16px}
+.settings-error button{margin-left:6px;padding:3px 9px;font-size:calc(12px * var(--text-scale))}
+.settings-inline-error{margin:0;font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--s-bad)}
+.settings-saved{display:inline-flex;align-items:center;gap:6px;margin:0;font-size:calc(12px * var(--text-scale));color:var(--s-ok)}
+.settings-dirty{margin:0;font-size:calc(12px * var(--text-scale));color:var(--s-muted)}
+.settings-empty{margin:0 0 16px;padding:28px 24px;color:var(--s-muted);font-size:calc(13px * var(--text-scale));line-height:1.55;border:1px dashed var(--s-line-strong);border-radius:var(--s-radius);text-align:center}
+.settings-empty h3{margin:0 0 6px;font-size:calc(14px * var(--text-scale));font-weight:600;color:var(--s-text)}
+.settings-empty p{margin:0 auto;max-width:420px}
+p.settings-empty[role=status]{border-style:solid;border-color:transparent;text-align:left;padding:8px 0}
+.settings-savebar{position:sticky;bottom:0;display:flex;align-items:center;justify-content:flex-end;gap:16px;margin:8px 0 0;padding:12px 0;background:linear-gradient(transparent,var(--s-bg) 30%);z-index:1}
+.settings-savebar>p{flex:1;min-width:0}
+.settings-page button.link{border:0;background:none;padding:0;color:var(--s-accent);text-decoration:underline;font-size:inherit}
+.settings-page button.quiet{display:inline-flex;align-items:center;gap:6px;border-color:transparent;background:transparent;color:var(--s-muted);font-size:calc(12px * var(--text-scale));padding:0 8px;min-height:28px}
+.settings-page button.quiet:hover:not(:disabled){background:var(--s-surface-hover);color:var(--s-text)}
+.settings-page button.icon-button{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border-color:transparent;background:transparent;color:var(--s-muted)}
+.settings-page button.icon-button:hover{background:var(--s-raised);color:var(--s-text)}
+.usage-note{font-size:calc(12px * var(--text-scale));color:var(--s-muted,var(--text-muted));margin:20px 0 0;line-height:1.55;max-width:640px}
+.usage-note code{font-family:var(--font-mono);font-size:calc(11px * var(--code-scale))}
+
+/* Older tab markup (and tabs not yet on these parts) still lines up. */
+.subscriptions-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px 24px;margin:0 0 20px;flex-wrap:wrap}
+.subscriptions-heading h2{font-size:calc(17px * var(--text-scale));font-weight:600;margin:0}
+.subscriptions-heading p{color:var(--s-muted,var(--text-muted));font-size:calc(13px * var(--text-scale));line-height:1.55;margin:6px 0 0;max-width:640px}
+.runner-preferences{display:block}
+.runner-preferences>h2{font-size:calc(17px * var(--text-scale));font-weight:600;letter-spacing:-.3px;margin:0}
+.runner-preferences>h2+p{margin:6px 0 20px;font-size:calc(13px * var(--text-scale));line-height:1.55;color:var(--s-muted);max-width:640px}
+.runner-preferences input,.runner-preferences select,.runner-preferences textarea{box-sizing:border-box;min-width:0;max-width:100%}
+.runner-preferences small{color:var(--s-muted,var(--text-muted))}
+
+/* Subscriptions. */
+.subscription-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,272px),1fr));gap:12px;align-items:start}
+.subscription-card{display:flex;flex-direction:column;min-width:0;background:var(--s-surface,var(--surface-raised));border:1px solid var(--s-line,var(--line));border-radius:var(--s-radius,8px);overflow:hidden}
+.subscription-card>header{display:flex;align-items:flex-start;gap:10px;padding:14px 14px 10px}
+.subscription-identity{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.subscription-card h3{margin:0;font-size:calc(13px * var(--text-scale));font-weight:600;color:var(--s-text,var(--text));overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.subscription-identity>span,.subscription-card header>div>span{color:var(--s-muted,var(--text-muted));font-size:calc(11px * var(--text-scale))}
+.subscription-email{display:block;font-size:calc(11px * var(--text-scale));color:var(--s-text-2,var(--text-subtle));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;user-select:text}
+.provider-mark{width:28px;height:28px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;background:var(--accent-bg);color:var(--warn);font-size:calc(19px * var(--text-scale));flex:none}
+.provider-mark.codex{background:var(--ok-bg-strong);color:var(--ok-soft);font-size:calc(22px * var(--text-scale))}
+.account-state{flex:none;margin-left:auto;font-size:calc(11px * var(--text-scale));line-height:calc(18px * var(--text-scale));padding:0 7px;border-radius:9px;background:var(--s-raised,var(--surface-active));color:var(--s-muted,var(--text-subtle));white-space:nowrap}
+.account-state.tone-ok{color:var(--s-ok);background:var(--ok-bg)}
+.account-state.tone-warn{color:var(--s-warn);background:var(--s-warn-bg)}
+.account-state.tone-bad{color:var(--s-bad);background:var(--s-bad-bg)}
+.subscription-back{margin:0 14px 6px;padding:8px 10px;border-radius:6px;font-size:calc(12.5px * var(--text-scale));font-weight:500;line-height:1.4;font-variant-numeric:tabular-nums}
+.subscription-back.tone-warn{color:var(--s-warn);background:var(--s-warn-bg)}
+.subscription-back.tone-bad{color:var(--s-bad);background:var(--s-bad-bg)}
+.subscription-back.tone-muted{color:var(--s-text-2);background:var(--s-raised)}
+.subscription-usage{display:flex;flex-direction:column;gap:10px;padding:6px 14px 14px}
+.usage-window>div{display:flex;justify-content:space-between;gap:8px;font-size:calc(12px * var(--text-scale));margin-bottom:6px;color:var(--s-text-2)}
+.usage-window>div>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.usage-window strong{flex:none;font-weight:500;color:var(--s-text);font-variant-numeric:tabular-nums}
+.usage-window progress{display:block;width:100%;height:4px;border:0;border-radius:4px;overflow:hidden;accent-color:var(--accent);background:var(--surface-strong)}
+.usage-window progress::-webkit-progress-bar{background:var(--surface-strong)}
+.usage-window progress::-webkit-progress-value{background:var(--accent);border-radius:4px}
+.usage-window progress::-moz-progress-bar{background:var(--accent)}
+.usage-window.is-full progress::-webkit-progress-value{background:var(--s-warn)}
+.usage-window.is-full progress::-moz-progress-bar{background:var(--s-warn)}
+.usage-window.is-full strong{color:var(--s-warn)}
+.usage-window.is-reset strong{color:var(--s-muted)}
+.usage-window small{display:block;margin-top:5px;font-size:calc(11px * var(--text-scale));color:var(--s-faint)}
+.subscription-next-reset{font-size:calc(11px * var(--text-scale));color:var(--s-faint);font-variant-numeric:tabular-nums}
+.usage-unavailable{display:flex;flex-direction:column;gap:4px;color:var(--s-text-2);font-size:calc(13px * var(--text-scale))}
+.usage-unavailable small{font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--s-muted)}
+.subscription-card .settings-error{margin:0 14px 12px}
+.subscription-card footer{border-top:1px solid var(--s-line,var(--line));display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px 6px 14px;min-height:40px;flex-wrap:wrap;margin-top:auto}
+.subscription-card footer small{font-size:calc(11px * var(--text-scale));color:var(--s-muted)}
+.sign-in-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--accent-line);background:var(--s-accent-bg);padding:10px 14px;border-radius:var(--s-radius);margin-bottom:16px;font-size:calc(13px * var(--text-scale))}
+
+/* Per-account opt-out of automatic subscription switching: one quiet switch row. */
+.rotation-toggle,.settings-switch{display:flex !important;flex-direction:row !important;align-items:center;gap:8px !important;margin:0;font-size:calc(12px * var(--text-scale)) !important;color:var(--s-text-2,var(--text-tertiary));cursor:pointer}
+.rotation-toggle input,.settings-switch input{appearance:none;-webkit-appearance:none;flex:none;width:28px;height:16px;margin:0;padding:0;border:0;border-radius:8px;background:var(--surface-strong);position:relative;cursor:pointer;transition:background .15s}
+.rotation-toggle input::after,.settings-switch input::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--text-muted);transition:transform .15s, background .15s}
+.rotation-toggle input:checked,.settings-switch input:checked{background:var(--accent-solid-hover)}
+.rotation-toggle input:checked::after,.settings-switch input:checked::after{transform:translateX(12px);background:var(--on-accent-solid)}
+.rotation-toggle input:disabled,.settings-switch input:disabled{opacity:.6;cursor:default}
+@media (prefers-reduced-motion: reduce){.rotation-toggle input,.rotation-toggle input::after,.settings-switch input,.settings-switch input::after{transition:none}}
+
+/* Add-subscription dialog. */
+.subscription-dialog{width:min(440px,calc(100vw - 32px));border:1px solid var(--line-bold);border-radius:12px;padding:24px;background:var(--surface-raised);color:var(--text);box-shadow:0 24px 80px color-mix(in srgb,var(--shadow) calc(60% * var(--shadow-strength)),transparent)}
+.subscription-dialog>header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+.subscription-dialog h2{font-size:calc(15px * var(--text-scale));font-weight:600;letter-spacing:-.2px;margin:0}
+.subscription-dialog>header button{font-size:calc(20px * var(--text-scale));padding:0 6px;border:0;background:transparent;color:var(--text-muted)}
+.subscription-dialog form{display:flex;flex-direction:column;gap:18px}
+.subscription-dialog label{display:flex;flex-direction:column;gap:8px!important;font-size:calc(12px * var(--text-scale))!important}
+.subscription-dialog label input,.subscription-dialog label select{width:100%;box-sizing:border-box;font-size:calc(13px * var(--text-scale));padding:9px 11px}
+.subscription-dialog p{font-size:calc(13px * var(--text-scale));color:var(--text-tertiary);line-height:1.6;margin:0}
+.subscription-dialog code{font-size:calc(12px * var(--code-scale));padding:2px 5px;border-radius:4px;background:var(--surface-strong);color:var(--accent-strong)}
+.subscription-dialog small{line-height:1.6}
+.subscription-dialog .primary{padding:10px 16px;display:inline-flex;align-items:center;justify-content:center;gap:7px}
+.enrollment-state{display:flex;flex-direction:column;gap:16px}
+.device-code{background:var(--surface-sunken);border:1px solid var(--accent-line-subtle);border-radius:8px;padding:16px;text-align:center;font-family:ui-monospace,monospace;font-size:calc(24px * var(--code-scale));letter-spacing:4px;color:var(--accent-strong);user-select:all}
+.enrollment-check{font-size:calc(30px * var(--text-scale));color:var(--ok-soft)}
+.enrollment-status{display:flex;align-items:center;gap:8px;margin:0!important;font-size:calc(13px * var(--text-scale))!important;font-weight:600;line-height:1.4!important;color:var(--text)!important}
+.enrollment-status svg{flex:none;color:var(--text-muted)}
+.enrollment-status.tone-waiting svg{color:var(--accent)}
+.enrollment-status.tone-problem svg{color:var(--warn)}
+.cancel-sign-in{align-self:center}
+.subscription-dialog .sign-in-other{align-self:center;display:inline-flex;align-items:center;min-height:28px;padding:0 8px;border-color:transparent;background:transparent;color:var(--text-muted);font-size:calc(12px * var(--text-scale))}
+.subscription-dialog .sign-in-other:hover:not(:disabled){background:var(--surface-hover,var(--surface-strong));color:var(--text)}
+.subscription-dialog .sign-in-hint{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:2px 4px;font-size:calc(12px * var(--text-scale))}
+.device-code-control{display:flex;flex-wrap:wrap;align-items:center;gap:10px}.device-code-control .device-code{flex:1;min-width:0;width:100%;box-sizing:border-box}.device-code-control button{flex:none}.copy-status{width:100%;font-size:calc(11px * var(--text-scale));color:var(--ok-soft)}.copy-status:empty{display:none}
+
+/* Switch rows (Notifications, Vim editing): the whole row toggles. */
+.settings-error.tone-note{color:var(--s-text-2);background:var(--s-raised)}
+.settings-page label.settings-row{cursor:pointer;color:inherit;font-size:inherit}
+.settings-page label.settings-row:hover{background:var(--s-surface-hover)}
+.settings-group-body>.settings-row:first-child{border-radius:var(--s-radius) var(--s-radius) 0 0}
+.settings-group-body>.settings-row:last-child{border-radius:0 0 var(--s-radius) var(--s-radius)}
+.settings-row:has(>.settings-switch){grid-template-columns:minmax(0,1fr) auto}
+.settings-row-control.settings-switch{display:flex;justify-content:flex-end}
+.settings-switch input{width:28px!important;height:16px!important}
+.notification-test{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.notification-test button{display:inline-flex;align-items:center;gap:7px;font-size:calc(12px * var(--text-scale));min-height:32px;padding:0 12px}
+.notification-test small{font-size:calc(12px * var(--text-scale));color:var(--s-muted)}
+
+/* Shortcuts. */
+.keyboard-settings .shortcut-input{font-family:var(--font-mono);font-size:calc(12.5px * var(--code-scale))}
+.keyboard-settings .settings-row{padding-top:10px;padding-bottom:10px}
+.keyboard-settings .settings-row:not(:first-child) .settings-row-label{font-weight:400;color:var(--s-text-2)}
+.keyboard-settings .settings-savebar{margin:-12px 0 12px}
+.vim-status-line:empty{display:none}
+.vim-status-line{margin:-12px 0 20px}
+.settings-page .leader-menu-settings{margin:0;padding:0;border:0}
+.settings-page .leader-menu-settings form{padding:14px 16px;display:grid;gap:12px}
+.settings-page .leader-menu-row{grid-template-columns:72px minmax(0,1.4fr) minmax(0,1fr) 96px 28px;align-items:end}
+.settings-page .leader-menu-row input,.settings-page .leader-menu-row select{height:var(--s-control);padding:0 10px}
+.settings-page .leader-menu-row .icon-button{margin-bottom:2px}
+.settings-page .leader-menu-actions{display:flex;align-items:center;gap:12px}
+.settings-page .leader-menu-actions>p{flex:1;margin:0;font-size:calc(12px * var(--text-scale));color:var(--s-ok)}
+.settings-page .leader-menu-actions button{display:inline-flex;align-items:center;gap:6px;min-height:var(--s-control);padding:0 12px}
+.leader-menu-empty{margin:0;font-size:calc(12px * var(--text-scale));color:var(--s-muted)}
+@container settings-group (max-width:560px){.settings-page .leader-menu-row{grid-template-columns:1fr 1fr}}
+
+/* Runner. */
+.settings-page .runner-control{max-width:none}
+.runner-status-control{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}
+.settings-page .runner-status-control .runner-indicator{font-size:calc(13px * var(--text-scale));color:var(--s-text);margin:0;padding:0}
+.runner-status-control button{display:inline-flex;align-items:center;gap:6px;min-height:var(--s-control);padding:0 12px;font-size:calc(12.5px * var(--text-scale))}
+.settings-page .runner-unavailable{margin:0;border:0;border-top:1px solid var(--s-line);border-radius:0;background:transparent;padding:12px 16px}
+.settings-page .runner-unavailable p{margin:0;font-size:calc(12px * var(--text-scale));line-height:1.55;color:var(--s-text-2)}
+.settings-page .runner-hosting{margin:0;padding:0;border:0;display:block}
+.settings-page .runner-hosting fieldset{padding:14px 16px;gap:8px}
+.settings-page .runner-hosting legend{float:left;width:100%;margin:0 0 8px;font-size:calc(12px * var(--text-scale));font-weight:500;color:var(--s-text-2)}
+.settings-page .runner-hosting .hosting-choice{background:var(--s-bg)}
+.settings-page .runner-hosting .hosting-message,.settings-page .runner-hosting .processes-notice{margin:0 16px 12px}
+.settings-page .runner-processes-summary{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 8px 8px 16px;border-top:1px solid var(--s-line);font-size:calc(12px * var(--text-scale));color:var(--s-muted)}
+
+/* Process. */
+.settings-page .process-scope{align-items:flex-end}
+.settings-page .process-scope label{flex-direction:column;align-items:stretch;gap:6px;font-size:calc(12px * var(--text-scale));color:var(--s-text-2)}
+.settings-page .process-scope select{height:var(--s-control);padding:0 10px;min-width:220px}
+.settings-page .process-role>header{padding-bottom:6px}
+@container settings (max-width:760px){.settings-tabs{mask-image:linear-gradient(to right,#000 calc(100% - 32px),transparent);-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 32px),transparent)}}
+@container settings-group (max-width:560px){.keyboard-settings .settings-row:not(:first-child):not(.vim-toggle){grid-template-columns:minmax(0,1fr) 128px}}
+
+/* Tabs not yet on the shared parts keep the same rhythm. */
+.settings-page .runtime-settings>h3{margin:24px 0 8px;font-size:calc(13px * var(--text-scale));font-weight:600}
+.settings-page .runtime-settings>button.primary{margin-top:16px}
+.settings-page .runtime-settings>fieldset{margin:0;padding:0;border:0}
+.settings-page .runtime-settings>fieldset>legend{padding:0;font-size:calc(13px * var(--text-scale));font-weight:600;margin-bottom:4px}
+.settings-page .runtime-settings>fieldset>p{font-size:calc(12px * var(--text-scale));line-height:1.55;color:var(--s-muted);margin:0 0 12px;max-width:640px}
+/* Settings → Chat (ChatSettings.tsx). */
+.chat-settings-choice{cursor:pointer;grid-template-columns:minmax(0,1fr) auto}
+.chat-settings-choice:hover{background:var(--s-surface-hover)}
+.chat-settings-choice input[type=radio]{width:16px;height:16px;margin:0;accent-color:var(--s-accent)}
+.chat-settings-choice:has(input:checked) .settings-row-label{color:var(--s-accent)}
+.chat-settings-choice:has(input:focus-visible){outline:1px solid var(--s-accent);outline-offset:-1px}
+.chat-settings kbd{font:calc(11px * var(--code-scale)) var(--font-mono);padding:1px 5px;border:1px solid var(--s-line-strong);border-radius:4px;background:var(--s-raised);color:var(--s-text)}
+.chat-settings-preview{padding:14px 16px;display:flex;flex-direction:column;gap:6px;font-size:calc(13px * var(--text-scale));color:var(--s-text)}
+.chat-settings-preview>p{margin:0;line-height:1.55}
+.chat-settings-preview .tool-lines{margin:0}
+
+.enrollment-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+/* Settings → Notifications → Sounds: which sound, a preview, on/off; one volume. */
+.sound-option .notification-sound-control{justify-content:flex-end}
+.sound-option .notification-sound-control select{min-width:0;flex:1;max-width:180px}
+.sound-option .sound-error{grid-column:1/-1;margin:0}
+.sound-volume{display:flex;align-items:center;gap:10px;color:var(--s-muted)}
+.sound-volume input[type=range]{flex:1;min-width:0;accent-color:var(--accent-solid)}
+.sound-volume output{min-width:3.5ch;text-align:right;font-variant-numeric:tabular-nums;font-size:calc(12px * var(--text-scale));color:var(--s-text)}

@@ -1,0 +1,130 @@
+/* The chat header: the title has the first line (two when it needs them) beside the window and menu
+   buttons; a calm second line says how the conversation is going, then its numbers as compact chips.
+   What the second line has no room for folds whole into "⋯" (ChatHeader, header-layout.ts): nothing
+   in the header is cut inside a word. The header is a size container: a slim dockview panel gets a
+   tighter header, not a squeezed one. Its popovers live in the top layer, outside the container. */
+.chat-heading{container:chat-heading/inline-size;display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:"avatar title actions" "avatar meta meta";column-gap:10px;row-gap:1px;align-items:start;min-height:56px;padding:6px 12px 5px 20px;border-bottom:1px solid var(--line);box-sizing:border-box}
+.chat-heading .agent-avatar{grid-area:avatar;width:28px;height:28px;margin-top:1px;flex:none;font-size:calc(18px * var(--text-scale));border-radius:7px}
+.chat-heading-title{grid-area:title;align-self:center;min-width:0}
+.chat-heading-actions{grid-area:actions;display:flex;align-items:center;gap:2px;color:var(--text-faint)}
+.chat-heading-actions>.icon-button,.chat-heading-actions .session-menu>summary{width:28px;height:28px;min-height:28px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:6px}
+
+/* The title: up to two balanced lines, then a clean clamp. Click: the first message; double-click: rename. */
+.conversation-title{display:flex;align-items:center;gap:2px;min-width:0}
+.conversation-title h2{margin:0;min-width:0;font-size:inherit;font-weight:inherit}
+.chat-heading .conversation-title h2{display:flex;flex:0 1 auto;min-width:0;font-size:calc(14px * var(--text-scale));line-height:calc(20px * var(--text-scale));letter-spacing:0}
+.conversation-title-text{display:block;max-width:100%;margin:0 0 0 -5px;padding:1px 5px;border:0;border-radius:5px;background:transparent;color:var(--text);font:600 calc(14px * var(--text-scale))/calc(20px * var(--text-scale)) var(--font-ui);letter-spacing:-.1px;text-align:left;cursor:pointer}
+.chat-heading .conversation-title .conversation-title-text{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;flex:0 1 auto;min-width:0;width:auto;height:auto;min-height:0;max-width:none;white-space:normal;overflow-wrap:break-word;text-wrap:balance;padding:1px 5px;font:600 calc(14px * var(--text-scale))/calc(20px * var(--text-scale)) var(--font-ui);color:var(--text)}
+.conversation-title-text:hover:not(:disabled){background:var(--surface-active)}
+.conversation-title-text:disabled{opacity:1;cursor:default}
+.conversation-rename-button{flex:none;width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:var(--text-muted);opacity:0;transition:opacity .12s}
+.conversation-title:hover .conversation-rename-button,.conversation-rename-button:focus-visible{opacity:1}
+.conversation-rename-button:hover{color:var(--text);background:var(--surface-active)}
+@media(hover:none){.conversation-rename-button{opacity:.7}}
+.chat-heading .conversation-title .conversation-rename-button,.chat-heading .conversation-rename .icon-button{width:24px;height:24px;min-height:0;padding:0}
+.conversation-rename{display:flex;align-items:center;gap:4px;min-width:0;margin:0 0 0 -5px}
+.conversation-rename input{flex:1;min-width:0;max-width:520px;height:26px;margin:0;padding:1px 5px;border:1px solid var(--accent-line);border-radius:5px;background:var(--surface-sunken);color:var(--text);font:600 calc(14px * var(--text-scale))/calc(20px * var(--text-scale)) var(--font-ui);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 12%,transparent);outline:0}
+.conversation-rename .icon-button{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:var(--text-subtle)}
+.conversation-rename .icon-button:hover:not(:disabled){background:var(--surface-selected);color:var(--text)}
+
+/* The first message, a click on the title away. */
+.first-message{position:fixed;inset:auto;margin:0;width:min(440px,calc(100vw - 16px));max-height:min(60dvh,520px);box-sizing:border-box;display:none;flex-direction:column;padding:0;border:1px solid var(--line-bold);border-radius:10px;background:var(--surface-raised);color:var(--text-soft);box-shadow:0 16px 48px color-mix(in srgb,var(--shadow) calc(45% * var(--shadow-strength)),transparent);font:calc(13px * var(--text-scale))/1.5 var(--font-ui)}
+.first-message:popover-open{display:flex}
+.first-message header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 8px 4px 14px}
+.first-message header strong{font-size:calc(11px * var(--text-scale));font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--text-muted)}
+.first-message header .icon-button{width:24px;height:24px;min-height:0;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:6px;background:transparent;color:var(--text-muted)}
+.first-message-text{flex:1;min-height:0;margin:0;padding:2px 14px 10px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text)}
+.first-message-empty{margin:0;padding:4px 14px 10px;color:var(--text-muted)}
+.first-message footer{display:flex;gap:6px;justify-content:flex-end;padding:8px 10px;border-top:1px solid var(--line-subtle)}
+.first-message footer button{display:inline-flex;align-items:center;gap:5px;height:26px;min-height:0;padding:0 9px;border:1px solid var(--line-strong);border-radius:6px;background:transparent;color:var(--text-subtle);font-size:calc(12px * var(--text-scale))}
+.first-message footer button:hover{background:var(--surface-active);color:var(--text)}
+
+/* The second line: how the conversation is going (left), its numbers (right). Fixed height: a chip
+   that appears or a count that ticks never moves the transcript. */
+.chat-heading-meta{grid-area:meta;display:flex;align-items:center;gap:12px;min-width:0;height:22px;font-size:calc(11px * var(--text-scale));line-height:calc(16px * var(--text-scale));color:var(--text-muted);white-space:nowrap}
+.chat-heading-about{display:flex;align-items:center;min-width:0;flex:0 1 auto;overflow:hidden}
+.chat-heading-about>*{flex:none;min-width:0}
+.chat-heading-about>*+*::before{content:'·';margin:0 6px;color:var(--text-disabled)}
+.chat-heading-status{display:inline-flex;align-items:center;min-width:0;flex:0 1 auto!important}
+.chat-heading-status>*+*{margin-left:6px}
+.chat-status{display:inline-flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;overflow:hidden;font-variant-numeric:tabular-nums;color:var(--text-muted)}
+/* A ticking status keeps a fixed slot: its neighbours never move because a clock ticked. */
+.chat-heading-meta .chat-status[data-tone=busy],.chat-heading-meta .chat-status[data-tone=waiting]{width:27ch;max-width:100%;box-sizing:border-box}
+.chat-status[data-tone=busy]{color:var(--attention-working,var(--running))}
+.chat-status[data-tone=waiting]{color:var(--attention-input,var(--warn))}
+.chat-status[data-tone=failed]{color:var(--attention-failed,var(--danger))}
+.chat-status-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-meta-branch{display:inline-flex;align-items:center;gap:4px;font-family:var(--font-mono);font-size:calc(10.5px * var(--code-scale));color:var(--text-subtle)}
+.chat-meta-branch>svg{flex:none;color:var(--text-muted)}
+.chat-meta-branch small{font-family:var(--font-ui);font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.chat-heading-meta .chat-model,.chat-heading-meta .chat-account{color:var(--text-subtle)}
+.chat-model[data-requested]{font-style:italic}
+.chat-heading .chat-model-button{display:inline-flex;align-items:center;gap:3px;margin:0 0 0 -4px;padding:0 4px;min-height:0;height:20px;border:0;border-radius:4px;background:none;color:var(--text-subtle);font:inherit;line-height:inherit;white-space:nowrap;cursor:pointer}
+.chat-heading .chat-model-button:hover,.chat-heading .chat-model-button:focus-visible{background:var(--surface-selected);color:var(--text)}
+.chat-heading .chat-model-button svg{flex:none;opacity:.6}
+
+/* The numbers: an icon and a count each; their words are in the tooltip, the accessible name and "⋯". */
+.chat-heading-stats{display:flex;align-items:center;gap:2px;flex:none;margin-left:auto}
+.chat-stat-host{display:contents}
+.chat-stat{display:inline-flex;align-items:center;flex:none}
+.chat-stat:not(:has(button:not([data-empty]))){display:none}
+.chat-heading .chat-stat .tool-activity-toolbar>button,.chat-heading .chat-stat .background-work-button,.chat-heading .chat-stat .context-trigger,.chat-heading .prompt-jump.in-header .prompt-jump-toggle{display:inline-flex;align-items:center;gap:5px;height:22px;min-height:0;padding:0 6px!important;border:0;border-radius:6px;background:transparent;color:var(--text-subtle);font-size:calc(11px * var(--text-scale))!important;font-variant-numeric:tabular-nums;white-space:nowrap}
+.chat-heading .chat-stat .tool-activity-toolbar>button:hover,.chat-heading .chat-stat .background-work-button:hover,.chat-heading .chat-stat .background-work-button[aria-expanded=true],.chat-heading .chat-stat .context-trigger:hover,.chat-heading .chat-stat .context-trigger[aria-expanded=true],.chat-heading .prompt-jump.in-header .prompt-jump-toggle:hover{background:var(--surface-active)!important;color:var(--text)}
+.chat-heading .tool-activity-toolbar{border:0;padding:0}
+.chat-heading .tool-activity-toolbar>button[data-empty]{display:none}
+.chat-heading .tool-activity-toolbar>button[data-running]{color:var(--attention-working,var(--running))}
+.chat-heading .tool-activity-count{margin:0}
+/* A count is not an alarm: it stays neutral. Only what failed is red, and it says so ("3 failed"). */
+.chat-heading .tool-activity-toolbar>button .tool-activity-failed{margin:0 0 0 1px;padding-left:6px;border-left:1px solid var(--line);color:var(--attention-failed,var(--danger));white-space:nowrap}
+.chat-heading .telemetry-panel.compact{padding:0;border:0;min-width:0}
+.chat-heading .context-mini-bar{width:24px}
+.chat-heading .context-trigger-cost{margin:0;padding:0 0 0 6px;border-left:1px solid var(--line-strong)}
+.chat-heading-stats .tool-activity-noun,.chat-heading-stats .background-work-noun,.chat-heading-stats .prompt-jump-noun{display:none}
+.chat-heading .chat-details-button{width:24px;height:22px;min-height:0;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:6px;background:transparent;color:var(--text-subtle)}
+.chat-heading .chat-details-button:hover,.chat-heading .chat-details-button:focus-visible{background:var(--surface-active);color:var(--text)}
+
+/* "⋯": what the line had no room for, with its words. */
+.chat-details{position:fixed;inset:auto;margin:0;width:300px;max-width:calc(100vw - 16px);box-sizing:border-box;padding:6px;overflow:visible;border:1px solid var(--line-bold);border-radius:10px;background:var(--surface-raised);color:var(--text-soft);box-shadow:0 14px 40px color-mix(in srgb,var(--shadow) calc(45% * var(--shadow-strength)),transparent);font:calc(12px * var(--text-scale))/calc(16px * var(--text-scale)) var(--font-ui)}
+.chat-details-row{display:grid;grid-template-columns:104px minmax(0,1fr);align-items:center;gap:8px;min-height:30px;padding:0 6px;border-radius:6px}
+.chat-details-row+.chat-details-row{border-top:1px solid var(--line-subtle)}
+.chat-details-row[data-stat]:not(:has(button:not([data-empty]))){display:none}
+.chat-details-label{color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.chat-details-value{display:flex;align-items:center;min-width:0;color:var(--text);overflow-wrap:anywhere}
+.chat-details .chat-meta-branch{white-space:normal}
+.chat-details .chat-stat .tool-activity-toolbar>button,.chat-details .chat-stat .background-work-button,.chat-details .chat-stat .context-trigger,.chat-details .prompt-jump.in-header .prompt-jump-toggle{margin-left:-6px;height:26px;color:var(--text)}
+.chat-heading .chat-details .chat-model-button{margin:0;height:24px}
+
+/* A slim panel: the avatar gives its room to the title, and the header tightens. */
+@container chat-heading (max-width:520px){
+  .chat-heading{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"title actions" "meta meta";padding-left:14px;column-gap:6px}
+  .chat-heading .agent-avatar{display:none}
+}
+
+/* The line under the conversation while the agent works: same words as the header. */
+.live-activity{display:flex;align-items:center;gap:8px;padding:6px 24px;font-size:calc(12px * var(--text-scale));color:var(--attention-working,var(--running));font-variant-numeric:tabular-nums;flex-shrink:0}
+.live-activity>i{display:none}
+.chat-heading .conversation-title .conversation-name-it{min-height:0;padding:0 7px}
+.chat-branch{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:100%;color:var(--text)}
+.chat-branch>svg{flex:none;color:var(--accent,var(--accent))}
+.chat-branch-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 calc(13px * var(--code-scale))/calc(20px * var(--code-scale)) var(--font-mono)}
+.chat-branch small{flex:none;font-size:calc(11px * var(--text-scale));font-weight:400;color:var(--text-muted)}
+.chat-untitled{font-weight:500;color:var(--text-tertiary)}
+.chat-heading .conversation-name-it{display:inline-flex;align-items:center;gap:4px;flex:none;height:22px;margin-left:6px;padding:0 7px;border:1px dashed var(--line-bold);border-radius:11px;background:transparent;color:var(--text-muted);font-size:calc(11px * var(--text-scale));font-weight:400;opacity:.85}
+.chat-heading .conversation-name-it:hover:not(:disabled){border-style:solid;border-color:var(--accent-line);color:var(--text);opacity:1}
+.native-toolbar{display:flex;align-items:center;justify-content:flex-start;gap:6px;min-height:32px;padding:2px 8px;background:var(--surface-sunken);border-bottom:1px solid var(--line-subtle)}
+.native-toolbar .application-name{margin-right:auto;color:var(--text-faint);font-size:calc(11px * var(--text-scale))}
+.native-toolbar .icon-button{width:26px;height:26px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:6px;background:transparent;color:var(--text-muted)}
+.native-toolbar .icon-button:hover{background:var(--surface-selected);color:var(--text,var(--text))}
+.native-toolbar .workspace-actions>summary{width:26px;height:26px;display:flex;align-items:center;justify-content:center;padding:0;border-radius:6px;color:var(--text-muted)}
+
+/* A failed sub-agent is news beside the status: a small chip that never clips a control. */
+.chat-heading-meta .subagent-attention{flex:none;min-width:0;height:18px}
+.chat-heading-meta .subagent-attention::before{content:none}
+.chat-heading-meta .subagent-attention button{min-height:0!important;height:18px;line-height:calc(16px * var(--text-scale));font-size:calc(11px * var(--text-scale))!important}
+.chat-heading-meta .subagent-attention-show{min-width:0;overflow:hidden;white-space:nowrap}
+/* A chat's own window leads with the way back (WindowControls.tsx). */
+.native-toolbar .put-back-button{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border:1px solid var(--accent-solid);border-radius:6px;background:var(--accent-solid);color:var(--on-accent-solid);font-size:calc(11px * var(--text-scale));font-weight:550;white-space:nowrap}
+.native-toolbar .put-back-button:hover{background:var(--accent-solid-hover);border-color:var(--accent-solid-hover)}
+.native-toolbar .put-back-button:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.native-toolbar .window-menu button{display:flex;align-items:center;gap:8px}
+.window-root{display:contents}

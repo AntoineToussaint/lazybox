@@ -1,0 +1,28 @@
+/* Mermaid diagrams: a zoomable, pannable viewport in the conversation and full screen. */
+.mermaid-block>header{gap:10px;flex-wrap:wrap}
+.diagram-toolbar,.diagram-zoom,.diagram-actions{display:flex;align-items:center;gap:2px;flex-wrap:wrap}
+.diagram-toolbar{gap:6px;margin-left:auto}
+.diagram-zoom{padding-right:6px;border-right:1px solid var(--line-strong)}
+.mermaid-block .diagram-tool{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;padding:0 6px!important;border:1px solid transparent;border-radius:5px;background:transparent;color:var(--text-secondary);font-size:calc(11px * var(--text-scale))!important;line-height:1}
+.mermaid-block .diagram-tool.text{padding:0 8px!important}
+.diagram-tool:hover:not(:disabled){background:var(--surface-strong);color:var(--text)}
+.diagram-tool[aria-pressed=true]{background:var(--accent-bg);border-color:var(--accent-line);color:var(--accent-strong)}
+.diagram-tool:focus-visible,.diagram-viewport:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+.diagram-scale{min-width:44px;text-align:center;font-variant-numeric:tabular-nums;color:var(--text-soft);font-size:calc(11px * var(--text-scale))}
+.diagram-viewport{position:relative;overflow:hidden;cursor:grab;touch-action:pan-y;user-select:none;-webkit-user-select:none;background:
+  radial-gradient(circle at 1px 1px,var(--surface-active) 1px,transparent 0) 0 0/18px 18px,var(--surface-sunken)}
+.diagram-viewport.inline{min-height:120px;max-height:520px}
+.diagram-viewport.dragging{cursor:grabbing}
+.diagram-viewport img{position:absolute;left:0;top:0;max-width:none;max-height:none;margin:0;padding:0;transform-origin:0 0;pointer-events:none;will-change:transform}
+.diagram-pending{display:flex;align-items:center;justify-content:center;color:var(--text-muted);margin:0}
+.diagram-fullscreen{position:fixed;inset:0;width:100vw;height:100dvh;max-width:none;max-height:none;margin:0;padding:0;border:0;background:var(--bg);color:var(--text-soft)}
+.diagram-fullscreen[open]{display:flex;flex-direction:column}
+.diagram-fullscreen::backdrop{background:color-mix(in srgb,var(--bg) 80%,transparent)}
+.diagram-fullscreen>header{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--line-subtle);background:var(--surface);flex-wrap:wrap}
+.diagram-fullscreen>header strong{font-size:calc(13px * var(--text-scale));font-weight:600}
+.diagram-fullscreen .diagram-zoom{margin-left:auto}
+.diagram-fullscreen .diagram-viewport{flex:1;min-height:0;touch-action:none}
+.diagram-fullscreen>footer{padding:8px 16px;border-top:1px solid var(--line-subtle);color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+@media (max-width:600px){.diagram-fullscreen>footer{display:none}.diagram-toolbar{margin-left:0}}
+@media (prefers-reduced-motion:no-preference){.diagram-tool{transition:background .12s,color .12s}}
+.diagram-help{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}

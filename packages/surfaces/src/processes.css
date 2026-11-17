@@ -1,0 +1,59 @@
+/* The Processes panel: every hosted agent, command and terminal. */
+.processes-panel{display:flex;flex-direction:column;flex:1;min-height:0;background:var(--canvas,var(--surface));container-type:inline-size}
+.processes-header{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:40px;padding:6px 14px;border-bottom:1px solid var(--line,var(--line-subtle));background:var(--surface);flex-wrap:wrap}
+.processes-count{display:flex;align-items:baseline;gap:10px;min-width:0}
+.processes-count strong{font-size:calc(12px * var(--text-scale));font-weight:600;color:var(--text,var(--text));white-space:nowrap}
+.processes-count span{font-size:calc(11px * var(--text-scale));color:var(--muted,var(--text-muted));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.processes-tools{display:flex;align-items:center;gap:10px}
+.workspace-shell .processes-scope{display:inline-flex;flex-direction:row;align-items:center;gap:6px;font-size:calc(11px * var(--text-scale));white-space:nowrap;cursor:pointer}
+.processes-scope input{margin:0}
+.processes-body{flex:1;min-height:0;overflow:auto;padding:10px 14px 16px}
+.processes-hosting{margin:0 0 8px;font-size:calc(11px * var(--text-scale));color:var(--muted,var(--text-muted));line-height:1.5}
+.processes-hosting strong{color:var(--text-secondary);font-weight:600}
+.processes-notice{display:flex;align-items:flex-start;gap:8px;margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface-raised);font-size:calc(11px * var(--text-scale));line-height:1.5;color:var(--text-secondary)}
+.processes-notice.tone-warn{border-color:var(--warn-line);background:var(--warn-bg);color:var(--warn-strong)}
+.processes-notice svg{flex:none;margin-top:1px}
+.processes-notice .link-button{margin-left:auto;flex:none}
+.link-button{background:none;border:0;padding:0;color:var(--accent,var(--accent));font-size:calc(11px * var(--text-scale));cursor:pointer;text-decoration:underline}
+.processes-empty{display:grid;justify-items:center;gap:4px;padding:28px 12px;text-align:center;color:var(--muted,var(--text-muted));font-size:calc(12px * var(--text-scale))}
+.processes-empty p{margin:0;max-width:360px;line-height:1.5}
+.processes-empty strong{color:var(--text,var(--text));font-weight:600}
+.process-group{margin-top:12px}
+.process-group>header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
+.process-group h3{margin:0;font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.6px;text-transform:uppercase;color:var(--text-muted)}
+.process-group h3 span{margin-left:4px;color:var(--text-disabled);font-weight:500}
+.workspace-shell .process-group>header button{font-size:calc(11px * var(--text-scale));padding:3px 8px}
+.process-group-note{margin:0 0 6px;font-size:calc(11px * var(--text-scale));line-height:1.5;color:var(--text-subtle)}
+.process-group ul{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.process-row{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:6px;min-width:0}
+.process-row:hover,.process-row:focus-within{background:var(--surface-hover)}
+.process-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--text-disabled)}
+.process-dot.tone-ok{background:var(--ok)}
+.process-dot.tone-warn{background:var(--warn)}
+.process-text{display:grid;gap:1px;flex:1;min-width:0}
+.process-title{display:flex;align-items:center;gap:8px;min-width:0}
+.process-title strong{font-size:calc(12px * var(--text-scale));font-weight:600;color:var(--text,var(--text));overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.process-state{flex:none;font-size:calc(10px * var(--text-scale));padding:0 6px;border-radius:9px;background:var(--surface-selected);color:var(--text-tertiary)}
+.process-state.tone-warn{background:var(--warn-bg-strong);color:var(--warn-soft)}
+.process-where{font-size:calc(11px * var(--text-scale));color:var(--text-subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.process-facts{font-size:calc(10px * var(--text-scale));color:var(--text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.process-actions{display:flex;align-items:center;gap:4px;flex:none}
+.workspace-shell .process-actions button{display:inline-flex;align-items:center;gap:4px;font-size:calc(11px * var(--text-scale));padding:3px 8px}
+.process-row:not(:hover):not(:focus-within) .process-actions button:not(.danger){opacity:.8}
+/* Docked beside the work, a row is text over actions: names stay readable. */
+@container (max-width:600px){.process-row{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;row-gap:6px}.process-dot{margin-top:5px}.process-actions{grid-column:2;flex-wrap:wrap}.process-where,.process-facts{white-space:normal}}
+
+
+/* Settings → Runner: process hosting. */
+.runner-hosting{display:grid;gap:10px;margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}
+.runner-hosting h3{margin:0;font-size:calc(14px * var(--text-scale));font-weight:600}
+.runner-hosting fieldset{display:grid;gap:8px;margin:0;padding:0;border:0}
+.runner-hosting legend{padding:0;margin-bottom:6px;font-size:calc(12px * var(--text-scale));color:var(--text-tertiary)}
+.runner-hosting .hosting-choice{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;align-items:start;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-raised);cursor:pointer}
+.runner-hosting .hosting-choice:has(input:checked){border-color:var(--accent-solid);background:var(--surface-hover)}
+.runner-hosting .hosting-choice:has(input:disabled){cursor:not-allowed;opacity:.7}
+.runner-hosting .hosting-choice input{grid-row:span 2;margin-top:3px}
+.runner-hosting .hosting-choice strong{font-size:calc(13px * var(--text-scale));font-weight:600;color:var(--text)}
+.runner-hosting .hosting-choice span{font-size:calc(12px * var(--text-scale));line-height:1.55;color:var(--text-tertiary)}
+.runner-hosting .hosting-choice code{white-space:normal}
+.runner-hosting .runner-processes-summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap}

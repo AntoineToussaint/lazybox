@@ -1,0 +1,33 @@
+/* Settings → Agents: ACP agent programs (AcpAgentsSettings.tsx). */
+.acp-agents{margin-top:36px}
+.acp-agents .settings-section-actions button{display:inline-flex;align-items:center;gap:6px}
+.acp-agent-list{list-style:none;margin:0;padding:0}
+.acp-agent{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start;padding:12px 16px}
+.acp-agent+.acp-agent{border-top:1px solid var(--s-line,var(--line-subtle))}
+.acp-agent-icon{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;background:var(--surface-active);color:var(--text-soft)}
+.acp-agent-text{display:flex;flex-direction:column;gap:4px;min-width:0}
+.acp-agent-name{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px}
+.acp-agent-name small{font-size:calc(10.5px * var(--code-scale))}
+.acp-agent-command{font-family:var(--font-mono);font-size:calc(11px * var(--code-scale));color:var(--text-muted);overflow-wrap:anywhere}
+.acp-agent-tag{font-size:calc(10px * var(--text-scale));color:var(--text-muted);border:1px solid var(--line);border-radius:100px;padding:1px 7px}
+.acp-agent-state{font-size:calc(10px * var(--text-scale));border-radius:100px;padding:1px 7px;margin-left:auto}
+.acp-agent-state.tone-ok{background:var(--ok-bg);color:var(--ok-soft)}
+.acp-agent-state.tone-warn{background:var(--warn-bg);color:var(--warn-soft)}
+.acp-agent-state.tone-muted{color:var(--text-muted)}
+.acp-agent-error{color:var(--warn-soft)}
+.acp-agent-link{font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.acp-agent-actions{display:flex;gap:6px}
+.acp-agent-actions button{display:inline-flex;align-items:center;gap:5px;padding:6px 9px;font-size:calc(11.5px * var(--text-scale))}
+.acp-agent-add{display:flex;align-items:center;gap:6px;width:100%;background:transparent;border:0;border-top:1px solid var(--s-line,var(--line-subtle));border-radius:0;padding:12px 16px;color:var(--text-muted)}
+.acp-agent-add:hover{color:var(--text);background:var(--surface-active)}
+.acp-agent-form{display:flex;flex-direction:column;gap:14px;padding:16px;border-top:1px solid var(--s-line,var(--line-subtle))}
+.acp-agent-form h4{margin:0;font-size:calc(13px * var(--text-scale))}
+.acp-field{display:flex;flex-direction:column;gap:7px}
+.acp-field>label{font-size:calc(12px * var(--text-scale));color:var(--text-tertiary)}
+.acp-agent-form small code{font-family:var(--font-mono)}
+.acp-agent-form-actions{display:flex;justify-content:flex-end;gap:8px}
+.acp-agents .settings-inline-error,.acp-agents .settings-saved{padding:0 16px 12px}
+@container settings-group (max-width:520px){.acp-agent{grid-template-columns:auto minmax(0,1fr)}.acp-agent-actions{grid-column:2}}
+.acp-preview{display:inline-block;font-size:calc(9.5px * var(--text-scale));font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--warn-soft);border:1px solid currentColor;border-radius:100px;padding:0 6px;line-height:1.5;vertical-align:1px}
+.acp-preview-note{display:block;margin-top:6px}
+.acp-preview-note .acp-preview{margin-right:6px}

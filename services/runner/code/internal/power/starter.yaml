@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=./actions.schema.json
+#
+# Your Lazybox actions and hooks. Lazybox reloads this file as soon as you
+# save it; Settings → Actions & hooks shows what loaded and any mistake, by
+# line. `lazybox actions validate` checks it from a terminal.
+#
+# Actions appear in the ]] menu (with a key), the command palette and the
+# conversation and workspace menus. They run with your own rules: a workspace
+# action still needs its scripts approved, a read-only conversation runs no
+# command. Hooks run a program, a shell line or a webhook when something
+# happens; they are listed in Settings and in Processes while they run.
+# Reference: POWER.md.
+version: 1
+
+actions:
+  - id: continue
+    title: Tell the agent to continue
+    icon: play
+    steps:
+      - send: Continue.
+
+  # - id: test-then-fix
+  #   title: Run the tests, ask the agent to fix failures
+  #   key: t                       # ]] t
+  #   where: [palette, menu, conversation]
+  #   steps:
+  #     - run: test                # a workspace action (Actions panel)
+  #     - when: failed
+  #       send: The tests failed. Read the output in the console and fix them.
+  #     - when: succeeded
+  #       open: changes
+
+  # - id: review
+  #   title: Ask for a review in a new conversation
+  #   steps:
+  #     - send: { snippet: review, to: new, wait: true }
+  #     - open: changes
+
+  # - id: unattended
+  #   title: Let this conversation run without asking
+  #   confirm: true
+  #   steps:
+  #     - permission: yolo
+
+hooks:
+  # - id: notify
+  #   on: agent.needs-input
+  #   run: [terminal-notifier, -title, Lazybox, -message, needs you]
+  #
+  # - id: slack
+  #   on: [turn.failed, pr.checks-failed]
+  #   filter: { workspace: "release*" }
+  #   webhook:
+  #     url: https://hooks.slack.com/services/…
+  #
+  # A hook's program receives the event as JSON on stdin, in
+  # $LAZYBOX_EVENT_FILE, and as LAZYBOX_EVENT_* variables. It holds no
+  # Lazybox credential unless you grant one (read, respond, start):
+  # - id: keep-going
+  #   on: turn.done
+  #   filter: { conversation: "overnight*" }
+  #   grants: [respond]
+  #   shell: lazybox send "$LAZYBOX_EVENT_CONVERSATION" "Continue with the next item."

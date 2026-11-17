@@ -1,0 +1,127 @@
+/* Inline review: a diff you can comment on, thread cards under their lines,
+   and the tray that collects comments until they go to the agent. */
+.review-diff-wrap{display:flex;flex-direction:column;gap:10px;min-width:0}
+.review-diff{font:calc(12px * var(--code-scale))/1.6 var(--font-mono);border:1px solid var(--line-subtle);border-radius:8px;background:var(--surface-sunken);overflow:auto;tab-size:4}
+.review-row{display:grid;grid-template-columns:3.6em 3.6em 22px minmax(0,1fr);min-width:max-content;position:relative}
+.review-row.is-meta,.review-row.is-hunk,.review-row.is-note{display:block;padding:2px 12px;color:var(--text-muted);white-space:pre}
+.review-row.is-hunk{background:var(--surface);color:var(--info)}
+.review-row.is-meta{color:var(--text-faint)}
+.review-number{padding:0 8px 0 0;text-align:right;color:var(--text-disabled);user-select:none;border-right:1px solid var(--line-subtle)}
+.review-number+.review-number{border-right:0}
+.review-gutter{display:flex;align-items:center;justify-content:center}
+.review-code{white-space:pre;padding-right:16px;color:var(--text-soft)}
+.review-sign{display:inline-block;width:1.4ch;color:var(--text-faint);user-select:none}
+.review-row.is-add{background:var(--diff-add-bg)}.review-row.is-add .review-sign{color:var(--diff-add-mark)}
+.review-row.is-del{background:var(--diff-del-bg)}.review-row.is-del .review-sign{color:var(--diff-del-mark)}
+.review-row.is-commented .review-number:first-child{box-shadow:inset 3px 0 0 var(--accent-solid-hover)}
+.review-row.is-selected{background:var(--accent-bg)!important}
+.review-row.is-selected .review-number:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+.review-diff .review-add{width:18px;height:18px;padding:0;border:0;border-radius:5px;background:var(--accent-solid);color:var(--on-accent-solid);font:600 calc(14px * var(--text-scale))/calc(18px * var(--text-scale)) var(--font-ui);cursor:pointer;opacity:0;transform:scale(.85);transition:opacity .08s,transform .08s}
+.review-row:hover .review-add,.review-add:focus-visible,.review-row.is-selected .review-add{opacity:1;transform:none}
+.review-add:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.review-inline{display:flex;flex-direction:column;gap:8px;padding:8px 12px 10px 60px;background:var(--surface);border-top:1px solid var(--line-subtle);border-bottom:1px solid var(--line-subtle);font:calc(13px * var(--text-scale))/1.5 var(--font-ui);min-width:0;position:sticky;left:0;max-width:min(860px,100%)}
+.review-hint{color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+
+.review-composer{display:flex;flex-direction:column;gap:8px;border:1px solid var(--accent-line);border-radius:8px;padding:8px;background:var(--surface)}
+.review-composer textarea{font:calc(12px * var(--code-scale))/1.55 var(--font-mono);padding:8px 10px;border-radius:6px;border:1px solid var(--line-strong);background:var(--bg);color:var(--text);resize:vertical;min-height:64px}
+.review-composer textarea:focus{outline:2px solid var(--focus);outline-offset:0;border-color:transparent}
+.review-composer footer{display:flex;align-items:center;gap:6px}
+.review-composer footer small{margin:0 auto 0 0!important;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.review-composer button,.review-thread footer button,.review-tray button{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;font-size:calc(12px * var(--text-scale));line-height:calc(16px * var(--text-scale));border-radius:6px;border:1px solid var(--line-strong);background:var(--surface-active);color:var(--text-soft);cursor:pointer;width:auto}
+.review-composer button:hover:not(:disabled),.review-thread footer button:hover,.review-tray button:hover:not(:disabled){background:var(--surface-selected);border-color:var(--line-bold)}
+.review-composer button:disabled,.review-tray button:disabled{opacity:.5;cursor:default}
+.review-thread footer button.danger{background:var(--danger-bg-strong);border-color:var(--danger-line);color:var(--text)}
+
+.review-thread{border:1px solid var(--line);border-radius:8px;padding:9px 11px;background:var(--surface);display:flex;flex-direction:column;gap:6px;min-width:0}
+.review-thread.is-focused{border-color:var(--focus);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent-solid-hover) 25%,transparent)}
+.review-thread.is-resolved,.review-thread.is-wont_fix{opacity:.78}
+.review-thread>header,.changes-panel .review-thread>header{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-start;gap:6px;padding:0}
+.review-thread>header strong{font-size:calc(12px * var(--text-scale));color:var(--text)}
+.review-thread>header small{margin:0!important;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.review-thread .rich-content{font-size:calc(13px * var(--text-scale));line-height:1.55}
+.review-thread>footer{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.review-thread>footer [role=group]{display:inline-flex;align-items:center;gap:6px;color:var(--text);font-size:calc(12px * var(--text-scale))}
+.review-spacer{flex:1}
+.review-chip{font:600 calc(10px * var(--text-scale))/1.6 var(--font-ui);letter-spacing:.04em;text-transform:uppercase;padding:1px 7px;border-radius:999px;background:var(--surface-selected);color:var(--text-tertiary);white-space:nowrap}
+.review-chip.is-open{background:var(--accent-bg);color:var(--accent-soft)}
+.review-chip.is-sent{background:var(--info-bg);color:var(--info-soft)}
+.review-chip.is-resolved{background:var(--ok-bg-strong);color:var(--ok)}
+.review-chip.is-wont_fix{background:var(--surface-selected);color:var(--text-subtle)}
+.review-chip.fresh-outdated{background:var(--warn-bg-strong);color:var(--warn)}
+.review-chip.fresh-moved{background:var(--info-bg);color:var(--info-soft)}
+.review-chip.fresh-unknown{background:var(--surface-selected);color:var(--text-subtle)}
+.review-muted{margin:0;color:var(--text-muted);font-size:calc(11px * var(--text-scale));line-height:1.5}
+.review-error{margin:0;color:var(--danger);font-size:calc(12px * var(--text-scale));line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.review-quote{margin:0;padding:6px 0;border-radius:6px;background:var(--surface-sunken);border:1px solid var(--line-subtle);font:calc(12px * var(--code-scale))/1.55 var(--font-mono);overflow:auto}
+.review-quote>div{display:flex;min-width:max-content}
+.review-quote code{white-space:pre;color:var(--text-secondary);padding-right:12px}
+.review-quote-number{display:inline-block;width:3.6em;padding-right:10px;text-align:right;color:var(--text-disabled);user-select:none}
+.review-elsewhere{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--line-bold);border-radius:8px;background:var(--surface-sunken)}
+.review-elsewhere h4{margin:0;font-size:calc(12px * var(--text-scale));color:var(--warn);font-weight:600}
+
+.review-tray{--review-tray-bg:var(--canvas,var(--bg));container:review-tray/inline-size;display:flex;flex-direction:column;min-height:0;overflow:auto;overscroll-behavior:contain;border-left:1px solid var(--border,var(--line-subtle));padding-left:12px;font-size:calc(12px * var(--text-scale));gap:8px}
+/* The tray scrolls as one: its header and the reviews under way (with their
+   loop controls) stay at the top, Send stays at the bottom, and whatever the
+   height nothing is squeezed out of reach. */
+.review-tray>*{flex-shrink:0}
+.review-tray-top{position:sticky;top:0;z-index:1;display:flex;flex-direction:column;gap:6px;max-height:max(50%,min(184px,70%));min-height:0;padding-bottom:2px;background:var(--review-tray-bg)}
+.review-tray-top>header,.changes-panel .review-tray-top>header{display:grid;grid-template-columns:1fr auto;align-items:center;gap:2px 8px;padding:.5rem 0 0!important}
+.review-tray-top>header h3{display:flex;align-items:center;gap:6px;margin:0;font-size:calc(13px * var(--text-scale));color:var(--text)}
+.review-tray-top>header small{grid-column:1;margin:0!important}
+.review-tray-top>header .review-icon{grid-row:1/span 2;grid-column:2;padding:4px;border:0;background:transparent;color:var(--text-muted)}
+.review-filters{display:flex;gap:4px;flex-wrap:wrap}
+.review-tray .review-filters button{padding:3px 8px;font-size:calc(11px * var(--text-scale));border-radius:999px;background:transparent}
+.review-tray .review-filters button[aria-pressed=true]{background:var(--accent-bg);border-color:var(--accent-line);color:var(--text)}
+.review-filters span{color:var(--text-muted);font-variant-numeric:tabular-nums}
+.review-tray-list{flex:1 0 auto;display:flex;flex-direction:column;gap:10px}
+.review-tray-list h4{margin:0 0 4px;font:500 calc(11px * var(--code-scale))/1.4 var(--font-mono);color:var(--accent);overflow-wrap:anywhere}
+.review-tray-list ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.review-tray-list li{display:flex;align-items:flex-start;gap:6px}
+.review-tray-list li input{width:auto;margin:8px 0 0}
+.review-tray .review-tray-jump{flex:1;min-width:0;white-space:normal;display:flex;flex-direction:column;align-items:stretch;gap:3px;text-align:left;padding:6px 8px;background:var(--surface);border-color:var(--line-subtle)}
+.review-tray-where{display:flex;flex-wrap:wrap;align-items:center;gap:5px;color:var(--text);font-weight:500}
+.review-tray-body{color:var(--text-tertiary);line-height:1.45;overflow-wrap:anywhere}
+.review-tray li.is-resolved .review-tray-body,.review-tray li.is-wont_fix .review-tray-body{text-decoration:line-through;text-decoration-color:var(--text-disabled)}
+.review-empty{margin:0;color:var(--text-muted);line-height:1.55}
+.review-tray>footer{position:sticky;bottom:0;z-index:1;display:flex;flex-direction:column;gap:8px;padding:8px 0 4px;border-top:1px solid var(--line-subtle);background:var(--review-tray-bg)}
+.review-target{display:flex;flex-direction:row;align-items:center;gap:8px;color:var(--text-subtle)}
+.review-target select{flex:1;min-width:0;padding:4px 6px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface-raised);color:var(--text);font-size:calc(12px * var(--text-scale))}
+.review-tray .review-send{justify-content:center;padding:7px 10px}
+.review-tray .review-auto{gap:6px;color:var(--text-subtle);font-size:calc(11px * var(--text-scale))}
+.review-tray .review-auto>input{margin:1px 0 0}
+
+.changes-review-toggle{display:inline-flex;align-items:center;gap:6px}
+.changes-review-toggle span{min-width:18px;padding:0 5px;border-radius:999px;background:var(--accent-solid);color:var(--on-accent-solid);font-size:calc(11px * var(--text-scale));line-height:calc(16px * var(--text-scale));text-align:center}
+/* The files and the review tray keep the widths dragged to (Resizer.tsx), else these. */
+.changes-columns.with-review{grid-template-columns:var(--split-changes-files,minmax(200px,22%)) minmax(0,1fr) var(--split-changes-review,minmax(250px,300px))}
+/* Narrow Changes panels (a chat docked beside it, a small window): the diff
+   keeps the whole height of the right column, so no comment thread in it is
+   ever covered, and the left column shows the files or the review tray, one
+   in front at a time with the whole height (the tabs above them). */
+.changes-panel{container:changes-panel/inline-size}
+.changes-panes{display:none}
+@container changes-panel (max-width:1100px){
+  .changes-columns.with-review{grid-template-columns:var(--split-changes-files,minmax(224px,34%)) minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);row-gap:8px}
+  .changes-columns.with-review>.changes-panes{display:flex;grid-column:1;grid-row:1}
+  .changes-columns.with-review>nav,.changes-columns.with-review>.review-tray{grid-column:1;grid-row:2}
+  .changes-columns.with-review>.diff-view{grid-column:2;grid-row:1/-1}
+  /* Hidden, not removed: each keeps its scroll position for the way back. */
+  .changes-columns[data-pane=review]>nav,.changes-columns[data-pane=files]>.review-tray{visibility:hidden}
+  /* The column folded to its rail: the tabs and the tray fold with the files. */
+  .changes-columns.with-review:has(>.resizer[data-collapsed]:not([data-off]))>:is(.changes-panes,.review-tray){visibility:hidden}
+  .changes-columns.with-review>.review-tray{border-left:0;padding:0 4px 0 0}
+  /* The tab already says Review: the header is the summary and the close button. */
+  .changes-columns.with-review .review-tray-top>header{padding-top:0!important}
+  .changes-columns.with-review .review-tray-top>header h3{display:none}
+  .changes-columns.with-review .review-tray-top>header .review-icon{grid-row:1}
+  .changes-columns.with-review .review-tray>footer .review-muted{display:none}
+}
+.changes-panes{gap:2px;padding:2px;border:1px solid var(--line-subtle);border-radius:8px;background:var(--surface-sunken)}
+.changes-panes [role=tab]{flex:1;min-width:0;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:4px 8px;border:0;border-radius:6px;background:transparent;color:var(--text-muted);font-size:calc(12px * var(--text-scale));line-height:calc(16px * var(--text-scale));cursor:pointer;white-space:nowrap}
+.changes-panes [role=tab]:hover{color:var(--text-soft);background:var(--surface-hover,var(--surface-selected))}
+.changes-panes [role=tab][aria-selected=true]{background:var(--surface-active);color:var(--text);box-shadow:0 0 0 1px var(--line-strong)}
+.changes-panes [role=tab]:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.changes-pane-count{min-width:16px;padding:0 5px;border-radius:999px;background:var(--surface-selected);color:var(--text-soft);font-size:calc(11px * var(--text-scale));line-height:calc(16px * var(--text-scale));text-align:center;font-variant-numeric:tabular-nums}
+.changes-panes [role=tab][id$=-tab-review] .changes-pane-count{background:var(--accent-solid);color:var(--on-accent-solid)}
+.changes-pane-alert{display:inline-flex;color:var(--warn)}
+.changes-panes svg{flex-shrink:0}

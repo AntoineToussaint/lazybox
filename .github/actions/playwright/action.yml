@@ -1,0 +1,46 @@
+# Installs the Playwright browsers the UI suites launch, cached per OS, browser
+# set and Playwright version (read from the installed @playwright/test, so a
+# lockfile bump invalidates the cache instead of running stale browsers).
+# Runs after `make deps`.
+
+name: playwright
+description: Install and cache Playwright browsers for the UI suites.
+
+inputs:
+  browsers:
+    description: Space-separated Playwright browsers (e.g. "chromium webkit").
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Playwright version and cache path
+      id: playwright
+      shell: bash
+      env:
+        BROWSERS: ${{ inputs.browsers }}
+      run: |
+        echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        echo "browsers=${BROWSERS// /-}" >> "$GITHUB_OUTPUT"
+        case "$RUNNER_OS" in
+          macOS) echo "path=$HOME/Library/Caches/ms-playwright" >> "$GITHUB_OUTPUT" ;;
+          Linux) echo "path=$HOME/.cache/ms-playwright" >> "$GITHUB_OUTPUT" ;;
+          *) echo "::error::unsupported runner OS $RUNNER_OS"; exit 1 ;;
+        esac
+    - uses: actions/cache@v6
+      with:
+        path: ${{ steps.playwright.outputs.path }}
+        key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-${{ steps.playwright.outputs.browsers }}
+    # A cache hit makes this a no-op check; on Linux it also needs system
+    # libraries, which are not cached.
+    - name: Install browsers
+      shell: bash
+      env:
+        BROWSERS: ${{ inputs.browsers }}
+      run: |
+        # shellcheck disable=SC2086 # one argument per browser
+        if [ "$RUNNER_OS" = Linux ]; then
+          node_modules/.bin/playwright install --with-deps $BROWSERS
+        else
+          node_modules/.bin/playwright install $BROWSERS
+        fi

@@ -1,0 +1,26 @@
+version: v1
+# Go package identity is explicit in api.proto. Managed rewriting couples Go
+# package names to protobuf namespaces and breaks versioned wire packages.
+managed:
+  enabled: false
+plugins:
+  - name: go
+    path: protoc-gen-go
+    out: ../code/pkg/gen
+    opt: paths=source_relative
+  - name: go-grpc
+    path: protoc-gen-go-grpc
+    out: ../code/pkg/gen
+    opt: paths=source_relative
+  - name: grpc-gateway
+    path: protoc-gen-grpc-gateway
+    out: ../code/pkg/gen
+    opt:
+      - paths=source_relative
+  - name: connect-go
+    path: protoc-gen-connect-go
+    out: ../code/pkg/gen
+    opt: paths=source_relative
+  - name: openapiv2
+    path: protoc-gen-openapiv2
+    out: ../openapi

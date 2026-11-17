@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=../extension.schema.json
+#
+# An example Lazybox extension (EXTENSIONS.md): every conversation as a card,
+# in a column of what it needs from you. It reads what needs you, may show a
+# conversation and run two actions that only move focus. It cannot read your
+# messages, send anything, change a setting or reach the network.
+lazybox: 1
+name: Agent board
+version: 1.0.0
+description: Every conversation as a card, in a column of what it needs from you.
+author: Lazybox
+panels:
+  - id: board
+    title: Agent board
+    description: A kanban of your agents by what they need
+    icon: columns
+    entry: index.html
+grants:
+  - read:attention
+  - show:conversations
+  - do:attention.next
+  - do:inbox.open

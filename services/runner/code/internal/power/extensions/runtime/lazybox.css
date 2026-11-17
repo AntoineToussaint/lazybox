@@ -1,0 +1,45 @@
+/* Lazybox extension base style (EXTENSIONS.md): the app's theme tokens, which
+   lazybox.js sets on <html> as the person's theme changes. Use the tokens
+   (var(--surface), var(--text-muted), var(--accent)…) and your panel follows
+   dark, light and every theme. The values below are the Dark and Light
+   themes', until the person's theme arrives. */
+:root {
+  color-scheme: dark;
+  --bg: #121317; --surface-sunken: #17181d; --surface: #1d1e24; --surface-raised: #202127; --surface-hover: #24252d; --surface-selected: #2a2b33; --line-subtle: #2c2d35; --line: #33343e; --line-strong: #3a3b45; --text-strong: #ffffff; --text: #e4e4eb; --text-soft: #d8d8e2; --text-secondary: #c4c6d0; --text-muted: #92939f; --text-faint: #7c7d89; --accent: #bdb1ed; --accent-bg: #2b2839; --accent-solid: #6f56c9; --accent-solid-hover: #7b62d6; --on-accent-solid: #ffffff; --focus: #b9afe3; --ok: #8fd0a9; --warn: #d6b46e; --danger: #dc9494; --info: #8fb5e0; --running: #97bba2; --ok-bg: #1b2b21; --warn-bg: #2b261c; --danger-bg: #362328; --info-bg: #1f2f3d; --chart-1: #579cf4; --chart-2: #e99557; --chart-3: #46bba5; --chart-4: #d3ae4b; --chart-5: #ab8cde; --chart-6: #b4a6c5; --chart-7: #799fad;
+  --font-ui: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --text-scale: 1;
+}
+/* Until the theme arrives, the computer's light mode gets Lazybox's Light. */
+@media (prefers-color-scheme: light) {
+  :root { color-scheme: light; --bg: #e8e8ee; --surface-sunken: #f1f1f5; --surface: #fafafc; --surface-raised: #ffffff; --surface-hover: #f0f0f4; --surface-selected: #e6e4f3; --line-subtle: #e6e6ec; --line: #d9d9e1; --line-strong: #c6c6d0; --text-strong: #0b0b10; --text: #1c1c23; --text-soft: #2b2b34; --text-secondary: #3a3a45; --text-muted: #5f5f6b; --text-faint: #6e6e79; --accent: #6a55c2; --accent-bg: #f0edfb; --accent-solid: #6a55c2; --accent-solid-hover: #5a46b0; --on-accent-solid: #ffffff; --focus: #6a55c2; --ok: #1d7646; --warn: #895f00; --danger: #b32b3b; --info: #2a63a6; --running: #2f7a50; --ok-bg: #e8f6ee; --warn-bg: #fbf3e0; --danger-bg: #fcebed; --info-bg: #e9f1fb; --chart-1: #2f74d0; --chart-2: #c86a22; --chart-3: #16907a; --chart-4: #a47f12; --chart-5: #7c58c4; --chart-6: #8a7aa3; --chart-7: #4f7a8a; }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--surface); color: var(--text);
+  font: calc(13px * var(--text-scale)) / 1.45 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { color: var(--text-strong); font-weight: 600; margin: 0; }
+h1 { font-size: calc(15px * var(--text-scale)); }
+h2 { font-size: calc(13px * var(--text-scale)); }
+h3 { font-size: calc(12px * var(--text-scale)); }
+small, .muted { color: var(--text-muted); }
+a { color: var(--accent); }
+code, pre { font-family: var(--font-mono); }
+button {
+  font: inherit; color: var(--text); background: var(--surface-raised);
+  border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; cursor: pointer;
+}
+button:hover { background: var(--surface-hover); }
+button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 1px; }
+button.primary { background: var(--accent-solid); color: var(--on-accent-solid); border-color: transparent; }
+button.primary:hover { background: var(--accent-solid-hover); }
+button:disabled { opacity: .5; cursor: default; }
+.card { background: var(--surface-raised); border: 1px solid var(--line-subtle); border-radius: 8px; padding: 8px 10px; }
+.empty { color: var(--text-muted); text-align: center; padding: 24px 12px; }
+.tabular { font-variant-numeric: tabular-nums; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; border: 2px solid var(--surface); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

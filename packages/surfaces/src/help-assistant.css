@@ -1,0 +1,56 @@
+/* Ask Lazybox (HelpAssistant.tsx): a quiet header that says which agent answers, the first question, and what is missing when nothing can answer. */
+.help-assistant{display:flex;flex-direction:column;min-height:0;height:100%;font-family:var(--font-ui);font-size:calc(13px * var(--text-scale));color:var(--text)}
+.help-assistant>.agent-window{flex:1;min-height:0}
+.help-assistant-header{display:flex;align-items:center;gap:6px;min-height:34px;padding:4px 8px 4px 12px;border-bottom:1px solid var(--border,var(--line-subtle));flex-shrink:0}
+.help-assistant-title{display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--text-strong,var(--text))}
+.help-assistant-title svg{color:var(--accent)}
+.help-assistant-dot{color:var(--text-muted,var(--text-faint))}
+.help-assistant-switch{flex:1;min-width:0;display:flex}
+.help-assistant-switch>summary{display:inline-flex;align-items:center;gap:4px;max-width:100%;min-width:0;padding:3px 6px;margin-left:-2px;border-radius:6px;color:var(--text-muted,var(--text-tertiary));cursor:pointer;list-style:none}
+.help-assistant-switch>summary::-webkit-details-marker{display:none}
+.help-assistant-using{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.help-assistant-switch>summary svg{flex-shrink:0}
+.help-assistant-fallback{display:flex;align-items:center;gap:6px;margin-top:8px!important;padding:5px 9px;border-radius:6px;border:1px solid var(--warn-line-subtle,var(--warn-line));background:var(--warn-bg);color:var(--text-soft,var(--text))!important;font-size:calc(12px * var(--text-scale))}
+.help-assistant-fallback svg{flex-shrink:0;color:var(--warn,var(--text-muted))}
+.help-assistant-switch>summary:hover,.help-assistant-icon:hover{background:var(--surface-hover,var(--surface-selected));color:var(--text)}
+.help-assistant-switch>.action-popover{min-width:260px;max-width:min(360px,calc(100vw - 32px))}
+.help-assistant-switch>.action-popover>button{display:flex;align-items:flex-start;gap:9px;text-align:left}
+.help-assistant-switch>.action-popover>button>span{display:flex;flex-direction:column;gap:1px;min-width:0}
+.help-assistant-switch>.action-popover>button small{color:var(--text-muted,var(--text-subtle));font-size:calc(11px * var(--text-scale))}
+.help-assistant-switch>.action-popover>button.help-choice-unready strong{color:var(--text-muted,var(--text-subtle));font-weight:500}
+.help-assistant-switch>.action-popover>button[aria-current] svg{color:var(--accent)}
+.help-assistant-switch>.action-popover>hr{border:0;border-top:1px solid var(--border,var(--line-subtle));margin:4px 0}
+.help-assistant-icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0!important;border:0!important;border-radius:6px;background:transparent!important;color:var(--text-muted,var(--text-subtle))}
+.help-assistant-error{margin:8px 12px 0}
+
+.help-start{display:flex;flex-direction:column;gap:14px;padding:18px 16px 14px;overflow:auto;flex:1;min-height:0}
+.help-start-intro h3{margin:0 0 4px;font-size:calc(15px * var(--text-scale));font-weight:600;color:var(--text-strong,var(--text))}
+.help-start-intro p{margin:0;line-height:1.55;color:var(--text-muted,var(--text-tertiary))}
+.help-suggestions{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.help-suggestions button{padding:5px 10px;border:1px solid var(--border,var(--line));border-radius:999px;background:var(--surface,var(--surface));color:var(--text);font-size:calc(12px * var(--text-scale));cursor:pointer;text-align:left;max-width:100%;white-space:normal}
+.help-suggestions button:hover:not(:disabled){border-color:var(--accent,var(--focus));background:var(--accent-bg)}
+.help-ask{display:flex;flex-direction:column;gap:8px;margin-top:auto}
+.help-ask textarea{width:100%;box-sizing:border-box;resize:vertical;min-height:72px;padding:9px 11px;border:1px solid var(--border-strong,var(--line-strong));border-radius:8px;background:var(--surface-sunken,var(--surface));color:var(--text);font:inherit;line-height:1.5}
+.help-ask textarea:focus{outline:2px solid var(--focus);outline-offset:-1px}
+.help-ask>button{align-self:flex-end;display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:6px}
+
+.help-empty{display:flex;flex-direction:column;gap:10px;padding:18px 16px 14px;overflow:auto;flex:1;min-height:0}
+.help-empty-icon{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:9px;background:var(--accent-bg);color:var(--accent)}
+.help-empty h3{margin:0;font-size:calc(15px * var(--text-scale));font-weight:600;color:var(--text-strong,var(--text))}
+.help-empty>p{margin:0;line-height:1.55;color:var(--text-muted,var(--text-tertiary))}
+.help-needs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.help-needs>li{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--border,var(--line));border-radius:9px;background:var(--surface,var(--surface))}
+.help-need-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.help-need-state{font-size:calc(12px * var(--text-scale))}
+.help-need-state.missing{color:var(--warn,var(--text-muted))}
+.help-need-state.ready{color:var(--ok,var(--text-muted))}
+.help-needs p{margin:0;font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--text-muted,var(--text-tertiary))}
+.help-command{display:flex;align-items:center;gap:6px;padding:4px 4px 4px 10px;border:1px solid var(--border,var(--line-subtle));border-radius:6px;background:var(--surface-sunken,var(--surface))}
+.help-command code{flex:1;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;font:calc(12px * var(--code-scale))/1.6 var(--font-mono);user-select:all}
+.help-command button{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;font-size:calc(11px * var(--text-scale));border-radius:5px}
+.help-need-actions{display:flex;flex-wrap:wrap;gap:6px}
+.help-need-actions:empty{display:none}
+.help-need-actions button{padding:5px 10px;font-size:calc(12px * var(--text-scale));border-radius:6px}
+.help-need-actions small{color:var(--text-muted,var(--text-subtle))}
+.help-empty>footer{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:4px}
+.help-empty>footer>button:not(.onboarding-docs){display:inline-flex;align-items:center;gap:6px;padding:5px 10px;font-size:calc(12px * var(--text-scale));border-radius:6px}

@@ -1,0 +1,17 @@
+{
+  "name": "@lazybox/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@lazybox/client-core": "0.0.0",
+    "@lazybox/platform": "0.0.0",
+    "@lazybox/surfaces": "0.0.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build"
+  }
+}

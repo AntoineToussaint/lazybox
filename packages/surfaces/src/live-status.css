@@ -1,0 +1,17 @@
+/* Live status: a ring that turns while an agent works, a dot that breathes while it waits for you. */
+.live-indicator{--live-size:8px;display:inline-block;flex:none;box-sizing:border-box;width:var(--live-size);height:var(--live-size);border-radius:50%;background:var(--attention-idle,var(--text-faint))}
+.live-indicator[data-tone=busy]{background:transparent;border:1.5px solid color-mix(in srgb,var(--attention-working,var(--running)) 28%,transparent);border-top-color:var(--attention-working,var(--running));animation:live-spin .9s linear infinite}
+.live-indicator[data-tone=waiting]{background:var(--attention-input,var(--warn));box-shadow:0 0 0 0 color-mix(in srgb,var(--attention-input,var(--warn)) 55%,transparent);animation:live-breathe 1.8s ease-out infinite}
+.live-indicator[data-tone=failed]{background:var(--attention-failed,var(--danger))}
+.live-indicator[data-tone=idle]{background:var(--attention-idle,var(--text-faint))}
+.live-indicator[data-tone=saved]{background:transparent;border:1px solid var(--text-disabled)}
+@keyframes live-spin{to{transform:rotate(360deg)}}
+@keyframes live-breathe{70%{box-shadow:0 0 0 4px transparent}100%{box-shadow:0 0 0 0 transparent}}
+@media(prefers-reduced-motion:reduce){.live-indicator[data-tone]{animation:none}.live-indicator[data-tone=busy]{border-color:var(--attention-working,var(--running))}}
+
+.live-status{display:inline-flex;align-items:center;gap:6px;min-width:0;white-space:nowrap;font-variant-numeric:tabular-nums}
+.live-status-text{overflow:hidden;text-overflow:ellipsis}
+.live-status[data-tone=busy]{color:var(--attention-working,var(--running))}
+.live-status[data-tone=waiting]{color:var(--attention-input,var(--warn))}
+.live-status[data-tone=failed]{color:var(--attention-failed,var(--danger))}
+.live-status[data-tone=idle],.live-status[data-tone=saved]{color:var(--text-muted)}

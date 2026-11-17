@@ -1,0 +1,44 @@
+/* Help → Send feedback (FeedbackDialog.tsx): the form on the left, exactly what is shared on the right. */
+.feedback-dialog{width:min(960px,calc(100vw - 32px));padding:20px 22px 16px;font-family:var(--font-ui);font-size:calc(13px * var(--text-scale));border-color:var(--line-strong)}
+.feedback-dialog>[data-dialog-drag-handle]{margin-bottom:6px}
+.feedback-heading{display:flex;align-items:center;gap:12px}
+.feedback-heading h2{margin:0;font-size:calc(18px * var(--text-scale));font-weight:600;letter-spacing:-.3px;color:var(--text-strong,var(--text))}
+.feedback-mark{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:9px;background:var(--accent-bg);color:var(--accent-soft,var(--accent))}
+.feedback-lede{margin:0 0 14px;color:var(--text-tertiary);line-height:1.55}
+.feedback-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:stretch}
+.feedback-form{display:flex;flex-direction:column;gap:14px;min-width:0}
+.feedback-what{display:flex;flex-direction:column;gap:6px}
+.feedback-what>span{font-weight:600;color:var(--text)}
+.feedback-what textarea{width:100%;box-sizing:border-box;min-height:120px;resize:vertical;padding:9px 11px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-sunken,var(--surface));color:var(--text);font:inherit;line-height:1.5}
+.feedback-what textarea:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.feedback-attach{margin:0;padding:0;border:0;display:flex;flex-direction:column;gap:2px}
+.feedback-attach legend{margin-bottom:6px;padding:0;font-weight:600;color:var(--text)}
+.feedback-option{display:grid;grid-template-columns:16px minmax(0,1fr) auto;align-items:start;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer}
+.feedback-option:hover{background:var(--surface-hover)}
+.feedback-option input{width:15px;height:15px;margin:2px 0 0;accent-color:var(--accent-solid-hover,var(--accent))}
+.feedback-option>span{display:flex;flex-direction:column;gap:2px;min-width:0}
+.feedback-option strong{font-weight:550;color:var(--text)}
+.feedback-option small{font-size:calc(11.5px * var(--text-scale));line-height:1.45;color:var(--text-muted)}
+.feedback-option.is-disabled{cursor:default;opacity:.65}
+.feedback-option.is-disabled:hover{background:none}
+.feedback-shot{width:96px;height:60px;object-fit:cover;object-position:top left;border:1px solid var(--line-strong);border-radius:5px;background:var(--surface);transition:opacity .15s}
+.feedback-shot.is-off{opacity:.35}
+.feedback-unavailable{display:flex;align-items:center;gap:8px;margin:0;padding:8px 10px;font-size:calc(11.5px * var(--text-scale));color:var(--text-muted)}
+.feedback-preview{display:flex;flex-direction:column;min-width:0;min-height:0}
+.feedback-preview h3{margin:0 0 6px;font-size:calc(12px * var(--text-scale));font-weight:600;color:var(--text-tertiary)}
+.feedback-preview pre{flex:1;margin:0;min-height:220px;max-height:min(420px,48dvh);overflow:auto;padding:10px 12px;border:1px solid var(--line-subtle);border-radius:8px;background:var(--surface-sunken,var(--surface));color:var(--text-secondary,var(--text));font:calc(11.5px * var(--code-scale,1)) /1.5 var(--font-mono);white-space:pre-wrap;overflow-wrap:anywhere}
+.feedback-preview pre:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.feedback-status{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px;margin:12px 0 0;padding:8px 10px;border-radius:7px;background:var(--surface-active);font-size:calc(12px * var(--text-scale));color:var(--text)}
+.feedback-status.is-error{background:var(--danger-bg);color:var(--danger-soft)}
+.feedback-reveal{padding:2px 8px;font-size:calc(11.5px * var(--text-scale));border-radius:5px}
+.feedback-actions{display:flex;align-items:center;gap:8px;margin-top:14px}
+.feedback-actions small{flex:1;font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.feedback-actions button{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;font-size:calc(12px * var(--text-scale));border-radius:6px;white-space:nowrap}
+.feedback-actions button:not(.primary),.feedback-reveal{border:1px solid var(--line-strong);background:var(--surface-active);color:var(--text)}
+.feedback-actions button:not(.primary):hover,.feedback-reveal:hover{background:var(--surface-strong)}
+@media(max-width:760px){
+  .feedback-layout{grid-template-columns:minmax(0,1fr)}
+  .feedback-preview pre{min-height:140px;max-height:30dvh}
+  .feedback-actions{flex-wrap:wrap}
+  .feedback-actions small{flex:1 1 100%}
+}

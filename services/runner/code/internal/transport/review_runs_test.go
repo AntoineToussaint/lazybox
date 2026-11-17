@@ -1,0 +1,281 @@
+package transport
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent/agenttest"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
+	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// reviewFixture: the terminal fixture's author conversation (Claude, "Fix
+// the parser") has done one turn that changed api/handler.go; Codex is the
+// other provider, fake, to review it.
+type reviewFixture struct {
+	*terminalFixture
+	codex  *agenttest.Adapter
+	claude *agenttest.Adapter
+	owner  context.Context
+}
+
+func newReviewFixture(t *testing.T) *reviewFixture {
+	t.Helper()
+	f := &reviewFixture{terminalFixture: newTerminalFixture(t), codex: &agenttest.Adapter{}, claude: &agenttest.Adapter{}}
+	f.bench.Adapters["codex"] = f.codex
+	ctx := timeout(t)
+	f.owner = bearer(ctx, ownerToken)
+	// The author: a Claude conversation of its own in the fixture's workspace.
+	f.bench.Adapters["claude"] = f.claude
+	opened, err := f.service.OpenSession(ctx, &pb.OpenSessionRequest{ProfileId: "claude-default", CollectionId: f.mine.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.service.RenameConversation(ctx, &pb.RenameConversationRequest{SessionId: opened.Session.Id, Title: "Fix the parser"}); err != nil {
+		t.Fatal(err)
+	}
+	if f.conversation, err = f.bench.Get(opened.Session.Id); err != nil {
+		t.Fatal(err)
+	}
+	f.agentToken = agentToken(t, f.claude.Session.Open.Env)
+	worktree := f.mine.Members[0].Path
+	turn(t, f.service, f.claude, f.conversation.ID, "op-handler", func() {
+		if err := os.WriteFile(filepath.Join(worktree, "handler.go"), []byte("package api\n\nfunc Handle() {\n\tlog.Print(\"x\")\n}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	waitTurns(t, f.service, f.conversation.ID, 1)
+	return f
+}
+
+// events waits until a conversation's journal holds an event of each type.
+func events(t *testing.T, b *runner.Bench, session string, types ...string) map[string]agent.Event {
+	t.Helper()
+	ctx := timeout(t)
+	found := map[string]agent.Event{}
+	for {
+		var cursor uint64
+		for {
+			read, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+			record, err := b.Timeline(read, session, cursor)
+			cancel()
+			if err != nil {
+				break
+			}
+			cursor = record.Sequence
+			var ev agent.Event
+			if json.Unmarshal(record.Value, &ev) == nil {
+				found[ev.Type] = ev
+			}
+		}
+		missing := false
+		for _, kind := range types {
+			if _, ok := found[kind]; !ok {
+				missing = true
+			}
+		}
+		if !missing {
+			return found
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("%s never recorded %v; saw %v", session, types, found)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// One click: a read-only Codex conversation in the same workspace, named for
+// what it reviews, linked to the author, briefed from what the Runner
+// recorded. Its findings arrive through its own credential only, anchored and
+// labeled; the author's conversation shows the review starting and its
+// outcome.
+func TestStartReviewBriefsAReadOnlyReviewerWhoseFindingsLandInTheTray(t *testing.T) {
+	f := newReviewFixture(t)
+	ctx := timeout(t)
+	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Scope: "turn", Turn: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, session := started.Run, started.Session
+	if run.ReviewerLabel != "Codex" || run.SourceLabel != "Claude" || run.ScopeLabel != "Turn 1" || run.State != "running" || run.SourceTitle != "Fix the parser" || run.ReviewerSessionId != session.Id || run.SourceSessionId != f.conversation.ID {
+		t.Fatalf("run: %+v", run)
+	}
+	if session.Title != "Review · Turn 1 · Codex" || session.Permission != "read-only" || session.CollectionId != f.mine.Id || session.Provider != "codex" || f.codex.Session.Open.Permission != "read-only" {
+		t.Fatalf("reviewer conversation: %+v (opened with %q)", session, f.codex.Session.Open.Permission)
+	}
+	var brief agent.Operation
+	select {
+	case brief = <-f.codex.Session.Applied:
+	case <-ctx.Done():
+		t.Fatal("the brief never reached the reviewer")
+	}
+	for _, want := range []string{"Do op-handler", "## What to review: Turn 1", "git -C ", "api/handler.go (", "lazybox review add --file", "You are read-only"} {
+		if !strings.Contains(brief.Text, want) {
+			t.Errorf("brief lacks %q:\n%s", want, brief.Text)
+		}
+	}
+	history, err := f.client.ListPromptHistory(f.owner, &pb.ListPromptHistoryRequest{ConversationId: session.Id})
+	if err != nil || len(history.Prompts) != 1 || history.Prompts[0].Source.GetKind() != runner.PromptSourceReview {
+		t.Fatalf("the brief is recorded as Lazybox's: %+v %v", history, err)
+	}
+
+	reviewer, author := bearer(ctx, agentToken(t, f.codex.Session.Open.Env)), bearer(ctx, f.agentToken)
+	finding := &pb.AddReviewFindingRequest{SessionId: session.Id, File: "api/handler.go", StartLine: 3, EndLine: 4, Severity: "critical", Title: "The error is logged, not returned", Body: "Return it so callers can retry."}
+	filed, err := f.client.AddReviewFinding(reviewer, finding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := filed.Finding
+	if filed.Updated || c.Severity != "blocker" || c.Author != "agent" || c.AuthorLabel != "Codex" || c.AuthorSessionId != session.Id || c.ReviewId != run.Id || c.Disposition != "proposed" ||
+		c.Member != "api" || c.Path != "handler.go" || strings.Join(c.Snippet, "\n") != "func Handle() {\n\tlog.Print(\"x\")" || c.Head == "" {
+		t.Fatalf("finding: %+v", c)
+	}
+	// Filed again (a retry, a second look): the same finding, updated.
+	finding.Severity, finding.Body = "major", "Return it; callers retry on error."
+	again, err := f.client.AddReviewFinding(reviewer, finding)
+	if err != nil || !again.Updated || again.Finding.Id != c.Id || again.Finding.Severity != "major" {
+		t.Fatal(again, err)
+	}
+	finding.Severity, finding.Title = "blocker", "Handle never reports failure"
+	if _, err = f.client.AddReviewFinding(reviewer, finding); err != nil {
+		t.Fatal(err)
+	}
+	for name, bad := range map[string]*pb.AddReviewFindingRequest{
+		"an unknown severity":      {SessionId: session.Id, File: "api/handler.go", StartLine: 1, Severity: "urgent", Title: "x"},
+		"a line past the file":     {SessionId: session.Id, File: "api/handler.go", StartLine: 99, Severity: "nit", Title: "x"},
+		"a file not in the repo":   {SessionId: session.Id, File: "api/missing.go", StartLine: 1, Severity: "nit", Title: "x"},
+		"a path outside the repos": {SessionId: session.Id, File: "../etc/passwd", StartLine: 1, Severity: "nit", Title: "x"},
+	} {
+		if _, err = f.client.AddReviewFinding(reviewer, bad); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	// Only the reviewer, only for itself: the author reviews nothing, and the
+	// reviewer cannot speak for the author.
+	if _, err = f.client.AddReviewFinding(author, &pb.AddReviewFindingRequest{SessionId: f.conversation.ID, File: "api/handler.go", StartLine: 1, Severity: "nit", Title: "self review"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("the author filed a finding: %v", err)
+	}
+	if _, err = f.client.AddReviewFinding(reviewer, &pb.AddReviewFindingRequest{SessionId: f.conversation.ID, File: "api/handler.go", StartLine: 1, Severity: "nit", Title: "x"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("the reviewer filed as another conversation: %v", err)
+	}
+	if _, err = f.client.ListReviewFindings(reviewer, &pb.ListReviewFindingsRequest{SessionId: f.conversation.ID}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("the reviewer listed as another conversation: %v", err)
+	}
+	if _, err = f.client.StartReview(reviewer, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("an agent started a review: %v", err)
+	}
+	listed, err := f.client.ListReviewFindings(reviewer, &pb.ListReviewFindingsRequest{SessionId: session.Id})
+	if err != nil || len(listed.Findings) != 2 || listed.Run.Id != run.Id || listed.Run.Blockers != 1 || listed.Run.Majors != 1 {
+		t.Fatal(listed, err)
+	}
+
+	// The tray: the findings with their author and severity, the review with
+	// its live counts. Accept one, dismiss the other with a reason.
+	tray, err := f.client.ListReviewComments(f.owner, &pb.ListReviewCommentsRequest{CollectionId: f.mine.Id})
+	if err != nil || len(tray.Runs) != 1 || tray.Runs[0].Id != run.Id || len(tray.Comments) != 2 {
+		t.Fatal(tray, err)
+	}
+	tray, err = f.client.SetReviewDisposition(f.owner, &pb.SetReviewDispositionRequest{CollectionId: f.mine.Id, Ids: []string{c.Id}, Disposition: "open"})
+	if err != nil || commentByID(t, tray, c.Id).Disposition != "open" {
+		t.Fatal(tray, err)
+	}
+	other := tray.Comments[1].Id
+	tray, err = f.client.SetReviewDisposition(f.owner, &pb.SetReviewDispositionRequest{CollectionId: f.mine.Id, Ids: []string{other}, Disposition: "dismissed", Note: "Handle cannot fail here"})
+	if d := commentByID(t, tray, other); err != nil || d.Disposition != "dismissed" || d.Note != "Handle cannot fail here" || tray.Runs[0].Blockers != 0 || tray.Runs[0].Majors != 1 {
+		t.Fatal(tray, err)
+	}
+
+	// The reviewer ends its turn: the review is done, and the author's
+	// conversation shows the review start and its outcome.
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tray, err = f.client.ListReviewComments(f.owner, &pb.ListReviewCommentsRequest{CollectionId: f.mine.Id})
+		if err == nil && tray.Runs[0].State == "done" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the review never finished: %+v %v", tray, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The blocker was dismissed: no blocker is open, so the loop ends clean.
+	if r := tray.Runs[0]; r.StopReason != "clean" || r.Detail != "No blocker open after 1 round; 1 major still open." || r.Majors != 1 {
+		t.Fatalf("finished: %+v", r)
+	}
+	seen := events(t, f.bench, f.conversation.ID, "review_started", "review_finished")
+	if ev := seen["review_started"]; ev.RequestID != run.Id || ev.Text != "Codex is reviewing turn 1" {
+		t.Fatalf("started event: %+v", ev)
+	}
+	var data runner.ReviewEvent
+	if ev := seen["review_finished"]; json.Unmarshal(ev.Data, &data) != nil || data.ReviewerSession != session.Id || data.Majors != 1 || data.Blockers != 0 || ev.Text != "Codex reviewed turn 1 · 1 major" {
+		t.Fatalf("finished event: %+v %+v", ev, data)
+	}
+
+	// A review of a review is refused; so is an agent nobody signed in for.
+	if _, err = f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: session.Id}); err == nil {
+		t.Fatal("a review conversation was reviewed")
+	}
+	if _, err = f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, ProfileId: "missing"}); err == nil {
+		t.Fatal("an unknown subscription reviewed")
+	}
+	if _, err = f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Scope: "turn", Turn: 7}); err == nil || !strings.Contains(err.Error(), "no turn 7") {
+		t.Fatalf("a missing turn: %v", err)
+	}
+}
+
+// A review of a conversation that is an attempt on a mission task is
+// evidence on that task: pending while it runs, failing while blockers are
+// open, and the task is not verified because of it.
+func TestAReviewIsMissionEvidence(t *testing.T) {
+	f := newReviewFixture(t)
+	missionID, taskID := missionWithTask(t, f.terminalFixture, f.owner)
+	if _, err := f.client.UpdateMission(f.owner, &pb.UpdateMissionRequest{MissionId: missionID, OperationId: "assign", Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: taskID, SessionId: f.conversation.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Provider: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.Run.MissionId != missionID || started.Run.TaskId != taskID || started.Run.ScopeLabel != "Changes" {
+		t.Fatalf("run: %+v", started.Run)
+	}
+	<-f.codex.Session.Applied
+	evidence := func() *pb.MissionEvidence {
+		for _, e := range taskOf(t, getMission(t, f.terminalFixture, f.owner, missionID), taskID).Evidence {
+			if e.Kind == work.EvidenceReview {
+				return e
+			}
+		}
+		return nil
+	}
+	if e := evidence(); e == nil || e.Outcome != work.OutcomePending || e.Ref != "review:"+started.Run.Id {
+		t.Fatalf("pending review evidence: %+v", e)
+	}
+	reviewer := bearer(timeout(t), agentToken(t, f.codex.Session.Open.Env))
+	if _, err = f.client.AddReviewFinding(reviewer, &pb.AddReviewFindingRequest{SessionId: started.Session.Id, File: "api/handler.go", StartLine: 4, Severity: "blocker", Title: "Logged, not returned"}); err != nil {
+		t.Fatal(err)
+	}
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	deadline := time.Now().Add(5 * time.Second)
+	for e := evidence(); e == nil || e.Outcome != work.OutcomeFail; e = evidence() {
+		if time.Now().After(deadline) {
+			t.Fatalf("review evidence never failed: %+v", e)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	task := taskOf(t, getMission(t, f.terminalFixture, f.owner, missionID), taskID)
+	if !contains(task.Flags, work.FlagBlockers) || task.EvidenceTrust == work.TrustVerified {
+		t.Fatalf("task with open blockers: %+v", task)
+	}
+}

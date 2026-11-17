@@ -1,0 +1,75 @@
+/* Tool calls as quiet lines of the conversation (ToolLine.tsx). */
+.tool-lines{display:flex;flex-direction:column;gap:1px;margin:2px 0 10px;font-size:calc(12px * var(--text-scale))}
+.tool-line{min-width:0}
+/* Scoped like the chat's own button rule (.embedded-chat button), which would otherwise pad every line to two. */
+.tool-line-row,.embedded-chat .tool-line-row,.workspace-shell .tool-line-row{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:7px;width:100%;min-height:24px;padding:2px 6px 2px 2px;border-radius:5px;cursor:pointer;color:var(--text-subtle);font-size:calc(12px * var(--text-scale));line-height:calc(18px * var(--text-scale))}
+.tool-line-row:hover,.embedded-chat .tool-line-row:hover,.workspace-shell .tool-line-row:hover{background:var(--surface);color:var(--text-secondary)}
+.tool-line-row:focus-visible{outline:1px solid var(--info-solid-hover);outline-offset:0}
+.tool-chevron{display:inline-flex;width:12px;flex:none;color:var(--text-disabled);transition:transform .12s}
+.tool-chevron[data-open]{transform:rotate(90deg)}
+.tool-line-row:hover .tool-chevron{color:var(--text-subtle)}
+.tool-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;flex:none;color:var(--text-faint)}
+.tool-line[data-state=failed]>.tool-line-row .tool-icon{color:var(--danger-soft)}
+.tool-line[data-state=unknown]>.tool-line-row .tool-icon{color:var(--text-disabled)}
+/* Stopped or denied: not run, not failed. A still square and a word, muted. */
+.tool-stop-square{display:inline-block;width:7px;height:7px;border-radius:1.5px;background:currentColor}
+.tool-line[data-state=stopped]>.tool-line-row .tool-icon,.tool-line[data-state=denied]>.tool-line-row .tool-icon{color:var(--text-disabled)}
+.tool-line-stopped{flex:none;margin-left:8px;color:var(--text-muted);font-size:calc(11px * var(--text-scale));white-space:nowrap}
+.tool-spinner{width:10px;height:10px;border-radius:50%;border:1.5px solid var(--info-line);border-top-color:var(--accent);animation:tool-spin .9s linear infinite}
+@keyframes tool-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.tool-spinner{animation:none;border-color:var(--accent)}}
+.tool-line-title{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tool-verb{color:inherit}
+.tool-target{color:var(--text-secondary)}
+code.tool-target{font-family:var(--font-mono);font-size:calc(11.5px * var(--code-scale));background:none;padding:0}
+.tool-line[data-state=running] .tool-verb{color:var(--accent)}
+.tool-meta{display:inline-flex;gap:8px;flex:none;color:var(--text-faint);font-size:calc(11px * var(--text-scale));font-variant-numeric:tabular-nums;white-space:nowrap}
+.tool-meta>span:before{content:'·';margin-right:8px;color:var(--line-bold)}
+.tool-meta [data-tone=failed]{color:var(--danger-soft)}
+.tool-meta ins{color:var(--ok);text-decoration:none}
+.tool-meta del{color:var(--danger-soft);text-decoration:none}
+.tool-line-problem{margin:0 0 3px 42px;color:var(--danger-soft);font-size:calc(11.5px * var(--code-scale));font-family:var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tool-group-calls{margin-left:18px;padding-left:6px;border-left:1px solid var(--line-subtle)}
+.tool-details{margin:4px 0 8px 22px;padding:2px 0 2px 12px;border-left:1px solid var(--line-subtle);display:flex;flex-direction:column;gap:8px;min-width:0}
+.tool-details .code-block{margin:0}
+.tool-details .code-block pre{max-height:240px;overflow:auto}
+.tool-output{min-width:0}
+.tool-output pre{margin:0;padding:8px 10px;max-height:320px;overflow:auto;background:var(--bg);border:1px solid var(--line-subtle);border-radius:6px;font-size:calc(11.5px * var(--code-scale));line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-secondary)}
+.tool-output[data-failed] pre{border-color:var(--danger-line-subtle)}
+.tool-output-more,.tool-details-actions button{font-size:calc(11px * var(--text-scale));padding:3px 8px;background:transparent;border:1px solid var(--line);color:var(--text-subtle);border-radius:5px}
+.tool-output-more{margin-top:5px}
+.tool-details-actions{display:flex;gap:6px;flex-wrap:wrap}
+.tool-details-actions button{display:inline-flex;align-items:center;gap:5px}
+.tool-details-actions button:hover,.tool-output-more:hover{color:var(--text);border-color:var(--line-bold);background:var(--surface)}
+.tool-note{color:var(--text-faint)}
+.tool-plan{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px;font-size:calc(12px * var(--text-scale));color:var(--text-secondary)}
+.tool-plan li{display:flex;gap:8px}
+.tool-plan li>span{width:12px;flex:none;color:var(--text-faint);text-align:center}
+.tool-plan li[data-status=completed]{color:var(--text-faint);text-decoration:line-through;text-decoration-color:var(--line-bold)}
+.tool-plan li[data-status=completed]>span{color:var(--ok)}
+.tool-plan li[data-status=in_progress]{color:var(--text)}
+.tool-plan li[data-status=in_progress]>span{color:var(--accent)}
+/* How a question or approval was answered: one quiet line. */
+.request-answered{display:flex;align-items:baseline;gap:8px;margin:2px 0 10px;padding:2px 2px;font-size:calc(12px * var(--text-scale));color:var(--text-subtle);min-width:0}
+.request-answered>svg{flex:none;align-self:center;color:var(--ok)}
+.request-answered[data-kind=declined]>svg{color:var(--danger-soft)}
+.request-answered strong{font-weight:500;color:var(--text-secondary)}
+.request-answered span{min-width:0;overflow-wrap:anywhere}
+.request-answered code{font-family:var(--font-mono);font-size:calc(11.5px * var(--code-scale));color:var(--text-secondary)}
+.tool-thinking .tool-line-row{cursor:default}
+.tool-thinking .tool-line-row:hover{background:none;color:var(--text-subtle)}
+.tool-thinking[data-state=running] .tool-verb{color:var(--accent)}
+.tool-thinking-dot{display:inline-flex;color:var(--accent);animation:tool-pulse 1.4s ease-in-out infinite}
+@keyframes tool-pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.tool-thinking-dot{animation:none}}
+.tool-inline{margin:2px 0 6px 42px;min-width:0}
+.tool-inline-diff pre{margin:0;padding:6px 10px;background:var(--bg);border:1px solid var(--line-subtle);border-radius:6px;font-size:calc(11.5px * var(--code-scale));line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;max-height:200px;overflow:auto}
+.tool-inline-diff [data-sign=add]{color:var(--diff-add-text);background:var(--diff-add-bg)}
+.tool-inline-diff [data-sign=del]{color:var(--diff-del-text);background:var(--diff-del-bg)}
+.tool-inline .tool-plan{padding:6px 10px;background:var(--surface-sunken);border:1px solid var(--line-subtle);border-radius:6px}
+/* Activity detail: Smart's run summaries and Quiet's turn line (ToolLine.tsx). */
+code.tool-target.tool-aside{color:var(--text-faint);margin-left:2px}
+.tool-summary>.tool-line-row .tool-verb{color:var(--text-tertiary)}
+.tool-summary[data-state=running]>.tool-line-row .tool-verb{color:var(--accent)}
+.tool-summary[data-state=failed]>.tool-line-row .tool-icon{color:var(--danger-soft)}
+.tool-summary-live{margin-left:18px;padding-left:6px;border-left:1px solid var(--line-subtle)}

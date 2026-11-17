@@ -1,0 +1,21 @@
+/* Settings → Agents & workspaces → Claude (ClaudeAuthSettings.tsx) and the account notices. */
+.claude-auth-mode{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;font-size:calc(12px * var(--text-scale));white-space:nowrap}
+.claude-auth-mode.tone-ok{background:var(--s-ok-bg, var(--ok-bg));color:var(--s-ok)}
+.claude-auth-mode.tone-warn{background:var(--s-warn-bg);color:var(--s-warn)}
+.claude-auth-mode.tone-muted{color:var(--s-text-2)}
+.claude-key-form,.claude-key-saved,.claude-program-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.claude-key-form input{flex:1 1 220px;min-width:0;font-family:var(--font-mono, ui-monospace, monospace)}
+.claude-program{display:inline-flex;align-items:center;gap:6px;color:var(--s-ok)}
+.settings-callout .link-button,.account-notice .link-button{padding:0;border:0;background:transparent;color:var(--accent);font:inherit;text-decoration:underline;cursor:pointer}
+.subscription-gated{color:var(--s-warn)}
+.subscription-imported{display:inline-flex;align-items:center;gap:8px}
+.account-notices{position:fixed;right:16px;bottom:16px;z-index:60;display:flex;flex-direction:column;gap:8px;width:min(420px, calc(100vw - 32px))}
+.account-notice{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border:1px solid var(--s-line, var(--line));border-radius:10px;background:var(--s-surface, var(--surface, var(--bg)));box-shadow:0 8px 28px color-mix(in srgb,var(--shadow) calc(40% * var(--shadow-strength)),transparent);font-size:calc(13px * var(--text-scale));line-height:1.45}
+.account-notice > svg{flex:none;margin-top:2px;color:var(--accent)}
+.account-notice-body{flex:1;min-width:0}
+.account-notice-body strong{display:block}
+.account-notice-body p{margin:2px 0 0;color:var(--s-text-2, var(--text-2))}
+.account-notice-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.onboarding-step-actions{display:flex;flex-direction:column;gap:6px;align-items:stretch}
+.onboarding-claude{display:flex;flex-direction:column;gap:6px;margin-top:12px;padding:12px;border-radius:8px;background:var(--s-surface-2, var(--surface-2))}
+.onboarding-claude p{margin:0}

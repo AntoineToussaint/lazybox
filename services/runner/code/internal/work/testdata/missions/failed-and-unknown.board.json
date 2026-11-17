@@ -1,0 +1,34 @@
+{
+ "mission": "m_failed",
+ "title": "Cleanup",
+ "process": "solo-pair",
+ "seq": 15,
+ "ignored": 2,
+ "tasks": [
+  {
+   "id": "t_gone",
+   "status": "failed",
+   "trust": "observed",
+   "evidence_trust": "claimed",
+   "live": "missing",
+   "reason": "Its conversation ended (deleted) without a report"
+  },
+  {
+   "id": "t_cancel",
+   "status": "canceled",
+   "evidence_trust": "claimed",
+   "reason": "Canceled: Out of scope"
+  },
+  {
+   "id": "t_ci",
+   "status": "working",
+   "trust": "observed",
+   "evidence_trust": "observed",
+   "flags": [
+    "ci_failing"
+   ],
+   "live": "running",
+   "reason": "The agent is working: Bash"
+  }
+ ]
+}

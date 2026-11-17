@@ -1,0 +1,765 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lazybox:schema:theme:v1",
+  "title": "Lazybox theme",
+  "description": "A theme file in the Runner's themes folder (Settings → Appearance). Set the base tokens; the others derive from them.",
+  "type": "object",
+  "required": [
+    "name",
+    "appearance"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "The name Settings shows."
+    },
+    "appearance": {
+      "enum": [
+        "dark",
+        "light"
+      ],
+      "description": "Whether this is a dark or a light theme."
+    },
+    "scheme": {
+      "enum": [
+        "dark",
+        "light"
+      ],
+      "description": "Another name for appearance."
+    },
+    "extends": {
+      "enum": [
+        "dark",
+        "light",
+        "dark-high-contrast",
+        "solarized-light"
+      ],
+      "description": "A built-in theme of the same appearance to start from."
+    },
+    "description": {
+      "type": "string"
+    },
+    "author": {
+      "type": "string"
+    },
+    "tokens": {
+      "type": "object",
+      "description": "Token = colour. A leading -- is accepted.",
+      "properties": {
+        "bg": {
+          "type": "string",
+          "description": "Behind everything: the window background. (Surfaces, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "surface-sunken": {
+          "type": "string",
+          "description": "Recessed areas: the sidebar, wells, code. (Surfaces)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "surface": {
+          "type": "string",
+          "description": "The main canvas: pages, panels and the chat. (Surfaces, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "surface-raised": {
+          "type": "string",
+          "description": "Cards, inputs, menus and dialogs. (Surfaces, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "surface-hover": {
+          "type": "string",
+          "description": "A row or control under the pointer. (Surfaces)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "surface-active": {
+          "type": "string",
+          "description": "A pressed control or an active row. (Surfaces)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "surface-selected": {
+          "type": "string",
+          "description": "The selected row, tab or item. (Surfaces)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "surface-strong": {
+          "type": "string",
+          "description": "Strong neutral fills: scroll thumbs, toggles, badges. (Surfaces)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "line-subtle": {
+          "type": "string",
+          "description": "Dividers between rows. (Lines)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "line": {
+          "type": "string",
+          "description": "Borders of panels, cards and inputs. (Lines, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "line-strong": {
+          "type": "string",
+          "description": "Borders that must stand out: focused or hovered controls. (Lines)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "line-bold": {
+          "type": "string",
+          "description": "The strongest neutral border. (Lines)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "text-strong": {
+          "type": "string",
+          "description": "Titles and text at full emphasis. (Text)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "text": {
+          "type": "string",
+          "description": "Body text. (Text, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "text-soft": {
+          "type": "string",
+          "description": "Body text a step quieter. (Text)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "text-secondary": {
+          "type": "string",
+          "description": "Secondary text: descriptions, previews. (Text)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "text-tertiary": {
+          "type": "string",
+          "description": "Labels and metadata. (Text)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "text-subtle": {
+          "type": "string",
+          "description": "Quiet labels. (Text)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "text-muted": {
+          "type": "string",
+          "description": "Muted text: timestamps, hints, placeholders. (Text, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "text-faint": {
+          "type": "string",
+          "description": "Faint text: decorations, separators. (Text)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "text-disabled": {
+          "type": "string",
+          "description": "Disabled text and icons. (Text)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "accent": {
+          "type": "string",
+          "description": "Accent: icons, links, indicators and fills. (Accent, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "accent-soft": {
+          "type": "string",
+          "description": "Accent text that reads a little lighter. (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "accent-strong": {
+          "type": "string",
+          "description": "Accent text at full emphasis. (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "accent-bg": {
+          "type": "string",
+          "description": "Accent tinted background (chips, notices). (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "accent-bg-strong": {
+          "type": "string",
+          "description": "Accent tinted background, selected or hovered. (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "accent-line-subtle": {
+          "type": "string",
+          "description": "Accent quiet border. (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "accent-line": {
+          "type": "string",
+          "description": "Accent border. (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "accent-solid": {
+          "type": "string",
+          "description": "Accent solid fill behind white text (primary and destructive buttons). (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "accent-solid-hover": {
+          "type": "string",
+          "description": "Accent solid fill, hovered. (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "on-accent": {
+          "type": "string",
+          "description": "Text on a accent fill. (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "on-accent-solid": {
+          "type": "string",
+          "description": "Text on a accent solid fill. (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "selection": {
+          "type": "string",
+          "description": "Selected text and editor selections. (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "focus": {
+          "type": "string",
+          "description": "The keyboard focus ring. (Accent)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ok": {
+          "type": "string",
+          "description": "Success: icons, links, indicators and fills. (Status, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ok-soft": {
+          "type": "string",
+          "description": "Success text that reads a little lighter. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ok-strong": {
+          "type": "string",
+          "description": "Success text at full emphasis. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ok-bg": {
+          "type": "string",
+          "description": "Success tinted background (chips, notices). (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ok-bg-strong": {
+          "type": "string",
+          "description": "Success tinted background, selected or hovered. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ok-line-subtle": {
+          "type": "string",
+          "description": "Success quiet border. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ok-line": {
+          "type": "string",
+          "description": "Success border. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ok-solid": {
+          "type": "string",
+          "description": "Success solid fill behind white text (primary and destructive buttons). (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ok-solid-hover": {
+          "type": "string",
+          "description": "Success solid fill, hovered. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "on-ok": {
+          "type": "string",
+          "description": "Text on a success fill. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "on-ok-solid": {
+          "type": "string",
+          "description": "Text on a success solid fill. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "warn": {
+          "type": "string",
+          "description": "Warning: icons, links, indicators and fills. (Status, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "warn-soft": {
+          "type": "string",
+          "description": "Warning text that reads a little lighter. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "warn-strong": {
+          "type": "string",
+          "description": "Warning text at full emphasis. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "warn-bg": {
+          "type": "string",
+          "description": "Warning tinted background (chips, notices). (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "warn-bg-strong": {
+          "type": "string",
+          "description": "Warning tinted background, selected or hovered. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "warn-line-subtle": {
+          "type": "string",
+          "description": "Warning quiet border. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "warn-line": {
+          "type": "string",
+          "description": "Warning border. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "warn-solid": {
+          "type": "string",
+          "description": "Warning solid fill behind white text (primary and destructive buttons). (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "warn-solid-hover": {
+          "type": "string",
+          "description": "Warning solid fill, hovered. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "on-warn": {
+          "type": "string",
+          "description": "Text on a warning fill. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "on-warn-solid": {
+          "type": "string",
+          "description": "Text on a warning solid fill. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "danger": {
+          "type": "string",
+          "description": "Danger: icons, links, indicators and fills. (Status, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "danger-soft": {
+          "type": "string",
+          "description": "Danger text that reads a little lighter. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "danger-strong": {
+          "type": "string",
+          "description": "Danger text at full emphasis. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "danger-bg": {
+          "type": "string",
+          "description": "Danger tinted background (chips, notices). (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "danger-bg-strong": {
+          "type": "string",
+          "description": "Danger tinted background, selected or hovered. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "danger-line-subtle": {
+          "type": "string",
+          "description": "Danger quiet border. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "danger-line": {
+          "type": "string",
+          "description": "Danger border. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "danger-solid": {
+          "type": "string",
+          "description": "Danger solid fill behind white text (primary and destructive buttons). (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "danger-solid-hover": {
+          "type": "string",
+          "description": "Danger solid fill, hovered. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "on-danger": {
+          "type": "string",
+          "description": "Text on a danger fill. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "on-danger-solid": {
+          "type": "string",
+          "description": "Text on a danger solid fill. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "info": {
+          "type": "string",
+          "description": "Information: icons, links, indicators and fills. (Status, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "info-soft": {
+          "type": "string",
+          "description": "Information text that reads a little lighter. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "info-strong": {
+          "type": "string",
+          "description": "Information text at full emphasis. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "info-bg": {
+          "type": "string",
+          "description": "Information tinted background (chips, notices). (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "info-bg-strong": {
+          "type": "string",
+          "description": "Information tinted background, selected or hovered. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "info-line-subtle": {
+          "type": "string",
+          "description": "Information quiet border. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "info-line": {
+          "type": "string",
+          "description": "Information border. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "info-solid": {
+          "type": "string",
+          "description": "Information solid fill behind white text (primary and destructive buttons). (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "info-solid-hover": {
+          "type": "string",
+          "description": "Information solid fill, hovered. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "on-info": {
+          "type": "string",
+          "description": "Text on a information fill. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "on-info-solid": {
+          "type": "string",
+          "description": "Text on a information solid fill. (Status)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "running": {
+          "type": "string",
+          "description": "Working agents and running commands. (Status, base)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "code-bg": {
+          "type": "string",
+          "description": "Behind code blocks and the console. (Code)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "code-text": {
+          "type": "string",
+          "description": "Code that has no highlighting. (Code)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "syntax-keyword": {
+          "type": "string",
+          "description": "Keywords and tags. (Code)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "syntax-string": {
+          "type": "string",
+          "description": "Strings. (Code)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "syntax-number": {
+          "type": "string",
+          "description": "Numbers and literals. (Code)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "syntax-comment": {
+          "type": "string",
+          "description": "Comments. (Code)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "syntax-type": {
+          "type": "string",
+          "description": "Types and built-ins. (Code)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "syntax-attr": {
+          "type": "string",
+          "description": "Attributes, properties and titles. (Code)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "syntax-function": {
+          "type": "string",
+          "description": "Function names. (Code)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "diff-add-bg": {
+          "type": "string",
+          "description": "Added lines. (Diff)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "diff-add-text": {
+          "type": "string",
+          "description": "Text of added lines. (Diff)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "diff-add-mark": {
+          "type": "string",
+          "description": "The + sign and added counts. (Diff)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "diff-word-add": {
+          "type": "string",
+          "description": "The changed words inside an added line. (Diff)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "diff-del-bg": {
+          "type": "string",
+          "description": "Removed lines. (Diff)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "diff-del-text": {
+          "type": "string",
+          "description": "Text of removed lines. (Diff)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "diff-word-del": {
+          "type": "string",
+          "description": "The changed words inside a removed line. (Diff)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "diff-del-mark": {
+          "type": "string",
+          "description": "The − sign and removed counts. (Diff)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-0": {
+          "type": "string",
+          "description": "ANSI black in command output. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-1": {
+          "type": "string",
+          "description": "ANSI red in command output. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-2": {
+          "type": "string",
+          "description": "ANSI green in command output. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-3": {
+          "type": "string",
+          "description": "ANSI yellow in command output. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-4": {
+          "type": "string",
+          "description": "ANSI blue in command output. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-5": {
+          "type": "string",
+          "description": "ANSI magenta in command output. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-6": {
+          "type": "string",
+          "description": "ANSI cyan in command output. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-7": {
+          "type": "string",
+          "description": "ANSI white in command output. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-8": {
+          "type": "string",
+          "description": "ANSI bright black. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-9": {
+          "type": "string",
+          "description": "ANSI bright red. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-10": {
+          "type": "string",
+          "description": "ANSI bright green. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-11": {
+          "type": "string",
+          "description": "ANSI bright yellow. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-12": {
+          "type": "string",
+          "description": "ANSI bright blue. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-13": {
+          "type": "string",
+          "description": "ANSI bright magenta. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-14": {
+          "type": "string",
+          "description": "ANSI bright cyan. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "ansi-15": {
+          "type": "string",
+          "description": "ANSI bright white. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "log-source-1": {
+          "type": "string",
+          "description": "Source 1 of a multi-service log: its name in the console and its filter chip. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "log-source-2": {
+          "type": "string",
+          "description": "Source 2 of a multi-service log: its name in the console and its filter chip. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "log-source-3": {
+          "type": "string",
+          "description": "Source 3 of a multi-service log: its name in the console and its filter chip. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "log-source-4": {
+          "type": "string",
+          "description": "Source 4 of a multi-service log: its name in the console and its filter chip. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "log-source-5": {
+          "type": "string",
+          "description": "Source 5 of a multi-service log: its name in the console and its filter chip. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "log-source-6": {
+          "type": "string",
+          "description": "Source 6 of a multi-service log: its name in the console and its filter chip. (Terminal colours)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "chart-1": {
+          "type": "string",
+          "description": "Chart series 1. (Charts)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "chart-2": {
+          "type": "string",
+          "description": "Chart series 2. (Charts)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "chart-3": {
+          "type": "string",
+          "description": "Chart series 3. (Charts)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "chart-4": {
+          "type": "string",
+          "description": "Chart series 4. (Charts)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "chart-5": {
+          "type": "string",
+          "description": "Chart series 5. (Charts)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "chart-6": {
+          "type": "string",
+          "description": "Chart series 6. (Charts)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "chart-7": {
+          "type": "string",
+          "description": "Chart series 7. (Charts)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "chart-muted": {
+          "type": "string",
+          "description": "Reserved or unused parts of a chart. (Charts)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "shadow": {
+          "type": "string",
+          "description": "The colour of shadows and backdrops. (Effects)",
+          "pattern": "^(#[0-9A-Fa-f]{3,8}|(rgb|rgba|hsl|hsla)\\(.*\\))$"
+        },
+        "shadow-strength": {
+          "description": "How strong shadows and backdrops are, 0–1. (Effects)",
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "string",
+              "pattern": "^(0(\\.\\d+)?|1(\\.0+)?)$"
+            }
+          ]
+        }
+      },
+      "patternProperties": {
+        "^--": {}
+      },
+      "additionalProperties": false
+    },
+    "typography": {
+      "type": "object",
+      "properties": {
+        "uiFont": {
+          "type": "string",
+          "description": "A font list, such as \"Inter, sans-serif\"; empty for the default."
+        },
+        "uiFontSize": {
+          "type": "number",
+          "minimum": 11,
+          "maximum": 16
+        },
+        "codeFont": {
+          "type": "string",
+          "description": "A font list, such as \"Inter, sans-serif\"; empty for the default."
+        },
+        "codeFontSize": {
+          "type": "number",
+          "minimum": 10,
+          "maximum": 20
+        },
+        "ligatures": {
+          "type": "boolean"
+        },
+        "density": {
+          "enum": [
+            "compact",
+            "comfortable",
+            "relaxed"
+          ]
+        },
+        "chatFontSize": {
+          "type": "number",
+          "minimum": 11,
+          "maximum": 22
+        },
+        "chatLineHeight": {
+          "type": "number",
+          "minimum": 1.1,
+          "maximum": 2.2
+        },
+        "chatParagraphGap": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "chatMaxWidth": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 200
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,51 @@
+[package]
+name = "lazybox-v2-desktop"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+# `unstable` is Tauri's multiwebview: a Web panel is a child webview of the
+# window it is docked in (WORKSPACES.md, "The Web panel").
+tauri = { version = "=2.12.5", features = ["dynamic-acl", "unstable"] }
+tauri-plugin-http = "=2.8.3"
+tauri-plugin-opener = "=2.7.2"
+tauri-plugin-clipboard-manager = "=2.3.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+sha2 = "0.10"
+tempfile = "3"
+tauri-plugin-single-instance = "=2.4.0"
+tauri-plugin-dialog = "=2.8.4"
+tauri-plugin-notification = "=2.8.0"
+tauri-plugin-updater = "=2.14.0"
+base64 = "0.22"
+
+[dev-dependencies]
+glob = "0.3"
+
+# `lazybox shot` (src/capture.rs): the window's own WKWebView snapshot. The
+# same crates and versions Tauri and wry already use, with the features it needs.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSData", "NSDictionary", "NSError", "NSString", "NSLocale", "NSSet", "NSArray", "NSEnumerator", "NSOperation", "NSObjCRuntime"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSView", "NSResponder"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKSnapshotConfiguration"] }
+# Voice (src/voice.rs): dictation with the Speech framework on-device, the
+# microphone through AVAudioEngine, and read-aloud with AVSpeechSynthesizer.
+objc2-speech = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-avf-audio", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionTask", "SFSpeechRecognitionResult", "SFSpeechRecognitionMetadata", "SFTranscription", "SFSpeechRecognitionTaskHint"] }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "block2", "AVAudioEngine", "AVAudioNode", "AVAudioIONode", "AVAudioFormat", "AVAudioBuffer", "AVAudioTime", "AVAudioTypes", "AVSpeechSynthesis"] }
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

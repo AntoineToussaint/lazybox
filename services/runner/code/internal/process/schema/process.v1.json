@@ -1,0 +1,734 @@
+{
+  "$defs": {
+    "Action": {
+      "oneOf": [
+        {
+          "enum": [
+            "enter_next_phase"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "assign": {
+              "description": "create_task: the role that takes it.",
+              "type": "string"
+            },
+            "create_task": {
+              "description": "Create a task of this kind (fix: charged to the parent task's retries).",
+              "type": "string"
+            },
+            "enter_next_phase": {
+              "description": "Enter the next phase (refused until the current phase's exit gate has passed). Also written as the bare string enter_next_phase.",
+              "type": "boolean"
+            },
+            "enter_phase": {
+              "description": "Enter this phase (refused until the current phase's exit gate has passed).",
+              "type": "string"
+            },
+            "escalate": {
+              "description": "Raise an escalation with this reason.",
+              "type": "string"
+            },
+            "exec": {
+              "description": "Run this repository script through lazybox run, with the event in LAZYBOX_EVENT; its output is evidence.",
+              "type": "string"
+            },
+            "integration.queue": {
+              "description": "Queue the event's task for integration.",
+              "enum": [
+                "task"
+              ],
+              "type": "string"
+            },
+            "notify": {
+              "description": "Notify a person.",
+              "items": {
+                "enum": [
+                  "inbox",
+                  "desktop"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "request_gate": {
+              "description": "Request this gate.",
+              "type": "string"
+            },
+            "send": {
+              "description": "Send a message to this role's session on the task (with snippet or text).",
+              "type": "string"
+            },
+            "snippet": {
+              "description": "send: the snippet to send.",
+              "type": "string"
+            },
+            "start": {
+              "description": "Start a new instance of this role on the event's task.",
+              "type": "string"
+            },
+            "stop": {
+              "description": "Stop this role's session on the task.",
+              "type": "string"
+            },
+            "text": {
+              "description": "send: the text to send.",
+              "type": "string"
+            },
+            "wake": {
+              "description": "Wake this role with the event.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "Budget": {
+      "additionalProperties": false,
+      "properties": {
+        "retries": {
+          "description": "Further attempts (and fix tasks) after the first.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "turns": {
+          "description": "Agent turns.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "usd": {
+          "description": "Cost in US dollars.",
+          "minimum": 0,
+          "type": "number"
+        },
+        "wall": {
+          "description": "Wall-clock time, such as 10h or 30m.",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(h|m|s|ms))+$",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Budgets": {
+      "additionalProperties": false,
+      "properties": {
+        "mission": {
+          "$ref": "#/$defs/Budget",
+          "description": "Limit for the whole mission."
+        },
+        "on_exhausted": {
+          "description": "What happens when a budget is spent.",
+          "enum": [
+            "stop",
+            "escalate",
+            "warn"
+          ],
+          "type": "string"
+        },
+        "task": {
+          "$ref": "#/$defs/Budget",
+          "description": "Limit per task. retries also bounds fix tasks created for it."
+        }
+      },
+      "type": "object"
+    },
+    "Ceiling": {
+      "additionalProperties": false,
+      "properties": {
+        "autonomy": {
+          "description": "Highest autonomy level.",
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "budgets": {
+          "$ref": "#/$defs/Budgets",
+          "description": "Highest budgets. An unset budget in the process takes the ceiling's value."
+        },
+        "permission": {
+          "description": "Highest permission any role may hold.",
+          "enum": [
+            "read_only",
+            "ask",
+            "yolo"
+          ],
+          "type": "string"
+        },
+        "providers": {
+          "description": "Providers roles may use.",
+          "items": {
+            "enum": [
+              "claude",
+              "codex"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Gate": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "description": "Who passes the gate. Only the owner passes a human gate; no role can be given that.",
+          "enum": [
+            "human",
+            "rule",
+            "check",
+            "agent"
+          ],
+          "type": "string"
+        },
+        "role": {
+          "description": "Agent gates: the role that judges it.",
+          "type": "string"
+        },
+        "show": {
+          "description": "What a person sees when asked to pass it.",
+          "items": {
+            "enum": [
+              "brief",
+              "assertions",
+              "task_graph",
+              "budget",
+              "diff",
+              "diffstat",
+              "findings",
+              "evidence",
+              "contract_table",
+              "cost",
+              "scenarios"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "when": {
+          "description": "CEL condition over mission, task and pr that passes the gate (rule, check and agent gates).",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Holdout": {
+      "additionalProperties": false,
+      "properties": {
+        "readers": {
+          "description": "Roles that may hold holdout.read.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "store": {
+          "description": "Where scenarios live; runner keeps them in Runner state, outside every worktree.",
+          "enum": [
+            "runner"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Instructions": {
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "description": "An existing agent definition by name: .claude/agents/\u003cname\u003e.md, .github/agents/\u003cname\u003e.md (or .agent.md), or .factory/droids/\u003cname\u003e.md.",
+          "type": "string"
+        },
+        "file": {
+          "description": "A file in the repository, relative to its root.",
+          "type": "string"
+        },
+        "snippet": {
+          "description": "A snippet key.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Inline text.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Integration": {
+      "additionalProperties": false,
+      "properties": {
+        "after_each_merge": {
+          "$ref": "#/$defs/Action",
+          "description": "Action after each merge, usually exec of an integration check."
+        },
+        "auto_merge": {
+          "description": "Merge without a person once checks and gates pass (autonomy 5).",
+          "type": "boolean"
+        },
+        "method": {
+          "description": "Merge method.",
+          "enum": [
+            "squash",
+            "merge",
+            "rebase"
+          ],
+          "type": "string"
+        },
+        "on_failure": {
+          "description": "What to do when a post-merge check fails.",
+          "enum": [
+            "bisect",
+            "stop",
+            "escalate"
+          ],
+          "type": "string"
+        },
+        "order": {
+          "description": "dependency: follow merge_after edges.",
+          "enum": [
+            "dependency",
+            "fifo"
+          ],
+          "type": "string"
+        },
+        "strategy": {
+          "description": "queue: a merge queue per repository; pr_per_task: one PR each; manual: a person lands it.",
+          "enum": [
+            "queue",
+            "pr_per_task",
+            "manual"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Notification": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "description": "Group into a digest instead of one notification each.",
+          "enum": [
+            "hourly",
+            "daily"
+          ],
+          "type": "string"
+        },
+        "on": {
+          "description": "Event types.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        },
+        "priority": {
+          "description": "Priority.",
+          "enum": [
+            "low",
+            "normal",
+            "high"
+          ],
+          "type": "string"
+        },
+        "to": {
+          "description": "Where they go.",
+          "items": {
+            "enum": [
+              "inbox",
+              "desktop"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "on",
+        "to"
+      ],
+      "type": "object"
+    },
+    "Phase": {
+      "additionalProperties": false,
+      "properties": {
+        "exit": {
+          "description": "Gate that ends the phase.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Phase id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "exit"
+      ],
+      "type": "object"
+    },
+    "Process": {
+      "additionalProperties": false,
+      "properties": {
+        "$schema": {
+          "description": "JSON Schema of this file, for editors. Ignored by Lazybox.",
+          "type": "string"
+        },
+        "autonomy": {
+          "description": "Autonomy level: 3 you review every PR, 4 you approve the contract and accept the result, 5 merges are automatic (needs container isolation).",
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "budgets": {
+          "$ref": "#/$defs/Budgets",
+          "description": "Spending limits per mission and per task."
+        },
+        "ceiling": {
+          "$ref": "#/$defs/Ceiling",
+          "description": "User file only: the most any repository process may ask for."
+        },
+        "description": {
+          "description": "What this process is for.",
+          "type": "string"
+        },
+        "extends": {
+          "description": "Built-in preset this file builds on (solo-pair, reviewed-team, factory). The repository's choice wins over the user's; with neither, solo-pair, or reviewed-team once a mission has more than one task.",
+          "type": "string"
+        },
+        "gates": {
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Gate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": "Gates by id. Phases exit through them; rules request them.",
+          "type": "object"
+        },
+        "holdout": {
+          "$ref": "#/$defs/Holdout",
+          "description": "Holdout scenarios: stored outside every worktree, readable only by the listed roles."
+        },
+        "integration": {
+          "$ref": "#/$defs/Integration",
+          "description": "How verified work lands."
+        },
+        "name": {
+          "description": "Name shown in Settings and in a pinned mission.",
+          "type": "string"
+        },
+        "notifications": {
+          "description": "Which events reach a person, and where.",
+          "items": {
+            "$ref": "#/$defs/Notification"
+          },
+          "type": "array"
+        },
+        "phases": {
+          "description": "Mission phases in order. Each ends when its exit gate passes.",
+          "items": {
+            "$ref": "#/$defs/Phase"
+          },
+          "type": "array"
+        },
+        "requires": {
+          "$ref": "#/$defs/Requires",
+          "description": "What the Runner must provide for this process to run."
+        },
+        "roles": {
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Role"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": "Roles by name. Code knows only the scopes a role may hold, never role names. In an overlay, null removes a role.",
+          "type": "object"
+        },
+        "rules": {
+          "description": "Deterministic reactions to events, in order. Rules handle every mechanical move; roles handle judgment.",
+          "items": {
+            "$ref": "#/$defs/Rule"
+          },
+          "type": "array"
+        },
+        "snippets": {
+          "$ref": "#/$defs/Snippets",
+          "description": "Snippets suggested per phase."
+        },
+        "version": {
+          "description": "Process file format version.",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "wip": {
+          "$ref": "#/$defs/WIP",
+          "description": "Work in progress limits."
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "type": "object"
+    },
+    "Requires": {
+      "additionalProperties": false,
+      "properties": {
+        "isolation": {
+          "description": "Isolation builders need. Autonomy 5 requires container.",
+          "enum": [
+            "none",
+            "container"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Role": {
+      "additionalProperties": false,
+      "properties": {
+        "budget": {
+          "$ref": "#/$defs/Budget",
+          "description": "Limits per instance of the role."
+        },
+        "concurrency": {
+          "description": "Live instances of the role.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "context": {
+          "description": "What the role is handed when it starts.",
+          "items": {
+            "enum": [
+              "brief",
+              "task_brief",
+              "decisions",
+              "board",
+              "diff",
+              "assertions",
+              "assertions_claimed",
+              "findings",
+              "evidence",
+              "scenarios"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "effort": {
+          "description": "Reasoning effort.",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "type": "string"
+        },
+        "instructions": {
+          "$ref": "#/$defs/Instructions",
+          "description": "The role's instructions."
+        },
+        "model": {
+          "description": "default, strongest, small, or a provider model id.",
+          "type": "string"
+        },
+        "permission": {
+          "description": "Permission mode. yolo applies only inside the role's own task worktree.",
+          "enum": [
+            "read_only",
+            "ask",
+            "yolo"
+          ],
+          "type": "string"
+        },
+        "provider": {
+          "description": "claude, codex, a list (round-robin across configured accounts), or other_than_\u003crole\u003e (the provider that role is not using).",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        },
+        "scopes": {
+          "description": "Lazybox tools the role may call, such as task.report, verdict.record or session.spawn:worker.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "triggers": {
+          "description": "Events that wake the role.",
+          "items": {
+            "$ref": "#/$defs/Trigger"
+          },
+          "type": "array"
+        },
+        "wip": {
+          "description": "Tasks one instance holds at once.",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "properties": {
+        "do": {
+          "$ref": "#/$defs/Action",
+          "description": "The action."
+        },
+        "if": {
+          "description": "CEL condition over the event's variables.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Fire at most this many times per subject (a count limit that bounds a trigger cycle).",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "on": {
+          "description": "Event types.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        }
+      },
+      "required": [
+        "on",
+        "do"
+      ],
+      "type": "object"
+    },
+    "Snippets": {
+      "additionalProperties": false,
+      "properties": {
+        "suggest": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Phase id to snippet keys.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "Trigger": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "description": "stall: how long a live task may go without an event.",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(h|m|s|ms))+$",
+          "type": "string"
+        },
+        "every": {
+          "description": "timer: the period.",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(h|m|s|ms))+$",
+          "type": "string"
+        },
+        "if": {
+          "description": "CEL condition over the event's variables.",
+          "type": "string"
+        },
+        "mode": {
+          "description": "manual: a person starts the role from the inbox.",
+          "enum": [
+            "auto",
+            "manual"
+          ],
+          "type": "string"
+        },
+        "on": {
+          "description": "Event types, or the synthetic timer and stall.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          ]
+        }
+      },
+      "required": [
+        "on"
+      ],
+      "type": "object"
+    },
+    "WIP": {
+      "additionalProperties": false,
+      "properties": {
+        "overlapping_paths": {
+          "description": "Whether tasks touching the same paths run one after another.",
+          "enum": [
+            "serial",
+            "parallel"
+          ],
+          "type": "string"
+        },
+        "workers": {
+          "description": "Live worker sessions in the mission.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "writers_per_repo": {
+          "description": "Tasks writing to one repository at once.",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "urn:lazybox:schema:process:v1",
+  "$ref": "#/$defs/Process",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "How Lazybox runs a mission: phases, gates, roles, rules and limits. See ORCHESTRATION.md.",
+  "title": "Lazybox process"
+}

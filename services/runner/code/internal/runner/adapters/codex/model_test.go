@@ -1,0 +1,83 @@
+package codex
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"reflect"
+	"testing"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
+)
+
+// A model switch applies from the next turn: turn/start carries it, plan
+// mode's collaboration settings name it, and a handoff keeps it.
+func TestLiveModelSwitchAppliesToFollowingTurns(t *testing.T) {
+	s := &session{settings: []byte(`{"model":"gpt-old","approvalPolicy":"never"}`)}
+	if !s.Capabilities().LiveModel {
+		t.Fatal("Codex turns accept a model")
+	}
+	r, err := s.Apply(context.Background(), agent.Operation{ID: "m", Kind: agent.Model, Model: "gpt-new"})
+	if err != nil || r.Delivery != "accepted" {
+		t.Fatalf("switch refused: %+v %v", r, err)
+	}
+	if string(s.overrides["model"]) != `"gpt-new"` || s.model != "gpt-new" {
+		t.Fatalf("model not kept for turn/start: %s %q", s.overrides, s.model)
+	}
+	if got := string(s.SessionSettings()); got != `{"approvalPolicy":"never","model":"gpt-new"}` {
+		t.Fatalf("a handoff would carry the old model: %s", got)
+	}
+	if _, err = s.Apply(context.Background(), agent.Operation{ID: "e", Kind: agent.Model}); err == nil {
+		t.Fatal("an empty model was accepted")
+	}
+}
+
+// A session lists the models its own app-server offers (its subscription's),
+// every page, without the hidden ones or repeats, once, as a command_catalog.
+func TestSessionReportsItsModelsForThePicker(t *testing.T) {
+	self, _ := os.Executable()
+	s, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ev := receive(t, s, "command_catalog")
+	var catalog struct{ Models []agent.ModelChoice }
+	if err = json.Unmarshal(ev.Data, &catalog); err != nil || ev.AgentID != "root" {
+		t.Fatalf("catalog: %s %v", ev.Data, err)
+	}
+	want := []agent.ModelChoice{{Value: "gpt-6.1-sol", DisplayName: "GPT-6.1-Sol", Description: "Workhorse"}, {Value: "gpt-6-luna", DisplayName: "GPT-6-Luna", Description: "Fast"}, {Value: "gpt-6-astra", DisplayName: "gpt-6-astra", Description: "Frontier"}}
+	if !reflect.DeepEqual(catalog.Models, want) {
+		t.Fatalf("models %+v, want %+v", catalog.Models, want)
+	}
+}
+
+// A Codex without model/list still opens: /model falls back to the Runner's list.
+func TestSessionOpensWhenCodexCannotListModels(t *testing.T) {
+	t.Setenv("FIXTURE_NO_MODEL_LIST", "1")
+	self, _ := os.Executable()
+	s, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err = listModels(context.Background(), s.(*session).p); err == nil {
+		t.Fatal("an unknown method listed models")
+	}
+	if _, ok := catalogEvent(nil); ok {
+		t.Fatal("no models is nothing to say")
+	}
+}
+
+// The Runner's own listing: an app-server started only for it, then stopped.
+func TestListModelsStartsAnAppServerOnlyToList(t *testing.T) {
+	self, _ := os.Executable()
+	models, err := ListModels(context.Background(), self, os.Environ(), t.TempDir())
+	if err != nil || len(models) != 3 || models[0].Value != "gpt-6.1-sol" {
+		t.Fatalf("models %+v %v", models, err)
+	}
+	t.Setenv("FIXTURE_NO_MODEL_LIST", "1")
+	if _, err = ListModels(context.Background(), self, os.Environ(), t.TempDir()); err == nil {
+		t.Fatal("a failed listing reported models")
+	}
+}

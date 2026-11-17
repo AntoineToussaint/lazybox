@@ -1,0 +1,265 @@
+# Lazybox V2 release: an installable macOS app (RELEASING.md).
+#
+# On a `v2-v<x.y.z>` tag:
+#   1. gates    — the V2 CI jobs (v2.yml): the release gate catalog, as on every PR.
+#   2. build    — `make release VERSION=<x.y.z>` on macOS: Runner, CLI,
+#                 Claude worker and pinned Node inside Lazybox.app; the DMG;
+#                 the updater archive and its signature; latest.json; the cask;
+#                 release notes from CHANGELOG.md; SHA256SUMS. Then a smoke
+#                 test of the built Runner and CLI.
+#   3. publish  — a GitHub release for the tag (never marked Latest, so V1's
+#                 cargo-dist releases stay the repository's latest), latest.json
+#                 on the rolling `v2-updates` release every installed app polls,
+#                 and Casks/lazybox-v2.rb in the AntoineToussaint/homebrew-lazybox
+#                 tap (V1's formula and cask are not touched).
+#
+# Signing follows the secrets that exist (V1's names, docs/desktop-release-signing.md):
+#   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY  → Developer ID signing
+#   + APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID (or APPLE_API_KEY, APPLE_API_ISSUER,
+#     APPLE_API_KEY_P8 base64)                                            → notarization + stapling
+# Without them the app is ad-hoc signed and the release is titled and
+# described as unsigned. The updater key is required either way:
+#   TAURI_SIGNING_PRIVATE_KEY (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD), with its
+#   public half committed as packaging/updater.pub.
+#
+# workflow_dispatch rebuilds an existing tag as a dry run: gates, build, sign,
+# notarize, smoke test, and the artifacts uploaded to the run — nothing published.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v2-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build as a dry run, e.g. v2-v0.1.0 (publishes nothing)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# One release at a time: they share the v2-updates feed and the tap. Never
+# cancel one mid-notarization.
+concurrency:
+  group: v2-release
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "26"
+  TAP_REPO: AntoineToussaint/homebrew-lazybox
+
+jobs:
+  gates:
+    name: gates
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: build · sign · notarize (macOS arm64)
+    needs: gates
+    runs-on: macos-15
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    env:
+      # Which signing secrets exist (a step's `if` cannot read secrets).
+      HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      HAS_NOTARY: ${{ (secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '') || (secrets.APPLE_API_KEY != '' && secrets.APPLE_API_ISSUER != '' && secrets.APPLE_API_KEY_P8 != '') }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Resolve the version from the tag
+        id: version
+        working-directory: .
+        env:
+          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RAW_TAG" =~ ^v2-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "::error::A V2 release tag is v2-v<major>.<minor>.<patch>[-pre], got '$RAW_TAG'"
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+          {
+            echo "version=$version"
+            echo "tag=$RAW_TAG"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Lazybox $version (tag $RAW_TAG, prerelease=$prerelease)"
+
+      - name: Require the updater signing key
+        # Every installed app verifies updates against the public key it was
+        # built with; a release without the private key could never be
+        # installed as an update. RELEASING.md: "Updater key".
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Generate the updater key pair, store the private key as this secret and commit packaging/updater.pub (RELEASING.md)."
+            exit 1
+          fi
+          if [ ! -s packaging/updater.pub ]; then
+            echo "::error::packaging/updater.pub is missing: commit the public key of the TAURI_SIGNING_PRIVATE_KEY pair (RELEASING.md)."
+            exit 1
+          fi
+
+      - name: Report how this release will be signed
+        run: |
+          if [ "$HAS_CERT" = true ] && [ "$HAS_NOTARY" = true ]; then
+            echo "Signing with the Developer ID and notarizing."
+          elif [ "$HAS_CERT" = true ]; then
+            echo "::warning::Signing with the Developer ID but NOT notarizing (no APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID or API key): Gatekeeper will still warn."
+          else
+            echo "::warning::No APPLE_* signing secrets: this release is ad-hoc signed and published as UNSIGNED."
+          fi
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: services/runner/code/go.mod
+          cache-dependency-path: services/runner/code/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> ../../../.cache/release/target
+
+      # V1's import step (release-desktop.yml): a temporary keychain holding
+      # only the Developer ID certificate, removed with the runner.
+      - name: Import the Developer ID certificate
+        if: ${{ env.HAS_CERT == 'true' }}
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Write the App Store Connect API key
+        id: apikey
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APPLE_API_KEY_P8:-}" ]; then
+            path="$RUNNER_TEMP/AuthKey.p8"
+            printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$path"
+            chmod 600 "$path"
+            echo "path=$path" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CARGO_BUILD_JOBS: "4"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ steps.apikey.outputs.path }}
+        run: make release VERSION="$VERSION" RELEASE_FLAGS=--publishable
+
+      - name: Show what was built
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cat "dist/$VERSION/release.json"
+          cat "dist/$VERSION/SHA256SUMS"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lazybox-v2-${{ steps.version.outputs.version }}
+          path: dist/${{ steps.version.outputs.version }}/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: publish (release · update feed · cask)
+    needs: build
+    # A manual run is a dry run: it never publishes.
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      TAG: ${{ needs.build.outputs.tag }}
+      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: lazybox-v2-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Verify the checksums
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          signing="$(jq -r '.signing + (if .notarized then "+notarized" else "" end)' dist/release.json)"
+          title="Lazybox $VERSION"
+          [ "$signing" = "developer-id+notarized" ] || title="$title (unsigned)"
+          flags=(--latest=false)
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$title" --notes-file dist/RELEASE_NOTES.md "${flags[@]}" \
+            dist/Lazybox_*.dmg dist/Lazybox_*.app.tar.gz dist/Lazybox_*.app.tar.gz.sig \
+            dist/latest.json dist/lazybox-v2.rb dist/SHA256SUMS dist/release.json
+
+      - name: Point the update feed at this release
+        # Installed apps read latest.json from the rolling v2-updates release
+        # (packaging/release.tauri.json). A prerelease never reaches them.
+        if: ${{ needs.build.outputs.prerelease != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view v2-updates --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create v2-updates --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "Lazybox update feed" \
+              --notes "Installed copies of Lazybox read latest.json here to find updates. Download Lazybox from its own release instead."
+          fi
+          gh release upload v2-updates dist/latest.json --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Publish the cask to the Homebrew tap
+        if: ${{ needs.build.outputs.prerelease != 'true' }}
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set: Casks/lazybox-v2.rb was not published (it is attached to the release)."
+            exit 0
+          fi
+          sha="$(awk '/\.dmg$/ { print $1 }' dist/SHA256SUMS)"
+          # V1's tested publisher, copied (scripts/release/publish-cask_test.sh): first
+          # publish, no-op and push-race handling, for another cask path.
+          scripts/release/publish-cask.sh packaging/homebrew/lazybox-v2.rb.tmpl \
+            "$VERSION" "$sha" "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" Casks/lazybox-v2.rb

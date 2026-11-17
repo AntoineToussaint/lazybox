@@ -1,0 +1,28 @@
+/* Appearance-wide rules: defaults before the theme applies, reduced motion,
+   code ligatures, selection, and what density changes. Colours live in the
+   tokens (appearance/tokens.ts), never here. */
+:root{--text-scale:1;--code-scale:1}
+html,body{background:var(--bg);color:var(--text)}
+::selection{background:var(--selection)}
+code,pre,kbd,samp,.mono,.monaco-editor .view-lines{font-variant-ligatures:var(--code-ligatures,none)}
+
+/* Reduce motion: Settings → Appearance, or the system's setting. Not inside SVG:
+   Mermaid measures labels while it draws, and a forced transition there skews the layout. */
+html[data-motion=reduce] :not(svg,svg *),html[data-motion=reduce] :not(svg,svg *)::before,html[data-motion=reduce] :not(svg,svg *)::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
+
+/* Density: compact fits more rows on screen, relaxed gives them air. */
+html[data-density=compact] .workspace-shell{--control-height:28px;--space-unit:3px}
+html[data-density=compact] .settings-page{--s-control:28px}
+html[data-density=compact] .collection-list .workspace-row>.workspace-link{padding-top:5px;padding-bottom:5px}
+html[data-density=compact] .conversation-link,html[data-density=compact] .collection-list .conversation-row .conversation-link{padding-top:5px!important;padding-bottom:5px!important}
+html[data-density=compact] .inbox-row{padding-top:6px;padding-bottom:6px}
+html[data-density=compact] .settings-row{padding-top:9px;padding-bottom:9px}
+html[data-density=compact] .tree-row{height:21px}
+html[data-density=compact] .message,html[data-density=compact] .embedded-chat .message{padding-top:8px;padding-bottom:10px}
+html[data-density=relaxed] .workspace-shell{--control-height:36px;--space-unit:5px}
+html[data-density=relaxed] .settings-page{--s-control:36px}
+html[data-density=relaxed] .collection-list .workspace-row>.workspace-link{padding-top:12px;padding-bottom:12px}
+html[data-density=relaxed] .conversation-link,html[data-density=relaxed] .collection-list .conversation-row .conversation-link{padding-top:11px!important;padding-bottom:11px!important}
+html[data-density=relaxed] .inbox-row{padding-top:12px;padding-bottom:12px}
+html[data-density=relaxed] .tree-row{height:28px}
+html[data-density=relaxed] .message,html[data-density=relaxed] .embedded-chat .message{padding-top:18px;padding-bottom:24px}

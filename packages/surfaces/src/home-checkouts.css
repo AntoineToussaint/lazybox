@@ -1,0 +1,214 @@
+/* Home checkouts: Settings → Repositories, the workspace's repositories dialog, the chat's "Run in … home" offers. */
+.home-checkout-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.home-checkout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  min-width: 0;
+}
+.home-checkout:hover,
+.home-checkout:focus-within {
+  background: var(--surface-hover);
+}
+.home-checkout-text {
+  flex: 1 1 240px;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.home-checkout-text strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: calc(12.5px * var(--text-scale));
+  font-weight: 600;
+  color: var(--text);
+}
+.home-checkout-text small {
+  color: var(--text-muted);
+  font-size: calc(11px * var(--text-scale));
+}
+.home-checkout-where {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.home-checkout-where code {
+  font-family: var(--font-mono);
+  font-size: calc(11px * var(--text-scale));
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.home-checkout-where small {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.home-checkout-where small.is-dirty { color: var(--warn, var(--text-soft)); }
+.home-checkout-where small.is-missing { color: var(--danger); }
+.home-checkout-actions {
+  /* Never wider than the row: on a phone the actions take their own line,
+     wrap one under another, and a long path in a button is cut, not scrolled to. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.home-checkout .home-checkout-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: calc(11px * var(--text-scale));
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+.home-checkout .home-checkout-actions button code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: calc(10.5px * var(--text-scale));
+}
+/* A path that does not fit loses its start, so the folder's own name stays: "…/team/api". */
+.home-checkout .home-checkout-actions button code.home-checkout-path-tail { direction: rtl; }
+.home-checkout-path-tail > span { direction: ltr; unicode-bidi: isolate; }
+.home-checkout-path {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.home-checkout-path input {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: calc(11.5px * var(--text-scale));
+  padding: 5px 8px;
+}
+section.settings-group.home-checkouts-settings {
+  margin-top: 24px;
+}
+.workspace-homes {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.workspace-homes h3 {
+  margin: 0;
+  font-size: calc(11.5px * var(--text-scale));
+  font-weight: 600;
+  color: var(--text-soft);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.workspace-homes h3 small {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* Under an agent's last message: the commands it handed back, one click each. */
+.message .home-runs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.home-runs .home-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 4px 9px;
+  border: 1px solid var(--accent-line);
+  border-radius: 7px;
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+  font-size: calc(11.5px * var(--text-scale));
+  cursor: pointer;
+}
+.home-runs .home-run:hover { background: var(--surface-hover); color: var(--text); }
+.home-runs .home-run:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.home-runs .home-run code {
+  font-family: var(--font-mono);
+  font-size: calc(11px * var(--text-scale));
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.home-runs .home-run.is-setup {
+  border-style: dashed;
+  background: transparent;
+}
+
+/* An offer is a split button (run here · ⌄ elsewhere), then how its run went. */
+.home-runs .home-run-row {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+}
+.home-runs .home-run-split {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+}
+.home-runs .home-run-split .home-run {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.home-runs .home-run-split .home-run-more {
+  padding: 4px 6px;
+  border: 1px solid var(--accent-line);
+  border-left: 0;
+  border-radius: 0 7px 7px 0;
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+}
+.code-run-terminal {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.code-run .code-run-tag {
+  align-self: center;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--warn-line, var(--line));
+  background: var(--warn-bg, transparent);
+  color: var(--text-soft);
+  font-size: calc(10.5px * var(--text-scale));
+  white-space: nowrap;
+}
+
+/* A Terminal panel tab of a shell outside the workspace: the home mark before its name. */
+.workspace-shell .terminal-tab button > svg {
+  margin-right: 4px;
+  vertical-align: -2px;
+}

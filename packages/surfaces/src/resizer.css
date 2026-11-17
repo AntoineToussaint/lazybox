@@ -1,0 +1,28 @@
+/* The divider inside a panel (Resizer.tsx): a line that lights up under the
+   pointer or the focus, on the edge between a side and the content beside it.
+   Its place and size are set from the layout; folded, it is a thin rail. */
+:where(:has(> .resizer)){position:relative}
+.resizer{position:absolute;z-index:3;box-sizing:border-box;width:9px;transform:translateX(-50%);cursor:col-resize;touch-action:none;outline:none;color:var(--text-muted)}
+.resizer[data-axis=y]{height:9px;transform:translateY(-50%);cursor:row-resize}
+.resizer[data-off]{display:none}
+.resizer::after{content:'';position:absolute;inset:0 3px;border-radius:2px;background:transparent;transition:background-color .12s}
+.resizer[data-axis=y]::after{inset:3px 0}
+.resizer:hover::after,.resizer:focus-visible::after,.resizer[data-dragging]::after{background:var(--accent-solid-hover,var(--accent))}
+.resizer:focus-visible::after{box-shadow:0 0 0 1px var(--focus)}
+.resizer>svg{display:none;pointer-events:none}
+/* Folded: a rail where the side was. A click, Enter or a drag brings it back. */
+.resizer[data-collapsed]{display:flex;align-items:center;justify-content:center;width:12px;border-radius:4px;background:var(--surface-sunken);box-shadow:inset 0 0 0 1px var(--line-subtle);cursor:pointer}
+.resizer[data-axis=y][data-collapsed]{width:auto;height:12px}
+.resizer[data-collapsed][data-off]{display:none}
+.resizer[data-collapsed]::after{display:none}
+.resizer[data-collapsed]>svg{display:block}
+.resizer[data-collapsed][data-side=end]>svg{transform:rotate(180deg)}
+.resizer[data-collapsed]:hover,.resizer[data-collapsed]:focus-visible{background:var(--surface-hover);color:var(--text)}
+.resizer[data-collapsed]:focus-visible{box-shadow:inset 0 0 0 2px var(--focus)}
+/* The folded side keeps its place in the layout but shows nothing. */
+:is(:has(+ .resizer[data-side=start][data-collapsed]:not([data-off])),.resizer[data-side=end][data-collapsed]:not([data-off]) + *){visibility:hidden;overflow:hidden!important;min-width:0!important;min-height:0!important;padding:0!important;border:0!important}
+/* While one is dragged: its cursor everywhere, no text selection, and pages in frames do not take the pointer. */
+html.is-resizing,html.is-resizing *{cursor:col-resize!important;user-select:none!important;-webkit-user-select:none!important}
+html.is-resizing[data-resize-axis=y],html.is-resizing[data-resize-axis=y] *{cursor:row-resize!important}
+html.is-resizing iframe,html.is-resizing webview{pointer-events:none}
+@media (prefers-reduced-motion:reduce){.resizer::after{transition:none}}

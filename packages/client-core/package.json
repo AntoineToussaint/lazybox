@@ -1,0 +1,12 @@
+{
+  "name": "@lazybox/client-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@connectrpc/connect": "2.3.0",
+    "@connectrpc/connect-web": "2.3.0",
+    "@lazybox/protocol": "0.0.0"
+  },
+  "exports": "./src/index.ts"
+}

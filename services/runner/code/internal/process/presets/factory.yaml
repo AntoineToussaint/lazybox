@@ -1,0 +1,64 @@
+version: 1
+name: factory
+autonomy: 5
+requires: {isolation: container}   # otherwise validation fails
+budgets:
+  mission: {usd: 400, wall: 48h}
+  task:    {usd: 25, turns: 200, retries: 3}
+  on_exhausted: stop
+wip: {workers: 8, writers_per_repo: 2, overlapping_paths: serial}
+holdout: {store: runner, readers: [verifier]}
+phases:
+  - {id: spec,      exit: contract}
+  - {id: plan,      exit: graph_ok}
+  - {id: build,     exit: holdout_pass}
+  - {id: integrate, exit: merged}
+gates:
+  contract:     {kind: human, show: [brief, assertions, scenarios]}   # the one human gate
+  graph_ok:     {kind: agent, role: transition, when: "mission.tasks.all(t, t.claims.size() > 0)"}
+  holdout_pass: {kind: agent, role: verifier,
+                 when: "mission.scenarios.all(s, s.verdict == 'pass')"}
+  merged:       {kind: check, when: "mission.prs.all(p, p.merged && p.post_merge_green)"}
+roles:
+  planner:
+    provider: claude
+    model: strongest
+    permission: read_only
+    scopes: [goal.*, assertion.*, task.create, task.edge]
+    triggers: [{on: gate.passed, if: "gate.id == 'contract'"}]
+  coordinator:
+    provider: claude
+    model: strongest
+    permission: read_only
+    scopes: [task.assign, session.spawn:worker, decision.record, escalate, evidence.read]
+    triggers: [{on: [phase.entered, task.question, verdict.recorded, integration.failed]}]
+  worker:
+    provider: [claude, codex]
+    permission: yolo
+    scopes: [task.report, task.question, evidence.read, decision.read]
+    concurrency: 8
+  verifier:
+    provider: other_than_worker
+    permission: read_only
+    scopes: [verdict.record, holdout.read, evidence.read]
+    context: [diff, assertions_claimed, scenarios]
+  integrator:
+    provider: codex
+    permission: yolo                # only in the integration worktree
+    scopes: [integration.*, task.create:fix]
+    triggers: [{on: integration.failed, if: "failure.kind == 'conflict'"}]
+  transition:
+    provider: claude
+    model: small
+    scopes: [phase.propose, status.report, escalate, task.create:fix]
+    triggers: [{on: timer, every: 1h}, {on: stall, after: 30m}, {on: budget.warning}]
+rules:
+  - {on: task.reported, do: {start: verifier}}
+  - {on: verdict.recorded, if: "verdict.failed", do: {create_task: fix, assign: worker}}
+  - {on: verdict.recorded, if: "verdict.passed", do: {integration.queue: task}}
+  - {on: check.failed, if: "check.branch == 'main'", do: {create_task: fix}}
+  - {on: gate.passed, do: enter_next_phase}
+integration: {strategy: queue, order: dependency, method: squash, auto_merge: true, on_failure: bisect}
+notifications:
+  - {on: [escalation.raised, budget.exhausted, integration.reverted], to: [inbox, desktop]}
+  - {on: status.reported, to: [inbox], digest: daily}

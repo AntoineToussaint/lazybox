@@ -1,0 +1,5 @@
+{
+  "$comment": "The extension content origin's Content-Security-Policies (EXTENSIONS.md). The Runner (extension_content.go) and the browser fixture (scripts/fixtures/extensions-fake.mjs) both serve these. {base} is the session's /x/<token>/ address, {hosts} the approved network origins or 'none', {frameAncestors} '; frame-ancestors <app origin>' when the app is served over http(s).",
+  "shell": "default-src 'none'; script-src {base}_lazybox/shell.js; style-src {base}_lazybox/shell.css; img-src 'none'; frame-src {base}; child-src {base}; base-uri 'none'; form-action 'none'; webrtc 'block'; sandbox allow-scripts{frameAncestors}",
+  "extension": "default-src 'none'; script-src {base}; style-src {base}; img-src {base} data: blob:; font-src {base}; media-src {base}; connect-src {hosts}; frame-src 'none'; child-src 'none'; worker-src 'none'; manifest-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; webrtc 'block'; sandbox allow-scripts"
+}

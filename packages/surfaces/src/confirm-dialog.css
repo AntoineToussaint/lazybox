@@ -1,0 +1,31 @@
+/* ConfirmDialog.tsx: the body of every confirmation (13px body, 12px notes).
+   Its title, × and footer buttons are every dialog's (dialog.css). */
+.draggable-dialog.confirm-dialog{width:min(440px,calc(100vw - 32px));padding:22px;border-color:var(--line-strong);font-family:var(--font-ui);font-size:calc(13px * var(--text-scale));line-height:1.55;color:var(--text-secondary)}
+.draggable-dialog.confirm-dialog>[data-dialog-drag-handle]{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}
+.confirm-dialog .confirm-close{margin:-2px -6px 0 0}
+
+/* The subject is a subtitle under the question, not a second heading. */
+.confirm-subject{display:flex;align-items:baseline;gap:10px;margin:-9px 0 14px;min-width:0;font-size:calc(13px * var(--text-scale));font-weight:500;color:var(--text-soft);overflow-wrap:anywhere}
+.confirm-subject>span{flex:1;min-width:0}
+.confirm-subject>small{flex:none;font-size:calc(12px * var(--text-scale));font-weight:400;color:var(--text-muted)}
+.confirm-body{display:flex;flex-direction:column;gap:6px}
+.confirm-body>p{margin:0;overflow-wrap:anywhere}
+.confirm-lead{color:var(--text-secondary)}
+.confirm-kept{font-size:calc(12px * var(--text-scale));color:var(--text-muted)}
+.confirm-status{margin:12px 0 0;font-size:calc(12px * var(--text-scale));color:var(--text-muted)}
+
+/* A risk beyond the usual, and the box to tick for it. */
+.confirm-warning{display:flex;flex-direction:column;gap:8px;margin:16px 0 0;padding:12px;border:1px solid var(--danger-line-subtle);border-radius:8px;background:var(--danger-bg);font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--text-secondary);overflow-wrap:anywhere}
+.confirm-warning+.confirm-warning{margin-top:10px}
+.confirm-warning>strong{font-weight:600;color:var(--danger-strong)}
+.confirm-warning>p{margin:0}
+/* A label is a quiet column app-wide (style.css, workspace.css): this one is a row of body text, the box on its first line. */
+.confirm-dialog label.confirm-check{display:flex;flex-direction:row;align-items:flex-start;gap:9px;margin:0;font-size:calc(12.5px * var(--text-scale));line-height:calc(18px * var(--text-scale));color:var(--text);cursor:pointer}
+.confirm-check>input{flex:none;width:15px;height:15px;margin:calc((18px * var(--text-scale) - 15px) / 2) 0 0;padding:0;accent-color:var(--danger-solid);cursor:pointer}
+.confirm-check-text{flex:1;min-width:0}
+.confirm-check-text>small{display:block;margin-top:2px;font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.confirm-dialog label.confirm-check:has(input:disabled){cursor:default;color:var(--text-muted)}
+
+.confirm-error{margin:14px 0 0;padding:8px 10px;border-radius:6px;background:var(--danger-bg);color:var(--danger-strong);font-size:calc(12px * var(--text-scale));overflow-wrap:anywhere}
+
+.confirm-dialog footer{margin-top:22px}

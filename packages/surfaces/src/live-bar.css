@@ -1,0 +1,48 @@
+/* The running turn, above the composer: its step with the real command, time, output, Stop, and background work. */
+.live-bar{--lb-working:var(--attention-working,var(--running));display:flex;flex-direction:column;gap:4px;flex:0 1 auto;min-height:0;max-height:45%;margin:0 24px 8px;padding:7px 8px 7px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-raised);font-size:calc(12px * var(--text-scale));min-width:0}
+.live-bar[data-only=background]{padding:2px 4px}
+.live-bar-row{flex:none;display:flex;align-items:center;gap:8px;min-width:0;min-height:26px}
+.live-bar .live-activity{display:inline;padding:0;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--lb-working);font-variant-numeric:tabular-nums}
+/* The step's words and clock sit in a slot of fixed width when the command follows them, so the command and
+   its folder do not slide as "59s" becomes "1m 0s". With nothing after them they take the row. */
+.live-bar-row>.live-activity:has(~ .live-bar-code){flex:0 0 auto;width:clamp(15ch,30%,27ch)}
+.live-bar-row>.live-activity:not(:has(~ .live-bar-code)){flex:1 1 0}
+.live-bar-code{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 7px;border-radius:5px;background:var(--surface-selected);color:var(--text);font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11.5px * var(--code-scale))}
+.live-bar-where{flex:0 2 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted)}
+.live-bar-where>code{font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11px * var(--code-scale));color:var(--text-tertiary);background:none;padding:0}
+.live-bar-actions{display:inline-flex;align-items:center;gap:2px;margin-left:auto;flex:none}
+.embedded-chat .live-bar-button,.live-bar-button{display:inline-flex;align-items:center;gap:5px;padding:4px 8px!important;border-radius:6px;font-size:calc(11px * var(--text-scale))!important;color:var(--text-tertiary)!important;background:transparent;white-space:nowrap}
+.live-bar-button:hover:not(:disabled){background:var(--surface-selected)!important;color:var(--text)!important}
+.embedded-chat .live-bar-stop,.live-bar-stop{color:var(--danger-soft)!important;border:1px solid var(--danger-line-subtle)!important}
+.live-bar-stop:hover:not(:disabled){background:var(--danger-bg)!important;color:var(--danger-strong)!important}
+.live-bar-output{margin:0;padding:6px 10px;border-radius:7px;background:var(--surface-sunken);color:var(--text-tertiary);font-family:var(--font-console,var(--font-mono,ui-monospace,monospace));font-size:calc(11px * var(--code-scale));line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;max-height:calc(3 * 1.5em + 12px);overflow:hidden}
+.live-bar-output{flex:none}
+/* The output's own close, in its corner: it is in the way as often as it is wanted. */
+.live-bar-output-frame{position:relative;display:flex;flex-direction:column;flex:0 1 auto;min-height:0}
+.live-bar-output-frame>.live-bar-output{padding-right:34px}
+.live-bar .live-bar-hide{position:absolute;top:4px;right:4px;width:22px;height:22px;min-width:0;padding:0!important;border:0;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;color:var(--text-muted);background:var(--surface-sunken)}
+.live-bar .live-bar-hide:hover{background:var(--surface-selected);color:var(--text)}
+.live-bar-output[data-expanded]{flex:0 1 auto;min-height:calc(3 * 1.5em + 12px);max-height:min(320px,40dvh);overflow:auto;overscroll-behavior:contain}
+.live-bar>.subagent-tray,.live-bar-error{flex:none}
+.live-bar-quiet{color:var(--text-faint);font-style:italic}
+.live-bar-error{margin:0;color:var(--attention-failed,var(--danger));font-size:calc(11px * var(--text-scale))}
+/* A step that may never end, and what moving one to the background did: one quiet line each. */
+.live-bar-hint,.live-bar-notice{flex:none;display:flex;align-items:flex-start;gap:6px;margin:0;color:var(--text-muted);font-size:calc(11px * var(--text-scale));line-height:1.45}
+.live-bar-hint>svg{flex:none;margin-top:2px;color:var(--warn-soft,var(--text-muted))}
+.live-bar-notice>svg{flex:none;margin-top:2px;color:var(--ok)}
+.live-bar-hint code{font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11px * var(--code-scale));background:var(--surface-selected);padding:0 4px;border-radius:4px}
+.live-bar-notice>span{flex:1 1 auto;min-width:0}
+.live-bar .live-bar-notice .icon-button{flex:none;width:20px;height:20px;min-width:0;padding:0!important;border:0;display:inline-flex;align-items:center;justify-content:center;background:transparent;color:var(--text-muted)}
+.live-bar .subagent-tray{padding:2px 0 0}
+.live-bar-row+.subagent-tray,.live-bar-output-frame+.subagent-tray{border-top:1px solid var(--line-subtle);padding-top:6px;margin-top:2px}
+@media (max-width:720px){
+  .live-bar{margin:0 10px 6px;padding:6px 6px 6px 10px}
+  .live-bar-row{flex-wrap:wrap;row-gap:4px}
+  .live-bar-where{display:none}
+  /* The buttons share the step's row when they fit ("Writing… · Interrupt") and take their own only when they do not. */
+  .live-bar-actions{margin-left:auto;justify-content:flex-end}
+  .live-bar .live-activity{flex:1 1 auto}
+  .live-bar-code{flex:1 1 100%;order:1}
+  .live-bar-button>span{display:none}
+  .live-bar-stop>span{display:inline!important}
+}

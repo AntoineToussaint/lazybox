@@ -1,0 +1,27 @@
+{
+ "mission": "m_claimed",
+ "title": "Fix login",
+ "process": "solo-pair",
+ "seq": 8,
+ "ignored": 0,
+ "tasks": [
+  {
+   "id": "t_1",
+   "status": "needs_you",
+   "trust": "claimed",
+   "evidence_trust": "claimed",
+   "flags": [
+    "no_evidence"
+   ],
+   "gate": "reviewed",
+   "live": "idle",
+   "reason": "Reported done, waiting for you to accept · no run or check recorded"
+  },
+  {
+   "id": "t_2",
+   "status": "ready",
+   "evidence_trust": "claimed",
+   "reason": "Not assigned yet"
+  }
+ ]
+}

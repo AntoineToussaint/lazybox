@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=../extension.schema.json
+#
+# Lazybox's own account policy (EXTENSIONS.md, "Account policy"): when a
+# conversation reaches its subscription's limit, the Runner moves it to
+# another of your signed-in accounts of the same provider and it continues
+# there. Without this extension Lazybox never switches by itself; the limit
+# card offers the switch and you choose.
+#
+# It has no panel and no code: the Runner reads the policy below. Remove a
+# grant to keep that provider's conversations where they are.
+#
+# Claude: Anthropic's terms may not allow switching between subscriptions to
+# keep working past a usage limit (CLAUDE_COMPLIANCE.md). Read them before
+# approving switch:claude: https://code.claude.com/docs/en/legal-and-compliance
+lazybox: 1
+name: Subscription rotation
+version: 1.0.0
+description: When a conversation reaches its subscription's limit, continue it on another of your signed-in accounts of the same provider.
+author: Lazybox
+grants:
+  - switch:codex
+  - switch:claude
+accountPolicy:
+  switchOnLimit: true
+  # Accounts to try, in order (ids from Settings → Subscriptions). Empty is
+  # every other signed-in account of the provider; Settings → Subscriptions
+  # → Automatic switching leaves one out.
+  accounts: []

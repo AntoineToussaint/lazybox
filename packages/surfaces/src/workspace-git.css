@@ -1,0 +1,64 @@
+/* A workspace row's git line (WorkspaceGitLine.tsx): one 16px line, the
+   branch shrinking first, the badges never. */
+.workspace-git{display:flex!important;align-items:center;gap:5px;min-width:0;overflow:hidden;container-type:inline-size;font-size:calc(11px * var(--text-scale));line-height:calc(16px * var(--text-scale));color:var(--git-muted,var(--text-muted));white-space:nowrap}
+.workspace-git>svg{flex:none;color:var(--git-icon,var(--text-faint))}
+.workspace-git-branch{min-width:min(4.5ch,30%);overflow:hidden;text-overflow:ellipsis;font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(10.5px * var(--code-scale));color:var(--git-branch,var(--text-subtle))}
+.workspace-git.is-pending .workspace-git-branch{color:var(--git-muted,var(--text-faint))}
+.workspace-git-more{flex:none;color:var(--git-muted,var(--text-faint));font-size:calc(10px * var(--text-scale))}
+.workspace-git-badges{display:inline-flex;align-items:center;gap:6px;margin-left:auto;flex:none;font-variant-numeric:tabular-nums;font-size:calc(10.5px * var(--text-scale))}
+.git-badge,.git-pull{display:inline-flex;align-items:center;gap:3px;line-height:calc(14px * var(--text-scale))}
+.git-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.git-badge.is-dirty{color:var(--git-dirty,var(--warn))}
+.git-badge.is-ahead{color:var(--git-ahead,var(--info-soft))}
+.git-badge.is-behind{color:var(--git-behind,var(--warn))}
+.git-badge.is-behind-default{color:var(--git-behind-default,var(--accent))}
+.git-badge.is-problem{color:var(--attention-failed,var(--danger))}
+.git-pull{padding:0 5px;border-radius:7px;background:var(--git-pull-bg,var(--surface-active));color:var(--git-pull,var(--text-secondary))}
+.git-pull.is-success .git-dot{color:var(--git-success,var(--ok))}
+.git-pull.is-failure .git-dot{color:var(--git-failure,var(--danger))}
+.git-pull.is-failure{box-shadow:inset 0 0 0 1px var(--git-failure-ring,var(--danger-line-subtle))}
+.git-pull.is-changes .git-dot{color:var(--git-changes,var(--warn))}
+.git-pull.is-changes{box-shadow:inset 0 0 0 1px var(--git-changes-ring,var(--warn-line-subtle,var(--line-bold)))}
+.git-pull.is-pending .git-dot{color:var(--git-pending,var(--warn));animation:git-pending 1.4s ease-in-out infinite}
+.git-pull.is-none .git-dot{color:var(--git-none,var(--text-faint))}
+.git-pull.is-draft{background:transparent;box-shadow:inset 0 0 0 1px var(--git-draft-ring,var(--line-bold));color:var(--git-muted,var(--text-muted))}
+.git-pull.is-draft .git-dot{color:var(--git-none,var(--text-faint))}
+.git-pull.is-merged .git-dot{color:var(--git-merged,var(--accent))}
+.git-pull.is-closed{color:var(--git-muted,var(--text-muted));text-decoration:line-through}
+.git-pull.is-closed .git-dot{color:var(--git-none,var(--text-faint))}
+.git-pull.is-more{background:transparent;color:var(--git-muted,var(--text-muted))}
+@keyframes git-pending{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.git-pull.is-pending .git-dot{animation:none}}
+.workspace-agent-more{flex:none;font-size:calc(10px * var(--text-scale));color:var(--git-muted,var(--text-muted));font-variant-numeric:tabular-nums}
+/* The row's hover buttons (new conversation, actions, "Name it") sit beside
+   its first two lines only: the git and agent lines take the full width. */
+.collection-list .workspace-row>.workspace-link{--row-reserve:52px}
+.collection-list .workspace-row:has(>.workspace-name-it)>.workspace-link{--row-reserve:112px}
+.collection-list .workspace-label>.workspace-git,.collection-list .workspace-label>.workspace-agent{margin-right:calc(-1 * var(--row-reserve))}
+/* The agent line: one mark, the title, then the status and its elapsed time.
+   The title gives way first (never below a few letters), then the status's
+   words; the elapsed time is never cut. */
+.collection-list .workspace-agent{gap:6px;container-type:inline-size}
+.collection-list .workspace-agent .workspace-agent-label{flex:1 1000 auto;min-width:min(14ch,45%);overflow:hidden;text-overflow:ellipsis}
+/* The status's words and its elapsed time are items of the line itself: the
+   words shrink, the time never does. */
+.collection-list .workspace-agent .workspace-agent-status{display:contents;font-variant-numeric:tabular-nums;color:var(--git-muted,var(--text-muted))}
+.collection-list .workspace-agent-words{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:calc(10.5px * var(--text-scale));color:inherit}
+.collection-list .workspace-agent-words::before{content:'·';margin-right:6px;color:var(--git-muted,var(--text-disabled))}
+.collection-list .workspace-agent-elapsed{font-size:calc(10.5px * var(--text-scale));color:inherit;margin-left:-6px}
+/* Too narrow for the status's words: the title and the time (the words stay for screen readers). */
+@container (max-width:200px){
+  .collection-list .workspace-agent .workspace-agent-label{min-width:min(5ch,30%)}
+  .collection-list .workspace-agent .workspace-agent-words:has(+.workspace-agent-elapsed){position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+}
+.workspace-agent-elapsed{flex:none;white-space:pre}
+.workspace-agent-status[data-tone=busy]{color:var(--attention-working,var(--running))}
+.workspace-agent-status[data-tone=waiting]{color:var(--attention-input,var(--warn))}
+.workspace-agent-status[data-tone=failed]{color:var(--attention-failed,var(--danger))}
+/* An empty workspace: "No repositories" with "Add…" in the same slot. */
+.collection-list .workspace-repo-names.is-empty{color:var(--git-muted,var(--text-faint))}
+.workspace-row>.workspace-add-repositories{position:absolute;right:10px;top:30px;height:16px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--accent,var(--accent));font-size:calc(11px * var(--text-scale));line-height:calc(16px * var(--text-scale));cursor:pointer}
+.workspace-row>.workspace-add-repositories:hover,.workspace-row>.workspace-add-repositories:focus-visible{background:var(--nav-hover,var(--surface-selected));outline:none}
+/* A narrow sidebar keeps what needs the person (uncommitted work, unpushed
+   commits, the pull request); the rest stays in the tooltip. */
+@container (max-width:200px){.git-badge.is-behind-default,.git-badge.is-behind{display:none}.git-pull+.git-pull{display:none}}

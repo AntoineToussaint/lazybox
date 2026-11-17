@@ -1,0 +1,10 @@
+{
+  "name": "@lazybox/iphone",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@lazybox/client-core": "0.0.0",
+    "@lazybox/platform": "0.0.0"
+  }
+}

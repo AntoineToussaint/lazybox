@@ -1,0 +1,229 @@
+/* Sub-agents: inline cards where they started, a tray of the running ones beside the composer, and a panel that follows one live. */
+.subagent-card{--sa-working:var(--attention-working,var(--running));--sa-failed:var(--attention-failed,var(--danger));--sa-waiting:var(--attention-input,var(--warn));--sa-done:var(--running);--sa-muted:var(--text-muted);
+  position:relative;margin:4px 0 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface-raised);overflow:hidden;transition:border-color .2s;
+  /* Its layout follows its own width (a narrow panel), not the window's. */
+  container:subagent-card/inline-size}
+.subagent-card[data-nested]{margin:6px 0;background:var(--surface);border-color:var(--line-subtle)}
+.subagent-card[data-status=running],.subagent-card[data-status=starting]{border-color:color-mix(in srgb,var(--sa-working) 34%,var(--line))}
+.subagent-card[data-status=waiting]{border-color:color-mix(in srgb,var(--sa-waiting) 40%,var(--line))}
+.subagent-card[data-status=failed]{border-color:color-mix(in srgb,var(--sa-failed) 45%,var(--line))}
+/* A running card carries a thin moving line along its top edge. */
+.subagent-card[data-status=running]::before,.subagent-card[data-status=starting]::before{content:'';position:absolute;inset:0 0 auto;height:2px;background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--sa-working) 80%,transparent),transparent);background-size:40% 100%;background-repeat:no-repeat;animation:subagent-sweep 1.8s ease-in-out infinite}
+@keyframes subagent-sweep{from{background-position:-40% 0}to{background-position:140% 0}}
+.subagent-card.subagent-flash,.message-flash>.subagent-card{animation:subagent-flash 1.2s ease-out}
+@keyframes subagent-flash{0%{box-shadow:0 0 0 2px var(--accent,var(--accent))}100%{box-shadow:0 0 0 2px transparent}}
+
+/* One header row: state, "Explore · task", then its numbers and actions on the right, inside the card. */
+.subagent-head{display:flex;align-items:center;gap:8px;padding:6px 8px 6px 6px;min-width:0}
+.embedded-chat .subagent-head>.subagent-toggle,.subagent-head>.subagent-toggle{display:flex;align-items:center;gap:9px;flex:1;min-width:0;padding:4px 6px;border-radius:6px;text-align:left;background:transparent;color:inherit}
+.subagent-head>.subagent-toggle:hover{background:var(--surface-active)}
+/* "Kind · task" is one line that ellipsizes as a whole: the kind leads, so it stays readable. */
+.subagent-who{display:block;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:calc(13px * var(--text-scale));font-weight:500;line-height:calc(20px * var(--text-scale));color:var(--text)}
+.subagent-type{font-weight:500;color:var(--accent)}
+.subagent-name{color:inherit}
+.subagent-chevron{flex:none;display:inline-flex;color:var(--text-faint);transition:transform .15s}
+.subagent-toggle[aria-expanded=true] .subagent-chevron{transform:rotate(90deg)}
+.subagent-side{display:inline-flex;align-items:center;gap:6px;flex:none;margin-left:auto}
+.subagent-stats{display:inline-flex;gap:4px;flex:none;color:var(--sa-muted,var(--text-muted));font-size:calc(11px * var(--text-scale));font-variant-numeric:tabular-nums;white-space:nowrap}
+.subagent-sep{color:var(--text-disabled);white-space:pre}
+.subagent-actions{display:inline-flex;align-items:center;gap:2px;flex:none}
+.embedded-chat .subagent-actions .icon-button,.subagent-actions .icon-button{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0!important;color:var(--text-subtle)}
+/* Narrow cards: fewer numbers first, then the numbers and actions take a row of their own. */
+@container subagent-card (max-width:560px){
+  .subagent-stat-tokens,.subagent-stat-tokens+.subagent-sep,.subagent-stats>.subagent-sep:has(+.subagent-stat-tokens){display:none}
+}
+/* ■ Stop: quiet until hovered, red once it means it. */
+.embedded-chat .subagent-stop,.subagent-stop{display:inline-flex;align-items:center;gap:5px;flex:none;height:24px;padding:0 8px!important;border:1px solid var(--line)!important;border-radius:6px!important;background:transparent!important;color:var(--text-subtle)!important;font-size:calc(11px * var(--text-scale))!important;font-weight:500!important;white-space:nowrap}
+.subagent-stop:hover:not(:disabled),.subagent-stop:focus-visible{color:var(--danger)!important;border-color:var(--danger-line,var(--danger))!important;background:var(--danger-bg,transparent)!important}
+.subagent-stop:disabled{opacity:.75;cursor:default}
+.subagent-stop-square{display:inline-block;flex:none;width:8px;height:8px;border-radius:1.5px;background:currentColor}
+.embedded-chat .subagent-stop[data-compact],.subagent-stop[data-compact]{height:20px;min-width:20px;padding:0 5px!important;justify-content:center;border-color:transparent!important}
+
+/* The status mark: a turning ring, then a check, a cross or a square. */
+.subagent-mark{--mark-size:14px;flex:none;display:inline-grid;place-items:center;box-sizing:border-box;width:var(--mark-size);height:var(--mark-size);border-radius:50%;font-size:calc(9px * var(--text-scale));font-weight:700;color:var(--on-info)}
+.subagent-mark[data-status=running],.subagent-mark[data-status=starting]{border:1.6px solid color-mix(in srgb,var(--attention-working,var(--running)) 25%,transparent);border-top-color:var(--attention-working,var(--running));animation:live-spin .9s linear infinite}
+.subagent-mark[data-status=waiting]{background:var(--attention-input,var(--warn));animation:live-breathe 1.8s ease-out infinite}
+.subagent-mark[data-status=done]{background:var(--running)}
+.subagent-mark[data-status=failed]{background:var(--attention-failed,var(--danger))}
+.subagent-mark[data-status=stopped]{border:1.4px solid var(--text-faint)}
+.subagent-mark[data-status=unknown]{border:1.4px dashed var(--text-faint);color:var(--text-subtle)}
+/* Ended without a report: muted, still, nothing to claim. */
+.subagent-mark[data-status=unreported]{border:1.4px dashed var(--text-faint)}
+.subagent-mark svg{stroke-width:2.6}
+.subagent-mark-square{width:40%;height:40%;background:var(--text-subtle);border-radius:1px}
+
+/* What it is doing now. */
+.subagent-now{display:flex;align-items:center;gap:8px;min-width:0;padding:0 14px 9px 37px;font-size:calc(12px * var(--text-scale));color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.subagent-now-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11.5px * var(--code-scale));
+  background:linear-gradient(90deg,var(--text-secondary) 40%,var(--text) 50%,var(--text-secondary) 60%);background-size:300% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:subagent-shimmer 2.4s linear infinite}
+@keyframes subagent-shimmer{from{background-position:100% 0}to{background-position:-50% 0}}
+.subagent-now-time{flex:none;color:var(--text-faint);font-size:calc(11px * var(--text-scale))}
+.subagent-progress{margin:-4px 0 0;padding:0 14px 9px 37px;font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--text-subtle);font-style:italic}
+
+/* How it ended. */
+.subagent-outcome{padding:0 14px 10px 37px;font-size:calc(12px * var(--text-scale));line-height:1.55;color:var(--text-tertiary)}
+.subagent-outcome>p{margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.subagent-outcome>p>strong{font-weight:600;margin-right:8px;color:var(--sa-done,var(--running))}
+.subagent-outcome[data-status=failed]>p>strong{color:var(--sa-failed,var(--danger))}
+.subagent-outcome[data-status=stopped]>p>strong,.subagent-outcome[data-status=unknown]>p>strong,.subagent-outcome[data-status=unreported]>p>strong{color:var(--text-subtle)}
+.subagent-card[data-status=unreported] .subagent-who{color:var(--text-secondary)}
+.embedded-chat .subagent-link,.subagent-link{padding:2px 0!important;margin-top:4px;font-size:calc(11px * var(--text-scale))!important;color:var(--accent,var(--accent))!important;background:transparent!important;border:0}
+.subagent-link:hover{text-decoration:underline}
+.subagent-result{margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);max-height:420px;overflow:auto;overscroll-behavior:contain}
+.subagent-result p,.subagent-prompt-text p{font-size:calc(13px * var(--text-scale))!important;line-height:1.65!important}
+
+/* Its own steps. */
+.subagent-body{border-top:1px solid var(--line-subtle);max-height:min(520px,60dvh);overflow:auto;overscroll-behavior:contain;padding:8px 12px 10px 14px;background:var(--surface)}
+.subagent-prompt{margin:2px 0 8px;border:1px solid var(--line-subtle);border-radius:7px;background:var(--surface-raised)}
+.subagent-prompt>summary{display:flex;align-items:baseline;gap:8px;padding:7px 10px;cursor:pointer;list-style:none;font-size:calc(11px * var(--text-scale));color:var(--text-subtle);min-width:0}
+.subagent-prompt>summary::-webkit-details-marker{display:none}
+.subagent-prompt>summary>span{flex:none;font-weight:600;color:var(--text-secondary)}
+.subagent-prompt>summary>small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted)}
+.subagent-prompt[open]>summary>small{display:none}
+.subagent-prompt-text{padding:2px 12px 10px;max-height:320px;overflow:auto}
+.subagent-timeline{list-style:none;margin:0;padding:0}
+.subagent-step.message .subagent-message{padding:6px 6px 8px!important}
+.subagent-step.message .subagent-message p{font-size:calc(var(--chat-font-size,14px) - 1px)!important;line-height:var(--chat-line-height,1.5)!important}
+/* In a card, prose is a few lines; the panel and "Show all" give the whole. */
+.subagent-timeline[data-compact] .subagent-message{max-height:5.2em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 55%,transparent);mask-image:linear-gradient(#000 55%,transparent)}
+.subagent-timeline[data-compact] .subagent-message p{margin:0!important}
+/* What it does now stays in sight at the bottom while it runs. */
+.subagent-step[data-current]{position:sticky;bottom:-10px;z-index:1;background:var(--surface);padding-bottom:2px}
+.subagent-panel .subagent-step[data-current]{bottom:-16px;background:var(--surface)}
+.subagent-step.now .tool-line-row{cursor:default}
+.subagent-step.now .tool-line-row:hover{background:none}
+.subagent-earlier{display:flex;flex-direction:column;align-items:center;gap:4px;padding:2px 0 6px;font-size:calc(11px * var(--text-scale));color:var(--text-muted);text-align:center}
+.subagent-earlier .show-earlier{margin:0!important}
+.subagent-earlier .subagent-link{margin:0}
+.subagent-empty{padding:10px 0;font-size:calc(12px * var(--text-scale));color:var(--text-muted)}
+
+/* Its tool calls are the chat's tool lines (ToolLine); in a timeline their facts (exit code, time, size) sit at the right edge. */
+.subagent-step .tool-lines{margin:0}
+.subagent-timeline .tool-line-row>.tool-meta{margin-left:auto;padding-left:8px}
+.subagent-timeline .tool-line-row>.tool-meta>span:first-child:before{content:none}
+.subagent-timeline .tool-line[data-state=failed]>.tool-line-row{background:color-mix(in srgb,var(--attention-failed,var(--danger)) 9%,transparent)}
+.subagent-timeline .tool-line[data-state=failed]>.tool-line-row .tool-verb{color:var(--danger-soft)}
+.subagent-timeline .tool-line-problem{margin-left:24px}
+
+/* The tray beside the composer. */
+.subagent-tray{position:relative;display:flex;align-items:center;gap:10px;min-width:0;padding:6px 24px;font-size:calc(12px * var(--text-scale));flex-shrink:0;color:var(--attention-working,var(--running));font-variant-numeric:tabular-nums}
+/* Short of room (a narrow chat), the tray wraps: "All N" never runs past the bar's edge. */
+.subagent-tray{flex-wrap:wrap;row-gap:4px}
+.subagent-tray>.subagent-chips{flex:1 1 90px}
+.subagent-tray>.subagent-tray-all{margin-left:auto}
+.subagent-tray-root{display:inline-flex;align-items:center;gap:8px;flex:none;white-space:nowrap}
+.subagent-tray-count{flex:none;color:var(--text-subtle);white-space:nowrap}
+.subagent-tray-root+.subagent-tray-count::before{content:'·';margin-right:10px;color:var(--text-disabled)}
+.subagent-chips{display:flex;gap:6px;min-width:0;flex:1;overflow-x:auto;scrollbar-width:none;padding:1px}
+.subagent-chips::-webkit-scrollbar{display:none}
+.subagent-chip-item{display:inline-flex;align-items:center;gap:1px;flex:none;min-width:0}
+.embedded-chat .subagent-chip,.subagent-chip{display:inline-flex;align-items:center;gap:7px;flex:none;max-width:280px;padding:4px 10px!important;border:1px solid var(--line-strong)!important;border-radius:999px!important;background:var(--surface-hover)!important;color:var(--text-soft)!important;font-size:calc(11.5px * var(--text-scale))!important;font-weight:400!important}
+.subagent-chip:hover{border-color:var(--accent-line)!important;background:var(--surface-selected)!important}
+.subagent-chip-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.subagent-chip-name .subagent-type,.subagent-tree-name .subagent-type{font-weight:600;color:var(--accent)}
+.subagent-chip>time{color:var(--text-muted);flex:none}
+.subagent-chip-nested{flex:none;font-size:calc(10px * var(--text-scale));color:var(--accent);background:var(--accent-bg);border-radius:999px;padding:0 5px}
+.embedded-chat .subagent-tray-all,.subagent-tray-all{display:inline-flex;align-items:center;gap:6px;flex:none;padding:4px 9px!important;font-size:calc(11px * var(--text-scale))!important;color:var(--text-subtle)!important}
+.subagent-tree{position:absolute;right:16px;bottom:calc(100% + 6px);z-index:20;width:min(420px,calc(100% - 32px));max-height:min(420px,60dvh);display:flex;flex-direction:column;border:1px solid var(--line-strong);border-radius:10px;background:var(--surface-hover);box-shadow:0 12px 40px color-mix(in srgb,var(--shadow) calc(53% * var(--shadow-strength)),transparent);color:var(--text-soft)}
+.subagent-tree>header{display:flex;align-items:center;gap:8px;padding:8px 8px 8px 14px;border-bottom:1px solid var(--line)}
+.subagent-tree>header>small{flex:1;color:var(--text-muted)}
+/* Clear finished: quiet, beside the close button; its Undo for a moment below the header. */
+.embedded-chat .subagent-tree-clear,.subagent-tree-clear{flex:none;height:24px;padding:0 8px!important;border:1px solid transparent!important;border-radius:6px!important;background:transparent!important;color:var(--text-subtle)!important;font-size:calc(11px * var(--text-scale))!important;font-weight:500!important;white-space:nowrap}
+.subagent-tree-clear:hover,.subagent-tree-clear:focus-visible{border-color:var(--line)!important;color:var(--text)!important}
+.subagent-tree-cleared,.subagent-tree-truncated{display:flex;align-items:center;gap:2px;margin:0;padding:5px 14px;border-bottom:1px solid var(--line-subtle);font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.subagent-tree-cleared .subagent-link{margin:0}
+.subagent-tree ul{list-style:none;margin:0;padding:4px;overflow:auto}
+.subagent-tree li{display:flex;align-items:center;gap:2px;padding-left:calc(var(--depth,0) * 18px)}
+.subagent-tree li[data-depth]:not([data-depth="0"])>.subagent-tree-row::before{content:'└';color:var(--text-disabled);margin-right:-2px}
+.embedded-chat .subagent-tree-row,.subagent-tree-row{display:flex;align-items:center;gap:8px;flex:1;min-width:0;padding:6px 8px!important;text-align:left;color:inherit!important}
+.subagent-tree-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:calc(12px * var(--text-scale))}
+.subagent-tree-row>small{flex:none;color:var(--text-muted);font-size:calc(11px * var(--text-scale));font-variant-numeric:tabular-nums}
+
+/* A failed sub-agent, in the parent's status line. */
+.subagent-attention{display:inline-flex;align-items:center;gap:0;margin-left:4px;border:1px solid color-mix(in srgb,var(--attention-failed,var(--danger)) 45%,transparent);border-radius:999px;background:color-mix(in srgb,var(--attention-failed,var(--danger)) 12%,transparent)}
+.embedded-chat .subagent-attention-show,.subagent-attention-show{display:inline-flex;align-items:center;gap:6px;padding:2px 4px 2px 9px!important;font-size:calc(11px * var(--text-scale))!important;color:var(--attention-failed,var(--danger))!important;background:transparent!important;white-space:nowrap}
+.subagent-attention .icon-button{padding:3px 6px 3px 3px!important;color:var(--attention-failed,var(--danger))!important}
+
+/* Background commands and the background-work list. */
+.subagent-tree[data-placement=below]{bottom:auto;top:calc(100% + 6px);right:0;width:min(420px,calc(100vw - 32px))}
+.subagent-tree-body{overflow:auto;padding:2px 4px 6px}
+.subagent-tree .subagent-tree-body ul{overflow:visible;padding:0}
+.subagent-tree-body h4{display:flex;align-items:center;gap:6px;margin:10px 10px 3px;font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.3px;text-transform:uppercase;color:var(--text-faint)}
+.subagent-tree-body h4 .subagent-tree-state{letter-spacing:0;text-transform:none}
+.subagent-tree-count{padding:0 6px;border-radius:999px;background:var(--surface-selected);color:var(--text-muted);font-variant-numeric:tabular-nums;letter-spacing:0}
+/* Its header says what there is, each kind once, then what runs and what failed. */
+.subagent-tree-title{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.subagent-tree>header>.subagent-tree-title>small{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;color:var(--text-muted);font-size:calc(11px * var(--text-scale));font-variant-numeric:tabular-nums}
+.subagent-tree-state{font-weight:500;font-size:calc(10.5px * var(--text-scale));font-variant-numeric:tabular-nums;white-space:nowrap}
+.subagent-tree-state[data-state=running]{color:var(--attention-working,var(--running))}
+.subagent-tree-state[data-state=idle]{color:var(--text-faint)}
+.subagent-tree-state[data-state=failed]{color:var(--attention-failed,var(--danger))}
+/* A row's title wraps to two lines rather than being cut mid-phrase; a command's script sits beneath. */
+.subagent-tree-label{display:flex;flex-direction:column;gap:1px;flex:1;min-width:0}
+.subagent-tree .subagent-tree-label>.subagent-tree-name{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;line-height:1.35}
+.subagent-tree-command{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(10.5px * var(--code-scale));color:var(--text-muted);background:none;padding:0}
+.subagent-tree li>.subagent-tree-row{align-items:flex-start}
+.subagent-tree li>.subagent-tree-row>.subagent-mark{margin-top:2px}
+.subagent-tree li>.subagent-tree-row>small{padding-top:1px}
+.subagent-tree li>.subagent-tree-row>small[data-status=failed]{color:var(--attention-failed,var(--danger))}
+.subagent-tree li>.subagent-tree-row>small[data-status=running],.subagent-tree li>.subagent-tree-row>small[data-status=starting],.subagent-tree li>.subagent-tree-row>small[data-status=waiting]{color:var(--attention-working,var(--running))}
+.subagent-tree-more>.subagent-tree-earlier{align-items:center!important;gap:6px;color:var(--text-muted)!important;font-size:calc(11.5px * var(--text-scale))}
+.subagent-tree-more>.subagent-tree-earlier:hover{color:var(--text)!important}
+.subagent-tree-name>code,code.subagent-chip-name,.subagent-panel-title code{font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11.5px * var(--code-scale));color:var(--text-soft);background:none;padding:0}
+.subagent-chip.command>svg{flex:none;color:var(--text-subtle)}
+.background-work{position:relative;display:inline-flex}
+/* Wider than an icon button: its icon and words must not spill out of it. */
+.embedded-chat .background-work-button,.background-work-button{display:inline-flex;align-items:center;gap:5px;width:auto;min-width:28px;padding:4px 8px!important;font-size:calc(11px * var(--text-scale))!important;color:var(--text-subtle);font-variant-numeric:tabular-nums;white-space:nowrap}
+.background-work-button:hover{background:var(--surface-active);color:var(--text)}
+.background-work-button[data-running]{color:var(--attention-working,var(--running))!important}
+.background-work-button[data-failed]:not([data-running]){color:var(--attention-failed,var(--danger))!important}.background-command h4{margin:14px 0 6px;font-size:calc(11px * var(--text-scale));font-weight:600;color:var(--text-subtle)}
+.background-command-file{display:flex;align-items:center;gap:8px;margin:10px 0 0;font-size:calc(11px * var(--text-scale));color:var(--text-muted);min-width:0}
+.background-command-file>code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;user-select:all;color:var(--text-secondary)}
+
+/* The panel. */
+.single-session{position:relative}
+.single-session.subagent-docked{padding-right:var(--subagent-dock,440px)}
+.subagent-panel{--sa-working:var(--attention-working,var(--running));position:absolute;z-index:15;display:flex;flex-direction:column;min-width:0;background:var(--surface);color:var(--text,var(--text));font-size:calc(13px * var(--text-scale))}
+.subagent-panel[data-mode=dock]{top:0;right:0;bottom:0;width:var(--subagent-dock,440px);border-left:1px solid var(--line,var(--line-subtle))}
+.subagent-panel[data-mode=float]{top:64px;right:20px;width:min(480px,calc(100% - 40px));height:min(620px,calc(100% - 96px));min-width:300px;min-height:220px;border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 18px 60px color-mix(in srgb,var(--shadow) calc(67% * var(--shadow-strength)),transparent);resize:both;overflow:hidden}
+.subagent-panel[data-mode=sheet]{inset:0;border:0}
+.subagent-panel-resize{position:absolute;left:-3px;top:0;bottom:0;width:6px;cursor:col-resize;z-index:1}
+.subagent-panel-resize:hover,.subagent-panel-resize:focus-visible{background:color-mix(in srgb,var(--accent,var(--accent)) 40%,transparent);outline:none}
+.subagent-panel-head{display:flex;align-items:center;gap:10px;padding:10px 10px 8px 14px;border-bottom:1px solid var(--line-subtle);flex:none;outline:none}
+.subagent-panel-head[data-movable]{cursor:grab}
+.subagent-panel-head:focus-visible{box-shadow:inset 0 0 0 1px var(--accent,var(--focus))}
+.subagent-panel-title{display:flex;flex-direction:column;align-items:flex-start;gap:3px;flex:1;min-width:0}
+.subagent-panel-title>h3{margin:0;font-size:calc(14px * var(--text-scale));font-weight:600;max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.subagent-panel-title .subagent-who{font-size:calc(14px * var(--text-scale));font-weight:600;color:var(--text);max-width:100%}
+.subagent-eyebrow{font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.3px;text-transform:uppercase;color:var(--text-faint)}
+.subagent-panel-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:8px 14px;flex:none;border-bottom:1px solid var(--line-subtle)}
+.subagent-panel>.subagent-progress{padding:8px 14px 0;margin:0}
+.subagent-panel-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:10px 14px 16px;outline:none}
+.subagent-panel-body>.subagent-outcome{padding:10px 0 0;border-top:1px solid var(--line-subtle);margin-top:8px}
+.subagent-panel-body>.subagent-outcome>p{-webkit-line-clamp:4}
+
+/* A narrow card (a slim panel, a phone): its numbers and actions take a row of their own, still inside it. */
+@container subagent-card (max-width:420px){
+  .subagent-head{flex-wrap:wrap;row-gap:0}
+  .subagent-side{flex-basis:100%;justify-content:space-between;padding-left:35px}
+  .subagent-now,.subagent-progress,.subagent-outcome{padding-left:14px}
+  .subagent-body{padding-inline:8px}
+  .subagent-body .tool-details{margin-left:8px}
+}
+/* Narrow and phone layouts: the tray scrolls. */
+@media (max-width:720px){
+  .subagent-tray{padding:6px 12px;gap:8px}
+  .subagent-tray-root{display:none}
+  .subagent-tray-noun{display:none}
+  .subagent-chip{max-width:200px}
+  .subagent-chip>time{display:none}
+  .subagent-tree{right:8px;width:calc(100% - 16px)}
+}
+@media (prefers-reduced-motion:reduce){
+  .subagent-card::before{animation:none!important;background:color-mix(in srgb,var(--attention-working,var(--running)) 60%,transparent)!important}
+  .subagent-mark[data-status]{animation:none}
+  .subagent-mark[data-status=running],.subagent-mark[data-status=starting]{border-color:var(--attention-working,var(--running))}
+  .subagent-now-text{animation:none;background:none;color:var(--text-secondary)}
+  .subagent-card.subagent-flash,.message-flash>.subagent-card{animation:none;box-shadow:0 0 0 2px var(--accent,var(--accent))}
+  .subagent-chevron{transition:none}
+}

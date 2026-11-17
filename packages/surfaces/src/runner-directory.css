@@ -1,0 +1,95 @@
+/* Several Runners in one window (RunnerDirectory.tsx): sections per Runner, badges on merged rows, health. */
+
+/* Health: a dot that says connected, connecting, not reachable or not running. */
+.runner-health{flex:none;display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;color:var(--text-faint)}
+.runner-health>i{width:7px;height:7px;border-radius:50%;background:var(--text-disabled)}
+.runner-health[data-health=online]>i{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 14%,transparent)}
+.runner-health[data-health=connecting]>i{background:var(--attention-working,var(--running));animation:runner-pulse 1.4s ease-in-out infinite}
+.runner-health[data-health=offline]{color:var(--warn)}
+.runner-health[data-health=invalid]{color:var(--danger)}
+@keyframes runner-pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.runner-health[data-health=connecting]>i{animation:none}}
+
+/* A Runner's name on a merged row: quiet, never louder than the row's state. */
+.runner-badge{flex:none;display:inline-flex;align-items:center;max-width:9em;height:calc(15px * var(--text-scale));padding:0 5px;border:1px solid var(--line);border-radius:4px;box-sizing:border-box;font-size:calc(9.5px * var(--text-scale));font-weight:550;letter-spacing:.1px;line-height:1;color:var(--text-subtle);background:var(--surface);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.runner-badge[data-channel=working]{color:var(--accent-strong,var(--accent));border-color:var(--accent-line,var(--line))}
+.runner-badge[data-channel=release]{color:var(--ok);border-color:var(--ok-line,var(--line))}
+.agent-meta>.runner-badge{flex:none;overflow:hidden}
+.inbox-meta>.runner-badge{margin-right:2px}
+.command-palette-detail>.runner-badge{margin-right:6px;vertical-align:1px}
+.peek-runner{margin:0 0 8px}
+
+/* Workspaces, grouped by Runner: one header per Runner, its workspaces under it. */
+.runner-grouped{display:flex;flex-direction:column;min-height:0}
+.runner-groups{display:flex;flex-direction:column;gap:6px}
+.runner-group{display:flex;flex-direction:column;min-width:0}
+.runner-group+.runner-group{padding-top:6px;border-top:1px solid var(--line-subtle,var(--line))}
+.runner-group-header{display:flex;align-items:center;gap:4px;min-width:0;padding:0 4px 2px 0}
+.workspace-shell .runner-group-toggle{flex:1;min-width:0;display:flex;align-items:center;gap:6px;height:26px;padding:0 6px;border:0;border-radius:5px;background:transparent;color:var(--text-soft);text-align:left;font-size:calc(11.5px * var(--text-scale))}
+.workspace-shell .runner-group-toggle:hover{background:var(--surface-hover);color:var(--text)}
+.workspace-shell .runner-group-toggle:focus-visible{outline:2px solid var(--focus,var(--accent));outline-offset:-2px}
+.runner-group-toggle>svg:first-child{flex:none;color:var(--text-faint)}
+.runner-group-name{min-width:0;font-weight:650;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.runner-group-channel,.runner-group-version{flex:none;font-size:calc(10px * var(--text-scale));color:var(--text-faint);font-variant-numeric:tabular-nums}
+.runner-group-version{font-family:var(--font-mono);font-size:calc(9.5px * var(--text-scale))}
+.runner-group-state{flex:none;margin-left:auto;font-size:calc(10px * var(--text-scale));color:var(--text-muted)}
+.runner-group[data-health=offline] .runner-group-state{color:var(--warn)}
+.runner-group-count{flex:none;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--surface-strong,var(--surface-selected));color:var(--text-soft);font-size:calc(10px * var(--text-scale));font-weight:600;line-height:16px;text-align:center;font-variant-numeric:tabular-nums}
+.runner-group-count.urgent{background:var(--attention-input);color:var(--on-warn)}
+.runner-group-showing{flex:none;padding:0 6px;font-size:calc(9.5px * var(--text-scale));font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--accent)}
+.workspace-shell .runner-group-show{flex:none;height:20px;padding:0 8px;border:1px solid var(--line);border-radius:5px;background:transparent;color:var(--text-subtle);font-size:calc(10.5px * var(--text-scale))}
+.workspace-shell .runner-group-show:hover:not(:disabled){background:var(--surface-selected);color:var(--text)}
+.workspace-shell .runner-group-show:disabled{opacity:.4}
+/* The Runner the page shows has a quiet accent rail; the others read as one step back. */
+.runner-group[data-active]>.runner-group-header{box-shadow:inset 2px 0 0 var(--accent);border-radius:0 5px 5px 0}
+/* Another Runner's workspaces: one line each, what waits there on the right. */
+.runner-workspaces{list-style:none;margin:0 0 2px;padding:0 0 0 14px}
+.workspace-shell .runner-workspace-row{display:flex;align-items:center;gap:7px;width:100%;min-width:0;height:26px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:var(--text-soft);text-align:left;font-size:calc(12px * var(--text-scale))}
+.workspace-shell .runner-workspace-row:hover:not(:disabled){background:var(--surface-hover);color:var(--text)}
+.workspace-shell .runner-workspace-row:focus-visible{outline:2px solid var(--focus,var(--accent));outline-offset:-2px}
+.runner-workspace-row>svg{flex:none;color:var(--text-faint)}
+.runner-workspace-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.runner-workspace-summary{flex:none;display:inline-flex;align-items:center;gap:4px;max-width:55%;overflow:hidden;white-space:nowrap;font-size:calc(10.5px * var(--text-scale));color:var(--text-muted)}
+.runner-workspace-row[data-state=needs-input] .runner-workspace-summary{color:var(--attention-input,var(--warn));font-weight:550}
+.runner-workspace-row[data-state=failed] .runner-workspace-summary{color:var(--attention-failed,var(--danger))}
+.runner-group[data-health=offline] .runner-workspaces{opacity:.55}
+.runner-page-workspaces{padding-left:2px}
+.runner-absent,.runner-empty{margin:2px 8px 4px 26px;font-size:calc(11px * var(--text-scale));line-height:1.45;color:var(--text-muted)}
+.runner-group[data-health=offline] .runner-absent{color:var(--warn)}
+
+/* Agents: a Runner that does not answer says so, once, above its rows' place. */
+.agents-runner-offline{display:flex;align-items:center;gap:6px;margin:2px 4px 4px;padding:5px 8px;border-radius:6px;background:var(--surface-sunken,var(--surface));font-size:calc(10.5px * var(--text-scale));line-height:1.4;color:var(--text-muted)}
+
+/* ⌘N: which Runner the task starts on. */
+.new-task-runners{display:flex;flex-wrap:wrap;gap:4px}
+.new-task-runners>button{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--text-subtle);font-size:calc(12px * var(--text-scale))}
+.new-task-runners>button:hover:not(:disabled){background:var(--surface-hover);color:var(--text)}
+.new-task-runners>button[aria-checked=true]{border-color:var(--accent-line,var(--accent));background:var(--accent-bg,var(--surface-selected));color:var(--text)}
+.new-task-runners>button:disabled{opacity:.45}
+
+/* Settings → Runners. */
+.runners-list{list-style:none;margin:0 0 18px;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.runners-item{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 14px;flex-wrap:wrap}
+.runners-item+.runners-item{border-top:1px solid var(--line-subtle,var(--line))}
+.runners-item[data-hidden]{opacity:.6}
+.runners-item-main{display:flex;align-items:flex-start;gap:10px;min-width:0;flex:1}
+.runners-item-main>.runner-health{margin-top:3px}
+.runners-item-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.runners-item-text>strong{display:flex;align-items:center;gap:6px;font-weight:600}
+.runners-item-text>small{color:var(--text-muted)}
+.runners-path{max-width:100%;font-size:calc(11px * var(--code-scale,1));color:var(--text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.runners-problem{color:var(--warn)!important}
+.runners-tag{padding:0 6px;border:1px solid var(--line);border-radius:4px;font-size:calc(10px * var(--text-scale));font-weight:550;color:var(--text-subtle)}
+.runners-tag.is-primary{border-color:var(--accent-line,var(--accent));color:var(--accent)}
+.runners-tag.is-quiet{border-style:dashed}
+.runners-item-actions{display:flex;align-items:center;gap:8px;flex:none}
+.runners-item-actions>button{display:inline-flex;align-items:center;gap:5px}
+.runners-item-actions>button[aria-pressed=true]{color:var(--accent)}
+.runners-toggle{flex:none}
+.runners-add{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+.runners-add>label{display:flex;flex-direction:column;gap:3px}
+.runners-add>label small{color:var(--text-muted);line-height:1.45}
+.runners-add-row{display:flex;gap:8px}
+.runners-add-row>input{flex:1;min-width:0}
+.workspace-launching{display:flex;align-items:center;justify-content:center}
+.workspace-runner{margin-right:2px}

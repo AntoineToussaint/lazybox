@@ -1,0 +1,45 @@
+:root { color-scheme: light dark; }
+body { margin: 0; background: Canvas; }
+.first-run {
+  --fr-text: #1d1d1f; --fr-muted: #6e6e73; --fr-line: rgba(0,0,0,.1); --fr-accent: #3b5bdb; --fr-bad: #c92a2a; --fr-warn: #b7791f; --fr-ok: #2f9e44; --fr-surface: rgba(0,0,0,.03);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  color: var(--fr-text); max-width: 560px; margin: 0 auto; padding: 28px 28px 20px; box-sizing: border-box; min-height: 100vh; display: flex; flex-direction: column; gap: 14px;
+}
+@media (prefers-color-scheme: dark) {
+  .first-run { --fr-text: #f5f5f7; --fr-muted: #a1a1a6; --fr-line: rgba(255,255,255,.12); --fr-accent: #748ffc; --fr-bad: #ff8787; --fr-warn: #ffd43b; --fr-ok: #69db7c; --fr-surface: rgba(255,255,255,.05); }
+}
+.first-run h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -.01em; }
+.first-run h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+.first-run p { margin: 0 0 6px; }
+.first-run code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--fr-surface); padding: 1px 4px; border-radius: 4px; }
+.first-run-header { display: flex; align-items: center; gap: 16px; }
+.first-run-header img { border-radius: 14px; }
+.first-run-muted { color: var(--fr-muted); }
+.first-run-points { margin: 8px 0 0; padding: 0 0 0 18px; display: grid; gap: 6px; }
+.first-run .first-run-option { display: flex; flex-direction: row; gap: 10px; align-items: flex-start; margin-top: 14px; padding: 12px; border: 1px solid var(--fr-line); border-radius: 10px; cursor: pointer; color: var(--fr-text); font-size: 14px; }
+.first-run .first-run-option > span { display: block; flex: 1; }
+.first-run .first-run-option input { margin: 3px 0 0; flex: none; width: auto; }
+.first-run-option small { display: block; color: var(--fr-muted); }
+.first-run-warning { border: 1px solid var(--fr-warn); border-radius: 10px; padding: 12px 14px; }
+.first-run-progress { display: flex; align-items: center; gap: 10px; color: var(--fr-muted); }
+.first-run-spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--fr-line); border-top-color: var(--fr-accent); animation: fr-spin .8s linear infinite; }
+@keyframes fr-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .first-run-spinner { animation: none; } }
+.first-run-error { color: var(--fr-bad); white-space: pre-wrap; }
+.first-run-done p:first-child { color: var(--fr-ok); font-weight: 600; }
+.first-run-hint { font-size: 12.5px; color: var(--fr-muted); }
+.first-run-checks { list-style: none; margin: 0; padding: 10px 12px; border: 1px solid var(--fr-line); border-radius: 10px; display: grid; gap: 6px; font-size: 13px; }
+.first-run-checks li { display: grid; grid-template-columns: 16px auto; column-gap: 6px; }
+.first-run-checks li > :not(span) { grid-column: 2; }
+.first-run-checks small { display: block; color: var(--fr-muted); }
+.check-ok > span { color: var(--fr-ok); } .check-warn > span { color: var(--fr-warn); } .check-fail > span { color: var(--fr-bad); }
+.first-run-actions { margin-top: auto; padding-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.first-run-spacer { flex: 1; }
+.first-run button { font: inherit; padding: 6px 14px; border-radius: 7px; border: 1px solid var(--fr-line); background: var(--fr-surface); color: inherit; cursor: pointer; }
+.first-run button.primary { background: var(--fr-accent); border-color: var(--fr-accent); color: white; font-weight: 600; }
+.first-run button:disabled { opacity: .5; cursor: default; }
+.first-run button:focus-visible, .first-run-option:focus-within { outline: 2px solid var(--fr-accent); outline-offset: 2px; }
+.first-run-inline-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.first-run-confirm { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--fr-line); }
+.first-run pre { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--fr-surface); border: 1px solid var(--fr-line); border-radius: 6px; padding: 6px 8px; margin: 4px 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.first-run-output { max-height: 160px; overflow: auto; }

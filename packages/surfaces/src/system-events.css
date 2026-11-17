@@ -1,0 +1,39 @@
+/* Lazybox's own events in a conversation: quiet lines, never message cards. */
+.system-event{margin:6px 0 10px;min-width:0;font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--text-subtle)}
+.system-event-line{display:flex;align-items:center;gap:2px;min-width:0}
+.system-event-toggle,.system-event-static{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;padding:3px 8px 3px 4px!important;border:1px solid transparent!important;border-radius:7px;background:transparent!important;color:inherit;font:inherit;text-align:left;width:auto!important;box-shadow:none!important}
+.system-event-toggle{cursor:pointer}
+.system-event-toggle:hover{background:var(--surface-hover)!important;color:var(--text-secondary)}
+.system-event-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.system-event-icon{display:inline-grid;place-items:center;flex:none;width:20px;height:20px;border-radius:6px;background:var(--surface-selected);color:var(--text-muted)}
+.system-event[data-tone=ok] .system-event-icon{background:var(--ok-bg);color:var(--ok)}
+.system-event[data-tone=review] .system-event-icon{background:var(--accent-bg);color:var(--accent)}
+.system-event[data-tone=ask] .system-event-icon{background:var(--info-bg);color:var(--info)}
+.system-event[data-tone=warn] .system-event-icon{background:var(--warn-bg);color:var(--warn)}
+.system-event[data-tone=muted] .system-event-icon{color:var(--text-faint)}
+.system-event-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}
+.system-event-detail{flex:none;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 7px;border:1px solid var(--line);border-radius:999px;font-size:calc(11px * var(--text-scale));line-height:1.6;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.system-event[data-kind=repository_added] .system-event-detail{font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(10.5px * var(--code-scale))}
+.system-event-chevron{display:inline-grid;flex:none;color:var(--text-faint);opacity:0;transition:transform .12s ease,opacity .12s ease}
+.system-event-toggle:hover .system-event-chevron,.system-event-toggle:focus-visible .system-event-chevron,.system-event[data-open] .system-event-chevron{opacity:1}
+.system-event[data-open] .system-event-chevron{transform:rotate(90deg)}
+.system-event-copy{flex:none;opacity:0;width:22px!important;height:22px;padding:0!important;color:var(--text-faint)}
+.system-event-line:hover .system-event-copy,.system-event-copy:focus-visible{opacity:1}
+.system-event-body{margin:4px 0 2px 14px;padding:8px 14px 10px;border-left:2px solid var(--line-strong);color:var(--text-secondary)}
+.system-event[data-tone=review] .system-event-body{border-left-color:var(--accent-line)}
+.system-event[data-tone=ask] .system-event-body{border-left-color:var(--info-line,var(--line-strong))}
+.system-event-caption{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 6px;font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.system-event-copy-text{display:inline-flex;align-items:center;gap:5px;width:auto!important;padding:2px 8px!important;border:1px solid var(--line)!important;border-radius:6px;background:transparent!important;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.system-event-copy-text:hover{color:var(--text);border-color:var(--line-strong)!important}
+.system-event-text-sent{margin:0;max-height:min(320px,45vh);overflow:auto;overscroll-behavior:contain;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:calc(12px * var(--text-scale));line-height:1.6;color:var(--text-secondary)}
+/* Events that follow each other read as one block. */
+.system-event-group{margin:6px 0 12px}
+.system-event-group>.system-event,.system-event-group>.review-exchange{margin:0 0 2px}
+.system-event-group>.runner-mark{margin:0}
+/* A restart that interrupted nothing: a small mark, its story on hover. */
+.runner-mark{display:flex;align-items:center;gap:8px;margin:2px 0 6px;color:var(--text-faint);opacity:.55;font-size:calc(10px * var(--text-scale));line-height:1;cursor:default}
+.runner-mark:before,.runner-mark:after{content:"";flex:1;border-top:1px dotted var(--line)}
+.runner-mark>span{display:inline-flex;align-items:center;gap:3px;font-variant-numeric:tabular-nums}
+.runner-mark:hover,.runner-mark:focus-visible{opacity:1;color:var(--text-muted)}
+.runner-mark:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+@media (prefers-reduced-motion:reduce){.system-event-chevron{transition:none}}

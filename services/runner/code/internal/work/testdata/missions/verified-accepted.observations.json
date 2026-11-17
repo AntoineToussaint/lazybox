@@ -1,0 +1,16 @@
+{
+ "c_ok": {
+  "State": "idle"
+ },
+ "c_stale": {
+  "State": "idle"
+ },
+ "c_redo": {
+  "State": "running",
+  "Detail": "Edit"
+ },
+ "c_ask": {
+  "State": "waiting",
+  "Detail": "Which cache size?"
+ }
+}

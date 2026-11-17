@@ -1,0 +1,11 @@
+{
+ "c_parse": {
+  "State": "idle",
+  "Session": "e_1"
+ },
+ "c_bench": {
+  "State": "running",
+  "Session": "e_2",
+  "Detail": "Bash"
+ }
+}

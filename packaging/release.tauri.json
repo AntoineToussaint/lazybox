@@ -1,0 +1,19 @@
+{
+  "$comment": "Tauri configuration merged over apps/desktop/src-tauri/tauri.conf.json for an installed release (scripts/release/build.mjs). The build adds the version, the runtime resources and the updater's public key; nothing here is secret. Dev and Working keep their own identities (ENVIRONMENTS.md).",
+  "productName": "Lazybox",
+  "identifier": "ai.lazybox.app",
+  "bundle": {
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "minimumSystemVersion": "13.5",
+      "hardenedRuntime": true,
+      "entitlements": "Entitlements.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/AntoineToussaint/lazybox/releases/download/v2-updates/latest.json"],
+      "requireSignedVersion": true
+    }
+  }
+}

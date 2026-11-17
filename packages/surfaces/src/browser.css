@@ -1,0 +1,121 @@
+/* The agent browser (BrowserPanel.tsx): a page the agent works in, where it acts, and its steps. */
+.browser-panel{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0;background:var(--canvas,var(--surface));container-type:inline-size}
+.browser-toolbar{display:flex;align-items:center;gap:6px;min-height:38px;padding:4px 6px 4px 8px;background:var(--surface);border-bottom:1px solid var(--line-subtle);min-width:0}
+.browser-toolbar-gap{flex:1 1 0;min-width:0}
+.browser-badge{display:inline-flex;align-items:center;gap:6px;flex:none;height:22px;padding:0 9px;border-radius:11px;font-size:calc(11.5px * var(--text-scale));font-weight:600;white-space:nowrap;background:var(--surface-hover);color:var(--text-secondary);border:1px solid var(--line)}
+.browser-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--text-faint)}
+.browser-badge[data-tone=live],.browsing-badge[data-tone=live]{background:var(--accent-bg);border-color:var(--accent-line);color:var(--accent-strong,var(--accent))}
+.browser-badge[data-tone=live] .browser-dot,.browsing-badge[data-tone=live] .browser-dot{background:var(--accent);box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 55%,transparent);animation:browser-pulse 1.6s ease-out infinite}
+.browser-badge[data-tone=person],.browsing-badge[data-tone=person]{background:var(--ok-bg);border-color:var(--ok-line-subtle,var(--line));color:var(--ok-soft,var(--ok))}
+.browser-badge[data-tone=person] .browser-dot,.browsing-badge[data-tone=person] .browser-dot{background:var(--ok)}
+.browser-badge[data-tone=waiting],.browsing-badge[data-tone=waiting]{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-soft)}
+.browser-badge[data-tone=waiting] .browser-dot,.browsing-badge[data-tone=waiting] .browser-dot{background:var(--warn);animation:browser-pulse 1.6s ease-out infinite}
+.browser-badge[data-tone=failed]{background:var(--danger-bg);border-color:var(--danger-line-subtle);color:var(--danger-soft)}
+.browser-badge[data-tone=failed] .browser-dot{background:var(--danger)}
+.browser-badge[data-tone=stopped] .browser-dot{background:var(--text-muted);border-radius:2px}
+@keyframes browser-pulse{70%{box-shadow:0 0 0 5px transparent}100%{box-shadow:0 0 0 0 transparent}}
+@media (prefers-reduced-motion:reduce){.browser-dot{animation:none!important}}
+/* The page's address, read-only while the agent holds the browser. */
+.browser-address{display:flex;align-items:center;gap:2px;min-height:30px;padding:0 10px 0 6px;border-bottom:1px solid var(--line-subtle);background:var(--surface);min-width:0;white-space:nowrap}
+.browser-address .web-origin{flex:0 1 auto}
+.browser-address .web-path{flex:0 1 auto;margin-right:8px}
+.browser-title{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;font-size:calc(12px * var(--text-scale));color:var(--text-muted)}
+.browser-address .browser-spinner{flex:none;margin-left:6px}
+.browser-control{display:inline-flex;align-items:center;gap:5px;flex:none;height:26px;padding:0 10px;font-size:calc(12px * var(--text-scale))}
+.browser-stop:hover:not(:disabled){color:var(--danger-strong);border-color:var(--danger-line)}
+.browser-menu>.action-popover{min-width:240px}
+.browser-menu [role=menuitemcheckbox][aria-checked=true] svg{color:var(--ok)}
+.browser-note,.browser-banner{display:flex;align-items:center;gap:8px;margin:0;padding:6px 10px;font-size:calc(12px * var(--text-scale));line-height:1.45;border-bottom:1px solid var(--line-subtle);background:var(--surface-raised);color:var(--text-secondary)}
+.browser-note>span,.browser-banner>span{flex:1;min-width:0}
+.browser-note>svg,.browser-banner>svg{flex:none}
+.browser-note button,.browser-banner button{flex:none;font-size:calc(12px * var(--text-scale));padding:2px 10px}
+.browser-note .icon-button{width:22px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center}
+.browser-note.is-stopped{background:var(--surface-sunken)}
+.browser-note.is-failed{background:var(--danger-bg);color:var(--danger-strong)}
+.browser-note[role=note]{background:var(--warn-bg);color:var(--warn-strong)}
+.browser-banner{background:var(--ok-bg);color:var(--text)}
+.browser-banner>svg{color:var(--ok)}
+.browser-banner kbd,.browser-banner button kbd{font:500 calc(10px * var(--code-scale)) var(--font-mono);padding:0 4px;border:1px solid var(--line-strong);border-radius:3px;background:var(--surface-sunken);color:var(--text-subtle)}
+.browser-banner button kbd{margin-left:4px;background:transparent;color:inherit;border-color:currentColor;opacity:.7}
+.browser-nav{border-bottom:1px solid var(--line-subtle)}
+.browser-view{position:relative;flex:1;min-height:120px;overflow:hidden;background:var(--surface-sunken)}
+.browser-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;outline:none}
+.browser-view[data-holding] .browser-canvas{cursor:default}
+.browser-view[data-holding]:focus-within{box-shadow:inset 0 0 0 2px var(--ok)}
+.browser-view[data-live]:not([data-holding]) .browser-canvas{cursor:not-allowed}
+.browser-placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--text-muted);font-size:calc(12px * var(--text-scale));pointer-events:none}
+.browser-scrim{position:absolute;inset:0;background:color-mix(in srgb,var(--surface-sunken) 55%,transparent);pointer-events:none}
+.browser-marks{position:absolute;inset:0;pointer-events:none}
+.browser-highlight{position:absolute;box-sizing:border-box;border:2px solid var(--accent);border-radius:4px;background:color-mix(in srgb,var(--accent) 14%,transparent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent);animation:browser-highlight 2.2s ease-out forwards}
+.browser-highlight[data-status=running]{animation:browser-highlight-hold 1s ease-in-out infinite alternate}
+.browser-highlight[data-status=failed],.browser-highlight[data-status=blocked]{border-color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,transparent);box-shadow:0 0 0 3px color-mix(in srgb,var(--danger) 20%,transparent)}
+@keyframes browser-highlight{0%{opacity:0;transform:scale(1.06)}12%{opacity:1;transform:scale(1)}70%{opacity:1}100%{opacity:0}}
+@keyframes browser-highlight-hold{from{opacity:.65}to{opacity:1}}
+.browser-cursor{position:absolute;left:0;top:0;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:var(--accent);border:2px solid var(--surface);box-shadow:0 1px 4px color-mix(in srgb,var(--shadow) 45%,transparent);transition:transform .35s cubic-bezier(.3,.7,.3,1)}
+@media (prefers-reduced-motion:reduce){.browser-cursor{transition:none}.browser-highlight{animation:none}}
+.browser-spinner{display:inline-block;width:10px;height:10px;border-radius:50%;border:1.5px solid var(--accent-line);border-top-color:var(--accent);animation:browser-spin .9s linear infinite}
+@keyframes browser-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.browser-spinner{animation:none;border-color:var(--accent)}}
+.browser-empty{flex:1;display:grid;align-content:center;justify-items:center;gap:8px;padding:28px 18px;text-align:center;color:var(--text-muted);font-size:calc(12px * var(--text-scale))}
+.browser-empty h3{margin:4px 0 0;font-size:calc(14px * var(--text-scale));font-weight:600;color:var(--text)}
+.browser-empty p{margin:0;max-width:420px;line-height:1.55}
+.browser-empty-small{font-size:calc(11px * var(--text-scale));color:var(--text-faint)}
+.browser-empty button{display:inline-flex;align-items:center;gap:6px;margin-top:6px}
+/* The steps: a short strip under the page; drag its corner to see more. */
+.browser-log{flex:none;display:flex;flex-direction:column;min-height:0;border-top:1px solid var(--line-subtle);background:var(--surface)}
+.browser-log[data-open]{height:var(--split-browser-log,132px);min-height:60px;max-height:80%;overflow:hidden}
+.browser-log-toggle{display:flex;align-items:center;gap:6px;flex:none;width:100%;height:26px;padding:0 10px;border:0;border-radius:0;background:transparent;color:var(--text-subtle);font-size:calc(11px * var(--text-scale));font-weight:600;text-align:left}
+.browser-log-toggle svg{transition:transform .12s;transform:rotate(-90deg)}
+.browser-log-toggle[aria-expanded=true] svg{transform:none}
+.browser-log-toggle small{font-weight:400;color:var(--text-faint)}
+.browser-log ol{flex:1;min-height:0;overflow-y:auto;margin:0;padding:0 4px 4px;list-style:none}
+.browser-log li>button,.browser-log li>div{display:flex;align-items:center;gap:7px;width:100%;min-height:24px;padding:2px 6px;border:0;border-radius:5px;background:transparent;color:var(--text-secondary);font-size:calc(12px * var(--text-scale));text-align:left;white-space:nowrap}
+.browser-log li>button:hover{background:var(--surface-hover)}
+.browser-log li>button:focus-visible{outline:2px solid var(--focus,var(--info));outline-offset:-2px}
+.browser-step-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;flex:none;color:var(--text-muted)}
+.browser-step-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.browser-step-text small{color:var(--text-faint)}
+.browser-step-actor{flex:none;font-size:calc(10px * var(--text-scale));font-weight:600;padding:0 5px;border-radius:3px;background:var(--ok-bg);color:var(--ok-soft,var(--ok))}
+.browser-step-tag{flex:none;font-size:calc(10.5px * var(--text-scale));padding:0 6px;border-radius:999px;background:var(--warn-bg);color:var(--warn-soft);border:1px solid var(--warn-line)}
+.browser-log time{flex:none;font-size:calc(11px * var(--text-scale));color:var(--text-faint);font-variant-numeric:tabular-nums}
+.browser-log li[data-status=failed] .browser-step-text,.browser-log li[data-status=failed] .browser-step-icon{color:var(--danger-soft)}
+.browser-log li[data-status=blocked] .browser-step-icon{color:var(--warn-soft)}
+.browser-log li[data-status=running] .browser-step-text{color:var(--text)}
+/* The chat header's chip. */
+.browsing-badge{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border-radius:10px;border:1px solid var(--line);background:var(--surface-hover);color:var(--text-secondary);font-size:calc(11px * var(--text-scale));font-weight:600;white-space:nowrap;line-height:1}
+button.browsing-badge{cursor:pointer}
+.chat-heading-meta .browsing-badge{order:1;flex:none;min-width:0;height:18px;margin-left:6px;padding:0 7px;overflow:hidden}
+.chat-heading-meta .browsing-badge>span:last-child{overflow:hidden;text-overflow:ellipsis}
+.chat-heading-meta .browsing-badge::before{content:none}
+button.browsing-badge:hover{filter:brightness(1.08)}
+/* A narrow panel: buttons are their icons, the page title goes. */
+@container (max-width:460px){.browser-title{display:none}.browser-control>span{display:none}.browser-control{padding:0 7px}}
+@container (max-width:340px){.browser-address .web-path{display:none}.browser-banner{flex-wrap:wrap}}
+
+/* Settings → Browser (BrowserSettingsPanel.tsx). */
+.browser-settings-status{display:inline-flex;align-items:center;gap:5px;min-height:20px;font-size:calc(12px * var(--text-scale));color:var(--ok);white-space:nowrap}
+.browser-sites{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.browser-sites li{display:flex;align-items:center;gap:8px;min-height:30px;padding:0 6px 0 10px;border-radius:6px;color:var(--text-muted)}
+.browser-sites li:hover{background:var(--surface-hover)}
+.browser-sites li>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--text);font-size:calc(12.5px * var(--code-scale))}
+.browser-sites .icon-button{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;opacity:.7}
+.browser-sites li:hover .icon-button,.browser-sites .icon-button:focus-visible{opacity:1}
+.browser-sites-empty{margin:4px 0;padding:0 10px;font-size:calc(12px * var(--text-scale));color:var(--text-faint)}
+.browser-site-add{display:flex;gap:6px;margin-top:8px;padding:0 4px}
+.browser-site-add input{flex:1;min-width:0;font-size:calc(12.5px * var(--code-scale))}
+.browser-site-add button{display:inline-flex;align-items:center;gap:5px;flex:none}
+.browser-workspaces{display:flex;flex-direction:column;gap:8px}
+.browser-workspace{border:1px solid var(--line);border-radius:8px;padding:8px 8px 6px;background:var(--surface-sunken)}
+.browser-workspace>header{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 2px 4px;color:var(--text-muted)}
+.browser-workspace>header strong{color:var(--text);font-size:calc(13px * var(--text-scale))}
+.browser-workspace>header small{flex:1;min-width:120px;font-size:calc(11.5px * var(--text-scale));color:var(--text-faint)}
+.browser-workspace>header button{font-size:calc(12px * var(--text-scale))}
+/* Settings → Browser: why agents cannot browse, and the fix. */
+.browser-availability{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;border:1px solid var(--warn-line);border-radius:8px;background:var(--warn-bg);color:var(--text);font-size:calc(12.5px * var(--text-scale));line-height:1.45}
+.browser-availability>svg{flex:none;color:var(--warn)}
+.browser-availability>span{flex:1 1 260px;min-width:0}
+.browser-availability button{flex:none;display:inline-flex;align-items:center;gap:6px}
+.browser-install-output{margin:0 0 12px}
+.browser-install-output .console{margin:0}
+.browser-install-output .output{max-height:220px}
+.browser-workspace-switch{display:inline-flex;align-items:center;gap:6px;font-size:calc(12px * var(--text-scale));color:var(--text-secondary)}

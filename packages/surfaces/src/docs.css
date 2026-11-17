@@ -1,0 +1,27 @@
+/* Help → Documentation (DocsViewer.tsx). */
+.docs-viewer{width:min(1080px,calc(100vw - 32px));height:min(780px,calc(100vh - 48px));max-width:none;max-height:none;padding:0;display:flex;flex-direction:column;overflow:hidden}
+.docs-viewer[open]{display:flex}
+.docs-viewer>header{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line,var(--line-subtle))}
+.docs-viewer>header h2{margin:0;font-size:calc(14px * var(--text-scale));font-weight:600;white-space:nowrap}
+.docs-viewer .docs-back{width:28px;height:28px;padding:0;display:inline-flex;align-items:center;justify-content:center}
+.docs-search{flex:1;display:flex;flex-direction:row;align-items:center;gap:6px;max-width:420px;margin-left:auto;height:28px;padding:0 8px;border:1px solid var(--line,var(--line-subtle));border-radius:6px;color:var(--muted,var(--text-muted))}
+.docs-viewer .docs-search input{flex:1;min-width:0;height:auto;margin:0;padding:0;border:0;box-shadow:none;background:transparent;color:var(--text,var(--text));font:inherit;outline:none}
+.docs-search:focus-within{border-color:var(--accent,var(--focus))}
+.docs-body{flex:1;min-height:0;display:grid;grid-template-columns:var(--split-docs-nav,240px) minmax(0,1fr)}
+.docs-nav{overflow:auto;padding:10px 8px;border-right:1px solid var(--line,var(--line-subtle))}
+.docs-nav h3{margin:12px 8px 4px;font-size:calc(11px * var(--text-scale));font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted,var(--text-muted))}
+.docs-nav ul{list-style:none;margin:0;padding:0}
+.docs-nav button{display:block;width:100%;text-align:left;padding:5px 8px;border:0;border-radius:6px;background:transparent;color:var(--text,var(--text));font:inherit;font-size:calc(13px * var(--text-scale));cursor:pointer}
+.docs-nav button:hover{background:var(--nav-hover,var(--surface-raised))}
+.docs-nav button.selected{background:var(--nav-selected,var(--surface-hover))}
+.docs-nav button small{display:block;margin-top:2px;color:var(--muted,var(--text-muted));font-size:calc(11.5px * var(--text-scale));line-height:1.4}
+.docs-nav button:focus-visible{outline:2px solid var(--accent,var(--focus));outline-offset:-2px}
+.docs-empty{margin:8px;color:var(--muted,var(--text-muted));font-size:calc(13px * var(--text-scale))}
+.docs-page{overflow:auto;padding:18px 28px 40px;outline:none}
+.docs-page .rich-document{max-width:760px;font-size:calc(14px * var(--text-scale));line-height:1.6}
+.docs-page .rich-document img{max-width:100%;height:auto;border-radius:8px;border:1px solid var(--line,var(--line-subtle))}
+.docs-page .rich-document .doc-link{color:var(--accent,var(--accent));cursor:pointer}
+.docs-page .rich-document table{border-collapse:collapse;font-size:calc(13px * var(--text-scale))}
+.docs-page .rich-document th,.docs-page .rich-document td{border:1px solid var(--line,var(--line-subtle));padding:4px 8px;text-align:left;vertical-align:top}
+@media (max-width:760px){.docs-body{grid-template-columns:1fr;grid-template-rows:minmax(0,32%) 1fr}.docs-nav{border-right:0;border-bottom:1px solid var(--line,var(--line-subtle))}.docs-page{padding:14px 16px 32px}}
+.docs-notice{display:flex;align-items:center;gap:8px;margin:0 0 12px;padding:6px 10px;border:1px solid var(--line,var(--line-subtle));border-radius:6px;color:var(--muted,var(--text-muted));font-size:calc(12.5px * var(--text-scale))}.docs-notice button{margin-left:auto;border:0;background:none;color:inherit;cursor:pointer}

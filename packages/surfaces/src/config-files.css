@@ -1,0 +1,47 @@
+/* Config files (POWER.md, "Config files"): where a Settings section is kept,
+   its problems by line; the layout import dialog. */
+.config-file{margin:0 0 16px;border:1px solid var(--line-subtle);border-radius:8px;background:var(--surface);overflow:hidden}
+.config-file.has-problems{border-color:var(--danger-line-subtle)}
+.config-file-line{display:flex;align-items:center;gap:10px;margin:0;padding:9px 8px 9px 12px;font-size:calc(12px * var(--text-scale));line-height:1.45;color:var(--text-tertiary)}
+.config-file-line>.icon,.config-file-line>svg{flex:none;color:var(--text-muted)}
+.config-file-line.is-muted{border:0;padding:0 0 12px;color:var(--text-muted)}
+.config-file-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.config-file-text strong{font:600 calc(12px * var(--code-scale)) var(--font-mono);color:var(--text)}
+.config-file-text small{color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.config-path{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:46%}
+.config-path code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:calc(11px * var(--code-scale)) var(--font-mono);color:var(--text-muted)}
+.config-path .icon-button{flex:none;padding:4px;border-color:transparent;background:transparent;color:var(--text-muted)}
+.config-path .icon-button:hover{color:var(--text);background:var(--surface-hover)}
+.config-file-banner{display:flex;gap:8px;align-items:flex-start;margin:0;padding:8px 12px;border-top:1px solid var(--danger-line-subtle);background:var(--danger-bg);color:var(--danger-soft);font-size:calc(12px * var(--text-scale));line-height:1.5}
+.config-file-banner svg{flex:none;margin-top:2px}
+.config-issues{list-style:none;margin:0;padding:0;border-top:1px solid var(--line-subtle)}
+.config-issues li{display:grid;grid-template-columns:62px 58px minmax(0,1fr);gap:8px;padding:7px 12px;font-size:calc(12px * var(--text-scale));line-height:1.5;align-items:baseline;color:var(--text-tertiary)}
+.config-issues li+li{border-top:1px solid var(--line-subtle)}
+.config-issues .sev{font-weight:600}.config-issues .sev.is-error{color:var(--danger-soft)}.config-issues .sev.is-warning{color:var(--warn-soft)}
+.config-issues .where{font:calc(11px * var(--code-scale)) var(--font-mono);color:var(--text-muted);overflow-wrap:anywhere}
+.config-files-list>li{align-items:flex-start}
+.config-files-list>li>svg{margin-top:2px}
+.config-files-list .config-issues{margin-top:6px;border:1px solid var(--line-subtle);border-radius:6px}
+.config-files-list .config-path{max-width:38%}
+@media (max-width:640px){
+  .config-file-line{flex-wrap:wrap}.config-path{max-width:100%;flex-basis:100%}
+  .config-issues li{grid-template-columns:auto 1fr;gap:2px 8px}.config-issues li>span:last-child{grid-column:1/-1}
+}
+
+/* Layout import (Layout menu → Import, a pasted layout in ⌘K). */
+.layout-import{width:min(560px,calc(100vw - 32px));font-family:var(--font-ui)}
+.layout-import p{margin:0 0 10px;color:var(--text-tertiary);font-size:calc(12px * var(--text-scale));line-height:1.5}
+.layout-import textarea{display:block;width:100%;box-sizing:border-box;min-height:220px;resize:vertical;font:calc(12px * var(--code-scale))/1.5 var(--font-mono);tab-size:2}
+.layout-import .config-issues{margin-top:10px;border:1px solid var(--danger-line-subtle);border-radius:6px}
+.layout-import footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:12px}
+.layout-import footer small{flex:1;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+
+/* The Layout menu: your layouts as files, broken ones by line, the folder. */
+.layout-menu .action-menu-heading .layout-cycle-key{float:right;font:calc(11px * var(--code-scale))/1.4 var(--font-ui);padding:0 6px;border:1px solid var(--line-strong);border-radius:4px;color:var(--text-muted);background:var(--surface);text-transform:none;letter-spacing:0}
+.layout-broken{list-style:none;margin:2px 0 6px;padding:0}
+.layout-broken li{display:flex;gap:6px;align-items:flex-start;padding:4px 8px;font-size:calc(11px * var(--text-scale));line-height:1.45;color:var(--danger-soft)}
+.layout-broken li svg{flex:none;margin-top:2px}
+.layout-broken li span{min-width:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.layout-broken code{font:calc(11px * var(--code-scale)) var(--font-mono);color:var(--text-tertiary)}
+.layout-menu .layout-folder{display:block;margin:6px 8px 2px;padding-top:8px;border-top:1px solid var(--line-subtle);font-size:calc(11px * var(--text-scale));color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.layout-menu .layout-folder code{font:calc(11px * var(--code-scale)) var(--font-mono)}

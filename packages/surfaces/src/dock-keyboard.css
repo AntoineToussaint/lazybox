@@ -1,0 +1,33 @@
+/* The dock from the keyboard (DockLayout, dock-keyboard.ts): the active group's ring, and each group's +. */
+
+/* Shown only while the dock is worked from the keyboard; the first click puts it away. */
+.dock-focus-ring{position:absolute;z-index:45;pointer-events:none;box-sizing:border-box;border:2px solid var(--focus,var(--accent));border-radius:6px;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--canvas,var(--bg)) 55%,transparent);transition:left .14s ease-out,top .14s ease-out,width .14s ease-out,height .14s ease-out}
+.dock-focus-ring[hidden]{display:none}
+/* Nothing beyond that edge: a short nudge toward it. */
+.dock-focus-ring[data-bump=left]{animation:dock-bump-left .26s ease-out}
+.dock-focus-ring[data-bump=right]{animation:dock-bump-right .26s ease-out}
+.dock-focus-ring[data-bump=up]{animation:dock-bump-up .26s ease-out}
+.dock-focus-ring[data-bump=down]{animation:dock-bump-down .26s ease-out}
+@keyframes dock-bump-left{35%{transform:translateX(-5px)}}
+@keyframes dock-bump-right{35%{transform:translateX(5px)}}
+@keyframes dock-bump-up{35%{transform:translateY(-5px)}}
+@keyframes dock-bump-down{35%{transform:translateY(5px)}}
+@media (prefers-reduced-motion:reduce){.dock-focus-ring{transition:none}.dock-focus-ring[data-bump]{animation:none;border-style:dashed}}
+
+/* The + right after a group's tabs: quiet until the group is hovered or active, like the group's other actions. */
+.dock-group-add{display:flex;align-items:center;height:100%;padding:0 2px}
+.dock-group-add details>summary{display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border-radius:5px;color:var(--text-muted);opacity:.55;cursor:pointer;list-style:none;transition:opacity .12s,background .12s}
+.dock-group-add details>summary::-webkit-details-marker{display:none}
+.dv-groupview:hover .dock-group-add details>summary,.dv-active-group .dock-group-add details>summary,.dock-group-add details[open]>summary,.dock-group-add summary:focus-visible{opacity:1}
+.dock-group-add details>summary:hover,.dock-group-add details[open]>summary{background:var(--surface-selected);color:var(--text)}
+.dock-group-add summary:focus-visible{outline:1px solid var(--focus);outline-offset:-1px}
+.workspace-shell .dock-add-menu .action-popover{min-width:230px}
+.workspace-shell .dock-add-menu .action-popover>button{display:flex;align-items:center;gap:9px}
+.workspace-shell .dock-add-menu .action-popover>button>span{flex:1}
+.workspace-shell .dock-add-menu .action-popover>button>svg{flex:none;color:var(--text-subtle)}
+.workspace-shell .dock-add-menu .action-popover>button>small,.workspace-shell .dock-add-menu .action-popover>button>kbd{color:var(--text-faint);font-size:calc(10.5px * var(--text-scale))}
+.workspace-shell .dock-add-menu .action-popover>button>kbd{font-family:var(--font-mono)}
+.workspace-shell .dock-add-menu .action-popover>button.dock-add-primary{font-weight:600}
+.workspace-shell .dock-add-menu .action-popover>hr{border:0;border-top:1px solid var(--line-strong);margin:4px 0}
+/* A minimized group is its tab bar alone: no + there (it opens first). */
+.dock-group-minimized .dock-group-add{display:none}

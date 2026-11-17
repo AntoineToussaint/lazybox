@@ -1,0 +1,196 @@
+/* The page's dock (DockLayout): dockview with the workspace's own quiet chrome. */
+.dockview-theme-lazybox {
+  /* The theme's scheme, from :root: native controls (checkboxes, scrollbars) follow light and dark. */
+  --dv-paneview-active-outline-color: var(--accent-solid-hover);
+  --dv-tabs-and-actions-container-font-size: calc(11px * var(--text-scale));
+  --dv-tabs-and-actions-container-height: 32px;
+  --dv-drag-over-background-color: color-mix(in srgb,var(--accent-solid-hover) 22%,transparent);
+  --dv-drag-over-border-color: var(--accent);
+  --dv-drag-over-border: 1px solid var(--accent);
+  --dv-edge-dock-indicator-color: var(--accent);
+  --dv-tabs-container-scrollbar-color: var(--line-bold);
+  --dv-icon-hover-background-color: var(--surface-selected);
+  --dv-floating-box-shadow: 0 18px 48px color-mix(in srgb,var(--shadow) calc(55% * var(--shadow-strength)),transparent), 0 2px 10px color-mix(in srgb,var(--shadow) calc(35% * var(--shadow-strength)),transparent);
+  --dv-floating-border: 1px solid var(--line-strong);
+  --dv-overlay-z-index: 30;
+  --dv-tab-font-size: calc(11px * var(--text-scale));
+  --dv-border-radius: 6px;
+  --dv-tab-margin: 0;
+  --dv-sash-color: transparent;
+  --dv-active-sash-color: var(--accent-solid-hover);
+  --dv-active-sash-transition-duration: 0.12s;
+  --dv-active-sash-transition-delay: 0.15s;
+  --dv-spacing-padding: 0px;
+  --dv-tab-border-radius: 0px;
+  --dv-sash-border-radius: 1px;
+  --dv-dropdown-border-radius: 6px;
+  --dv-tab-close-icon-size: 12px;
+  --dv-floating-group-border: 1px solid var(--line-strong);
+  --dv-floating-group-dragging-opacity: 0.6;
+  --dv-floating-titlebar-height: 14px;
+  --dv-floating-titlebar-background-color: var(--surface);
+  --dv-floating-titlebar-border-bottom: 1px solid var(--line-subtle);
+  --dv-group-view-background-color: var(--canvas, var(--bg));
+  --dv-tabs-and-actions-container-background-color: var(--surface-sunken);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--canvas, var(--bg));
+  --dv-activegroup-hiddenpanel-tab-background-color: transparent;
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--surface);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: transparent;
+  --dv-tab-divider-color: transparent;
+  --dv-activegroup-visiblepanel-tab-color: var(--text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--text-muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--text-tertiary);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--text-faint);
+  --dv-separator-border: var(--line-subtle);
+  --dv-paneview-header-border-color: var(--line-subtle);
+}
+.dock-layout{position:relative;flex:1;min-height:0;min-width:0;display:flex;overflow:hidden}
+/* Clip, never scroll: dockview parks hidden panels' overlays below the dock, and
+   overflow:hidden would let a focus() or scrollIntoView scroll the whole dock to them. */
+.dock-container{flex:1;min-width:0;min-height:0;position:relative;overflow:hidden;overflow:clip}
+.dock-container>.dv-shell,.dock-container>.dv-dockview{height:100%}
+.dock-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.dock-empty>*{pointer-events:auto}
+
+/* Tabs: icon, title, a quiet close button. Tabs that do not fit go into the
+   group's overflow menu (the chevron), never behind a horizontal scroll bar. */
+.dockview-theme-lazybox .dv-tabs-and-actions-container{border-bottom:1px solid var(--line-subtle)}
+.dockview-theme-lazybox .dv-tabs-container{scrollbar-width:none}
+.dockview-theme-lazybox .dv-tabs-container::-webkit-scrollbar{display:none;height:0}
+.dockview-theme-lazybox .dv-tab{padding:0 4px 0 10px;transition:color .12s,background .12s}
+.dockview-theme-lazybox .dv-tab:focus-visible{outline:1px solid var(--focus);outline-offset:-2px}
+.dockview-theme-lazybox .dv-groupview.dv-active-group .dv-tab.dv-active-tab{box-shadow:inset 0 2px 0 var(--accent-solid-hover)}
+.dock-tab{display:flex;align-items:center;gap:7px;height:100%;min-width:0;max-width:240px;white-space:nowrap;user-select:none}
+.dock-tab>svg{flex:none;opacity:.8}
+.dock-tab-image{flex:none;width:14px;height:14px;border-radius:3px;object-fit:contain}
+.dock-tab-title{overflow:hidden;text-overflow:ellipsis;font-size:calc(11px * var(--text-scale))}
+/* A tab's badge (a review's "3 findings", a live dot while it works): small, beside the title. */
+.dock-tab-badge{flex:none;display:inline-flex;align-items:center;gap:4px;height:15px;padding:0 5px;border-radius:8px;background:var(--surface-selected);color:var(--text-subtle);font-size:calc(10px * var(--text-scale));font-variant-numeric:tabular-nums;line-height:1}
+.dock-tab-badge[hidden]{display:none}
+.dock-tab-badge[data-tone=busy]{padding:0 4px;background:transparent;color:var(--attention-working,var(--running))}
+.dock-tab-badge[data-tone=busy]::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;animation:dock-tab-badge-pulse 1.4s ease-in-out infinite}
+.dock-tab-badge[data-tone=done]{color:var(--ok)}
+.dock-tab-badge[data-tone=warn]{background:var(--warn-bg-strong,var(--surface-selected));color:var(--warn)}
+.dock-tab-badge[data-tone=failed]{background:var(--danger-bg-strong,var(--surface-selected));color:var(--danger)}
+@keyframes dock-tab-badge-pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.dock-tab-badge[data-tone=busy]::before{animation:none}}
+/* A chat group's preview tab: the next conversation chosen with a single click replaces it (double-click keeps it). */
+.dock-tab[data-preview] .dock-tab-title{font-style:italic}
+/* A conversation's status before its title: working, needs you, failed, done. */
+.dock-tab-status{flex:none;width:7px;height:7px;margin:0 -2px;border-radius:50%;background:var(--text-tertiary)}
+.dock-tab-status[hidden]{display:none}
+.dock-tab-status[data-state=working]{background:var(--running,var(--accent))}
+.dock-tab-status[data-state=needs-you]{background:var(--warn)}
+.dock-tab-status[data-state=failed]{background:var(--danger)}
+.dock-tab-status[data-state=done]{background:var(--ok)}
+.dock-tab-status[data-state=idle]{background:var(--text-disabled)}
+@media (prefers-reduced-motion:no-preference){.dock-tab-status[data-state=working]{animation:dock-tab-working 1.6s ease-in-out infinite}}
+@keyframes dock-tab-working{50%{opacity:.45}}
+/* Quiet, but never so faint that a panel looks like it cannot be closed. */
+.workspace-shell .dock-tab-close,.dock-tab-close{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;padding:0;margin-left:1px;border:0;border-radius:4px;background:transparent;color:inherit;opacity:.85;transition:opacity .12s,background .12s}
+.dock-tab-close:hover{opacity:1!important;background:var(--surface-selected)}
+
+/* Group actions, right of the tabs: maximize and the group menu. */
+.dock-group-actions{display:flex;align-items:center;gap:2px;height:100%;padding:0 4px}
+.workspace-shell .dock-group-actions .icon-button,.dock-group-actions .icon-button{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:5px;background:transparent;color:var(--text-muted);opacity:.6;transition:opacity .12s}
+.dock-group-actions details>summary{display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border-radius:5px;color:var(--text-muted);opacity:.6;transition:opacity .12s}
+.dv-groupview:hover .dock-group-actions .icon-button,.dv-groupview:hover .dock-group-actions details>summary,.dock-group-actions details[open]>summary,.dock-group-actions :focus-visible,.dv-active-group .dock-group-actions .icon-button,.dv-active-group .dock-group-actions details>summary{opacity:1}
+.dock-group-actions .icon-button:hover,.dock-group-actions details>summary:hover{background:var(--surface-selected);color:var(--text)}
+/* The shell's generic menu rule (.workspace-shell .workspace-actions>div>button, display:block) must not win: icon beside label. */
+.dock-group-menu .action-popover>button,.workspace-shell .dock-group-menu .action-popover>button{display:flex;align-items:center;gap:9px}
+.dock-group-menu .action-popover>button>span{flex:1}
+.dock-group-menu .action-popover>button>svg{flex:none;color:var(--text-subtle)}
+.dock-group-menu .action-popover>button>kbd{font:calc(10px * var(--code-scale)) var(--font-mono);color:var(--text-faint)}
+.dock-group-menu .action-popover>hr{border:0;border-top:1px solid var(--line-strong);margin:4px 0}
+
+/* A minimized group is its tab bar; its content is not drawn. */
+.dock-group-minimized .dv-content-container,.dock-panel-content.dock-content-hidden{visibility:hidden}
+.dock-group-minimized .dv-tabs-and-actions-container{border-bottom:0}
+
+/* Panel content fills its place; the panel's own header is the tab. */
+.dock-panel-content{height:100%;width:100%;display:flex;flex-direction:column;min-height:0;min-width:0}
+.dock-panel-content>.panel-host{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}
+.dock-panel-content>.panel-host>.workspace-panel{flex:1;border:0}
+
+/* Dividers: invisible until pointed at, focused or dragged; reachable by keyboard. */
+.dockview-theme-lazybox .dv-sash:focus-visible{outline:none;background:var(--accent-solid-hover)}
+.dockview-theme-lazybox .dv-sash:hover{background:var(--accent-solid-hover);transition:background .12s .15s}
+
+/* The drop preview: where the panel lands, outlined, with the rest dimmed. */
+.dockview-theme-lazybox .dv-drop-target-selection{border-radius:6px;box-shadow:inset 0 0 0 1px var(--accent)}
+.dockview-theme-lazybox .dv-tab.dv-tab-dragging,.dockview-theme-lazybox .dv-dragged{opacity:.55}
+
+/* The dock and the phone's single panel fill the page area. */
+.workspace-shell .page-layout{display:flex;flex-direction:column}
+.page-layout>.dock-layout,.page-layout>.mobile-panel{flex:1;min-height:0;min-width:0}
+.mobile-panel{display:flex;flex-direction:column}
+.mobile-panel-body{display:flex;flex-direction:column;flex:1;min-height:0}
+.mobile-panel-body>.panel-host{display:flex;flex-direction:column;flex:1;min-height:0}
+.mobile-panel-body>.panel-host>.workspace-panel{flex:1;border:0}
+.mobile-panel-bar{display:flex;align-items:center;gap:8px;height:40px;padding:0 4px 0 14px;border-bottom:1px solid var(--line);flex:none}
+.mobile-panel-bar>strong{flex:1;font-size:calc(12px * var(--text-scale));font-weight:500;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.workspace-shell .mobile-panel-bar>button{width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent}
+.dock-empty-state{text-align:center;max-width:360px}
+.dock-empty-state h3{font-size:calc(14px * var(--text-scale));color:var(--text-soft);margin-bottom:6px}
+
+html.dock-dragging,html.dock-dragging *{user-select:none!important;-webkit-user-select:none!important;cursor:grabbing}
+
+/* Header: the Panels and Layout menus. */
+/* Panels, Layout and Help sit together and look alike. */
+.workspace-shell .layout-menu>summary,.workspace-shell .panels-menu>summary,.workspace-shell .workspace-header-actions>.help-menu>summary{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:6px;color:var(--text-tertiary)}
+.workspace-shell .layout-menu>summary:hover,.workspace-shell .panels-menu>summary:hover,.workspace-shell .workspace-header-actions>.help-menu>summary:hover{background:var(--surface-selected);color:var(--text)}
+.layout-menu .action-popover{width:min(392px,calc(100vw - 16px))}
+.layout-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:6px;padding:4px 6px 6px}
+.layout-tile{position:relative;display:flex}
+.workspace-shell .layout-tile .layout-apply{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 6px;border:1px solid var(--line);border-radius:8px;background:var(--surface);white-space:normal;text-align:center}
+.workspace-shell .layout-tile .layout-apply:hover{border-color:var(--text-disabled);background:var(--surface-hover)}
+.workspace-shell .layout-tile[aria-current] .layout-apply{border-color:var(--accent-solid-hover);box-shadow:inset 0 0 0 1px var(--accent-solid-hover)}
+.layout-tile .layout-apply>span{font-size:calc(11px * var(--text-scale));line-height:1.3;color:var(--text-soft)}
+.layout-thumbnail{display:block}
+.layout-tile-actions{position:absolute;top:3px;right:3px;display:flex;gap:2px;opacity:0;transition:opacity .12s}
+.layout-tile:hover .layout-tile-actions,.layout-tile:focus-within .layout-tile-actions{opacity:1}
+.workspace-shell .layout-tile-actions .icon-button{width:20px;height:20px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:4px;background:var(--surface-hover)}
+.workspace-shell .layout-menu .layout-action{display:flex;align-items:center;gap:9px;width:100%}
+.layout-menu .layout-action>span{flex:1;text-align:left}
+.layout-name{display:flex;gap:6px;padding:6px}
+.layout-name input{padding:6px 8px;font-size:calc(12px * var(--text-scale))}
+.workspace-shell .layout-name button{padding:6px 10px}
+.workspace-shell .show-panel{display:flex;align-items:center;gap:9px}
+.show-panel>span{flex:1}
+.show-panel>svg{flex:none;color:var(--text-subtle)}
+.panels-menu .show-panel>small{font-size:calc(10px * var(--text-scale));color:var(--accent-solid-hover)}
+
+@media (prefers-reduced-motion: reduce){
+  .dockview-theme-lazybox{--dv-transition-duration:0ms;--dv-active-sash-transition-duration:0s}
+  .dock-tab-close,.dock-group-actions .icon-button,.dock-group-actions details>summary{transition:none}
+}
+
+/* A tablet-width window: the header's tools become icons (their names stay in
+   their tooltips and accessible names), so Panels, Layout and Help fit beside
+   them without the header running off the page. */
+@media (min-width: 761px) and (max-width: 1100px) {
+  .workspace-shell .workspace-header-actions{gap:2px;min-width:0}
+  .workspace-shell .workspace-header-actions .toolbar-action{padding:0 8px}
+  .workspace-shell .workspace-header-actions .toolbar-action>span{display:none}
+}
+
+/* A tool whose panel is already open (its tab names it) keeps only its icon. */
+.workspace-shell .toolbar-action.icon-only{padding:0 9px}
+
+/* Below 760px the page shows one panel at a time: no dock menus. Below 480px
+   Files, Terminal and Help move into the header's ⋯ (WorkspaceHeader). CSS
+   hides them as the window narrows, before the page re-renders. */
+@media (max-width: 760px) {
+  .workspace-shell .workspace-header-actions>.panels-menu,.workspace-shell .workspace-header-actions>.layout-menu{display:none}
+}
+@media (max-width: 479px) {
+  .workspace-shell .workspace-header-actions>.phone-overflow,.workspace-shell .workspace-header-actions>.help-menu{display:none!important}
+}
+/* A group in a window of its own: the way back is labelled, not an arrow to guess (DockMenus GroupActions). */
+.dock-group-actions .dock-put-back{display:inline-flex;align-items:center;gap:6px;height:24px;margin-right:4px;padding:0 10px;border:1px solid var(--accent-solid);border-radius:5px;background:var(--accent-solid);color:var(--on-accent-solid);font-size:calc(11px * var(--text-scale));font-weight:550;white-space:nowrap;cursor:pointer}
+.dock-group-actions .dock-put-back:hover{background:var(--accent-solid-hover);border-color:var(--accent-solid-hover)}
+.dock-group-actions .dock-put-back:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.dv-tabs-and-actions-container:has(.dock-put-back){container-type:inline-size}
+@container (max-width: 380px){.dock-group-actions .dock-put-back span{display:none}.dock-group-actions .dock-put-back{padding:0 7px}}
+/* The content area beside a sidebar left alone (EMPTY_CONTENT in dock-bridge.ts): the empty state, centred. */
+.dock-empty-content{height:100%;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--bg)}

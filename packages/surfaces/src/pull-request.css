@@ -1,0 +1,91 @@
+/* The PR loop: one quiet action bar per repository, one primary next step,
+   and a pull request card whose checks lead with what needs attention. */
+.ship{display:flex;flex-direction:column;gap:6px;padding:0 .5rem 10px;font-size:calc(12px * var(--text-scale))}
+.ship-actions{display:flex;flex-wrap:wrap;gap:6px}
+.changes-panel .ship button{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;font-size:calc(12px * var(--text-scale));line-height:calc(16px * var(--text-scale));border-radius:6px;border:1px solid var(--line-strong);background:var(--surface-active);color:var(--text-soft);cursor:pointer;width:auto}
+.changes-panel .ship button:hover:not(:disabled){background:var(--surface-selected);border-color:var(--line-bold)}
+.changes-panel .ship button:disabled{opacity:.5;cursor:default}
+.changes-panel .ship button.primary,.ship-dialog footer .primary{background:var(--accent-solid);border-color:var(--accent-solid-hover);color:var(--on-accent-solid)}
+.changes-panel .ship button.primary:hover:not(:disabled),.ship-dialog footer .primary:hover:not(:disabled){background:var(--accent-solid-hover)}
+.ship-muted{display:flex;align-items:center;gap:6px;margin:0;color:var(--text-muted);font-size:calc(11px * var(--text-scale));line-height:1.5}
+.ship-warning{color:var(--warn)}
+.ship-error{margin:0;color:var(--danger);font-size:calc(11px * var(--text-scale));line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.ship-notice{margin:0;color:var(--ok);font-size:calc(11px * var(--text-scale));line-height:1.5;overflow-wrap:anywhere}
+.changes-panel .ship-link{border:0!important;background:transparent!important;padding:0 2px!important;color:var(--accent)!important;text-decoration:underline}
+.changes-panel .ship button.ship-icon{margin-left:auto;padding:2px 4px;border:0;background:transparent;color:var(--text-muted);flex-shrink:0}
+.changes-panel .ship button.ship-icon:hover{color:var(--text);background:var(--surface-selected)}
+
+.ship-pr{border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:var(--surface);display:flex;flex-direction:column;gap:6px}
+.ship-pr.is-merged{border-color:var(--accent-line)}
+.changes-panel .ship-pr>header{display:flex;align-items:flex-start;justify-content:flex-start;gap:7px;padding:0!important;color:var(--ok)}
+.ship-pr.is-merged>header,.ship-pr.is-merged .ship-chip.is-merged{color:var(--accent)}
+.ship-pr.is-draft>header,.ship-pr.is-closed>header{color:var(--text-muted)}
+.ship-pr>header a{color:var(--text);text-decoration:none;overflow-wrap:anywhere;line-height:1.4}
+.ship-pr>header a:hover{text-decoration:underline}
+.ship-pr>header a svg{margin-left:4px;vertical-align:-1px;opacity:.6}
+.ship-pr-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0}
+.ship-pr-meta small{margin:0!important;overflow-wrap:anywhere}
+.ship-chip{font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.04em;text-transform:uppercase;padding:2px 7px;border-radius:999px;background:var(--surface-selected);color:var(--text-tertiary)}
+.ship-chip.is-open{background:var(--ok-bg-strong);color:var(--ok)}.ship-chip.is-merged{background:var(--accent-bg)}.ship-chip.is-closed{background:var(--danger-bg);color:var(--danger)}
+.ship-chip.review-approved{background:var(--ok-bg-strong);color:var(--ok)}.ship-chip.review-changes_requested{background:var(--danger-bg);color:var(--danger)}.ship-chip.review-review_required{background:var(--warn-bg-strong);color:var(--warn)}
+.ship-checks summary{display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text-tertiary);padding:2px 0}
+.ship-checks ul{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:2px}
+.ship-check{display:grid;grid-template-columns:14px minmax(0,1fr) auto;align-items:start;gap:7px;padding:3px 2px}
+.ship-check span{overflow-wrap:anywhere;color:var(--text-soft)}
+.ship-check small{display:block!important;margin:1px 0 0!important;color:var(--text-muted)}
+.ship-check a{display:inline-flex;align-items:center;gap:3px;color:var(--accent);font-size:calc(11px * var(--text-scale));text-decoration:none}
+.ship-check a:hover{text-decoration:underline}
+.ship-check em{color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.ship-check.is-failed>svg,.ship-checks-state.is-failure{color:var(--danger)}
+.ship-check.is-running>svg,.ship-checks-state.is-pending{color:var(--warn)}
+.ship-check.is-passed>svg,.ship-checks-state.is-success{color:var(--ok)}
+.ship-check.is-skipped>svg,.ship-checks-state.is-none{color:var(--text-muted)}
+.ship-checks-state{display:inline-flex}
+.ship-pr-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.ship-merge{display:inline-flex;gap:4px;align-items:center}
+.changes-panel .ship-merge select{width:auto;padding:4px 6px;font-size:calc(11px * var(--text-scale));border-radius:6px;background:var(--surface-active);color:var(--text-soft);border:1px solid var(--line-strong);max-width:150px}
+.ship-confirm{display:flex;flex-wrap:wrap;align-items:center;gap:6px;color:var(--text)}
+.ship-blocker{font-size:calc(11px * var(--text-scale))}.ship-blocker a{color:var(--accent)}
+
+.ship-dialog{width:min(560px,calc(100vw - 32px));font-family:var(--font-ui);font-size:calc(13px * var(--text-scale));display:flex;flex-direction:column;gap:12px}
+.ship-dialog[open]{display:flex}
+.ship-dialog h2{display:flex;align-items:center;gap:8px;margin:0;font-size:calc(17px * var(--text-scale));font-weight:600;letter-spacing:-.2px}
+.ship-dialog h2 code{font-size:calc(13px * var(--code-scale));font-weight:500;color:var(--accent);overflow-wrap:anywhere}
+.ship-dialog>[data-dialog-drag-handle]{margin-bottom:4px!important}
+.ship-dialog>[data-dialog-drag-handle]>button{width:28px;height:28px;padding:0;border:0;background:transparent;color:var(--text-muted);font-size:calc(20px * var(--text-scale))}
+.ship-field{display:flex;flex-direction:column;gap:6px;font-size:calc(11px * var(--text-scale));font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted)}
+.ship-field input,.ship-field textarea{font:calc(13px * var(--text-scale))/1.5 var(--font-ui);text-transform:none;letter-spacing:0;font-weight:400;padding:8px 10px;border-radius:7px;border:1px solid var(--line-strong);background:var(--surface-sunken);color:var(--text);resize:vertical}
+.ship-field textarea{font-family:var(--font-mono);font-size:calc(12px * var(--code-scale))}
+.ship-field input:focus,.ship-field textarea:focus{outline:2px solid var(--focus);outline-offset:0;border-color:transparent}
+.ship-files{border:1px solid var(--line);border-radius:7px;padding:0;margin:0;min-width:0}
+.ship-files legend{padding:0 6px;margin-left:6px;font-size:calc(11px * var(--text-scale));color:var(--text-tertiary)}
+.ship-dialog .ship-files legend label{display:flex;flex-direction:row;align-items:center;gap:6px;margin:0}
+.ship-files>div{max-height:150px;overflow:auto;padding:4px 8px 8px;display:flex;flex-direction:column;gap:1px}
+.ship-files>div label{display:grid;grid-template-columns:auto 22px minmax(0,1fr);align-items:center;gap:8px;padding:3px 2px;font-size:calc(12px * var(--text-scale));color:var(--text-soft);cursor:pointer}
+.ship-files code{color:var(--accent);white-space:pre;font-size:calc(11px * var(--code-scale))}
+.ship-files span{overflow-wrap:anywhere}
+.ship-assist{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.ship-ask{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;font-size:calc(12px * var(--text-scale));border-radius:6px;border:1px dashed var(--accent-line);background:transparent;color:var(--accent-soft);cursor:pointer}
+.ship-ask:hover:not(:disabled){background:var(--accent-bg)}
+.ship-ask:disabled{opacity:.5;cursor:default;border-color:var(--line-strong);color:var(--text-muted)}
+.ship-agent-waiting{display:inline-flex;align-items:center;gap:8px;color:var(--accent-soft);font-size:calc(12px * var(--text-scale))}
+.ship-agent-waiting .ship-link{background:transparent;border:0;color:var(--accent);text-decoration:underline;cursor:pointer;font-size:calc(12px * var(--text-scale))}
+.ship-spinner{width:12px;height:12px;border-radius:50%;border:2px solid var(--accent-line);border-top-color:var(--accent-soft);animation:ship-spin .8s linear infinite}
+@keyframes ship-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.ship-spinner{animation:none}}
+.ship-route{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0;color:var(--text-muted)}
+.ship-route code{color:var(--accent);overflow-wrap:anywhere}
+.ship-route small{margin-left:auto;font-size:calc(11px * var(--text-scale))}
+.ship-dialog .ship-base{display:inline-flex;flex-direction:row;align-items:center;gap:6px}
+.ship-dialog .ship-base select{width:auto;padding:4px 6px;border-radius:6px;background:var(--surface-sunken);color:var(--text);border:1px solid var(--line-strong);font-size:calc(12px * var(--text-scale))}
+.ship-dialog input[type=checkbox]{width:15px;height:15px;flex:none;padding:0;margin:0;accent-color:var(--accent-solid-hover)}
+.ship-dialog .ship-toggle{display:flex;flex-direction:row;align-items:center;gap:8px;font-size:calc(12px * var(--text-scale));color:var(--text-soft)}
+.ship-notes{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.ship-notes:empty{display:none}
+.ship-notes li{display:flex;align-items:center;gap:6px}
+.ship-dialog footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:4px}
+.ship-dialog footer small{flex:1;font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.ship-dialog footer button{padding:8px 12px;font-size:calc(12px * var(--text-scale));border-radius:6px;line-height:calc(18px * var(--text-scale))}
+.changes-notice{display:flex;align-items:center;gap:10px;margin:0 0 8px;padding:8px 10px;border-radius:7px;background:var(--ok-bg);border:1px solid var(--ok-line-subtle);color:var(--ok-strong);font-size:calc(12px * var(--text-scale))}
+.changes-notice span{flex:1}
+.changes-notice button{border:0;background:transparent;color:var(--running);font-size:calc(16px * var(--text-scale));padding:0 4px;cursor:pointer}

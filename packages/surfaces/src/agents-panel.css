@@ -1,0 +1,106 @@
+/* Agents: every conversation across workspaces, by urgency (AgentsPanel). */
+.panel-agents{background:var(--sidebar)}
+/* The filter and grouping stay put; the list scrolls under them. */
+.agents-panel{flex:1;display:flex;flex-direction:column;box-sizing:border-box;height:100%;min-height:0;padding:6px 6px 0;overflow:hidden;background:var(--sidebar)}
+.agents-list{flex:1;min-height:0;display:flex;flex-direction:column;gap:1px;margin:0 -6px;padding:0 6px 12px;overflow:auto;overscroll-behavior:contain}
+
+/* Filter, mark all read; then the grouping and what needs you. */
+.agents-heading{display:flex;align-items:center;gap:4px;padding:2px 2px 4px}
+.agents-filter,.workspace-shell .agents-filter{flex:1;min-width:0;flex-direction:row;display:flex;align-items:center;gap:6px;box-sizing:border-box;height:26px;padding:0 4px 0 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--text-faint);cursor:text}
+.agents-filter>svg{flex:none}
+.agents-filter:focus-within{border-color:var(--focus,var(--accent));color:var(--text-muted)}
+.workspace-shell .agents-filter input{flex:1;min-width:0;height:22px;padding:0;border:0;outline:none;background:transparent;color:var(--text);font-size:calc(11.5px * var(--text-scale))}
+.agents-filter input::-webkit-search-cancel-button{display:none}
+.agents-filter input::placeholder{color:var(--text-faint)}
+.workspace-shell .agents-filter-clear,.workspace-shell .agents-mark-all{width:22px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:4px;background:transparent;color:var(--text-muted)}
+.workspace-shell .agents-mark-all{width:26px;height:26px}
+.workspace-shell .agents-mark-all:disabled{opacity:.35}
+.workspace-shell .agents-filter-clear:hover,.workspace-shell .agents-mark-all:hover:not(:disabled){background:var(--surface-selected);color:var(--text)}
+.agents-toolbar{display:flex;align-items:center;gap:8px;padding:0 2px 6px}
+.agents-grouping{flex:none;display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.workspace-shell .agents-grouping button{padding:2px 8px;font-size:calc(10px * var(--text-scale));line-height:calc(16px * var(--text-scale));border:0;border-radius:0;background:transparent;color:var(--text-subtle)}
+.workspace-shell .agents-grouping button+button{border-left:1px solid var(--line)}
+.workspace-shell .agents-grouping button[aria-pressed=true]{background:var(--surface-selected);color:var(--text)}
+.agents-summary{flex:1;min-width:0;text-align:right;font-size:calc(10.5px * var(--text-scale));color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.agents-summary[data-urgent]{color:var(--attention-input,var(--warn));font-weight:550}
+
+/* Sections fold; the count stays. */
+.workspace-shell .agents-group-title{display:flex;align-items:center;gap:6px;width:100%;height:24px;padding:0 6px;border:0;border-radius:5px;background:transparent;font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--text-muted)}
+.workspace-shell .agents-group-title:hover{background:var(--surface-hover);color:var(--text-soft)}
+.agents-group-title>svg:first-child{flex:none;color:var(--text-faint)}
+.agents-group-pin{display:inline-flex;color:var(--accent)}
+.agents-group-name{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agents-group-title>b{font-weight:500;color:var(--text-faint);font-variant-numeric:tabular-nums;letter-spacing:0}
+.agents-group>ul{list-style:none;margin:0 0 4px;padding:0}
+.agents-group li{position:relative}
+
+/* A row: state, title, age on the first line; workspace · what it needs on the second. */
+.workspace-shell .agent-row{display:flex;align-items:flex-start;gap:8px;width:100%;min-width:0;padding:5px 8px 5px 6px;border:0;border-radius:6px;background:transparent;text-align:left;white-space:normal;color:inherit}
+.workspace-shell .agent-row:hover{background:var(--surface-hover)}
+.workspace-shell .agent-row:focus-visible{outline:2px solid var(--focus,var(--accent));outline-offset:-2px;background:var(--surface-hover)}
+.workspace-shell .agent-row[aria-current=true]{background:var(--nav-selected,var(--surface-active));box-shadow:inset 2px 0 var(--accent)}
+.agent-mark{position:relative;flex:none;display:inline-flex;margin-top:2px}
+.agent-mark>.unread-dot{position:absolute;right:-3px;top:-2px;box-shadow:0 0 0 2px var(--sidebar)}
+.agents-group li[data-state=failed] .unread-dot{background:var(--attention-failed)}
+.agent-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.agent-title{display:flex;align-items:center;gap:5px;min-width:0}
+.agent-title strong{min-width:0;font-size:calc(12px * var(--text-scale));line-height:calc(17px * var(--text-scale));font-weight:450;color:var(--text-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agents-group li[data-unread] .agent-title strong,.agents-group li[data-state=needs-input] .agent-title strong{font-weight:600;color:var(--text)}
+.agent-pinned{flex:none;display:inline-flex;color:var(--accent)}
+.agent-meta{display:flex;gap:6px;min-width:0;font-size:calc(10.5px * var(--text-scale));line-height:calc(15px * var(--text-scale));color:var(--text-muted)}
+.agent-meta>*{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-meta>.agent-workspace{flex:none;max-width:45%}
+.agent-meta>.agent-workspace::after{content:' ·';color:var(--text-faint)}
+.agent-meta em{font-style:normal}
+.agents-group li[data-state=needs-input] .agent-meta{color:var(--attention-input)}
+.agents-group li[data-state=failed] .agent-meta{color:var(--attention-failed)}
+.agents-group li[data-state=working] .agent-meta .inbox-live{color:var(--attention-working);font-variant-numeric:tabular-nums}
+.agent-age{flex:none;width:30px;margin-top:1px;text-align:right;font-size:calc(10px * var(--text-scale));line-height:calc(17px * var(--text-scale));color:var(--text-faint);font-variant-numeric:tabular-nums}
+
+/* Pin and mark read take the age's place on hover or focus; never both at once. */
+.agent-tools{position:absolute;right:4px;top:4px;display:none;gap:2px}
+.agents-group li:hover>.agent-tools,.agents-group li:focus-within>.agent-tools{display:flex}
+.agents-group li:hover>.agent-row .agent-age,.agents-group li:focus-within>.agent-row .agent-age{visibility:hidden}
+.agents-group li:hover>.agent-row:has(+.agent-tools .agent-seen) .agent-title,.agents-group li:focus-within>.agent-row:has(+.agent-tools .agent-seen) .agent-title{padding-right:24px}
+.workspace-shell .agent-pin,.workspace-shell .agent-seen{width:22px;height:20px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:4px;background:transparent;color:var(--text-muted)}
+.workspace-shell .agent-pin:hover,.workspace-shell .agent-seen:hover{background:var(--surface-selected);color:var(--text)}
+.workspace-shell .agent-pin[aria-pressed=true]{color:var(--accent)}
+
+/* Running sub-agents, one level under their conversation, folded. */
+.workspace-shell .agent-subagents-toggle{display:flex;align-items:center;gap:4px;margin:-2px 0 2px 26px;padding:1px 6px;height:18px;border:0;border-radius:4px;background:transparent;font-size:calc(10px * var(--text-scale));color:var(--text-muted)}
+.workspace-shell .agent-subagents-toggle:hover,.workspace-shell .agent-subagents-toggle:focus-visible{background:var(--surface-hover);color:var(--text-soft)}
+.agent-subagents{list-style:none;margin:0 0 4px 30px;padding:0 0 0 6px;border-left:1px solid var(--line-subtle)}
+.workspace-shell .agent-subagent{display:flex;align-items:center;gap:6px;width:100%;min-width:0;height:22px;padding:0 6px;border:0;border-radius:4px;background:transparent;text-align:left;font-size:calc(10.5px * var(--text-scale));color:var(--text-tertiary)}
+.workspace-shell .agent-subagent:hover,.workspace-shell .agent-subagent:focus-visible{background:var(--surface-hover);color:var(--text-soft)}
+.agent-subagent .live-indicator{--live-size:7px;flex:none}
+.agent-subagent-name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-soft)}
+.agent-subagent-detail{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted)}
+.agent-subagent time{flex:none;font-size:calc(10px * var(--text-scale));color:var(--text-faint);font-variant-numeric:tabular-nums}
+
+/* Renaming in place. */
+.agent-renaming{display:flex;align-items:center;gap:8px;padding:3px 6px}
+.conversation-inline-rename{flex:1;min-width:0;display:flex}
+.workspace-shell .conversation-inline-rename input{flex:1;min-width:0;height:24px;padding:2px 6px;font-size:calc(12px * var(--text-scale));border-radius:4px}
+
+.agents-empty{display:flex;flex-direction:column;align-items:center;gap:8px;margin:auto 0;padding:24px 16px;text-align:center;color:var(--text-muted)}
+.agents-empty p{margin:0;font-size:calc(11.5px * var(--text-scale));line-height:1.5}
+.workspace-shell .agents-empty button{padding:4px 10px;font-size:calc(11px * var(--text-scale))}
+
+/* Agent trees (Session.lineage): an orchestrator's agents nest one level
+   under it; an agent away from its orchestrator says who started it. */
+.agents-group li[data-depth="1"]{margin-left:14px;border-left:1px solid var(--line-subtle);padding-left:4px}
+.agent-title .agent-orchestrator{flex:none;display:inline-flex;align-items:center;gap:3px;margin-left:6px;padding:0 5px;border:1px solid var(--accent-line);border-radius:7px;background:var(--accent-bg);color:var(--accent-strong);font-size:calc(9.5px * var(--text-scale));line-height:calc(14px * var(--text-scale));font-variant-numeric:tabular-nums}
+/* A block, not a flex row: text-overflow only cuts a block's own text with "…". */
+.agent-main .agent-lineage{display:block;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:calc(10px * var(--text-scale));line-height:calc(14px * var(--text-scale));color:var(--text-faint)}
+.agent-main .agent-lineage>svg{display:inline-block;vertical-align:-1px;margin-right:4px}
+.inbox-lineage{display:block;font-size:calc(11px * var(--text-scale));color:var(--text-subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* What missions need from the person, at the top of the Agents list: plans to
+   approve and tasks to accept, before any conversation. */
+.agents-list .inbox-missions{margin:2px 0 8px;padding:6px 6px 4px;border:1px solid var(--attention-input-line,var(--warn-line));border-radius:8px;background:var(--surface-raised)}
+.agents-list .inbox-missions h3{display:flex;align-items:center;gap:6px;margin:0 2px 4px;font-size:calc(10.5px * var(--text-scale));font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+.agents-list .inbox-missions h3 span{margin-left:auto;font-variant-numeric:tabular-nums}
+.agents-list .inbox-missions ul{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.agents-list .inbox-missions .inbox-task{padding:6px 6px}
+.agents-list .inbox-missions .inbox-task-head strong{font-size:calc(12px * var(--text-scale))}
+.agent-title .agent-role{flex:none;padding:0 5px;border:1px solid var(--line);border-radius:7px;font-size:calc(9.5px * var(--text-scale));line-height:calc(14px * var(--text-scale));color:var(--text-subtle)}

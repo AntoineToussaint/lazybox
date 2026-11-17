@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=../layout.schema.json
+name: Review
+description: Changes, the file, and the conversation side by side
+layout:
+  split: row
+  sizes: [16, 32, 30, 22]
+  children:
+    - split: column
+      sizes: [55, 45]
+      children:
+        - panels: [collections]
+        - panels: [agents]
+    - panels: [changes]
+    - panels: [editor]
+    - panels: [chat]

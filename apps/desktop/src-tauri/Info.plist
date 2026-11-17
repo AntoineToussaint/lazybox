@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Voice (VOICE.md): shown by macOS the first time you dictate. Tauri
+	     merges this file into the app bundle's Info.plist and embeds it in a
+	     development binary. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Lazybox listens only while you dictate a message or a command. Audio is never saved.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Lazybox turns what you dictate into text on this Mac. Audio is never saved.</string>
+</dict>
+</plist>

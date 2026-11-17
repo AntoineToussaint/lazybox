@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=../extension.schema.json
+#
+# A Lazybox extension (EXTENSIONS.md): static pages Lazybox shows in a
+# sandboxed panel. It can do only what you approve in Settings → Extensions:
+#
+#   read:workspaces  read:sessions  read:attention  read:commands
+#   read:missions    read:usage     show:conversations
+#   send:messages    do:<action>    (an action that only shows, focuses or
+#                                    arranges: lazybox do --list marks them)
+#
+# network: lists the https:// origins its pages may fetch from; nothing else
+# is reachable. Lazybox reloads the panel when you save a file here.
+# Check it with: lazybox extension validate
+lazybox: 1
+name: {{name}}
+version: 0.1.0
+description: What this panel shows.
+panels:
+  - id: main
+    title: {{name}}
+    icon: puzzle
+    entry: index.html
+grants:
+  - read:attention
+network: []

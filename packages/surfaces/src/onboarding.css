@@ -1,0 +1,73 @@
+/* Onboarding: the first-run welcome, What's new in a corner, and Help (?). */
+.onboarding-welcome{width:min(640px,calc(100vw - 32px));padding:22px 24px 18px;font-family:var(--font-ui);font-size:calc(13px * var(--text-scale));border-color:var(--border-strong,var(--line-strong));background:var(--surface-raised,var(--surface-raised))}
+.onboarding-welcome>[data-dialog-drag-handle]{margin-bottom:8px}
+.onboarding-title{display:flex;align-items:center;gap:12px}
+.onboarding-title h2{margin:0;font-size:calc(19px * var(--text-scale));line-height:calc(26px * var(--text-scale));font-weight:600;letter-spacing:-.3px;color:var(--text-strong,var(--text))}
+.onboarding-close{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0!important;border:0!important;border-radius:6px;background:transparent!important;color:var(--text-muted,var(--text-muted))}
+.onboarding-close:hover{background:var(--surface-hover,var(--surface-selected))!important;color:var(--text,var(--text))}
+.onboarding-lede{margin:0 0 16px;color:var(--text-muted,var(--text-tertiary));line-height:1.6}
+.onboarding-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.onboarding-steps>li{display:grid;grid-template-columns:32px minmax(0,1fr) auto;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border,var(--line));border-radius:10px;background:var(--surface,var(--surface))}
+.onboarding-steps>li.onboarding-keys-step{grid-template-columns:32px minmax(0,1fr);align-items:start}
+.onboarding-step-icon{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;background:var(--accent-bg);color:var(--accent-soft)}
+.onboarding-steps h3{margin:0 0 3px;font-size:calc(13px * var(--text-scale));font-weight:600;color:var(--text-strong,var(--text))}
+.onboarding-steps p{margin:0;font-size:calc(12px * var(--text-scale));line-height:1.55;color:var(--text-muted,var(--text-tertiary))}
+.onboarding-agents{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:2px;font-size:calc(11px * var(--text-scale))}
+.onboarding-agents li{display:flex;align-items:center;gap:6px;color:var(--text-muted,var(--text-tertiary))}
+.onboarding-agents li.ready svg{color:var(--ok,var(--accent))}
+.onboarding-agents li.missing svg{color:var(--warn,var(--text-muted))}
+.onboarding-steps>li>button{white-space:nowrap;padding:6px 12px;font-size:calc(12px * var(--text-scale));border-radius:6px}
+.onboarding-key-list{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;margin:8px 0 0}
+.onboarding-key-list>div{display:grid;grid-template-columns:104px minmax(0,1fr);align-items:baseline;gap:10px}
+.onboarding-key-list dt{white-space:nowrap}
+.onboarding-key-list dd{margin:0;display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;min-width:0}
+.onboarding-key-list dd strong{font-size:calc(12px * var(--text-scale));font-weight:550;color:var(--text,var(--text))}
+.onboarding-key-list dd small{font-size:calc(11px * var(--text-scale));color:var(--text-muted,var(--text-muted))}
+.onboarding-keys{display:inline-flex;gap:3px}
+.onboarding-welcome kbd{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 5px;border:1px solid var(--border-strong,var(--line-bold));border-bottom-width:2px;border-radius:5px;background:var(--surface-sunken,var(--surface-sunken));color:var(--text,var(--text));font:600 calc(11px * var(--code-scale))/1 var(--font-mono)}
+.onboarding-or{color:var(--text-muted,var(--text-faint))}
+.onboarding-welcome>footer{display:flex;align-items:center;gap:12px;margin-top:16px}
+.onboarding-welcome>footer small{flex:1;font-size:calc(11px * var(--text-scale));color:var(--text-muted,var(--text-muted))}
+.onboarding-docs{border:0;background:none;padding:0;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:5px;color:var(--accent-text,var(--accent));font-size:calc(12px * var(--text-scale));text-decoration:none}
+.onboarding-docs:hover{text-decoration:underline}
+.onboarding-welcome>footer button.primary{padding:7px 16px;font-size:calc(12px * var(--text-scale));border-radius:6px}
+@media(max-width:560px){
+  .onboarding-steps>li{grid-template-columns:32px minmax(0,1fr)}
+  .onboarding-steps>li>button{grid-column:2;justify-self:start}
+  .onboarding-key-list>div{grid-template-columns:1fr;gap:2px}
+  .onboarding-welcome>footer{flex-wrap:wrap}
+}
+
+/* What's new: a quiet card in the corner; it never takes focus unless asked for. */
+.whats-new{position:fixed;right:16px;bottom:48px;z-index:40;display:flex;flex-direction:column;width:min(380px,calc(100vw - 32px));max-height:min(460px,calc(100dvh - 128px));border:1px solid var(--border-strong,var(--line-strong));border-radius:12px;background:var(--surface-raised,var(--surface-raised));box-shadow:0 18px 50px color-mix(in srgb,var(--shadow) calc(53% * var(--shadow-strength)),transparent);font-family:var(--font-ui);font-size:calc(12px * var(--text-scale));color:var(--text,var(--text));animation:whats-new-in .18s ease-out}
+.whats-new:focus{outline:none}.whats-new:focus-visible{outline:2px solid var(--focus,var(--focus));outline-offset:2px}
+@keyframes whats-new-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){.whats-new{animation:none}}
+.whats-new>header{display:flex;align-items:center;justify-content:space-between;padding:10px 10px 0 14px}
+.whats-new-badge{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:999px;background:var(--accent-bg);color:var(--accent-soft);font-size:calc(11px * var(--text-scale));font-weight:600;letter-spacing:.02em}
+.whats-new-body{overflow:auto;padding:8px 14px 4px;display:flex;flex-direction:column;gap:10px}
+.whats-new-release h3{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin:0 0 6px;font-size:calc(14px * var(--text-scale));font-weight:600;color:var(--text-strong,var(--text))}
+.whats-new-release h3 small{font-size:calc(10px * var(--text-scale));font-weight:400;color:var(--text-muted,var(--text-muted));white-space:nowrap}
+.whats-new-release ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+.whats-new-release li{display:flex;flex-direction:column;gap:1px;line-height:1.5}
+.whats-new-release li strong{font-weight:550;color:var(--text,var(--text))}
+.whats-new-release li span{color:var(--text-muted,var(--text-tertiary))}
+.whats-new-group+.whats-new-group{margin-top:12px}
+.whats-new-group h4{margin:0 0 5px;font-size:calc(10.5px * var(--text-scale));font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted,var(--text-subtle))}
+.whats-new-older{border-top:1px solid var(--border,var(--line-subtle));padding-top:8px}
+.whats-new-older>summary{cursor:pointer;color:var(--text-muted,var(--text-subtle));font-size:calc(11px * var(--text-scale));margin-bottom:6px}
+.whats-new-older .whats-new-release{margin-top:8px}
+.whats-new>footer{display:flex;justify-content:flex-end;padding:8px 14px 12px}
+.whats-new>footer button{padding:5px 14px;font-size:calc(12px * var(--text-scale));border-radius:6px}
+.whats-new>footer{gap:8px}
+/* Right after an update: which version this is now; or that the install did not take. */
+.whats-new-updated{margin:0 auto 0 8px;font-size:calc(11px * var(--text-scale));color:var(--text-muted,var(--text-muted))}
+.whats-new.is-failed .whats-new-badge{background:var(--warn-bg);color:var(--warn-soft)}
+.whats-new.is-failed .whats-new-body p{margin:0;line-height:1.55;color:var(--text-tertiary)}
+
+/* Help (?) in the header. */
+.help-mark{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1.5px solid currentColor;border-radius:50%;font:700 calc(11px * var(--text-scale))/1 var(--font-ui)}
+.workspace-header-actions>.help-menu>summary{color:var(--text-muted,var(--text-subtle))}
+.help-menu>.action-popover>button{display:flex;align-items:center;gap:9px}
+.help-menu>.action-popover>button>svg{flex:none;color:var(--text-muted,var(--text-subtle))}
+.help-menu>.action-popover>hr{border:0;border-top:1px solid var(--line-strong);margin:4px 0}

@@ -1,0 +1,115 @@
+/* The workspace hover card (WorkspaceHover.tsx): calm, dense, readable at a
+   glance. Colour says state only: changes, checks, what waits for you. */
+.workspace-hover{position:fixed;inset:auto;margin:0;box-sizing:border-box;width:348px;max-width:calc(100vw - 16px);overflow:auto;overscroll-behavior:contain;padding:12px 0 0;border:1px solid var(--line);border-radius:10px;background:var(--surface-raised);color:var(--text);font:calc(12px * var(--text-scale))/1.4 var(--font-ui);text-align:left;box-shadow:0 14px 36px color-mix(in srgb,var(--shadow) calc(45% * var(--shadow-strength,1)),transparent),0 2px 6px color-mix(in srgb,var(--shadow) calc(18% * var(--shadow-strength,1)),transparent);z-index:2147483646;animation:workspace-hover-in .12s ease-out}
+.workspace-hover:not(:popover-open){display:none}
+.workspace-hover[data-side=left]{animation-name:workspace-hover-in-left}
+.workspace-hover[data-side=below],.workspace-hover[data-side=above]{animation-name:workspace-hover-fade}
+.workspace-hover:focus{outline:none}
+.workspace-hover:focus-visible{box-shadow:0 0 0 2px var(--focus),0 14px 36px color-mix(in srgb,var(--shadow) calc(45% * var(--shadow-strength,1)),transparent)}
+@keyframes workspace-hover-in{from{opacity:0;transform:translateX(-4px)}}
+@keyframes workspace-hover-in-left{from{opacity:0;transform:translateX(4px)}}
+@keyframes workspace-hover-fade{from{opacity:0}}
+@media(prefers-reduced-motion:reduce){.workspace-hover{animation:none}}
+html[data-motion=reduce] .workspace-hover{animation:none}
+
+.workspace-hover a{color:inherit;text-decoration:none}
+/* Above the shell's own button look (.workspace-shell button), wherever the card is put. */
+div.workspace-hover button{font:inherit;color:inherit;font-weight:inherit;white-space:normal;transition:none}
+.workspace-hover ul{list-style:none;margin:0;padding:0}
+
+/* Header: name, task, age. */
+.workspace-hover-header{display:flex;flex-direction:column;gap:3px;padding:0 14px 10px}
+.workspace-hover-header h3{margin:0;font-size:calc(14px * var(--text-scale));font-weight:600;line-height:1.3;color:var(--text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.workspace-hover-origin{display:inline-flex;align-items:center;gap:5px;max-width:100%;min-width:0;color:var(--text-secondary);align-self:flex-start;border-radius:4px}
+.workspace-hover-origin>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.workspace-hover-origin>svg{flex:none;color:var(--text-muted)}
+a.workspace-hover-origin:hover{color:var(--accent)}
+a.workspace-hover-origin:hover>svg{color:inherit}
+.workspace-hover-age{margin:0;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+
+/* What waits for you: the one highlighted line. */
+.workspace-hover .workspace-hover-waiting{display:flex;align-items:center;gap:8px;width:calc(100% - 20px);margin:0 10px 10px;padding:6px 10px;border:1px solid var(--warn-line-subtle);border-radius:7px;background:var(--warn-bg);color:var(--warn-strong);font-weight:600;text-align:left;cursor:pointer}
+.workspace-hover .workspace-hover-waiting:hover{background:var(--warn-bg-strong)}
+.workspace-hover .workspace-hover-waiting:focus-visible{outline:none;box-shadow:0 0 0 2px var(--focus)}
+.workspace-hover-go{display:inline-flex;align-items:center;gap:2px;margin-left:auto;font-weight:500;font-size:calc(11px * var(--text-scale));opacity:.85}
+
+/* Sections. */
+.workspace-hover-section{padding:9px 14px 10px;border-top:1px solid var(--line-subtle)}
+.workspace-hover-section h4{margin:0 0 6px;font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.6px;text-transform:uppercase;color:var(--text-faint)}
+.workspace-hover-none{margin:0;color:var(--text-muted)}
+.workspace-hover .workspace-hover-more{display:block;margin:4px 0 0 -4px;padding:1px 4px;border:0;border-radius:4px;background:transparent;color:var(--text-muted);font-size:calc(11px * var(--text-scale));cursor:pointer}
+.workspace-hover .workspace-hover-more:hover{color:var(--text);background:var(--surface-hover)}
+
+/* Repositories: name and ↑↓ against main; branch and what it changes. */
+.workspace-hover-repos{display:flex;flex-direction:column;gap:7px}
+.workspace-hover-repo-line{display:flex;align-items:center;gap:6px;min-width:0}
+.workspace-hover-repo-line>svg{flex:none;color:var(--text-muted)}
+.workspace-hover-repo-line.is-detail{margin-top:2px;padding-left:18px;color:var(--text-secondary);font-size:calc(11.5px * var(--text-scale))}
+.workspace-hover-repo-line.is-detail>svg{color:var(--text-faint)}
+.workspace-hover-repo-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.workspace-hover-owner{color:var(--text-muted);font-weight:400}
+.workspace-hover-level{flex:none;color:var(--text-secondary);font-family:var(--font-mono);font-size:calc(11px * var(--code-scale));font-variant-numeric:tabular-nums}
+.workspace-hover-branch{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:calc(11px * var(--code-scale))}
+.workspace-hover-changes{flex:none;margin-left:auto;padding-left:8px;font-family:var(--font-mono);font-size:calc(11px * var(--code-scale));font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--text-secondary)}
+.workspace-hover-changes.is-clean{font-family:var(--font-ui);font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.workspace-hover-changes .is-add{color:var(--diff-add-text)}
+.workspace-hover-changes .is-del{color:var(--diff-del-text)}
+.workspace-hover-files{color:var(--text-muted)}
+.workspace-hover-problem{display:inline-flex;align-items:center;gap:5px;min-width:0;color:var(--warn-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Pull requests: number, title, then small pills. */
+.workspace-hover-pulls{display:flex;flex-direction:column;gap:6px}
+.workspace-hover-pulls li{display:flex;flex-direction:column;gap:3px;min-width:0}
+.workspace-hover-pulls a{display:flex;align-items:center;gap:6px;min-width:0;border-radius:4px}
+.workspace-hover-pulls a[href]:hover .workspace-hover-pull-title{color:var(--accent)}
+.workspace-hover-pulls a:focus-visible{outline:none;box-shadow:0 0 0 2px var(--focus)}
+.workspace-hover-number{flex:none;font-family:var(--font-mono);font-size:calc(11px * var(--code-scale));color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.workspace-hover-pull-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.workspace-hover-pills{display:flex;flex-wrap:wrap;gap:4px;padding-left:13px}
+.workspace-hover-pill{display:inline-flex;align-items:center;gap:3px;height:17px;padding:0 6px;border:1px solid var(--line-subtle);border-radius:9px;color:var(--text-secondary);font-size:calc(10.5px * var(--text-scale));white-space:nowrap}
+.workspace-hover-pill.is-success{color:var(--ok-strong);border-color:var(--ok-line-subtle);background:var(--ok-bg)}
+.workspace-hover-pill.is-failure{color:var(--danger-strong);border-color:var(--danger-line-subtle);background:var(--danger-bg)}
+.workspace-hover-pill.is-changes,.workspace-hover-pill.is-pending{color:var(--warn-strong);border-color:var(--warn-line-subtle);background:var(--warn-bg)}
+.workspace-hover-pill.is-merged{color:var(--accent-strong);border-color:var(--accent-line-subtle);background:var(--accent-bg)}
+.workspace-hover-pill.is-draft,.workspace-hover-pill.is-closed{border-style:dashed;color:var(--text-muted)}
+
+/* Agents: a live dot, the conversation, its agent and model, its state. */
+.workspace-hover-agents{display:flex;flex-direction:column;gap:1px;margin:0 -6px}
+.workspace-hover .workspace-hover-agents button{display:flex;align-items:center;gap:8px;width:100%;padding:4px 6px;border:0;border-radius:6px;background:transparent;text-align:left;cursor:pointer}
+.workspace-hover .workspace-hover-agents button:hover{background:var(--surface-hover)}
+.workspace-hover .workspace-hover-agents button:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--focus)}
+.workspace-hover-agents .live-indicator{margin:0 1px}
+.workspace-hover-agent-text{display:flex;flex-direction:column;flex:1 1 auto;min-width:0}
+.workspace-hover-agent-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.workspace-hover-agent-text small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.workspace-hover-state{flex:none;font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.workspace-hover-state[data-state=needs-you]{color:var(--attention-input,var(--warn));font-weight:600}
+.workspace-hover-state[data-state=working]{color:var(--attention-working,var(--running))}
+.workspace-hover-state[data-state=failed]{color:var(--attention-failed,var(--danger))}
+
+/* Running: name and port, a link when it serves a page. */
+.workspace-hover-runs{display:flex;flex-wrap:wrap;gap:5px}
+.workspace-hover-runs a,.workspace-hover-runs li>span{display:inline-flex;align-items:center;gap:5px;max-width:100%;height:22px;padding:0 8px;border:1px solid var(--line-subtle);border-radius:11px;background:var(--surface);color:var(--text-secondary)}
+.workspace-hover-runs svg{flex:none;color:var(--ok)}
+.workspace-hover-runs a:hover{border-color:var(--accent-line);color:var(--text)}
+.workspace-hover-runs a:focus-visible{outline:none;box-shadow:0 0 0 2px var(--focus)}
+.workspace-hover-run-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.workspace-hover-port{font-family:var(--font-mono);font-size:calc(11px * var(--code-scale));color:var(--text-muted)}
+
+/* A part not read yet: a quiet bar where it will be. */
+.workspace-hover-skeleton{display:inline-block;flex:none;margin-left:auto;width:72px;height:9px;border-radius:5px;background:linear-gradient(90deg,var(--surface-hover),var(--surface-strong),var(--surface-hover));background-size:200% 100%;animation:workspace-hover-shimmer 1.2s ease-in-out infinite}
+.workspace-hover-skeleton.is-wide{display:block;margin:2px 0;width:46%;height:20px;border-radius:11px}
+@keyframes workspace-hover-shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
+@media(prefers-reduced-motion:reduce){.workspace-hover-skeleton{animation:none}}
+html[data-motion=reduce] .workspace-hover-skeleton{animation:none}
+
+/* Quick actions: small icons, the cost to the right. */
+.workspace-hover-actions{position:sticky;bottom:0;display:flex;align-items:center;gap:2px;padding:6px 8px;border-top:1px solid var(--line-subtle);background:var(--surface-raised);border-radius:0 0 10px 10px}
+.workspace-hover .workspace-hover-actions .icon-button{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-muted)}
+.workspace-hover .workspace-hover-actions .icon-button:hover:not(:disabled){background:var(--surface-hover);color:var(--text)}
+.workspace-hover .workspace-hover-actions .icon-button:focus-visible{outline:none;box-shadow:0 0 0 2px var(--focus)}
+.workspace-hover .workspace-hover-actions .icon-button:disabled{opacity:.4}
+.workspace-hover .workspace-hover-open{height:24px;margin-right:4px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--text);font-weight:500;font-size:calc(11.5px * var(--text-scale))}
+.workspace-hover .workspace-hover-open:hover{background:var(--surface-hover);border-color:var(--line-strong)}
+.workspace-hover .workspace-hover-open:focus-visible{outline:none;box-shadow:0 0 0 2px var(--focus)}
+.workspace-hover-cost{margin-left:auto;padding-right:6px;color:var(--text-muted);font-size:calc(11px * var(--text-scale));font-variant-numeric:tabular-nums;white-space:nowrap}

@@ -1,0 +1,29 @@
+node_modules/
+dist/
+build/
+bin/
+coverage/
+target/
+.expo/
+.cache/
+*.tsbuildinfo
+*.log
+.env
+.env.*
+!.env.example
+
+.codefly/
+runner.config.json
+playwright-report/
+test-results/
+
+# The docs site (docs-site/): VitePress writes these when its outDir and cacheDir are not set.
+docs-site/.vitepress/cache/
+docs-site/.vitepress/.temp/
+docs-site/.vitepress/dist/
+
+# Editor and OS files, local agent state.
+.DS_Store
+*.swp
+*.swo
+.claude/

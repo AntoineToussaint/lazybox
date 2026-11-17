@@ -1,0 +1,21 @@
+/* The conversation's message list: loading a long history and reaching earlier messages. */
+.conversation-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;min-height:160px;color:var(--text-subtle);font-size:calc(13px * var(--text-scale))}
+.conversation-loading span{font-variant-numeric:tabular-nums}
+.conversation-loading progress{width:min(240px,60%);height:4px;appearance:none;-webkit-appearance:none;border:0;border-radius:2px;background:var(--surface-selected);overflow:hidden}
+.conversation-loading progress::-webkit-progress-bar{background:var(--surface-selected);border-radius:2px}
+.conversation-loading progress::-webkit-progress-value{background:var(--accent);border-radius:2px}
+.conversation-loading progress::-moz-progress-bar{background:var(--accent)}
+.show-earlier{display:flex;align-items:center;gap:8px;margin:0 auto 14px;padding:6px 14px!important;border-radius:999px;background:var(--surface);border-color:var(--line);color:var(--text-secondary);font-size:calc(12px * var(--text-scale))}
+.show-earlier small{color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+/* The latest turns are shown while the earlier history is read. */
+.earlier-loading{display:flex;justify-content:center;margin:0 auto 14px;padding:6px 0;color:var(--text-muted);font-size:calc(12px * var(--text-scale))}
+/* A command run in the conversation: one quiet line, not a message. */
+.command-line{display:flex;align-items:center;gap:7px;margin:4px 0 12px;padding:3px 0;color:var(--text-muted);font-size:calc(11.5px * var(--text-scale));line-height:1.5}
+.command-line svg{flex:none;color:var(--text-faint)}
+.command-line span{min-width:0;overflow-wrap:anywhere}
+.command-line code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:calc(11.5px * var(--text-scale))/1.5 var(--font-mono,ui-monospace,monospace);color:var(--text-soft)}
+.command-sent{justify-content:flex-end}
+/* A failure's own words from the provider, folded under the plain sentence. */
+.failure-detail{margin-top:6px;color:var(--text-muted);font-size:calc(11.5px * var(--text-scale))}
+.failure-detail summary{cursor:pointer;width:fit-content}
+.failure-detail pre{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:calc(11px * var(--text-scale))/1.5 var(--font-mono,ui-monospace,monospace);color:var(--text-soft)}

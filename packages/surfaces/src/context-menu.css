@@ -1,0 +1,22 @@
+/* Lazybox context menus: the same surface as the ⋯ menus, at the pointer. */
+.context-menu-layer{position:fixed;inset:auto;left:0;top:0;width:0;height:0;margin:0;padding:0;border:0;background:transparent;overflow:visible;color:inherit}
+.context-menu-layer::backdrop{background:transparent}
+.context-menu{position:fixed;left:0;top:0;z-index:1;box-sizing:border-box;min-width:200px;max-width:min(340px,calc(100vw - 16px));max-height:calc(100dvh - 16px);overflow:auto;padding:5px;background:var(--surface-hover);color:var(--text);border:1px solid var(--line-strong);border-radius:8px;box-shadow:0 12px 32px color-mix(in srgb,var(--shadow) calc(47% * var(--shadow-strength)),transparent),0 0 0 1px color-mix(in srgb,var(--shadow) calc(20% * var(--shadow-strength)),transparent);font:calc(12px * var(--text-scale))/calc(16px * var(--text-scale)) var(--font-ui,system-ui);outline:none;user-select:none;-webkit-user-select:none;animation:context-menu-in .08s ease-out}
+@keyframes context-menu-in{from{opacity:0;transform:translateY(-2px)}}
+@media (prefers-reduced-motion:reduce){.context-menu{animation:none}}
+.context-menu-item{display:flex;align-items:center;gap:9px;min-height:28px;padding:5px 9px 5px 8px;border-radius:5px;cursor:default;white-space:nowrap;outline:none}
+.context-menu-item.is-active,.context-menu-item:focus-visible{background:var(--accent-bg-strong)}
+.context-menu-item[aria-disabled=true]{color:var(--text-faint)}
+.context-menu-item[aria-disabled=true].is-active{background:var(--surface-selected)}
+.context-menu-item.danger{color:var(--danger-soft)}
+.context-menu-item.danger.is-active{background:var(--danger-bg-strong);color:var(--danger-strong)}
+.context-menu-icon{flex:none;display:inline-flex;width:15px;height:15px;color:var(--text-subtle)}
+.context-menu-item.is-active .context-menu-icon{color:var(--text-soft)}
+.context-menu-item.danger .context-menu-icon{color:inherit}
+.context-menu-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.context-menu-shortcut{flex:none;margin-left:18px;padding:0;border:0;background:none;color:var(--text-faint);font:calc(11px * var(--text-scale))/calc(16px * var(--text-scale)) var(--font-ui,system-ui);letter-spacing:.3px}
+.context-menu-more{flex:none;display:inline-flex;color:var(--text-faint);margin-right:-3px}
+.context-menu-separator{height:1px;margin:4px 6px;background:var(--surface-strong)}
+.context-menu-notice{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:2147483647;padding:7px 14px;border-radius:7px;background:var(--surface-selected);color:var(--text);border:1px solid var(--line-bold);box-shadow:0 8px 24px color-mix(in srgb,var(--shadow) calc(40% * var(--shadow-strength)),transparent);font:calc(12px * var(--text-scale))/calc(16px * var(--text-scale)) var(--font-ui,system-ui);pointer-events:none;animation:context-menu-notice 2.2s ease forwards}
+@keyframes context-menu-notice{0%{opacity:0;transform:translate(-50%,4px)}8%,80%{opacity:1;transform:translate(-50%,0)}100%{opacity:0}}
+@media (prefers-reduced-motion:reduce){.context-menu-notice{animation:none}}

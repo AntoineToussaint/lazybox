@@ -1,0 +1,30 @@
+/* Messages waiting behind the running turn (QueuedMessages.tsx): one calm strip above the message box. */
+.queued-messages{flex:none;display:flex;flex-direction:column;gap:6px;margin:0 24px 8px;padding:7px 8px 7px 12px;border:1px dashed var(--line-strong,var(--line));border-radius:10px;background:var(--surface-raised);font-size:calc(12px * var(--text-scale));min-width:0}
+.queued-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--text-muted)}
+.queued-head>svg{flex:none;color:var(--accent)}
+.queued-head>span{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}
+.queued-head strong{color:var(--text);font-weight:600}
+.queued-messages button{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:6px;font-size:calc(11px * var(--text-scale));white-space:nowrap}
+.queued-messages .queued-toggle{flex:none;border-color:transparent;background:transparent;color:var(--text-tertiary)}
+.queued-messages .queued-toggle:hover{background:var(--surface-selected);color:var(--text)}
+.queued-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.queued-message{display:flex;flex-direction:column;gap:6px;min-width:0}
+.queued-row{display:flex;align-items:center;gap:8px;min-width:0}
+.queued-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);quotes:"“" "”"}
+/* A message Lazybox wrote waits as what it is, not as a quote of its words. */
+.queued-event{display:flex;align-items:center;gap:6px;color:var(--text-secondary)}
+.queued-event>svg{flex:none;color:var(--text-muted)}
+.queued-event>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.queued-event>small{flex:none;padding:0 6px;border:1px solid var(--line);border-radius:999px;color:var(--text-muted);font-size:calc(10.5px * var(--text-scale))}
+.queued-actions{flex:none;display:inline-flex;align-items:center;gap:4px}
+.queued-messages .queued-actions button{border-color:var(--line-strong,var(--line));background:var(--surface);color:var(--text-soft,var(--text))}
+.queued-messages .queued-actions button:hover{background:var(--surface-selected)}
+.queued-working{color:var(--accent);font-size:calc(11px * var(--text-scale))}
+.queued-more,.queued-note{margin:0;color:var(--text-muted);font-size:calc(11px * var(--text-scale));line-height:1.45}
+.queued-error{margin:0;color:var(--danger);font-size:calc(11px * var(--text-scale))}
+@media (max-width:720px){
+  .queued-messages{margin:0 10px 6px;padding:6px 6px 6px 10px}
+  .queued-row{flex-wrap:wrap}
+  .queued-text{flex:1 1 100%}
+  .queued-actions{margin-left:auto}
+}

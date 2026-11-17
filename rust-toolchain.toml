@@ -1,0 +1,6 @@
+[toolchain]
+# The Tauri host (apps/desktop/src-tauri) and tools/lazybox-snippets track the
+# newest stable compiler, as CI does.
+channel = "stable"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

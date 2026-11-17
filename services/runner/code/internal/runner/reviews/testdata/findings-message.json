@@ -1,0 +1,70 @@
+{
+  "comments": [
+    {
+      "id": "rc-p",
+      "member": "web",
+      "path": "app.ts",
+      "side": "old",
+      "startLine": 5,
+      "endLine": 6,
+      "snippet": [
+        "old()",
+        "older()"
+      ],
+      "body": "Keep the old call as a wrapper.",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "view": "uncommitted",
+      "createdAt": 12,
+      "freshness": "outdated",
+      "currentStartLine": 0,
+      "currentEndLine": 0
+    },
+    {
+      "id": "rc-m",
+      "member": "api",
+      "path": "src/handler.go",
+      "side": "new",
+      "startLine": 12,
+      "endLine": 12,
+      "snippet": [
+        "name := `x`"
+      ],
+      "body": "Use the constant.",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "view": "branch",
+      "base": "main",
+      "author": "agent",
+      "authorLabel": "Codex",
+      "severity": "minor",
+      "title": "Magic string",
+      "createdAt": 11,
+      "freshness": "moved",
+      "currentStartLine": 14,
+      "currentEndLine": 14
+    },
+    {
+      "id": "rc-f",
+      "member": "api",
+      "path": "src/handler.go",
+      "side": "new",
+      "startLine": 3,
+      "endLine": 4,
+      "snippet": [
+        "func Handle() error {",
+        "\tlog.Print(\"handle\")"
+      ],
+      "body": "Return it so callers can retry.\n",
+      "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "view": "uncommitted",
+      "author": "agent",
+      "authorLabel": "Codex",
+      "severity": "blocker",
+      "title": "The error is logged, not returned",
+      "createdAt": 10,
+      "freshness": "current",
+      "currentStartLine": 3,
+      "currentEndLine": 4
+    }
+  ],
+  "message": "Please address these 3 review comments on the workspace’s changes. Each names the file and lines, quotes them as they were when I commented, and says which diff I was reading.\n\nComments marked outdated were made on lines that have changed since; find the same place in the current code, or tell me if it no longer applies.\n\n### 1. api/src/handler.go:3–4\n\n**Blocker: The error is logged, not returned** (finding rc-f, from Codex)\n\n_uncommitted changes on aaaaaaaa_\n\n```go\nfunc Handle() error {\n\tlog.Print(\"handle\")\n```\n\nReturn it so callers can retry.\n\n### 2. api/src/handler.go:14 (was line 12 when I commented)\n\n**Minor: Magic string** (finding rc-m, from Codex)\n\n_branch diff main…aaaaaaaa_\n\n```go\nname := `x`\n```\n\nUse the constant.\n\n### 3. web/app.ts — removed lines 5–6 (in the version before the change)\n\n_uncommitted changes on bbbbbbbb · outdated: these lines have changed since_\n\n```ts\nold()\nolder()\n```\n\nKeep the old call as a wrapper.\n\nThe findings are Codex’s, reviewing your work. To ask about one, run `lazybox ask reviewer \"<your question>\"`; the reply comes back to you.\n\nWhen you are done, say which comments you addressed and how, and which you did not and why."
+}

@@ -1,0 +1,13 @@
+{
+  "profiles": [
+    { "id": "codex-default", "provider": "codex", "isolation": "inherited" },
+    { "id": "claude-default", "provider": "claude", "isolation": "inherited" }
+  ],
+  "defaults": {},
+  "gateways": [],
+  "defaultGateways": {},
+  "repositories": [],
+  "eventBudget": 8388608,
+  "eventHistoryBudget": 2147483648,
+  "commandBudget": 8388608
+}

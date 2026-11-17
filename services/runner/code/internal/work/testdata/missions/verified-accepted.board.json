@@ -1,0 +1,45 @@
+{
+ "mission": "m_verified",
+ "title": "Ship v2 API",
+ "process": "solo-pair",
+ "seq": 27,
+ "ignored": 0,
+ "tasks": [
+  {
+   "id": "t_ok",
+   "status": "done",
+   "trust": "accepted",
+   "evidence_trust": "verified",
+   "live": "idle",
+   "reason": "Accepted: Looks right; evidence: checks passed on team/api#12 at aaa1111"
+  },
+  {
+   "id": "t_stale",
+   "status": "needs_you",
+   "trust": "observed",
+   "evidence_trust": "observed",
+   "flags": [
+    "stale"
+   ],
+   "gate": "reviewed",
+   "live": "idle",
+   "reason": "Reported done, waiting for you to accept · last run passed: go test ./... (exit 0); checks passed on an older head of team/api#13 at aaa1111"
+  },
+  {
+   "id": "t_redo",
+   "status": "changes_requested",
+   "trust": "observed",
+   "evidence_trust": "observed",
+   "live": "running",
+   "reason": "You asked for changes: Keep the old flag as an alias"
+  },
+  {
+   "id": "t_ask",
+   "status": "needs_you",
+   "trust": "observed",
+   "evidence_trust": "claimed",
+   "live": "waiting",
+   "reason": "The agent is waiting for you: Which cache size?"
+  }
+ ]
+}

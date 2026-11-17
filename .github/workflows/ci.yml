@@ -1,0 +1,285 @@
+# Per-change CI. It runs the same checks as the release catalog
+# (`scripts/release-gates.json`, run by `make check-release` at
+# staging), split into parallel jobs so a regression is caught on the PR that
+# causes it instead of at release staging.
+#
+# | Job        | Runner       | Release gate it mirrors                         |
+# | ---------- | ------------ | ----------------------------------------------- |
+# | plan       | ubuntu-24.04 | reads the catalog; emits the UI shard matrix    |
+# | go         | macos-15     | core: fmt-check, go vet, `make test`, race run  |
+# | generated  | ubuntu-24.04 | core: `make check-generated` (Codefly + Buf)    |
+# | typescript | ubuntu-24.04 | core: `make check-workspaces`                   |
+# | launcher   | macos-15     | core: `make test-environments`                  |
+# | desktop    | macos-15     | native: `make check-desktop`                    |
+# | ui (N)     | macos-15     | ui: every `scope: "ui"` gate, sharded           |
+# | typos      | ubuntu-24.04 | spelling across the repository (typos.toml)     |
+#
+# The UI matrix is generated from the catalog (`release-gates.mjs shards`), so a
+# gate added there runs here with no edit to this file. Live/real-provider tests
+# are the catalog's `external` entries and are never selected.
+#
+# macOS where the product's platform matters. The Runner is macOS-only today
+# (`internal/processguard` calls `syscall.Getsid`, which Go defines only for
+# darwin/BSD, so `go vet` fails for GOOS=linux), the launcher and Working
+# packaging refuse other hosts, the Tauri shell embeds WKWebView, and the UI
+# suites drive Playwright WebKit with layout/scroll assertions authored on
+# macOS. Linux carries the platform-independent checks. This repository is
+# private, so macOS minutes are billed (at the macOS rate) against the
+# account's included minutes, and the account runs at most 5 macOS jobs at
+# once. These are 6 (go, launcher, desktop and UI_SHARDS shards), so the
+# shortest can queue briefly behind the others.
+#
+# Not run here, with reasons, in RELEASE_GATES.md ("CI").
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  # The release workflow runs these same jobs as its gates (release.yml).
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Dev's installed LTS; package.json's engines floor is 24.
+  NODE_VERSION: "26"
+  # Three UI shards keep a shard at about a dozen gates (~13 today), a few
+  # minutes each; more would only queue behind the 5-job macOS limit.
+  UI_SHARDS: "3"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    name: plan (release catalog)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ui: ${{ steps.shards.outputs.ui }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # Loading the catalog also fails when an npm `test:` script is not
+      # classified, so an unadmitted test stops CI here, as it stops staging.
+      - name: Shard the UI gates
+        id: shards
+        run: |
+          node scripts/release-gates.mjs list release
+          matrix="$(node scripts/release-gates.mjs shards ui "$UI_SHARDS")"
+          echo "ui=$matrix" >> "$GITHUB_OUTPUT"
+
+  go:
+    name: go (vet, test, race)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: services/runner/code/go.mod
+          cache-dependency-path: services/runner/code/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      # Session-host and process tests skip without tmux; a skip here would be
+      # coverage silently lost, so it is installed rather than optional.
+      - name: Install tmux
+        run: command -v tmux || brew install tmux
+      # The Makefile defaults to one build job and one P for the shared dev
+      # box; a runner is ours alone, so builds use every core.
+      - name: Use every core for builds
+        run: echo "GO_BUILD_JOBS=$(sysctl -n hw.ncpu)" >> "$GITHUB_ENV"
+      - name: Format and vet
+        run: make fmt-check check-go
+      - name: Test (GOMAXPROCS = cores)
+        run: make test GOMAXPROCS="$GO_BUILD_JOBS"
+      # The packages that keep agents and commands alive across a Runner
+      # restart, under the race detector (session hosts included, via GORACE),
+      # on one P: the configuration the release gate runs everything in.
+      - name: Race-check the restart packages (GOMAXPROCS=1)
+        run: make test-outlive GOMAXPROCS=1
+
+  generated:
+    name: generated code (Codefly + Buf)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # A release whose `codefly sync` reproduces the committed output byte for
+      # byte; the service agent (go-grpc 0.1.70) is pinned separately in
+      # services/runner/service.codefly.yaml. Bump both deliberately.
+      CODEFLY_VERSION: "0.1.212"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: services/runner/code/go.mod
+          cache-dependency-path: services/runner/code/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install Codefly
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="codefly_${CODEFLY_VERSION}_linux_amd64.tar.gz"
+          gh release download "v${CODEFLY_VERSION}" --repo codefly-dev/cli \
+            --pattern "$archive" --pattern checksums.txt
+          sha256sum --check --ignore-missing checksums.txt
+          mkdir -p codefly-bin && tar -xzf "$archive" -C codefly-bin codefly
+          echo "$PWD/codefly-bin" >> "$GITHUB_PATH"
+      # `codefly sync service runner` downloads the pinned go-grpc agent and
+      # generates inside its proto companion image (ghcr.io, public) through
+      # the runner's Docker; `buf generate` then rebuilds the TypeScript.
+      # check-generated fails if either output differs from the commit, then
+      # runs buf lint and buf breaking against contracts/runner-v1.binpb.
+      - name: Generated output is current; contract lint and compatibility
+        run: make check-generated
+      - name: Generation left no other change
+        run: git diff --exit-code
+
+  typescript:
+    name: typescript (typecheck, client, worker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      # The agent browser's Chromium (Playwright's headless shell) and its
+      # system libraries: the browser-service tests launch it.
+      - name: Agent browser
+        run: make browser && sudo env "PATH=$PATH" node_modules/.bin/playwright-core install-deps chromium
+      # typecheck + npm workspace links + test:client + test:worker
+      - run: make check-workspaces
+
+  launcher:
+    name: launcher (environments, service, restart, gates)
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: make deps
+      - uses: ./.github/actions/playwright
+        with:
+          browsers: chromium
+      - run: make test-environments
+      - name: README and CONTRIBUTING name only what exists
+        run: node scripts/export-check.mjs
+
+  desktop:
+    name: desktop (Tauri fmt, test, clippy)
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+          # Save only from main: a PR restores main's cache (GitHub scopes
+          # caches to the base branch) without filling the 10GB pool per PR.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      # fmt --check, the UI assets Tauri embeds, cargo test --locked,
+      # clippy --locked -D warnings.
+      - run: make check-desktop CARGO_BUILD_JOBS="$(sysctl -n hw.ncpu)"
+
+  ui:
+    name: ui ${{ matrix.shard }}
+    needs: plan
+    runs-on: macos-15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.ui) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: make deps
+      - uses: ./.github/actions/playwright
+        with:
+          browsers: chromium webkit
+      # The gate runner, not `npm run` directly: same env scrubbing, process
+      # groups and per-gate deadlines as staging, and every gate in the shard
+      # runs even after one fails. --retry-flaky runs a failed UI gate once
+      # more: passing then, it is reported flaky (a warning, the job summary,
+      # the receipt) rather than failing the build. Staging never retries.
+      - name: Run ${{ matrix.gates }}
+        env:
+          GATES: ${{ matrix.gates }}
+          SHARD: ${{ matrix.shard }}
+        run: node scripts/release-gates.mjs run ui --only "$GATES" --report ".cache/gates-ui-$SHARD.json" --retry-flaky
+      # The suites drive Playwright as a library and save screenshots (several
+      # only on failure) to .cache and /tmp; they record no traces.
+      - name: Upload screenshots and gate report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-${{ matrix.shard }}
+          path: |
+            .cache/*.png
+            .cache/gates-ui-*.json
+            /tmp/lazybox-*.png
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+  typos:
+    name: typos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # Pinned to a tagged release so a silent upstream change cannot flip CI.
+      - uses: crate-ci/typos@v1.50.3
+
+  # One stable check name for branch protection: it fails unless every job
+  # above passed.
+  ci:
+    name: ci
+    if: always()
+    needs: [plan, go, generated, typescript, launcher, desktop, ui, typos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          test "$(jq -r 'map(select(. != "success")) | length' <<<"$RESULTS")" = 0

@@ -1,0 +1,52 @@
+/* The Changes diff's layouts: side by side, word marks, folded and hidden
+   unchanged lines, and the mode toggle, viewed boxes and hunk keys around it.
+   Colors are tokens with the review palette as fallbacks. */
+.review-diff .diff-word{background:var(--diff-word-add);color:inherit;border-radius:2px;padding:0}
+.review-diff .is-del .diff-word{background:var(--diff-word-del)}
+
+/* Side by side: two columns of number, comment button and code. Long lines
+   wrap, so neither side scrolls away from the other. */
+.review-diff.is-split{overflow-x:hidden}
+.review-split-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);position:relative}
+.review-split-side{display:grid;grid-template-columns:3.6em 22px minmax(0,1fr);min-width:0}
+.review-split-side+.review-split-side{border-left:1px solid var(--diff-divider,var(--line-subtle))}
+.review-split-side .review-number{border-right:1px solid var(--diff-number-border,var(--line-subtle))}
+.review-split-side .review-code{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
+.review-split-side.is-add{background:var(--diff-add-bg,var(--diff-add-bg))}.review-split-side.is-add .review-sign{color:var(--diff-add-sign,var(--diff-add-mark))}
+.review-split-side.is-del{background:var(--diff-del-bg,var(--diff-del-bg))}.review-split-side.is-del .review-sign{color:var(--diff-del-sign,var(--diff-del-mark))}
+.review-split-side.is-empty{background:var(--diff-empty-bg,repeating-linear-gradient(135deg,var(--surface-sunken) 0 6px,var(--surface) 6px 12px))}
+.review-split-side.is-commented .review-number{box-shadow:inset 3px 0 0 var(--accent,var(--accent-solid-hover))}
+.review-split-side.is-selected{background:var(--diff-selected-bg,var(--accent-bg))!important}
+.review-split-side.is-selected .review-number{box-shadow:inset 3px 0 0 var(--accent)}
+.review-split-row:hover .review-add,.review-split-side.is-selected .review-add{opacity:1;transform:none}
+
+/* Unchanged lines: a fold inside a hunk, and the gap before or after one. */
+.review-row.is-fold,.review-row.is-gap{display:block;padding:0;background:var(--diff-gap-bg,var(--surface));color:var(--muted,var(--text-muted));font:calc(11px * var(--code-scale))/1.9 var(--font-ui)}
+.review-row.is-gap .diff-gap-count{display:block;padding:0 12px;user-select:none}
+.review-diff .diff-expand{display:flex;align-items:center;gap:8px;width:100%;padding:0 12px;border:0;border-radius:0;background:transparent;color:var(--diff-expand,var(--info));font:inherit;text-align:left;cursor:pointer}
+.review-diff .diff-expand:hover:not(:disabled),.review-diff .diff-expand:focus-visible{background:var(--diff-expand-hover,var(--accent-bg));color:var(--text,var(--text))}
+.review-diff .diff-expand:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+.review-diff .diff-expand:disabled{opacity:.6;cursor:progress}
+.review-row.is-hunk:focus{outline:none;box-shadow:inset 3px 0 0 var(--accent,var(--focus));background:var(--diff-hunk-focus,var(--accent-bg))}
+
+/* The diff header: Unified / Split, Viewed, and the keys. */
+.diff-view>header{justify-content:flex-start;flex-wrap:wrap;gap:6px 14px}
+.diff-view>header>strong{flex:1 1 200px;min-width:0}
+.diff-view>header label{flex-direction:row;align-items:center;font-size:calc(12px * var(--text-scale));color:var(--muted,var(--text-secondary))}
+.diff-view>header .changes-viewed-count{margin:0}
+.diff-view .diff-mode{display:inline-flex;border:1px solid var(--border,var(--line-strong));border-radius:6px;overflow:hidden;flex:none}
+.diff-view .diff-mode button{padding:3px 10px;border:0;border-radius:0;background:transparent;color:var(--muted,var(--text-subtle));font-size:calc(12px * var(--text-scale));line-height:calc(18px * var(--text-scale));width:auto}
+.diff-view .diff-mode button:hover{background:var(--diff-expand-hover,var(--accent-bg));color:var(--text,var(--text))}
+.diff-view .diff-mode button+button{border-left:1px solid var(--border,var(--line-strong))}
+.diff-view .diff-mode button[aria-pressed=true]{background:var(--accent-bg,var(--accent-bg-strong));color:var(--text,var(--text))}
+.diff-view .diff-mode-note{display:inline;margin:0;color:var(--muted,var(--text-muted));font-size:calc(11px * var(--text-scale));white-space:nowrap}
+.diff-keys{padding:0 12px 6px;color:var(--muted,var(--text-faint));font-size:calc(11px * var(--text-scale))}
+.diff-keys kbd{font:calc(10px * var(--code-scale))/1 var(--font-mono);padding:1px 4px;border:1px solid var(--border,var(--line-strong));border-radius:3px;background:var(--surface);color:var(--text-secondary)}
+.changes-viewed-count{color:var(--muted,var(--text-muted));font-size:calc(11px * var(--text-scale));white-space:nowrap}
+
+/* File rows with their Viewed box; a viewed file steps back. */
+.changes-file{display:flex;align-items:center;gap:4px}
+.changes-columns nav .changes-file>button{flex:1;min-width:0}
+.changes-file>input[type=checkbox]{width:auto;margin:0 6px 0 2px;flex:none;cursor:pointer;accent-color:var(--accent,var(--accent-solid-hover))}
+.changes-file.is-viewed>button{opacity:.55}
+.changes-file.is-viewed>button.selected{opacity:.8}

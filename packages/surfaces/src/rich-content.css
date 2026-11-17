@@ -1,0 +1,31 @@
+.rich-content{min-width:0;line-height:var(--chat-line-height,1.5);overflow-wrap:anywhere;white-space:normal}
+.rich-content>:first-child{margin-top:0}.rich-content>:last-child{margin-bottom:0}
+.rich-content p{white-space:normal!important;line-height:var(--chat-line-height,1.5);margin:0 0 var(--chat-paragraph-gap,8px)}
+.rich-content h1,.rich-content h2,.rich-content h3{line-height:1.3;margin:calc(var(--chat-paragraph-gap,8px) * 2) 0 var(--chat-paragraph-gap,8px);font-weight:650;color:var(--text)}
+.rich-content h1{font-size:1.55em}.rich-content h2{font-size:1.3em}.rich-content h3{font-size:1.1em}
+.rich-content ul,.rich-content ol{padding-left:22px;margin:var(--chat-paragraph-gap,8px) 0}.rich-content li{margin:calc(var(--chat-paragraph-gap,8px) / 3) 0}.rich-content li p{margin:0}
+.rich-content blockquote{border-left:3px solid var(--accent-line);margin:14px 0;padding:4px 16px;color:var(--text-tertiary)}
+.rich-content a{color:var(--accent);text-decoration:underline;text-underline-offset:3px}.content-reference{color:var(--text-tertiary)}
+.rich-content :not(pre)>code{background:var(--surface-selected);border-radius:4px;padding:2px 5px;font-size:.9em;color:var(--accent-strong)}
+.rich-content table{display:block;overflow:auto;border-collapse:collapse;max-width:100%;margin:14px 0}.rich-content th,.rich-content td{padding:8px 12px;border:1px solid var(--line-strong);text-align:left}.rich-content th{background:var(--surface-hover)}
+.rich-content input[type=checkbox]{width:auto;margin-right:7px}.rich-content hr{border:0;border-top:1px solid var(--line-strong);margin:20px 0}
+.code-block,.mermaid-block{min-width:0;margin:12px 0;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--code-bg)}
+.code-block>header,.mermaid-block>header{display:flex;align-items:center;justify-content:space-between;padding:5px 12px;background:var(--surface-hover);border-bottom:1px solid var(--line);color:var(--text-subtle);font-size:calc(11px * var(--code-scale))}
+.code-block header button,.mermaid-block header button{padding:4px 8px!important;font-size:calc(11px * var(--code-scale))!important}
+.code-block pre{margin:0!important;padding:14px 16px!important;overflow:auto;white-space:pre!important;max-height:480px;background:transparent!important;font-size:calc(12px * var(--code-scale));line-height:1.6}
+.code-block code{font-family:var(--font-mono);color:var(--code-text);white-space:pre}
+.mermaid-block>p{padding:12px}.mermaid-block .code-block{margin:0;border:0;border-radius:0}
+.hljs-attr,.hljs-property,.hljs-title{color:var(--syntax-attr)}.hljs-string,.hljs-addition{color:var(--syntax-string)}.hljs-number,.hljs-literal{color:var(--syntax-number)}.hljs-keyword,.hljs-selector-tag{color:var(--syntax-keyword)}.hljs-comment,.hljs-quote{color:var(--syntax-comment)}.hljs-built_in,.hljs-type{color:var(--syntax-type)}.hljs-title.function_,.hljs-function .hljs-title{color:var(--syntax-function)}.hljs-deletion{color:var(--diff-del-text)}
+.request .approval-description{margin:8px 0;color:var(--text-soft)}.request .request-metadata{margin-top:14px;font-size:calc(11px * var(--text-scale))}.request .request-metadata summary{color:var(--text-muted)}.request .row{margin-top:16px}
+
+.file-reference{display:inline;padding:0;border:0;border-radius:0;background:transparent;color:var(--accent-soft);text-decoration:underline;text-underline-offset:3px;white-space:normal;overflow-wrap:anywhere;text-align:left;font:inherit}
+.inline-file{font-family:monospace;background:var(--accent-bg);border-radius:3px;padding:1px 4px}
+.file-preview-dialog{width:min(1100px,calc(100vw - 32px));min-height:260px;max-height:min(820px,calc(100dvh - 48px));max-width:none;padding:20px;overflow:hidden}
+.file-preview-dialog[open]{display:flex;flex-direction:column}.file-preview-dialog h2{font-size:calc(15px * var(--text-scale));overflow-wrap:anywhere;min-width:0}.file-preview-toolbar{display:flex;align-items:center;gap:12px;padding:12px 0;color:var(--text-muted);flex-wrap:wrap}.file-preview-toolbar button:first-of-type{margin-left:auto}
+.file-preview-content{min-height:0;max-height:60dvh;overflow:auto;flex:1}.file-preview-content .rich-content{padding:16px;line-height:1.7}
+.file-lines{font-size:calc(12px * var(--text-scale));line-height:1.7;margin:0;padding:12px 0;tab-size:4}.file-lines>div{min-width:max-content;padding-right:16px}.line-number{display:inline-block;width:5em;padding-right:16px;text-align:right;color:var(--text-faint);user-select:none}.highlighted-line{background:var(--accent-bg-strong)}
+/* "anywhere" lets a cell shrink to one character ("Se/rv/ic/e"); in tables only
+   break words that cannot fit, and give the first column, usually names, room to stay readable. */
+.rich-content th,.rich-content td,.rich-content th p,.rich-content td p,.rich-content th code,.rich-content td code{overflow-wrap:break-word;word-break:normal}
+.rich-content th,.rich-content td{min-width:7ch;vertical-align:top}
+.rich-content tr>:first-child{min-width:14ch}

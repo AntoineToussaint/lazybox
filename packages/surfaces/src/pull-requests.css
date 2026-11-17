@@ -1,0 +1,114 @@
+/* Tracked pull requests: the Pull requests panel, the header's pills and the
+   Inbox's rows. Colour only says the state; everything else stays quiet. */
+:root{--pr-failure:var(--danger);--pr-changes:var(--warn);--pr-success:var(--ok);--pr-pending:var(--warn);--pr-merged:var(--accent);--pr-none:var(--text-faint)}
+.pr-status{display:inline-flex;flex:none;align-items:center;justify-content:center;color:var(--pr-none)}
+.pr-status.is-failure{color:var(--pr-failure)}
+.pr-status.is-changes{color:var(--pr-changes)}
+.pr-status.is-success{color:var(--pr-success)}
+.pr-status.is-pending{color:var(--pr-pending)}
+.pr-status.is-merged{color:var(--pr-merged)}
+.pr-status.is-pending svg{animation:pr-spin 1.4s linear infinite}
+@keyframes pr-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.pr-status.is-pending svg{animation:none}}
+
+/* The panel */
+.pull-requests-panel{container-type:inline-size;display:flex;flex-direction:column;height:100%;min-height:0;overflow:auto;padding:4px 6px 0;font-size:calc(13px * var(--text-scale));color:var(--text)}
+.pr-tracking-note{display:flex;align-items:center;gap:6px;margin:6px 8px;color:var(--text-muted);font-size:calc(11.5px * var(--text-scale))}
+.pr-tracking-note svg{color:var(--warn);flex:none}
+.pr-group h3{display:flex;align-items:center;gap:7px;margin:12px 10px 4px;font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.7px;text-transform:uppercase;color:var(--text-muted)}
+.pr-group h3>span{margin-left:auto;font-variant-numeric:tabular-nums;letter-spacing:0}
+.pr-group ul,.pr-mentioned ul{list-style:none;margin:0;padding:0}
+.pr-empty{margin:4px 10px 8px;color:var(--text-faint);font-size:calc(12px * var(--text-scale))}
+.pr-blank{display:flex;flex-direction:column;align-items:center;gap:6px;margin:auto;padding:32px 18px;text-align:center;color:var(--text-muted)}
+.pr-blank strong{color:var(--text-soft);font-weight:500}
+.pr-blank p{margin:0;max-width:34ch;font-size:calc(12px * var(--text-scale))}
+.pr-item{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;border-radius:8px}
+.pr-item:hover,.pr-item:focus-within{background:var(--surface-active)}
+.pr-row{display:flex;align-items:flex-start;gap:9px;min-width:0;padding:8px 6px 8px 10px;text-align:left;background:transparent;border:0;border-radius:8px;color:inherit;white-space:normal}
+.pr-row:hover{background:transparent}
+.pr-row:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+.pr-row>.pr-status{margin-top:2px}
+.pr-main{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.pr-title{display:flex;align-items:baseline;gap:6px;min-width:0}
+.pr-title strong{flex:none;font-weight:500;font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11.5px * var(--code-scale));color:var(--text-soft)}
+.pr-title span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}
+.pr-meta{display:flex;flex-wrap:wrap;gap:0 8px;min-width:0;color:var(--text-muted);font-size:calc(11.5px * var(--text-scale))}
+.pr-meta em{font-style:normal;color:var(--text-secondary)}
+.pr-item[data-status=checks-failed] .pr-meta em{color:var(--pr-failure)}
+.pr-meta span+span::before,.pr-meta em+span::before{content:'·';margin-right:8px;color:var(--text-disabled)}
+.pr-age{flex:none;margin-left:6px;color:var(--text-faint);font-size:calc(11px * var(--text-scale));font-variant-numeric:tabular-nums}
+.pr-actions{display:flex;align-items:center;gap:4px;padding:6px 8px 0 0}
+.pr-actions button{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;font-size:calc(11.5px * var(--text-scale))}
+.pr-actions .icon-button{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;color:var(--text-muted)}
+.pr-actions .icon-button:hover,.pr-actions .icon-button:focus-visible{background:var(--surface-selected);color:var(--text)}
+.pr-confirm{grid-column:1 / -1;display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 10px 8px 33px;padding:8px 10px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-raised);font-size:calc(12px * var(--text-scale))}
+.pr-confirm span{flex:1 1 220px;min-width:0}
+.pr-confirm button{height:26px;padding:0 10px}
+.pr-note{grid-column:1 / -1;margin:0 10px 8px 33px;color:var(--text-muted);font-size:calc(11.5px * var(--text-scale))}
+.pr-note.is-error{color:var(--danger)}
+.pr-mentioned{margin:12px 10px 4px;color:var(--text-muted);font-size:calc(12px * var(--text-scale))}
+.pr-mentioned summary{display:flex;align-items:center;gap:7px;cursor:pointer;font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.7px;text-transform:uppercase}
+.pr-mentioned summary span{margin-left:auto;font-variant-numeric:tabular-nums;letter-spacing:0}
+.pr-mentioned p{margin:6px 0;color:var(--text-faint);font-size:calc(11.5px * var(--text-scale))}
+.pr-mentioned li{display:flex;align-items:baseline;gap:8px;padding:2px 0}
+.pr-mentioned a{display:inline-flex;align-items:center;gap:4px;color:var(--text-secondary);font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11px * var(--code-scale))}
+.pr-mentioned small{color:var(--text-faint)}
+.pr-keys{position:sticky;bottom:0;margin-top:auto;display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:8px 10px;border-top:1px solid var(--line-subtle);background:var(--surface);color:var(--text-faint);font-size:calc(11px * var(--text-scale))}
+.pr-keys kbd{margin-left:6px}
+.pr-keys kbd:first-child{margin-left:0}
+@container (max-width:380px){.pr-actions button span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}}
+
+/* The header's pills: small, one line, never wider than they need. */
+.pr-pills{display:inline-flex;align-items:center;gap:4px;flex:none;min-width:0}
+.pr-pill{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 8px;border:1px solid var(--line-subtle);border-radius:12px;background:transparent;color:var(--text-secondary);font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11px * var(--code-scale));font-variant-numeric:tabular-nums;text-decoration:none;white-space:nowrap;cursor:pointer}
+.pr-pill:hover,.pr-pill:focus-visible{background:var(--surface-selected);color:var(--text);outline:none}
+.pr-pill:focus-visible{box-shadow:0 0 0 2px var(--focus)}
+.pr-pill.is-failure{border-color:var(--danger-line-subtle,var(--line-subtle))}
+.pr-pill.is-changes{border-color:var(--warn-line-subtle,var(--line-subtle))}
+.pr-pill.is-more{font-family:var(--font-ui);color:var(--text-muted)}
+/* The branch's own pull request: the pill opens the PR loop, its ↗ opens GitHub. */
+.pr-pill.is-split{padding:0;gap:0;cursor:default;overflow:hidden}
+.pr-pill.is-split:hover{background:transparent}
+.pr-pill.is-split>button,.pr-pill.is-split>.pr-pill-out{display:inline-flex;align-items:center;gap:5px;height:100%;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer;text-decoration:none}
+.pr-pill.is-split>button{padding:0 6px 0 8px}
+.pr-pill.is-split>.pr-pill-out{padding:0 7px 0 4px;color:var(--text-muted);border-left:1px solid var(--line-subtle)}
+.pr-pill.is-split>button:hover,.pr-pill.is-split>.pr-pill-out:hover{background:var(--surface-selected);color:var(--text)}
+.pr-pill.is-split>button:focus-visible,.pr-pill.is-split>.pr-pill-out:focus-visible{outline:none;box-shadow:inset 0 0 0 2px var(--focus)}
+.pr-pill-note{font-family:var(--font-ui);color:var(--text-muted)}
+@media(max-width:719px){.pr-pill-note{display:none}}
+.pr-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:currentColor;flex:none;color:var(--pr-none)}
+.pr-dot.is-failure{color:var(--pr-failure)}
+.pr-dot.is-changes{color:var(--pr-changes)}
+.pr-dot.is-success{color:var(--pr-success)}
+.pr-dot.is-pending{color:var(--pr-pending);animation:pr-blink 1.4s ease-in-out infinite}
+.pr-dot.is-merged{color:var(--pr-merged)}
+.pr-dot.is-draft{background:transparent;box-shadow:inset 0 0 0 1.5px var(--pr-none)}
+@keyframes pr-blink{50%{opacity:.35}}
+@media(prefers-reduced-motion:reduce){.pr-dot.is-pending{animation:none}}
+/* A phone's header keeps the most urgent pill only. */
+@media(max-width:479px){.pr-pills .pr-pill+.pr-pill{display:none}}
+
+/* The Inbox's pull request rows (desktop and phone). */
+.pr-inbox-item{display:flex;flex-direction:column;gap:2px;padding:0 0 8px;border-radius:8px}
+.pr-inbox-item:hover,.pr-inbox-item:focus-within{background:var(--surface-active)}
+.pr-inbox-head{display:flex;align-items:flex-start;gap:10px;width:100%;min-width:0;padding:9px 10px 4px;text-align:left;background:transparent;border:0;border-radius:8px;color:inherit;white-space:normal}
+.pr-inbox-head:hover{background:transparent}
+.pr-inbox-head:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+.pr-inbox-head>.pr-status{margin-top:1px}
+.pr-inbox-text{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.pr-inbox-text strong{font-weight:500;color:var(--text-soft);overflow-wrap:anywhere}
+.pr-inbox-text small{color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pr-inbox-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-left:36px;padding-right:10px}
+.pr-inbox-confirm{display:inline-flex;gap:6px}
+.pr-inbox-actions button,.pr-inbox-actions a{display:inline-flex;align-items:center;gap:5px;min-height:28px;padding:0 10px;font-size:calc(12px * var(--text-scale));border-radius:6px}
+.pr-inbox-actions a{border:1px solid var(--line-subtle);color:var(--text-secondary);text-decoration:none}
+.pr-inbox-actions a:hover,.pr-inbox-actions a:focus-visible{background:var(--surface-selected);color:var(--text)}
+.pr-inbox-actions .pr-dismiss{background:transparent;border-color:transparent;color:var(--text-muted)}
+.pr-inbox-note{margin:4px 10px 0 36px;color:var(--text-muted);font-size:calc(11.5px * var(--text-scale))}
+.pr-inbox-note.is-error{color:var(--danger)}
+/* On a phone the actions are thumb-sized and wrap under the text. */
+.remote-group .pr-inbox-item{list-style:none;padding:0 14px 12px}
+.remote-group .pr-inbox-head{padding:12px 0 6px}
+.remote-group .pr-inbox-actions{margin-left:0;padding-right:0}
+.remote-group .pr-inbox-actions button,.remote-group .pr-inbox-actions a{min-height:40px;padding:0 14px;font-size:calc(14px * var(--text-scale))}
+.remote-group .pr-inbox-note{margin-left:0}

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cost dashboard</title>
+<link rel="stylesheet" href="_lazybox/lazybox.css">
+<link rel="stylesheet" href="dashboard.css">
+<script src="_lazybox/lazybox.js"></script>
+<script src="dashboard.js" defer></script>
+</head>
+<body>
+<div class="page" id="page" data-state="loading">
+  <header class="head">
+    <div class="toolbar">
+      <div class="period" id="period" role="radiogroup" aria-label="Period">
+        <button type="button" role="radio" data-period="today" aria-checked="false" tabindex="-1">Today</button>
+        <button type="button" role="radio" data-period="week" aria-checked="true" tabindex="0">7 days</button>
+        <button type="button" role="radio" data-period="month" aria-checked="false" tabindex="-1">30 days</button>
+        <button type="button" role="radio" data-period="all" aria-checked="false" tabindex="-1">All</button>
+      </div>
+      <span class="updated" id="updated" aria-live="polite"></span>
+    </div>
+    <div class="hero">
+      <p class="hero-label" id="hero-label">Spent in the last 7 days</p>
+      <p class="hero-figure"><span class="hero-value" id="total">–</span><span class="delta" id="delta" hidden></span></p>
+      <p class="hero-note" id="hero-note"></p>
+    </div>
+    <div class="filters" id="filters" hidden></div>
+  </header>
+
+  <p class="notice" id="notice" role="status" hidden></p>
+
+  <section class="state" id="state" aria-live="polite">
+    <svg class="state-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
+    <h2 id="state-title">Reading usage…</h2>
+    <p id="state-text">Tokens and cost, by model, workspace and conversation.</p>
+  </section>
+
+  <main class="board" id="board" aria-label="Spend">
+    <section class="tiles" aria-label="Totals">
+      <article class="tile">
+        <h3>Tokens in</h3>
+        <p class="tile-value" id="tokens-in">–</p>
+        <p class="tile-note" id="tokens-in-note"></p>
+      </article>
+      <article class="tile">
+        <h3>Tokens out</h3>
+        <p class="tile-value" id="tokens-out">–</p>
+        <p class="tile-note" id="tokens-out-note"></p>
+      </article>
+      <article class="tile">
+        <h3>Cache hit rate</h3>
+        <p class="tile-value" id="cache-rate">–</p>
+        <div class="meter" aria-hidden="true"><span id="cache-meter"></span></div>
+        <p class="tile-note" id="cache-note"></p>
+      </article>
+      <article class="tile tile-top" id="top-tile">
+        <h3>Top conversation</h3>
+        <p class="tile-value" id="top-cost">–</p>
+        <p class="tile-note tile-title" id="top-title"></p>
+        <p class="tile-note" id="top-note"></p>
+      </article>
+    </section>
+
+    <section class="card spend" aria-labelledby="spend-title">
+      <div class="card-head">
+        <h2 id="spend-title">Spend per day</h2>
+        <ul class="legend" id="legend" aria-label="Models"></ul>
+      </div>
+      <div class="chart" id="chart" tabindex="0" role="img" aria-roledescription="bar chart" aria-label="Spend over time">
+        <svg id="chart-svg" aria-hidden="true"></svg>
+        <div class="tooltip" id="tooltip" role="presentation" hidden></div>
+      </div>
+      <p class="chart-hint" id="chart-hint"></p>
+    </section>
+
+    <section class="card breakdown models" aria-labelledby="models-title">
+      <h2 id="models-title">By model</h2>
+      <ol class="rank" id="by-model"></ol>
+    </section>
+    <section class="card breakdown workspaces" aria-labelledby="workspaces-title">
+      <h2 id="workspaces-title">By workspace</h2>
+      <ol class="rank" id="by-workspace"></ol>
+    </section>
+    <section class="card breakdown conversations" aria-labelledby="conversations-title">
+      <h2 id="conversations-title">By conversation</h2>
+      <ol class="rank" id="by-conversation"></ol>
+    </section>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,30 @@
+.messages-frame{position:relative;display:flex;flex-direction:column;flex:1;min-height:0}
+.messages-frame>.messages{flex:1;min-height:0}
+.prompt-rail{position:absolute;top:12px;bottom:12px;right:3px;width:12px;z-index:2;pointer-events:none}
+/* The app's button styles are broad; the markers must stay thin ticks. */
+.messages-frame .prompt-rail>button{position:absolute;right:0;box-sizing:border-box;width:8px;min-width:0;height:4px;min-height:0;margin:-2px 0 0;padding:0;border:0;border-radius:2px;background:var(--accent-line);font-size:0;line-height:0;cursor:pointer;pointer-events:auto;transition:width .12s,background .12s}
+.messages-frame .prompt-rail>button:hover,.messages-frame .prompt-rail>button:focus-visible{width:14px;background:var(--accent);outline:none}
+.prompt-jump{position:absolute;top:8px;right:20px;z-index:3}
+.prompt-jump-toggle{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border:1px solid var(--line-strong);border-radius:12px;background:var(--canvas,var(--surface));box-shadow:0 2px 10px color-mix(in srgb,var(--shadow) calc(53% * var(--shadow-strength)),transparent);color:var(--text-subtle);font-size:calc(11px * var(--text-scale));opacity:.85}
+.prompt-jump-toggle:hover,.prompt-jump-toggle:focus-visible,.prompt-jump-toggle[aria-expanded=true]{opacity:1;color:var(--text)}
+.prompt-jump-list{position:absolute;top:28px;right:0;width:min(420px,80vw);max-height:min(420px,60vh);display:flex;flex-direction:column;border:1px solid var(--line-bold);border-radius:10px;background:var(--surface-hover);box-shadow:0 14px 40px color-mix(in srgb,var(--shadow) calc(53% * var(--shadow-strength)),transparent);overflow:hidden}
+.prompt-jump-list input{margin:8px;padding:7px 9px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--text);font-size:calc(12px * var(--text-scale))}
+.prompt-jump-list ul{list-style:none;margin:0;padding:0 4px 4px;overflow:auto;flex:1}
+.prompt-jump-list li button{display:flex;gap:10px;width:100%;padding:7px 8px;border:0;border-radius:6px;background:transparent;color:var(--text-soft);font-size:calc(12px * var(--text-scale));text-align:left}
+.prompt-jump-list li[aria-selected=true] button{background:var(--accent-bg-strong)}
+.prompt-jump-list li small{flex:none;color:var(--text-faint);font-variant-numeric:tabular-nums}
+.prompt-jump-list li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prompt-jump-empty{padding:10px;color:var(--text-muted);font-size:calc(12px * var(--text-scale))}
+.prompt-jump-list footer{padding:6px 10px;border-top:1px solid var(--line);color:var(--text-faint);font-size:calc(10.5px * var(--text-scale))}
+.message-flash{animation:message-flash 1.4s ease-out}
+@keyframes message-flash{0%{box-shadow:0 0 0 2px var(--accent-solid-hover)}100%{box-shadow:0 0 0 2px transparent}}
+@media (prefers-reduced-motion:reduce){.message-flash{animation:none;box-shadow:0 0 0 1px var(--accent-solid-hover)}.prompt-rail button{transition:none}}
+@media (max-width:700px){.prompt-rail{display:none}}
+.messages:focus{outline:none}
+/* In the chat header the chip is one of its tools: no shadow, no overlap, its list opens under it. */
+.prompt-jump-slot{display:inline-flex;align-items:center;flex:none}
+.prompt-jump-slot:empty{display:none}
+.prompt-jump.in-header{position:relative;top:auto;right:auto}
+.prompt-jump.in-header .prompt-jump-toggle{height:28px;padding:0 8px;border:0;border-radius:6px;background:transparent;box-shadow:none;color:inherit;opacity:1;white-space:nowrap}
+.prompt-jump.in-header .prompt-jump-toggle:hover,.prompt-jump.in-header .prompt-jump-toggle[aria-expanded=true]{background:var(--surface-hover);color:var(--text)}
+.prompt-jump.in-header .prompt-jump-list{top:32px;z-index:30}

@@ -1,0 +1,4043 @@
+syntax = "proto3";
+package lazybox.bench.v1;
+
+option go_package = "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen;gen";
+
+service RunnerService {
+  rpc ListSnippets(InfoRequest) returns (SnippetCatalog);
+  rpc GetRepositoryCatalog(GetRepositoryCatalogRequest) returns (RepositoryCatalog);
+  rpc PrepareWorkspace(PrepareWorkspaceRequest) returns (stream WorkspacePreparation);
+  rpc Version(VersionRequest) returns (VersionResponse);
+  rpc GetRunnerSettings(InfoRequest) returns (RunnerSettings);
+  rpc SaveRunnerSettings(RunnerSettings) returns (RunnerSettings);
+  rpc SetModelPrice(SetModelPriceRequest) returns (RunnerSettings);
+  // Owner only. How Claude agents authenticate (CLAUDE_COMPLIANCE.md): whether
+  // an Anthropic API key is saved (never the key itself) and which cloud
+  // provider the Runner's environment selects.
+  rpc GetClaudeAuth(InfoRequest) returns (ClaudeAuth);
+  // Owner only. Saves or forgets the Anthropic API key the claude-default
+  // account's agents run with.
+  rpc SetClaudeApiKey(SetClaudeApiKeyRequest) returns (ClaudeAuth);
+  // Owner only. The user's themes folder for Settings → Appearance: each .json
+  // or .toml file parsed to JSON, read on every call so edits apply without a
+  // restart. The client validates each document against its token catalogue.
+  rpc ListThemes(ListThemesRequest) returns (ThemeFolder);
+  // Owner only. Creates a theme file in that folder; never replaces an
+  // existing one.
+  rpc CreateTheme(CreateThemeRequest) returns (CreateThemeResponse);
+  rpc Info(InfoRequest) returns (InfoResponse);
+  // Owner only. Which agent providers this Runner can run and on which saved
+  // subscriptions: each provider's program (found, where, which version) and
+  // each subscription's state. Ask Lazybox picks its agent from it; the
+  // welcome shows it. Programs are probed once and again on refresh;
+  // subscription states are read on every call.
+  rpc GetProviderAvailability(ProviderAvailabilityRequest) returns (ProviderAvailability);
+  // Owner only. Adds or changes an ACP agent the person runs (a custom one,
+  // or a built-in one's command), and answers with the availability report,
+  // probed again. Environment values stay on the Runner (ACP.md).
+  rpc SaveAcpAgent(SaveAcpAgentRequest) returns (ProviderAvailability);
+  // Owner only. Removes a custom ACP agent, or restores a built-in one's
+  // command. Running conversations keep their agent.
+  rpc RemoveAcpAgent(RemoveAcpAgentRequest) returns (ProviderAvailability);
+  rpc GetTelemetry(TelemetryRequest) returns (TelemetryReport);
+  rpc RenameCollection(RenameCollectionRequest) returns (CollectionResponse);
+  rpc AddSubscription(AddSubscriptionRequest) returns (SubscriptionEnrollment);
+  rpc GetSubscriptionEnrollment(SubscriptionEnrollmentRequest) returns (SubscriptionEnrollment);
+  rpc CancelSubscriptionEnrollment(SubscriptionEnrollmentRequest) returns (SubscriptionEnrollment);
+  rpc RefreshSubscription(RefreshSubscriptionRequest) returns (Profile);
+  // Owner only. Forgets a subscription saved in Lazybox: its registry entry and
+  // its private folder (an imported token among them). Refused while a running
+  // conversation uses it. The person's own CLI sign-ins are never touched.
+  rpc RemoveSubscription(RemoveSubscriptionRequest) returns (InfoResponse);
+  rpc GetGitHubConnection(GetGitHubConnectionRequest) returns (GitHubConnection);
+  rpc ConfigureGitHubApp(ConfigureGitHubAppRequest) returns (GitHubConnection);
+  rpc ConnectGitHubPersonalToken(ConnectGitHubPersonalTokenRequest) returns (GitHubConnection);
+  rpc ListRepositoryDiscovery(ListRepositoryDiscoveryRequest) returns (RepositoryDiscovery);
+  rpc ScanRepositoryRoot(ScanRepositoryRootRequest) returns (RepositoryDiscovery);
+  rpc BeginGitHubSignIn(BeginGitHubSignInRequest) returns (GitHubSignIn);
+  rpc GetGitHubSignIn(GitHubSignInRequest) returns (GitHubSignIn);
+  rpc CancelGitHubSignIn(GitHubSignInRequest) returns (GitHubSignIn);
+  rpc DisconnectGitHub(GetGitHubConnectionRequest) returns (GitHubConnection);
+  rpc ListGitHubInstallations(ListGitHubInstallationsRequest) returns (ListGitHubInstallationsResponse);
+  rpc ListGitHubRepositories(ListGitHubRepositoriesRequest) returns (ListGitHubRepositoriesResponse);
+  rpc ImportGitHubRepository(ImportGitHubRepositoryRequest) returns (ImportGitHubRepositoryResponse);
+  rpc ListGitHubItems(ListGitHubItemsRequest) returns (ListGitHubItemsResponse);
+  // Work items (PROJECTS_AND_INTEGRATIONS.md): search a provider for the
+  // picker, read one item with the context an agent is given, turn a pasted
+  // link into its reference, and find the workspaces started from one.
+  rpc SearchItems(SearchItemsRequest) returns (ItemPage);
+  rpc GetItem(ItemRequest) returns (ItemDetail);
+  rpc ResolveItemUrl(ResolveItemUrlRequest) returns (ItemRef);
+  rpc FindItemWorkspaces(ItemRequest) returns (ItemWorkspaces);
+  rpc AddLocalRepository(AddLocalRepositoryRequest) returns (AddLocalRepositoryResponse);
+  rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
+  rpc RemoveRepository(RemoveRepositoryRequest) returns (RepositoryDiscovery);
+  // Home checkouts (WORKSPACES.md, "Home checkouts"): the person's own,
+  // non-worktree clone of a repository, for logins, long-lived dev servers
+  // and trying a module by hand. Owner only. Lazybox never deletes one, and
+  // no workspace operation touches it.
+  rpc ListRepositoryHomes(ListRepositoryHomesRequest) returns (RepositoryHomes);
+  // Creates (clones), adopts (an existing checkout) or forgets a home; forgetting changes no file.
+  rpc SetRepositoryHome(SetRepositoryHomeRequest) returns (RepositoryHome);
+  // Opens a repository's home in Finder or an editor on the Runner's computer.
+  rpc OpenRepositoryHome(OpenRepositoryHomeRequest) returns (OpenRepositoryHomeResponse);
+  // Fetches the home's origin, then fast-forwards its default branch to the
+  // remote's only when it is checked out and has no changes; otherwise says
+  // why. Never discards, resets or switches anything.
+  rpc UpdateRepositoryHome(UpdateRepositoryHomeRequest) returns (RepositoryHomeUpdate);
+  rpc CreateCollection(CreateCollectionRequest) returns (CollectionResponse);
+  rpc AddCollectionRepositories(AddCollectionRepositoriesRequest) returns (CollectionResponse);
+  rpc GetCollection(CollectionRequest) returns (CollectionResponse);
+  rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
+  rpc ArchiveCollection(CollectionRequest) returns (CollectionResponse);
+  rpc ReconcileCollection(ReconcileCollectionRequest) returns (CollectionResponse);
+  rpc OpenSession(OpenSessionRequest) returns (SessionResponse);
+  rpc OpenAssistant(OpenAssistantRequest) returns (SessionResponse);
+  rpc RenameConversation(RenameConversationRequest) returns (SessionResponse);
+  // Pin or unpin a conversation (any of its attempts' IDs). The owner's only.
+  rpc PinConversation(PinConversationRequest) returns (SessionResponse);
+  // Archive a conversation, or bring it back. Nothing is stopped or deleted:
+  // its agent keeps any turn in progress, and History still lists it.
+  rpc ArchiveConversation(ArchiveConversationRequest) returns (SessionResponse);
+  rpc ListWorkspaceChanges(WorkspaceChangesRequest) returns (WorkspaceChanges);
+  rpc ReadWorkspaceDiff(WorkspaceDiffRequest) returns (WorkspaceDiff);
+  rpc ReadWorkspaceFile(WorkspaceFileRequest) returns (WorkspaceFile);
+  rpc SaveWorkspaceFile(SaveWorkspaceFileRequest) returns (WorkspaceFile);
+  rpc SearchWorkspaceFiles(SearchWorkspaceFilesRequest) returns (WorkspaceFileSearch);
+  rpc ResolveWorkspacePath(ResolveWorkspacePathRequest) returns (WorkspacePathResolution);
+  rpc ListHistory(ListHistoryRequest) returns (ListHistoryResponse);
+  rpc ResumeSession(ResumeSessionRequest) returns (SessionResponse);
+  // Continues the conversation in a new agent started with another permission
+  // mode, for an agent whose running worker cannot change mode live.
+  rpc RestartWithPermission(RestartWithPermissionRequest) returns (SessionResponse);
+  // Owner only. Continues the conversation in a new agent started with another
+  // model, for an agent whose running worker cannot switch model live: it is
+  // ended between turns and the same provider conversation resumes.
+  rpc RestartWithModel(RestartWithModelRequest) returns (SessionResponse);
+  // Owner only. "Give Claude the browser" (BROWSER.md): turns the agent
+  // browser back on for the conversation's workspace if the person turned it
+  // off there, and, for an agent started without the browser tools, ends it
+  // between turns and resumes the same provider conversation in a new agent
+  // that has them. Returns the session the conversation continues in.
+  rpc GiveBrowser(GiveBrowserRequest) returns (SessionResponse);
+  // Owner only. Moves a live conversation to another signed-in subscription of
+  // its provider and continues the same conversation: the same execution,
+  // workspace, commands and queued messages, with a portable checkpoint for the
+  // new account. The current subscription retries in place (after a reset).
+  rpc SwitchSubscription(SwitchSubscriptionRequest) returns (SessionResponse);
+  // Owner only. Turns automatic switching at a subscription limit on or off
+  // for a conversation that already runs, or for every running one.
+  rpc SetSessionRotation(SetSessionRotationRequest) returns (SessionResponse);
+  rpc GetSession(SessionRequest) returns (SessionResponse);
+  rpc Apply(ApplyRequest) returns (Receipt);
+  // The bytes of an image or a text file a sent message carried, so the
+  // conversation can show it: only a file the Runner retained as a message
+  // attachment (the path an operation_accepted record lists), only an image
+  // type a browser displays (PNG, JPEG, GIF, WebP) or text (valid UTF-8, no
+  // NUL; always served as text/plain), at most 20 MiB. The owner, and a
+  // paired phone reading conversations (REMOTE.md); never an agent.
+  rpc ReadAttachment(ReadAttachmentRequest) returns (AttachmentContent);
+  rpc CloseSession(SessionRequest) returns (SessionResponse);
+  rpc StopSessionResources(SessionRequest) returns (SessionResponse);
+  rpc DeleteConversation(DeleteConversationRequest) returns (DeleteConversationResponse);
+  rpc PreviewWorkspaceDeletion(CollectionRequest) returns (WorkspaceDeletionPreview);
+  rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (CollectionResponse);
+  rpc ContinueSession(ContinueSessionRequest) returns (SessionResponse);
+  rpc WatchEvents(WatchEventsRequest) returns (stream JournalEvent);
+  // The latest turns of a conversation in one response, or an earlier page:
+  // a window shows the latest at once and reads the rest in a few pages
+  // instead of a record-per-message replay. Turn starts come from an index the
+  // Runner keeps as journals open and grow, so no journal is parsed to find
+  // them.
+  rpc ReadSessionTail(ReadSessionTailRequest) returns (ReadSessionTailResponse);
+  rpc StartCommand(StartCommandRequest) returns (CommandStatus);
+  rpc RegisterPipe(RegisterPipeRequest) returns (CommandStatus);
+  rpc Publish(PublishRequest) returns (CommandStatus);
+  rpc FinishPipe(FinishPipeRequest) returns (CommandStatus);
+  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+  // Takes a terminal run shared with a conversation (`lazybox log --to`) for
+  // one composer: true for the first caller only, so the run is added once.
+  rpc ClaimCommandShare(CommandRequest) returns (ClaimCommandShareResponse);
+  rpc ReadCommand(ReadCommandRequest) returns (ReadCommandResponse);
+  rpc WaitCommand(CommandRequest) returns (CommandStatus);
+  rpc CancelCommand(CommandRequest) returns (CommandStatus);
+  // Moves a `lazybox run` that is still in the foreground to the background:
+  // the agent's (or the person's) call returns now with a report, and the
+  // command keeps running, its output still streaming to the console. Only a
+  // run whose CLI follows the Runner (CommandStatus.can_background) can move.
+  rpc BackgroundCommand(CommandRequest) returns (CommandStatus);
+  // The `lazybox run` that publishes a pipe reports its state (foreground or
+  // background, its process, its listening ports) and waits up to wait_ms for
+  // what the Runner asks of it: stop the command, or move it to the
+  // background. Calling it makes the pipe followed: a Runner restart keeps it,
+  // and CancelCommand stops it through its CLI.
+  rpc FollowPipe(FollowPipeRequest) returns (FollowPipeResponse);
+  rpc WatchOutput(WatchOutputRequest) returns (stream OutputEvent);
+  // Workspace terminals: a person's interactive shell, never an agent's.
+  rpc OpenTerminal(OpenTerminalRequest) returns (TerminalStatus);
+  rpc ListTerminals(ListTerminalsRequest) returns (ListTerminalsResponse);
+  rpc WatchTerminal(WatchTerminalRequest) returns (stream TerminalEvent);
+  rpc WriteTerminal(WriteTerminalRequest) returns (TerminalStatus);
+  rpc ResizeTerminal(ResizeTerminalRequest) returns (TerminalStatus);
+  rpc CloseTerminal(TerminalRequest) returns (TerminalStatus);
+  // Owner only. Asks the launcher that supervises this Runner to start it
+  // again: the Runner records the request and stops exactly as on any restart,
+  // detaching (never stopping) agents, managed commands and terminals.
+  rpc RestartRunner(RestartRunnerRequest) returns (RestartRunnerResponse);
+  // The PR loop, per workspace repository: the owner's only Git and GitHub
+  // writes. Agent credentials can never call these.
+  rpc CommitWorkspaceChanges(CommitWorkspaceChangesRequest) returns (CommitWorkspaceChangesResponse);
+  rpc PushWorkspaceBranch(PushWorkspaceBranchRequest) returns (PushWorkspaceBranchResponse);
+  rpc CreatePullRequest(CreatePullRequestRequest) returns (PullRequestStatus);
+  rpc GetPullRequest(GetPullRequestRequest) returns (PullRequestStatus);
+  rpc MergePullRequest(MergePullRequestRequest) returns (PullRequestStatus);
+  // The sidebar's git state, per workspace and repository: branch, ahead and
+  // behind its pushed branch and the default branch, uncommitted files, and the
+  // last pull request seen for the branch. Local Git only (no fetch); the pull
+  // request comes from the tracked items (ListLinks), which the Runner keeps
+  // fresh in the background for pushed branches. Owner only.
+  rpc ListWorkspaceGitSummaries(WorkspaceGitSummariesRequest) returns (WorkspaceGitSummaries);
+  // Tracked work items (PROJECTS_AND_INTEGRATIONS.md, GITHUB.md "Tracked pull
+  // requests"): the pull requests a workspace delivers and the items it
+  // mentions, kept fresh by their provider and persisted across restarts.
+  // ListLinks and LinkItem admit an agent for its own workspace (`lazybox
+  // items`, `lazybox link`); a paired phone reads them with the read grant.
+  rpc ListLinks(ListLinksRequest) returns (Links);
+  rpc LinkItem(LinkItemRequest) returns (Links);
+  rpc UnlinkItem(UnlinkItemRequest) returns (Links);
+  // One-click reactions to a tracked pull request, always a person's: the
+  // failing checks' logs, compacted as `lazybox run` compacts output, and
+  // GitHub's review comments as Review comments, each sent to the
+  // conversation that delivered it (queued while it is mid-turn).
+  rpc SendPullRequestFailures(PullRequestReactionRequest) returns (PullRequestReaction);
+  rpc ImportPullRequestReview(PullRequestReactionRequest) returns (PullRequestReaction);
+  // Inline review comments on a workspace's changes, kept per workspace on the
+  // Runner so every window shows them. Owner only. Every reply is the whole
+  // review, each comment anchored against the working tree as it is now.
+  rpc ListReviewComments(ListReviewCommentsRequest) returns (WorkspaceReview);
+  rpc AddReviewComment(AddReviewCommentRequest) returns (WorkspaceReview);
+  rpc EditReviewComment(EditReviewCommentRequest) returns (WorkspaceReview);
+  rpc DeleteReviewComment(DeleteReviewCommentRequest) returns (WorkspaceReview);
+  rpc SetReviewDisposition(SetReviewDispositionRequest) returns (WorkspaceReview);
+  rpc SetReviewAutoResolve(SetReviewAutoResolveRequest) returns (WorkspaceReview);
+  // Owner only. One-click cross-agent review (GITHUB.md, "Agent review"):
+  // opens a read-only conversation in the same workspace on another agent
+  // (by default the other provider than the source conversation's), titled
+  // "Review · <scope> · <agent>", linked to the source, and sends it a brief
+  // generated from the source's goal, the scope's diff and files, and the
+  // `lazybox run` evidence so far. Its findings land in the workspace's review.
+  rpc StartReview(StartReviewRequest) returns (StartReviewResponse);
+  // A reviewer's finding, from `lazybox review add`. An agent credential may
+  // call it only for its own execution, and only while that execution is the
+  // reviewer of a review in its own workspace: the Runner derives the
+  // workspace, review and author from the execution, never the request. A
+  // finding with the key of one already filed in that review updates it.
+  rpc AddReviewFinding(AddReviewFindingRequest) returns (ReviewFinding);
+  // The findings of the review an execution is the reviewer (or the author)
+  // of, from `lazybox review list`. The same agent rule as AddReviewFinding.
+  rpc ListReviewFindings(ListReviewFindingsRequest) returns (ReviewFindings);
+  // The reviewer's verdict on one of its own findings in a later round
+  // (`lazybox review resolve|reopen <id> --note`): resolved, or still open.
+  // The same agent rule as AddReviewFinding; only findings of its own review.
+  rpc SetReviewFindingState(SetReviewFindingStateRequest) returns (ReviewFinding);
+  // Owner only. Controls a review's loop: pause, resume, stop, take over,
+  // and how findings reach the author between rounds.
+  rpc UpdateReviewRun(UpdateReviewRunRequest) returns (WorkspaceReview);
+  // One agent asks the other a question (`lazybox ask author|reviewer`): an
+  // agent credential may ask only for its own execution, and only between the
+  // author and the reviewer of one review in the same workspace. The question
+  // goes to the other conversation as a labelled message; its reply comes back.
+  rpc AskAgent(AskAgentRequest) returns (AgentAsk);
+  // Waits, at most timeout_seconds (bounded), for the reply. Only the asker.
+  rpc WaitAgentAsk(WaitAgentAskRequest) returns (AgentAsk);
+  // Owner only. Every process the Runner hosts so it outlives the Runner
+  // (agents, managed commands, terminals), held by this Runner or orphaned.
+  rpc ListProcesses(ListProcessesRequest) returns (ProcessInventory);
+  // Owner only. Stops one hosted process the way its owner would: closes the
+  // agent's session, cancels the command, closes the terminal; an orphan is
+  // stopped directly.
+  rpc StopProcess(StopProcessRequest) returns (ProcessInventory);
+  // Owner only. The safe sweep: stops every host this Runner does not hold.
+  rpc CleanUpOrphanProcesses(CleanUpOrphanProcessesRequest) returns (CleanUpOrphanProcessesResponse);
+  // Owner only. The orchestration process (ORCHESTRATION.md §4) a mission
+  // in a workspace would run: a built-in preset, the user's process file and
+  // the repository's committed .lazybox/process.yaml, resolved under the
+  // user's ceiling and validated. Read-only; nothing runs it yet.
+  rpc GetOrchestrationProcess(OrchestrationProcessRequest) returns (OrchestrationProcess);
+  // Owner only. What that process does on one event type, in firing order.
+  rpc ExplainOrchestrationProcess(ExplainOrchestrationProcessRequest) returns (OrchestrationProcessExplanation);
+  // Owner only. Per-turn code checkpoints: the workspace's files saved to a
+  // private ref before each agent turn and after it, uncommitted and untracked
+  // files included. Lists a conversation's turns and reverts.
+  rpc ListTurnCheckpoints(TurnCheckpointsRequest) returns (TurnCheckpoints);
+  // Owner only. What one turn changed (checkpoint before → after), per repository.
+  rpc ListTurnChanges(TurnChangesRequest) returns (TurnChanges);
+  rpc ReadTurnDiff(TurnDiffRequest) returns (WorkspaceDiff);
+  // Owner only. What reverting to before a turn would change, without changing it.
+  rpc PreviewRevertCode(RevertCodeRequest) returns (RevertCodePreview);
+  // Owner only. Restores the workspace's files to before a turn, after saving
+  // the current ones so the revert can be undone. Never moves a branch.
+  // Refused while an agent in the workspace is in a turn.
+  rpc RevertCode(RevertCodeRequest) returns (CodeRevert);
+  // Owner only. Undoes the latest revert (an undo can itself be undone).
+  rpc UndoRevertCode(UndoRevertCodeRequest) returns (CodeRevert);
+  // The workspace runtime (WORKSPACE_RUNTIME.md): each repository's committed
+  // .lazybox/workspace.yaml (setup, archive, actions, files to copy) and the
+  // workspace's port block. Owner only: neither an agent's nor a terminal's
+  // credential may call these. An agent starts an action only through its
+  // lazybox_command tool, and only when its session's permission allows.
+  rpc GetWorkspaceRuntime(WorkspaceRuntimeRequest) returns (WorkspaceRuntime);
+  // Approves exactly the repository scripts the person reviewed (by hash),
+  // optionally running setup right away.
+  rpc ApproveWorkspaceScripts(ApproveWorkspaceScriptsRequest) returns (WorkspaceRuntime);
+  rpc StartWorkspaceAction(WorkspaceActionRequest) returns (WorkspaceActionResult);
+  rpc StopWorkspaceAction(WorkspaceActionRequest) returns (WorkspaceActionResult);
+  rpc RunWorkspaceSetup(RunWorkspaceSetupRequest) returns (WorkspaceRuntime);
+  rpc GetWorkspaceRuntimeSettings(InfoRequest) returns (WorkspaceRuntimeSettings);
+  rpc SaveWorkspaceRuntimeSettings(WorkspaceRuntimeSettings) returns (WorkspaceRuntimeSettings);
+  // Owner only. Remote control from a phone (REMOTE.md): how a paired device
+  // reaches this Runner, and turning the Tailscale route on or off.
+  rpc GetRemoteAccess(GetRemoteAccessRequest) returns (RemoteAccess);
+  rpc SetRemoteAccess(SetRemoteAccessRequest) returns (RemoteAccess);
+  // Owner only. A one-time, short-lived pairing offer for the QR code, its
+  // progress while the phone completes it, and withdrawing it.
+  rpc BeginDevicePairing(BeginDevicePairingRequest) returns (DevicePairing);
+  rpc GetDevicePairing(DevicePairingRequest) returns (DevicePairing);
+  rpc CancelDevicePairing(DevicePairingRequest) returns (DevicePairing);
+  // Owner only. Paired devices, and revoking one: its access ends at its next request.
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  rpc RevokeDevice(RevokeDeviceRequest) returns (ListDevicesResponse);
+  // Web Push to a paired phone (REMOTE.md). A phone reads and sets its own
+  // subscription and preferences (the device allowlist admits it with read);
+  // the owner sees them on each device and can send it a test.
+  rpc GetPushSettings(GetPushSettingsRequest) returns (PushSettings);
+  rpc SetPushSettings(SetPushSettingsRequest) returns (PushSettings);
+  rpc SendTestPush(SendTestPushRequest) returns (SendTestPushResponse);
+  // Missions (ORCHESTRATION.md slice 1), owner only. A mission's board is
+  // derived from its event log and live observations; nothing else is stored.
+  rpc ListMissions(ListMissionsRequest) returns (ListMissionsResponse);
+  rpc GetMission(GetMissionRequest) returns (Mission);
+  rpc CreateMission(CreateMissionRequest) returns (Mission);
+  // One typed change: a goal, a task, an assignment, a report, a decision at
+  // a gate, a cancellation. Refused changes say why and write nothing.
+  rpc UpdateMission(UpdateMissionRequest) returns (Mission);
+  // Owner only. Sent prompts, newest first, from the Runner's prompt log, with
+  // the snippet chain a conversation offers next.
+  rpc ListPromptHistory(ListPromptHistoryRequest) returns (PromptHistory);
+  // The Orchestrator verbs (`lazybox agents …`; audits/2026-11-16/sota-agents.md
+  // §6.3). An agent credential calls them only for its own execution. Starting
+  // an agent needs an Orchestrator grant in force, which only the person gives
+  // (UpdateMission grant); every other verb reaches only the caller's own
+  // lineage: the children it started, or its parent. None approves, answers,
+  // passes a gate or accepts a task.
+  rpc SpawnAgent(SpawnAgentRequest) returns (AgentLineage);
+  rpc ListAgentLineage(AgentLineageRequest) returns (AgentLineage);
+  rpc SendAgentMessage(SendAgentMessageRequest) returns (AgentMessageReceipt);
+  // Waits, at most timeout_seconds (bounded), until the targets reach a state
+  // or (until "event") anything happens in the lineage after after_seq.
+  rpc WaitAgents(WaitAgentsRequest) returns (AgentLineage);
+  rpc StopChildAgent(StopChildAgentRequest) returns (AgentLineage);
+  // A child reports its own task done to the person (and its parent).
+  rpc ReportAgentTask(ReportAgentTaskRequest) returns (AgentLineage);
+  // An orchestrator proposes how it would split the mission into agents,
+  // with an estimate (`lazybox mission plan`). It waits for the person's
+  // approval (UpdateMission approve_plan, owner only) before any of them
+  // starts when the grant requires a plan.
+  rpc ProposePlan(ProposePlanRequest) returns (MissionPlan);
+  // Advisory path leases (`lazybox lease`): an agent leases paths for its own
+  // task (an orchestrator, for its agents' tasks). Nothing is blocked; an
+  // edit inside another task's exclusive lease is recorded as an overlap.
+  rpc ClaimLease(ClaimLeaseRequest) returns (MissionLeases);
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (MissionLeases);
+  rpc ListLeases(LeasesRequest) returns (MissionLeases);
+  // Artifacts: versioned documents (plans, reports, specs, notes) of one
+  // workspace, kept by the Runner (ARTIFACTS.md). An agent credential may list,
+  // read and put artifacts of its own execution's workspace only
+  // (`lazybox artifact`), and retire the ones an agent published there;
+  // everything else here is the owner's.
+  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+  rpc GetArtifact(GetArtifactRequest) returns (Artifact);
+  // Creates an artifact, or appends a version to one. The author is who called
+  // (a person, or the agent whose credential it is), never what the request says.
+  rpc PutArtifact(PutArtifactRequest) returns (Artifact);
+  // Owner only. Tracks a workspace text file: the artifact's first version is
+  // the file, and the Runner records a version whenever the file changes on
+  // disk. Tracking a file that is already tracked returns that artifact.
+  rpc TrackArtifactFile(TrackArtifactFileRequest) returns (Artifact);
+  // Owner only. Rename, change kind, or stop following the tracked file.
+  rpc UpdateArtifact(UpdateArtifactRequest) returns (Artifact);
+  rpc DeleteArtifact(DeleteArtifactRequest) returns (DeleteArtifactResponse);
+  // Retires an artifact, or restores a retired one. Retiring is reversible:
+  // the artifact and every version are kept, it leaves the default list, and
+  // it may name the artifact that supersedes it. The owner retires or restores
+  // any; an agent credential may only retire, in its own execution's
+  // workspace, an artifact every version of which an agent published.
+  rpc RetireArtifact(RetireArtifactRequest) returns (Artifact);
+  // Owner only. Writes the artifact's latest version into a workspace
+  // repository; never stages or commits.
+  rpc SaveArtifactToRepository(SaveArtifactToRepositoryRequest) returns (SaveArtifactToRepositoryResponse);
+  // Owner only. Opens a GitHub issue with the artifact as its body, in a
+  // workspace repository's GitHub project, through the GitHub connection.
+  rpc CreateArtifactIssue(CreateArtifactIssueRequest) returns (CreateArtifactIssueResponse);
+  // Power-user extensibility (POWER.md), owner only. The user's actions and
+  // hooks file as the Runner last loaded it: actions the app offers in its
+  // menus and runs with the owner's own rules, hooks the Runner fires on
+  // events, and every problem with the file by line.
+  rpc GetUserActions(GetUserActionsRequest) returns (UserActions);
+  // Owner only. Creates the actions file with a commented starter and its
+  // JSON Schema beside it, when there is none; never replaces a file.
+  rpc InitUserActions(GetUserActionsRequest) returns (UserActions);
+  // Owner only. Recent hook runs, newest first; each run's output is its
+  // command's (ReadCommand).
+  rpc ListHookRuns(ListHookRunsRequest) returns (HookRuns);
+  // Owner only. Fires one hook now with a sample event, as Settings' Test does.
+  rpc TestHook(TestHookRequest) returns (HookRun);
+  // Owner only. Asks the person's open Lazybox window to do something the CLI
+  // cannot: show a workspace, conversation or file (`lazybox open`), take a
+  // screenshot (`lazybox shot`) or run a user action (`lazybox actions run`).
+  // Refused at once when no window is open to handle it.
+  rpc PostUiRequest(UiRequest) returns (UiRequest);
+  // Owner only. Waits for a posted request's outcome (bounded).
+  rpc WaitUiRequest(WaitUiRequestRequest) returns (UiRequest);
+  // Owner only. A window follows the requests addressed to it…
+  rpc WatchUiRequests(WatchUiRequestsRequest) returns (stream UiRequest);
+  // …and answers each one, with a screenshot's PNG when one was asked for.
+  rpc CompleteUiRequest(CompleteUiRequestRequest) returns (UiRequest);
+  // Owner only. The person's config files beside the actions file (POWER.md,
+  // "Config files"): keys.yaml, settings.yaml and layouts/*.yaml as the
+  // Runner last loaded them, each with its problems by line. A file that does
+  // not load keeps its last good version in force, marked stale.
+  rpc GetConfigFiles(GetConfigFilesRequest) returns (ConfigFiles);
+  // Owner only. Changes one config file: values at paths (comments kept), a
+  // whole new content (import), or removal (a layout). Nothing is written
+  // when the result would not load; the refusal names each problem by line.
+  rpc UpdateConfigFile(UpdateConfigFileRequest) returns (ConfigFiles);
+  // Owner only. Sandboxed panel extensions (EXTENSIONS.md): the folders in the
+  // config folder's extensions/, each with what its manifest asks for, what
+  // the person approved, and its state. Reloaded every second.
+  rpc ListExtensions(ListExtensionsRequest) returns (Extensions);
+  // Owner only. Approves exactly the grants and hosts the person was shown and
+  // turns the extension on; refused when its manifest asks for anything else
+  // now, or does not load.
+  rpc ApproveExtension(ApproveExtensionRequest) returns (Extensions);
+  // Owner only. Turns an approved extension off, or back on (refused when it
+  // asks for more than was approved: that needs ApproveExtension).
+  rpc SetExtensionEnabled(SetExtensionEnabledRequest) returns (Extensions);
+  // Owner only. Deletes an extension's folder and its approval.
+  rpc RemoveExtension(RemoveExtensionRequest) returns (Extensions);
+  // Owner only. Copies one of the bundled examples into the folder, not yet approved.
+  rpc InstallExampleExtension(InstallExampleExtensionRequest) returns (Extensions);
+  // Owner only. Opens one panel of a running extension: the address of its
+  // sandboxed page on the extension content origin, and the credential the
+  // app's bridge calls the Runner with for it, which admits its approved
+  // grants alone and is revoked when they change.
+  rpc OpenExtensionPanel(OpenExtensionPanelRequest) returns (ExtensionPanelSession);
+  // Agents ask for a repository instead of reaching outside their workspace
+  // (WORKSPACES.md, "When an agent needs another repository"). An agent
+  // credential may list its own execution's workspace repositories, ask to
+  // add one to that workspace and wait for the person's answer: it can never
+  // add one. Adding is the owner's PrepareWorkspace, with
+  // repository_request_id; declining is DeclineRepositoryRequest.
+  rpc ListWorkspaceRepositories(ListWorkspaceRepositoriesRequest) returns (WorkspaceRepositories);
+  // Matches the query against the repository catalog and records a pending
+  // request on the asking conversation; adds nothing.
+  rpc RequestRepository(RequestRepositoryRequest) returns (RepositoryRequest);
+  // Waits, at most timeout_seconds (bounded), for the person's answer.
+  rpc WaitRepositoryRequest(WaitRepositoryRequestRequest) returns (RepositoryRequest);
+  // Owner only. Declines a request; the agent is told the reason.
+  rpc DeclineRepositoryRequest(DeclineRepositoryRequestRequest) returns (RepositoryRequest);
+  // Agents ask the person to start a conversation (docs/guides/orchestrator.md,
+  // "Ask an agent to start another conversation"). An agent credential may
+  // ask for its own execution and wait for its own requests: it never starts
+  // one. The request waits in the asking conversation like an approval; the
+  // person starts it (as asked, or edited) or declines it. A conversation
+  // that holds an Orchestrator grant in force starts the agent at once, as
+  // SpawnAgent does, under that grant.
+  rpc RequestConversationStart(RequestConversationStartRequest) returns (ConversationStartRequest);
+  // Waits, at most timeout_seconds (bounded), for the person's answer.
+  rpc WaitConversationStart(WaitConversationStartRequest) returns (ConversationStartRequest);
+  // The person's answer: start (with their edits) or decline. A paired phone
+  // that may respond answers it, without changing the agent or workspace.
+  rpc AnswerConversationStart(AnswerConversationStartRequest) returns (ConversationStartRequest);
+  // The agent browser (BROWSER.md): a Runner-owned Chromium that an agent
+  // drives through its browser_* tools and the person watches beside the
+  // chat. Every RPC below is the owner's. An agent reaches only its own
+  // conversation's browser, and only through the tool pipe of its own
+  // execution, never with a credential.
+  //
+  // Follows one conversation's browser: its state and recent action log
+  // first, then live frames (only while someone watches), actions and state.
+  rpc WatchBrowser(WatchBrowserRequest) returns (stream BrowserEvent);
+  // Take over / Give back / Stop / Let the agent browse again, browse freely,
+  // and the person's own navigation while they hold the browser.
+  rpc ControlBrowser(ControlBrowserRequest) returns (BrowserState);
+  // The person's mouse and keyboard while they hold the browser (Take over).
+  rpc SendBrowserInput(BrowserInputRequest) returns (BrowserState);
+  // Answers a site, download or sign-in request the agent's browsing raised.
+  rpc DecideBrowserRequest(DecideBrowserRequestRequest) returns (BrowserState);
+  // Settings → Browser.
+  rpc GetBrowserSettings(InfoRequest) returns (BrowserSettings);
+  rpc SaveBrowserSettings(BrowserSettings) returns (BrowserSettings);
+  // Closes a workspace's agent browsers and deletes its browser profile
+  // (cookies, storage, cache) and its always-allowed sites.
+  rpc ClearBrowserData(ClearBrowserDataRequest) returns (BrowserSettings);
+  // Installs the Chromium the agent browser runs, in a developer build whose
+  // Chromium is missing (BrowserSettings.installable), as a command whose
+  // output Settings → Browser shows. One at a time: a second call returns the
+  // install already running.
+  rpc InstallBrowser(InfoRequest) returns (CommandStatus);
+}
+
+message InfoRequest {}
+message ModelPrice {
+ string provider = 1; string model = 2; int64 input = 3; int64 output = 4; int64 cache_read = 5;
+ int64 cache_write5m = 6; int64 cache_write1h = 7; int64 max_input = 8; string version = 9; bool custom = 10;
+}
+message RunnerSettings { uint64 revision = 1; string naming = 2; string permission = 3; string context = 4; string claude_context = 5; string codex_context = 6; repeated ModelPrice prices = 7; string suggested_name = 8;
+  // Hosts new agents, commands and terminals: "sessionhost" or "tmux"; "" keeps
+  // the Runner configuration's choice. Running processes keep theirs.
+  string process_backend = 9;
+  // Subscriptions left out of automatic switching; every other signed-in
+  // subscription of a conversation's provider is in its default pool.
+  repeated string rotation_excluded_profile_ids = 10;
+  // New Claude sessions load the person's claude.ai connectors (Claude's cloud
+  // MCP servers, such as Claude Docs, Gmail or Notion). Off by default: plans
+  // and documents stay in Lazybox artifacts. Running sessions keep theirs.
+  bool claude_ai_connectors = 11;
+  // Agent review (GITHUB.md, "Agent review").
+  ReviewSettings review = 12;
+  // Conversations keep the title made from their first message: no title is
+  // generated after the first turn. Off by default, so an older client that
+  // does not know the field keeps titles generated.
+  bool plain_titles = 13;
+  // Lazybox may offer a Claude subscription sign-in (Settings → Subscriptions)
+  // and run conversations on the Claude subscriptions saved there. Off by
+  // default; CLAUDE_COMPLIANCE.md says why.
+  bool claude_subscription_sign_in = 14;
+  // One-time notices the person has not dismissed yet, by id
+  // ("automatic-switching-moved", "claude-sign-in-kept"). Saving the settings
+  // without one dismisses it; a save never adds one.
+  repeated string notices = 15;
+  // Read only: the providers an enabled extension's account policy switches
+  // automatically at a limit. Empty: switching is always the person's choice.
+  repeated string automatic_switching_providers = 16;
+  // Read only: claude_subscription_sign_in was turned on by the migration,
+  // because this Runner already had Claude subscriptions saved in Lazybox.
+  bool claude_sign_in_carried_over = 17;
+}
+message ClaudeAuth {
+  // An Anthropic API key is saved; the claude-default account's agents use it.
+  bool api_key_set = 1;
+  // Its last four characters, to recognise it; never more.
+  string api_key_hint = 2;
+  // The cloud provider the Runner's environment selects for Claude
+  // ("bedrock", "vertex", "foundry", "anthropic-aws"), or "".
+  string cloud_provider = 3;
+}
+message SetClaudeApiKeyRequest {
+  // The key (sk-ant-…). Empty with clear forgets the saved one.
+  string api_key = 1;
+  bool clear = 2;
+}
+message ReviewSettings {
+  // The default reviewer: "" for the other provider than the conversation
+  // under review, else a subscription (profile id).
+  string reviewer = 1;
+  // The brief template; "" is the built-in one (default_template).
+  string template = 2;
+  // Start a review when an agent's turn ends with changes. Off by default.
+  bool auto_start = 3;
+  // Read only: the built-in template, for "Reset".
+  string default_template = 4;
+  // How a new review's findings reach the author between rounds: "ask" (you
+  // accept and send them; the default), "auto" or "off" (one pass).
+  string loop = 5;
+  // Rounds before a loop stops and asks you; 0 is 3.
+  uint32 max_rounds = 6;
+  // Who reviews by default: "other" (the other agent than the author's:
+  // Codex reviews Claude's work and Claude reviews Codex's; the default),
+  // "same" (the author's own agent, in a fresh conversation) or "fixed"
+  // (reviewer, and reviewer_model when set). "" is "fixed" when reviewer is
+  // set, else "other", as before this field. An agent that is not available
+  // (not installed, or not signed in) gives way to the author's own agent,
+  // and the review says so.
+  string reviewer_mode = 7;
+  // fixed: the model the reviewer runs on; "" is its agent's default.
+  string reviewer_model = 8;
+}
+message SetModelPriceRequest { uint64 revision = 1; ModelPrice price = 2; bool remove = 3; }
+message ListThemesRequest {}
+// One file in the themes folder.
+message ThemeFile {
+  // The file name, extension included.
+  string name = 1;
+  // "json" or "toml".
+  string format = 2;
+  // The parsed document as compact JSON; empty when it cannot be parsed.
+  string json = 3;
+  // Why the file cannot be used: a parse error with its line (and column when
+  // known), or a file too large to read.
+  string error = 4;
+  int64 modified_unix_millis = 5;
+}
+message ThemeFolder {
+  string directory = 1;
+  // Sorted by name; at most 64.
+  repeated ThemeFile files = 2;
+  // Changes whenever any file is added, removed or edited, so a client polling
+  // ListThemes reapplies only on a change.
+  string revision = 3;
+}
+message CreateThemeRequest {
+  // The base name, without extension: letters, digits, space, '.', '_', '-'.
+  string name = 1;
+  // The theme as TOML.
+  string content = 2;
+}
+message CreateThemeResponse {
+  ThemeFolder folder = 1;
+  // The created file's name and absolute path.
+  string file = 2;
+  string path = 3;
+}
+message RenameCollectionRequest { string collection_id = 1; string name = 2; }
+message TelemetryRequest {
+  string workspace = 1; string execution = 2; string conversation = 3;
+  // Also report usage hour by hour (TelemetryReport.series), for spend over time.
+  bool series = 4;
+}
+message TelemetryScope { string workspace = 1; string conversation = 2; string execution = 3; string profile = 4; string provider = 5; string attempt = 6; }
+message TokenCounts { optional int64 input = 1; optional int64 output = 2; optional int64 cache_read = 3; optional int64 cache_write5m = 4; optional int64 cache_write1h = 5; }
+message ContextDetail { string name = 1; optional int64 tokens = 2; }
+message ContextCategory { string name = 1; optional int64 tokens = 2; bool included = 3; string kind = 4; repeated ContextDetail details = 5; }
+message ContextSnapshot {
+ TelemetryScope scope = 1; string agent = 2; string model = 3; optional int64 used = 4; optional int64 capacity = 5;
+ optional int64 reserve = 6; string source = 7; repeated ContextCategory categories = 8; string observed_at = 9;
+}
+message UsageRecord {
+ string id = 1; TelemetryScope scope = 2; string agent = 3; string parent = 4; string model = 5; string source = 6;
+ string response_id = 7; string status = 8; TokenCounts tokens = 9; optional int64 nanos = 10; string price_version = 11;
+ string reason = 12; string tier = 13; string observed_at = 14;
+ // What each part of nanos cost; absent when unpriced.
+ TokenCosts costs = 15;
+}
+// What each kind of token cost, in nanodollars; a part is absent when unknown.
+message TokenCosts { optional int64 input = 1; optional int64 output = 2; optional int64 cache_read = 3; optional int64 cache_write5m = 4; optional int64 cache_write1h = 5; }
+message UsageGroup {
+ TelemetryScope scope = 1; string agent = 2; string model = 3; string source = 4; TokenCounts tokens = 5;
+ optional int64 nanos = 6; int64 records = 7; int64 unpriced = 8; int64 incomplete = 9;
+ // What each part of nanos cost, when every priced record says; absent otherwise.
+ TokenCosts costs = 10;
+ // Why the unpriced records have no price, each reason once.
+ repeated string unpriced_reasons = 11;
+ // The tokens of the unpriced records: what nanos leaves out.
+ TokenCounts unpriced_tokens = 12;
+}
+// Usage in one hour (UTC) by conversation, provider and model: tokens and
+// cost, counted as the report's groups count them.
+message UsageBucket {
+ int64 hour_unix_millis = 1; string conversation = 2; string provider = 3; string model = 4;
+ TokenCounts tokens = 5; optional int64 nanos = 6; int64 records = 7; int64 unpriced = 8;
+}
+message TelemetryReport {
+ repeated UsageGroup groups = 1; repeated ContextSnapshot contexts = 2; repeated UsageRecord recent = 3;
+ // Hour by hour, oldest first; only when the request asked for series.
+ repeated UsageBucket series = 4;
+}
+message AddSubscriptionRequest {
+  string request_key = 1;
+  string provider = 2;
+  string label = 3;
+  // Secret input: never retained in ordinary metadata or logs.
+  string subscription_token = 4;
+  // How the person signs in: "browser" (the provider's page in a browser on
+  // the Runner's computer, which calls back to the provider CLI there) or
+  // "device" (a one-time code entered on any device; Codex only). Empty is
+  // the Runner's default, the browser.
+  string sign_in_method = 5;
+}
+message SubscriptionEnrollmentRequest {
+  string enrollment_id = 1;
+  string request_key = 2;
+  string provider = 3;
+}
+message RefreshSubscriptionRequest { string profile_id = 1; }
+message SubscriptionEnrollment {
+  string id = 1;
+  string state = 2;
+  string profile_id = 3;
+  string provider = 4;
+  string label = 5;
+  string sign_in_url = 6;
+  string user_code = 7;
+  string error = 8;
+  // "browser" or "device" (AddSubscriptionRequest.sign_in_method); empty for
+  // an imported token. A browser sign-in has a sign_in_url and no user_code.
+  string sign_in_method = 9;
+  // Why a sign-in failed, so the client can offer the way out:
+  // "device_sign_in_disabled" (the account refuses device codes; the browser
+  // works) or "sign_in_in_progress" (another sign-in holds the provider's
+  // local callback). Empty otherwise.
+  string error_code = 10;
+}
+message UsageWindow {
+  string name = 1;
+  double used_percent = 2;
+  int64 reset_at = 3;
+  int64 duration_minutes = 4;
+}
+message Profile {
+  string id = 1;
+  string provider = 2;
+  string isolation = 3;
+  AccountObservation availability = 4;
+  string label = 5;
+  bool managed = 6;
+  // A Claude account an earlier Lazybox imported from a subscription token
+  // (no longer done; not recommended). The token itself is never sent.
+  bool token_imported = 7;
+}
+message RemoveSubscriptionRequest {
+  string profile_id = 1;
+}
+message Gateway {
+  string id = 1;
+  string provider = 2;
+}
+message InfoResponse {
+  repeated Profile profiles = 1;
+  repeated Gateway gateways = 2;
+  repeated Session sessions = 3;
+  string default_model = 4;
+  string default_permission = 5;
+  AttachmentLimits attachment_limits = 6;
+  repeated SubscriptionEnrollment pending_enrollments = 7;
+  bool shared_subscriptions = 8;
+  // A supervising launcher will start this Runner again after RestartRunner.
+  bool restart_available = 9;
+  // Random per Runner process: a new value means a new process is serving.
+  string instance_id = 10;
+}
+message ProviderAvailabilityRequest {
+  // Probe the provider programs again (path and version) instead of answering
+  // from the last probe.
+  bool refresh = 1;
+}
+message ProviderAvailability {
+  // Every provider the Runner knows, installed or not, in a fixed order.
+  repeated ProviderStatus providers = 1;
+  // When the programs were last probed.
+  int64 checked_at_unix_millis = 2;
+}
+message ProviderStatus {
+  // "claude", "codex", or an ACP agent: "acp:<id>" (ACP.md).
+  string provider = 1;
+  // The program as people know it: "Claude Code", "Codex", "Gemini CLI".
+  string title = 2;
+  // ready (a subscription can take work), limited (every subscription is at a
+  // limit), sign_in (none is signed in), billing, no_subscription,
+  // not_installed, or unusable (installed but cannot run: see error).
+  string state = 3;
+  bool installed = 4;
+  // The program the Runner runs, and its reported version ("2.1.311").
+  string path = 5;
+  string version = 6;
+  // Where the program comes from: configured, bundled (with the SDK), path.
+  string source = 7;
+  // Why the provider cannot run, in plain words; empty when it can.
+  string error = 8;
+  // A command that installs the provider, when it is missing.
+  string install_command = 9;
+  // This provider's saved subscriptions, the best to use first.
+  repeated SubscriptionAvailability subscriptions = 10;
+  // Set for an ACP agent (provider "acp:<id>"); Claude and Codex have none.
+  AcpAgentInfo acp = 11;
+  // The models a conversation of this provider can switch to (/model): what
+  // the program lists (Codex's model/list), else a built-in list. A running
+  // agent's own list (its command_catalog event) is more precise; this is
+  // the fallback for an agent that reports none. Empty for an ACP agent.
+  repeated ProviderModel models = 12;
+}
+// One model a provider offers, as the model picker lists it.
+message ProviderModel {
+  // The id the provider takes: an alias ("opus") or a full id ("claude-opus-5-5").
+  string value = 1;
+  // Its name as people say it: "Opus 5.5", "GPT-6.1-Sol".
+  string display_name = 2;
+  string description = 3;
+}
+// An ACP agent (Agent Client Protocol) as Settings → Agents shows it.
+message AcpAgentInfo {
+  string id = 1;
+  // The client's icon for it ("agent-gemini"); "agent" for a custom one.
+  string icon = 2;
+  // How the Runner starts it: a program on its PATH or an absolute path.
+  string command = 3;
+  repeated string args = 4;
+  // The names of the environment variables it is given. Their values never
+  // leave the Runner.
+  repeated string env_names = 5;
+  string homepage = 6;
+  // The person added it, or changed a built-in one's command.
+  bool custom = 7;
+  // A built-in agent's installed program does not name, in its --help, the
+  // flags Lazybox starts it with: a sentence for Settings, empty when they
+  // are all named or it was not checked. A hint; the agent may still start.
+  string launch_problem = 8;
+}
+message AcpEnvVar {
+  string name = 1;
+  // Empty keeps the value saved before under this name.
+  string value = 2;
+}
+message SaveAcpAgentRequest {
+  // Lowercase letters, digits and dashes; empty makes one from the title. A
+  // built-in agent's id changes how that agent starts.
+  string id = 1;
+  string title = 2;
+  string command = 3;
+  repeated string args = 4;
+  repeated AcpEnvVar env = 5;
+}
+message RemoveAcpAgentRequest {
+  string id = 1;
+}
+message SubscriptionAvailability {
+  string profile_id = 1;
+  // The label Settings shows; empty for a CLI sign-in the Runner inherited.
+  string label = 2;
+  // available, unverified (no limit observed and no credential found to
+  // check), limited, sign_in or billing.
+  string state = 3;
+  // When a limited subscription resets (Unix seconds); 0 when unknown.
+  int64 reset_at = 4;
+  // One plain line: "Signed in", "Not signed in", the reason it is unusable.
+  string detail = 5;
+  bool managed = 6;
+  string isolation = 7;
+}
+message RestartRunnerRequest {}
+message RestartRunnerResponse {
+  // The process that is stopping; Info reports another one once its successor serves.
+  string instance_id = 1;
+}
+message AttachmentLimits {
+  uint32 max_files = 1;
+  uint64 max_file_bytes = 2;
+  uint64 max_message_bytes = 3;
+}
+message RunnerOptions {
+  string model = 1;
+  string permission = 2;
+  string gateway_id = 3;
+  string workflow = 4;
+  repeated string rotation_profile_ids = 5;
+  string instructions = 6;
+  // Keep this conversation on the selected subscription: no automatic switching.
+  bool no_rotation = 7;
+}
+message OpenSessionRequest {
+  string profile_id = 1;
+  string cwd = 2;
+  string resume_reference = 3;
+  RunnerOptions options = 4;
+  string collection_id = 5;
+  // Allocate a persistent, repo-less directory on the Runner. Exclusive with cwd, collection and resume.
+  bool empty_workspace = 6;
+}
+message OpenAssistantRequest {
+  string profile_id = 1;
+  string purpose = 2;
+  string context = 3;
+  RunnerOptions options = 4;
+  string collection_id = 5;
+}
+message AccountObservation {
+  string state = 1;
+  string reason = 2;
+  int64 reset_at = 3;
+  int64 retry_after_seconds = 4;
+  repeated UsageWindow windows = 5;
+  string plan = 6;
+  int64 observed_at_unix_millis = 7;
+  string email = 8;
+}
+message AgentActivity {
+  string id = 1;
+  string parent_id = 2;
+  string native_id = 3;
+  string name = 4;
+  string kind = 5;
+  // starting, ready, running, waiting_input, waiting_approval, done,
+  // interrupted, failed, stopped, unknown, or switching_profile.
+  string status = 6;
+  string last_turn_status = 7;
+  int64 updated_at_unix_millis = 8;
+  // When the agent's last turn ended; 0 before its first turn ends.
+  int64 turn_ended_at_unix_millis = 9;
+  // When the current or last turn began; 0 before the first turn.
+  int64 turn_started_at_unix_millis = 10;
+  // What the agent reports doing inside a turn: working, requesting,
+  // thinking, responding, compacting or tool; empty between turns.
+  string phase = 11;
+  // The tool in use during the tool phase, when the provider names it.
+  string tool = 12;
+  // When phase or tool last changed.
+  int64 phase_since_unix_millis = 13;
+}
+message ListHistoryRequest { uint32 limit = 1; uint32 offset = 2; optional string collection_id = 3; string search = 4; }
+message RenameConversationRequest { string session_id = 1; string title = 2; }
+message PinConversationRequest { string session_id = 1; bool pinned = 2; }
+message ArchiveConversationRequest { string session_id = 1; bool archived = 2; }
+message WorkspaceChangesRequest {
+  string collection_id = 1;
+  // Ref to compare the branch's commits with (e.g. main, origin/main); empty is the commit the workspace started from.
+  string compare = 2;
+}
+message ChangedFile { string path = 1; string original_path = 2; string index_status = 3; string worktree_status = 4; }
+message Commit { string id = 1; string subject = 2; int64 committed_at_unix = 3; }
+// files are uncommitted changes. committed are the changes the branch's commits
+// made since base, the commit the workspace started from; commits lists them.
+message RepositoryChanges { string member = 1; string branch = 2; string head = 3; repeated ChangedFile files = 4; string error = 5; bool truncated = 6; string base = 7; repeated ChangedFile committed = 8; repeated Commit commits = 9; bool committed_truncated = 10; string committed_error = 11;
+  // Local and remote-tracking branches, and the default branch (origin/HEAD, else main or master).
+  repeated string branches = 12; string default_branch = 13;
+  // The remote-tracking ref of the branch's last push (origin/<branch>), empty
+  // when never pushed. ahead counts commits on HEAD that are not there yet.
+  string upstream = 14; uint32 ahead = 15;
+  // owner/name when origin is a GitHub repository, so the PR loop applies.
+  string github_repository = 16; }
+message WorkspaceChanges { repeated RepositoryChanges repositories = 1; }
+message CommitWorkspaceChangesRequest {
+  string collection_id = 1; string member = 2; string message = 3;
+  // Member-relative paths to stage and commit; empty commits every change, untracked files included.
+  repeated string paths = 4;
+}
+message CommitWorkspaceChangesResponse { string commit = 1; string subject = 2; uint32 files = 3; string branch = 4; }
+message PushWorkspaceBranchRequest { string collection_id = 1; string member = 2; }
+message PushWorkspaceBranchResponse { string branch = 1; string upstream = 2; string head = 3; string github_repository = 4; }
+message CreatePullRequestRequest {
+  string collection_id = 1; string member = 2; string title = 3; string body = 4;
+  // Empty is the repository's default branch.
+  string base = 5; bool draft = 6;
+}
+message GetPullRequestRequest { string collection_id = 1; string member = 2; }
+message MergePullRequestRequest {
+  string collection_id = 1; string member = 2; int64 number = 3;
+  // squash, merge or rebase.
+  string method = 4;
+  // The head the person reviewed; GitHub refuses the merge if the branch moved since.
+  string expected_head = 5;
+  // A tracked pull request this workspace delivers, on any branch; member may then be empty.
+  ItemRef item = 6;
+}
+message PullRequestCheck {
+  string name = 1;
+  // queued, in_progress or completed.
+  string status = 2;
+  // With completed: success, failure, neutral, cancelled, skipped, timed_out, action_required or stale.
+  string conclusion = 3;
+  // The check's page on GitHub, where its logs are.
+  string url = 4;
+  string summary = 5;
+}
+message PullRequestStatus {
+  // Why the PR loop does not apply to this repository (no GitHub origin, no
+  // GitHub connection, detached HEAD); empty when it does.
+  string unavailable = 1;
+  string github_repository = 2; string branch = 3; string default_branch = 4;
+  // Whether a pull request exists for the branch; the fields below describe it.
+  bool found = 5;
+  int64 number = 6; string title = 7; string url = 8;
+  // open, closed or merged.
+  string state = 9; bool draft = 10; string base = 11; string head_sha = 12;
+  // GitHub's mergeable_state: clean, blocked, behind, dirty, unstable, has_hooks, draft or unknown.
+  string mergeable_state = 13; bool mergeable = 14;
+  // approved, changes_requested, review_required, or empty when no review is asked for.
+  string review_decision = 15;
+  repeated PullRequestCheck checks = 16;
+  // success, failure, pending, or none when the head has no checks.
+  string checks_state = 17;
+  string merge_commit = 18; string author = 19;
+}
+message WorkspaceGitSummariesRequest {
+  // Empty is every workspace.
+  repeated string collection_ids = 1;
+  // Also count the lines each branch changes (RepositoryGitSummary.changes).
+  // One more Git process per repository: a client asks for it for one
+  // workspace, on demand (the sidebar's hover card), never in its poll.
+  bool changes = 2;
+}
+// A pull request as last read from GitHub for a repository's branch.
+// A work item outside Lazybox: an issue, a ticket, a pull request. Lazybox
+// keeps a reference, a snapshot of what it shows, and links to workspaces
+// (PROJECTS_AND_INTEGRATIONS.md).
+message ItemRef {
+  // github, or an extension provider's id.
+  string provider = 1;
+  // The provider's stable key: owner/name#number on GitHub, PAY-142 on Linear.
+  string key = 2;
+}
+message ItemState {
+  // open, started, review, done, closed or merged: the same words for every provider.
+  string category = 1;
+  // The provider's own words ("In Review").
+  string label = 2;
+}
+message ItemCheck { string name = 1; string url = 2; }
+// What a code review item adds (a GitHub pull request; later a merge request).
+message ItemPullRequest {
+  string head = 1; string base = 2; bool draft = 3;
+  // success, failure, pending, or none when the head has no checks.
+  string checks = 4;
+  // approved, changes_requested, review_required, or empty when none is asked for.
+  string review = 5;
+  bool mergeable = 6;
+  repeated ItemCheck failing_checks = 7;
+  string head_sha = 8;
+  // GitHub's mergeable_state: clean, blocked, behind, dirty (conflicts), unstable, draft or unknown.
+  string mergeable_state = 9;
+  // How many checks the head has, failing ones included.
+  uint32 checks_total = 10;
+  // When it was merged or closed; zero while open.
+  int64 closed_at_unix_millis = 11;
+}
+message Item {
+  ItemRef ref = 1;
+  // issue, pull_request, ticket…
+  string kind = 2;
+  string title = 3;
+  string url = 4;
+  ItemState state = 5;
+  // The repository's identity, when the item belongs to one.
+  string repository = 6;
+  // The branch the provider suggests for work on it.
+  string branch_hint = 7;
+  repeated string assignees = 8;
+  repeated string labels = 9;
+  int64 updated_at_unix_millis = 10;
+  // How a commit or pull request references it so the provider links it ("Fixes PAY-142").
+  string closing_reference = 11;
+  ItemPullRequest pull_request = 12;
+  // When Lazybox last read it from the provider.
+  int64 observed_at_unix_millis = 13;
+  string author = 14;
+}
+message SearchItemsRequest {
+  // github; empty searches every connected provider.
+  string provider = 1;
+  // Free text. owner/name#123 or an item's URL finds that one item.
+  string query = 2;
+  // mine (assigned to you and not done, the default), recent or all.
+  string scope = 3;
+  // A previous page's next; empty for the first page.
+  string cursor = 4;
+}
+message ItemPage {
+  repeated Item items = 1;
+  // The cursor of the next page; empty on the last one.
+  string next = 2;
+}
+message ItemRequest {
+  ItemRef ref = 1;
+  // At most this many of the most recent comments; 0 is the provider's default (10).
+  uint32 comments = 2;
+}
+message ItemComment {
+  string author = 1;
+  // Markdown, as the provider stores it.
+  string body = 2;
+  int64 created_at_unix_millis = 3;
+  string url = 4;
+}
+// An item with what an agent is given about it.
+message ItemDetail {
+  Item item = 1;
+  // The description, as Markdown.
+  string body = 2;
+  // The most recent comments, oldest first.
+  repeated ItemComment comments = 3;
+  // How many comments the item has in all.
+  uint32 comment_count = 4;
+  // Exactly what the agent receives: the title, body and comments, quoted as
+  // external content with their authors and the item's URL.
+  string context = 5;
+  // The same without the comments.
+  string context_without_comments = 6;
+}
+message ResolveItemUrlRequest { string url = 1; }
+message ItemWorkspaces {
+  // The workspaces started from the item (their origin), newest first.
+  repeated Collection workspaces = 1;
+}
+message ItemLink {
+  Item item = 1;
+  string collection_id = 2;
+  // The conversation it came from or belongs to, when known.
+  string session_id = 3;
+  // origin (the workspace started from it), delivers (work it produced, a pull
+  // request) or mentions (named in the conversation; listed, never tracked).
+  string role = 4;
+  // How Lazybox learned of it: started-from, branch, agent-output, cli or person.
+  string source = 5;
+  int64 linked_at_unix_millis = 6;
+  // The workspace's name, kept for history once it is deleted.
+  string collection_name = 7;
+  bool collection_deleted = 8;
+  // The workspace repository whose origin is the item's repository, when one is.
+  string member = 9;
+  // The conversation's id (session_id is the execution that linked it).
+  string conversation_id = 10;
+}
+message PullRequestSummary {
+  int64 number = 1; string title = 2; string url = 3;
+  // open, closed or merged.
+  string state = 4; bool draft = 5;
+  // success, failure, pending, or none.
+  string checks_state = 6;
+  // approved, changes_requested, review_required, or empty.
+  string review_decision = 7;
+  int64 observed_at_unix_millis = 8;
+}
+message RepositoryGitSummary {
+  string member = 1;
+  // Empty on a detached HEAD.
+  string branch = 2; string head = 3;
+  // origin/<branch> when the branch was pushed, else empty. ahead and behind
+  // count commits against it; a never-pushed branch counts its commits since
+  // the workspace started as ahead.
+  string upstream = 4; uint32 ahead = 5; uint32 behind = 6;
+  // origin/HEAD (else main or master), and commits ahead of and behind it.
+  string default_branch = 7; uint32 ahead_of_default = 8; uint32 behind_default = 9;
+  // Uncommitted files: staged, unstaged and untracked.
+  uint32 dirty = 10; bool dirty_truncated = 11;
+  // owner/name when origin is a GitHub repository.
+  string github_repository = 12;
+  // Absent when no pull request is known for the branch (yet).
+  PullRequestSummary pull_request = 13;
+  string error = 14;
+  // What the branch changes, when the request asked for it and it could be counted.
+  LineChanges changes = 15;
+}
+// What a branch changes against where it forked from the default branch (else
+// against the commit the workspace started from), uncommitted work included:
+// what its pull request would show, and what is not committed yet.
+message LineChanges {
+  // The default branch compared with ("origin/main"); empty when it is the workspace's start.
+  string base = 1;
+  // Files changed, untracked ones included.
+  uint32 files = 2;
+  // Lines added and deleted in tracked text files; an untracked file's lines are not counted.
+  uint32 additions = 3;
+  uint32 deletions = 4;
+  // Too many changes to list in full: the counts are a floor.
+  bool truncated = 5;
+}
+message WorkspaceGitSummary { string collection_id = 1; repeated RepositoryGitSummary repositories = 2; }
+message WorkspaceGitSummaries { repeated WorkspaceGitSummary workspaces = 1; }
+message ListLinksRequest {
+  // One workspace's links.
+  string collection_id = 1;
+  // An agent's own execution (`lazybox items`): the Runner derives its workspace.
+  string session_id = 2;
+  // Every workspace's links, deleted workspaces' included (the Pull requests panel).
+  bool all = 3;
+  // The asking window has focus: open pull requests are read more often.
+  bool focused = 4;
+}
+message Links {
+  repeated ItemLink links = 1;
+  // The latest transitions, newest first: what hooks, the Inbox and push saw.
+  repeated ItemEvent events = 2;
+  // Why tracking cannot read the provider now (not connected, rate limited); empty when it can.
+  string tracking_error = 3;
+  // How often open pull requests are read now, in seconds.
+  uint32 poll_seconds = 4;
+}
+// A tracked item's transition, emitted once: pr.opened, pr.checks-failed,
+// pr.checks-passed, pr.changes-requested, pr.approved, pr.merged, pr.closed or pr.conflicts.
+message ItemEvent {
+  string id = 1;
+  string name = 2;
+  ItemRef ref = 3;
+  string collection_id = 4;
+  string session_id = 5;
+  int64 at_unix_millis = 6;
+  // One short phrase: "checks failed: lint, unit-api".
+  string reason = 7;
+  string head_sha = 8;
+  string title = 9;
+  string url = 10;
+}
+message LinkItemRequest {
+  // An agent's own execution (`lazybox link`): its workspace and conversation.
+  string session_id = 1;
+  // The owner names the workspace instead.
+  string collection_id = 2;
+  string url = 3;
+  // delivers or mentions; empty is delivers for a pull request, mentions otherwise.
+  string role = 4;
+}
+message UnlinkItemRequest { string collection_id = 1; ItemRef ref = 2; }
+message PullRequestReactionRequest {
+  string collection_id = 1;
+  ItemRef ref = 2;
+  // The conversation to send to; empty is the one that delivered the pull request.
+  string session_id = 3;
+}
+message PullRequestReaction {
+  // The execution the message went to.
+  string session_id = 1;
+  // The conversation was mid-turn: the message waits for its turn to end.
+  bool queued = 2;
+  // What was sent, in one line.
+  string summary = 3;
+  // Where the full logs were saved, for the agent to read.
+  repeated string files = 4;
+  // What could not be included, and why ("deploy: logs need Actions: read").
+  repeated string notes = 5;
+  // Review comments imported into the workspace's Review.
+  uint32 comments = 6;
+}
+message WorkspaceDiffRequest { string collection_id = 1; string member = 2; string path = 3; bool staged = 4; // Diff of the branch's commits since the workspace's base, not of uncommitted changes.
+  bool committed = 5;
+  // With committed: the ref compared with; empty is the workspace start.
+  string compare = 6; }
+message WorkspaceDiff { string text = 1; bool truncated = 2; bool binary = 3; }
+message ListHistoryResponse { repeated Session sessions = 1; bool has_more = 2; }
+message RestartWithPermissionRequest {
+  string session_id = 1;
+  // ask, read-only or yolo.
+  string mode = 2;
+}
+message GiveBrowserRequest {
+  string session_id = 1;
+}
+message RestartWithModelRequest {
+  string session_id = 1;
+  // The provider's model identifier (an alias such as "opus" or a full id).
+  string model = 2;
+}
+message SwitchSubscriptionRequest {
+  string session_id = 1;
+  // A configured profile of the conversation's provider. Its current profile
+  // retries the interrupted request on the same subscription.
+  string profile_id = 2;
+  // Also switch automatically from now on when a subscription reaches a limit.
+  // Refused unless an enabled extension's account policy covers the provider
+  // (EXTENSIONS.md, "Account policy").
+  bool enable_rotation = 3;
+}
+message SetSessionRotationRequest {
+  string session_id = 1;
+  bool enabled = 2;
+  // Apply to every running conversation of this provider that did not opt
+  // out, and include every subscription of the provider in automatic switching.
+  bool all_sessions = 3;
+}
+message ResumeSessionRequest {
+  string session_id = 1;
+  // Explicit reconciliation after an unclean shutdown, never inferred by a client.
+  bool processes_stopped = 2;
+}
+message SessionRequest {
+  string session_id = 1;
+}
+message Capabilities {
+  bool images = 1;
+  bool questions = 2;
+  bool approvals = 3;
+  bool steer = 4;
+  bool resume = 5;
+  bool pending_resume = 6;
+  string profile_isolation = 7;
+  bool files = 8;
+  bool subagents = 9;
+  // The permission mode can change while the session runs.
+  bool live_permission = 10;
+  // One sub-agent can be stopped (ApplyRequest.stop_agent) while the main
+  // agent continues.
+  bool stop_agent = 11;
+  // The model can change while the session runs (ApplyRequest.model), for
+  // the agent's following turns.
+  bool live_model = 12;
+}
+message AgentEvent {
+  string type = 1;
+  string session_reference = 2;
+  string turn_id = 3;
+  string request_id = 4;
+  string operation_id = 5;
+  string text = 6;
+  string status = 7;
+  bytes provider_data_json = 8;
+  string agent_id = 9;
+  string parent_agent_id = 10;
+  string name = 11;
+  string agent_kind = 12;
+  string native_id = 13;
+  AccountObservation account = 14;
+}
+message Session {
+  string id = 1;
+  string profile_id = 2;
+  string provider_reference = 3;
+  string gateway_id = 4;
+  bool busy = 5;
+  bool closed = 6;
+  string fault = 7;
+  uint32 queued = 8;
+  Capabilities capabilities = 9;
+  repeated AgentEvent pending = 10;
+  string work_id = 11;
+  string previous_execution_id = 12;
+  string collection_id = 13;
+  string working_directory = 14;
+  string status = 15;
+  repeated AgentActivity agents = 16;
+  AccountObservation account = 17;
+  bool activity_truncated = 18;
+  string purpose = 19;
+  repeated string rotation_profile_ids = 20;
+  string conversation_id = 21;
+  string title = 22;
+  bool historical = 23;
+  bool recovery_required = 24;
+  string resume_blocked = 25;
+  int64 created_at_unix_millis = 26;
+  string successor_execution_id = 27;
+  string provider = 28;
+  string model = 29;
+  bool model_reported = 30;
+  // Current permission mode: inherit (empty), ask, read-only or yolo.
+  string permission = 31;
+  string workflow = 32;
+  // The shared agent instructions changed since this session received them;
+  // the update is delivered with the next message.
+  bool instructions_pending = 33;
+  // The tail of the main agent's latest message, at most 512 bytes.
+  string last_message = 34;
+  // The conversation's agent browser, while it is open or was stopped.
+  BrowserState browser = 35;
+  // The messages waiting for the turn in progress, oldest first (queued counts them).
+  repeated QueuedMessage queued_messages = 36;
+  // When the person pinned the conversation to the top of their lists; 0 when
+  // not pinned. Kept by the Runner, so every window and a paired phone agree.
+  int64 pinned_at_unix_millis = 37;
+  // When the person archived the conversation; 0 when not archived. Archived
+  // conversations leave the working lists but stay in History.
+  int64 archived_at_unix_millis = 38;
+  // Where this conversation sits in an agent tree, when it does.
+  SessionLineage lineage = 39;
+  // The "always allow" choices the person made for this conversation that
+  // its agent holds, oldest first. They outlive the agent's process: a
+  // restarted or resumed agent holds them again. ApplyRequest.revoke_grant
+  // takes one back. Choices saved to the workspace's own settings are not
+  // listed: they are the agent's.
+  repeated PermissionGrant permission_grants = 40;
+  // Whether its agent has the agent browser (BROWSER.md): "has"; "can_give"
+  // (it started without it, or the browser is off for its workspace: Give
+  // the browser fixes that); "off" (off in Settings → Browser); empty where
+  // the browser does not apply (no service, assistants, ACP agents, ended).
+  string browser_access = 41;
+}
+// PermissionGrant is one "always allow" of a conversation.
+message PermissionGrant {
+  string id = 1;
+  // What it allows, in words: "commands starting with `npm run`".
+  string label = 2;
+  // The agent's tool it applies to (Bash, mcp__lazybox__command…).
+  string tool = 3;
+  int64 granted_at_unix_millis = 4;
+}
+// SessionLineage nests conversations by who started them: an orchestrator's
+// children name it as their parent.
+message SessionLineage {
+  // The orchestrator conversation that started this one.
+  string parent_conversation_id = 1;
+  string parent_title = 2;
+  string mission_id = 3;
+  string mission_title = 4;
+  string task_id = 5;
+  string role = 6;
+  // This conversation holds an Orchestrator grant in force.
+  string grant_id = 7;
+  uint32 live_children = 8;
+  uint32 max_children = 9;
+}
+// QueuedMessage is a message accepted while the agent was busy, waiting to be
+// delivered as the next turn.
+message QueuedMessage {
+  string operation_id = 1;
+  // The start of the message, at most 280 characters.
+  string text = 2;
+  int64 queued_at_unix_millis = 3;
+  // Set on a message Lazybox wrote rather than the person.
+  MessageOrigin origin = 4;
+}
+// MessageOrigin marks a message Lazybox wrote, not the person: the answer to a
+// repository request, a review's findings, a question between two agents, a
+// mission's brief. The agent receives the message's text unchanged; clients
+// show it as an event of the conversation, never as the person's words. The
+// operation_accepted record of such a message carries the same fields as
+// `origin` in its provider data.
+message MessageOrigin {
+  // repository_added, repository_declined, review_brief, review_findings,
+  // review_round, agent_ask, agent_answer, mission_brief, continuation, or
+  // between an orchestrator and an agent it started: agent_brief, agent_note
+  // or agent_report.
+  string kind = 1;
+  // The event in one line: "Added authority to this workspace".
+  string summary = 2;
+  // A short label beside it: a branch, "Round 2 of 3".
+  string detail = 3;
+  // What the event offers to copy (a path).
+  string copy = 4;
+  // The agent the message speaks for ("Codex"); empty is Lazybox.
+  string from = 5;
+  // From's conversation and session, when it is another agent of this one's
+  // tree (an orchestrator and the agents it started): clients open it.
+  string conversation = 6;
+  string session = 7;
+}
+
+message Repository {
+  string id = 1;
+  string path = 2;
+  string name = 3;
+  string source_url = 4;
+  int64 github_id = 5;
+  string git_identity = 6;
+  // The person's home checkout, when it has one: a regular checkout outside
+  // every workspace. "" when none.
+  string home_path = 7;
+  // configured (chosen in Settings) or source (the folder the repository was
+  // registered from, which is already the person's own checkout).
+  string home_kind = 8;
+}
+// A repository's home checkout and what it holds now (local Git only, no fetch).
+message RepositoryHome {
+  string repository_id = 1;
+  // owner/repo when known, else the repository's name.
+  string name = 2;
+  // "" when the repository has no home.
+  string path = 3;
+  // configured, source or "" (none).
+  string kind = 4;
+  bool exists = 5;
+  string branch = 6;
+  bool detached = 7;
+  // Changed and untracked files (at most 1000 counted).
+  uint32 dirty = 8;
+  // Why its state could not be read, or why it is missing.
+  string error = 9;
+  // Where Create puts it when no path is given.
+  string suggested_path = 10;
+  // Short commit of HEAD.
+  string head = 11;
+  // The remote's default branch (main), and how many commits the checked-out
+  // branch is behind origin/<it> as last fetched.
+  string default_branch = 12;
+  uint32 behind = 13;
+}
+message UpdateRepositoryHomeRequest { string repository_id = 1; }
+message RepositoryHomeUpdate {
+  RepositoryHome home = 1;
+  // The default branch moved to the remote's.
+  bool updated = 2;
+  // What happened, as a sentence: updated, already current, or why not.
+  string message = 3;
+}
+message ListRepositoryHomesRequest {
+  // Empty lists every repository of the library.
+  repeated string repository_ids = 1;
+}
+message RepositoryHomes {
+  repeated RepositoryHome homes = 1;
+  // The folder default homes go in (<root>/<owner>/<name>).
+  string root = 2;
+}
+message SetRepositoryHomeRequest {
+  string repository_id = 1;
+  // create: clone into path (empty: the suggested path), which must not
+  // exist yet; adopt: use the existing checkout of this repository at path;
+  // clear: forget the home (no file changes; the source folder of a local
+  // repository stays its home).
+  string action = 2;
+  string path = 3;
+}
+message OpenRepositoryHomeRequest {
+  string repository_id = 1;
+  // finder, or an editor: vscode, cursor, zed, sublime, intellij.
+  string app = 2;
+}
+message OpenRepositoryHomeResponse {}
+message AddLocalRepositoryRequest { string path = 1; string name = 2; }
+message AddLocalRepositoryResponse { Repository repository = 1; }
+message ListRepositoriesRequest {}
+message ListRepositoriesResponse { repeated Repository repositories = 1; }
+message WorktreeSpec {
+  string name = 1;
+  string repository_id = 2;
+  string base_ref = 3;
+  string branch = 4;
+}
+message CollectionSpec {
+  string name = 1;
+  string work_id = 2;
+  repeated WorktreeSpec members = 3;
+}
+message CollectionWorktree {
+  WorktreeSpec spec = 1;
+  string path = 2;
+  string base_commit = 3;
+  bool ready = 4;
+}
+message Collection {
+  string id = 1;
+  string name = 2;
+  string work_id = 3;
+  string root = 4;
+  string state = 5;
+  string error = 6;
+  repeated CollectionWorktree members = 7;
+  string owner_execution_id = 8;
+  bool ownership_uncertain = 9;
+  repeated string owner_execution_ids = 10;
+  // The work item it was started from, if any.
+  ItemRef origin = 11;
+  // When it was created; 0 for a workspace older than the field.
+  int64 created_at_unix_millis = 12;
+}
+message CreateCollectionRequest {
+  string request_key = 1;
+  CollectionSpec spec = 2;
+}
+message AddCollectionRepositoriesRequest {
+  string collection_id = 1;
+  string request_key = 2;
+  repeated WorktreeSpec members = 3;
+}
+message CollectionRequest { string collection_id = 1; }
+message CollectionResponse { Collection collection = 1; }
+message ListCollectionsRequest {}
+message ListCollectionsResponse { repeated Collection collections = 1; }
+message ReconcileCollectionRequest {
+  string collection_id = 1;
+  string expected_owner_execution_id = 2;
+  bool processes_stopped = 3;
+  string reason = 4;
+}
+message SessionResponse {
+  Session session = 1;
+}
+message Image {
+  string media_type = 1;
+  string base64_data = 2;
+}
+message Message {
+  string text = 1;
+  repeated Image images = 2;
+  repeated FileAttachment attachments = 3;
+  // Where the text came from, recorded in the prompt log. Absent is typed, or
+  // the snippet whose catalog body the text is exactly.
+  PromptSource source = 4;
+}
+message PromptSource {
+  // typed, snippet, console, inbox, mission, handoff, review (a review
+  // brief, findings or a re-review sent by Lazybox), pr-checks (a tracked
+  // pull request's failing checks) or pr-review (its GitHub review).
+  string kind = 1;
+  string snippet_key = 2;
+  // console: the run whose compact view was sent.
+  string command_id = 3;
+  // mission: the task whose brief was sent.
+  string mission_id = 4;
+  string task_id = 5;
+}
+message FileAttachment {
+  string name = 1;
+  string media_type = 2;
+  bytes data = 3;
+}
+message ReadAttachmentRequest {
+  // As the operation_accepted record of the message lists it.
+  string path = 1;
+}
+message AttachmentContent {
+  string name = 1;
+  // Detected from the bytes, not taken from the sender.
+  string media_type = 2;
+  bytes data = 3;
+}
+message Interrupt {}
+message Answers {
+  repeated string values = 1;
+}
+message Answer {
+  string request_id = 1;
+  map<string, Answers> answers = 2;
+}
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  DECISION_ACCEPT = 1;
+  DECISION_DECLINE = 2;
+  DECISION_CANCEL = 3;
+}
+message Approval {
+  string request_id = 1;
+  Decision decision = 2;
+  // With DECISION_ACCEPT: the id of one of the "always allow" choices the
+  // request offered (its provider data's `always` list), so the provider stops
+  // asking for the same thing within that choice's scope. Empty allows once.
+  string always = 3;
+  // With DECISION_DECLINE: why, in the user's words; the agent is told.
+  string reason = 4;
+}
+message ApplyRequest {
+  string session_id = 1;
+  string operation_id = 2;
+  oneof operation {
+    Message message = 3;
+    Message steer = 4;
+    Interrupt interrupt = 5;
+    Answer answer = 6;
+    Approval approval = 7;
+    Permission permission = 8;
+    StopAgent stop_agent = 9;
+    ModelChange model = 10;
+    DeliverQueued deliver_queued = 11;
+    RevokeGrant revoke_grant = 12;
+  }
+}
+// Takes back one "always allow" of the conversation (Session.permission_grants):
+// the agent asks again for what it covered, now and after any restart.
+message RevokeGrant {
+  string grant_id = 1;
+}
+// Delivers a queued message (Session.queued_messages) ahead of its turn.
+// how "now": the turn in progress is interrupted and this message is the next
+// turn. how "steer": the message goes into the running turn without
+// interrupting it (Capabilities.steer). Either way it leaves the queue once.
+message DeliverQueued {
+  string operation_id = 1;
+  string how = 2;
+}
+// Switches a running session's model for its following turns, when
+// Capabilities.live_model. A setting, not a response: the owner's alone.
+message ModelChange {
+  string model = 1;
+}
+// Stops one running sub-agent, when Capabilities.stop_agent; the main agent's
+// turn continues. agent_id is an AgentActivity id other than root.
+message StopAgent {
+  string agent_id = 1;
+}
+// Changes a running session's permission mode: ask, read-only or yolo.
+message Permission {
+  string mode = 1;
+}
+message Receipt {
+  string operation_id = 1;
+  string delivery = 2;
+  string provider_id = 3;
+  string error = 4;
+}
+message WatchEventsRequest {
+  string session_id = 1;
+  uint64 after = 2;
+  bool include_previous = 3;
+  // Ask for heartbeats: a JournalEvent with `heartbeat` set once the stream has
+  // replayed everything there was (at once when there was nothing to replay),
+  // then one every 15 seconds while no record arrives. A reader can then tell
+  // a live but idle conversation from a stream that never connected. A Runner
+  // from before this field sends none.
+  bool heartbeats = 4;
+}
+message JournalEvent {
+  uint64 cursor = 1;
+  string captured_at = 2;
+  AgentEvent event = 3;
+  Receipt receipt = 4;
+  bytes metadata_json = 5;
+  // The last cursor the timeline had retained when this record was sent. A
+  // reader whose cursor reaches it has replayed the history that existed when
+  // it asked; later records are live. Zero when the Runner does not say.
+  uint64 retained = 6;
+  // A heartbeat (WatchEventsRequest.heartbeats), not a record: no event, and
+  // `cursor` repeats the last record sent (0 before any). The reader is
+  // caught up and the stream is alive.
+  bool heartbeat = 7;
+}
+// A page of a conversation's timeline (the records WatchEvents replays with
+// include_previous), read backward from `before`.
+message ReadSessionTailRequest {
+  string session_id = 1;
+  // The page ends just before this cursor; 0 means at the latest record.
+  uint64 before = 2;
+  // When positive, the page starts where one of the person's messages starts
+  // a turn, at most this many turns back (fewer when the size bound is
+  // reached). Zero: the page is bounded by size alone.
+  uint32 turns = 3;
+  // About how many bytes of journal the page may hold; 0 selects the Runner's
+  // default (1 MiB). A turn larger than this is cut to its latest records.
+  // At least one record is returned when any precedes `before`.
+  uint32 max_bytes = 4;
+}
+message ReadSessionTailResponse {
+  // Contiguous and ascending, from `start` up to just before `before`. Each
+  // record's `retained` is the response's.
+  repeated JournalEvent events = 1;
+  // The cursor of the first record: 1 when nothing precedes the page.
+  uint64 start = 2;
+  // The timeline's last cursor when it was read. WatchEvents with `after` set
+  // to the last record's cursor continues the page with no gap.
+  uint64 retained = 3;
+}
+message Checkpoint {
+  string objective = 1;
+  repeated string criteria = 2;
+  repeated string decisions = 3;
+  repeated string outstanding = 4;
+  repeated string results = 5;
+  repeated string source_revisions = 6;
+  string working_tree_state = 7;
+  repeated string command_ids = 8;
+  repeated string service_references = 9;
+  repeated string omitted_context = 10;
+}
+message ContinueSessionRequest {
+  string session_id = 1;
+  string profile_id = 2;
+  string mode = 3;
+  string reason = 4;
+  Checkpoint checkpoint = 5;
+}
+message CommandRequest {
+  string command_id = 1;
+}
+message StartCommandRequest {
+  string session_id = 1;
+  string title = 2;
+  repeated string argv = 3;
+  // The folder to run in: an absolute path to a directory inside the
+  // conversation's folder (its workspace). Empty runs in that folder.
+  string cwd = 4;
+}
+message RegisterPipeRequest {
+  // The execution whose console shows the output (an agent's `lazybox run`/`log`).
+  string session_id = 1;
+  string title = 2;
+  // Instead of session_id: a workspace run, shown in the console of every
+  // conversation in that workspace (`lazybox log` in a workspace terminal).
+  string collection_id = 3;
+  // With collection_id: the conversation (id or title) whose message box receives
+  // the run's compact view when it finishes. The person still decides to send it.
+  string share_with = 4;
+}
+message PublishRequest {
+  string command_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+}
+message FinishPipeRequest {
+  string command_id = 1;
+  string capture_error = 2;
+  // What a `lazybox run` gave its agent. Absent for a plain pipe (`lazybox log`).
+  CommandReport report = 3;
+  // The signal that ended a `lazybox run`'s command (SIGTERM after a stop), if one did.
+  string signal = 4;
+}
+message FollowPipeRequest {
+  string command_id = 1;
+  // The run went on in the background: the agent's or person's call returned.
+  bool background = 2;
+  // The command's process (the group that Stop signals), for Processes.
+  int32 pid = 3;
+  // TCP ports the command's processes listen on.
+  repeated uint32 ports = 4;
+  // How long to wait for a request before answering, at most 30000 ms; 0
+  // reports and answers at once.
+  uint32 wait_ms = 5;
+}
+message FollowPipeResponse {
+  // Stop the command: SIGTERM to its process group, SIGKILL after a grace period.
+  bool stop = 1;
+  // Move the command to the background now (BackgroundCommand).
+  bool background = 2;
+  // The output bytes the Runner holds, so a CLI that lost a reply resumes there.
+  uint64 offset = 3;
+}
+// CommandReport is what a `lazybox run` gave the agent compared with what the
+// command printed, so the console can label the run and telemetry can measure it.
+message CommandReport {
+  // The command's own exit status, which a pipe's capture cannot observe.
+  int32 exit_code = 1;
+  // Everything the command printed, stdout and stderr.
+  uint64 output_bytes = 2;
+  // The size of the view the agent received.
+  uint64 agent_bytes = 3;
+  // The gortk filter that built the view: "passthrough" when none matched, "raw" for --raw.
+  string filter = 4;
+  // The file holding the full output; empty when it could not be saved.
+  string output_path = 5;
+  // The compact view itself (at most 64 KiB), for a workspace run a person can
+  // hand to an agent. Empty for an agent's own run: that agent already has it.
+  string agent_view = 6;
+  // The output came through a pipe (`lazybox log`): exit_code is not the producer's.
+  bool piped = 7;
+}
+message CommandStatus {
+  string id = 1;
+  string session_id = 2;
+  string title = 3;
+  string mode = 4;
+  uint64 offset = 5;
+  bool done = 6;
+  optional int32 exit_code = 7;
+  string signal = 8;
+  string capture_error = 9;
+  repeated string argv = 10;
+  CommandReport report = 11;
+  // Set for a workspace run: it belongs to the workspace, not to one conversation.
+  string collection_id = 12;
+  // "terminal" for a run published from a workspace terminal; "action",
+  // "setup" or "archive" for one the workspace runtime started.
+  string origin = 13;
+  // The conversation id a terminal run was shared with (`lazybox log --to`).
+  string share_with = 14;
+  // The folder the command runs in.
+  string cwd = 15;
+  // A `lazybox run` that went on in the background (a server or a watcher):
+  // the agent's or person's call returned and the command keeps running.
+  bool background = 16;
+  // TCP ports the command's processes listen on, lowest first, while it runs.
+  repeated uint32 ports = 17;
+  // A `lazybox run` still in the foreground whose CLI follows the Runner:
+  // BackgroundCommand can move it to the background.
+  bool can_background = 18;
+  // When the command started (Unix milliseconds); 0 when not known.
+  int64 started_at_unix_millis = 19;
+  // The command's process (the session host's program, or a `lazybox run`'s), when known.
+  int32 pid = 20;
+}
+message ListCommandsRequest {
+  // The execution's own commands, and the runs of its workspace.
+  string session_id = 1;
+}
+message ClaimCommandShareResponse {
+  bool claimed = 1;
+  CommandStatus status = 2;
+}
+message ListCommandsResponse {
+  repeated CommandStatus commands = 1;
+}
+message ReadCommandRequest {
+  string command_id = 1;
+  uint64 offset = 2;
+  uint32 limit = 3;
+}
+message ReadCommandResponse {
+  bytes data = 1;
+  CommandStatus status = 2;
+  uint64 next_offset = 3;
+}
+message WatchOutputRequest {
+  string command_id = 1;
+  uint64 after = 2;
+}
+message OutputEvent {
+  uint64 cursor = 1;
+  string captured_at = 2;
+  string type = 3;
+  string channel = 4;
+  uint64 offset = 5;
+  bytes data = 6;
+  CommandStatus status = 7;
+}
+
+// A terminal runs the user's login shell in a workspace directory. Its output
+// is addressed by byte offset; only the last bounded scrollback is retained.
+message OpenTerminalRequest {
+  string collection_id = 1;
+  // Workspace-relative directory, for example a member repository; empty for
+  // the workspace root. Resolved and confined on the Runner.
+  string directory = 2;
+  uint32 cols = 3;
+  uint32 rows = 4;
+  // Retrying with the same key returns the terminal already started.
+  string request_key = 5;
+  // Instead of a workspace directory: this repository's home checkout
+  // (a repository id), or the person's home folder. The terminal still
+  // belongs to collection_id (its panel, its credential, its cleanup).
+  string repository_home = 6;
+  bool user_home = 7;
+}
+message TerminalRequest {
+  string terminal_id = 1;
+}
+message TerminalStatus {
+  string id = 1;
+  string collection_id = 2;
+  string directory = 3;
+  string title = 4;
+  string shell = 5;
+  uint32 cols = 6;
+  uint32 rows = 7;
+  // Output end offset, and how many bytes before it are still retained.
+  uint64 offset = 8;
+  uint64 retained = 9;
+  bool done = 10;
+  optional int32 exit_code = 11;
+  string signal = 12;
+  string error = 13;
+  int64 created_at_unix_millis = 14;
+  // "" in the workspace; repository-home or user-home outside it.
+  string place = 15;
+  // The repository whose home it runs in (place repository-home).
+  string repository_id = 16;
+  // Where the shell started, for a terminal outside the workspace.
+  string cwd = 17;
+  // How many command lines the shell said ended (its OSC 133;D mark, from
+  // Lazybox's zsh integration), and the latest one's exit status: how a
+  // window learns that a command it typed for the person finished.
+  uint64 command_ends = 18;
+  int32 last_command_status = 19;
+}
+message ListTerminalsRequest {
+  string collection_id = 1;
+}
+message ListTerminalsResponse {
+  repeated TerminalStatus terminals = 1;
+}
+message WatchTerminalRequest {
+  string terminal_id = 1;
+  // Byte offset already displayed. Output older than the scrollback is
+  // skipped; each event's offset says where its data starts.
+  uint64 after = 2;
+}
+message TerminalEvent {
+  uint64 offset = 1;
+  bytes data = 2;
+  TerminalStatus status = 3;
+}
+message WriteTerminalRequest {
+  string terminal_id = 1;
+  bytes data = 2;
+}
+message ResizeTerminalRequest {
+  string terminal_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+message VersionRequest {
+  // Wait (up to 30 seconds) for a probe of agent_cli in progress, as
+  // `lazybox doctor` does, instead of returning the last one.
+  bool wait_agent_cli = 1;
+}
+message VersionResponse {
+  string version = 1;
+  // Which lazybox agents' shells reach. Unset when this Runner gives agents
+  // no CLI, or before its first probe finished.
+  AgentCliCheck agent_cli = 2;
+}
+// AgentCliCheck is which lazybox the shells agents run commands in reach.
+// Shell startup files can put another lazybox (V1's) first on PATH; the
+// Runner's shell integration puts its own back first (COMMAND_OUTPUT.md).
+message AgentCliCheck {
+  // This Runner's CLI: what agents should reach.
+  string cli = 1;
+  // The shell probed: the person's, which agents' commands run in.
+  string shell = 2;
+  // Another lazybox the person's startup files put first, without the
+  // integration, and the shells that do (`zsh -lc`, …). Empty when none.
+  string shadow = 3;
+  repeated string shadow_in = 4;
+  // Shells that reach something else even with the integration, with what
+  // they reach. Empty when every probed shell reaches the CLI.
+  repeated string unfixed = 5;
+  bool fixed = 6;
+  // What the person is told, or empty when nothing needs saying.
+  string notice = 7;
+  // Why the shell could not be probed at all.
+  string problem = 8;
+  int64 checked_at_unix_millis = 9;
+}
+
+// Credentials are submitted explicitly and retained only on the Runner.
+// Connection responses never contain credentials.
+message GetGitHubConnectionRequest {}
+message ListRepositoryDiscoveryRequest {}
+message ScanRepositoryRootRequest { string path = 1; }
+message DiscoveredRepository { string path = 1; string name = 2; string git_identity = 3; }
+message RepositorySearchRoot { string path = 1; int64 scanned_at = 2; bool truncated = 3; uint32 skipped = 4; repeated DiscoveredRepository repositories = 5; }
+message RepositoryDiscovery { repeated RepositorySearchRoot roots = 1; }
+message ConnectGitHubPersonalTokenRequest { string token = 1; }
+message ConfigureGitHubAppRequest { string client_id = 1; string slug = 2; }
+message GitHubConnection {
+ string state = 1; string client_id = 2; string app_slug = 3; string login = 4;
+ int64 user_id = 5; int64 expires_at = 6; string error = 7; GitHubSignIn pending_sign_in = 8;
+ string auth_method = 9;
+}
+message BeginGitHubSignInRequest { string request_key = 1; }
+message GitHubSignInRequest { string id = 1; }
+message GitHubSignIn { string id = 1; string state = 2; string user_code = 3; string sign_in_url = 4; int64 expires_at = 5; string error = 6; }
+message ListGitHubInstallationsRequest { uint32 page = 1; }
+message GitHubInstallation { int64 id = 1; string account = 2; string repository_selection = 3; }
+message ListGitHubInstallationsResponse { repeated GitHubInstallation installations = 1; bool has_more = 2; }
+message ListGitHubRepositoriesRequest { int64 installation_id = 1; uint32 page = 2; }
+message GitHubRepository { int64 id = 1; string name = 2; string full_name = 3; bool private = 4; string default_branch = 5; string html_url = 6; bool archived = 7; string registered_id = 8; }
+message ListGitHubRepositoriesResponse { repeated GitHubRepository repositories = 1; bool has_more = 2; }
+message ImportGitHubRepositoryRequest { int64 repository_id = 1; }
+message ImportGitHubRepositoryResponse { Repository repository = 1; }
+message ListGitHubItemsRequest { int64 repository_id = 1; uint32 page = 2; }
+message GitHubItem { int64 id = 1; int64 number = 2; string kind = 3; string title = 4; string state = 5; string html_url = 6; string author = 7; string updated_at = 8; }
+message ListGitHubItemsResponse { repeated GitHubItem items = 1; bool has_more = 2; }
+
+message WorkspaceDeletionPreview {
+  repeated string active_session_ids = 1;
+  repeated string dirty_repositories = 2;
+  bool files_outside_repositories = 3;
+  string blocked = 4;
+}
+message DeleteWorkspaceRequest {
+  string collection_id = 1;
+  string confirm_name = 2;
+  bool discard_changes = 3;
+  bool stop_sessions = 4;
+}
+
+// References are resolved inside the owned workspace on the Runner, never on the client.
+message WorkspaceFileRequest { string collection_id = 1; string path = 2; }
+message WorkspaceDirectoryEntry { string name = 1; string path = 2; bool directory = 3; }
+message WorkspaceFile { string path = 1; string text = 2; bool truncated = 3; bool binary = 4; string version = 5; bool directory = 6; repeated WorkspaceDirectoryEntry entries = 7; }
+
+message SaveWorkspaceFileRequest { string collection_id = 1; string path = 2; string text = 3; string expected_version = 4; }
+
+// A fuzzy file finder over the workspace's repositories. Files Git ignores are
+// left out; the index is bounded and positions index the matched characters of
+// path in UTF-16 code units.
+message SearchWorkspaceFilesRequest { string collection_id = 1; string query = 2; uint32 limit = 3; }
+message WorkspaceFileMatch { string path = 1; repeated uint32 positions = 2; }
+message WorkspaceFileSearch { repeated WorkspaceFileMatch matches = 1; bool truncated = 2; uint32 indexed = 3; }
+
+// Where a file reference an agent wrote points: the path as given, under each
+// repository, then by path suffix and file name. Several matches are a choice
+// for the person, not an error.
+message ResolveWorkspacePathRequest { string collection_id = 1; string path = 2; }
+message WorkspacePathMatch { string path = 1; bool directory = 2; }
+message WorkspacePathResolution { repeated WorkspacePathMatch matches = 1; bool exact = 2; bool truncated = 3; }
+
+message DeleteConversationRequest { string session_id = 1; bool stop_sessions = 2; }
+message DeleteConversationResponse {}
+
+message RemoveRepositoryRequest { string repository_id = 1; string git_identity = 2; }
+
+message GetRepositoryCatalogRequest { bool refresh = 1; }
+message RepositoryCatalogEntry { string identity = 1; string name = 2; string repository_id = 3; }
+message RepositoryCatalogSource { string id = 1; string state = 2; string detail = 3; int64 updated_at = 4; }
+message RepositoryCatalog { repeated RepositoryCatalogEntry entries = 1; repeated RepositoryCatalogSource sources = 2; uint32 refresh_seconds = 3; }
+message PrepareWorkspaceRequest {
+  string request_key = 1; string collection_id = 2; string name = 3; repeated string repository_identities = 4;
+  // The new workspace's branch, for every repository; empty keeps the Runner's default. Ignored when adding to a workspace.
+  string branch = 5;
+  // Adding to a workspace: the agent's request this answers. Once the
+  // repositories are added, the request is resolved as added and the agent told.
+  string repository_request_id = 6;
+  // A new workspace started from a work item: recorded as its origin.
+  ItemRef item = 7;
+}
+message WorkspacePreparation { string identity = 1; string message = 2; Collection collection = 3; }
+
+message Snippet { string key = 1; string category = 2; string description = 3; string body = 4; string origin = 5; repeated string next = 6; }
+message SnippetCatalog { repeated Snippet snippets = 1; }
+
+// Processes the Runner hosts so they outlive it (see SESSION_HOSTS.md).
+message ListProcessesRequest {}
+message StopProcessRequest { string id = 1; }
+message CleanUpOrphanProcessesRequest {}
+message ProcessUsage {
+  // Percent of one core, summed over the host and every process under it.
+  double cpu_percent = 1;
+  uint64 memory_bytes = 2;
+  uint32 process_count = 3;
+}
+message HostedProcess {
+  // The session host's id.
+  string id = 1;
+  // "agent", "command" or "terminal".
+  string kind = 2;
+  // "sessionhost" or "tmux": what started this process's host; "run" for a
+  // `lazybox run` that went on in the background, which has no session host
+  // (its id is "run:" and the command id).
+  string backend = 3;
+  // "running", "starting", "exited" or "unreachable".
+  string state = 4;
+  // This Runner holds the host. A host no Runner holds is an orphan.
+  bool attached = 5;
+  int32 host_pid = 6;
+  int32 program_pid = 7;
+  int64 uptime_seconds = 8;
+  string label = 9;
+  string workspace_id = 10;
+  string workspace_name = 11;
+  // The conversation attempt (session) an agent or command belongs to.
+  string session_id = 12;
+  string conversation_title = 13;
+  string provider = 14;
+  string command_id = 15;
+  string terminal_id = 16;
+  // Attaches a terminal to a tmux-hosted process's window; empty otherwise.
+  string attach_command = 17;
+  // Absent when the process table could not be read.
+  ProcessUsage usage = 18;
+  // TCP ports a command's processes listen on.
+  repeated uint32 ports = 19;
+}
+message ProcessHosting {
+  // The backend new processes use, and the Runner configuration's default.
+  string selected = 1;
+  string configured = 2;
+  // tmux -V when tmux can host processes; otherwise why not.
+  string tmux_version = 3;
+  string tmux_problem = 4;
+  // Why the last process meant for tmux runs in a session host instead.
+  string fallback = 5;
+}
+message ProcessInventory {
+  repeated HostedProcess processes = 1;
+  ProcessHosting hosting = 2;
+  // Hosts that could not be listed, for example an unreadable directory.
+  string problem = 3;
+}
+message CleanUpOrphanProcessesResponse {
+  uint32 stopped = 1;
+  // Hosts the sweep left alone because it could not confirm their state.
+  string problem = 2;
+  ProcessInventory inventory = 3;
+}
+
+message OrchestrationProcessRequest {
+  // Workspace whose repositories' committed .lazybox/process.yaml is read;
+  // empty resolves the user's process file over the presets alone.
+  string collection_id = 1;
+  // The workspace repository (id or name) whose process file applies. Empty
+  // applies the only one that has a file; with several, none applies and
+  // notice says so.
+  string repository = 2;
+  // Tasks in the mission, which selects the default preset; 0 without one.
+  uint32 tasks = 3;
+}
+message OrchestrationProcessLayer {
+  // preset, user or repository.
+  string kind = 1;
+  string source = 2;
+  // sha256 of the file as read: what a person approves before first use.
+  string digest = 3;
+}
+message OrchestrationProcessIssue {
+  // error or warning.
+  string severity = 1;
+  // Key path in the effective process, such as roles.worker.permission.
+  string path = 2;
+  string message = 3;
+  // The layer and file that wrote the value, when known.
+  string layer = 4;
+  string source = 5;
+  uint32 line = 6;
+  uint32 column = 7;
+}
+message OrchestrationProcessCandidate {
+  string repository_id = 1;
+  string name = 2;
+  string path = 3;
+  string digest = 4;
+}
+message OrchestrationProcess {
+  string preset = 1;
+  bool valid = 2;
+  // The effective process as a process file, and as JSON in the shape of the
+  // published schema (process.v1.json). Empty when a layer cannot be parsed.
+  string yaml = 3;
+  string json = 4;
+  // sha256 of the effective process: what a mission pins.
+  string digest = 5;
+  // Lowest first: preset, user, repository.
+  repeated OrchestrationProcessLayer layers = 6;
+  repeated OrchestrationProcessIssue issues = 7;
+  // Workspace repositories that carry a process file.
+  repeated OrchestrationProcessCandidate candidates = 8;
+  // Why no repository file applies although some exist, or empty.
+  string notice = 9;
+  // The user's ceiling as JSON (the schema's Ceiling).
+  string ceiling_json = 10;
+  // Where the user's process file is read from (it may not exist).
+  string user_file = 11;
+}
+message ExplainOrchestrationProcessRequest {
+  OrchestrationProcessRequest process = 1;
+  // An event type such as task.reported, or timer or stall.
+  string event_type = 2;
+}
+message OrchestrationReaction {
+  // rule, trigger or notification.
+  string kind = 1;
+  // Where it is in the process: rules[2], roles.coordinator.triggers[0].
+  string path = 2;
+  // CEL condition; empty fires always.
+  string condition = 3;
+  // The role it wakes or acts on, with that role's permission and scopes.
+  string role = 4;
+  string permission = 5;
+  repeated string scopes = 6;
+  // A person starts the role (manual trigger).
+  bool manual = 7;
+  // A rule's count limit per subject; 0 without one.
+  uint32 limit = 8;
+  // Where a notification goes.
+  repeated string to = 9;
+  // Event types it may cause.
+  repeated string emits = 10;
+  string summary = 11;
+}
+message OrchestrationProcessExplanation {
+  string event_type = 1;
+  // In firing order: rules, then role triggers, then notifications.
+  repeated OrchestrationReaction reactions = 2;
+  // The same, written for a person.
+  string text = 3;
+  // The effective process explained, and its problems.
+  string digest = 4;
+  bool valid = 5;
+  repeated OrchestrationProcessIssue issues = 6;
+}
+
+// Inline review comments (see GITHUB.md, "Review comments").
+message ReviewComment {
+  string id = 1;
+  string member = 2;
+  // Relative to the member's worktree.
+  string path = 3;
+  // "new": the file as changed (added and unchanged lines); "old": lines the
+  // change removed.
+  string side = 4;
+  // 1-based and inclusive, numbered as that side was when the comment was made.
+  uint32 start_line = 5;
+  uint32 end_line = 6;
+  // The lines as the person saw them, and their content hash.
+  repeated string snippet = 7;
+  string hash = 8;
+  // Markdown.
+  string body = 9;
+  // The member's commit when the comment was made, and the diff it was read
+  // in: view is "uncommitted", "staged" or "branch"; base is what a branch
+  // diff compared with (a branch, or the workspace's start commit).
+  string head = 10;
+  string view = 11;
+  string base = 12;
+  int64 created_at_unix = 13;
+  int64 updated_at_unix = 14;
+  // "open", "sent", "resolved" or "wont_fix".
+  string disposition = 15;
+  // The conversation it was put in for the agent, and the commit then.
+  string sent_to = 16;
+  string sent_to_title = 17;
+  int64 sent_at_unix = 18;
+  string sent_head = 19;
+  // The commit that changed the lines when the Runner resolved it on its own,
+  // and a sentence saying so.
+  string resolved_by = 20;
+  string note = 21;
+  // Computed on every read against the working tree: "current", "moved"
+  // (re-anchored to the same lines elsewhere), "outdated" or "unknown".
+  string freshness = 22;
+  uint32 current_start_line = 23;
+  uint32 current_end_line = 24;
+  string freshness_reason = 25;
+  // Who wrote it: "" for the person, "agent" for a reviewer agent's finding.
+  string author = 26;
+  // A finding's reviewer, as people name it ("Codex"), and its conversation.
+  string author_label = 27;
+  string author_session_id = 28;
+  // A finding's severity: "blocker", "major", "minor" or "nit"; "" for a
+  // person's comment.
+  string severity = 29;
+  // A finding's one-line title.
+  string title = 30;
+  // The agent review the finding belongs to (ReviewRun.id).
+  string review_id = 31;
+  // The finding's stable key in its review: filing it again updates it.
+  string finding_key = 32;
+  // The review round it was filed in, and how many later rounds found it
+  // still open (two for a blocker stops the loop: it is stuck).
+  uint32 round = 33;
+  uint32 still_open_rounds = 34;
+}
+// One round of a review loop: the reviewer's pass, from the brief or a
+// re-review, and what it found.
+message ReviewRound {
+  uint32 number = 1;
+  // "start", or "author_turn" (the author's turn changed files after findings).
+  string trigger = 2;
+  // The author's turn this round re-reviews, if any.
+  uint32 author_turn = 3;
+  int64 started_at_unix = 4;
+  int64 ended_at_unix = 5;
+  uint32 filed = 6;
+  uint32 resolved = 7;
+  uint32 still_open = 8;
+  // Open blockers when the round ended.
+  uint32 blockers = 9;
+}
+// What happened in a review, in order: rounds, findings, who said what.
+message ReviewTimelineEntry {
+  int64 at_unix = 1;
+  // round_started, round_ended, filed, resolved, reopened, sent, fixing,
+  // asked, answered, paused, resumed, mode, stopped, escalated.
+  string kind = 2;
+  // Who: the reviewer's or author's name, "You" or "Lazybox".
+  string actor = 3;
+  string text = 4;
+  string finding_id = 5;
+  uint32 round = 6;
+}
+// One agent review: a reviewer conversation started on a scope of another
+// conversation's work, and what it found.
+message ReviewRun {
+  string id = 1;
+  string collection_id = 2;
+  // The read-only reviewer conversation, its title and the agent's name.
+  string reviewer_session_id = 3;
+  string reviewer_title = 4;
+  string reviewer_label = 5;
+  string reviewer_provider = 6;
+  string reviewer_profile_id = 7;
+  // The conversation whose work is reviewed ("the author").
+  string source_session_id = 8;
+  string source_title = 9;
+  string source_label = 10;
+  // "changes" (a branch or uncommitted diff), "turn" (one agent turn's
+  // checkpoints) or "pr" (a pull request); its label, as in the title.
+  string scope = 11;
+  string scope_label = 12;
+  uint32 turn = 13;
+  string compare = 14;
+  string pull_request_url = 15;
+  // "running" while the reviewer works, "done" once it ended its turn,
+  // "failed" when it could not.
+  string state = 16;
+  // A sentence about the state, for the person.
+  string detail = 17;
+  int64 created_at_unix = 18;
+  int64 updated_at_unix = 19;
+  // Findings by severity, open ones only.
+  uint32 blockers = 20;
+  uint32 majors = 21;
+  uint32 minors = 22;
+  uint32 nits = 23;
+  // The mission task the source conversation is an attempt on, if any.
+  string mission_id = 24;
+  string task_id = 25;
+  // The author's provider ("claude" or "codex").
+  string source_provider = 26;
+  // The loop: "ask" (you send findings between rounds), "auto" (Lazybox
+  // sends them) or "off" (one pass). Re-reviews follow an author turn that
+  // changed files after findings were sent, up to max_rounds.
+  string loop = 27;
+  uint32 max_rounds = 28;
+  uint32 round = 29;
+  // reviewing (the reviewer works), triage (findings wait for you), fixing
+  // (findings sent; the author's turn), done.
+  string phase = 30;
+  bool paused = 31;
+  // Why the loop ended: clean, max_rounds, stuck, error, stopped, taken_over;
+  // "" while it runs.
+  string stop_reason = 32;
+  repeated ReviewRound rounds = 33;
+  repeated ReviewTimelineEntry timeline = 34;
+  // Why the reviewer is not the one asked for, in one quiet sentence ("Codex
+  // is not available, so a fresh Claude conversation reviews."); "" when it is.
+  string fallback = 35;
+  // The focus the person gave (`/review <focus>`), if any.
+  string focus = 36;
+}
+message WorkspaceReview {
+  repeated ReviewComment comments = 1;
+  // Resolve a sent comment when a later commit changes its lines.
+  bool auto_resolve = 2;
+  // The comment an add created.
+  string added_id = 3;
+  // The workspace's agent reviews, newest first.
+  repeated ReviewRun runs = 4;
+}
+message StartReviewRequest {
+  string collection_id = 1;
+  // The conversation whose work is reviewed.
+  string source_session_id = 2;
+  // "changes", "turn" or "pr".
+  string scope = 3;
+  // changes: the ref the branch is compared with ("" is the workspace start,
+  // ":uncommitted" uncommitted work only).
+  string compare = 4;
+  // turn: the source conversation's turn number.
+  uint32 turn = 5;
+  // pr: the workspace repository whose pull request is reviewed.
+  string member = 6;
+  // The reviewer: a subscription (profile id), else a provider ("claude" or
+  // "codex"), else the default reviewer setting (the other provider).
+  string profile_id = 7;
+  string provider = 8;
+  // What the person asked the reviewer to look at in particular
+  // (`/review <focus>`); added to the brief. At most 2 KiB.
+  string focus = 9;
+  // The model the reviewer runs on; "" is the setting's (fixed), else its
+  // agent's default.
+  string model = 10;
+}
+message StartReviewResponse {
+  ReviewRun run = 1;
+  Session session = 2;
+}
+message AddReviewFindingRequest {
+  // The reviewer's own execution.
+  string session_id = 1;
+  // "member/path", relative to the workspace root, or a path in the only member.
+  string file = 2;
+  uint32 start_line = 3;
+  uint32 end_line = 4;
+  // blocker, major, minor or nit (also critical, high, medium, low, info).
+  string severity = 5;
+  string title = 6;
+  // Markdown: what is wrong and what to do about it.
+  string body = 7;
+  // A stable key; empty derives one from the file, line and title.
+  string key = 8;
+}
+message ReviewFinding {
+  ReviewComment finding = 1;
+  // True when the key matched a finding already filed, which was updated.
+  bool updated = 2;
+}
+message ListReviewFindingsRequest { string session_id = 1; }
+message SetReviewFindingStateRequest {
+  string session_id = 1;
+  string finding_id = 2;
+  // "resolved" or "open" (still open).
+  string state = 3;
+  string note = 4;
+}
+message UpdateReviewRunRequest {
+  string collection_id = 1;
+  string review_id = 2;
+  // pause, resume, stop, take_over or loop (with loop and max_rounds).
+  string action = 3;
+  string loop = 4;
+  uint32 max_rounds = 5;
+}
+message AskAgentRequest {
+  // The asking execution.
+  string session_id = 1;
+  // "author", "reviewer", or the other conversation's id.
+  string to = 2;
+  string question = 3;
+  // How long the call waits for the reply (bounded); 0 returns at once.
+  uint32 timeout_seconds = 4;
+}
+message WaitAgentAskRequest { string ask_id = 1; uint32 timeout_seconds = 2; }
+message SpawnAgentRequest {
+  // The orchestrator's execution.
+  string session_id = 1;
+  // Idempotency: a retried spawn starts no second agent.
+  string operation_id = 2;
+  // A new task's title and brief (its first message), or an existing task.
+  string title = 3;
+  string brief = 4;
+  string task_id = 5;
+  // Within the grant's ceiling; empty: the orchestrator's own subscription
+  // and model, and the narrower of its permission and the ceiling.
+  string profile_id = 6;
+  string model = 7;
+  string permission = 8;
+  // "same" (default: the orchestrator's workspace, shared files) or "new"
+  // (a workspace of its own: its repositories on new branches started from
+  // the orchestrator's).
+  string workspace = 9;
+  // A label: worker (default), reviewer, researcher.
+  string role = 10;
+}
+message AgentLineageRequest { string session_id = 1; }
+message AgentChild {
+  string conversation_id = 1;
+  // The child's latest session.
+  string session_id = 2;
+  string title = 3;
+  string task_id = 4;
+  string task_title = 5;
+  // The task's derived status (working, needs_you, claimed_done, done).
+  string task_status = 6;
+  string collection_id = 7;
+  string workspace_name = 8;
+  string profile_id = 9;
+  string model = 10;
+  string permission = 11;
+  string role = 12;
+  // running, waiting (for the person), idle, closed or missing.
+  string live = 13;
+  string live_detail = 14;
+  // The child reported its task; report is what it said.
+  bool reported = 15;
+  string report = 16;
+  // The tail of its latest message.
+  string last_message = 17;
+  int64 started_at_unix_millis = 18;
+  // The attempt ended (stopped, deleted).
+  bool ended = 19;
+  string outcome = 20;
+  // "parent" for the caller's own parent, else "child".
+  string relation = 21;
+  // What its conversation cost so far, and its plan estimate.
+  double cost_usd = 22;
+  double estimate_usd = 23;
+}
+message AgentLineageEvent {
+  uint64 seq = 1;
+  int64 at_unix_millis = 2;
+  string type = 3;
+  string conversation_id = 4;
+  string summary = 5;
+}
+message AgentLineage {
+  string mission_id = 1;
+  string mission_title = 2;
+  // The caller's own grant, when it orchestrates.
+  MissionGrant grant = 3;
+  // The caller's parent, when an orchestrator started it.
+  AgentChild parent = 4;
+  repeated AgentChild children = 5;
+  // The mission log's cursor: wait and watch continue after it.
+  uint64 seq = 6;
+  // WaitAgents: what happened in the lineage after after_seq, oldest first.
+  repeated AgentLineageEvent events = 7;
+  // WaitAgents: the condition held (else the wait timed out); why, in words.
+  bool matched = 8;
+  string reason = 9;
+  // SpawnAgent: the child just started.
+  AgentChild spawned = 10;
+  // The caller's newest plan: what it proposed and, once approved, the task each entry became.
+  MissionPlan plan = 11;
+  // The caller's grant's tree: spent and reserved against its cap (also on grant).
+  double spent_usd = 12;
+  double reserved_usd = 13;
+}
+message SendAgentMessageRequest {
+  string session_id = 1;
+  // "parent", or a child: its conversation id, session id or title.
+  string to = 2;
+  string text = 3;
+  string operation_id = 4;
+}
+message AgentMessageReceipt {
+  string id = 1;
+  string to_conversation_id = 2;
+  string to_label = 3;
+  // queued (the receiver is in a turn) or delivered.
+  string delivery = 4;
+}
+message WaitAgentsRequest {
+  string session_id = 1;
+  // Children (conversation id, session id or title), or "parent"; empty: every live child.
+  repeated string targets = 2;
+  // idle (its turn ended), needs-input (it waits for the person), reported,
+  // closed, settled (any of these: the default) or event (anything new).
+  string until = 3;
+  // Every target must hold (the default), or any one.
+  bool any = 4;
+  uint32 timeout_seconds = 5;
+  uint64 after_seq = 6;
+}
+message StopChildAgentRequest {
+  string session_id = 1;
+  string target = 2;
+  // End the conversation and its attempt, not only its turn.
+  bool end = 3;
+  string reason = 4;
+}
+message ReportAgentTaskRequest { string session_id = 1; string summary = 2; }
+message AgentAsk {
+  string id = 1;
+  string review_id = 2;
+  // pending, answered or expired.
+  string state = 3;
+  string question = 4;
+  string answer = 5;
+  string asker_label = 6;
+  string answerer_label = 7;
+  string asker_session_id = 8;
+  string answerer_session_id = 9;
+  int64 created_at_unix = 10;
+  int64 answered_at_unix = 11;
+}
+message ReviewFindings {
+  ReviewRun run = 1;
+  repeated ReviewComment findings = 2;
+}
+message ListReviewCommentsRequest { string collection_id = 1; }
+message AddReviewCommentRequest {
+  string collection_id = 1;
+  string member = 2;
+  string path = 3;
+  string side = 4;
+  uint32 start_line = 5;
+  repeated string snippet = 6;
+  string body = 7;
+  string view = 8;
+  string base = 9;
+}
+message EditReviewCommentRequest { string collection_id = 1; string id = 2; string body = 3; }
+message DeleteReviewCommentRequest { string collection_id = 1; string id = 2; }
+message SetReviewDispositionRequest {
+  string collection_id = 1;
+  repeated string ids = 2;
+  string disposition = 3;
+  // With "sent": the conversation whose message box received them.
+  string session_id = 4;
+  string session_title = 5;
+  // With "dismissed": why, for the record.
+  string note = 6;
+}
+message SetReviewAutoResolveRequest { string collection_id = 1; bool enabled = 2; }
+message TurnCheckpointsRequest { string session_id = 1; }
+// One repository's checkpoint at a point of the conversation.
+message RepositoryCheckpoint {
+  string member = 1;
+  string commit = 2;
+  string branch = 3;
+  // Untracked files left out (too large, too many, nested repositories).
+  repeated string skipped = 4;
+  uint32 skipped_count = 5;
+  // Why this repository could not be checkpointed; empty when it was.
+  string error = 6;
+}
+message TurnCheckpoint {
+  // 1-based, numbered across the whole conversation, resumes included.
+  uint32 turn = 1;
+  // The message that started the turn.
+  string operation_id = 2;
+  string prompt = 3;
+  int64 started_at_unix_millis = 4;
+  // 0 while the turn is running.
+  int64 ended_at_unix_millis = 5;
+  // What the turn changed, before → after, across repositories.
+  uint32 files = 6;
+  uint32 additions = 7;
+  uint32 deletions = 8;
+  repeated RepositoryCheckpoint before = 9;
+}
+message CodeRevert {
+  string id = 1;
+  // revert, or undo (of the revert named by undo_of).
+  string kind = 2;
+  // The turn whose start the files were reverted to.
+  uint32 turn = 3;
+  string undo_of = 4;
+  // The undo that undid this revert; empty while it can still be undone.
+  string undone_by = 5;
+  int64 at_unix_millis = 6;
+  // Files written or deleted.
+  uint32 files = 7;
+  // Files or repositories that could not be restored, said plainly.
+  repeated string problems = 8;
+}
+message TurnCheckpoints {
+  repeated TurnCheckpoint turns = 1;
+  repeated CodeRevert reverts = 2;
+  // A note for the agent waits for the next message.
+  bool note_pending = 3;
+}
+message TurnChangesRequest { string session_id = 1; uint32 turn = 2; }
+message TurnFile {
+  string path = 1;
+  string original_path = 2;
+  // A added, M modified, D deleted, R renamed, T type changed.
+  string status = 3;
+  uint32 additions = 4;
+  uint32 deletions = 5;
+  bool binary = 6;
+}
+message TurnRepositoryChanges {
+  string member = 1;
+  repeated TurnFile files = 2;
+  bool truncated = 3;
+  string error = 4;
+}
+message TurnChanges {
+  repeated TurnRepositoryChanges repositories = 1;
+  // The turn is still running: its changes so far, against the files now.
+  bool in_progress = 2;
+}
+message TurnDiffRequest {
+  string session_id = 1; uint32 turn = 2; string member = 3; string path = 4;
+  // A rename's source path.
+  string original_path = 5;
+}
+message RevertCodeRequest { string session_id = 1; uint32 turn = 2; }
+message RevertRepositoryPreview {
+  string member = 1;
+  // From the revert's side: A recreated, D deleted, M put back as it was.
+  repeated TurnFile files = 2;
+  bool truncated = 3;
+  // Commits made since the checkpoint. They stay on the branch.
+  uint32 commits_since = 4;
+  string branch_then = 5;
+  string branch_now = 6;
+  // Why this repository will be left as it is.
+  string error = 7;
+}
+message RevertCodePreview {
+  repeated RevertRepositoryPreview repositories = 1;
+  // Why the revert would be refused now (an agent is working); empty when it would not.
+  string blocked = 2;
+}
+message UndoRevertCodeRequest { string session_id = 1; string revert_id = 2; }
+// The workspace runtime (WORKSPACE_RUNTIME.md).
+message WorkspaceRuntimeRequest { string collection_id = 1; }
+// The workspace's port block: LAZYBOX_PORT_i is base + i, LAZYBOX_PORT is
+// LAZYBOX_PORT_0 unless an action picks another port of the block.
+message WorkspacePorts { uint32 base = 1; uint32 count = 2; }
+// One repository's runtime configuration, as committed.
+message WorkspaceScriptSource {
+  // The workspace member (its folder) and its repository.
+  string member = 1;
+  string repository_id = 2;
+  // ".lazybox/workspace.yaml" when the member has one, else "".
+  string path = 3;
+  // Why the file could not be used, with its line; nothing from it runs.
+  string error = 4;
+  // "none" (nothing committed), "approved", "required" (never approved) or
+  // "changed" (differs from every version approved before).
+  string approval = 5;
+  // What ApproveWorkspaceScripts must name: the hash of what is shown.
+  string hash = 6;
+  // The file itself, for review.
+  string content = 7;
+  // Entries that differ from the last approved version: "setup", "archive",
+  // "files", "env" or "action:<name>".
+  repeated string changed = 8;
+  // Settings > Workspaces adds or replaces entries for this repository.
+  bool overridden = 9;
+}
+message WorkspaceRunState {
+  // "idle", "running", "stopping", "succeeded", "failed" or "stopped".
+  string state = 1;
+  string command_id = 2;
+  optional int32 exit_code = 3;
+  string signal = 4;
+  string error = 5;
+  int64 started_at_unix_millis = 6;
+  // The output's last line, for a status at a glance.
+  string last_line = 7;
+}
+message WorkspaceAction {
+  // "<member>/<name>": what Start/StopWorkspaceAction take.
+  string key = 1;
+  string member = 2;
+  string name = 3;
+  string run = 4;
+  string cwd = 5;
+  bool default = 6;
+  // false: starting it stops the same action in every other workspace.
+  bool concurrent = 7;
+  // Where it serves, with LAZYBOX_PORT resolved; "" when it does not serve.
+  string url = 8;
+  // Its LAZYBOX_PORT; 0 when the workspace has no port block.
+  uint32 port = 9;
+  // "repository" (committed, needs approval) or "settings" (yours).
+  string source = 10;
+  // Why it cannot start now, e.g. its scripts await approval; "" when it can.
+  string blocked = 11;
+  WorkspaceRunState run_state = 12;
+  // Other workspaces where this repository's action of the same name runs.
+  repeated string running_elsewhere = 13;
+}
+message WorkspaceSetup {
+  string member = 1;
+  string run = 2;
+  string source = 3;
+  // The scripts await approval: setup has not run.
+  bool pending_approval = 4;
+  WorkspaceRunState run_state = 5;
+  // Files copied from the source checkout into the worktree, and listed
+  // files the source checkout does not have.
+  repeated string copied_files = 6;
+  repeated string missing_files = 7;
+}
+message WorkspaceRuntime {
+  string collection_id = 1;
+  WorkspacePorts ports = 2;
+  // Why no port block could be allocated; actions still run without one.
+  string ports_error = 3;
+  repeated WorkspaceScriptSource sources = 4;
+  repeated WorkspaceAction actions = 5;
+  repeated WorkspaceSetup setups = 6;
+  // The action Run starts: Settings first, then the first `default: true`,
+  // then the first action.
+  string default_action = 7;
+}
+message ApproveWorkspaceScriptsRequest {
+  string collection_id = 1;
+  string member = 2;
+  // The hash the person reviewed; a file changed since is refused.
+  string hash = 3;
+  // Run the member's setup once approved, if it has not succeeded yet.
+  bool run_setup = 4;
+}
+message WorkspaceActionRequest {
+  string collection_id = 1;
+  // WorkspaceAction.key.
+  string action = 2;
+  // Start: stop a running instance first. Ignored by Stop.
+  bool restart = 3;
+}
+message StoppedElsewhere { string collection_id = 1; string workspace_name = 2; string action = 3; }
+message WorkspaceActionResult {
+  WorkspaceRuntime runtime = 1;
+  // A non-concurrent action stopped in other workspaces to start here.
+  repeated StoppedElsewhere stopped_elsewhere = 2;
+}
+message RunWorkspaceSetupRequest { string collection_id = 1; string member = 2; }
+// Your own runtime settings, kept on this Runner and never committed.
+message RepositoryRuntimeOverride {
+  string repository_id = 1;
+  // Shown name; ignored on save.
+  string name = 2;
+  // YAML in the same schema as .lazybox/workspace.yaml. Its entries add to or
+  // replace the repository's, and run without approval: you wrote them.
+  string config = 3;
+  // The action Run starts in this repository's workspaces ("<name>").
+  string default_action = 4;
+  // Never run this repository's setup automatically.
+  bool skip_setup = 5;
+  // Why config was refused, on read.
+  string error = 6;
+}
+message WorkspaceRuntimeSettings {
+  uint64 revision = 1;
+  // Port blocks are allocated in [port_range_start, port_range_end].
+  uint32 port_range_start = 2;
+  uint32 port_range_end = 3;
+  repeated RepositoryRuntimeOverride repositories = 4;
+}
+message GetRemoteAccessRequest {}
+message SetRemoteAccessRequest {
+  // Serve the device gateway to this tailnet over HTTPS (never Funnel).
+  bool tailscale = 1;
+}
+message RemoteAccess {
+  // The device gateway on this machine (loopback only). Empty when it is not running.
+  string local_url = 1;
+  // What a phone opens: the gateway as another device reaches it. Empty while
+  // no route reaches this Runner from another device.
+  string phone_url = 2;
+  TailscaleAccess tailscale = 3;
+  // Why the gateway or the phone app is unavailable, if it is.
+  string problem = 4;
+}
+message TailscaleAccess {
+  // not_installed, not_running, needs_login, https_disabled, available,
+  // serving, conflict (another service owns the HTTPS port), failed.
+  string state = 1;
+  // This machine's tailnet name, e.g. laptop.example.ts.net.
+  string dns_name = 2;
+  uint32 https_port = 3;
+  // The owner turned the route on; it is restored when the Runner starts.
+  bool enabled = 4;
+  string detail = 5;
+}
+message BeginDevicePairingRequest {
+  // read is always granted; respond and start are optional.
+  repeated string grants = 1;
+}
+message DevicePairingRequest { string pairing_id = 1; }
+message DevicePairing {
+  string id = 1;
+  // pending, paired, expired, cancelled, failed.
+  string state = 2;
+  // What the phone opens (the QR code). Only BeginDevicePairing returns it:
+  // its fragment holds the one-time secret, which the Runner keeps only hashed.
+  string url = 3;
+  int64 expires_at_unix_millis = 4;
+  repeated string grants = 5;
+  // The device the offer paired.
+  Device device = 6;
+}
+message Device {
+  string id = 1;
+  string name = 2;
+  repeated string grants = 3;
+  int64 paired_at_unix_millis = 4;
+  int64 last_seen_at_unix_millis = 5;
+  // A short digest of the device's key; the phone shows the same one.
+  string fingerprint = 6;
+  // Its push notifications, without the Runner's key.
+  PushSettings push = 7;
+}
+message ListDevicesRequest {}
+message ListDevicesResponse { repeated Device devices = 1; }
+message RevokeDeviceRequest { string device_id = 1; }
+message GetPushSettingsRequest {}
+// A browser's push subscription, as PushSubscription.toJSON() gives it.
+message PushSubscription {
+  // The push service URL. Only Apple's, Google's, Mozilla's and Microsoft's
+  // push services are accepted: the Runner posts to it.
+  string endpoint = 1;
+  // The browser's P-256 public key and auth secret, base64url.
+  string p256dh = 2;
+  string auth = 3;
+}
+message PushPreferences {
+  bool needs_input = 1;
+  bool failed = 2;
+  bool review = 3;
+  // Quiet hours in the phone's time zone, "HH:MM"; both empty for none.
+  string quiet_start = 4;
+  string quiet_end = 5;
+  // An IANA time zone, e.g. Europe/Paris.
+  string time_zone = 6;
+}
+message PushSettings {
+  // The Runner's VAPID public key (an uncompressed P-256 point, base64url):
+  // the phone's applicationServerKey. Only a phone's own call returns it.
+  string application_server_key = 1;
+  bool subscribed = 2;
+  PushPreferences preferences = 3;
+  // The push service's host, e.g. web.push.apple.com.
+  string service = 4;
+  int64 last_sent_at_unix_millis = 5;
+  // Why the last delivery failed, if it did.
+  string last_error = 6;
+}
+message SetPushSettingsRequest {
+  // Replaces the phone's subscription.
+  PushSubscription subscription = 1;
+  // Removes the subscription: notifications off on this phone.
+  bool unsubscribe = 2;
+  // Absent keeps the current preferences.
+  PushPreferences preferences = 3;
+}
+message SendTestPushRequest {
+  // The owner names a device; a phone may only test itself (empty or its own id).
+  string device_id = 1;
+}
+message SendTestPushResponse { PushSettings push = 1; }
+// Missions. Statuses: ready, blocked, working, needs_you, changes_requested,
+// claimed_done, done, failed, canceled (verifying is reserved). Trust:
+// claimed (said so), observed (the Runner saw the exit status or process),
+// verified (checks passed on the newest head), accepted (a person, at a gate).
+message ListMissionsRequest {}
+message ListMissionsResponse { repeated Mission missions = 1; }
+message GetMissionRequest {
+  string mission_id = 1;
+  // Also refresh the pull requests of live attempts (at most once a minute per
+  // repository); the result arrives as evidence on a later read.
+  bool refresh_evidence = 2;
+}
+message CreateMissionRequest { string request_key = 1; string title = 2; string brief = 3; }
+message UpdateMissionRequest {
+  string mission_id = 1;
+  // Idempotency: a retried change with the same id is not applied twice.
+  string operation_id = 2;
+  oneof change {
+    MissionEdit edit = 3;
+    MissionCancel cancel = 4;
+    GoalCreate add_goal = 5;
+    TaskCreate add_task = 6;
+    TaskEdit edit_task = 7;
+    TaskCancel cancel_task = 8;
+    TaskAssign assign = 9;
+    TaskReport report = 10;
+    GateDecision accept = 11;
+    GateDecision reject = 12;
+    // The person lets one conversation run agents for this mission, and
+    // takes that back. Never an agent's: UpdateMission is owner only.
+    OrchestratorGrantChange grant = 13;
+    GrantRevoke revoke_grant = 14;
+    // The person decides an orchestrator's plan; approving creates its tasks
+    // and makes the cap and fan-out the grant's. Then raises a budget that
+    // stopped new agents.
+    PlanDecision approve_plan = 15;
+    PlanDecision reject_plan = 16;
+    BudgetRaise raise_budget = 17;
+  }
+}
+message PlanDecision {
+  string plan_id = 1;
+  // Approval: what the whole tree may spend (0: no cap) and how many agents at once (0: unchanged).
+  double cap_usd = 2;
+  uint32 max_children = 3;
+  string note = 4;
+}
+message BudgetRaise { string grant_id = 1; double cap_usd = 2; }
+message PlanTask {
+  // Names the task inside the plan; after refers to keys.
+  string key = 1;
+  string title = 2;
+  string brief = 3;
+  string role = 4;
+  string profile_id = 5;
+  string permission = 6;
+  // same or new.
+  string workspace = 7;
+  // Paths it would change (relative; a trailing / names a folder).
+  repeated string paths = 8;
+  double estimate_usd = 9;
+  repeated string after = 10;
+  // Once approved: the mission task it became.
+  string task_id = 11;
+}
+message PlanOverlap { string path = 1; repeated string keys = 2; }
+message MissionPlan {
+  string id = 1;
+  string grant_id = 2;
+  string summary = 3;
+  repeated PlanTask tasks = 4;
+  double total_usd = 5;
+  // proposed, approved, rejected or superseded.
+  string state = 6;
+  double cap_usd = 7;
+  string note = 8;
+  int64 proposed_at_unix_millis = 9;
+  int64 decided_at_unix_millis = 10;
+  // Paths more than one task would change: parallel writers collide there.
+  repeated PlanOverlap overlaps = 11;
+  // The orchestrator that proposed it.
+  string conversation_id = 12;
+  string proposed_by = 13;
+}
+message ClaimLeaseRequest {
+  string session_id = 1;
+  // The task (an orchestrator's agent's); empty: the caller's own.
+  string task_id = 2;
+  // Relative to the workspace: api/handler.go, or web/ for a folder.
+  string path = 3;
+  bool exclusive = 4;
+  uint32 ttl_seconds = 5;
+  string reason = 6;
+}
+message ReleaseLeaseRequest { string session_id = 1; string lease = 2; }
+message LeasesRequest { string session_id = 1; }
+message MissionLease {
+  string id = 1;
+  string task_id = 2;
+  string task_title = 3;
+  string path = 4;
+  // exclusive or shared.
+  string mode = 5;
+  string holder_conversation_id = 6;
+  int64 claimed_at_unix_millis = 7;
+  int64 expires_at_unix_millis = 8;
+  string reason = 9;
+}
+message MissionLeases { string mission_id = 1; repeated MissionLease leases = 2; MissionLease claimed = 3; }
+message MissionOverlap {
+  repeated string task_ids = 1;
+  repeated string paths = 2;
+  // files (both changed them) or lease (one changed what the other leased exclusively).
+  string kind = 3;
+  string lease_id = 4;
+  int64 at_unix_millis = 5;
+}
+message ProposePlanRequest {
+  string session_id = 1;
+  string operation_id = 2;
+  string summary = 3;
+  repeated PlanTask tasks = 4;
+}
+message OrchestratorGrantChange {
+  // Any session of the conversation that is to orchestrate.
+  string session_id = 1;
+  OrchestratorCeiling ceiling = 2;
+}
+// The most an orchestrator's children may get. Each field only narrows.
+message OrchestratorCeiling {
+  // read-only, ask or yolo; at most the holder's own permission.
+  string permission = 1;
+  // The subscriptions children may run on; empty: the holder's own and its rotation.
+  repeated string profile_ids = 2;
+  // Children live at once (1-16, default 3).
+  uint32 max_children = 3;
+  // 1: children start no agents (default); 2-3: the orchestrator may narrow
+  // its grant for a child.
+  uint32 depth = 4;
+  // What the whole tree may spend; 0 sets no cap.
+  double budget_usd = 5;
+  // No agent starts before the person approves a plan; then only its tasks.
+  bool plan_required = 6;
+  // New agents are held while this many tasks wait for the person (0: 3).
+  uint32 review_limit = 7;
+}
+message GrantRevoke { string grant_id = 1; string reason = 2; }
+message MissionGrant {
+  string id = 1;
+  // The conversation that orchestrates, and its latest session.
+  string conversation_id = 2;
+  string session_id = 3;
+  string title = 4;
+  // The grant this one was narrowed from, for a child orchestrator.
+  string parent_grant_id = 5;
+  OrchestratorCeiling ceiling = 6;
+  repeated string scopes = 7;
+  int64 issued_at_unix_millis = 8;
+  int64 revoked_at_unix_millis = 9;
+  string revoke_reason = 10;
+  // human, agent (narrowed for a child) or lazybox (the conversation was deleted).
+  string issued_by = 11;
+  string revoked_by = 12;
+  bool live = 13;
+  uint32 live_children = 14;
+  uint32 children = 15;
+  // What the tree (the orchestrator and its agents) spent, what its live
+  // agents reserved of their estimates, and "" / warning / exhausted.
+  double spent_usd = 16;
+  double reserved_usd = 17;
+  string budget_state = 18;
+}
+message MissionMessage {
+  string id = 1;
+  uint64 seq = 2;
+  int64 at_unix_millis = 3;
+  string from_conversation_id = 4;
+  string to_conversation_id = 5;
+  string from_label = 6;
+  string to_label = 7;
+  // note or report.
+  string kind = 8;
+  string text = 9;
+}
+message MissionEdit { string title = 1; string brief = 2; }
+message MissionCancel { string reason = 1; }
+message GoalCreate { string title = 1; }
+message TaskCreate { string goal_id = 1; string title = 2; string brief = 3; repeated string blocked_by = 4; }
+message TaskEdit { string task_id = 1; string title = 2; string brief = 3; }
+message TaskCancel { string task_id = 1; string reason = 2; }
+message TaskAssign {
+  string task_id = 1;
+  // An existing conversation (any of its sessions), or open a new one.
+  string session_id = 2;
+  OpenSessionRequest open = 3;
+  // Send the task's brief as the conversation's next message.
+  bool send_brief = 4;
+}
+message TaskReport { string task_id = 1; string summary = 2; }
+message GateDecision { string task_id = 1; string note = 2; }
+message Mission {
+  string id = 1; string title = 2; string brief = 3;
+  string process = 4; string process_digest = 5; int32 autonomy = 6;
+  int64 created_at_unix_millis = 7; int64 updated_at_unix_millis = 8;
+  bool canceled = 9; uint64 seq = 10;
+  repeated MissionGoal goals = 11;
+  repeated MissionTask tasks = 12;
+  // GetMission only: the log, newest first (at most 200).
+  repeated MissionEvent events = 13;
+  // The mission's log could not be read; it is listed, never written.
+  string error = 14;
+  // Events kept in the log that this Runner does not fold (unknown types or newer versions).
+  uint32 ignored = 15;
+  // UpdateMission: the change's result, e.g. the id of a created task.
+  string created_id = 16;
+  // UpdateMission with assign: the session the task went to.
+  string session_id = 17;
+  // Orchestrator grants, live and revoked, oldest first.
+  repeated MissionGrant grants = 18;
+  // GetMission only: messages between agents, newest first (at most 200).
+  repeated MissionMessage messages = 19;
+  // Orchestrators' plans, newest first.
+  repeated MissionPlan plans = 20;
+  // Leases in force, and the overlaps the Runner observed, newest first.
+  repeated MissionLease leases = 21;
+  repeated MissionOverlap overlaps = 22;
+  // Tasks waiting for the person's review (at a gate).
+  uint32 awaiting_review = 23;
+}
+message MissionGoal { string id = 1; string title = 2; }
+message MissionTask {
+  string id = 1; string goal_id = 2; string title = 3; string brief = 4;
+  string status = 5;
+  // What backs the status; empty where it claims nothing.
+  string trust = 6;
+  // What the recorded evidence alone supports.
+  string evidence_trust = 7;
+  // One sentence: why this status, and what backs it.
+  string reason = 8;
+  // stale, failing, ci_failing, no_evidence, blockers (an agent review has open blockers).
+  repeated string flags = 9;
+  // The human gate waiting for a decision (awaiting acceptance), or empty.
+  string gate = 10;
+  MissionAttempt attempt = 11;
+  repeated MissionAttempt attempts = 12;
+  // Newest first.
+  repeated MissionEvidence evidence = 13;
+  string report = 14; int64 reported_at_unix_millis = 15;
+  // The note of the last decision at a gate.
+  string decision_note = 16;
+  repeated string blocked_by = 17;
+  int64 created_at_unix_millis = 18; int64 updated_at_unix_millis = 19;
+  // The snippet last sent to the current attempt's conversation, and what it chains to.
+  string last_snippet = 20; repeated string next_snippets = 21;
+  // What its conversations cost so far, and the estimate of the plan it came from.
+  double cost_usd = 22;
+  double estimate_usd = 23;
+  string plan_id = 24;
+}
+message MissionAttempt {
+  string id = 1; string conversation_id = 2;
+  // The conversation's latest session, to open it.
+  string session_id = 3;
+  string collection_id = 4;
+  int64 started_at_unix_millis = 5; int64 ended_at_unix_millis = 6;
+  // deleted, handoff or stopped, once ended.
+  string outcome = 7;
+  // running, waiting, idle, closed or missing.
+  string live = 8;
+  string live_detail = 9;
+  string title = 10;
+  // Lineage: the conversation that started this one, under which grant, as
+  // what role, at which permission and on which subscription.
+  string parent_conversation_id = 11;
+  string grant_id = 12;
+  string role = 13;
+  string permission = 14;
+  string profile_id = 15;
+}
+message MissionEvidence {
+  string ref = 1;
+  // run, commit, pr or review (an agent review: failing while blockers are open).
+  string kind = 2;
+  string title = 3;
+  // pass, fail, pending or unknown.
+  string outcome = 4;
+  optional int32 exit_code = 5;
+  bool piped = 6;
+  string member = 7; string repository = 8; string head = 9;
+  int64 number = 10; string url = 11; string state = 12;
+  string collection_id = 13; string session_id = 14; string command_id = 15;
+  string output_path = 16; string detail = 17;
+  int64 at_unix_millis = 18;
+}
+message MissionEvent {
+  uint64 seq = 1; int64 at_unix_millis = 2; string type = 3; uint32 version = 4;
+  string subject = 5; string actor_kind = 6; string actor_role = 7; string conversation_id = 8;
+  string summary = 9;
+  // This Runner folds it; otherwise it is kept and shown raw.
+  bool known = 10;
+  repeated string evidence = 11;
+  string raw_json = 12;
+  // The event's id and the event it reacts to: the timeline's arrows.
+  string id = 13;
+  string caused_by = 14;
+}
+message ListPromptHistoryRequest {
+  // Scope: one conversation, one workspace, or (both empty) every conversation.
+  string conversation_id = 1;
+  string collection_id = 2;
+  string search = 3;
+  uint32 limit = 4;
+}
+message PromptRecord {
+  string text = 1; string conversation_id = 2; string collection_id = 3; string session_id = 4;
+  int64 at_unix_millis = 5;
+  PromptSource source = 6;
+}
+message PromptHistory {
+  repeated PromptRecord prompts = 1;
+  // With conversation_id: the snippet last sent there and the chain it offers.
+  string last_snippet = 2;
+  repeated string next_snippets = 3;
+  // With collection_id: the workspace's last distinct snippets, newest first.
+  repeated string recent_snippets = 4;
+}
+// Who wrote one version of an artifact.
+message ArtifactAuthor {
+  // "person" (the owner, from the app), "agent" (an execution's credential,
+  // `lazybox artifact put`) or "file" (the tracked file changed on disk, by
+  // whoever changed it).
+  string kind = 1;
+  // The execution, for an agent.
+  string session_id = 2;
+}
+// Where one version's content came from.
+message ArtifactSource {
+  // "message" (a conversation message), "file" (a workspace file), "agent"
+  // (published by an agent) or "edit" (written in the app).
+  string kind = 1;
+  // A message: the execution and its conversation, the message's journal
+  // cursor and turn.
+  string session_id = 2;
+  string conversation_id = 3;
+  string message_id = 4;
+  string turn_id = 5;
+  // A file: its workspace path ("member/path").
+  string path = 6;
+}
+// A reference from an artifact to work it belongs to. Reserved for missions
+// and tasks (ORCHESTRATION.md, slice 1): until the Runner has them, a link of
+// any kind is refused.
+message ArtifactLink {
+  // "mission" or "task".
+  string kind = 1;
+  string id = 2;
+  // "brief" or "evidence".
+  string role = 3;
+}
+message ArtifactVersion {
+  uint32 number = 1;
+  int64 created_at_unix_millis = 2;
+  ArtifactAuthor author = 3;
+  ArtifactSource source = 4;
+  // sha256 of the content, hex.
+  string digest = 5;
+  uint64 size = 6;
+}
+message Artifact {
+  string id = 1;
+  string collection_id = 2;
+  string title = 3;
+  // plan, report, spec, notes or other.
+  string kind = 4;
+  // markdown (mermaid fences render as diagrams).
+  string format = 5;
+  int64 created_at_unix_millis = 6;
+  int64 updated_at_unix_millis = 7;
+  // Every version, oldest first (headers only).
+  repeated ArtifactVersion versions = 8;
+  // The requested version's content (GetArtifact, PutArtifact); empty in lists.
+  string content = 9;
+  // The version content belongs to.
+  uint32 content_version = 10;
+  // The conversation the artifact was first taken from, if any: "Update from
+  // this message" is offered on that conversation's later messages.
+  string origin_session_id = 11;
+  string origin_conversation_id = 12;
+  // The workspace file the Runner follows, if any ("member/path").
+  string tracked_path = 13;
+  // Why the tracked file could not be followed lately (removed, too large,
+  // not text); empty while it is followed.
+  string tracking_problem = 14;
+  repeated ArtifactLink links = 15;
+  // Set while the artifact is retired (RetireArtifact): hidden from the
+  // default list, kept with every version, restorable.
+  ArtifactRetirement retired = 16;
+}
+// Why and when an artifact was retired.
+message ArtifactRetirement {
+  int64 at_unix_millis = 1;
+  // "person" or "agent" (with its execution).
+  ArtifactAuthor by = 2;
+  // The artifact of the same workspace that replaces it, if any.
+  string superseded_by = 3;
+  string reason = 4;
+}
+message ListArtifactsRequest {
+  string collection_id = 1;
+  // Also list retired artifacts; by default they are left out.
+  bool include_retired = 2;
+}
+message ListArtifactsResponse { repeated Artifact artifacts = 1; }
+message GetArtifactRequest {
+  string collection_id = 1;
+  string artifact_id = 2;
+  // 0 is the latest version.
+  uint32 version = 3;
+}
+message PutArtifactRequest {
+  string collection_id = 1;
+  // Empty creates an artifact; otherwise a version is added to this one.
+  string artifact_id = 2;
+  // Required to create; on an update, empty keeps the title.
+  string title = 3;
+  // Empty is "other" on create, and keeps the kind on an update.
+  string kind = 4;
+  string content = 5;
+  // Ignored for an agent credential (its source is always its own execution).
+  ArtifactSource source = 6;
+  // On an update: the version the writer saw. The Runner refuses the write if
+  // a newer version exists, so a reviewed diff is the diff that is saved. 0
+  // skips the check.
+  uint32 expected_version = 7;
+  repeated ArtifactLink links = 8;
+  // Artifacts of the same workspace this one replaces: once it is saved, each
+  // is retired as superseded by it (RetireArtifact's rules apply to each, and
+  // all are checked before anything is written).
+  repeated string supersedes = 9;
+}
+message TrackArtifactFileRequest {
+  string collection_id = 1;
+  // Workspace path ("member/path").
+  string path = 2;
+  // Empty takes the file's first heading, else its name.
+  string title = 3;
+  string kind = 4;
+}
+message UpdateArtifactRequest {
+  string collection_id = 1;
+  string artifact_id = 2;
+  // Empty keeps the title; likewise kind.
+  string title = 3;
+  string kind = 4;
+  // Stop recording versions from the tracked file; its versions are kept.
+  bool stop_tracking = 5;
+}
+message DeleteArtifactRequest { string collection_id = 1; string artifact_id = 2; }
+message DeleteArtifactResponse {}
+message RetireArtifactRequest {
+  string collection_id = 1;
+  string artifact_id = 2;
+  // Retire it as replaced by this artifact of the same workspace; empty names none.
+  string superseded_by = 3;
+  // One line on why, shown with it.
+  string reason = 4;
+  // Restore a retired artifact instead (owner only).
+  bool restore = 5;
+}
+message SaveArtifactToRepositoryRequest {
+  string collection_id = 1;
+  string artifact_id = 2;
+  // Workspace path ("member/path") of a Markdown file.
+  string path = 3;
+  // Replacing an existing file requires the version the person saw
+  // (WorkspaceFile.version); empty only creates a new file.
+  string expected_file_version = 4;
+  // Then follow that file: later edits on disk become versions.
+  bool track = 5;
+}
+message SaveArtifactToRepositoryResponse {
+  string path = 1;
+  Artifact artifact = 2;
+}
+message CreateArtifactIssueRequest {
+  string collection_id = 1;
+  string artifact_id = 2;
+  // The workspace repository whose GitHub project receives the issue.
+  string member = 3;
+  // Empty is the artifact's title.
+  string title = 4;
+}
+message CreateArtifactIssueResponse {
+  int64 number = 1;
+  string url = 2;
+}
+
+// Power-user extensibility (POWER.md): the actions and hooks file.
+message GetUserActionsRequest {}
+message UserActions {
+  // The file the Runner reads, and whether it exists.
+  string path = 1;
+  bool exists = 2;
+  // The file as a whole could not be read (YAML syntax, say). The actions and
+  // hooks below are then the last version that loaded, if any (stale).
+  string error = 3;
+  // Problems with single entries; an entry with an error is left out.
+  repeated UserActionIssue issues = 4;
+  repeated UserAction actions = 5;
+  repeated UserHook hooks = 6;
+  // Increases whenever what the file declares changes.
+  uint64 revision = 7;
+  int64 loaded_at_unix_millis = 8;
+  // The JSON Schema of the file, and where InitUserActions writes it.
+  string schema = 9;
+  string schema_path = 10;
+  // The events hooks may follow, for Settings and completions.
+  repeated string events = 11;
+  // The actions and hooks above come from an earlier version of the file,
+  // because the current one does not load.
+  bool stale = 12;
+}
+message GetConfigFilesRequest {}
+message ConfigFiles {
+  // The folder holding them (the actions file's).
+  string directory = 1;
+  repeated ConfigFile files = 2;
+  // Increases whenever any of them changes.
+  uint64 revision = 3;
+}
+message ConfigFile {
+  // keys, settings, or layouts/<id>.
+  string name = 1;
+  // keys, settings or layout.
+  string kind = 2;
+  string path = 3;
+  bool exists = 4;
+  // The file as a whole does not load; json is then its last good version
+  // (stale), if any.
+  string error = 5;
+  bool stale = 6;
+  repeated UserActionIssue issues = 7;
+  // What the file declares, as JSON (POWER.md documents each shape).
+  string json = 8;
+  uint64 revision = 9;
+  int64 loaded_at_unix_millis = 10;
+  // The JSON Schema the file's yaml-language-server header names.
+  string schema_path = 11;
+}
+message ConfigEdit {
+  // The keys from the top of the file: ["notifications", "needs-input"].
+  repeated string path = 1;
+  // The new value as JSON; empty removes the key.
+  string json = 2;
+}
+message UpdateConfigFileRequest {
+  // keys, settings, or layouts/<id>.
+  string name = 1;
+  repeated ConfigEdit edits = 2;
+  // The whole file instead of edits (an import); validated first.
+  string content = 3;
+  // Removes the file (layouts only).
+  bool remove = 4;
+}
+message UserActionIssue {
+  // Where in the file: "actions[2].steps[0]", say.
+  string path = 1;
+  uint32 line = 2;
+  string message = 3;
+  // "error" leaves the entry out; "warning" keeps it.
+  string severity = 4;
+}
+message UserAction {
+  string id = 1;
+  string title = 2;
+  string description = 3;
+  string icon = 4;
+  // One key after the leader (]] t), or empty.
+  string key = 5;
+  // Where the action is offered: palette, menu (the ]] which-key menu),
+  // conversation (its menu) and workspace (its row's menu).
+  repeated string where = 6;
+  repeated UserActionStep steps = 7;
+  // Ask before running.
+  bool confirm = 8;
+}
+message UserActionStep {
+  // send, open, run, command, permission or wait.
+  string kind = 1;
+  string name = 2;
+  // always (default), succeeded or failed: whether the step runs, from the
+  // result of the last step before it that has no condition.
+  string when = 3;
+  // send: the text, or a snippet's key; to: current (default), new, or a
+  // conversation's id or title; wait: also wait for the turn to end.
+  string text = 4;
+  string snippet = 5;
+  string to = 6;
+  bool wait = 7;
+  // open: a panel kind, a web URL, or a workspace file and line.
+  string panel = 8;
+  string url = 9;
+  string file = 10;
+  uint32 line = 11;
+  // run: a workspace action's key (its scripts' approval applies).
+  string action = 12;
+  // command: a shell command run as a managed command of the conversation.
+  string command = 13;
+  // permission: ask, read-only or yolo.
+  string permission = 14;
+  // wait: idle or needs-input.
+  string until = 15;
+  uint32 timeout_seconds = 16;
+  // do: an action of the app's registry (`lazybox do --list`), and its argument.
+  string do_action = 17;
+  string do_argument = 18;
+}
+message UserHook {
+  string id = 1;
+  string description = 2;
+  repeated string on = 3;
+  // Filters: every one set must match. Workspace and conversation match the
+  // name or title, with * as a wildcard; repository matches owner/name.
+  repeated string workspaces = 4;
+  repeated string conversations = 5;
+  repeated string repositories = 6;
+  // Exactly one of: a program and its arguments, a shell line, a webhook.
+  repeated string run = 7;
+  string shell = 8;
+  string webhook = 9;
+  map<string, string> headers = 10;
+  // Credential grants for the hook's own `lazybox` calls: read, respond,
+  // start. Without grants a hook holds no Runner credential at all.
+  repeated string grants = 11;
+  uint32 timeout_seconds = 12;
+  bool enabled = 13;
+}
+message ListHookRunsRequest { uint32 limit = 1; }
+message HookRuns { repeated HookRun runs = 1; }
+message HookRun {
+  string id = 1;
+  string hook_id = 2;
+  string event = 3;
+  // running, succeeded, failed or skipped.
+  string state = 4;
+  // The managed command holding the run's output (ReadCommand).
+  string command_id = 5;
+  optional int32 exit_code = 6;
+  string error = 7;
+  // One line about the event: "Alpha feature · fix the tests needs input".
+  string summary = 8;
+  string collection_id = 9;
+  string session_id = 10;
+  int64 started_at_unix_millis = 11;
+  int64 ended_at_unix_millis = 12;
+  // A webhook's HTTP status.
+  uint32 http_status = 13;
+  repeated string grants = 14;
+  bool test = 15;
+}
+message TestHookRequest { string hook_id = 1; }
+message UiRequest {
+  string id = 1;
+  // open, shot, action (a user action) or do (an action of the app's
+  // registry, `lazybox do`; a hook may ask only for one marked safe).
+  string kind = 2;
+  // open and action: a workspace, a conversation, or a workspace file and line.
+  string collection_id = 3;
+  string session_id = 4;
+  string file = 5;
+  uint32 line = 6;
+  // shot: empty for the window, or a panel kind; open: a panel to show.
+  string panel = 7;
+  // action: the user action's id; do: the registry action's id.
+  string action_id = 8;
+  // pending, done or failed.
+  string state = 9;
+  string error = 10;
+  // shot: the PNG.
+  bytes png = 11;
+  // What the window did, in one line ("Showed Alpha feature · fix the tests").
+  string detail = 12;
+  int64 created_at_unix_millis = 13;
+  // do: the action's argument, when it takes one (a settings section, a
+  // palette query).
+  string argument = 14;
+}
+message WaitUiRequestRequest {
+  string id = 1;
+  // Bounded by the Runner to two minutes; zero selects 30 seconds.
+  uint32 timeout_ms = 2;
+}
+message WatchUiRequestsRequest {
+  // "desktop" or "web": a desktop window is preferred when both are open.
+  string surface = 1;
+}
+message CompleteUiRequestRequest {
+  string id = 1;
+  string error = 2;
+  bytes png = 3;
+  string detail = 4;
+}
+
+// One repository of a workspace, as an agent sees it.
+message WorkspaceRepository {
+  // The worktree's folder name in the workspace.
+  string name = 1;
+  string path = 2;
+  string branch = 3;
+  // The catalog identity (github:owner/repo, or a local one).
+  string identity = 4;
+  bool ready = 5;
+  // The person's home checkout of this repository ("" when none): theirs,
+  // read-only for agents.
+  string home = 6;
+  string repository_id = 7;
+}
+message ListWorkspaceRepositoriesRequest { string collection_id = 1; }
+message WorkspaceRepositories {
+  string collection_id = 1;
+  string name = 2;
+  // The branch a repository added to this workspace gets.
+  string branch = 3;
+  repeated WorkspaceRepository repositories = 4;
+  // Requests agents made in this workspace that are still waiting.
+  repeated RepositoryRequest requests = 5;
+}
+// A catalog repository that matches what an agent asked for, best first.
+message RepositoryCandidate {
+  // Empty for a local git folder not in the catalog yet (local_path names it).
+  string identity = 1;
+  string name = 2;
+  // workspace, registered, local, github or folder.
+  string source = 3;
+  string local_path = 4;
+  int32 score = 5;
+}
+message RequestRepositoryRequest {
+  // The asking execution; an agent may only name its own.
+  string session_id = 1;
+  // A name, owner/repo, GitHub URL or absolute local path.
+  string query = 2;
+  string reason = 3;
+}
+message RepositoryRequest {
+  string id = 1;
+  string session_id = 2;
+  string conversation_id = 3;
+  string collection_id = 4;
+  string query = 5;
+  string reason = 6;
+  repeated RepositoryCandidate candidates = 7;
+  // pending, added, declined or expired.
+  string state = 8;
+  // The branch the repository gets in this workspace.
+  string branch = 9;
+  // declined: the person's reason, if they gave one.
+  string decline_reason = 10;
+  // added: the new worktrees.
+  repeated WorkspaceRepository added = 11;
+  int64 created_at_unix_millis = 12;
+  int64 expires_at_unix_millis = 13;
+  int64 resolved_at_unix_millis = 14;
+  // The repository was already in the workspace: nothing was asked.
+  bool already = 15;
+}
+message WaitRepositoryRequestRequest {
+  string request_id = 1;
+  // At most 60; 0 returns at once.
+  uint32 timeout_seconds = 2;
+}
+message DeclineRepositoryRequestRequest {
+  string request_id = 1;
+  string reason = 2;
+}
+
+// An agent's request that the person start a conversation.
+message RequestConversationStartRequest {
+  // The asking execution; an agent may only name its own.
+  string session_id = 1;
+  // The new conversation's title, in a line.
+  string title = 2;
+  // Its first message: objective, done when, boundaries (at most 8 KB).
+  string brief = 3;
+  // A Lazybox artifact of the asking workspace that holds the brief; the new
+  // conversation's first message names it.
+  string brief_artifact_id = 4;
+  // same (default): the asking conversation's workspace; new: a workspace of
+  // its own, with new branches from this one's.
+  string workspace = 5;
+  // claude, codex or an ACP agent's provider; empty: the asking agent's.
+  string provider = 6;
+  // A subscription of that provider; empty: the asking one's, or the provider's first.
+  string profile_id = 7;
+  // Empty: the asking agent's model when the provider is the same, else the provider's default.
+  string model = 8;
+  // Why, in a line the person decides from (optional).
+  string reason = 9;
+}
+message ConversationStartRequest {
+  string id = 1;
+  string session_id = 2;
+  string conversation_id = 3;
+  string collection_id = 4;
+  // The asking conversation's title.
+  string from_title = 5;
+  string title = 6;
+  string brief = 7;
+  string reason = 8;
+  // same or new.
+  string workspace = 9;
+  string provider = 10;
+  string profile_id = 11;
+  string model = 12;
+  // The permission the new conversation runs at: the asking conversation's.
+  string permission = 13;
+  string brief_artifact_id = 14;
+  string brief_artifact_title = 15;
+  uint32 brief_artifact_version = 16;
+  // How many conversations are live in the asking workspace now, the asking
+  // one included: a new one there shares their files.
+  uint32 shared_with = 17;
+  // pending, started, declined or expired.
+  string state = 18;
+  string decline_reason = 19;
+  // started: the new conversation.
+  string started_session_id = 20;
+  string started_conversation_id = 21;
+  string started_collection_id = 22;
+  string started_title = 23;
+  // Started under the asking conversation's Orchestrator grant: an agent of
+  // its mission (mission_title), not a peer.
+  bool child = 24;
+  string mission_title = 25;
+  int64 created_at_unix_millis = 26;
+  int64 expires_at_unix_millis = 27;
+  int64 resolved_at_unix_millis = 28;
+}
+message WaitConversationStartRequest {
+  string request_id = 1;
+  // At most 60; 0 returns at once.
+  uint32 timeout_seconds = 2;
+}
+message AnswerConversationStartRequest {
+  string request_id = 1;
+  // start or decline.
+  string decision = 2;
+  // decline: why, told to the agent (optional).
+  string reason = 3;
+  // start: the person's edits; empty keeps what the agent asked for.
+  string title = 4;
+  string brief = 5;
+  // same or new.
+  string workspace = 6;
+  string profile_id = 7;
+  string model = 8;
+}
+
+// One conversation's agent browser (BROWSER.md).
+message BrowserState {
+  string conversation_id = 1;
+  // The execution that drives it now (the conversation's latest).
+  string session_id = 2;
+  string collection_id = 3;
+  // closed | starting | open | stopped | failed
+  string status = 4;
+  // Who holds it: agent | person (after Take over).
+  string controller = 5;
+  string url = 6;
+  string title = 7;
+  bool loading = 8;
+  bool can_go_back = 9;
+  bool can_go_forward = 10;
+  // The agent opens any site without asking, in this conversation.
+  bool browse_freely = 11;
+  // Why it failed or was stopped, in words for the person.
+  string problem = 12;
+  // The agent's action in progress, if any.
+  BrowserAction current = 13;
+  uint32 viewport_width = 14;
+  uint32 viewport_height = 15;
+  int64 updated_at_unix_millis = 16;
+  // "Claude" or "Codex": who browses.
+  string agent_name = 17;
+  // A site, download or sign-in request waits for the person.
+  bool waiting = 18;
+}
+// One step in a browser's action log.
+message BrowserAction {
+  uint64 seq = 1;
+  // open | navigate | snapshot | click | type | select | press | scroll |
+  // screenshot | back | forward | wait | close | blocked | download |
+  // take_over | give_back | stop | site
+  string kind = 2;
+  // agent | person | lazybox
+  string actor = 3;
+  // One readable line: Clicked button "Sign in".
+  string summary = 4;
+  string url = 5;
+  // Where it happened, in the page's CSS pixels; absent when nowhere.
+  BrowserBox box = 6;
+  // running | done | failed | blocked
+  string status = 7;
+  string error = 8;
+  int64 at_unix_millis = 9;
+  uint32 duration_ms = 10;
+}
+message BrowserBox {
+  double x = 1;
+  double y = 2;
+  double width = 3;
+  double height = 4;
+}
+// One screencast frame: a JPEG of the page's viewport.
+message BrowserFrame {
+  bytes jpeg = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  uint64 seq = 4;
+}
+message WatchBrowserRequest {
+  // Any execution of the conversation; the browser belongs to the conversation.
+  string session_id = 1;
+}
+message BrowserEvent {
+  BrowserState state = 1;
+  BrowserFrame frame = 2;
+  BrowserAction action = 3;
+  // First event only: the recent action log, oldest first.
+  repeated BrowserAction history = 4;
+}
+message ControlBrowserRequest {
+  string session_id = 1;
+  // take_over | give_back | stop | resume | browse_freely | ask_sites |
+  // navigate | back | forward | reload (the last four only while the person holds it)
+  string action = 2;
+  string url = 3;
+}
+message BrowserInputRequest {
+  string session_id = 1;
+  // mouse_move | mouse_down | mouse_up | wheel | key_down | key_up | text
+  string type = 2;
+  // Page CSS pixels.
+  double x = 3;
+  double y = 4;
+  // left | middle | right
+  string button = 5;
+  uint32 click_count = 6;
+  double delta_x = 7;
+  double delta_y = 8;
+  // A KeyboardEvent.key value: "Enter", "a", "ArrowLeft".
+  string key = 9;
+  string text = 10;
+  // Alt=1, Control=2, Meta=4, Shift=8.
+  uint32 modifiers = 11;
+}
+// A request the agent's browsing raised, waiting for the person. It is a
+// session's pending entry of type "browser_request" whose provider data is
+// this message.
+message BrowserRequest {
+  string id = 1;
+  string session_id = 2;
+  string conversation_id = 3;
+  string collection_id = 4;
+  // site (first visit to an origin) | download | sign_in (a form with a password)
+  string kind = 5;
+  string url = 6;
+  string origin = 7;
+  // The agent's reason, when it gave one.
+  string reason = 8;
+  string file_name = 9;
+  int64 created_at_unix_millis = 10;
+  // The conversation's permission mode when asked ("yolo" still asks for sites).
+  string permission = 11;
+  string agent_name = 12;
+}
+message DecideBrowserRequestRequest {
+  string request_id = 1;
+  // site: once | conversation | workspace | deny. download, sign_in: once | deny.
+  string decision = 2;
+  // Told to the agent with a deny.
+  string reason = 3;
+}
+message BrowserWorkspaceSites {
+  string collection_id = 1;
+  string name = 2;
+  // Sites always allowed in this workspace ("Always for this workspace").
+  repeated string sites = 3;
+  // The workspace has a browser profile on disk (cookies, storage, cache).
+  bool has_data = 4;
+  int64 data_bytes = 5;
+  // Agents of this workspace get no browser (Settings → Browser, per workspace).
+  bool off = 6;
+}
+message BrowserSettings {
+  uint64 revision = 1;
+  // ask (each new site asks) | allow (any site, no asking) | off (no agent browser)
+  string default_permission = 2;
+  // Sites any agent opens without asking: example.com, *.example.com.
+  repeated string allowed_sites = 3;
+  // ask | block
+  string downloads = 4;
+  // Show the agent browser beside the chat when an agent starts browsing.
+  bool show_panel = 5;
+  repeated BrowserWorkspaceSites workspaces = 6;
+  // Why agents cannot browse on this Runner, if they cannot.
+  string problem = 7;
+  // ready | not_installed (Chromium is missing) | off | unavailable (no
+  // browser service on this Runner).
+  string availability = 8;
+  // Chromium is missing and InstallBrowser can install it (a developer build).
+  bool installable = 9;
+  // The latest InstallBrowser command, while it runs and after: its output.
+  string install_command_id = 10;
+}
+message ClearBrowserDataRequest {
+  string collection_id = 1;
+}
+message ListExtensionsRequest {}
+message Extensions {
+  // The config folder's extensions/ (it may not exist yet).
+  string directory = 1;
+  repeated Extension extensions = 2;
+  // Bundled examples, and whether each is in the folder.
+  repeated ExtensionExample examples = 3;
+  uint64 revision = 4;
+  // The extension protocol this Runner serves.
+  uint32 protocol = 5;
+}
+message Extension {
+  // Its folder's name.
+  string id = 1;
+  string name = 2;
+  string version = 3;
+  string description = 4;
+  string author = 5;
+  string homepage = 6;
+  string path = 7;
+  // new (never approved), enabled, disabled, review (asks for more than was
+  // approved; runs with what was), or broken (does not load).
+  string state = 8;
+  repeated ExtensionPanel panels = 9;
+  // What its manifest asks for now.
+  repeated string grants = 10;
+  repeated string hosts = 11;
+  // What the person approved.
+  repeated string approved_grants = 12;
+  repeated string approved_hosts = 13;
+  int64 approved_at_unix_millis = 14;
+  // Why it does not load, and its manifest's problems by line.
+  string error = 15;
+  repeated UserActionIssue issues = 16;
+  // Changes whenever one of its files does: open panels reload.
+  string digest = 17;
+  // An account policy the Runner interprets (EXTENSIONS.md, "Account policy");
+  // unset when the manifest declares none.
+  ExtensionAccountPolicy account_policy = 18;
+}
+message ExtensionAccountPolicy {
+  // The providers it applies to: "claude", "codex".
+  repeated string providers = 1;
+  // Move a conversation to another signed-in account when it reaches a limit.
+  bool switch_on_limit = 2;
+  // Accounts to try, in order (profile ids); empty is every other signed-in
+  // account of the provider, sorted.
+  repeated string accounts = 3;
+}
+message ExtensionPanel {
+  string id = 1;
+  string title = 2;
+  string icon = 3;
+  string entry = 4;
+  string description = 5;
+}
+message ExtensionExample {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  bool installed = 4;
+}
+message ApproveExtensionRequest {
+  string id = 1;
+  // Exactly what the approval sheet showed.
+  repeated string grants = 2;
+  repeated string hosts = 3;
+}
+message SetExtensionEnabledRequest {
+  string id = 1;
+  bool enabled = 2;
+}
+message RemoveExtensionRequest { string id = 1; }
+message InstallExampleExtensionRequest { string example = 1; }
+message OpenExtensionPanelRequest {
+  string id = 1;
+  // A panel id; empty opens its first.
+  string panel = 2;
+  // The app's own origin, which may frame the page.
+  string origin = 3;
+}
+message ExtensionPanelSession {
+  // The shell page to frame (sandbox="allow-scripts").
+  string url = 1;
+  // The extension content origin.
+  string content_origin = 2;
+  // What the bridge calls the Runner with for this panel.
+  string credential = 3;
+  // What this panel may do: what it asks for and the person approved.
+  repeated string grants = 4;
+  repeated string hosts = 5;
+  string digest = 6;
+  uint32 protocol = 7;
+}

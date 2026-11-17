@@ -1,0 +1,55 @@
+.draggable-dialog { padding:24px; border:1px solid var(--line-bold); border-radius:12px; background:var(--surface-raised); color:var(--text); box-shadow:0 24px 80px color-mix(in srgb,var(--shadow) calc(60% * var(--shadow-strength)),transparent); }
+.draggable-dialog > [data-dialog-drag-handle] { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:12px; }
+.draggable-dialog > [data-dialog-drag-handle] > button { margin-left:auto; flex-shrink:0; }
+.draggable-dialog[open] { position:fixed; box-sizing:border-box; max-width:calc(100vw - 16px); max-height:min(85dvh, calc(100dvh - 16px)); overflow:auto; }
+.draggable-dialog::backdrop { background:color-mix(in srgb,var(--bg) 25%,transparent); }
+.draggable-dialog [data-dialog-drag-handle] { cursor:grab; user-select:none; touch-action:none; }
+.draggable-dialog [data-dialog-drag-handle]:focus-visible { outline:2px solid var(--focus); outline-offset:4px; border-radius:4px; }
+.draggable-dialog [data-dialog-drag-handle] button { cursor:pointer; }
+.draggable-dialog.dialog-dragging, .draggable-dialog.dialog-dragging [data-dialog-drag-handle] { cursor:grabbing; }
+
+/*
+ * One dialog style for every DraggableDialog, ConfirmDialog included: the
+ * frame above, then one title size, one × button, one footer, and one primary
+ * and one danger button. The button rules carry two classes so that no
+ * shell-wide rule (`button.danger`, `button.primary`) can repaint a filled
+ * button's label in the colour of its fill. A primary or danger button that
+ * cannot be pressed is plainly off (grey), not a faded fill. A dialog's own
+ * stylesheet sets its width and its body, not these.
+ */
+.draggable-dialog > [data-dialog-drag-handle] h2{margin:0;min-width:0;font-size:calc(15px * var(--text-scale));line-height:calc(21px * var(--text-scale));font-weight:600;letter-spacing:-.2px;color:var(--text);overflow-wrap:anywhere}
+/* A viewer (a file, a documentation page, a peek) is a window more than a dialog: its title stays compact. */
+.draggable-dialog:is(.file-preview-dialog,.docs-viewer,.peek-dialog) > [data-dialog-drag-handle] h2{font-size:calc(14px * var(--text-scale));line-height:calc(20px * var(--text-scale));letter-spacing:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.draggable-dialog > [data-dialog-drag-handle] > button:last-child{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-muted);font-size:calc(20px * var(--text-scale));line-height:1}
+.draggable-dialog > [data-dialog-drag-handle] > button:last-child:hover:not(:disabled){background:var(--surface-hover);color:var(--text)}
+.draggable-dialog footer{display:flex;align-items:center;justify-content:flex-end;gap:8px}
+.draggable-dialog footer button{padding:7px 14px;font-size:calc(12px * var(--text-scale));line-height:calc(18px * var(--text-scale));font-weight:500;border-radius:6px}
+.draggable-dialog footer button.primary{background:var(--accent-solid);border:1px solid var(--accent-solid);color:var(--on-accent-solid);font-weight:600}
+.draggable-dialog footer button.primary:hover:not(:disabled){background:var(--accent-solid-hover);border-color:var(--accent-solid-hover)}
+.draggable-dialog footer button.danger{background:var(--danger-solid);border:1px solid var(--danger-solid);color:var(--on-danger-solid);font-weight:600}
+.draggable-dialog footer button.danger:hover:not(:disabled){background:var(--danger-solid-hover);border-color:var(--danger-solid-hover)}
+.draggable-dialog footer button:disabled{cursor:default;opacity:.55}
+.draggable-dialog footer button:is(.danger,.primary):disabled{opacity:1;background:var(--surface-strong);border-color:var(--line);color:var(--text-disabled);font-weight:500}
+
+
+.draggable-dialog button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+.snippet-picker{width:min(760px,calc(100vw - 32px));font-family:var(--font-ui)}
+.snippet-browser{display:grid;grid-template-columns:var(--split-snippet-list,240px) minmax(0,1fr);height:360px;max-height:50dvh;margin:16px 0;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.snippet-browser>[role=listbox]{overflow:auto;border-right:1px solid var(--line);padding:4px}
+.snippet-browser [role=option]{display:flex;flex-direction:column;align-items:flex-start;gap:4px;width:100%;padding:10px;text-align:left;white-space:normal;font-size:calc(12px * var(--text-scale))}
+.snippet-browser [aria-selected=true]{background:var(--accent-bg);color:var(--accent-strong)}
+.snippet-browser [role=option] span{font-size:calc(11px * var(--text-scale));color:var(--text-tertiary)}.snippet-browser small{font-size:calc(10px * var(--text-scale));color:var(--text-muted)}
+.snippet-preview{overflow:auto;padding:16px;font-size:calc(12px * var(--text-scale));line-height:1.6}.snippet-preview>small{display:block;margin-bottom:12px}
+.snippet-picker footer{display:flex;align-items:center;gap:8px}.snippet-picker footer small{flex:1;font-size:calc(11px * var(--text-scale))}.snippet-picker footer button{font-size:calc(12px * var(--text-scale))}
+@media(max-width:600px){.snippet-browser{grid-template-columns:1fr;height:auto}.snippet-browser>[role=listbox]{max-height:160px}.snippet-preview{max-height:200px}}
+
+
+.workspace-shell.dialog-layer{display:contents}
+.snippet-filters small{margin-left:auto}.snippet-star{color:var(--warn);margin-right:5px;font-weight:400}.snippet-uses{font-variant-numeric:tabular-nums}.snippet-empty{margin:0;padding:12px 4px;font-size:calc(12px * var(--text-scale));color:var(--text-muted)}
+
+/* A click outside a dialog holding unsaved edits: the footer shakes, like a macOS sheet (dismiss.ts). */
+@keyframes dismiss-nudge{0%,100%{transform:translateX(0)}20%{transform:translateX(-7px)}40%{transform:translateX(6px)}60%{transform:translateX(-4px)}80%{transform:translateX(2px)}}
+@keyframes dismiss-flash{0%,100%{box-shadow:none}30%{box-shadow:0 0 0 2px var(--focus)}}
+.dismiss-nudge{animation:dismiss-nudge .38s ease-in-out}
+@media (prefers-reduced-motion:reduce){.dismiss-nudge{animation:dismiss-flash .45s ease-in-out;border-radius:6px}}

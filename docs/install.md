@@ -57,7 +57,7 @@ and Codex is installed and signed in as usual.
 | `make install LINK_DIR=<folder>` | Link `lazybox` into this folder instead of `/usr/local/bin` (or `~/.local/bin`). |
 
 **Update.** A build from source does not update itself, and never offers to:
-**Settings → Updates** says *Built from source; update with make update*, with
+**Settings → About & updates** says *Built from source; update with make update*, with
 the commit it was built from. In your clone:
 
 ```sh
@@ -158,7 +158,7 @@ Where things are:
 
 ## Updates
 
-Lazybox offers updates and never forces one. **Settings → Updates** (or
+Lazybox offers updates and never forces one. **Settings → About & updates** (or
 **Help → Check for updates…**) is where you decide:
 
 - **Check automatically** (on by default) asks for a new version when
@@ -166,7 +166,7 @@ Lazybox offers updates and never forces one. **Settings → Updates** (or
   (`latest.json` from the `v2-updates` release on GitHub) and sends nothing
   about you. Turn it off and Lazybox looks only when you choose **Check now**.
 - When a version is out, the header shows one quiet line, **Lazybox x.y.z ·
-  Update…**, and Settings → Updates says so. Nothing is downloaded yet.
+  Update…**, and Settings → About & updates says so. Nothing is downloaded yet.
 - **Update…** shows what changed since your version, then:
   - **Install and restart** downloads the update, checks it against the
     signing key built into your copy of Lazybox (a download that does not
@@ -175,7 +175,7 @@ Lazybox offers updates and never forces one. **Settings → Updates** (or
   - **Remind me later** hides it for a day (the × on the header line does the
     same).
   - **Skip this version** never offers that version again; the next one is
-    offered as usual. **Stop skipping** in Settings → Updates undoes it.
+    offered as usual. **Stop skipping** in Settings → About & updates undoes it.
 
 **Running agents keep running.** Before you confirm, the dialog says how many
 agents are running. Installing replaces the app on disk while every running
@@ -199,7 +199,7 @@ time it starts.
 Homebrew installs update the same way (the cask is marked `auto_updates`);
 `brew upgrade --greedy --cask lazybox-v2` also works.
 
-| Message in Settings → Updates | What it means |
+| Message in Settings → About & updates | What it means |
 | --- | --- |
 | *Lazybox could not reach GitHub* | No network, or GitHub is unreachable. Nothing to do; it tries again later. |
 | *No update information is published* | The feed does not exist yet (no release has been published), or GitHub answered without it. |
@@ -303,7 +303,7 @@ Runner.
 | "Lazybox can't reach its Runner" | **Start the Runner**; if it stops again, **Show log** (or `lazybox service logs`). |
 | An agent cannot find `codex`, `gh`, `npm`… | The Runner's PATH comes from your login shell when the service was installed. Fix your shell's PATH, then `lazybox service install`. |
 | `lazybox` runs something else | Another `lazybox` comes first on your PATH: see [Another `lazybox` comes first](#another-lazybox-comes-first). |
-| Versions differ in Settings → Updates | **Move the Runner now** there, or quit and reopen Lazybox: it moves the Runner to its own version. Or `lazybox service install`. Agents keep running. |
+| Versions differ in Settings → About & updates | **Move the Runner now** there, or quit and reopen Lazybox: it moves the Runner to its own version. Or `lazybox service install`. Agents keep running. |
 | macOS will not open the app | An unsigned build: see [Unsigned builds](#unsigned-builds). |
 
 Logs: `~/Library/Logs/Lazybox/runner.log` (the Runner),

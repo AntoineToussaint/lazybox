@@ -1,4 +1,4 @@
-/* Settings → Updates, the install dialog and the header's update notice (UpdateSettings.tsx, UpdateDialog.tsx). */
+/* Settings → About & updates, the install dialog and the header's update notice (AboutSettings.tsx, UpdateDialog.tsx). */
 
 /* The status of this Mac: one line that says where things stand, and the one next step. */
 .update-status{display:grid;grid-template-columns:36px minmax(0,1fr) auto;align-items:center;gap:14px;padding:16px}

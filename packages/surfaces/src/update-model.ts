@@ -1,9 +1,9 @@
 /**
- * Updates: the pure decisions behind Settings → Updates, the header's notice
+ * Updates: the pure decisions behind Settings → About & updates, the header's notice
  * and the install dialog. An update is offered, never forced: nothing is
  * downloaded or installed until the person chooses Install, a skipped version
  * is never offered again, and Remind me later means a day of quiet.
- * Rendering is in UpdateSettings.tsx; the shared check state in app-update.ts.
+ * Rendering is in AboutSettings.tsx; the shared check state in app-update.ts.
  */
 import type { AppInfo, AvailableUpdate, UpdateErrorKind, UpdateProgress, UpdateRelease } from '@lazybox/platform';
 
@@ -81,7 +81,7 @@ export const remindValue = (version: string, now: number) => `${version} ${now +
 
 /**
  * What to do with an update the feed offers:
- * - `offer`: say so (the header's notice, Settings → Updates);
+ * - `offer`: say so (the header's notice, Settings → About & updates);
  * - `skipped`: the person skipped this version; a later one is offered again;
  * - `snoozed`: Remind me later, still within its day (for this version only);
  * - `none`: nothing newer.
@@ -220,8 +220,8 @@ export function postUpdateDecision(installing: string | null | undefined, curren
  * version (the app was updated and the service not yet moved, or someone
  * reinstalled one without the other) is explained, with the fix.
  */
-export function versionAgreement({ release, app, runner }: { release: boolean; app: string; runner: string }): { agree: boolean; problem: string; canMove: boolean } {
-  if (!release) return { agree: true, problem: '', canMove: false };
+export function versionAgreement({ release, ownRunner = true, app, runner }: { release: boolean; ownRunner?: boolean; app: string; runner: string }): { agree: boolean; problem: string; canMove: boolean } {
+  if (!release || !ownRunner) return { agree: true, problem: '', canMove: false };
   if (!runner) return { agree: false, problem: 'The Runner is not answering, so its version is unknown.', canMove: false };
   if (runner === app) return { agree: true, problem: '', canMove: false };
   const older = compareVersions(runner, app) < 0;
@@ -235,15 +235,14 @@ export function versionAgreement({ release, app, runner }: { release: boolean; a
 }
 
 /**
- * How this copy of Lazybox gets new versions, for Settings → Updates and
- * About. A build from source (`make install`) has no updater and never
- * checks a feed: it updates with `make update` in the checkout it was built
+ * How this copy of Lazybox gets new versions, for Settings → About & updates. A build from source (`make install`) has no
+ * updater and never checks a feed: it updates with `make update` in the checkout it was built
  * from. Dev and Working move through stage and promote. Only a downloaded
  * release (`updater`) updates itself.
  */
 export type UpdatePath = { kind: 'updater' | 'source' | 'development' | 'browser'; text: string; commit?: string };
 export function updatePath(info: Pick<AppInfo, 'channel' | 'updater' | 'source'> | undefined): UpdatePath {
-  if (!info) return { kind: 'browser', text: 'Updates come with the Lazybox app for Mac; this window is not the app.' };
+  if (!info) return { kind: 'browser', text: 'Manage app updates in the Lazybox app for Mac.' };
   if (info.source) {
     const commit = info.source.commit ? info.source.commit.slice(0, 12) + (info.source.dirty ? ', with uncommitted changes' : '') : undefined;
     const where = info.source.checkout ? ` in ${info.source.checkout}` : '';

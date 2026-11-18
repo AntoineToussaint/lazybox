@@ -32,7 +32,6 @@ import { AgentSettings, PricingSettings, useRunnerSettings } from './RunnerSetti
 import { RunnerSection } from './RunnerControl';
 import { OrchestrationProcessSettings } from './OrchestrationProcessSettings';
 import { AboutSettings } from './AboutSettings';
-import { UpdateSettings } from './UpdateSettings';
 import { Resizer } from './Resizer';
 import { SPLITS } from './resizable-model';
 
@@ -57,7 +56,7 @@ const terminal = (state = '') => ['added', 'failed', 'cancelled', 'expired'].inc
 function EnrollmentStatus({ tone, icon, children }: { tone: 'waiting' | 'problem' | 'stopped'; icon: string; children: ReactNode }) {
   return <p className={`enrollment-status tone-${tone}`}><Icon name={icon} size={15}/><span>{children}</span></p>;
 }
-export type SettingsTab = 'appearance' | 'chat' | 'subscriptions' | 'repositories' | 'agents' | 'workspaces' | 'pricing' | 'notifications' | 'voice' | 'web' | 'browser' | 'devices' | 'keyboard' | 'runners' | 'runner' | 'process' | 'power' | 'extensions' | 'updates' | 'about';
+export type SettingsTab = 'appearance' | 'chat' | 'subscriptions' | 'repositories' | 'agents' | 'workspaces' | 'pricing' | 'notifications' | 'voice' | 'web' | 'browser' | 'devices' | 'keyboard' | 'runners' | 'runner' | 'process' | 'power' | 'extensions' | 'about';
 /** The sections, in the order and groups the sidebar shows them. */
 export const settingsTabs: { id: SettingsTab; label: string; icon: string; group: string }[] = [
   { id: 'subscriptions', label: 'Subscriptions', icon: 'card', group: 'Accounts' },
@@ -78,8 +77,7 @@ export const settingsTabs: { id: SettingsTab; label: string; icon: string; group
   { id: 'devices', label: 'Devices', icon: 'phone', group: 'System' },
   { id: 'runners', label: 'Runners', icon: 'collections', group: 'System' },
   { id: 'runner', label: 'Runner', icon: 'processes', group: 'System' },
-  { id: 'updates', label: 'Updates', icon: 'download', group: 'System' },
-  { id: 'about', label: 'About', icon: 'sparkle', group: 'System' },
+  { id: 'about', label: 'About & updates', icon: 'sparkle', group: 'System' },
 ];
 
 const usedText = (percent: number) => `${percent.toLocaleString(undefined, { maximumFractionDigits: 1 })}% used`;
@@ -127,7 +125,7 @@ function SubscriptionCard({ profile, now, refreshing, error, onRefresh, footer }
     <footer>{footer}<button type="button" className="quiet" disabled={refreshing} aria-label={refreshing ? "Refreshing…" : "Refresh usage"} title={observed} onClick={onRefresh}><Icon name="refresh" size={13}/>{refreshing ? "Refreshing…" : "Refresh"}</button></footer>
   </article>;
 }
-export function SettingsPage({ app, zoom, viewState, openSignIn, copySignInCode, chooseRepositoryFolder, tab: shownTab, onTab, onShowProcesses, onRunInShell }: { /** The desktop app: version and updates (Settings → About). */ app?: AppHost; zoom?: ZoomHost; onShowProcesses?(): void; /** Types a command into a workspace's shell panel and shows it (Install Claude Code). */ onRunInShell?(command: string): Promise<void>; chooseRepositoryFolder?(): Promise<string | null>; viewState?: ViewStateStore; openSignIn?(url: string): Promise<void>; copySignInCode?(code: string): Promise<void>; tab?: SettingsTab; onTab?(tab: SettingsTab): void }) {
+export function SettingsPage({ app, zoom, viewState, openSignIn, copySignInCode, chooseRepositoryFolder, tab: shownTab, onTab, onShowProcesses, onRunInShell }: { /** The desktop app: version and updates (Settings → About & updates). */ app?: AppHost; zoom?: ZoomHost; onShowProcesses?(): void; /** Types a command into a workspace's shell panel and shows it (Install Claude Code). */ onRunInShell?(command: string): Promise<void>; chooseRepositoryFolder?(): Promise<string | null>; viewState?: ViewStateStore; openSignIn?(url: string): Promise<void>; copySignInCode?(code: string): Promise<void>; tab?: SettingsTab; onTab?(tab: SettingsTab): void }) {
   const { api, info, refresh } = useRunner();
   const [ownTab, setOwnTab] = useState<SettingsTab>('subscriptions');
   const tab = shownTab || ownTab, setTab = (next: SettingsTab) => { setOwnTab(next); onTab?.(next); };
@@ -358,8 +356,7 @@ export function SettingsPage({ app, zoom, viewState, openSignIn, copySignInCode,
     {panel('extensions', <ExtensionsSettings/>)}
     {panel('runner', <RunnerSection onShowProcesses={onShowProcesses}/>)}
     {panel('process', <OrchestrationProcessSettings/>)}
-    {panel('updates', <UpdateSettings app={app}/>)}
-    {panel('about', <AboutSettings app={app} onShowUpdates={() => select('updates', true)}/>)}
+    {panel('about', <AboutSettings app={app}/>)}
     {panel('agents', <><AgentSettings/><ClaudeAuthSettings onRunInShell={onRunInShell}/><AcpAgentsSettings/><TerminalSettings/></>)}
     {panel('workspaces', <RuntimeSettings/>)}
     {panel('devices', <DevicesSettings/>)}

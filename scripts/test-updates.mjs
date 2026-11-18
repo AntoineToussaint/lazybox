@@ -1,4 +1,4 @@
-// Settings → Updates and the install flow against a fake update feed, in the
+// Settings → About & updates and the install flow against a fake update feed, in the
 // desktop's main window (the native shell replaced: scripts/fixtures/updater-window).
 // An update is offered and never forced: nothing downloads until Install, a
 // skipped version stays quiet, Remind me later is a day of quiet, automatic
@@ -18,7 +18,7 @@ import { testViteCache } from './fixtures/vite-cache.mjs';
 const fixture = await startRunnerFixture();
 fixture.versionInfo.version = '0.1.0';
 const releases = [
-  { id: '0.2.0', date: '2026-12-01', title: 'Updates you choose', items: [{ title: 'Settings → Updates', body: 'Check now, skip a version, or be reminded tomorrow. Nothing installs until you say so.' }, { title: 'Send feedback', body: 'Help → Send feedback writes a report you read before it goes anywhere.' }] },
+  { id: '0.2.0', date: '2026-12-01', title: 'Updates you choose', items: [{ title: 'Settings → About & updates', body: 'Check now, skip a version, or be reminded tomorrow. Nothing installs until you say so.' }, { title: 'Send feedback', body: 'Help → Send feedback writes a report you read before it goes anywhere.' }] },
   { id: '2026-11-25.1', date: '2026-11-25', title: 'Quieter notices', items: [{ title: 'One line in the header', body: 'A new version is one quiet line, never a dialog.' }] },
   { id: '0.1.0', date: '2026-11-17', title: 'First release', items: [{ title: 'Already installed', body: 'This must not be shown as new.' }] },
 ];
@@ -47,8 +47,8 @@ try {
   const notice = page => page.locator('.workspace-header .update-notice');
   const openUpdates = async page => {
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
-    await page.getByRole('tab', { name: 'Updates' }).click();
-    return page.getByRole('tabpanel', { name: 'Updates' });
+    await page.getByRole('tab', { name: 'About & updates' }).click();
+    return page.getByRole('tabpanel', { name: 'About & updates' });
   };
 
   for (const scheme of ['dark', 'light']) {
@@ -69,6 +69,12 @@ try {
     await expect(panel).toContainText('Stable');
     await expect(panel.getByRole('button', { name: 'Check now' })).toBeEnabled();
     await page.screenshot({ path: `.cache/updates-available-${scheme}.png` });
+
+    await panel.getByRole('button', { name: 'Add to terminal' }).click();
+    await expect(panel.getByText('/usr/local/bin/lazybox', { exact: true })).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await panel.evaluate(el => el.scrollWidth <= el.clientWidth), true, 'the combined page fits a phone');
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     // (b) What's new before installing: everything since 0.1.0, not 0.1.0 itself, and the running agents.
     await panel.getByRole('button', { name: "What's new and install…" }).click();
@@ -194,12 +200,11 @@ try {
     // Help → Check for updates… opens the page and checks.
     await page.locator('summary[aria-label="Help"]').click();
     await page.getByRole('button', { name: 'Check for updates…', exact: true }).click();
-    await expect(page.getByRole('tabpanel', { name: 'Updates' }).locator('.update-status')).toContainText('Lazybox 0.2.0 is available');
+    await expect(page.getByRole('tabpanel', { name: 'About & updates' }).locator('.update-status')).toContainText('Lazybox 0.2.0 is available');
     assert.equal(state.requests, before + 1);
 
     // (k) A build from source (make install): no updater, so nothing is
-    // checked or offered, even with a newer version on the feed; Updates and
-    // About say how it updates instead.
+    // checked or offered, even with a newer version on the feed.
     state.feed = feed();
     const quiet = state.requests;
     await page.goto(`${url('0.1.0')}&source=1`);
@@ -213,14 +218,13 @@ try {
     await expect(sourcePanel.getByRole('button', { name: 'Check now' })).toHaveCount(0);
     await expect(sourcePanel.getByRole('switch', { name: 'Check automatically' })).toHaveCount(0);
     if (scheme === 'dark') await page.screenshot({ path: '.cache/updates-source-dark.png' });
-    await page.getByRole('tab', { name: 'About' }).click();
-    const about = page.getByRole('tabpanel', { name: 'About' });
-    await expect(about).toContainText('Built from source at 0123456789ab');
-    await expect(about.getByRole('button', { name: 'Updates…' })).toHaveCount(0);
+    await expect(page.getByRole('tab', { name: 'Updates', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('tab', { name: 'About', exact: true })).toHaveCount(0);
+    await expect(sourcePanel.getByRole('button', { name: "What's new" })).toBeVisible();
     // Help → Check for updates… only shows how it updates.
     await page.locator('summary[aria-label="Help"]').click();
     await page.getByRole('button', { name: 'Check for updates…', exact: true }).click();
-    await expect(page.getByRole('tabpanel', { name: 'Updates' })).toContainText('update with make update');
+    await expect(page.getByRole('tabpanel', { name: 'About & updates' })).toContainText('update with make update');
     await expect(notice(page)).toHaveCount(0);
     assert.equal(state.requests, quiet, 'a build from source never asks the update feed');
 

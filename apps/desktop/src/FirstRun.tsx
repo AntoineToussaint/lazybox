@@ -87,7 +87,7 @@ export function FirstRun() {
         <li><strong>Agents keep working</strong> when you close this window or quit Lazybox.</li>
         <li><strong>It starts when you log in</strong> and listens only on this Mac, never on your network.</li>
         <li><strong>Your data stays here</strong>, in your Library: conversations, subscriptions and workspaces.</li>
-        <li><strong>You stay in control:</strong> Settings → About, or <code>lazybox service stop</code>, stops or removes it.</li>
+        <li><strong>You stay in control:</strong> Use <code>lazybox service stop</code> to stop the Runner.</li>
       </ul>
       <label className="first-run-option"><input type="checkbox" checked={linkCli} disabled={busy} onChange={e => setLinkCli(e.target.checked)}/>
         <span>Add the <code>lazybox</code> command to your terminal<small>Links <code>lazybox</code> into /usr/local/bin or ~/.local/bin, with completions for your shell. No password needed.</small></span>

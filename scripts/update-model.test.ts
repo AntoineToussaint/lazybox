@@ -113,6 +113,7 @@ test('the launch after an install says whether it took', () => {
 test('app and Runner versions must agree in a release, and a mismatch says what to do', () => {
   assert.deepEqual(versionAgreement({ release: false, app: '0.0.0', runner: 'dev' }), { agree: true, problem: '', canMove: false });
   assert.equal(versionAgreement({ release: true, app: '0.2.0', runner: '0.2.0' }).agree, true);
+  assert.deepEqual(versionAgreement({ release: true, ownRunner: false, app: '0.2.0', runner: '0.1.0' }), { agree: true, problem: '', canMove: false });
   const behind = versionAgreement({ release: true, app: '0.2.0', runner: '0.1.0' });
   assert.equal(behind.agree, false);
   assert.equal(behind.canMove, true);

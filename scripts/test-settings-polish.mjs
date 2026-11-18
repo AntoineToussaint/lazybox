@@ -168,20 +168,20 @@ try {
   await expect(page.getByRole('dialog', { name: 'Edit model price' })).toHaveCount(0);
 
   // About says which lazybox agents reach, and what Lazybox did about another one first on PATH.
-  await page.getByRole('tab', { name: 'About', exact: true }).click();
+  await page.getByRole('tab', { name: 'About & updates', exact: true }).click();
   const agents = page.locator('.settings-page').getByText('lazybox for agents', { exact: true }).locator('xpath=ancestor::*[contains(concat(" ",normalize-space(@class)," ")," settings-row ")][1]');
   await expect(agents).toContainText('/Users/me/.cargo/bin/lazybox');
   await expect(agents).toContainText('nothing to do');
   await expect(agents.getByRole('status')).toHaveText('Fixed');
   fixture.versionInfo.agentCli = { ...fixture.versionInfo.agentCli, fixed: false, unfixed: ['sh -lc finds /usr/local/bin/lazybox'], notice: 'Agents\' shells reach another lazybox before this Lazybox\'s (sh -lc finds /usr/local/bin/lazybox), even with Lazybox\'s shell integration. Agents are told to call it by its full path.' };
   await page.getByRole('tab', { name: 'Runner', exact: true }).click();
-  await page.getByRole('tab', { name: 'About', exact: true }).click();
+  await page.getByRole('tab', { name: 'About & updates', exact: true }).click();
   await expect(agents.getByRole('status')).toHaveText('Needs full path');
   await expect(agents).toContainText('sh -lc finds /usr/local/bin/lazybox');
 
   // Every section fits a phone without sideways scrolling.
   await page.setViewportSize({ width: 390, height: 844 });
-  for (const tab of ['Subscriptions', 'Pricing', 'Repositories', 'Agents & workspaces', 'Workspaces', 'Process', 'Notifications', 'Shortcuts', 'Devices', 'Runner', 'About']) {
+  for (const tab of ['Subscriptions', 'Pricing', 'Repositories', 'Agents & workspaces', 'Workspaces', 'Process', 'Notifications', 'Shortcuts', 'Devices', 'Runner', 'About & updates']) {
     await page.getByRole('tab', { name: tab, exact: true }).click();
     await page.waitForTimeout(250);
     assert.ok(await page.locator('.settings-page').evaluate(n => n.scrollWidth <= n.clientWidth), `${tab} scrolls sideways on a phone`);

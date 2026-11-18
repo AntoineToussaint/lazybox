@@ -124,7 +124,7 @@ export function releaseBody(releases, version, { unsigned = false } = {}) {
   });
   // No Homebrew line: the workflow publishes the cask only for a release
   // without a prerelease suffix, so the notes do not promise it.
-  out.push(`Install: download the disk image below, open it and drag Lazybox to Applications. Already installed? Lazybox offers the update and installs it only when you choose to (Settings → Updates). Full instructions: [the install guide](${installGuide}).`);
+  out.push(`Install: download the disk image below, open it and drag Lazybox to Applications. Already installed? Lazybox offers the update and installs it only when you choose to (Settings → About & updates). Full instructions: [the install guide](${installGuide}).`);
   return out.join('\n') + '\n';
 }
 

@@ -4,7 +4,7 @@
 //! app restarts, so the two never run different versions for long. Agents
 //! keep running across that Runner restart (SESSION_HOSTS.md).
 //!
-//! Nothing here runs on its own: the window asks (Settings → Updates, the
+//! Nothing here runs on its own: the window asks (Settings → About & updates, the
 //! header's notice), and installs only when the person chooses Install.
 //!
 //! Only a release build carries an updater configuration

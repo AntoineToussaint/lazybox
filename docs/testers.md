@@ -79,7 +79,7 @@ yourself, with:
 - **What you did, what you expected, what happened**, and a screenshot for
   anything you can see.
 - **The output of `lazybox doctor`**, and the commit you built
-  (`git rev-parse --short HEAD` in your clone; Settings → Updates shows it too).
+  (`git rev-parse --short HEAD` in your clone; Settings → About & updates shows it too).
 - **For a conversation that misbehaves:** `lazybox debug "<its title>"`
   explains its state in plain words; paste that.
 - **For an install that failed:** the end of the terminal output of

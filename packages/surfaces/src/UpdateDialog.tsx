@@ -11,7 +11,7 @@ import './updates.css';
 /**
  * Install an update, after reading what changed and what happens to running
  * agents. Nothing installs from anywhere else: the header's notice and
- * Settings → Updates open this. While it installs, the dialog shows each
+ * Settings → About & updates open this. While it installs, the dialog shows each
  * step; Escape hides it (the header keeps the progress).
  */
 export function UpdateDialog({ app, update, onClose }: { app?: AppHost; update: AvailableUpdate; onClose(): void }) {

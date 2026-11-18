@@ -179,3 +179,11 @@ func (s *Service) AddCollectionRepositories(ctx context.Context, r *pb.AddCollec
 	}
 	return &pb.CollectionResponse{Collection: wireCollection(c)}, nil
 }
+
+func (s *Service) RemoveCollectionRepository(ctx context.Context, r *pb.RemoveCollectionRepositoryRequest) (*pb.CollectionResponse, error) {
+	c, err := s.Bench.RemoveWorkspaceRepository(ctx, r.CollectionId, r.MemberName)
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	return &pb.CollectionResponse{Collection: wireCollection(c)}, nil
+}

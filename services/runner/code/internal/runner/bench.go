@@ -203,6 +203,7 @@ type Bench struct {
 	Config              Config
 	Accounts            *accounts.State
 	Commands            *commands.Manager
+	terminalStart       sync.Mutex
 	Terminals           *terminals.Manager
 	Attachments         *attachments.Store
 	Collections         *collections.Manager

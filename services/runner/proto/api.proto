@@ -96,6 +96,7 @@ service RunnerService {
   rpc UpdateRepositoryHome(UpdateRepositoryHomeRequest) returns (RepositoryHomeUpdate);
   rpc CreateCollection(CreateCollectionRequest) returns (CollectionResponse);
   rpc AddCollectionRepositories(AddCollectionRepositoriesRequest) returns (CollectionResponse);
+  rpc RemoveCollectionRepository(RemoveCollectionRepositoryRequest) returns (CollectionResponse);
   rpc GetCollection(CollectionRequest) returns (CollectionResponse);
   // The workspaces in the person's order (ArrangeWorkspaces).
   rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
@@ -1550,6 +1551,10 @@ message AddCollectionRepositoriesRequest {
   string collection_id = 1;
   string request_key = 2;
   repeated WorktreeSpec members = 3;
+}
+message RemoveCollectionRepositoryRequest {
+  string collection_id = 1;
+  string member_name = 2;
 }
 message CollectionRequest { string collection_id = 1; }
 message CollectionResponse { Collection collection = 1; }

@@ -79,6 +79,11 @@ func TestAgentCredentialMayOnlyAskForRepositoriesInItsOwnWorkspace(t *testing.T)
 	denied("decline its own request", err)
 	_, err = f.client.AddCollectionRepositories(agent, &pb.AddCollectionRepositoriesRequest{CollectionId: f.mine.Id, RequestKey: "self", Members: []*pb.WorktreeSpec{{RepositoryId: module.Repository.Id}}})
 	denied("add a repository", err)
+	remove := &pb.RemoveCollectionRepositoryRequest{CollectionId: f.mine.Id, MemberName: "api"}
+	_, err = f.client.RemoveCollectionRepository(agent, remove)
+	denied("remove a repository", err)
+	_, err = f.client.RemoveCollectionRepository(terminal, remove)
+	denied("terminal remove", err)
 	stream, err := f.client.PrepareWorkspace(agent, &pb.PrepareWorkspaceRequest{RequestKey: "self", CollectionId: f.mine.Id, RepositoryIdentities: []string{module.Repository.GitIdentity}, RepositoryRequestId: request.Id})
 	if err == nil {
 		_, err = stream.Recv()

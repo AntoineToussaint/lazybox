@@ -38,13 +38,16 @@ wait_for_runner() {
 start
 wait_for_runner
 [ "$(operator link serve --probe)" = 'lazybox-link 1' ]
-before=$(operator link owners ls)
+before=$(operator link owners ls --json)
 docker stop "$runner" >/dev/null
 docker rm "$runner" >/dev/null
 runner=
 
 start
 wait_for_runner
-after=$(operator link owners ls)
-[ "$before" = "$after" ]
+after=$(operator link owners ls --json)
+if [ "$before" != "$after" ]; then
+    printf '%s\n' 'Owner-link identity changed after container replacement.' >&2
+    exit 1
+fi
 printf '%s\n' 'Runner endpoint and owner-link identity survived container replacement.'

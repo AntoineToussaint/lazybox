@@ -15,7 +15,7 @@ RUN --mount=type=bind,target=/tmp/bundles set -eu; \
     printf '%s  %s\n' "$LAZYBOX_BUNDLE_SHA256" "$bundle" | sha256sum --strict --check; \
     mkdir -p /opt/lazybox; \
     tar -xzf "$bundle" --no-same-owner -C /opt/lazybox; \
-    (cd /opt/lazybox && sha256sum --strict --check SHA256SUMS)
+    (cd /opt/lazybox && sha256sum --quiet --strict --check SHA256SUMS)
 
 ENV XDG_DATA_HOME=/var/lib/lazybox/data \
     XDG_CONFIG_HOME=/var/lib/lazybox/config \

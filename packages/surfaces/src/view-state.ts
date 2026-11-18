@@ -58,14 +58,14 @@ export function writePreference(store: ViewStateStore | undefined, name: string,
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(PREFERENCE_EVENT, { detail: { name } }));
 }
 
-export type LaunchChoices = { provider: string; profile: string; model: string; gateway: string };
+export type LaunchChoices = { provider: string; profile: string; model: string; gateway: string; behaviorProfile?: string };
 export function readLaunchChoices(store?: ViewStateStore): Partial<LaunchChoices> {
   if (!store) return {};
   try {
     const raw = store.getItem(`${store.scope || store.key}:launch-choices`);
     const data = raw && raw.length < 4096 ? JSON.parse(raw) : {};
     if (!data || !(['claude', 'codex'].includes(data.provider) || isAcp(data.provider))) return {};
-    return Object.fromEntries(['provider', 'profile', 'model', 'gateway'].filter(k => typeof data[k] === 'string' && data[k].length < 512).map(k => [k, data[k]]));
+    return Object.fromEntries(['provider', 'profile', 'model', 'gateway', 'behaviorProfile'].filter(k => typeof data[k] === 'string' && data[k].length < 512).map(k => [k, data[k]]));
   } catch { return {}; }
 }
 export function writeLaunchChoices(store: ViewStateStore | undefined, choices: LaunchChoices): void {

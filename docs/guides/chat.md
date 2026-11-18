@@ -420,9 +420,27 @@ with a draft that references the findings artifact and the selected IDs.
 Review and send the draft. **Review again** on the template's card captures
 the updated workspace for another read-only pass.
 
-Choose **Balanced** or **Hands-on** when starting a coding conversation to
-include reusable guidance on when to act and when to ask. The session menu
-shows the selected profile. The permission selector controls tool access.
+Choose a behavior profile when starting a coding conversation. Lazybox
+remembers the launch choice when you change models or switch between
+supported harnesses. The session menu shows the selected profile.
 
-Runner administrators can set `defaults.behaviorProfile` in Runner configuration
-to `balanced-v1` or `hands-on-v1`. Existing conversations keep their profile.
+- **Balanced** starts clear, reversible work after inspecting the workspace
+  and asks about decisions that materially change the outcome.
+- **Hands-on** makes reversible decisions and carries requested steps through
+  verification, including recovery from routine failures.
+- **Check in first** starts Claude or Codex with read-only access. The agent
+  inspects the workspace and proposes a plan. Approve the plan when the
+  harness presents it. If the conversation is still read-only afterward,
+  change permissions from the session menu.
+
+Runner administrators can set `defaults.behaviorProfile` to `balanced-v2`,
+`hands-on-v2`, or `check-in-first-v1`. Existing conversations keep the
+guidance they started with. Profiles guide the model's judgment and tool
+permissions enforce the read-only start.
+
+To compare live model behavior, run `make test-personality`. The same fixtures
+measure first-turn answers, whether the agent asks for input, elapsed time,
+and whether the read-only workspace changed. Set
+`LAZYBOX_V2_REAL_CODEX_MODEL=gpt-6-astra` to test Astra explicitly or
+`LAZYBOX_V2_REAL_CLAUDE_MODEL` to select a Claude model. The test uses live
+subscriptions and temporary Runner state.

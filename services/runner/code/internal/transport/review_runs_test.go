@@ -353,3 +353,27 @@ func TestOpenSessionAppliesBehaviorProfile(t *testing.T) {
 		t.Fatalf("profile did not apply alongside the session configuration: %+v", opts)
 	}
 }
+
+func TestCheckInFirstStartsReadOnlyAcrossNativeHarnesses(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		t.Run(provider, func(t *testing.T) {
+			f := newReviewFixture(t)
+			opened, err := f.service.OpenSession(f.owner, &pb.OpenSessionRequest{
+				ProfileId: provider + "-default", CollectionId: f.mine.Id,
+				Options: &pb.RunnerOptions{BehaviorProfile: "check-in-first-v1", Permission: "yolo"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			adapter := f.codex
+			if provider == "claude" {
+				adapter = f.claude
+			}
+			opts := adapter.Session.Open
+			if opened.Session.Permission != "read-only" || opts.Permission != "read-only" ||
+				!strings.Contains(opts.Context, "then wait for approval") {
+				t.Fatalf("session permission %q, adapter permission %q, context %q", opened.Session.Permission, opts.Permission, opts.Context)
+			}
+		})
+	}
+}

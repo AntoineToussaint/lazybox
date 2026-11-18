@@ -62,6 +62,10 @@ test: build-worker
 test-real: build-worker
 	cd $(GO_ROOT) && LAZYBOX_V2_REAL=1 LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -timeout 12m -v ./tests/integration -run TestReal
 
+.PHONY: test-personality
+test-personality: build-worker
+	cd $(GO_ROOT) && LAZYBOX_V2_REAL=1 LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -timeout 12m -v ./tests/integration -run '^TestRealPersonality$$'
+
 test-browser: deps
 	LAZYBOX_V2_ENDPOINT='$(ENDPOINT)' npm run test:browser
 fmt:

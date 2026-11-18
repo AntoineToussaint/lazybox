@@ -779,6 +779,12 @@ func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gate
 		if options.Permission == "" {
 			options.Permission = b.Config.Defaults.Permission
 		}
+		if purpose == "coding" && options.BehaviorProfile == accounts.CheckInFirst {
+			if selected.Provider != "codex" && selected.Provider != "claude" {
+				return nil, errors.New("Check in first requires a harness with enforced read-only access (Claude or Codex)")
+			}
+			options.Permission = "read-only"
+		}
 	}
 	if gatewayID == "" {
 		gatewayID = b.Config.DefaultGateways[selected.Provider]

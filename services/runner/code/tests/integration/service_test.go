@@ -17,9 +17,9 @@ import (
 )
 
 func TestRunningCodeflyServiceNativeGRPC(t *testing.T) {
-	path := os.Getenv("LAZYBOX_V2_ENDPOINT")
+	path := os.Getenv("LAZYBOX_V2_LIVE_SERVICE_ENDPOINT")
 	if path == "" {
-		t.Skip("running Codefly service not selected; set LAZYBOX_V2_ENDPOINT")
+		t.Skip("running Codefly service not selected; set LAZYBOX_V2_LIVE_SERVICE_ENDPOINT to an owner endpoint file")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

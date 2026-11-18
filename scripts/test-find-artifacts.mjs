@@ -100,7 +100,11 @@ try{
  await expect(rows.getByRole('option',{name:/Rollout plan/})).toBeVisible();
  await expect(panel.locator('.artifacts-list-header strong')).toHaveText('1 artifact from this conversation');
  await page.screenshot({path:'.cache/find-artifacts-chip.png'});
- await filter.getByRole('button',{name:'Show every artifact of this workspace'}).click();
+ // The workspace command resets the conversation filter even with the panel already open.
+ await composer.focus();
+ await page.keyboard.press('Meta+k');await expect(palette).toBeVisible();
+ await search.fill('Show artifacts');await page.keyboard.press('Enter');
+ await expect(filter).toHaveCount(0);
  await expect(rows.getByRole('option')).toHaveCount(2);
 
  // ⌘K finds an artifact of another workspace by its words or its workspace's, and opens it there.

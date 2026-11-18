@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { mergeDictation } from './voice-model';
-import { finishAndSend, registerDictationTarget, startDictation, stopDictation, takeOverDictation, useVoiceState, voiceState, recognizers, type DictationSink, type DictationTarget } from './voice-session';
+import { finishAndSend, registerDictationTarget, startDictation, takeOverDictation, useVoiceState, voiceState, recognizers, type DictationSink, type DictationTarget } from './voice-session';
 
 /** The span of the draft still being recognized, drawn over the message box. */
 export type LiveRange = { start: number; end: number };
@@ -104,9 +104,8 @@ export function useComposerDictation({ textarea, value, enabled, onPreview, onCo
     /** This box is taking dictation now. */
     active: listening,
     live,
-    /** The mic button: start here (toggle), or stop. */
-    toggle() {
-      if (active && voiceState().phase !== 'idle') { void stopDictation(); return; }
+    /** Start hands-free dictation from the composer button. */
+    start() {
       if (target.current) void startDictation({ mode: 'toggle', target: target.current });
     },
     /** The person typed: their text stands. */

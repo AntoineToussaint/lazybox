@@ -29,8 +29,9 @@ Object.assign(f.sessions[1], { provider: 'claude', model: 'claude-opus-5-5', mod
   channel.push({ type: 'turn_ended', status: 'completed' }, new Date(at += 100).toISOString());
 }
 let used = 404000;
+let capacity = '1000000';
 const telemetry = () => ({ groups: [{ scope: { execution: session.id, profile: 'claude-default' }, source: 'gateway', model: 'claude-opus-5-5', records: '12', unpriced: '0', incomplete: '0', nanos: '1365000000', tokens: { input: '120000', output: '9000' } }],
-  contexts: [{ scope: { execution: session.id }, agent: 'root', used: String(used), capacity: '1000000', reserve: '33000', source: 'sdk_summary_estimate', observedAt: new Date().toISOString(), categories: [{ name: 'messages', tokens: String(used), kind: 'used', included: true }] }], recent: [] });
+  contexts: [{ scope: { execution: session.id }, agent: 'root', used: String(used), capacity, reserve: '33000', source: 'sdk_summary_estimate', observedAt: new Date().toISOString(), categories: [{ name: 'messages', tokens: String(used), kind: 'used', included: true }] }], recent: [] });
 
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: f.url } } } });
 let browser;
@@ -49,6 +50,7 @@ try {
 
   for (const scheme of ['dark', 'light']) {
     used = 404000;
+    capacity = '1000000';
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
     // Leaving a page cuts its in-flight polls, which WebKit reports as page errors ("access control checks") on the page being left: not failures. Anything else is.
@@ -97,6 +99,14 @@ try {
     assert.notEqual(normal, danger, 'the colour changes with the level');
     await page.mouse.move(0, 0);
     await composer.screenshot({ path: `.cache/composer-info-danger-${scheme}.png` });
+
+    // Codex can report a used count before it reports the capacity.
+    capacity = undefined;
+    await expect(contextButton).toHaveText('912K tokens', { timeout: 10000 });
+    await expect(header.getByRole('button', { name: 'Context and token cost' })).toContainText('912K tokens');
+    await expect(contextButton.locator('.composer-info-meter')).toHaveCount(0);
+    capacity = '1000000';
+    await expect(contextButton).toHaveText('91.2%', { timeout: 10000 });
 
     // The meter opens the header's context popover, over the message box; a second click closes it.
     await contextButton.click();

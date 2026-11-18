@@ -41,6 +41,30 @@ Code and Codex are deliberately not built in: their native adapters do more
 (sub-agents, steering, subscriptions and rotation, the metered gateway); their
 ACP bridges (`claude-agent-acp`, `codex-acp`) can be added as custom agents.
 
+## Add an agent
+
+For an ACP v1 agent, install its executable on the Runner, then use
+**Settings → Agents → Add an agent** to register its name and launch command.
+The Runner creates the profile and the conversation picker discovers it.
+The adapter negotiates optional capabilities during initialization and maps
+them to the same conversation operations and events the built-in agents use.
+
+To try the path without an account, register the checked-in
+`scripts/fixtures/acp-fake.mjs` as a custom agent with the command
+`node /absolute/path/to/lazybox/scripts/fixtures/acp-fake.mjs`. Start a
+conversation with that agent and send a message. The fixture is also the
+reference for the required handshake, response, turn completion, and the
+optional capability and update shapes.
+
+For a native integration, implement `agent.Adapter.Open` and register it in
+the Runner's adapter map. `agent.Session` is the lifecycle contract: return a
+stable native reference, declare capabilities, accept operations through
+`Apply`, publish normalized events through `Receive`, and release resources
+through `Close`. Return `agent.ErrUnsupported` for an unavailable operation.
+Add tests for startup, a complete turn, cancellation and cleanup, and each
+declared capability. The ACP tests below exercise the same contract through
+an external process.
+
 ## Where it lives
 
 | Part | File |

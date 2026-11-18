@@ -19,8 +19,11 @@ none of it is ever saved.
    `↵` (or `⌘↵`) to send. While the agent works, `↵` queues the message
    and `⌘↵` sends it now.
 
-`⌥Space` works too, held or tapped, as before. Pausing to think is fine: what
+Tap `⌥Space` to start listening and tap it again to send. Hold and release
+`⌥Space` to keep the text for editing. Pausing to think is fine: what
 you said before the pause stays, and the words after it follow.
+When a browser yields an empty speech result during a pause, Lazybox keeps
+the words it already heard.
 
 `Right ⌥` with any other key is still an ordinary `⌥`: `⌥e` for an accent or
 `⌥←` to move by word starts nothing, and a quick tap does nothing either.
@@ -31,14 +34,14 @@ the next word gets a capital.
 
 | To… | Do this |
 | --- | --- |
-| Keep listening without holding the key | **Tap `Right ⌥` twice** (or tap `⌥Space` once); tap `Right ⌥` once more (or click ■ in the pill) to finish |
+| Keep listening without holding the key | **Tap `Right ⌥` twice** (or tap `⌥Space` once); tap `Right ⌥` or `⌥Space` to send, or click ■ in the pill to keep the draft |
 | Send what you said | `⌘↵` (or `↵`) while listening or after: the last words settle, then the message goes (while the agent works, `⌘↵` sends it now and `↵` queues it) |
-| Use the mouse | The **microphone button** next to Snippets in the message box |
+| Use the mouse | Click the **microphone button** next to Snippets to start. Click the same button again to finish and send, or click ■ in the pill to keep the text for editing. |
 | Throw away what you just said | `Esc`, the **×** in the pill, or say "cancel" / "annule" |
 | Take over with the keyboard | Just type: the words stay and listening stops |
 | Move the pill | Drag it; it stays where you put it |
 
-Dictation never sends anything on its own. With Vim editing on, it works in
+Sending requires a shortcut, a click, or an enabled spoken send command. With Vim editing on, it works in
 any mode: in normal mode the words go after the cursor, as with `a`, and `Esc`
 cancels the dictation without changing your mode.
 
@@ -113,7 +116,7 @@ while you dictate.
 | --- | --- | --- | --- |
 | **Desktop app (macOS)** | macOS speech recognition | **Yes** for every language your Mac has for dictation | macOS voices |
 | **Browser** (Chrome, Edge, Safari) | The browser's speech recognition | Only where the browser says so — Chrome usually sends audio to Google, Safari to Apple | The browser's voices |
-| **Phone** (paired web app) | The phone browser's speech recognition: the 🎤 next to Send | As in the browser | — |
+| **Phone** (paired web app) | The phone browser's speech recognition: tap the microphone to start, then tap it again to finish and send | As in the browser | — |
 | **Firefox**, or iOS Safari without Siri | No speech recognition: the microphone button is hidden | — | Firefox reads aloud |
 
 On a phone without the button, use the **microphone on the keyboard**: iOS and

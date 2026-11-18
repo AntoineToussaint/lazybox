@@ -27,6 +27,7 @@ leave out.
 
 ### Install and updates
 
+- **Dictation keeps the start of your sentence** If the browser sends an empty speech result during a pause, the message box keeps the words already heard.
 - **Faster pull request checks** CI spreads UI suites across six runners and uses a Playwright image with browsers and system libraries ready to go.
 - **Track never covers the message** The Track button is an icon in a gutter the message keeps free, so hovering a message no longer hides its text.
 - **A Mac app with everything inside** Download the disk image, open it and drag Lazybox to Applications. It brings its Runner, the Claude worker, Node and Claude Code: you only sign in.

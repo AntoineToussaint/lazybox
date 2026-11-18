@@ -37,6 +37,40 @@ These rules hold for every caller:
   left out of `ListArtifacts` unless `include_retired`, and is restored as
   it was.
 
+## Proposed artifact extensions
+
+Use the existing [sandboxed extension host](EXTENSIONS.md) for artifact
+editors and previews. A versioned manifest contribution identifies a
+workspace artifact type by extension ID and type ID, and names its editor,
+preview, and optional export formats. The host resolves the contribution
+when a person creates or opens an artifact. Conversations can publish the
+same versioned source through the artifact API, regardless of their agent.
+
+The Runner keeps the source, author, version history, and optimistic write
+check. An editor receives the explicitly opened revision and returns proposed
+source. Lazybox saves it only when the person chooses Save, with the expected
+version from the revision that was opened. The preview receives just that
+revision. Export asks the extension for bytes in a declared format and uses
+Lazybox's normal save flow. The extension uses the host's existing approval
+and network rules.
+
+Start with two contributions:
+
+| Type | Source | Preview and export |
+| --- | --- | --- |
+| Plan | Existing Markdown | Plan outline and checklist, with Markdown export |
+| Visualization | Versioned declarative chart specification stored as text | Interactive chart, with source and static image export |
+
+Keep Markdown as the default for existing artifacts. Every registered type
+has a readable source view and source export available if its extension is
+disabled, missing, or incompatible. Preserve the revision history across
+extension upgrades. A type that needs a source migration proposes a new
+revision through the same save flow.
+
+The first implementation should exercise creating, editing, previewing, and
+exporting both types through one manifest contract. Also test a conflicting
+edit and opening an existing revision after disabling its extension.
+
 ## Where artifacts come from
 
 **A chat message.** Every agent message has a quiet **Track** button that
@@ -187,7 +221,9 @@ What it does not cover:
 
 **The panel.** **Panels → Artifacts** (workspace header), `] ] a`, ⌘K
 *Show artifacts*, or the chat header's "N artifacts" opens it (see
-[Finding an artifact](#finding-an-artifact)). Tracking something also opens it. The list shows each artifact's kind
+[Finding an artifact](#finding-an-artifact)). The workspace commands open the full workspace list. The chat header opens
+a list filtered to that conversation. Tracking something also opens the panel.
+The list shows each artifact's kind
 icon, title, kind, latest version, who made that version, when, and the file
 it follows, if any. A dot marks an artifact **updated since you looked**: a
 version you did not make, newer than the last one you opened on this device

@@ -140,7 +140,7 @@ try {
   await message.fill('');
   await page.keyboard.press('Alt+Space');
   await listening();
-  await expect(pill).toContainText('Tap Right ⌥ to finish');
+  await expect(pill).toContainText('Tap Right ⌥ to send');
   await expect(pill).toContainText('⌘↵ send');
   await say('first line new line', true);
   await say('second line send', true);
@@ -174,7 +174,7 @@ try {
   await expect(message).toHaveValue('Keep this kept by the button');
   await mic.click();
   await listening();
-  await expect(page.getByRole('button', { name: 'Stop dictation', exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Send dictation', exact: true })).toBeVisible();
   await expect(pill.getByRole('note'), 'the key has worked here: no word about other apps').toHaveCount(0);
   await say('dropped');
   await pill.getByRole('button', { name: 'Cancel dictation' }).click();
@@ -185,8 +185,10 @@ try {
   await page.keyboard.press('Alt+Space');
   await listening();
   await say('look at the logs');
+  await say(' ');
+  await expect(message).toHaveValue('Look at the logs');
   const recognitions = await page.evaluate(() => window.__speech.created);
-  await page.evaluate(() => window.__speech.pause());
+  await page.evaluate(() => { window.__speech.say('', true); window.__speech.pause(); });
   await expect.poll(() => page.evaluate(() => window.__speech.created)).toBe(recognitions + 1);
   await listening();
   await expect(pill).toContainText('Listening');
@@ -201,6 +203,27 @@ try {
   await pill.getByRole('button', { name: 'Stop dictation' }).click();
   await expect(pill).toHaveCount(0);
   await expect(message).toHaveValue('Look at the logs and fix them then run the tests');
+
+  // The microphone button becomes Send in the same spot and waits for the final words.
+  await message.fill('');
+  const dictationButton = page.locator('.composer-mic');
+  await mic.click();
+  await listening();
+  await say('send from the microphone');
+  await expect(dictationButton).toHaveAccessibleName('Send dictation');
+  await dictationButton.click();
+  await expect.poll(() => applied('Send from the microphone')).toBe(true);
+  await expect(mic).toBeVisible();
+  await expect(message).toHaveValue('');
+
+  // A second tap of the dictation shortcut finishes and sends.
+  await page.keyboard.press('Alt+Space');
+  await listening();
+  await say('send with the same shortcut');
+  await page.keyboard.press('Alt+Space');
+  await expect.poll(() => applied('Send with the same shortcut')).toBe(true);
+  await expect(pill).toHaveCount(0);
+  await expect(message).toHaveValue('');
 
   // ⌘↵ while listening: the last words settle, then the message goes as with ↵.
   await message.fill('');
@@ -257,15 +280,16 @@ try {
   // ⌥→ moved the caret past "works"; the dropped dictation leaves it there, so the next one goes at the end.
   await page.waitForTimeout(100);
   assert.equal(await message.evaluate(box => box.selectionStart), 'Right option works'.length, 'a dropped dictation never moves the caret back');
-  // Tapped twice, it keeps listening; tapped once more, it stops.
+  // Tapped twice, it keeps listening; tapped once more, it sends.
   await page.keyboard.press('AltRight'); await page.keyboard.press('AltRight');
   await listening();
   await say('and keeps listening');
   await page.waitForTimeout(500);
-  await expect(pill).toContainText('Tap Right ⌥ to finish');
+  await expect(pill).toContainText('Tap Right ⌥ to send');
   await page.keyboard.press('AltRight');
   await expect(pill).toHaveCount(0);
-  await expect(message).toHaveValue('Right option works and keeps listening');
+  await expect.poll(() => applied('Right option works and keeps listening')).toBe(true);
+  await expect(message).toHaveValue('');
 
   // Typing while listening takes over: the words stay, the microphone closes.
   await message.fill('');

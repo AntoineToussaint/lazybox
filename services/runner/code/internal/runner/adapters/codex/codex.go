@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,7 +196,15 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 		if err = json.Unmarshal(o.ProviderSettings, &s.overrides); err != nil {
 			return fail(errors.New("invalid carried provider settings"))
 		}
-		s.settings = append(json.RawMessage(nil), o.ProviderSettings...)
+		// Carried provider settings describe the previous attempt. The
+		// current launch permission owns the policy for the next turn.
+		if policy := turnPolicies[o.Permission]; policy != nil {
+			if s.overrides == nil {
+				s.overrides = make(map[string]json.RawMessage)
+			}
+			maps.Copy(s.overrides, policy)
+		}
+		s.settings, _ = json.Marshal(s.overrides)
 		if model := s.overrides["model"]; len(model) > 0 {
 			_ = json.Unmarshal(model, &s.model)
 		}
@@ -440,9 +449,7 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		if s.overrides == nil {
 			s.overrides = map[string]json.RawMessage{}
 		}
-		for key, value := range policy {
-			s.overrides[key] = value
-		}
+		maps.Copy(s.overrides, policy)
 		s.mu.Unlock()
 		r.Delivery = "accepted"
 		return r, nil

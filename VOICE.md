@@ -143,7 +143,9 @@ for a meter breaks Safari's recognizer and would prompt twice). Read-aloud is
 `speechSynthesis`. A browser ends a continuous recognition on its own after a
 pause; until the person stops, a new one starts and its results continue the
 segment numbers (what the old one still had in progress is sent as final
-first), with the same quiet limits as the Mac. The phone web app uses the same code; where the browser has
+first), with the same quiet limits as the Mac. An empty interim update leaves
+the last words visible, and an empty final result settles those words. The
+phone web app uses the same code; where the browser has
 no recognizer (Firefox, iOS Safari without Siri) the button is hidden and the
 keyboard's own dictation works in the text field.
 

@@ -37,8 +37,8 @@
 .dictation-overlay mark{color:transparent;background:color-mix(in srgb,var(--accent) 16%,transparent);border-radius:3px;text-decoration:underline dotted var(--accent);text-decoration-thickness:1.5px;text-underline-offset:3px}
 textarea.is-dictating{caret-color:var(--accent)}
 .composer-mic{position:relative}
-.composer-mic[aria-pressed=true]{color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,transparent)}
-.composer-mic[aria-pressed=true]::after{content:'';position:absolute;top:3px;right:3px;width:6px;height:6px;border-radius:50%;background:var(--danger)}
+.composer-mic.is-active{color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,transparent)}
+.composer-mic.is-active::after{content:'';position:absolute;top:3px;right:3px;width:6px;height:6px;border-radius:50%;background:var(--danger)}
 
 /* The command palette's microphone and what it heard. */
 .command-palette .command-palette-mic{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;min-width:0;min-height:0;padding:0;border:0;border-radius:50%;background:none;color:var(--text-muted);cursor:pointer}

@@ -66,7 +66,8 @@ them side by side, drag them anywhere.
   workspace loads, until you open that conversation again.
 - **A single click** on a conversation (in Workspaces, Agents, ⌘K, ⌘J) brings
   its tab forward, or opens it in a tab of its own. A new conversation opens in
-  a tab too.
+  a regular tab even when previews are enabled, including one started from
+  **New task** in another workspace.
 - **Settings → Chat → Open a workspace's conversations as tabs** (on unless you
   turn it off). Off, a single click shows a conversation in the chat group's
   **preview tab**, its title in *italics*, which the next single click

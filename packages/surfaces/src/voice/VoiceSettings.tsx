@@ -12,7 +12,7 @@ const permissionText: Record<VoicePermission, string> = { granted: 'Allowed', de
 const behaviours: { value: KeyBehaviour; label: string; detail: string }[] = [
   { value: 'both', label: 'Hold to talk, tap to keep listening', detail: 'Hold the key while you speak and release it to finish; a quick tap keeps listening until you press it again (Right ⌥ alone: tap it twice). Recommended.' },
   { value: 'hold', label: 'Hold to talk', detail: 'Listening stops as soon as you release the key.' },
-  { value: 'toggle', label: 'Press to start, press again to stop', detail: 'Listening goes on until you press the key again, say “stop”, or press Esc (Right ⌥ alone: tap it twice to start, once to stop).' },
+  { value: 'toggle', label: 'Press to start, press again to send', detail: 'Press the key again to finish and send a dictated message. With Right ⌥ alone, tap twice to start and once to send. Say “stop” to keep the draft or press Esc to cancel.' },
 ];
 const commandLabels: Record<SpokenCommand, { label: string; detail: string }> = {
   send: { label: 'Send', detail: 'Sends the message when “Send when I say send” is on; otherwise stops listening so you can press ↵.' },

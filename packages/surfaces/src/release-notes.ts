@@ -13,6 +13,7 @@ export const releaseNotes: readonly Release[] = [
     date: '2026-11-17',
     title: 'The first prerelease',
     items: [
+      { group: 'Install and updates', title: 'Dictation keeps the start of your sentence', body: 'If the browser sends an empty speech result during a pause, the message box keeps the words already heard.' },
       { group: 'Install and updates', title: 'Faster pull request checks', body: 'CI spreads UI suites across six runners and uses a Playwright image with browsers and system libraries ready to go.' },
       { group: 'Install and updates', title: 'Track never covers the message', body: 'The Track button is an icon in a gutter the message keeps free, so hovering a message no longer hides its text.' },
       { group: 'Install and updates', title: 'A Mac app with everything inside', body: 'Download the disk image, open it and drag Lazybox to Applications. It brings its Runner, the Claude worker, Node and Claude Code: you only sign in.' },

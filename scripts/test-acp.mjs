@@ -116,6 +116,14 @@ try{
  await setup.getByRole('button',{name:'Start Gemini CLI ↗',exact:true}).click();
  await expect.poll(()=>fixture.mutations.findLast(m=>m.method==='OpenSession')?.body.profileId).toBe('acp-gemini');
 
+ // A newly registered agent launches through the same picker and profile path.
+ await page.getByRole('button',{name:'New conversation',exact:true}).click();
+ await picker.click();
+ await list.getByRole('option',{name:/Team agent/}).click();
+ await expect(setup.getByLabel('Account profile')).toHaveValue('acp-team-agent');
+ await setup.getByRole('button',{name:'Start Team agent ↗',exact:true}).click();
+ await expect.poll(()=>fixture.mutations.findLast(m=>m.method==='OpenSession')?.body.profileId).toBe('acp-team-agent');
+
  // "Add an agent…" in the picker opens Settings at Agent programs, with the form ready.
  await page.getByRole('button',{name:'New conversation',exact:true}).click();
  await setup.getByRole('combobox',{name:'Agent',exact:true}).click();await setup.getByRole('button',{name:'Add an agent…'}).click();

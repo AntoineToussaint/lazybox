@@ -337,12 +337,22 @@ its turn here first. A conversation on a subscription Lazybox keeps apart from
 your own CLI sign-in says so instead: its history is in that subscription's
 private folder.
 
+## Claude Code and Codex capabilities
+
+Both native adapters support attachments, approvals, resuming, subagents,
+and switching models and permissions where the running provider supports it.
+Codex offers structured questions in Plan mode. Claude Code also offers them
+in Execute mode. Stopping an individual subagent is available when the
+Claude worker advertises it. The chat uses the session's capabilities to
+decide which controls to offer.
+
 ## What it costs
 
 The left of the message box's controls shows who answers, the agent and model
 (*Claude · Opus 5.5*), and how full its context is: a small meter and a
 percentage, amber from 60% and red from 85%, the same reading as the chat
-header's (a conversation that has not started shows neither). Click the agent
+header's. If the agent reports the number of tokens used before it reports
+the window capacity, both show the token count. Click the agent
 to switch model. Click either meter, or type `/cost`, for the usage popover:
 the context window once the agent has reported usage (`/context` opens it
 before that) and the conversation's **token cost**: input, cache read, cache write and output,

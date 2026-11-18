@@ -258,7 +258,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     title: target => conversationTitle(info?.sessions.find(session => session.id === target.sessionId)) || 'Conversation',
     announce: text => dock.current?.announce(text), error: setError,
   });
-  const select = (requested: RunnerTarget) => {
+  const select = (requested: RunnerTarget, mode: 'preview' | 'tab' = 'preview') => {
     if (switched(requested)) return;
     const target = localTarget(requested);
     if (target.collectionId !== workspaceID) {
@@ -272,7 +272,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         catch (error) { next = defaultLayout(target, agentsChoice.current); unreadable = `Saved pages could not be restored: ${String(error)}. Their data has been retained.`; }
         // The conversation asked for shows as a single click shows it: its tab, else the preview tab.
         // A page the person left without a chat stays as it is, with the conversation selected.
-        const shows = (page: WorkspacePage) => shownPanels(page).some(isChatTab) ? openConversation(page, target, { mode: openModeFor('preview', tabsOn) }, () => crypto.randomUUID()).page : { ...page, selection: target };
+        const shows = (page: WorkspacePage) => (mode === 'tab' || shownPanels(page).some(isChatTab)) ? openConversation(page, target, { mode: openModeFor(mode, tabsOn) }, () => crypto.randomUUID()).page : { ...page, selection: target };
         if (target.sessionId) next = { ...next, pages: next.pages.map(page => page.id === next.selectedPage ? shows(page) : page) };
         // Switching workspace never moves the dividers: the target keeps its own
         // pages and panels, but takes the current split sizes wherever its
@@ -323,16 +323,16 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   });
   // A new conversation opens in a tab: the page needs room for one, or a preview tab to show it in.
   const canShowNewSession = shownPanels(page).some(p => isChatTab(p) && p.preview) || allPanels(page).length < PANEL_LIMIT;
-  const showSession = (requested: RunnerTarget) => {
+  const showSession = (requested: RunnerTarget, mode: 'preview' | 'tab' = 'preview') => {
     if (switched(requested)) { setSettings(false); setNewSession(false); return; }
     const selection = localTarget(requested);
     setMobilePanelId('');
-    if (selection.collectionId !== workspaceID) { select(selection); setSettings(false); setNewSession(false); return; }
+    if (selection.collectionId !== workspaceID) { select(selection, mode); setSettings(false); setNewSession(false); return; }
     const live = livePage();
     const open = detachedFor(live, selection);
     if (open && chatHost) { if (changePage({ ...live, selection })) { setSettings(false); setNewSession(false); } void chatHost.openChat({ panelId: open.id, ...pinnedTarget(open) }).catch(error => setError(String(error))); return; }
     // Its tab if it has one, else the preview tab; never a second panel on the same conversation.
-    if (tabs.open(selection, 'preview')) setNewSession(false);
+    if (tabs.open(selection, mode)) setNewSession(false);
   };
   const showChanges = () => {
     const existing = current.current.pages.find(value => shownPanels(value).some(panel => panel.kind === 'changes'));
@@ -426,7 +426,8 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   useKeyboardAction('files.explorer', () => { if (workbench) focusFiles(); }, () => !!workbench);
   // An artifact asked for (tracked from a message or a file) is shown in the Artifacts panel.
   useOpenArtifactRequests(workspaceID, () => void showModule('artifacts'));
-  useKeyboardAction('artifacts.open', () => { if (workspaceID) showModule('artifacts'); }, () => !!workspaceID);
+  const showWorkspaceArtifacts = () => { if (workspaceID) openArtifact({ collectionId: workspaceID, artifactId: '' }); };
+  useKeyboardAction('artifacts.open', showWorkspaceArtifacts, () => !!workspaceID);
   /** A web page in the page's Web panel (the one used last), or in a new one beside the work. */
   useLinkPreferences(viewState);
   const openWeb = ({ url, newPanel }: ViewerRequest): boolean => {
@@ -535,7 +536,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const showNewSession = (sessionId: string) => {
     const target = { collectionId: workspaceID || info?.sessions.find(s => s.id === sessionId)?.collectionId || '', sessionId, commandId: '' };
     const group = conversationGroup.current; conversationGroup.current = '';
-    if (target.collectionId !== workspaceID) showSession(target);
+    if (target.collectionId !== workspaceID) showSession(target, 'tab');
     // Started either way: on a full page it waits in the sidebar while the page offers room.
     else { tabs.open(target, 'tab', group ? { group } : {}); setNewSession(false); }
     refreshRunner();
@@ -851,7 +852,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       command('layout.reset', 'Reset layout to default', 'Layouts', () => applyLayout(builtinPresets.find(value => value.id === DEFAULT_PRESET)!), () => !locked),
       command('layout.reset-all', 'Reset the layout and shortcuts', 'Layouts', () => resetEverything(), () => true, keymap['layout.reset-all']),
       ...[...builtinPresets, ...savedLayouts].map(preset => command(`layout.preset:${preset.id}`, `Layout: ${preset.name}`, 'Layouts', () => applyLayout(preset), () => !locked)),
-      ...Object.entries(registry).map(([kind, module]) => command(`panel.show:${kind}`, `Show ${module.title}`, 'Panels', () => kind === 'terminal' ? showTerminal() : kind === 'chat' ? showSession(livePage().selection) : kind === 'agents' ? void bringBackAgents() : void showModule(kind), () => !locked && !settings && (kind !== 'terminal' || terminalReady))),
+      ...Object.entries(registry).map(([kind, module]) => command(`panel.show:${kind}`, `Show ${module.title}`, 'Panels', () => kind === 'terminal' ? showTerminal() : kind === 'chat' ? showSession(livePage().selection) : kind === 'artifacts' ? showWorkspaceArtifacts() : kind === 'agents' ? void bringBackAgents() : void showModule(kind), () => !locked && !settings && (kind !== 'terminal' || terminalReady))),
     ];
   };
   useEffect(() => provideLayoutCommands(() => commandsRef.current()), []);
@@ -977,7 +978,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       editing={editing} changesShown={layout.pages.some(value => shownPanels(value).some(panel => panel.kind === 'changes'))} canOpenWorkspaceWindow={!!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId}
       layoutMenu={!settings && !narrow && <>
         <PanelsMenu menu={panelsMenu} registry={registry} shown={kindsShown} beside={beside?.title} disabled={kind => locked || (kind === 'terminal' && !terminalReady)}
-          onShow={kind => { if (kind === 'terminal') showTerminal(); else if (kind === 'chat' && !beside) showSession(page.selection); else { const id = kind === 'agents' ? bringBackAgents() : showModule(kind); if (id) focusAfter.current = { panel: id }; } }}
+          onShow={kind => { if (kind === 'terminal') showTerminal(); else if (kind === 'chat' && !beside) showSession(page.selection); else if (kind === 'artifacts') showWorkspaceArtifacts(); else { const id = kind === 'agents' ? bringBackAgents() : showModule(kind); if (id) focusAfter.current = { panel: id }; } }}
           onClose={() => setBeside(undefined)}/>
         <LayoutMenu menu={layoutMenu} current={templateOf(page)} saved={savedLayouts} broken={layoutFiles.broken} folder={layoutFiles.folder} cycleKey={keymap['layout.cycle'] ? displayBinding(bindings(keymap['layout.cycle'])[0]).join('') : undefined}
           icons={kindIcons} disabled={locked || !!pending} onApply={applyLayout} onSave={saveLayout}
@@ -999,7 +1000,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       onShowModule={kind => kind === 'terminal' ? showTerminal() : kind === 'web' ? void openWeb({ url: '', newPanel: true }) : void showModule(kind)}/>
     {!settings && <OtherWindows windows={otherWindows} putBackKeys={putBackKeys} onPutAllBack={putAllBack}/>}
     {repositoryWorkspace && <WorkspaceRepositories workspace={collections.find(value => value.id === repositoryWorkspace.id) || repositoryWorkspace} onClose={() => setRepositoryWorkspace(undefined)} onSaved={refreshCatalog} chooseRepositoryFolder={host?.chooseRepositoryFolder}/>}
-    {!fixedWorkspaceId && <NewTaskHost viewState={viewState} onStarted={target => { refreshCatalog(); refreshRunner(); showSession(target); }}/>}
+    {!fixedWorkspaceId && <NewTaskHost viewState={viewState} onStarted={target => { refreshCatalog(); refreshRunner(); showSession(target, target.sessionId ? 'tab' : 'preview'); }}/>}
     <NewConversationDialog open={newSession} quickStart={quickStart} workspaceID={workspaceID} workspaceName={collections.find(value => value.id === workspaceID)?.name} viewState={sessionStore}
       onQuickStart={() => setQuickStart(true)} onClose={() => { setNewSession(false); conversationGroup.current = ''; }} onStarted={showNewSession}/>
     <RestartNotice/>

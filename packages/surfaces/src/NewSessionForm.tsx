@@ -43,10 +43,14 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
   const [model, setModel] = useState(remembered.model || '');
   const [gateway, setGateway] = useState(remembered.gateway || '');
   const [instructions, setInstructions] = useState('');
-  const [behaviorProfile, setBehaviorProfile] = useState('');
+  const [behaviorProfile, setBehaviorProfile] = useState(() => {
+    const saved = readLaunchChoices(viewState).behaviorProfile || '';
+    return saved === 'check-in-first-v1' && provider !== 'claude' && provider !== 'codex' ? '' : saved;
+  });
   const quickStarted = useRef(false);
   const [permission, setPermission] = useState('');
   const [workflow, setWorkflow] = useState('execute');
+  const checkInFirst = behaviorProfile === 'check-in-first-v1';
   const [opening, setOpening] = useState(false);
   const openingRef = useRef(false);
 
@@ -60,10 +64,10 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
     openingRef.current = true; setOpening(true); onError('');
     const signal = lifetime.current!.signal;
     try {
-      const options = { model, permission, workflow, gatewayId: gateway, rotationProfileIds: [], noRotation: !rotate, instructions, behaviorProfile: assistant ? '' : behaviorProfile };
+      const options = { model, permission: checkInFirst ? 'read-only' : permission, workflow, gatewayId: gateway, rotationProfileIds: [], noRotation: !rotate, instructions, behaviorProfile: assistant ? '' : behaviorProfile };
       const result = assistant ? await api.openAssistant({ profileId: selectedProfile, purpose, context: assistantContext, collectionId, options }, { signal }) : await api.openSession({ profileId: selectedProfile, cwd: collectionId || emptyWorkspace ? '' : cwd, collectionId, emptyWorkspace, options }, { signal });
       if (!result.session) throw new Error('Runner did not return a session');
-      if (!signal.aborted) { try { writeLaunchChoices(viewState, { provider, profile: selectedProfile, model, gateway }); } catch { /* Session remains usable if local preferences cannot be saved. */ } onStarted(result.session.id); }
+      if (!signal.aborted) { try { writeLaunchChoices(viewState, { provider, profile: selectedProfile, model, gateway, behaviorProfile }); } catch { /* Session remains usable if local preferences cannot be saved. */ } onStarted(result.session.id); }
     } catch (e) { if (!signal.aborted) onError(String(e)); }
     finally { if (!signal.aborted) { openingRef.current = false; setOpening(false); } }
   };
@@ -80,7 +84,7 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
 
   return {
     runnerSettings, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway,
-    instructions, setInstructions, behaviorProfile, setBehaviorProfile, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open,
+    instructions, setInstructions, behaviorProfile, setBehaviorProfile, checkInFirst, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open,
   };
 }
 
@@ -97,7 +101,7 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
   collectionId: string;
   agentName: string;
 }) {
-  const { runnerSettings, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway, instructions, setInstructions, behaviorProfile, setBehaviorProfile, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open } = launcher;
+  const { runnerSettings, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway, instructions, setInstructions, behaviorProfile, setBehaviorProfile, checkInFirst, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open } = launcher;
   const assistant = purpose !== 'coding';
   return <section className="session-setup">
     <div className="eyebrow">New conversation</div>
@@ -105,7 +109,7 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
     <p>{assistant ? `${purposeLabel(purpose)}. This conversation runs on the Runner.` : emptyWorkspace ? 'Start a conversation with room to create files. No repository needed.' : 'Connect to your project and start working.'}</p>
     <form onSubmit={open} className="open-form">
       <div className="setup-row">
-        <AgentPicker value={provider} disabled={!info || opening} onChange={next => { setProvider(next); setProfile(''); setModel(''); setGateway(''); }}/>
+        <AgentPicker value={provider} disabled={!info || opening} onChange={next => { setProvider(next); setProfile(''); setModel(''); setGateway(''); if (checkInFirst && next !== 'claude' && next !== 'codex') setBehaviorProfile(''); }}/>
         <label>Account profile<select value={selectedProfile} disabled={!profiles.length || opening} onChange={e => setProfile(e.target.value)}>
           <SubscriptionOptions profiles={profiles}/>
         </select></label>
@@ -118,19 +122,21 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
           : collectionId
             ? <p className="collection-context">Uses the selected workspace and its repositories</p>
             : <label>Working directory<input required disabled={opening} placeholder="/absolute/path/to/project" value={cwd} onChange={e => setCwd(e.target.value)}/></label>}
-      <label>Permissions<select disabled={opening || assistant} value={assistant ? 'read-only' : permission} onChange={e => setPermission(e.target.value)}>
+      <label>Permissions<select disabled={opening || assistant || checkInFirst} value={assistant || checkInFirst ? 'read-only' : permission} onChange={e => setPermission(e.target.value)}>
         <option value="">Runner default{runnerSettings?.permission ? ` · ${runnerSettings.permission === 'yolo' ? 'YOLO' : runnerSettings.permission}` : ' · current CLI settings'}</option>
         <option value="inherit">Current CLI settings</option>
         <option value="ask">Ask for approval</option>
         <option value="read-only">Read only</option>
         <option value="yolo" disabled={workflow === 'plan'}>YOLO · full access, no approval prompts</option>
       </select></label>
-      {(permission === 'yolo' || (!permission && runnerSettings?.permission === 'yolo')) && !assistant && <small>Full tool access for this session. Existing conversations keep their original permissions.</small>}
+      {(permission === 'yolo' || (!permission && runnerSettings?.permission === 'yolo')) && !assistant && !checkInFirst && <small>Full tool access for this session. Existing conversations keep their original permissions.</small>}
       {!assistant && <label>Behavior profile<select disabled={opening} value={behaviorProfile} onChange={event => setBehaviorProfile(event.target.value)}>
         <option value="">Default behavior</option>
-        <option value="balanced-v1">Balanced · inspect, then act when clear</option>
-        <option value="hands-on-v1">Hands-on · proceed through reversible choices</option>
+        <option value="balanced-v2">Balanced · inspect, then act when clear</option>
+        <option value="hands-on-v2">Hands-on · proceed through reversible choices</option>
+        {(provider === 'codex' || provider === 'claude') && <option value="check-in-first-v1">Check in first · review a plan before edits</option>}
       </select></label>}
+      {checkInFirst && <small>Starts read only. Approve the plan when you’re ready. Use the session menu to change permissions if it stays read only.</small>}
       <details className="session-options">
         <summary>Model & context</summary>
         <div className="options-grid">

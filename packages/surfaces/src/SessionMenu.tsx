@@ -112,7 +112,8 @@ export function SessionMenu({ session, sessionID, accountName, stream, allowStar
   useHandoffMenus();
   const { api, info } = useRunner();
   const handoff = conversationHandoffItems(api, session, info);
-  const behavior = session?.behaviorProfile === 'balanced-v1' ? 'Balanced' : session?.behaviorProfile === 'hands-on-v1' ? 'Hands-on' : session?.behaviorProfile;
+  const profile = session?.behaviorProfile || '';
+  const behavior = profile.startsWith('balanced-') ? 'Balanced' : profile.startsWith('hands-on-') ? 'Hands-on' : profile === 'check-in-first-v1' ? 'Check in first' : profile;
   const gateway = session?.gatewayId && session.gatewayId !== 'direct' ? session.gatewayId : '';
   return <ActionMenu className="session-menu" label="Session actions">
     <strong>Session{live ? '' : <span className="session-connection" role="status"><span aria-hidden="true"/>{streamLabel(stream)}</span>}</strong>

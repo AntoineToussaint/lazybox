@@ -60,12 +60,26 @@
 /* Agents: a Runner that does not answer says so, once, above its rows' place. */
 .agents-runner-offline{display:flex;align-items:center;gap:6px;margin:2px 4px 4px;padding:5px 8px;border-radius:6px;background:var(--surface-sunken,var(--surface));font-size:calc(10.5px * var(--text-scale));line-height:1.4;color:var(--text-muted)}
 
-/* ⌘N: which Runner the task starts on. */
-.new-task-runners{display:flex;flex-wrap:wrap;gap:4px}
-.new-task-runners>button{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--text-subtle);font-size:calc(12px * var(--text-scale))}
-.new-task-runners>button:hover:not(:disabled){background:var(--surface-hover);color:var(--text)}
-.new-task-runners>button[aria-checked=true]{border-color:var(--accent-line,var(--accent));background:var(--accent-bg,var(--surface-selected));color:var(--text)}
-.new-task-runners>button:disabled{opacity:.45}
+/* ⌘N: "on Dev ▾" in the title, the Runner the task starts on, and its menu. */
+.new-task-runner{position:relative;display:inline-block}
+.new-task-sheet .new-task-runner-pick{display:inline-flex;align-items:center;gap:2px;height:auto;padding:0 4px;margin-left:-2px;border:0;border-radius:5px;background:transparent;color:var(--accent);font:inherit;letter-spacing:inherit;cursor:pointer}
+.new-task-sheet .new-task-runner-pick:hover:not(:disabled),.new-task-sheet .new-task-runner-pick[aria-expanded=true]{background:var(--surface-hover)}
+.new-task-sheet .new-task-runner-pick:focus-visible{outline:2px solid var(--focus,var(--accent));outline-offset:0}
+.new-task-sheet .new-task-runner-pick:disabled{color:var(--text-subtle);cursor:default}
+.new-task-sheet .new-task-runner-pick>svg{color:var(--text-muted)}
+.new-task-runner-menu{position:absolute;z-index:20;top:calc(100% + 4px);left:0;display:flex;flex-direction:column;min-width:180px;padding:4px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-hover);box-shadow:0 12px 32px color-mix(in srgb,var(--shadow) calc(47% * var(--shadow-strength)),transparent),0 0 0 1px color-mix(in srgb,var(--shadow) calc(20% * var(--shadow-strength)),transparent);font-size:calc(12.5px * var(--text-scale));font-weight:400;letter-spacing:0}
+.new-task-sheet .new-task-runner-menu>button{display:flex;align-items:center;justify-content:flex-start;gap:8px;height:28px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:var(--text);text-align:left;font:inherit}
+.new-task-runner-name{flex:1;text-align:left}
+.new-task-sheet .new-task-runner-menu>button>small{color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.new-task-sheet .new-task-runner-menu>button>svg{color:var(--accent)}
+.new-task-sheet .new-task-runner-menu>button:hover:not(:disabled),.new-task-sheet .new-task-runner-menu>button:focus-visible{background:var(--surface-active,var(--surface-selected));outline:none}
+.new-task-sheet .new-task-runner-menu>button:disabled{opacity:.45}
+
+/* A Runner section's +: a new task on that Runner. */
+.workspace-shell .runner-group-new{flex:none;display:inline-grid;place-items:center;width:20px;height:20px;padding:0;border:0;border-radius:5px;background:transparent;color:var(--text-muted)}
+.workspace-shell .runner-group-new:hover:not(:disabled){background:var(--surface-selected);color:var(--text)}
+.workspace-shell .runner-group-new:disabled{opacity:.35}
+.runner-empty .link-button{margin-left:4px;padding:0;border:0;background:transparent;color:var(--accent);font:inherit;text-decoration:underline;cursor:pointer}
 
 /* Settings → Runners. */
 .runners-list{list-style:none;margin:0 0 18px;padding:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}

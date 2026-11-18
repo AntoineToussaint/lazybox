@@ -1,4 +1,4 @@
-import { useKeyboardAction } from "./keyboard";
+import { useKeyboardAction, useKeymap } from "./keyboard";
 import { useConversationIndex } from "./useConversationIndex";
 import { isWorkConversation } from "./attention";
 import { DeleteConversationDialog } from "./DeleteConversationDialog";
@@ -17,7 +17,7 @@ import { RunnerHealthDot, useMergedInbox, useRunnerDirectory, type RunnerView } 
 import { groupByMachine, linkStateText, routeLabel, rttText, runnerCounts, runnerStateText, SLOW_RTT_MS, thisMachineLabel, type Machine, type RunnerRow } from "./runner-directory";
 import { AttentionIcon } from "./Inbox";
 import type { AttentionState } from "./attention";
-import { runAction } from "./actions";
+import { bindings, displayBinding, runAction, useActionRevision } from "./actions";
 import type { ViewTarget } from "./workspace-model";
 import { Icon } from "./Icons";
 import { useListReorder } from "./useListReorder";
@@ -71,6 +71,12 @@ function RunnerGroups(props: ListProps) {
   // Runners on other computers: grouped under the computer they run on, this one first.
   const machines = groupByMachine(directory.shown, thisMachineLabel());
   const byMachine = machines.some((machine) => machine.remote);
+  const showing = directory.runners.find((row) => row.id === directory.active)?.label || "this Runner";
+  const keymap = useKeymap(props.viewState);
+  useActionRevision();
+  const first = bindings(keymap["task.new"])[0], newKeys = first ? displayBinding(first).join("") : "";
+  // A Runner's +: New task on that Runner (the page moves to it once the task starts).
+  const newOn = (id: string) => runAction("task.new", { runner: id });
   return (
     <section className="collection-panel runner-grouped">
       <div className="explorer-heading">
@@ -79,7 +85,7 @@ function RunnerGroups(props: ListProps) {
           <button className="icon-button" aria-label="Refresh workspaces" title="Refresh" onClick={() => { props.refresh(); void directory.reread(); }}>
             <Icon name="refresh" size={14} />
           </button>
-          <button className="icon-button" aria-label="New workspace" title={`New workspace on ${directory.runners.find((row) => row.id === directory.active)?.label || "this Runner"}`} onClick={() => runAction("workspace.new")}>
+          <button className="icon-button" aria-label={`New workspace on ${showing}`} title={`New workspace on ${showing}, the Runner the page shows${newKeys ? ` (${newKeys})` : ""}\nOpens New task: repositories, an agent and your first message. Each Runner's + starts on that one.`} onClick={() => newOn(directory.active)}>
             <Icon name="plus" size={16} />
           </button>
         </div>
@@ -92,11 +98,11 @@ function RunnerGroups(props: ListProps) {
               const active = row.id === directory.active, shut = folded.includes(row.id);
               return (
                 <section key={row.id} className="runner-group" data-runner={row.id} data-health={row.health} data-active={active || undefined} aria-label={`${row.label} workspaces`}>
-                  <RunnerGroupHeader row={row} active={active} folded={shut} counts={inbox.byRunner[row.id]} onToggle={() => toggle(row.id)} onShow={() => directory.activate(row.id)} />
+                  <RunnerGroupHeader row={row} active={active} folded={shut} counts={inbox.byRunner[row.id]} onToggle={() => toggle(row.id)} onShow={() => directory.activate(row.id)} onNew={() => newOn(row.id)} />
                   {!shut && (active
                     ? <WorkspaceList {...props} embedded />
                     : row.state && (row.health === "online" || row.health === "offline")
-                      ? <RunnerWorkspaces row={row} rows={inbox.rows.filter((value) => value.runner === row.id)} onOpen={(collectionId) => props.onTarget({ collectionId, sessionId: "", commandId: "", runner: row.id } as ViewTarget)} />
+                      ? <RunnerWorkspaces row={row} rows={inbox.rows.filter((value) => value.runner === row.id)} onNew={() => newOn(row.id)} onOpen={(collectionId) => props.onTarget({ collectionId, sessionId: "", commandId: "", runner: row.id } as ViewTarget)} />
                       : <RunnerAbsent row={row} />)}
                 </section>
               );
@@ -109,7 +115,7 @@ function RunnerGroups(props: ListProps) {
 }
 
 /** Another Runner's workspaces, one line each: its name and what waits there. Choosing one shows that Runner's page on it. */
-function RunnerWorkspaces({ row, rows, onOpen }: { row: RunnerView; rows: RunnerRow[]; onOpen(collectionId: string): void }) {
+function RunnerWorkspaces({ row, rows, onOpen, onNew }: { row: RunnerView; rows: RunnerRow[]; onOpen(collectionId: string): void; onNew(): void }) {
   // Each Runner keeps its own order: a row moves within its Runner's section only.
   const api = row.health === "online" ? row.state?.api : undefined;
   const reorder = useListReorder({
@@ -118,7 +124,12 @@ function RunnerWorkspaces({ row, rows, onOpen }: { row: RunnerView; rows: Runner
     onError: (body) => showToast({ tone: "failed", title: `Workspaces on ${row.label} not reordered`, body }),
   });
   if (!row.collectionsLoaded) return <p className="runner-absent" role="status">Loading workspaces…</p>;
-  if (!row.collections.length) return <p className="module-empty runner-empty">No workspaces on {row.label} yet.</p>;
+  if (!row.collections.length) return (
+    <p className="module-empty runner-empty">
+      No workspaces on {row.label} yet.
+      {row.health === "online" && <button type="button" className="link-button" title={`New workspace on ${row.label}: opens New task`} onClick={onNew}>Create one</button>}
+    </p>
+  );
   return (
     <ul className="runner-workspaces" aria-label={`${row.label} workspaces`} {...reorder.listProps}>
       <li className="sr-only" role="status" aria-live="polite">{reorder.announcement}</li>
@@ -174,7 +185,7 @@ function MachineHeader({ machine }: { machine: Machine<RunnerView> }) {
 }
 
 /** A Runner's section header: fold, name, channel, version, health, and what waits there. */
-export function RunnerGroupHeader({ row, active, folded, counts, onToggle, onShow }: { row: RunnerView; active: boolean; folded: boolean; counts?: Record<AttentionState, number>; onToggle(): void; onShow(): void }) {
+export function RunnerGroupHeader({ row, active, folded, counts, onToggle, onShow, onNew }: { row: RunnerView; active: boolean; folded: boolean; counts?: Record<AttentionState, number>; onToggle(): void; onShow(): void; onNew?(): void }) {
   const { waiting, review } = runnerCounts(row.health === "online" || active ? counts : undefined);
   const detail = [row.channel && row.channel !== row.label ? row.channel : "", row.version ? `v${row.version.replace(/^v/, "")}` : "", runnerStateText(row)].filter(Boolean).join(" · ");
   const state = row.health !== "online" ? runnerStateText(row) : "";
@@ -190,6 +201,12 @@ export function RunnerGroupHeader({ row, active, folded, counts, onToggle, onSho
       </button>
       {waiting > 0 && <b className="runner-group-count urgent" title={`${waiting} waiting for you on ${row.label}`}>{waiting}</b>}
       {!waiting && review > 0 && <b className="runner-group-count" title={`${review} to review on ${row.label}`}>{review}</b>}
+      {onNew && (
+        <button type="button" className="runner-group-new" aria-label={`New workspace on ${row.label}`} disabled={!row.state || row.health !== "online"}
+          title={row.health === "online" ? `New workspace on ${row.label}\nOpens New task on ${row.label}: repositories, an agent and your first message` : `${row.label}: ${runnerStateText(row)}`} onClick={onNew}>
+          <Icon name="plus" size={14} />
+        </button>
+      )}
       {active
         ? <span className="runner-group-showing" title="The page shows this Runner">Showing</span>
         : <button type="button" className="runner-group-show" disabled={!row.state || row.health === "stopped"} onClick={onShow} title={`Show ${row.label}'s workspaces here`}>Show</button>}

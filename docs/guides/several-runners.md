@@ -39,6 +39,11 @@ them side by side, and the page shows one of them at a time.
   and says *Showing*; another Runner's are one line each with what waits there.
   Choose one (or **Show** on the header) and the page shows that Runner, with
   its own saved layout. Click a header to fold it.
+- **+ on a Runner's header** (*New workspace on Working*) opens New task on
+  that Runner, whichever Runner the page shows; the page moves to it once the
+  task starts. A Runner with no workspaces says *No workspaces on Working yet.
+  Create one*, which does the same. The **+** at the top of Workspaces starts
+  on the Runner the page shows, and its tooltip names it.
 - **Agents and the Inbox** list the conversations of every Runner together,
   most urgent first, each with a badge naming its Runner. **Runner** in the
   Agents panel groups them by Runner instead. Pin, mark read, rename, peek
@@ -51,8 +56,10 @@ them side by side, and the page shows one of them at a time.
 - **⌘K** finds conversations and workspaces on every Runner, and **Show
   Working** switches the page. **⌘J** (next that needs you) moves across
   Runners.
-- **⌘N** starts the task on the Runner the page shows; the **Runner** row of
-  the sheet picks another (←/→), with that Runner's repositories and agents.
+- **⌘N** starts the task on the Runner the page shows, and the sheet's title
+  says which: *New task on Dev ▾*. Choose **on Dev** (or ↓ on it) to start on
+  another Runner, with that Runner's repositories and agents; your message is
+  kept.
 
 ## When a Runner goes away
 

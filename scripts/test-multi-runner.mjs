@@ -55,6 +55,7 @@ const proxy = {
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react(), runnerList], server: { host: '127.0.0.1', port: 0, proxy } });
 const calls = (fixture, method) => fixture.calls.filter(call => call.method === method);
 const mutations = (fixture, method) => fixture.mutations.filter(call => call.method === method);
+const tab = process.env.TEST_CHROMIUM ? 'Tab' : 'Alt+Tab', shiftTab = process.env.TEST_CHROMIUM ? 'Shift+Tab' : 'Alt+Shift+Tab';
 let browser;
 try {
   await server.listen(); await mkdir('.cache', { recursive: true });
@@ -221,19 +222,25 @@ try {
       await expect(page.getByRole('combobox', { name: 'Workspace', exact: true })).toHaveValue('beta');
       void palette; void query;
 
-      // ⌘N on Working's page starts on Working; the Runner row moves it to Dev, keeping the message.
+      // ⌘N on Working's page starts on Working, and its title says so; "on Working ▾" moves it to Dev, keeping the message.
       await page.keyboard.press('Meta+n');
-      const sheet = page.getByRole('dialog', { name: 'New task' });
+      const sheet = page.getByRole('dialog', { name: /^New task/ });
       await expect(sheet).toBeVisible();
-      const picker = sheet.getByRole('radiogroup', { name: 'Runner' });
-      await expect(picker.getByRole('radio', { name: /Working/ })).toHaveAttribute('aria-checked', 'true');
-      await expect(picker.getByRole('radio', { name: /Release/ })).toBeDisabled();
+      await expect(sheet).toHaveAccessibleName('New task on Working');
       await sheet.getByRole('textbox', { name: 'First message' }).fill('Write the changelog for 0.1.22');
+      const runnerPick = sheet.getByRole('button', { name: /^on / });
+      await expect(runnerPick).toHaveAccessibleName('on Working');
+      await runnerPick.click();
+      const runnerMenu = sheet.getByRole('menu', { name: 'Start on' });
+      await expect(runnerMenu.getByRole('menuitemradio', { name: /Working/ })).toHaveAttribute('aria-checked', 'true');
+      await expect(runnerMenu.getByRole('menuitemradio', { name: /Working/ })).toBeFocused();
+      await expect(runnerMenu.getByRole('menuitemradio', { name: /Release/ })).toBeDisabled();
       await sheet.screenshot({ path: '.cache/multi-runner-new-task-dark.png' });
-      await picker.getByRole('radio', { name: /Working/ }).focus();
-      await page.keyboard.press('ArrowLeft');
-      await expect(picker.getByRole('radio', { name: /Dev/ })).toHaveAttribute('aria-checked', 'true');
-      await expect(picker.getByRole('radio', { name: /Dev/ })).toBeFocused();
+      await runnerMenu.getByRole('menuitemradio', { name: /Dev/ }).click();
+      await expect(sheet).toHaveAccessibleName('New task on Dev');
+      await expect(runnerPick).toHaveAccessibleName('on Dev');
+      await expect(runnerPick).toBeFocused();
+      await expect(runnerMenu).toHaveCount(0);
       await expect(sheet.getByRole('textbox', { name: 'First message' })).toHaveValue('Write the changelog for 0.1.22');
       const workingPrepares = mutations(working, 'PrepareWorkspace').length;
       await sheet.getByRole('combobox', { name: 'Add a repository' }).click();
@@ -243,6 +250,96 @@ try {
       await expect.poll(() => mutations(dev, 'PrepareWorkspace').length).toBe(1);
       await expect.poll(() => mutations(dev, 'Apply').filter(m => m.body.message?.text === 'Write the changelog for 0.1.22').length).toBe(1);
       assert.equal(mutations(working, 'PrepareWorkspace').length, workingPrepares, 'a task started on Dev never reaches Working');
+      await expect(devGroup).toHaveAttribute('data-active', 'true');
+
+      // The panel's + names the Runner it starts on: the one the page shows. Each Runner's section has a + of its own.
+      const headerNew = page.locator('.runner-grouped > .explorer-heading').getByRole('button', { name: 'New workspace on Dev' });
+      await expect(headerNew).toHaveAttribute('title', /^New workspace on Dev, the Runner the page shows \(⌘N\)/);
+      await expect(devGroup.getByRole('button', { name: 'New workspace on Dev' })).toBeVisible();
+      await expect(workingGroup.getByRole('button', { name: 'New workspace on Working' })).toBeEnabled();
+      await expect(releaseGroup.getByRole('button', { name: 'New workspace on Release' })).toBeDisabled();
+      await page.locator('.panel-collections').screenshot({ path: '.cache/multi-runner-sidebar-new-dark.png' }).catch(() => {});
+      await headerNew.click();
+      await expect(sheet).toHaveAccessibleName('New task on Dev');
+      await page.keyboard.press('Escape');
+      await expect(sheet).toHaveCount(0);
+
+      // Working's + starts on Working while the page shows Dev: only Working is asked, and the page moves there once it starts.
+      const prepares = { dev: mutations(dev, 'PrepareWorkspace').length, working: mutations(working, 'PrepareWorkspace').length };
+      await workingGroup.getByRole('button', { name: 'New workspace on Working' }).click();
+      await expect(sheet).toHaveAccessibleName('New task on Working');
+      await expect(devGroup).toHaveAttribute('data-active', 'true');
+      await sheet.getByRole('textbox', { name: 'First message' }).fill('Bump the invoice schema');
+      await sheet.getByRole('combobox', { name: 'Add a repository' }).click();
+      await sheet.getByRole('option', { name: /Start without a repository/ }).click();
+      await sheet.getByRole('textbox', { name: 'First message' }).press('Enter');
+      await expect(sheet).toHaveCount(0);
+      await expect.poll(() => mutations(working, 'PrepareWorkspace').length).toBe(prepares.working + 1);
+      await expect.poll(() => mutations(working, 'Apply').filter(m => m.body.message?.text === 'Bump the invoice schema').length).toBe(1);
+      assert.equal(mutations(dev, 'PrepareWorkspace').length, prepares.dev, "Working's + never reaches Dev");
+      await expect(workingGroup).toHaveAttribute('data-active', 'true');
+
+      // Keyboard only (⌥Tab in WebKit, as Safari moves between buttons; Tab elsewhere): from Dev's header to its +, Enter, then "on Dev ▾" (⇧⌥Tab) and ↓ to change the Runner; Escape closes the menu, not the sheet.
+      await devGroup.locator('.runner-group-toggle').focus();
+      await page.keyboard.press(tab);
+      await expect(devGroup.getByRole('button', { name: 'New workspace on Dev' })).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(sheet).toHaveAccessibleName('New task on Dev');
+      await expect(sheet.getByRole('textbox', { name: 'First message' })).toBeFocused();
+      await page.keyboard.type('Tidy the release script');
+      await page.keyboard.press(shiftTab);
+      await page.keyboard.press(shiftTab);
+      await expect(runnerPick).toBeFocused();
+      await page.keyboard.press('ArrowDown');
+      await expect(runnerMenu.getByRole('menuitemradio', { name: /Dev/ })).toBeFocused();
+      await page.keyboard.press('Escape');
+      await expect(runnerMenu).toHaveCount(0);
+      await expect(sheet).toBeVisible();
+      await expect(runnerPick).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(runnerMenu.getByRole('menuitemradio', { name: /Dev/ })).toBeFocused();
+      await page.keyboard.press('ArrowDown');
+      await expect(runnerMenu.getByRole('menuitemradio', { name: /Working/ })).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(sheet).toHaveAccessibleName('New task on Working');
+      await expect(runnerPick).toBeFocused();
+      await expect(sheet.getByRole('textbox', { name: 'First message' })).toHaveValue('Tidy the release script');
+      await page.keyboard.press(tab);
+      await page.keyboard.press(tab);
+      await expect(sheet.getByRole('textbox', { name: 'First message' })).toBeFocused();
+      // Working remembers no repository: Enter asks for one, ↑ is "Start without a repository", Enter takes it, Enter starts.
+      await page.keyboard.press('Enter');
+      await expect(sheet.getByRole('combobox', { name: 'Add a repository' })).toBeFocused();
+      await page.keyboard.press('ArrowUp');
+      await page.keyboard.press('Enter');
+      await expect(sheet.getByRole('textbox', { name: 'First message' })).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(sheet).toHaveCount(0);
+      await expect.poll(() => mutations(working, 'Apply').filter(m => m.body.message?.text === 'Tidy the release script').length).toBe(1);
+      assert.equal(mutations(dev, 'PrepareWorkspace').length, prepares.dev, 'a task moved to Working never reaches Dev');
+
+      // A Runner with no workspaces says so, with "Create one": the same as its +.
+      await devGroup.getByText('Alpha feature').first().click();
+      await expect(devGroup).toHaveAttribute('data-active', 'true');
+      const kept = working.collections.splice(0);
+      await expect(workingGroup.locator('.runner-empty')).toContainText('No workspaces on Working yet.', { timeout: 15_000 });
+      const createOne = workingGroup.getByRole('button', { name: 'Create one' });
+      await workingGroup.locator('.runner-group-toggle').focus();
+      await page.keyboard.press(tab);
+      await page.keyboard.press(tab);
+      await page.keyboard.press(tab);
+      await expect(createOne).toBeFocused();
+      await page.locator('.panel-collections').screenshot({ path: '.cache/multi-runner-empty-dark.png' }).catch(() => {});
+      await page.keyboard.press('Enter');
+      await expect(sheet).toHaveAccessibleName('New task on Working');
+      await page.keyboard.press('Escape');
+      await expect(sheet).toHaveCount(0);
+      await createOne.click();
+      await expect(sheet).toHaveAccessibleName('New task on Working');
+      await page.keyboard.press('Escape');
+      await expect(sheet).toHaveCount(0);
+      working.collections.push(...kept);
+      await expect(workingGroup).toContainText('Billing service', { timeout: 15_000 });
       await expect(devGroup).toHaveAttribute('data-active', 'true');
 
       // A notification from Working while the person is elsewhere names Working.

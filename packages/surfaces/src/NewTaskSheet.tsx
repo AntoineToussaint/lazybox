@@ -84,6 +84,12 @@ async function startTask(api: RunnerClient, plan: Plan, attempt: Attempt, progre
   return { collectionId: attempt.collectionId, sessionId: attempt.sessionId };
 }
 
+/** The Runner a `task.new` asks for (`{ runner: id }`), if any. */
+function newTaskRunner(argument: unknown): string {
+  const runner = argument && typeof argument === 'object' ? (argument as { runner?: unknown }).runner : undefined;
+  return typeof runner === 'string' ? runner : '';
+}
+
 /** A Runner the sheet can start on, when the window shows several. */
 type RunnerChoice = { id: string; label: string; channel: string; health: RunnerHealth };
 
@@ -102,8 +108,16 @@ export function NewTaskHost({ viewState, onStarted }: { viewState?: ViewStateSto
   const [runner, setRunner] = useState(here);
   // "Start from an issue…" (the palette): the sheet, with its issue picker open. A count, so asking again reopens it.
   const [pick, setPick] = useState(0);
-  useAction('task.new', () => { if (sheet.current?.open) sheet.current.querySelector<HTMLTextAreaElement>('.new-task-prompt')?.focus(); else { setFailure(''); setRunner(here); setPick(0); setOpen(true); } });
-  useAction('task.fromIssue', () => { if (!sheet.current?.open) { setFailure(''); setRunner(here); } setPick(n => n + 1); setOpen(true); });
+  // `{ runner }` (a Runner section's +, its "Create one"): the sheet starts on that Runner, if it answers; else on the page's.
+  const usable = (id: string) => id === here || directory?.shown.some(row => row.id === id && row.health === 'online' && !!row.state);
+  const asked = (argument: unknown) => { const id = newTaskRunner(argument); return id && usable(id) ? id : here; };
+  useAction('task.new', argument => {
+    // Opened (or moved) by the person, not from the sheet's own Runner menu: the message has the focus.
+    runnerPickedAt = 0;
+    if (sheet.current?.open) { if (newTaskRunner(argument)) setRunner(asked(argument)); sheet.current.querySelector<HTMLTextAreaElement>('.new-task-prompt')?.focus(); }
+    else { setFailure(''); setRunner(asked(argument)); setPick(0); setOpen(true); }
+  });
+  useAction('task.fromIssue', () => { if (!sheet.current?.open) { runnerPickedAt = 0; setFailure(''); setRunner(here); } setPick(n => n + 1); setOpen(true); });
   if (!open) return null;
   const choices: RunnerChoice[] | undefined = directory?.multi ? directory.shown.map(row => ({ id: row.id, label: row.label, channel: row.channel, health: row.health })) : undefined;
   const chosen = choices?.some(choice => choice.id === runner) ? runner : here;
@@ -111,6 +125,53 @@ export function NewTaskHost({ viewState, onStarted }: { viewState?: ViewStateSto
   const body = <NewTaskSheet key={chosen} ref={sheet} viewState={viewState} failure={failure} pickIssue={pick} onClose={() => setOpen(false)} runners={choices} runner={chosen} onRunner={setRunner}
     onStarted={started} onFailed={message => { setFailure(message); setOpen(true); }}/>;
   return chosen === here ? body : <RunnerScope runner={chosen}>{body}</RunnerScope>;
+}
+
+/**
+ * "on Dev ▾" in the sheet's title, when the window shows several Runners:
+ * where the task starts, and a menu to start it on another. A Runner that
+ * does not answer is listed, and cannot be picked.
+ */
+function RunnerPick({ runners, runner, disabled, onPick }: { runners: RunnerChoice[]; runner: string; disabled: boolean; onPick(id: string): void }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLSpanElement>(null), button = useRef<HTMLButtonElement>(null);
+  const current = runners.find(choice => choice.id === runner);
+  const items = () => [...box.current?.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]:not(:disabled)') || []];
+  useEffect(() => {
+    if (!open) return;
+    (items().find(item => item.getAttribute('aria-checked') === 'true') || items()[0])?.focus();
+    const outside = (event: PointerEvent) => { if (!box.current?.contains(event.target as Node)) setOpen(false); };
+    document.addEventListener('pointerdown', outside);
+    return () => document.removeEventListener('pointerdown', outside);
+  }, [open]);
+  const close = () => { setOpen(false); button.current?.focus(); };
+  const pick = (id: string) => { setOpen(false); if (id !== runner) onPick(id); else button.current?.focus(); };
+  const menuKeys = (event: KeyboardEvent<HTMLDivElement>) => {
+    const list = items(), at = list.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === 'ArrowDown' ? list[(at + 1) % list.length] : event.key === 'ArrowUp' ? list[(at - 1 + list.length) % list.length]
+      : event.key === 'Home' ? list[0] : event.key === 'End' ? list.at(-1) : undefined;
+    if (next) { event.preventDefault(); next.focus(); return; }
+    // Escape closes the menu, not the sheet.
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return; }
+    if (event.key === 'Tab') setOpen(false);
+  };
+  return <span className="new-task-runner" ref={box}>
+    <button ref={button} type="button" className="new-task-runner-pick" aria-haspopup="menu" aria-expanded={open} disabled={disabled}
+      aria-description="The Runner this task starts on. Choose another." title={`Starts on ${current?.label || 'this Runner'}${current?.channel && current.channel !== current.label ? ` (${current.channel})` : ''} · choose another Runner`}
+      onClick={() => setOpen(value => !value)}
+      onKeyDown={event => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setOpen(true); } }}>
+      on {current?.label || 'this Runner'}<Icon name="chevron" size={12}/>
+    </button>
+    {open && <div className="new-task-runner-menu" role="menu" aria-label="Start on" onKeyDown={menuKeys}>
+      {runners.map(choice => <button key={choice.id} type="button" role="menuitemradio" aria-checked={choice.id === runner} disabled={choice.health !== 'online' && choice.id !== runner}
+        title={choice.health === 'online' ? `Start on ${choice.label}${choice.channel && choice.channel !== choice.label ? ` (${choice.channel})` : ''}` : `${choice.label}: ${healthLabel[choice.health]}`}
+        onClick={() => pick(choice.id)}>
+        <RunnerHealthDot health={choice.health}/><span className="new-task-runner-name">{choice.label}</span>
+        {choice.health !== 'online' && <small aria-hidden="true">{healthLabel[choice.health]}</small>}
+        {choice.id === runner && <Icon name="check" size={12}/>}
+      </button>)}
+    </div>}
+  </span>;
 }
 
 function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStarted, onFailed, runners, runner, onRunner }: { ref: RefObject<HTMLDialogElement | null>; viewState?: ViewStateStore; failure: string; /** Changes when the palette asks for the issue picker. */ pickIssue?: number; onClose(): void; onStarted(target: ViewTarget): void; onFailed(message: string): void; runners?: RunnerChoice[]; runner?: string; onRunner?(id: string): void }) {
@@ -134,7 +195,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
 
   useEffect(() => {
     ref.current?.showModal();
-    if (Date.now() - runnerPickedAt < 1000) { ref.current?.querySelector<HTMLElement>('.new-task-runners [aria-checked=true]')?.focus(); return; }
+    if (Date.now() - runnerPickedAt < 1000) { ref.current?.querySelector<HTMLElement>('.new-task-runner-pick')?.focus(); return; }
     const field = prompt.current;
     if (field) { field.focus(); field.setSelectionRange(field.value.length, field.value.length); }
   }, []);
@@ -300,7 +361,8 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
   return <DraggableDialog ref={ref} className="new-task-sheet" aria-labelledby={`${id}-title`} draft="kept" onKeyDownCapture={sheetKeys}
     onCancel={event => { event.preventDefault(); if (busy) moveToBackground(); else onClose(); }} onClose={() => { if (!busy) onClose(); }}>
     <DialogHeader>
-      <div><h2 id={`${id}-title`}>New task</h2><p>A workspace on its own branch, an agent, and your first message.</p></div>
+      <div><h2 id={`${id}-title`}>New task{runners && <> <RunnerPick runners={runners} runner={runner || ''} disabled={busy} onPick={next => { runnerPickedAt = Date.now(); onRunner?.(next); }}/></>}</h2>
+        <p>A workspace on its own branch, an agent, and your first message.</p></div>
       <button type="button" aria-label="Close new task" title={busy ? 'Keeps starting in the background' : 'Close · your message is kept'} onClick={() => busy ? moveToBackground() : onClose()}>×</button>
     </DialogHeader>
     <form onSubmit={submit} aria-busy={busy || undefined}>
@@ -321,24 +383,6 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
         onOpen={workspace => { if (unsent) unsent = { ...unsent, item: undefined, withoutComments: false }; onClose(); onStarted({ collectionId: workspace.id, sessionId: '', commandId: '' }); }}
         onAnother={() => { setAnother(true); prompt.current?.focus(); }}/>}
 
-      {runners && <div className="new-task-field new-task-runner">
-        <span className="new-task-label" id={`${id}-runner`}><Icon name="processes" size={13}/>Runner</span>
-        <div className="new-task-runners" role="radiogroup" aria-labelledby={`${id}-runner`}
-          onKeyDown={event => {
-            const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 0;
-            if (!step) return;
-            event.preventDefault();
-            const usable = runners.filter(choice => choice.health === 'online' || choice.id === runner);
-            const next = usable[(usable.findIndex(choice => choice.id === runner) + step + usable.length) % usable.length];
-            if (next && next.id !== runner) { runnerPickedAt = Date.now(); onRunner?.(next.id); }
-          }}>
-          {runners.map(choice => <button key={choice.id} type="button" role="radio" aria-checked={choice.id === runner} tabIndex={choice.id === runner ? 0 : -1} disabled={busy || (choice.health !== 'online' && choice.id !== runner)}
-            title={choice.health === 'online' ? `Start on ${choice.label}${choice.channel && choice.channel !== choice.label ? ` (${choice.channel})` : ''}` : `${choice.label}: ${healthLabel[choice.health]}`}
-            onClick={() => { if (choice.id !== runner) { runnerPickedAt = Date.now(); onRunner?.(choice.id); } }}>
-            <RunnerHealthDot health={choice.health}/><span>{choice.label}</span>
-          </button>)}
-        </div>
-      </div>}
 
       <div className="new-task-field" data-invalid={problem?.field === 'repositories' || undefined}>
         <label className="new-task-label" htmlFor={`${id}-search`}><Icon name="repository" size={13}/>Repositories</label>

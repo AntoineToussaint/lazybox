@@ -38,8 +38,12 @@ workspaces and agents by Runner. The person's guide is
 lists its workspaces in full, the others one line each. Agents, the Inbox,
 notifications, the dock badge, ⌘K and ⌘J merge every Runner, each row badged
 with its Runner; Agents can also group by Runner. Opening anything of another
-Runner shows that Runner's page. ⌘N starts on the page's Runner and its Runner
-row picks another. A Runner that stops answering says *Not reachable* on its
+Runner shows that Runner's page. ⌘N starts on the page's Runner, which its
+title names (*New task on Dev ▾*); the *on Dev* menu picks another. Each
+Runner's section header has its own + (*New workspace on Working*), and an
+empty Runner offers *Create one*: New task on that Runner, wherever the page
+is; the page moves there once it starts. The panel's + names the Runner the
+page shows in its tooltip. A Runner that stops answering says *Not reachable* on its
 header and leaves the Inbox; nothing is an error. Settings → Runners lists
 them all: show, make primary (the window opens on it), hide, add by file,
 forget.
@@ -116,8 +120,10 @@ and light: only the window's own Runner by default, the brand's "Dev", the
 hint once and never again once dismissed, a hidden Runner never called, opting
 in from the hint and from Settings; then grouping, versions and counts, merged inbox with badges, a pin, a
 peek, an approval and a new task each reaching only their Runner, switching
-pages from the sidebar, Agents and ⌘K, the Inbox popover badged, ⌘N's Runner picker with the message
-kept, a notification naming its Runner, one Runner going offline and coming
+pages from the sidebar, Agents and ⌘K, the Inbox popover badged, ⌘N's title and Runner menu (by mouse and
+keyboard, Escape closing the menu only) with the message kept, the panel's +
+naming its Runner, a section's + and an empty Runner's *Create one* starting on
+that Runner only, a notification naming its Runner, one Runner going offline and coming
 back, folding, Settings → Runners hide and primary, the primary opening the
 window and a stopped Runner handing the page back).
 

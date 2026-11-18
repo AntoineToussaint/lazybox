@@ -2,6 +2,7 @@ package collections
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -43,7 +44,11 @@ func (m *Manager) DefaultBase(ctx context.Context, repositoryID string) (Base, e
 	if !ok {
 		return Base{}, os.ErrNotExist
 	}
-	return m.stamp(ctx, r.Path, m.defaultBase(ctx, r.Path))
+	base, err := m.resolveDefaultBase(ctx, r.Path)
+	if err != nil {
+		return Base{}, err
+	}
+	return m.stamp(ctx, r.Path, base), nil
 }
 
 // BranchBase resolves a branch the person chose to start from as last
@@ -65,33 +70,46 @@ func (m *Manager) BranchBase(ctx context.Context, repositoryID, branch string) (
 	if remote, _ := m.git(ctx, r.Path, "config", "--get", "remote.origin.url"); remote == "" {
 		ref = "refs/heads/" + branch
 	}
-	base, err := m.stamp(ctx, r.Path, Base{Ref: ref, Branch: branch})
+	commit, err := m.git(ctx, r.Path, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
 	if err != nil {
 		return Base{}, os.ErrNotExist
 	}
-	return base, nil
+	return m.stamp(ctx, r.Path, Base{Ref: ref, Branch: branch, Commit: commit}), nil
 }
 
-// stamp adds the commit a base names and when it was last updated.
-func (m *Manager) stamp(ctx context.Context, path string, base Base) (Base, error) {
+// resolveDefaultBase turns an unresolvable default into an actionable error.
+func (m *Manager) resolveDefaultBase(ctx context.Context, path string) (Base, error) {
+	base := m.defaultBase(ctx, path)
 	commit, err := m.git(ctx, path, "rev-parse", "--verify", "--end-of-options", base.Ref+"^{commit}")
-	if err != nil {
+	if err == nil {
+		base.Commit = commit
+		return base, nil
+	}
+	refs, refsErr := m.git(ctx, path, "for-each-ref", "--count=1", "--format=%(refname)")
+	if refsErr != nil {
 		return Base{}, err
 	}
-	base.Commit = commit
+	if refs == "" {
+		return Base{}, errors.New("no starting commit is available. If this repository is empty, create an initial commit and push it if there is a remote, then retry. If it already has commits, check access to its remote and retry")
+	}
+	return Base{}, errors.New("no default starting commit is available. Use Start from to choose an existing branch")
+}
+
+// stamp records when the base was last updated.
+func (m *Manager) stamp(ctx context.Context, path string, base Base) Base {
 	if gitDir, err := m.git(ctx, path, "rev-parse", "--path-format=absolute", "--git-common-dir"); err == nil {
 		if info, err := os.Stat(gitDir + "/FETCH_HEAD"); err == nil {
 			base.AsOf = info.ModTime()
 		}
 	}
 	if base.AsOf.IsZero() {
-		if seconds, err := m.git(ctx, path, "log", "-1", "--format=%ct", commit); err == nil {
+		if seconds, err := m.git(ctx, path, "log", "-1", "--format=%ct", base.Commit); err == nil {
 			if n, err := strconv.ParseInt(seconds, 10, 64); err == nil {
 				base.AsOf = time.Unix(n, 0)
 			}
 		}
 	}
-	return base, nil
+	return base
 }
 
 func (m *Manager) defaultBase(ctx context.Context, repo string) Base {

@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Collection } from '@lazybox/protocol';
 import { Icon } from './Icons';
+import { humanError } from './human-error';
 import { CardHead, editable, Kbd, useChatKeys, useInitialFocus } from './request-parts';
 import type { RequestCardProps } from './RequestCards';
 import { additionKey, pickerQuery, repositoryRequestOf, sourceLabel, sourceTag } from './repository-request-model';
@@ -55,7 +56,7 @@ export function RepositoryRequestCard({ request, api, onError, position, agentNa
       if (!added) throw Error('Preparation ended before the Runner confirmed the repository. Add again to check the same request.');
       setDone(`Added ${target.name} · ${agent} is told`); setMode('done');
     } catch (e) {
-      setError(String(e)); setMode('ask');
+      setError(humanError(e)); setMode('ask');
     } finally { busy.current = false; }
   };
   const decline = async () => {

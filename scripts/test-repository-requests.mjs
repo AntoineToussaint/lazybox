@@ -55,6 +55,18 @@ try{
  await page.screenshot({path:'.cache/repository-request-inbox.png'});
  await row.locator('.agent-row').click();
 
+ // A failed addition leaves the request open and shows the Runner's next step.
+ const noCommit='module-directory has no starting commit. Create an initial commit, then retry.';
+ const end=Buffer.from(JSON.stringify({error:{code:'failed_precondition',message:noCommit}}));
+ const header=Buffer.alloc(5);
+ header[0]=2;
+ header.writeUInt32BE(end.length,1);
+ await page.route('**/PrepareWorkspace',route=>route.fulfill({
+  contentType:'application/connect+json',body:Buffer.concat([header,end]),
+ }),{times:1});
+ await card.getByRole('button',{name:'Add acme/module-directory'}).click();
+ await expect(card.getByRole('alert')).toHaveText(noCommit);
+
  // ── Add: the workspace's own add path, its progress in the card, then gone.
  fixture.runner.preparationDelayMs=400;
  // The done line shows until the next session poll drops the answered card, which can be at once on

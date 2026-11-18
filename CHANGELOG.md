@@ -150,6 +150,7 @@ leave out.
 
 ### Runner reliability
 
+- **Dev opens past the white screen** The desktop launcher allows React’s startup script under Dev’s content security policy.
 - **Resume Codex after restarting Dev** A Runner launched from an agent shell ignores that agent's sign-in overrides when it selects its own accounts.
 - **Slow Runners have their own status** Lazybox retries a late Runner response or history refresh and reconnects automatically.
 - **Agents outlive the Runner** Restarting or updating the Runner leaves agents, commands and terminals running; the new Runner picks them back up within seconds, and an approval that was waiting stays waiting.

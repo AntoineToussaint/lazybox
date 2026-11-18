@@ -162,11 +162,14 @@ test('Working disables Codefly watching in its snapshot without changing develop
 
 test('desktop development CSP uses only its bound loopback origin', () => {
   const paths=environmentPaths('/fixture','dev');
-  const config=desktopDevConfig(paths,'http://127.0.0.1:49177');
+  const nonce='A'.repeat(24);
+  const config=desktopDevConfig(paths,'http://127.0.0.1:49177',nonce);
   assert.equal(config.build.devUrl,'http://127.0.0.1:49177');
   assert.ok(config.app.security.devCsp.includes('ws://127.0.0.1:49177'));
   assert.equal(config.app.security.csp,undefined,'production CSP must not be overridden');
-  for(const url of ['http://example.com:49177','http://127.0.0.1','http://secret@127.0.0.1:49177','http://127.0.0.1:49177/path']) assert.throws(()=>desktopDevConfig(paths,url));
+  assert.ok(config.app.security.devCsp.includes(`script-src 'self' 'nonce-${nonce}'`));
+  for(const url of ['http://example.com:49177','http://127.0.0.1','http://secret@127.0.0.1:49177','http://127.0.0.1:49177/path']) assert.throws(()=>desktopDevConfig(paths,url,nonce));
+  assert.throws(()=>desktopDevConfig(paths,'http://127.0.0.1:49177','invalid'));
 });
 
 test('watcher policy has an explicit bounded macOS stopgap and configurable backends', () => {
@@ -193,7 +196,7 @@ test('real Vite server watches CSS and refuses runtime-state files', {timeout:15
   await writeFile(html,`<html><head><link rel="stylesheet" href="/${name}"></head><body>Reload check</body></html>`);
   t.after(()=>rm(html,{force:true}));
   const signalHandlers=process.listeners('SIGTERM');
-  const {server,url}=await startDesktopDevServer(source);
+  const {server,url,nonce}=await startDesktopDevServer(source);
   assert.deepEqual(process.listeners('SIGTERM'),signalHandlers,'embedded Vite must not own launcher shutdown');
   t.after(()=>server.close());
   assert.equal(server.httpServer.address().address,'127.0.0.1');
@@ -202,6 +205,8 @@ test('real Vite server watches CSS and refuses runtime-state files', {timeout:15
   assert.equal(denied.status,403,'development source outside UI must not be served');
   const browser=await chromium.launch({headless:true});t.after(()=>browser.close());
   const page=await browser.newPage();
+  const devHtml=await (await fetch(`${url}/${name}.html`)).text();
+  assert.ok(devHtml.includes(`<script type="module" nonce="${nonce}">`), 'the inline React preamble must carry the launcher nonce');
   const connected=new Promise(resolve=>page.on('websocket',socket=>socket.on('framereceived',frame=>{
     if (typeof frame.payload === 'string' && JSON.parse(frame.payload).type === 'connected') resolve();
   })));

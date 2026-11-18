@@ -35,6 +35,8 @@ its Runner. A failed build keeps the previous CLI and says so; it never stops
 Dev. The desktop rereads its selected private endpoint file and adopts the new bearer
 on the same resolved origin. No credential is put in the Vite URL or public assets.
 Vite binds a loopback port assigned by the OS and serves only UI source/dependencies.
+The launcher gives Vite and Tauri the same per-launch script nonce so React's
+development startup script can run under the Dev content security policy.
 UI watchers share the explicit macOS compatibility policy in
 [release validation](RELEASE_GATES.md#watcher-diagnostic). The desktop launcher
 reports its backend; `LAZYBOX_V2_UI_WATCHER=default|native|polling` overrides it.

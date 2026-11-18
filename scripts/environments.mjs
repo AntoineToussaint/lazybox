@@ -371,7 +371,7 @@ async function launch(environmentRoot, channel) {
       // `lazybox` in any terminal finds this Runner (lazybox runners / --runner).
       registerRunner(channel, paths).catch(error => console.error(`The lazybox CLI will not find this Runner by name: ${error.message}`));
       desktop =channel === 'dev'
-        ? spawn(join(source, 'node_modules/.bin/tauri'), ['dev', '--config', JSON.stringify(desktopDevConfig(paths, ui.url)), '--', '--', '--endpoint', paths.endpoint], { cwd: join(source, 'apps/desktop'), env: { ...buildEnv, CARGO_TARGET_DIR: join(environmentRoot, 'build', 'dev') }, stdio: 'inherit', detached: true })
+        ? spawn(join(source, 'node_modules/.bin/tauri'), ['dev', '--config', JSON.stringify(desktopDevConfig(paths, ui.url, ui.nonce)), '--', '--', '--endpoint', paths.endpoint], { cwd: join(source, 'apps/desktop'), env: { ...buildEnv, CARGO_TARGET_DIR: join(environmentRoot, 'build', 'dev') }, stdio: 'inherit', detached: true })
         : spawn(join(app, 'Contents/MacOS/lazybox-v2-desktop'), ['--endpoint', paths.endpoint], { env: buildEnv, stdio: 'inherit' });
       desktop.on('error', error => console.error(`Desktop launch failed: ${error.message}`));
       console.log(`${paths.productName} is running. State: ${paths.state}\nClosing the desktop leaves this Runner alive. Ctrl+C here stops this environment's Runner; Restart Runner in the app starts it again here.`);

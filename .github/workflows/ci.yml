@@ -120,6 +120,8 @@ jobs:
       - run: make test-environments
       - name: README and CONTRIBUTING name only what exists
         run: node scripts/export-check.mjs
+      - name: Nothing private or secret in the tree
+        run: node scripts/check-private.mjs
 
   # The Runner on a Linux machine: the same Go suite and race run as `go`, on
   # Linux. The tests that need systemd (a service whose stop kills its cgroup,

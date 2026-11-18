@@ -73,7 +73,8 @@ function fakeSpeech({ recognition = true } = {}) {
   window.SpeechRecognition = FakeRecognition; window.webkitSpeechRecognition = FakeRecognition;
 }
 
-const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: f.url } } } });
+f.remote.tailscale = { ...f.remote.tailscale, enabled: true, state: 'serving' };
+const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: f.url }, '/remote/v1/': { target: f.url } } } });
 let browser;
 try {
   await server.listen();
@@ -140,7 +141,7 @@ try {
   await message.fill('');
   await page.keyboard.press('Alt+Space');
   await listening();
-  await expect(pill).toContainText('Tap Right ⌥ to send');
+  await expect(pill).toContainText('Tap Right ⌥ to finish');
   await expect(pill).toContainText('⌘↵ send');
   await say('first line new line', true);
   await say('second line send', true);
@@ -174,7 +175,7 @@ try {
   await expect(message).toHaveValue('Keep this kept by the button');
   await mic.click();
   await listening();
-  await expect(page.getByRole('button', { name: 'Send dictation', exact: true })).toBeVisible();
+  await expect(page.locator('.composer-mic')).toHaveAccessibleName('Stop dictation');
   await expect(pill.getByRole('note'), 'the key has worked here: no word about other apps').toHaveCount(0);
   await say('dropped');
   await pill.getByRole('button', { name: 'Cancel dictation' }).click();
@@ -204,26 +205,27 @@ try {
   await expect(pill).toHaveCount(0);
   await expect(message).toHaveValue('Look at the logs and fix them then run the tests');
 
-  // The microphone button becomes Send in the same spot and waits for the final words.
+  // The microphone button stops listening and keeps an editable draft.
   await message.fill('');
   const dictationButton = page.locator('.composer-mic');
   await mic.click();
   await listening();
   await say('send from the microphone');
-  await expect(dictationButton).toHaveAccessibleName('Send dictation');
+  await expect(dictationButton).toHaveAccessibleName('Stop dictation');
   await dictationButton.click();
-  await expect.poll(() => applied('Send from the microphone')).toBe(true);
   await expect(mic).toBeVisible();
-  await expect(message).toHaveValue('');
+  await expect(message).toHaveValue('Send from the microphone');
+  assert.equal(applied('Send from the microphone'), false);
 
-  // A second tap of the dictation shortcut finishes and sends.
+  // A second tap of the shortcut also leaves a draft.
+  await message.fill('');
   await page.keyboard.press('Alt+Space');
   await listening();
   await say('send with the same shortcut');
   await page.keyboard.press('Alt+Space');
-  await expect.poll(() => applied('Send with the same shortcut')).toBe(true);
   await expect(pill).toHaveCount(0);
-  await expect(message).toHaveValue('');
+  await expect(message).toHaveValue('Send with the same shortcut');
+  assert.equal(applied('Send with the same shortcut'), false);
 
   // ⌘↵ while listening: the last words settle, then the message goes as with ↵.
   await message.fill('');
@@ -280,16 +282,16 @@ try {
   // ⌥→ moved the caret past "works"; the dropped dictation leaves it there, so the next one goes at the end.
   await page.waitForTimeout(100);
   assert.equal(await message.evaluate(box => box.selectionStart), 'Right option works'.length, 'a dropped dictation never moves the caret back');
-  // Tapped twice, it keeps listening; tapped once more, it sends.
+  // Tapped twice, it keeps listening; tapped once more, it keeps the draft.
   await page.keyboard.press('AltRight'); await page.keyboard.press('AltRight');
   await listening();
   await say('and keeps listening');
   await page.waitForTimeout(500);
-  await expect(pill).toContainText('Tap Right ⌥ to send');
+  await expect(pill).toContainText('Tap Right ⌥ to finish');
   await page.keyboard.press('AltRight');
   await expect(pill).toHaveCount(0);
-  await expect.poll(() => applied('Right option works and keeps listening')).toBe(true);
-  await expect(message).toHaveValue('');
+  await expect(message).toHaveValue('Right option works and keeps listening');
+  assert.equal(applied('Right option works and keeps listening'), false);
 
   // Typing while listening takes over: the words stay, the microphone closes.
   await message.fill('');
@@ -306,6 +308,13 @@ try {
   await page.getByRole('tab', { name: 'Voice' }).click();
   const settings = page.locator('.voice-settings');
   await expect(settings.getByRole('heading', { name: 'Voice' })).toBeVisible();
+  await expect(settings.getByRole('link', { name: 'Get Wispr Flow' })).toHaveAttribute('href', 'https://wisprflow.ai/');
+  await expect(settings.getByRole('link', { name: 'Setup guide' })).toHaveAttribute('href', /docs\.wisprflow\.ai/);
+  const wisprPractice = settings.getByRole('textbox', { name: 'Try Wispr Flow' });
+  await wisprPractice.fill('Practice dictation');
+  await wisprPractice.press('Enter');
+  await expect(wisprPractice).toHaveValue('Practice dictation');
+  assert.equal(applied('Practice dictation'), false);
   await expect(settings).toContainText('Browser speech recognition');
   await expect(settings.getByRole('note', { name: 'Privacy' })).toContainText('Your browser sends the audio to its speech service');
   await expect(settings.getByRole('note', { name: 'Privacy' })).not.toContainText('On-device');
@@ -431,6 +440,7 @@ try {
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('tab', { name: 'Voice' }).click();
   await settings.getByLabel('Agent replies').selectOption('summary');
+  await settings.getByRole('switch', { name: 'Conversations that need you' }).check();
   await settings.getByLabel('Voice', { exact: true }).selectOption('voice-fr');
   await settings.getByRole('button', { name: 'Play a sample' }).click();
   await expect.poll(() => page.evaluate(() => window.__spoken.at(-1))).toEqual({ text: 'Voici comment Lazybox lira les réponses de vos agents.', rate: 1, voice: 'voice-fr' });
@@ -458,12 +468,43 @@ try {
   assert.equal(await page.evaluate(() => window.__spoken.length), spokenBefore + 1);
   await page.keyboard.press('Escape');
 
+  // A fresh question waits for dictation to end, then reads the question and its short choices.
+  await page.keyboard.press('Alt+Space');
+  await listening();
+  const releaseSession = f.sessions[1];
+  Object.assign(releaseSession, { agents: root('waiting_input', Date.now()), pending: [{
+    type: 'question', requestId: 'q-build', providerDataJson: data({ questions: [{
+      question: 'Which build should I verify?', options: [{ label: 'Dev' }, { label: 'Working' }],
+    }] }),
+  }] });
+  await expect(page.locator('.agent-row').filter({ hasText: 'Ship release notes' })).toContainText('Which build should I verify?');
+  assert.equal(await page.evaluate(() => window.__spoken.length), spokenBefore + 1);
+  await page.keyboard.press('Escape');
+  const announcement = 'Beta release. Ship release notes. Which build should I verify? Choices: Dev or Working.';
+  await expect.poll(() => page.evaluate(() => window.__spoken.at(-1)?.text)).toBe(announcement);
+  await page.evaluate(() => window.__finishSpeaking());
+  await page.keyboard.press('Meta+k');
+  await search.fill('>repeat last announcement');
+  await palette.getByRole('option').first().click();
+  await expect.poll(() => page.evaluate(() => window.__spoken.length)).toBe(spokenBefore + 3);
+  await page.evaluate(() => window.__finishSpeaking());
+  await page.keyboard.press('Meta+k');
+  await search.fill('>read latest reply');
+  await palette.getByRole('option').first().click();
+  await expect.poll(() => page.evaluate(() => window.__spoken.at(-1)?.text)).toBe('Another reply.');
+  await page.evaluate(() => window.__finishSpeaking());
+
   // The registry: palette entries and the shortcuts overlay list the voice actions with their keys.
   await page.keyboard.press('Meta+k');
   await search.fill('>dictate');
   await expect(palette.getByRole('option').first()).toContainText('Dictate');
   await expect(palette.getByRole('option').first().locator('kbd')).toHaveText(['Right ⌥']);
   await page.keyboard.press('Escape');
+  await hold('Space', true);
+  await listening();
+  await say('open that', true);
+  await release('Space', true);
+  await expect(page.getByRole('heading', { name: 'Ship release notes' })).toBeVisible();
   assert.deepEqual(errors, []);
 
   // A browser without speech recognition: no mic button, and Settings says what to use instead.
@@ -482,6 +523,44 @@ try {
   await other.keyboard.press('Alt+Space');
   await expect(other.locator('.voice-pill.is-error')).toContainText('no speech recognition');
   await plain.close();
+  // The paired phone uses the same stop-and-review flow, with a separate Send button.
+  f.remote.phoneUrl = origin;
+  const offer = await fetch(`${f.url}/lazybox.bench.v1.RunnerService/BeginDevicePairing`, {
+    method: 'POST', headers: { authorization: `Bearer ${f.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ grants: ['respond'] }),
+  });
+  const phoneContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await phoneContext.addInitScript(fakeSpeech);
+  const phone = await phoneContext.newPage();
+  await phone.goto((await offer.json()).url);
+  await phone.getByRole('textbox', { name: 'Name this phone' }).fill('Dictation phone');
+  await phone.getByRole('button', { name: 'Pair this phone' }).click();
+  await phone.getByRole('button', { name: 'Open inbox' }).click();
+  await phone.locator('.remote-row').filter({ hasText: 'Index the API' }).locator('.remote-row-open').click();
+  await phone.getByRole('button', { name: 'Read latest reply' }).click();
+  await expect.poll(() => phone.evaluate(() => window.__spoken.at(-1)?.text)).toBe('Another reply.');
+  await phone.getByRole('button', { name: 'Stop reading reply' }).click();
+  const phoneMic = phone.locator('.remote-mic');
+  await phoneMic.click();
+  await expect.poll(() => phone.evaluate(() => !!window.__speech.active)).toBe(true);
+  await phone.evaluate(() => window.__speech.say('draft from the phone'));
+  await phoneMic.click();
+  await expect(phone.getByRole('textbox', { name: 'Message' })).toHaveValue('Draft from the phone');
+  await expect(phoneMic).toHaveAccessibleName('Dictate');
+  assert.equal(applied('Draft from the phone'), false);
+  await phone.getByRole('button', { name: 'Send message' }).click();
+  await expect.poll(() => applied('Draft from the phone')).toBe(true);
+  await expect(phone.getByRole('textbox', { name: 'Message' })).toHaveValue('');
+  await phoneMic.click();
+  await expect.poll(() => phone.evaluate(() => !!window.__speech.active)).toBe(true);
+  await phone.evaluate(() => window.__speech.say('keep this with the original conversation'));
+  await phone.getByRole('button', { name: 'Back to inbox' }).click();
+  await phone.locator('.remote-row').filter({ hasText: 'Ship release notes' }).locator('.remote-row-open').click();
+  await expect(phone.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('');
+  await phone.getByRole('button', { name: 'Back to inbox' }).click();
+  await phone.locator('.remote-row').filter({ hasText: 'Index the API' }).locator('.remote-row-open').click();
+  await expect(phone.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('Keep this with the original conversation');
+  assert.equal(applied('Keep this with the original conversation'), false);
+  await phoneContext.close();
   console.log('voice: dictation, commands, palette, read-aloud and settings passed');
 } finally {
   await browser?.close();

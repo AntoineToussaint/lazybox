@@ -116,11 +116,17 @@ test('notifications: only watched transitions with new agent activity, never for
   assert.equal(notice?.title, 'Question · Title s');
   assert.equal(notice?.body, 'Alpha feature · Which database should I use?');
   assert.equal(notice?.sessionId, 's');
+  assert.equal(notice?.speech?.requestId, 'q1');
+  assert.match(notice?.speech?.text || '', /Which \*\*database\*\* should I use\?/);
   assert.equal(noticeFor(working, asks, prefs, true), undefined, 'on screen');
   assert.equal(noticeFor(working, asks, { ...prefs, needsInput: false }), undefined);
   assert.equal(noticeFor(asks, asks, prefs, false), undefined, 'the same request is announced once');
   const second = deriveAttention(session('s', { status: 'waiting_approval', pending: [question, approval], agents: [{ updated: 2_500 }] }));
-  assert.equal(noticeFor(asks, second, prefs, false)?.kind, 'needs-input', 'a new request while one waits');
+  const nextNotice = noticeFor(asks, second, prefs, false);
+  assert.equal(nextNotice?.kind, 'needs-input', 'a new request while one waits');
+  assert.equal(nextNotice?.speech?.requestId, 'a1');
+  assert.match(nextNotice?.speech?.text || '', /Approval needed. Run npm test/);
+  assert.notEqual(nextNotice?.speech?.id, notice?.speech?.id);
 
   const idle = deriveAttention(session('s', { agents: [{ status: 'done', updated: 1_000, ended: 1_000 }] }), 1_000);
   const relabelled = deriveAttention(session('s', { fault: 'provider_failure', agents: [{ status: 'done', updated: 1_000, ended: 1_000 }] }));
@@ -135,6 +141,7 @@ test('notifications: only watched transitions with new agent activity, never for
   const review = deriveAttention(session('s', { lastMessage: 'Done.', agents: [{ status: 'done', updated: 4_000, ended: 4_000 }] }), 1_000);
   assert.equal(noticeFor(working, review, prefs, false), undefined, 'ready for review is opt-in');
   assert.equal(noticeFor(working, review, { ...prefs, review: true }, false)?.body, 'Done.');
+  assert.equal(noticeFor(working, review, { ...prefs, review: true }, false)?.speech, undefined);
 });
 
 test('rows read well: last line and age', () => {

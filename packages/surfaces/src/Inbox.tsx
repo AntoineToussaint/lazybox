@@ -9,6 +9,7 @@ import { useRunner } from './RunnerContext';
 import { conversationDetails, conversationName } from './conversation-model';
 import { useKeyboardAction, useKeymap, type Keymap } from './keyboard';
 import { ageLabel, attentionTitle, seenMark, type Attention, type AttentionState, type Inbox } from './attention';
+import { announceAttention } from './voice/voice-session';
 import { attentionChanges, deliverAttention } from './attention-alerts';
 import { bindings, displayKey, isChord } from './actions';
 import { useAttentionHost, useNotificationPreferences, useViewingReader } from './useAttention';
@@ -168,10 +169,17 @@ function useAttentionNotifier(inbox: ReturnType<typeof useMergedInbox>, collecti
     const here = focused ? inbox.rows.find(row => row.runner === inbox.here && row.session.id === selection.sessionId)?.key : '';
     const elsewhere = viewing();
     const runnerOf = (row: Attention) => row.runner && row.runner !== inbox.here ? others.current?.find(value => value.id === row.runner) : undefined;
-    const notices = attentionChanges(before, inbox.rows, row => row.key === here || row.key === elsewhere, row => { const other = runnerOf(row); const name = (other ? other.collections : collections).find(value => value.id === row.session.collectionId)?.name; return other ? [other.label, name].filter(Boolean).join(' · ') : name; })
+    const notices = attentionChanges(before, inbox.rows, () => false, row => { const other = runnerOf(row); const name = (other ? other.collections : collections).find(value => value.id === row.session.collectionId)?.name; return other ? [other.label, name].filter(Boolean).join(' · ') : name; })
       .map(notice => { const row = inbox.rows.find(value => value.key === notice.key); return row && row.runner !== inbox.here ? { ...notice, runner: row.runner } : notice; });
+    const openNotice = (notice: (typeof notices)[number]) => open.current({ collectionId: notice.collectionId, sessionId: notice.sessionId, commandId: '', ...(notice.runner ? { runner: notice.runner } : {}) });
+    announceAttention(notices, notice => {
+      const current = previous.current?.get(notice.key);
+      if (!current || current.state !== notice.kind) return false;
+      const requestId = notice.speech?.requestId;
+      return requestId ? current.requests.includes(requestId) : current.at === notice.speech?.at;
+    }, openNotice);
     const next = bindings(latest.current.keymap['attention.next']).find(isChord);
-    deliverAttention(notices, preferences, { host, focused, nextKey: next ? displayKey(next) : undefined, open: notice => open.current({ collectionId: notice.collectionId, sessionId: notice.sessionId, commandId: '', ...(notice.runner ? { runner: notice.runner } : {}) }) });
+    deliverAttention(notices.filter(notice => notice.key !== here && notice.key !== elsewhere), preferences, { host, focused, nextKey: next ? displayKey(next) : undefined, open: openNotice });
   }, [host, inbox.rows]);
   const badge = preferences.badge ? inbox.counts['needs-input'] : 0;
   useEffect(() => {

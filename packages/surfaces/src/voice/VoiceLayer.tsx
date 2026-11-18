@@ -5,7 +5,7 @@ import { beginDrag, preventMouseDown } from '../drag-gesture';
 import { Icon } from '../Icons';
 import type { Keymap } from '../keyboard';
 import { elapsed } from './voice-model';
-import { canOpenVoiceSystemSettings, cancelDictation, dictating, dismissVoiceError, finishAndSend, markVoiceKeyUsed, openVoiceSystemSettings, setDictationKeyHeld, setDictationMode, setVoicePreferencesContext, startDictation, stopDictation, stopReading, toggleDictation, useVoicePreferences, useVoiceState, voiceKeysSuspended, voiceKeyUsed, voiceState, type DictationKind } from './voice-session';
+import { canOpenAnnouncement, canRepeatAnnouncement, canOpenVoiceSystemSettings, cancelDictation, dictating, dismissVoiceError, markVoiceKeyUsed, openAnnouncement, openVoiceSystemSettings, repeatAnnouncement, setDictationKeyHeld, setDictationMode, setVoicePreferencesContext, startDictation, stopDictation, stopReading, toggleDictation, useVoicePreferences, useVoiceState, voiceKeysSuspended, voiceKeyUsed, voiceState, type DictationKind } from './voice-session';
 import './voice.css';
 
 /** How long a press of the dictation key may last and still be a tap (it then keeps listening). */
@@ -44,6 +44,8 @@ export function VoiceLayer({ viewState, keymap, onOpenSettings }: { viewState?: 
   useActions({
     'voice.dictate': () => toggleDictation(),
     'voice.command': () => { if (dictating()) void stopDictation(); else listenForCommand('toggle'); },
+    'voice.repeat': { run: repeatAnnouncement, enabled: canRepeatAnnouncement },
+    'voice.open-announcement': { run: openAnnouncement, enabled: canOpenAnnouncement },
     'voice.stop-reading': { run: () => void stopReading(), enabled: () => voiceState().reading },
   });
 
@@ -57,11 +59,6 @@ export function VoiceLayer({ viewState, keymap, onOpenSettings }: { viewState?: 
       // In the palette, either key talks to the palette.
       if (kind === 'palette' || document.querySelector('dialog.command-palette[open]')) listenForCommand(mode);
       else void startDictation({ mode });
-    };
-
-    const finishFromKey = (kind: DictationKind) => {
-      if (kind === 'composer' && finishAndSend()) return;
-      void stopDictation();
     };
 
     // Right ⌥ (or Right ⌘) alone: held for LONE_HOLD_MS with no other key, it
@@ -131,7 +128,7 @@ export function VoiceLayer({ viewState, keymap, onOpenSettings }: { viewState?: 
       pressed = { kind, at: Date.now(), code: event.code, modifiers, stops: false };
       setDictationKeyHeld(true);
       // A second press finishes toggle dictation.
-      if (dictating()) { pressed.stops = true; finishFromKey(kind); return; }
+      if (dictating()) { pressed.stops = true; void stopDictation(); return; }
       begin(kind, behaviour() === 'toggle' ? 'toggle' : 'hold');
     };
     const release = (held: number, stops: boolean) => {
@@ -142,9 +139,9 @@ export function VoiceLayer({ viewState, keymap, onOpenSettings }: { viewState?: 
     };
     const keyup = (event: KeyboardEvent) => {
       if (lone && event.code === lone.code) {
-        const { kind, at, started, toggled, stops } = lone; dropLone();
+        const { at, started, toggled, stops } = lone; dropLone();
         const now = Date.now();
-        if (stops) { event.preventDefault(); event.stopImmediatePropagation(); if (dictating()) finishFromKey(kind); return; }
+        if (stops) { event.preventDefault(); event.stopImmediatePropagation(); if (dictating()) void stopDictation(); return; }
         if (toggled) { event.preventDefault(); event.stopImmediatePropagation(); return; }
         if (started) {
           event.preventDefault(); event.stopImmediatePropagation();
@@ -268,17 +265,17 @@ export function VoicePill({ state, keymap, onOpenSettings, inline }: { state: Re
     </div>;
   }
   const what = state.phase === 'starting' ? 'Starting the microphone…' : state.phase === 'stopping' ? 'Finishing…' : state.kind === 'palette' ? 'Say a command' : 'Listening';
-  const hint = state.mode === 'hold' ? 'Release to finish' : keyText ? `${key && isLoneModifier(key) ? 'Tap ' : ''}${keyText} to ${state.kind === 'composer' ? 'send' : 'finish'}` : 'Stop to finish';
+  const hint = state.mode === 'hold' ? 'Release to finish' : keyText ? `${key && isLoneModifier(key) ? 'Tap ' : ''}${keyText} to finish` : 'Stop to finish';
   const level = state.level ?? (state.hearing ? 0.6 : 0.12);
   // Sending while listening waits for the last words (Composer, finishAndSend); ⌘↵ is Send now, a plain send while the agent is idle.
   const sendChord = state.kind === 'composer' ? bindings(keymap?.['chat.send-now']).find(isChord) : undefined;
   const tip = !inline && state.kind === 'composer' && keyUnproven && keyText;
-  return <div className={'voice-pill' + (inline ? ' is-inline' : '')} data-phase={state.phase} data-kind={state.kind} role="status" aria-label={`${what}. ${state.onDevice ? 'On-device.' : ''}`} style={style} onPointerDown={down} onMouseDown={press}>
+  return <div className={'voice-pill' + (inline ? ' is-inline' : '')} data-phase={state.phase} data-kind={state.kind} role="status" aria-label={`${what}. ${state.destination ? state.destination + '. ' : ''}${state.onDevice ? 'On-device.' : ''}`} style={style} onPointerDown={down} onMouseDown={press}>
     <span className="voice-pill-dot" aria-hidden="true"/>
     <span className={'voice-pill-meter' + (state.level === undefined ? ' is-estimated' : '')} aria-hidden="true">
       {[0.55, 0.8, 1, 0.8, 0.55].map((weight, i) => <i key={i} style={{ transform: `scaleY(${Math.max(0.18, Math.min(1, level * weight * 1.4))})` }}/>)}
     </span>
-    <span className="voice-pill-text">{what}</span>
+    <span className="voice-pill-text" title={state.destination}>{what}{state.destination && <span className="voice-pill-destination"> · {state.destination}</span>}</span>
     <span className="voice-pill-time" aria-label="Elapsed">{elapsed(now - state.startedAt)}</span>
     {state.phase === 'listening' && <span className={'voice-pill-privacy' + (state.onDevice ? ' is-local' : '')} title={state.onDevice ? 'Recognized on this device: the audio never leaves it.' : `${state.engine}: the audio is sent to its speech service.`}>
       <Icon name={state.onDevice ? 'lock' : 'cloud'} size={12}/>{state.onDevice ? 'On-device' : 'Online'}

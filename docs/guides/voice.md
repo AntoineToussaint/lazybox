@@ -10,6 +10,11 @@ none of it is ever saved.
 
 ## Dictate a message
 
+Open **Settings → Voice → Wispr Flow** for the app download, sign-in
+instructions, and a practice field. Sign in in the Wispr Flow app. Then focus
+the Lazybox message box and use your Wispr shortcut. Review the inserted text
+and send it through the usual composer controls.
+
 1. Click into a conversation's message box (or just have one on screen).
 2. **Hold `Right ⌥`** — the Option key on the right of the space bar, on its
    own — and speak. A small pill shows a red recording light, the microphone
@@ -19,7 +24,7 @@ none of it is ever saved.
    `↵` (or `⌘↵`) to send. While the agent works, `↵` queues the message
    and `⌘↵` sends it now.
 
-Tap `⌥Space` to start listening and tap it again to send. Hold and release
+Tap `⌥Space` to start listening and tap it again to keep the draft. Hold and release
 `⌥Space` to keep the text for editing. Pausing to think is fine: what
 you said before the pause stays, and the words after it follow.
 When a browser yields an empty speech result during a pause, Lazybox keeps
@@ -34,14 +39,14 @@ the next word gets a capital.
 
 | To… | Do this |
 | --- | --- |
-| Keep listening without holding the key | **Tap `Right ⌥` twice** (or tap `⌥Space` once); tap `Right ⌥` or `⌥Space` to send, or click ■ in the pill to keep the draft |
+| Keep listening without holding the key | **Tap `Right ⌥` twice** (or tap `⌥Space` once); tap `Right ⌥` or `⌥Space` to stop, or click ■ in the pill to keep the draft |
 | Send what you said | `⌘↵` (or `↵`) while listening or after: the last words settle, then the message goes (while the agent works, `⌘↵` sends it now and `↵` queues it) |
-| Use the mouse | Click the **microphone button** next to Snippets to start. Click the same button again to finish and send, or click ■ in the pill to keep the text for editing. |
+| Use the mouse | Click the **microphone button** next to Snippets to start. Click the same button again to keep the draft, or click ■ in the pill to keep the text for editing. |
 | Throw away what you just said | `Esc`, the **×** in the pill, or say "cancel" / "annule" |
 | Take over with the keyboard | Just type: the words stay and listening stops |
 | Move the pill | Drag it; it stays where you put it |
 
-Sending requires a shortcut, a click, or an enabled spoken send command. With Vim editing on, it works in
+Send explicitly with the keyboard, the Send button, or an enabled spoken send command. With Vim editing on, it works in
 any mode: in normal mode the words go after the cursor, as with `a`, and `Esc`
 cancels the dictation without changing your mode.
 
@@ -103,8 +108,15 @@ With the palette already open, `⌥Space` talks to the palette too.
 - **Agent replies** — the first paragraph or the whole reply, when a turn ends in
   a conversation you have open. Code blocks are named ("code block"), not read;
   links are read as their text.
-- **Conversations that need you** — the "needs you" notification: a question,
-  an approval, a failure.
+- **Conversations that need you** — fresh questions, pending approvals, and failures that need attention. Short
+  choices can be read with the question. If you are dictating, Lazybox waits
+  until you finish and skips requests that have already been resolved.
+
+Use **Read latest reply**, **Repeat last announcement**, or **Open that
+announcement** in the command palette when you want to follow up. Say “open
+that” with the voice command shortcut to jump to the conversation that was
+announced. On a paired phone, tap the speaker in a conversation header to
+read its latest reply.
 
 Pick a voice and a speed, and **Play a sample**. `Esc` (or ■ in the pill, or
 *Stop reading aloud* in the command palette) stops reading. Nothing is read
@@ -116,7 +128,7 @@ while you dictate.
 | --- | --- | --- | --- |
 | **Desktop app (macOS)** | macOS speech recognition | **Yes** for every language your Mac has for dictation | macOS voices |
 | **Browser** (Chrome, Edge, Safari) | The browser's speech recognition | Only where the browser says so — Chrome usually sends audio to Google, Safari to Apple | The browser's voices |
-| **Phone** (paired web app) | The phone browser's speech recognition: tap the microphone to start, then tap it again to finish and send | As in the browser | — |
+| **Phone** (paired web app) | The phone browser's speech recognition: tap the microphone to start, then tap it again to keep the draft | As in the browser | Read the latest reply on demand |
 | **Firefox**, or iOS Safari without Siri | No speech recognition: the microphone button is hidden | — | Firefox reads aloud |
 
 On a phone without the button, use the **microphone on the keyboard**: iOS and

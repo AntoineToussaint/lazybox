@@ -12,7 +12,7 @@ const permissionText: Record<VoicePermission, string> = { granted: 'Allowed', de
 const behaviours: { value: KeyBehaviour; label: string; detail: string }[] = [
   { value: 'both', label: 'Hold to talk, tap to keep listening', detail: 'Hold the key while you speak and release it to finish; a quick tap keeps listening until you press it again (Right ⌥ alone: tap it twice). Recommended.' },
   { value: 'hold', label: 'Hold to talk', detail: 'Listening stops as soon as you release the key.' },
-  { value: 'toggle', label: 'Press to start, press again to send', detail: 'Press the key again to finish and send a dictated message. With Right ⌥ alone, tap twice to start and once to send. Say “stop” to keep the draft or press Esc to cancel.' },
+  { value: 'toggle', label: 'Press to start, press again to stop', detail: 'Press again to keep the draft. With Right ⌥ alone, tap twice to start and once to stop. Press Esc to cancel.' },
 ];
 const commandLabels: Record<SpokenCommand, { label: string; detail: string }> = {
   send: { label: 'Send', detail: 'Sends the message when “Send when I say send” is on; otherwise stops listening so you can press ↵.' },
@@ -103,6 +103,15 @@ export function VoiceSettings({ store }: { store?: ViewStateStore }) {
       </>}
     </SettingsGroup>
 
+    <SettingsGroup title="Wispr Flow" description="Use the Wispr Flow app to dictate into any Lazybox message box.">
+      <SettingsRow label="Install and sign in" description="Open the Wispr Flow app, sign in there, and follow its microphone and accessibility setup for your device.">
+        <span><a href="https://wisprflow.ai/" target="_blank" rel="noreferrer">Get Wispr Flow</a> · <a href="https://docs.wisprflow.ai/articles/3152211871-setup-guide" target="_blank" rel="noreferrer">Setup guide</a></span>
+      </SettingsRow>
+      <SettingsRow label="Try Wispr Flow" htmlFor="wispr-flow-test" stacked description="Click the field, hold your Wispr shortcut, speak, then release. When you’re ready, use the same shortcut in the Lazybox composer.">
+        <input id="wispr-flow-test" type="text" autoComplete="off" placeholder="Dictate a test sentence"/>
+      </SettingsRow>
+    </SettingsGroup>
+
     <SettingsGroup title="Keys" description="Both keys work from anywhere in the window, also while you type.">
       <SettingsRow label="Dictate" description={<>Into the message box you are working in. Right ⌥ alone: hold it to talk, tap it twice to keep listening. If ⌥Space does nothing, another app (ChatGPT, Raycast, Alfred) may use it. Pick another key.</>}><VoiceKey store={store} id="voice.dictate"/></SettingsRow>
       <SettingsRow label="Say a command" description="Opens the command palette and runs what you say: “next agent that needs me”, “open changes”, “switch to Beta”."><VoiceKey store={store} id="voice.command"/></SettingsRow>
@@ -132,7 +141,7 @@ export function VoiceSettings({ store }: { store?: ViewStateStore }) {
             {replies.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
           </select>
         </SettingsRow>
-        <Switch label="Conversations that need you" detail="Reads the “needs you” notification: a question, an approval, a failure." checked={preferences.readNeedsYou} onChange={readNeedsYou => set({ readNeedsYou })}/>
+        <Switch label="Conversations that need you" detail="Reads fresh questions, pending approvals and blocking failures." checked={preferences.readNeedsYou} onChange={readNeedsYou => set({ readNeedsYou })}/>
         <SettingsRow label="Voice" htmlFor="voice-voice">
           <select id="voice-voice" value={preferences.voice} onChange={e => set({ voice: e.target.value })}>
             <option value="">System default</option>

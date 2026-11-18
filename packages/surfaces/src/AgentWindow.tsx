@@ -67,8 +67,9 @@ import { shellBlocksIn } from './code-run';
 import { showMenuNotice } from './ContextMenu';
 import { useSlashCommands } from './useSlashCommands';
 import { showToast } from './toasts';
-import { useReadAloudReplies } from './voice/useReadAloudReplies';
-import { dictating, voiceState } from './voice/voice-session';
+import { useReadAloudReplies, latestAgentReply } from './voice/useReadAloudReplies';
+import { speakableText } from './voice/voice-model';
+import { dictating, readAloud, voiceState } from './voice/voice-session';
 import { ItemOriginChip } from './WorkItems';
 import { humanError } from './human-error';
 import { focusComposerOf, wantsComposerFocus } from './confirm-card';
@@ -486,6 +487,10 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
   };
   const canRunLast = () => !!codeRuns && activity.current() && !!lastBlock.current;
   useActions({
+    'voice.read-latest': mode === 'agent' && {
+      run: () => void readAloud(speakableText(latestAgentReply(transcript.messages), 'full')),
+      enabled: () => activity.current() && !dictating() && !!latestAgentReply(transcript.messages),
+    },
     'code.run-last': !!codeRuns && { run: () => runLast(false), enabled: canRunLast },
     'code.run-last-myself': !!codeRuns && { run: () => runLast(true), enabled: canRunLast },
   });

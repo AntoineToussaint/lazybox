@@ -166,6 +166,9 @@ Hold the key and speak; release to finish (a quick tap keeps listening until you
 | --- | --- | --- |
 | Dictate | `Right ⌥` or `⌥Space` | `Right Alt` or `Alt+Space` |
 | Say a command | `⌥⇧Space` | `Alt+Shift+Space` |
+| Read latest reply | — | — |
+| Repeat last announcement | — | — |
+| Open that announcement | — | — |
 | Stop reading aloud | — | — |
 
 ## Sidebar

@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { RecognitionEvent, RecognitionSession, SpeechRecognizerHost, SpeechSynthesizerHost, ViewStateStore, VoiceHost } from '@lazybox/platform';
 import { PREFERENCE_EVENT, readPreference, writePreference } from '../view-state';
+import type { AttentionNotice } from '../attention';
 import { showToast } from '../toasts';
 import { applyResult, dictationView, emptyDictation, parseVoicePreferences, settleAll, settleDictation, speakableText, type Dictation, type DictationOptions, type DictationView, type VoicePreferences } from './voice-model';
 import { webRecognizer, webSynthesizer } from './web-speech';
@@ -65,12 +66,14 @@ export type DictationSink = {
 export type DictationTarget = {
   kind: DictationKind;
   element(): HTMLElement | null;
+  label?(): string;
   available(): boolean;
   begin(): DictationSink | null;
 };
 export type VoiceState = {
   phase: 'idle' | 'starting' | 'listening' | 'stopping' | 'error';
   kind?: DictationKind;
+  destination?: string;
   mode: 'hold' | 'toggle';
   startedAt: number;
   /** 0–1 from the microphone; undefined for an engine that reports none. */
@@ -197,7 +200,7 @@ export async function startDictation({ mode, target, kind }: { mode: 'hold' | 't
   const id = ++runs;
   const current: Run = { id, target: chosen, sink, dictation: emptyDictation(), options: optionsFor(p, p.language), over: false };
   run = current;
-  set({ ...idle, phase: 'starting', kind: chosen.kind, mode, startedAt: Date.now(), engine: recognizer.label, reading: false });
+  set({ ...idle, phase: 'starting', kind: chosen.kind, destination: chosen.label?.(), mode, startedAt: Date.now(), engine: recognizer.label, reading: false });
   try {
     let status = await recognizer.status(p.language).catch(() => undefined);
     if (run !== current) return false;
@@ -311,14 +314,14 @@ function end(current: Run, reason: EndReason, saidSendWithoutAutoSend = false) {
   const view = dictationView(reason === 'cancel' ? current.dictation : settleAll(current.dictation, current.options).dictation, current.options);
   try { current.sink.end(reason, view); } catch (error) { console.error('Dictation target failed', error); }
   void current.session?.cancel().catch(() => {});
-  if (run === current) { run = undefined; set({ ...idle, reading: state.reading }); }
+  if (run === current) { run = undefined; set({ ...idle, reading: state.reading }); flushAttentionSpeech(); }
   if (saidSendWithoutAutoSend) showToast({ id: 'voice:send-off', tone: 'info', title: 'Press ↵ to send', body: 'Sending by voice is off. Turn on “Send when I say send” in Settings → Voice.' });
 }
 
 /** Stop listening and keep the words: the recognizer has a moment to settle them. */
 export async function stopDictation(): Promise<void> {
   const current = run;
-  if (!current || current.over) return;
+  if (!current || current.over || state.phase === 'stopping') return;
   if (!current.session) { end(current, 'stop'); return; }
   set({ phase: 'stopping' });
   current.stopTimer = setTimeout(() => end(current, 'stop'), STOP_GRACE_MS);
@@ -389,11 +392,36 @@ export function readReply(key: string, markdown: string): boolean {
   void readAloud(text);
   return true;
 }
-/** Conversations that need the person, read aloud when they asked for it. */
-export function announceAttention(notices: readonly { kind: string; title: string; body: string }[]) {
-  if (!preferences.readNeedsYou || dictating()) return;
-  const wanted = notices.filter(n => n.kind === 'needs-input' || n.kind === 'failed');
-  if (!wanted.length) return;
-  const text = wanted.length === 1 ? `${wanted[0].title}. ${wanted[0].body}` : `${wanted.length} conversations need you. ${wanted[0].title}.`;
-  void readAloud(text);
+type Announcement = { id: string; text: string; pending(): boolean; open(): void };
+let queued: Announcement[] = [];
+let lastAnnouncement: Announcement | undefined;
+
+/** Queue decisions and blockers. The source checks whether each still needs action. */
+export function announceAttention(notices: readonly AttentionNotice[], pending: (notice: AttentionNotice) => boolean, open: (notice: AttentionNotice) => void) {
+  if (!preferences.readNeedsYou) return;
+  queued = queued.filter(item => item.pending());
+  for (const notice of notices) {
+    if (!notice.speech || queued.some(item => item.id === notice.speech?.id)) continue;
+    queued.push({ id: notice.speech.id, text: notice.speech.text, pending: () => pending(notice), open: () => open(notice) });
+  }
+  flushAttentionSpeech();
 }
+
+function flushAttentionSpeech() {
+  if (dictating()) return;
+  const batch = queued;
+  queued = [];
+  if (!preferences.readNeedsYou || !synthesizer()) return;
+  const fresh = batch.filter(item => item.pending() && claimReading(item.id));
+  const first = fresh.at(-1);
+  if (!first) return;
+  const line = speakableText(first.text, 'full');
+  const text = line.length > 300 ? line.slice(0, 300).replace(/\s+\S*$/, '') + '…' : line;
+  lastAnnouncement = { ...first, text: fresh.length > 1 ? `${fresh.length} items need you. ${text}` : text };
+  void readAloud(lastAnnouncement.text);
+}
+
+export function canRepeatAnnouncement() { return !!lastAnnouncement && !dictating(); }
+export function repeatAnnouncement() { if (lastAnnouncement) void readAloud(lastAnnouncement.text); }
+export function canOpenAnnouncement() { return !!lastAnnouncement?.pending(); }
+export function openAnnouncement() { if (canOpenAnnouncement()) lastAnnouncement?.open(); }

@@ -208,7 +208,7 @@ test('a reply read aloud: no Markdown, code named, links as words; the summary i
     { id: '5', type: 'message_delta', text: 'Older', turnId: 't0' },
   ];
   assert.equal(replyOfTurn(messages, 't1'), 'Working on it.\n\nDone.');
-  assert.equal(replyOfTurn(messages, 'missing'), 'Older');
+  assert.equal(replyOfTurn(messages, 'missing'), '');
 });
 
 test('preferences: any saved shape reads safely; defaults never send for you', () => {

@@ -169,6 +169,14 @@ try {
   await expect(pullRows.first().locator('.pr-inbox-note')).toContainText('Sent 2 failing checks');
   await pullRows.nth(1).getByRole('button', {name: 'Address the review'}).click();
   await expect.poll(() => sent('ImportPullRequestReview').length).toBe(1);
+  f.tracked.externalReviewOnly = true;
+  const reviewRow = pullRows.nth(1);
+  await reviewRow.getByRole('button', {name: 'Address the review'}).click();
+  await expect(reviewRow.getByRole('status')).toContainText('No new review feedback was sent.');
+  await expect(reviewRow.getByRole('link', {name: 'Open review'})).toHaveAttribute('href', 'https://github.com/acme/api/pull/77/files');
+  await reviewRow.screenshot({path: '.cache/pull-requests-external-review.png'});
+  assert.equal(f.tracked.sent.filter(item => item.method === 'ImportPullRequestReview').length, 1);
+  f.tracked.externalReviewOnly = false;
   await pullRows.nth(1).getByRole('button', {name: /Dismiss acme\/api#77/}).click();
   await expect(pullRows).toHaveCount(1);
   await page.keyboard.press('Escape');

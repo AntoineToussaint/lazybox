@@ -1,5 +1,16 @@
 import { join } from 'node:path';
 
+// A Runner launched from an agent shell owns its own account selection.
+// Keep the person's normal terminal overrides, but drop the parent agent's.
+export function runnerLaunchEnvironment(inherited) {
+  if (!inherited.LAZYBOX_V2_SESSION_ID) return inherited;
+  const env = { ...inherited };
+  for (const name of ['CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']) {
+    delete env[name];
+  }
+  return env;
+}
+
 // Both terminal and native-service launch paths use the same Codefly contract.
 // Values are resolved filesystem locators, never credentials or allocated ports.
 export function runnerArguments({ paths, source, snippetAdapter, snippetDirectory, subscriptionState, cliDir, restartRequest, actionsFile }) {

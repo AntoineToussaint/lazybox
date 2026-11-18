@@ -63,6 +63,12 @@ them side by side, and the page shows one of them at a time.
 
 ## When a Runner goes away
 
+When the page's Runner misses a response deadline, the header says *Slow to
+respond* and Lazybox keeps checking. After three consecutive timeouts, the
+window says *Runner is not responding*. A successful poll clears the notice.
+Conversation history also retries a single timeout and keeps the entries it
+already loaded.
+
 A Runner that stops answering says *Not reachable* on its header, its
 conversations leave the Inbox (nothing it last said is offered as if you could
 still act on it), and the Agents panel says so once. Nothing is shown as an

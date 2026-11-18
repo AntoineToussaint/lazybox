@@ -17,7 +17,8 @@ function runnerState(runner: ReturnType<typeof useRunner>): { label: string; ton
   if (restart.phase === 'failed') return { label: 'Restart failed', tone: 'bad' };
   if (connecting) return { label: 'Connecting', tone: 'busy' };
   // Header says so when the Runner refuses this window's bearer, even while Info itself answered.
-  if (error) return { label: runner.authFailed ? 'Not authorized' : 'Disconnected', tone: 'bad' };
+  if (error) return { label: runner.authFailed ? 'Not authorized' : runner.slow ? 'Not responding' : 'Disconnected', tone: 'bad' };
+  if (runner.slow) return { label: 'Slow to respond', tone: 'busy' };
   return { label: 'Connected', tone: 'ok' };
 }
 
@@ -28,7 +29,7 @@ export function RunnerIndicator({ onOpen }: { onOpen?(): void }) {
   // With several Runners in the window, which one the page shows: "Working · Connected".
   const identity = useRunnerIdentity();
   const label = identity.multi && identity.label ? `${identity.label} · ${state}` : state;
-  const detail = runner.restart.phase === 'failed' ? runner.restart.message : runner.error || (runner.connecting ? 'Connecting to Runner' : 'Runner connected');
+  const detail = runner.restart.phase === 'failed' ? runner.restart.message : runner.error || (runner.connecting ? 'Connecting to Runner' : runner.slow ? 'The Runner is taking longer than usual to answer' : 'Runner connected');
   const className = `runner-indicator tone-${tone}${tone === 'bad' ? ' offline' : ''}`;
   if (!onOpen) return <span className={className} title={detail}><i/>{label}</span>;
   return <button type="button" className={className} title={`${detail}. Open Runner settings`} aria-label={`Runner status: ${label} (open Runner settings)`} onClick={onOpen}><i/>{label}</button>;

@@ -34,7 +34,7 @@ const (
 	originPRReview       = "pr_review"
 )
 
-// Reaction is what a reaction sent.
+// Reaction is the outcome of a pull request action.
 type Reaction struct {
 	Session  string
 	Queued   bool
@@ -439,9 +439,9 @@ func (b *Bench) ImportPullRequestReview(ctx context.Context, workspace string, r
 	}
 	if len(added) == 0 && len(unanchored) == 0 && len(summaries) == 0 {
 		if skipped > 0 {
-			return Reaction{}, fmt.Errorf("no new review comments on %s#%d from its owners, members or collaborators since the last import (%s)", repository, number, notes[0])
+			return Reaction{Summary: "No new review feedback was sent. Open review to read feedback on GitHub."}, nil
 		}
-		return Reaction{}, fmt.Errorf("no new review comments on %s#%d since the last import", repository, number)
+		return Reaction{Summary: "No new review feedback to send."}, nil
 	}
 	key := fmt.Sprintf("%s#%d", repository, number)
 	title := key

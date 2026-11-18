@@ -43,7 +43,7 @@ export async function startRunnerFixture() {
   let token = randomUUID(), url = '';
   const calls = [], mutations = [], pins = [];
   // Tracked pull requests (ListLinks): links the test sets, the reactions sent.
-  const tracked = { links: [], events: [], trackingError: '', refusal: '', requests: [], sent: [] };
+  const tracked = { links: [], events: [], trackingError: '', refusal: '', externalReviewOnly: false, requests: [], sent: [] };
   const workspaceFiles=new Map();
   // Message attachments the fake Runner retained, by the path its journal lists.
   const attachments=new Map();let attachmentReadDelayMs=0;
@@ -1020,6 +1020,7 @@ actions:
         const l=tracked.links.find(x=>x.collectionId===body.collectionId&&x.item?.ref?.key===body.ref?.key&&x.role!=='mentions');
         if(!l)return error('not_found','this workspace does not deliver that pull request');
         if(tracked.refusal)return error('failed_precondition',tracked.refusal);
+        if(method==='ImportPullRequestReview'&&tracked.externalReviewOnly)return json({summary:'No new review feedback was sent. Open review to read feedback on GitHub.'});
         const sessionId=body.sessionId||l.sessionId,key=l.item.ref.key,session=sessions.find(x=>x.id===sessionId),queued=!!session?.busy;
         const failing=(l.item.pullRequest?.failingChecks||[]).map(c=>c.name);
         const kind=method==='SendPullRequestFailures'?'pr_checks':'pr_review';

@@ -15,6 +15,7 @@ export function useConversationIndex() {
   useEffect(() => {
     const control = new AbortController();
     let pending = false;
+    let timeouts = 0;
     const load = async () => {
       if (pending) return;
       pending = true;
@@ -29,12 +30,18 @@ export function useConversationIndex() {
           if (!page.hasMore) break;
         }
         if (!control.signal.aborted) {
+          timeouts = 0;
           setSaved(rows);
           setComplete(true);setUnsupported(false);
           setError("");
         }
       } catch (error) {
-        if (!control.signal.aborted) {if(ConnectError.from(error).code===Code.Unimplemented)setUnsupported(true);else setError(String(error));}
+        if (!control.signal.aborted) {
+          const code = ConnectError.from(error).code;
+          timeouts = code === Code.DeadlineExceeded ? timeouts + 1 : 0;
+          if (code === Code.Unimplemented) setUnsupported(true);
+          else if (code !== Code.DeadlineExceeded || timeouts >= 2) setError(String(error));
+        }
       } finally {
         pending = false;
       }

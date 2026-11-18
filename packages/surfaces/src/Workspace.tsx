@@ -177,7 +177,7 @@ const readAgentsChoice = (viewState?: ViewStateStore): SidebarAgents | undefined
 function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = emptyTarget(), host, onOpenViewer, onTargetChange, reveal, ownWindows = true }: ViewProps) {
   const keyboardHint = useKeyboardNavigation(viewState);
   const keymap = useKeymap(viewState);
-  const { api, info, error: connectionError, refresh: refreshRunner, restart } = useRunner();
+  const { api, info, error: connectionError, slow: runnerSlow, authFailed, refresh: refreshRunner, restart } = useRunner();
   // Which Runner this page shows; a target naming another one switches the window to it.
   const directory = useRunnerDirectory();
   const { id: here } = useRunnerIdentity();
@@ -1008,7 +1008,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     {/* Retry reconnects the Runner, so it is offered for a dropped connection only; any other error is dismissed with ×. */}
     {(error || (connectionError && restart.phase !== 'restarting')) && (connectionError && restart.phase !== 'restarting'
       ? <div className="error" role="alert">
-        <strong>Runner disconnected.</strong> Reconnecting automatically… <details><summary>Connection details</summary>{connectionError}</details>
+        <strong>{runnerSlow && !authFailed ? 'Runner is not responding.' : 'Runner disconnected.'}</strong> Reconnecting automatically… <details><summary>Connection details</summary>{connectionError}</details>
         <button onClick={() => { if (host?.reconnect) void host.reconnect().catch(e => setError(String(e))); else refresh(); }}>Retry now</button>
       </div>
       : <div className="error workspace-error" role="alert">

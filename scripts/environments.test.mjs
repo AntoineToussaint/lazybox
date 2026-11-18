@@ -9,6 +9,21 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { loadGateCatalog } from './release-gates.mjs';
 import { chromium } from '@playwright/test';
+import { runnerLaunchEnvironment } from './runner-command.mjs';
+
+test('a terminal launcher does not pass the parent agent account to the Runner', () => {
+  const terminal = {
+    PATH: '/fixture/bin',
+    CODEX_HOME: '/fixture/codex',
+    OPENAI_API_KEY: 'fixture-key',
+    CLAUDE_CONFIG_DIR: '/fixture/claude',
+    CLAUDE_CODE_OAUTH_TOKEN: 'fixture-token',
+  };
+  assert.deepEqual(runnerLaunchEnvironment(terminal), terminal);
+  const agent = { ...terminal, LAZYBOX_V2_SESSION_ID: 'fixture-agent' };
+  assert.deepEqual(runnerLaunchEnvironment(agent), { PATH: terminal.PATH, LAZYBOX_V2_SESSION_ID: 'fixture-agent' });
+  assert.equal(agent.CODEX_HOME, terminal.CODEX_HOME);
+});
 
 test('launcher cleans up a watcher that ignores termination without touching another group', async () => {
   const launch = () => spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); console.log('ready'); setInterval(()=>{},1000)"], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });

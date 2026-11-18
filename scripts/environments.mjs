@@ -6,7 +6,7 @@ import { cp, mkdir, readFile, writeFile, rename, rm, readdir, lstat, realpath } 
 import { resolve, dirname, join, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
-import { runnerArguments } from './runner-command.mjs';
+import { runnerArguments, runnerLaunchEnvironment } from './runner-command.mjs';
 import { registerRunner, userActionsFile } from './user-config.mjs';
 import { loadGateCatalog, validateReleaseReceipt } from './release-gates.mjs';
 import { startDesktopDevServer, desktopDevConfig, stopProcessGroup, spawnProcessGroup } from './desktop-dev.mjs';
@@ -334,11 +334,12 @@ async function launch(environmentRoot, channel) {
     // independent ports; neither channel borrows another channel's endpoint.
     const restartRequest = restartRequestPath(paths);
     const args = runnerArguments({ paths, source, snippetAdapter, snippetDirectory: source, subscriptionState, cliDir, restartRequest, actionsFile: userActionsFile() });
+    const runnerEnv = runnerLaunchEnvironment(buildEnv);
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
     // One Runner process: spawn it and wait until its new endpoint answers Info.
     const start = async () => {
       let previousToken = ''; try { previousToken = JSON.parse(await readFile(paths.endpoint, 'utf8')).token; } catch { /* first launch */ }
-      runner = spawnProcessGroup('codefly', args, { cwd: source, env: buildEnv, stdio: 'inherit' });
+      runner = spawnProcessGroup('codefly', args, { cwd: source, env: runnerEnv, stdio: 'inherit' });
       let exited = false, failure;
       finished = new Promise(resolve => {
         runner.once('exit', (code, signal) => { exited = true; resolve({ code, signal, failure }); });

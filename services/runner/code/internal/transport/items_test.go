@@ -365,8 +365,9 @@ func TestPullRequestReactions(t *testing.T) {
 		t.Fatalf("review comments: %+v %v", review, err)
 	}
 	f.github.Update(func(s *githubtest.Server) { s.Pulls["team/api"][0].Reviews = nil })
-	if _, err = f.client.ImportPullRequestReview(owner, &pb.PullRequestReactionRequest{CollectionId: f.mine.Id, Ref: ref}); err == nil || !strings.Contains(err.Error(), "no new review comments") {
-		t.Fatalf("imported once: %v", err)
+	empty, err := f.client.ImportPullRequestReview(owner, &pb.PullRequestReactionRequest{CollectionId: f.mine.Id, Ref: ref})
+	if err != nil || empty.SessionId != "" || empty.Comments != 0 || !strings.Contains(empty.Summary, "Open review") {
+		t.Fatalf("repeat import with only external feedback: %+v %v", empty, err)
 	}
 
 	// Merge a tracked pull request on another branch; one this workspace does not deliver is refused.

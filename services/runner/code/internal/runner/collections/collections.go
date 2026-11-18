@@ -566,12 +566,18 @@ func (m *Manager) planMembers(ctx context.Context, c Collection, specs []MemberS
 		branches[branchKey] = true
 		// No explicit base: origin's default branch as last fetched (base.go),
 		// never the source copy's own stale branch or the checkout's current one.
+		var commit string
 		if s.BaseRef == "HEAD" {
-			s.BaseRef = m.defaultBase(ctx, r.Path).Ref
-		}
-		commit, err := m.git(ctx, r.Path, "rev-parse", "--verify", "--end-of-options", s.BaseRef+"^{commit}")
-		if err != nil {
-			return Collection{}, fmt.Errorf("base ref for %s: %w", s.Name, err)
+			base, err := m.resolveDefaultBase(ctx, r.Path)
+			if err != nil {
+				return Collection{}, fmt.Errorf("%s: %w", s.Name, err)
+			}
+			s.BaseRef, commit = base.Ref, base.Commit
+		} else {
+			commit, err = m.git(ctx, r.Path, "rev-parse", "--verify", "--end-of-options", s.BaseRef+"^{commit}")
+			if err != nil {
+				return Collection{}, fmt.Errorf("base ref for %s: %w", s.Name, err)
+			}
 		}
 		c.Members = append(c.Members, Member{MemberSpec: s, Path: filepath.Join(c.Root, s.Name), BaseCommit: commit, CommonDir: m.common[r.ID]})
 	}

@@ -66,7 +66,8 @@ func (b *Bench) refreshBase(ctx context.Context, identity, repositoryID, name st
 	log.Printf("workspace base: could not update %s from origin: %v", name, err)
 	base, e := b.Collections.DefaultBase(ctx, repositoryID)
 	if e != nil {
-		return progress(identity, "Couldn't update "+name+"; started from its last known default branch")
+		// Planning will explain why there is no usable starting commit.
+		return nil
 	}
 	return progress(identity, fmt.Sprintf("Couldn't update %s; started from %s as of %s", name, firstOf(base.Branch, "its default branch"), base.AsOf.Local().Format("Jan 2 15:04")))
 }

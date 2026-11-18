@@ -10,7 +10,10 @@ import (
 	"testing"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/githubconnection"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/repositories"
@@ -266,5 +269,60 @@ func TestAListedRepositoryReplacedOnGitHubIsCopiedFresh(t *testing.T) {
 	}
 	if got, want := rootOf(t, created.Members[0].Path), rootOf(t, replacement); got != want {
 		t.Fatalf("root %s, want %s", got, want)
+	}
+}
+
+func TestRequestedEmptyRepositoryCanBeRetriedAfterFirstPush(t *testing.T) {
+	s, provider := replacingService(t)
+	ctx := context.Background()
+	origin := t.TempDir()
+	git(t, origin, "init", "-b", "main")
+	provider.becomes(101, origin)
+
+	created, err := s.CreateCollection(ctx, &pb.CreateCollectionRequest{RequestKey: "workspace", Spec: &pb.CollectionSpec{Name: "Workspace"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceID := created.Collection.Id
+	conversation, err := s.Bench.OpenCollection("claude-default", workspaceID, "", accounts.Options{}, "direct", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ask, err := s.RequestRepository(ctx, &pb.RequestRepositoryRequest{SessionId: conversation.ID, Query: "team/api"})
+	if err != nil || len(ask.GetCandidates()) == 0 {
+		t.Fatal(ask, err)
+	}
+	request := &pb.PrepareWorkspaceRequest{
+		CollectionId: workspaceID, RepositoryRequestId: ask.Id, RequestKey: "add-api",
+		RepositoryIdentities: []string{"github:team/api"},
+	}
+	stream := &preparationStream{ctx: ctx}
+	err = s.PrepareWorkspace(request, stream)
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "create an initial commit") {
+		t.Fatalf("wanted actionable empty repository error, got %v", err)
+	}
+	for _, update := range stream.sent {
+		if strings.Contains(update.Message, "started from") || update.Collection != nil {
+			t.Fatalf("preparation reported a start despite missing a commit: %v", update)
+		}
+	}
+	workspace, err := s.ListWorkspaceRepositories(ctx, &pb.ListWorkspaceRepositoriesRequest{CollectionId: workspaceID})
+	if err != nil || len(workspace.GetRepositories()) != 0 || len(workspace.GetRequests()) != 1 || workspace.Requests[0].State != "pending" {
+		t.Fatalf("failed preparation altered the workspace or request: %v, %v", workspace, err)
+	}
+
+	git(t, origin, "commit", "--allow-empty", "-m", "first commit")
+	first := git(t, origin, "rev-parse", "HEAD")
+	stream = &preparationStream{ctx: ctx}
+	if err := s.PrepareWorkspace(request, stream); err != nil {
+		t.Fatal("retry after first push:", err)
+	}
+	ready := stream.sent[len(stream.sent)-1].GetCollection()
+	if len(ready.GetMembers()) != 1 || ready.Members[0].BaseCommit != first {
+		t.Fatalf("retry did not attach the new commit: %v", ready)
+	}
+	answer, err := s.WaitRepositoryRequest(ctx, &pb.WaitRepositoryRequestRequest{RequestId: ask.Id})
+	if err != nil || answer.GetState() != "added" {
+		t.Fatal(answer, err)
 	}
 }

@@ -56,17 +56,19 @@ origin which branch its HEAD names (never assuming `main`), fetches it into
 that commit — never from a source copy's stale branch, the branch a checkout
 has out, or another workspace's branch
 (`internal/runner/fresh_base.go`, `internal/gitpublish/refresh.go`,
-`internal/runner/collections/base.go`). If origin cannot be reached the
-workspace is still created, from the last known default branch, and
-preparation says so: *Couldn't update api; started from main as of Nov 17
-09:12*. A repository without origin starts from its `HEAD`. An explicit base
+`internal/runner/collections/base.go`). If origin cannot be reached and the
+Runner has a usable copy of the default branch, it uses that commit and
+reports when it last fetched it. A repository without origin starts from its
+`HEAD`. An explicit base
 (a branch to continue, an orchestrator's parent branch) is used as given.
 Only remote-tracking refs change; existing checkout contents and branches are
 not changed. Default folder
 names use the repository name, adding a numeric suffix only for collisions.
 Explicit folder names still require uniqueness. Successful source preparations
 remain reusable after a later failure; retrying the same request does not clone
-again or create another workspace.
+again or create another workspace. An empty Git repository needs an initial
+commit before Lazybox can create its worktree. Create the commit, push it if
+the repository has a remote, then retry the same request.
 
 ### Start from another branch
 

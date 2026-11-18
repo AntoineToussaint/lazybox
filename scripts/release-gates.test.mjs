@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -114,6 +115,17 @@ test('deterministic gates cannot inherit live execution or different source/watc
   const code = `const keys=${JSON.stringify(Object.keys(unsafe))};process.exit(keys.some(key=>process.env[key]!==undefined)?9:0);`;
   const result = await executeGate({ command: process.execPath, args: ['-e', code], timeoutMs: 5000 }, { root: f.root, env: { ...process.env, ...unsafe } });
   assert.equal(result.status, 'passed');
+});
+
+test('the shards command selects only the named UI gates', () => {
+  const script = fileURLToPath(new URL('./release-gates.mjs', import.meta.url));
+  const shards = (...args) => spawnSync(process.execPath, [script, 'shards', 'ui', '6', ...args], { encoding: 'utf8' });
+  const selected = shards('--only', 'workspace,voice');
+  assert.equal(selected.status, 0, selected.stderr);
+  assert.deepEqual(JSON.parse(selected.stdout).include.map(shard => shard.gates), ['workspace', 'voice']);
+  const invalid = shards('--only', 'workspace,missing');
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /outside the ui profile.*missing/);
 });
 
 test('CI shards cover every gate of a profile exactly once and run only named gates', async t => {

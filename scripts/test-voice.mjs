@@ -345,7 +345,7 @@ try {
   await message.fill('');
   await page.getByRole('button', { name: 'Dictate', exact: true }).click();
   await expect(pill).toContainText('Listening');
-  await page.getByRole('button', { name: 'Stop dictation', exact: true }).click();
+  await page.locator('.composer-mic').click();
   await expect(message).toHaveValue('Direct from Wispr Flow');
   assert.equal(Buffer.from(wisprAudio, 'base64').subarray(0, 4).toString(), 'RIFF');
   assert.equal(applied('Direct from Wispr Flow'), false);

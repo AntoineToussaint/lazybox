@@ -566,6 +566,10 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 	e.queue = append(append([]agent.Operation{op}, e.queue[:at]...), e.queue[at+1:]...)
 	e.persistDurableLocked()
 	busy := e.state.Busy
+	interruptID := op.ID[:min(len(op.ID), 120)] + ":now"
+	if previous, found := e.ops[interruptID]; found && previous.receipt.Delivery != "accepted" {
+		interruptID = "queued-interrupt:" + rand.Text()
+	}
 	e.mu.Unlock()
 	if !busy {
 		go e.dispatch()
@@ -574,7 +578,7 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 	// The interrupt ends the turn; the dispatch that follows takes this message.
 	// Each delivery attempt can interrupt again if the provider did not end
 	// the turn. Reusing the queued message ID here only replayed the old receipt.
-	r, err := e.Apply(ctx, agent.Operation{ID: "queued-interrupt:" + rand.Text(), Kind: agent.Interrupt})
+	r, err := e.Apply(ctx, agent.Operation{ID: interruptID, Kind: agent.Interrupt})
 	if err != nil && e.stillQueued(op.ID) {
 		return r, err
 	}

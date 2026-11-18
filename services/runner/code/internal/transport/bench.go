@@ -114,6 +114,7 @@ func wireSession(e *runner.Execution) *pb.Session {
 	w := &pb.Session{Id: s.ID, ProfileId: s.Profile, ProviderReference: s.Reference, GatewayId: s.GatewayID, Busy: s.Busy, Closed: s.Closed, Fault: s.Fault, Queued: uint32(s.Queued), WorkId: e.WorkID, PreviousExecutionId: e.Previous, CollectionId: e.CollectionID, WorkingDirectory: e.Cwd, Purpose: e.Purpose, Status: string(s.Status), Account: wireAccount(s.Account), ActivityTruncated: s.ActivityTruncated, RotationProfileIds: e.Options.RotationProfiles, Capabilities: &pb.Capabilities{Images: c.Images, Files: c.Files, Questions: c.Questions, Approvals: c.Approvals, Steer: c.Steer, Resume: c.Resume, PendingResume: c.PendingResume, ProfileIsolation: c.ProfileIsolation, Subagents: c.Subagents, LivePermission: c.LivePermission, StopAgent: c.StopAgent, LiveModel: c.LiveModel}}
 	w.ConversationId = e.Saved.ConversationID
 	w.Permission, w.Workflow = e.Options.Permission, e.Options.Workflow
+	w.BehaviorProfile = e.Options.BehaviorProfile
 	w.Title = s.Title
 	if w.Title == "" {
 		w.Title = e.Saved.Title
@@ -233,6 +234,7 @@ func (s *Service) OpenSession(ctx context.Context, r *pb.OpenSessionRequest) (*p
 	if p.Options != nil {
 		options.Model = p.Options.Model
 		options.Instructions = p.Options.Instructions
+		options.BehaviorProfile = p.Options.BehaviorProfile
 		options.Workflow = p.Options.Workflow
 		options.Permission = p.Options.Permission
 		options.RotationProfiles = p.Options.RotationProfileIds

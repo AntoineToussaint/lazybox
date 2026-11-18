@@ -746,6 +746,12 @@ func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gate
 			options.Instructions = b.Config.Defaults.Instructions
 		}
 		contextText += "\n" + sectionText(briefing, "settings") + "\n" + sectionText(briefing, "provider") + "\n" + options.Instructions
+		if options.BehaviorProfile == "" && purpose == "coding" {
+			options.BehaviorProfile = b.Config.Defaults.BehaviorProfile
+		}
+		if behavior := options.BehaviorInstructions(); purpose == "coding" && behavior != "" {
+			contextText += "\n\n" + behavior
+		}
 		var rest []string
 		for _, s := range briefing {
 			if s.id != "settings" && s.id != "provider" {

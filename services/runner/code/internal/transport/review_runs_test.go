@@ -279,3 +279,77 @@ func TestAReviewIsMissionEvidence(t *testing.T) {
 		t.Fatalf("task with open blockers: %+v", task)
 	}
 }
+
+func TestStartReviewTemplateCapturesInputAndPublishesFindings(t *testing.T) {
+	f := newReviewFixture(t)
+	path := filepath.Join(f.mine.Members[0].Path, "untracked.go")
+	if err := os.WriteFile(path, []byte("package api\n// captured\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, TemplateId: "security-review-v1"}
+	started, err := f.client.StartReview(f.owner, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brief := <-f.codex.Session.Applied
+	if started.Run.TemplateId != request.TemplateId || started.Session.Permission != "read-only" ||
+		!strings.Contains(brief.Text, "defensive security review") || !strings.Contains(brief.Text, "api/untracked.go") {
+		t.Fatalf("run %+v; brief %s", started.Run, brief.Text)
+	}
+	if err := os.WriteFile(path, []byte("package api\n// changed afterward\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reviewer := bearer(timeout(t), agentToken(t, f.codex.Session.Open.Env))
+	filed, err := f.client.AddReviewFinding(reviewer, &pb.AddReviewFindingRequest{
+		SessionId: started.Session.Id, File: "api/untracked.go", StartLine: 2, Severity: "major", Title: "Example finding", Body: "Review the evidence.",
+	})
+	if err != nil || strings.Join(filed.GetFinding().GetSnippet(), "") != "// captured" {
+		t.Fatalf("finding: %+v, %v", filed, err)
+	}
+	f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "Review coverage: captured API changes."}
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	events(t, f.bench, f.conversation.ID, "review_finished")
+	report, err := f.client.GetArtifact(f.owner, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: started.Run.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Versions) != 1 || report.Versions[0].Schema != "lazybox.review-findings/v1" {
+		t.Fatalf("result version: %+v", report.Versions)
+	}
+	for _, want := range []string{"lazybox.review-findings/v1", "captured API changes", filed.Finding.Id, "// captured"} {
+		if !strings.Contains(report.Content, want) {
+			t.Errorf("result lacks %q: %s", want, report.Content)
+		}
+	}
+}
+
+func TestStartReviewTemplateRequiresReportedCoverage(t *testing.T) {
+	f := newReviewFixture(t)
+	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, TemplateId: "code-review-v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-f.codex.Session.Applied
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	events(t, f.bench, f.conversation.ID, "review_finished")
+	result, err := f.client.ListReviewFindings(bearer(timeout(t), agentToken(t, f.codex.Session.Open.Env)), &pb.ListReviewFindingsRequest{SessionId: started.Session.Id})
+	if err != nil || result.GetRun().GetState() != "failed" || result.GetRun().GetResultArtifactId() != "" {
+		t.Fatalf("did not distinguish missing coverage from zero findings: %+v, %v", result, err)
+	}
+}
+
+func TestOpenSessionAppliesBehaviorProfile(t *testing.T) {
+	f := newReviewFixture(t)
+	opened, err := f.service.OpenSession(f.owner, &pb.OpenSessionRequest{
+		ProfileId: "codex-default", CollectionId: f.mine.Id,
+		Options: &pb.RunnerOptions{BehaviorProfile: "balanced-v1", Permission: "read-only", Instructions: "Extra session guidance"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := f.codex.Session.Open
+	if opened.Session.BehaviorProfile != "balanced-v1" || opts.Permission != "read-only" ||
+		!strings.Contains(opts.Context, "Inspect available context before asking") || !strings.Contains(opts.Context, "Extra session guidance") {
+		t.Fatalf("profile did not apply alongside the session configuration: %+v", opts)
+	}
+}

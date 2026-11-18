@@ -104,7 +104,7 @@ func wireReviewComment(c reviews.Comment, a reviews.Anchor) *pb.ReviewComment {
 func (s *Service) wireReviewRun(review reviews.Review, run reviews.Run, workspace string) *pb.ReviewRun {
 	run = s.Bench.ReviewRunView(run)
 	counts := reviews.CountFindings(review, run.ID)
-	out := &pb.ReviewRun{Id: run.ID, CollectionId: workspace, ReviewerSessionId: run.ReviewerSession, ReviewerTitle: run.ReviewerTitle, ReviewerLabel: run.ReviewerLabel, ReviewerProvider: run.ReviewerProvider, ReviewerProfileId: run.ReviewerProfile,
+	out := &pb.ReviewRun{TemplateId: run.TemplateID, ResultArtifactId: run.ResultArtifact, Id: run.ID, CollectionId: workspace, ReviewerSessionId: run.ReviewerSession, ReviewerTitle: run.ReviewerTitle, ReviewerLabel: run.ReviewerLabel, ReviewerProvider: run.ReviewerProvider, ReviewerProfileId: run.ReviewerProfile,
 		SourceSessionId: run.SourceSession, SourceTitle: run.SourceTitle, SourceLabel: run.SourceLabel, Scope: run.Scope, ScopeLabel: run.ScopeLabel, Turn: uint32(run.Turn), Compare: run.Compare, PullRequestUrl: run.PullRequestURL,
 		State: run.State, Detail: run.Detail, CreatedAtUnix: run.CreatedAt, UpdatedAtUnix: run.UpdatedAt,
 		Blockers: uint32(counts.Blockers), Majors: uint32(counts.Majors), Minors: uint32(counts.Minors), Nits: uint32(counts.Nits), MissionId: run.Mission, TaskId: run.Task, SourceProvider: run.SourceProvider,
@@ -279,7 +279,7 @@ func (s *Service) StartReview(ctx context.Context, r *pb.StartReviewRequest) (*p
 	if _, err := s.reviewStore(r.CollectionId); err != nil {
 		return nil, err
 	}
-	req := runner.ReviewRequest{Workspace: r.CollectionId, Source: r.SourceSessionId, Scope: r.Scope, Compare: r.Compare, Turn: int(r.Turn), Member: r.Member, Profile: r.ProfileId, Provider: r.Provider, Focus: r.Focus, Model: r.Model}
+	req := runner.ReviewRequest{TemplateID: r.TemplateId, Workspace: r.CollectionId, Source: r.SourceSessionId, Scope: r.Scope, Compare: r.Compare, Turn: int(r.Turn), Member: r.Member, Profile: r.ProfileId, Provider: r.Provider, Focus: r.Focus, Model: r.Model}
 	if r.Scope == reviews.ScopePR {
 		pr, err := s.GetPullRequest(ctx, &pb.GetPullRequestRequest{CollectionId: r.CollectionId, Member: r.Member})
 		if err != nil {

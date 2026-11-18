@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { ActionMenu } from './ActionMenu';
 import { ActionMenuItems } from './ActionMenuItems';
+import { actionEnabled, runAction, useActionRevision } from './actions';
 import type { MenuItem } from './context-menu-model';
 import type { DockHandle, GroupView } from './DockLayout';
 import { Icon } from './Icons';
@@ -223,13 +224,26 @@ export type AddCommands = {
  * A panel shown elsewhere moves here; Web opens a new one.
  */
 export function GroupAdd({ group, commands }: { group: GroupView; commands: AddCommands }) {
+  useActionRevision();
   const front = group.active ? commands.title(group.active) : 'this';
   const why = commands.whyNoConversation();
+  const canReview = actionEnabled('review.start');
   return <ActionMenu className="dock-add-menu" label={`New tab in the ${front} group`} title={`New conversation, or open a panel here${commands.addKeys ? ` (${commands.addKeys})` : ''}`} summary={<Icon name="plus" size={14}/>}>
     <small className="action-menu-heading">New tab here</small>
     <button type="button" className="dock-add-primary" disabled={!!why} title={why || undefined} onClick={() => commands.newConversation(group.id)}>
       <Icon name="chat"/><span>New conversation…</span>{commands.newConversationKeys && <kbd>{commands.newConversationKeys}</kbd>}
     </button>
+    {canReview && <>
+      <small className="action-menu-heading">Conversation templates</small>
+      <button type="button" disabled={!!why} title={why || 'Open a read-only review of the workspace changes beside the work'}
+        onClick={() => runAction('review.start', 'code-review-v1', 'menu')}>
+        <Icon name="review"/><span>Code review</span><small>Workspace changes</small>
+      </button>
+      <button type="button" disabled={!!why} title={why || 'Open a read-only defensive security review of the workspace changes'}
+        onClick={() => runAction('review.start', 'security-review-v1', 'menu')}>
+        <Icon name="review"/><span>Security review</span><small>Workspace changes</small>
+      </button>
+    </>}
     <hr/>
     {Object.entries(commands.registry).filter(([kind]) => !commands.hidden.has(kind)).map(([kind, module]) => {
       const where = module.multiple ? 'none' : commands.where(kind, group.id), reason = commands.disabled(kind);

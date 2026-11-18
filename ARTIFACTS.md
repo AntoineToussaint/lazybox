@@ -442,3 +442,11 @@ on the artifact side:
   it is a small handler of its own. When the app-wide context menu lands,
   its items move there with one registration under the `message` extension
   point.
+
+## Review findings reports
+
+The Code review and Security review conversation templates publish a report
+when the reviewer reports its coverage. The version carries the
+`lazybox.review-findings/v1` schema identifier. Its Markdown includes a JSON
+block with the captured Git revisions, coverage, and findings with stable IDs
+and source locations. The review card opens the original result version.

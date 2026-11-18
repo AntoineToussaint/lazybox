@@ -68,6 +68,7 @@ type Link struct {
 }
 
 type Version struct {
+	Schema    string `json:"schema,omitempty"`
 	Number    uint32 `json:"number"`
 	CreatedAt int64  `json:"createdAt"`
 	Author    Author `json:"author"`
@@ -368,7 +369,7 @@ func (s *Store) Put(ws string, p Put) (Document, error) {
 		return s.document(a, 0)
 	}
 	if changed {
-		if err = s.append(&next, p.Content, p.Author, p.Source); err != nil {
+		if err = s.append(&next, p.Content, p.Author, p.Source, ""); err != nil {
 			return Document{}, err
 		}
 	} else {
@@ -382,6 +383,30 @@ func (s *Store) Put(ws string, p Put) (Document, error) {
 }
 
 func (s *Store) create(ws, title, kind, content string, author Author, source Source, tracked string) (Document, error) {
+	return s.createWithID(ws, newID(), title, kind, content, author, source, tracked, "")
+}
+
+// PublishReview publishes an immutable result under the review run ID. A
+// retry after a Runner restart returns the already published version.
+func (s *Store) PublishReview(ws, id, title, content, schema string, source Source) (Document, error) {
+	if err := validWorkspace(ws); err != nil {
+		return Document{}, err
+	}
+	if !segment.MatchString(id) {
+		return Document{}, errors.New("invalid review artifact id")
+	}
+	if err := validContent(content); err != nil {
+		return Document{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.items[ws][id]; existing != nil {
+		return s.document(existing, 1)
+	}
+	return s.createWithID(ws, id, title, "report", content, Author{Kind: "agent", SessionID: source.SessionID}, source, "", schema)
+}
+
+func (s *Store) createWithID(ws, id, title, kind, content string, author Author, source Source, tracked, schema string) (Document, error) {
 	title, err := normalizeTitle(title)
 	if err != nil {
 		return Document{}, err
@@ -393,14 +418,14 @@ func (s *Store) create(ws, title, kind, content string, author Author, source So
 		return Document{}, err
 	}
 	now := s.now().UnixMilli()
-	a := Artifact{ID: newID(), Workspace: ws, Title: title, Kind: kind, Format: "markdown", CreatedAt: now, TrackedPath: tracked}
+	a := Artifact{ID: id, Workspace: ws, Title: title, Kind: kind, Format: "markdown", CreatedAt: now, TrackedPath: tracked}
 	if source.Kind == "message" || source.Kind == "agent" {
 		a.OriginSessionID, a.OriginConversationID = source.SessionID, source.ConversationID
 	}
 	if err = os.MkdirAll(s.dir(ws, a.ID), 0o700); err != nil {
 		return Document{}, err
 	}
-	if err = s.append(&a, content, author, source); err != nil {
+	if err = s.append(&a, content, author, source, schema); err != nil {
 		_ = os.RemoveAll(s.dir(ws, a.ID))
 		return Document{}, err
 	}
@@ -410,12 +435,12 @@ func (s *Store) create(ws, title, kind, content string, author Author, source So
 }
 
 // append writes the next version's body, then the metadata naming it.
-func (s *Store) append(a *Artifact, content string, author Author, source Source) error {
+func (s *Store) append(a *Artifact, content string, author Author, source Source, schema string) error {
 	if len(a.Versions) >= MaxVersions {
 		return fmt.Errorf("%q has reached %d versions; track a new artifact to keep going", a.Title, MaxVersions)
 	}
 	now := s.now().UnixMilli()
-	v := Version{Number: a.Latest() + 1, CreatedAt: now, Author: author, Source: source, Digest: Digest(content), Size: uint64(len(content))}
+	v := Version{Schema: schema, Number: a.Latest() + 1, CreatedAt: now, Author: author, Source: source, Digest: Digest(content), Size: uint64(len(content))}
 	if err := writeFile(s.versionPath(a.Workspace, a.ID, v.Number), []byte(content)); err != nil {
 		return err
 	}

@@ -50,7 +50,7 @@ func artifactError(err error) error {
 func wireArtifact(a artifacts.Artifact) *pb.Artifact {
 	out := &pb.Artifact{Id: a.ID, CollectionId: a.Workspace, Title: a.Title, Kind: a.Kind, Format: a.Format, CreatedAtUnixMillis: a.CreatedAt, UpdatedAtUnixMillis: a.UpdatedAt, OriginSessionId: a.OriginSessionID, OriginConversationId: a.OriginConversationID, TrackedPath: a.TrackedPath, TrackingProblem: a.TrackingProblem}
 	for _, v := range a.Versions {
-		out.Versions = append(out.Versions, &pb.ArtifactVersion{Number: v.Number, CreatedAtUnixMillis: v.CreatedAt, Author: &pb.ArtifactAuthor{Kind: v.Author.Kind, SessionId: v.Author.SessionID}, Source: artifactWireSource(v.Source), Digest: v.Digest, Size: v.Size})
+		out.Versions = append(out.Versions, &pb.ArtifactVersion{Schema: v.Schema, Number: v.Number, CreatedAtUnixMillis: v.CreatedAt, Author: &pb.ArtifactAuthor{Kind: v.Author.Kind, SessionId: v.Author.SessionID}, Source: artifactWireSource(v.Source), Digest: v.Digest, Size: v.Size})
 	}
 	for _, l := range a.Links {
 		out.Links = append(out.Links, &pb.ArtifactLink{Kind: l.Kind, Id: l.ID, Role: l.Role})

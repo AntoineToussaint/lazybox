@@ -94,7 +94,7 @@ func (s *Store) observe(f tracked, text, problem string, debounce time.Duration)
 	delete(s.pending, key)
 	next := clone(a)
 	next.TrackingProblem = ""
-	if err := s.append(&next, text, Author{Kind: "file"}, Source{Kind: "file", Path: f.path}); err != nil {
+	if err := s.append(&next, text, Author{Kind: "file"}, Source{Kind: "file", Path: f.path}, ""); err != nil {
 		s.setProblem(a, err.Error())
 		return
 	}

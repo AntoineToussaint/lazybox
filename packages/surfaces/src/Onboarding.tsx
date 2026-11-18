@@ -85,7 +85,7 @@ export function Onboarding({ viewState, collections, collectionsLoaded, automati
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     try { setFeedback({ png: await host.captureWindow() }); } catch (error) { setFeedback({ error: String(error instanceof Error ? error.message : error) }); }
   };
-  const openUpdates = () => { onOpenSettings('updates'); void checkForUpdate(host?.app); };
+  const openUpdates = () => { onOpenSettings('about'); void checkForUpdate(host?.app); };
   useEffect(() => {
     const listener = (event: Event) => {
       const request = (event as CustomEvent<OnboardingRequest>).detail;

@@ -218,7 +218,7 @@ plus one field of Lazybox's own:
   release configuration sets `requireSignedVersion`, so a feed cannot pair a
   new version number with an older signed archive (a downgrade).
 - Nothing installs on its own. The app checks when it opens and every six
-  hours (Settings → Updates → Check automatically, on by default, can be
+  hours (Settings → About & updates → Check automatically, on by default, can be
   turned off), shows a quiet line in the header, and installs only on
   **Install and restart**. Skip this version and Remind me later are the
   person's to choose ([docs/install.md](docs/install.md#updates)).
@@ -350,7 +350,7 @@ locally needs (`release.json` records `"updaterKey": "test"`).
 | Feed, cask, signing plan, release config, changelog | `node --test scripts/release/release.test.mjs` (in `make test-environments`) |
 | Updater configuration, error kinds, feed notes, launch plan, CLI reports, feedback files | `cargo test` in `apps/desktop/src-tauri` (`updates::`, `release::`, `feedback::`) |
 | Version order, skip and remind, automatic checks, running-agents warning, redaction | `npm run test:client` (`update-model.test.ts`, `feedback-model.test.ts`) |
-| Settings → Updates and the install flow against a fake feed (offline, bad signature, skip, remind, install, post-update notice, version mismatch) | `npm run test:updates` |
+| Settings → About & updates and the install flow against a fake feed (offline, bad signature, skip, remind, install, post-update notice, version mismatch) | `npm run test:updates` |
 | Help → Send feedback: preview equals what is saved, copied and put in the issue; redaction | `npm run test:feedback` |
 | Resume after a reboot (Runner and every session host killed) | `make test-reboot` (SESSION_HOSTS.md, "After a reboot") |
 | Workflows | `actionlint .github/workflows/release.yml .github/workflows/ci.yml .github/workflows/docs.yml` |

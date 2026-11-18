@@ -5,7 +5,7 @@ import { automaticCheckDue, offerState, updatePath, readUpdatePreferences, remin
 
 /**
  * One update state for the whole window, shared by the header's notice,
- * Settings → Updates and the install dialog. The window asks the feed on its
+ * Settings → About & updates and the install dialog. The window asks the feed on its
  * own only while "Check automatically" is on (every six hours, counted across
  * launches); nothing is downloaded or installed until the person chooses
  * Install. The decisions are in update-model.ts.

@@ -16,7 +16,7 @@ For a bug, include:
 - What you did, what you expected and what happened, with a screenshot for
   anything visual.
 - The output of `lazybox doctor`, and the commit you built
-  (`git rev-parse --short HEAD`; Settings → Updates shows it too). Working on
+  (`git rev-parse --short HEAD`; Settings → About & updates shows it too). Working on
   Lazybox itself? Say whether it was Dev or Working (`make environments`).
 - Your macOS version.
 - For a failed `make install`, the end of its terminal output.

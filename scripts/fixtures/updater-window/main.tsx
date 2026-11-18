@@ -57,6 +57,7 @@ const app: AppHost = {
     const next = new URL(location.href); next.searchParams.set('version', pending.version); location.replace(next);
     await new Promise(() => {});
   },
+  linkCli: async () => ({ link: '/usr/local/bin/lazybox', hints: ['Open a new terminal to pick up the change.'] }),
   moveRunner: async () => { const response = await fetch('/fixture-feed/move-runner', { method: 'POST', body: version }); if (!response.ok) throw new Error(await response.text()); },
   feedbackDiagnostics: async () => ({
     os: '15.1', arch: 'aarch64', home: '/Users/tester',

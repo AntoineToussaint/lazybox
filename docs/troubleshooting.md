@@ -190,7 +190,7 @@ workspace terminal gets a shell integration that runs your startup files and
 then puts this Lazybox's CLI back first, for zsh, bash and Claude Code's Bash
 tool ([command output](../COMMAND_OUTPUT.md#which-lazybox-agents-run)). When
 your files shadow it, the first new conversation says so in a Runner line, and
-**Settings → About → Agents** and `lazybox doctor` (*Agents' lazybox*) show
+**Settings → About & updates → Command line** and `lazybox doctor` (*Agents' lazybox*) show
 what was found. Nothing to do then.
 
 If they say the integration could not fix a shell, every new conversation says

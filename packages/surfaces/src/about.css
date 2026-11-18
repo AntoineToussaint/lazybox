@@ -1,6 +1,5 @@
-/* Settings → About (AboutSettings.tsx); updates are in updates.css. */
+/* Settings → About & updates (AboutSettings.tsx); updates are in updates.css. */
 .about-version{font:600 calc(13px * var(--code-scale))/1 var(--font-mono,ui-monospace,monospace);color:var(--s-text,var(--text))}
 .about-version.is-warn{color:var(--s-warn,var(--warn-soft))}
-.about-notes{margin:0;padding:10px 12px;border:1px solid var(--s-line,var(--line-subtle));border-radius:var(--s-radius,8px);background:var(--s-surface,var(--surface-raised));color:var(--s-text-2,var(--text-tertiary));font:calc(12.5px * var(--text-scale))/1.55 var(--font-ui,inherit);white-space:pre-wrap;max-height:240px;overflow:auto}
 .about-link p,.about-hint{margin:4px 0;color:var(--s-text-2,var(--text-tertiary));font-size:calc(12.5px * var(--text-scale))}
 .about-link code{font-family:var(--font-mono,ui-monospace,monospace)}

@@ -1,7 +1,7 @@
 import { HelpItems, HelpMenu } from './HelpMenu';
 import type { Collection, InfoResponse } from '@lazybox/protocol';
 import type { AppHost, ViewStateStore } from '@lazybox/platform';
-import { UpdateNotice } from './AboutSettings';
+import { UpdateNotice } from './UpdateDialog';
 import { ActionMenu } from './ActionMenu';
 import { Icon } from './Icons';
 import { actionEnabled, bindings, displayBinding, runAction, useActionRevision } from './actions';

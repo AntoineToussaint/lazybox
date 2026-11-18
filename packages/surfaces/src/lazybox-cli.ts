@@ -11,7 +11,7 @@ const LAZYBOX_CLI = /"[^"]*\/lazybox"|'[^']*\/lazybox'|"\$(?:LAZYBOX_V2_CLI|\{LA
 /** A command with the Lazybox CLI, however it was called, read as plain `lazybox`. */
 export const plainLazybox = (command: string) => command.replace(LAZYBOX_CLI, 'lazybox');
 
-/** A short status for the lazybox agents reach (Settings → About → Agents). */
+/** A short status for the lazybox agents reach (Settings → About & updates → Command line). */
 export function agentCliStatus(check: Pick<AgentCliCheck, 'problem' | 'unfixed' | 'shadow'>): { label: string; tone: 'ok' | 'warn' } {
   if (check.problem) return { label: 'Not checked', tone: 'warn' };
   if (check.unfixed.length) return { label: 'Needs full path', tone: 'warn' };

@@ -21,6 +21,8 @@ extend-ignore-re = [
 ]
 
 [default.extend-words]
+# Apple's device identifier (xcrun simctl), in the iPhone app's README.
+udid = "udid"
 # Accepted English variants and identifiers.
 unparseable = "unparseable"
 seeked = "seeked"            # DOM media event name (HTMLMediaElement 'seeked')

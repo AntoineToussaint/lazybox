@@ -2,6 +2,7 @@ import { createServer } from 'vite';
 import { spawn } from 'node:child_process';
 import { createServer as createHTTPServer } from 'node:http';
 import { realpath } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { uiWatcher } from './ui-watch.mjs';
 
 // Every owned supervisor gets its own group: a child may signal its entire
@@ -29,6 +30,7 @@ export async function stopProcessGroup(child, graceMs = 1500, kill = (pid, signa
 // Bind first so both HTTP and HMR use the actual OS-assigned port.
 export async function startDesktopDevServer(source) {
   const watcher = uiWatcher();
+  const nonce = randomBytes(18).toString('base64');
   source = await realpath(source);
   // Scope private paths below this source. A release's *ancestor* may itself
   // be .cache; rejecting that ancestor would reject every UI asset in a stage.
@@ -53,6 +55,7 @@ export async function startDesktopDevServer(source) {
     vite = await createServer({
       root: join(source, 'apps/desktop'),
       configFile: join(source, 'apps/desktop/vite.config.ts'),
+      html: { cspNonce: nonce },
       server: {
         // Tauri owns native source/build watching. Do not poll its build tree.
         watch: { ...watcher.options, ignored: [`${sourceGlob}/apps/desktop/src-tauri/**`, `${sourceGlob}/**/.cache/**`] },
@@ -62,16 +65,17 @@ export async function startDesktopDevServer(source) {
         fs: { strict: true, allow: ['apps/desktop', 'packages', 'node_modules', 'docs'].map(path => join(source, path)), deny: privatePaths },
       },
     });
-    return { server: { httpServer: http, watcher: vite.watcher, close }, url: `http://127.0.0.1:${address.port}`, watchBackend: watcher.backend };
+    return { server: { httpServer: http, watcher: vite.watcher, close }, url: `http://127.0.0.1:${address.port}`, nonce, watchBackend: watcher.backend };
   } catch (error) { await close(); throw error; }
 }
 
-export function desktopDevConfig(paths, url) {
+export function desktopDevConfig(paths, url, nonce) {
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1' || !parsed.port || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) throw new Error('Expected the resolved loopback development origin');
+  if (typeof nonce !== 'string' || !/^[A-Za-z0-9+/]{24}$/.test(nonce)) throw new Error('Expected the development server script nonce');
   return {
     identifier: paths.identifier, productName: paths.productName,
     build: { devUrl: parsed.origin },
-    app: { security: { devCsp: `default-src 'self'; connect-src ipc: http://ipc.localhost ${parsed.origin} ws://${parsed.host}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; worker-src 'self' blob:; frame-src http://127.0.0.1:*` } },
+    app: { security: { devCsp: `default-src 'self'; script-src 'self' 'nonce-${nonce}'; connect-src ipc: http://ipc.localhost ${parsed.origin} ws://${parsed.host}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; worker-src 'self' blob:; frame-src http://127.0.0.1:*` } },
   };
 }

@@ -36,7 +36,9 @@ func fixtureAppServer() {
 				Input []struct {
 					Text string `json:"text"`
 				} `json:"input"`
-				Cursor string `json:"cursor"`
+				Cursor         string          `json:"cursor"`
+				ApprovalPolicy string          `json:"approvalPolicy"`
+				SandboxPolicy  json.RawMessage `json:"sandboxPolicy"`
 			} `json:"params"`
 			Result struct {
 				Decision     json.RawMessage `json:"decision"`
@@ -59,6 +61,10 @@ func fixtureAppServer() {
 		case "thread/start":
 			send(map[string]any{"id": m.ID, "result": map[string]any{"model": "fixture-model", "thread": map[string]string{"id": "thread-1"}}})
 		case "turn/start":
+			if os.Getenv("FIXTURE_EXPECT_YOLO_TURN") != "" && (m.Params.ApprovalPolicy != "never" || string(m.Params.SandboxPolicy) != `{"type":"dangerFullAccess"}`) {
+				send(map[string]any{"id": m.ID, "error": map[string]any{"code": -32602, "message": "turn did not receive YOLO policy"}})
+				continue
+			}
 			send(map[string]any{"id": m.ID, "result": map[string]any{"turn": map[string]string{"id": "turn-1"}}})
 			send(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": "thread-1", "turn": map[string]string{"id": "turn-1"}}})
 			if os.Getenv("FIXTURE_EXIT_IN_TURN") != "" {
@@ -584,5 +590,26 @@ func TestResolvedRequestIsNotReplayedAfterReattach(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestExplicitYOLOOverridesCarriedSettingsOnFirstTurn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := (Adapter{Binary: binary}).Open(ctx, agent.Open{
+		Cwd: t.TempDir(), Permission: "yolo",
+		Env:              append(os.Environ(), "FIXTURE_EXPECT_YOLO_TURN=1"),
+		ProviderSettings: json.RawMessage(`{"approvalPolicy":"untrusted","sandboxPolicy":{"type":"workspaceWrite"}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Apply(ctx, agent.Operation{ID: "first", Kind: agent.Message, Text: "hello"}); err != nil {
+		t.Fatal(err)
 	}
 }

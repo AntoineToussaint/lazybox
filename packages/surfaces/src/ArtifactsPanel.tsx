@@ -78,7 +78,11 @@ export function ArtifactsPanel({ workspaceId, collections, viewState, target, on
   const host = useContext(ArtifactHostContext);
   const list = useRef<HTMLDivElement>(null);
   useArtifactSelection(workspaceId, (request: OpenArtifactRequest) => {
-    if (request.conversation) { setScope('workspace'); setFromConversation(request.conversation); setQuery(''); }
+    if (request.conversation || !request.artifactId) {
+      setScope('workspace');
+      setFromConversation(request.conversation);
+      setQuery('');
+    }
     setSelected(request.artifactId);
     setFocus(request.artifactId && (request.version || request.compareWith) ? { artifactId: request.artifactId, version: request.version, compareWith: request.compareWith, at: Date.now() } : undefined);
   });

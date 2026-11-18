@@ -57,11 +57,11 @@ function UsageTable({usage,label,compact=false}:{usage:UsageBreakdown;label?:str
  * that chip opens: the message box shows the same number and opens the same
  * details without asking the Runner again.
  */
-export type ConversationContext={percent?:number;popover:string};
+export type ConversationContext={percent?:number;tokensLabel?:string;popover:string};
 const contextReads=new Map<string,ConversationContext>(),contextListeners=new Set<()=>void>();
 function publishContext(executionId:string,read:ConversationContext|undefined){
  const previous=contextReads.get(executionId);
- if(previous?.percent===read?.percent&&previous?.popover===read?.popover)return;
+ if(previous?.percent===read?.percent&&previous?.tokensLabel===read?.tokensLabel&&previous?.popover===read?.popover)return;
  if(read)contextReads.set(executionId,read);else contextReads.delete(executionId);
  for(const listener of contextListeners)listener();
 }
@@ -124,9 +124,9 @@ export function TelemetryPanel({workspaceId,executionId,conversationId,compact=f
   window.addEventListener(USAGE_EVENT,listener);return()=>window.removeEventListener(USAGE_EVENT,listener);
  },[compact,executionId]);
  const groups=report?.groups||[],contexts=(report?.contexts||[]).filter((context,index,all)=>!conversationId||all.findIndex(value=>value.agent===context.agent)===index);
- const root=contexts.find(c=>c.agent==='root'),percent=percentage(root?.used,root?.capacity);
+ const root=contexts.find(c=>c.agent==='root'),percent=percentage(root?.used,root?.capacity),tokensLabel=root?.used===undefined?undefined:`${short(root.used)} tokens`;
  // The header's chip is the one reader of a conversation's usage: the message box shows what it read.
- useEffect(()=>{if(compact&&executionId)publishContext(executionId,{percent,popover:id});},[compact,executionId,percent,id]);
+ useEffect(()=>{if(compact&&executionId)publishContext(executionId,{percent,tokensLabel,popover:id});},[compact,executionId,percent,tokensLabel,id]);
  useEffect(()=>()=>{if(compact&&executionId&&contextReads.get(executionId)?.popover===id)publishContext(executionId,undefined);},[compact,executionId,id]);
  if(!workspaceId&&!executionId&&!conversationId)return <p className="module-empty">Select a workspace to view its usage.</p>;
  const known=groups.filter(g=>g.nanos!==undefined),usage=usageBreakdown(groups),cost=Number(usage.nanos??0n)/1e9;
@@ -146,7 +146,7 @@ export function TelemetryPanel({workspaceId,executionId,conversationId,compact=f
   </div></details>
  </>;
  if(!compact)return <section className="telemetry-panel" aria-label="Workspace usage">{content}</section>;
- return <div className="telemetry-panel compact"><button ref={trigger} className="context-trigger" popoverTarget={id} aria-expanded={open} data-empty={percent===undefined&&!known.length&&!open&&!asked?true:undefined} aria-label="Context and token cost" onClick={event=>{event.currentTarget.focus();if(popover.current)placeUsagePopover(popover.current,event.currentTarget.getBoundingClientRect());}} title={`Context ${percent===undefined?'not reported yet':`${percentLabel(percent)} used`}${known.length?` · ${costLabel}`:''}`}><span className="context-mini-bar" aria-hidden="true" data-level={percent===undefined?undefined:contextLevel(percent)}><i style={{width:`${Math.max(0,Math.min(100,percent??0))}%`}}/></span><span className="context-trigger-percent">{percent===undefined?'Context':percentLabel(percent)}</span>{known.length>0&&<span className="context-trigger-cost">{cost>=0.01?`$${cost.toFixed(2)}`:costLabel}</span>}</button>
+ return <div className="telemetry-panel compact"><button ref={trigger} className="context-trigger" popoverTarget={id} aria-expanded={open} data-empty={percent===undefined&&!tokensLabel&&!known.length&&!open&&!asked?true:undefined} aria-label="Context and token cost" onClick={event=>{event.currentTarget.focus();if(popover.current)placeUsagePopover(popover.current,event.currentTarget.getBoundingClientRect());}} title={`Context ${percent===undefined?(tokensLabel?`${tokensLabel} used`:'not reported yet'):`${percentLabel(percent)} used`}${known.length?` · ${costLabel}`:''}`}><span className="context-mini-bar" aria-hidden="true" data-level={percent===undefined?undefined:contextLevel(percent)}><i style={{width:`${Math.max(0,Math.min(100,percent??0))}%`}}/></span><span className="context-trigger-percent">{percent===undefined?(tokensLabel||'Context'):percentLabel(percent)}</span>{known.length>0&&<span className="context-trigger-cost">{cost>=0.01?`$${cost.toFixed(2)}`:costLabel}</span>}</button>
   {/* On the page, not in the header: a chip folded into "⋯" is hidden, and the message box opens this too. */}
   {createPortal(<div id={id} ref={popover} popover="auto" className="context-popover" onToggle={event=>{setOpen(event.newState==='open');if(event.newState!=='open')setAsked(false);}}><header><strong>Context</strong><button aria-label="Close context" popoverTarget={id} popoverTargetAction="hide">×</button></header>{content}</div>,document.body)}
  </div>;

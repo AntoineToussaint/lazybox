@@ -342,7 +342,7 @@ function PhoneComposer({ session, respond, start, onError }: { session: Session;
   return <form ref={formRef} className="remote-composer" onSubmit={event => { dictation.takeOver(); void send(event); }}>
     {session.busy && !session.closed && <button type="button" className="remote-interrupt" onClick={() => void interrupt()}>Interrupt</button>}
     <textarea ref={box} rows={1} aria-label="Message" placeholder={session.closed ? 'Continue this conversation…' : session.busy ? 'Queue a follow-up…' : 'Reply…'} value={text} onChange={event => { dictation.takeOver(); setText(event.target.value); attempt.current = ''; }} onKeyDown={keyDown} enterKeyHint="send"/>
-    {dictation.supported && <button type="button" className={'remote-mic' + (dictation.active ? ' is-active' : '')} aria-label={dictation.active ? 'Stop dictation' : 'Dictate'} aria-pressed={dictation.active} disabled={sending} onClick={dictation.toggle}><Icon name="mic" size={18}/></button>}
+    {dictation.supported && <button type="button" className={'remote-mic' + (dictation.active ? ' is-active' : '')} aria-label={dictation.active ? 'Send dictation' : 'Dictate'} disabled={sending} onClick={dictation.active ? dictation.finishAndSend : dictation.start}><Icon name={dictation.active ? 'send' : 'mic'} size={18}/></button>}
     <button className="primary remote-send" aria-label={sending ? 'Sending…' : 'Send message'} disabled={sending || !text.trim()}><Icon name="send" size={18}/></button>
   </form>;
 }

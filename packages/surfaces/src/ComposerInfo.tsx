@@ -26,17 +26,17 @@ export function ComposerInfo({ agentName, modelLabel, modelRequested, sessionID,
   const text = agentModelText(agentName, modelLabel);
   const tooltip = `${modelLabel || agentName}${modelRequested ? ' · requested; the provider has not confirmed it yet' : ''}`;
   const percent = context?.percent;
-  const label = percentLabel(percent);
+  const label = percent === undefined ? context?.tokensLabel : percentLabel(percent);
   const words = <><span className="composer-info-agent">{agentName}</span>{model && <span className="composer-info-model-name"> · {model}</span>}</>;
   return <div className="composer-info" role="group" aria-label="Agent and context">
     {onPickModel
       // tabIndex: WebKit (the desktop app) leaves buttons out of Tab unless they ask; this one is /model from the keyboard.
       ? <button type="button" tabIndex={0} className="composer-info-model" data-requested={modelRequested || undefined} title={`${tooltip}\nSwitch model (/model)`} aria-label={`${text}: change model`} onClick={onPickModel}>{words}</button>
       : <span className="composer-info-model" data-requested={modelRequested || undefined} title={tooltip}>{words}</span>}
-    {percent !== undefined && context && <button type="button" className="composer-info-context" data-level={contextLevel(percent)} popoverTarget={context.popover}
+    {label && context && <button type="button" className="composer-info-context" data-level={percent === undefined ? undefined : contextLevel(percent)} popoverTarget={context.popover}
       title={`Context ${label} used · show context and cost`} aria-label={`Context ${label} used: show context and cost`}
       onClick={event => { const popover = document.getElementById(context.popover); if (popover) placeUsagePopover(popover, event.currentTarget.getBoundingClientRect(), 'below'); }}>
-      <span className="context-mini-bar composer-info-meter" aria-hidden="true" data-level={contextLevel(percent)}><i style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}/></span>
+      {percent !== undefined && <span className="context-mini-bar composer-info-meter" aria-hidden="true" data-level={contextLevel(percent)}><i style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}/></span>}
       <span className="composer-info-percent">{label}</span>
     </button>}
   </div>;

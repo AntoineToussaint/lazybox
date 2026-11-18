@@ -5,7 +5,7 @@ import { beginDrag, preventMouseDown } from '../drag-gesture';
 import { Icon } from '../Icons';
 import type { Keymap } from '../keyboard';
 import { elapsed } from './voice-model';
-import { canOpenVoiceSystemSettings, cancelDictation, dictating, dismissVoiceError, markVoiceKeyUsed, openVoiceSystemSettings, setDictationKeyHeld, setDictationMode, setVoicePreferencesContext, startDictation, stopDictation, stopReading, toggleDictation, useVoicePreferences, useVoiceState, voiceKeysSuspended, voiceKeyUsed, voiceState, type DictationKind } from './voice-session';
+import { canOpenVoiceSystemSettings, cancelDictation, dictating, dismissVoiceError, finishAndSend, markVoiceKeyUsed, openVoiceSystemSettings, setDictationKeyHeld, setDictationMode, setVoicePreferencesContext, startDictation, stopDictation, stopReading, toggleDictation, useVoicePreferences, useVoiceState, voiceKeysSuspended, voiceKeyUsed, voiceState, type DictationKind } from './voice-session';
 import './voice.css';
 
 /** How long a press of the dictation key may last and still be a tap (it then keeps listening). */
@@ -59,9 +59,14 @@ export function VoiceLayer({ viewState, keymap, onOpenSettings }: { viewState?: 
       else void startDictation({ mode });
     };
 
+    const finishFromKey = (kind: DictationKind) => {
+      if (kind === 'composer' && finishAndSend()) return;
+      void stopDictation();
+    };
+
     // Right ⌥ (or Right ⌘) alone: held for LONE_HOLD_MS with no other key, it
     // talks; tapped twice, it keeps listening; tapped while listening, it
-    // stops. Any other key while it is down (⌥e, ⌥→, ⌥-click) makes it that
+    // finishes the run. Any other key while it is down (⌥e, ⌥→, ⌥-click) makes it that
     // key's modifier: nothing starts, and the key goes through untouched.
     type Lone = { kind: DictationKind; code: string; at: number; timer?: ReturnType<typeof setTimeout>; started: number; toggled: boolean; stops: boolean };
     let lone: Lone | null = null;
@@ -92,7 +97,7 @@ export function VoiceLayer({ viewState, keymap, onOpenSettings }: { viewState?: 
         const now = Date.now();
         const current: Lone = { kind: lonely, code: event.code, at: now, started: 0, toggled: false, stops: false };
         lone = current;
-        // Pressed while listening: released alone, it stops.
+        // Pressed while listening: released alone, it finishes the run.
         if (dictating()) { current.stops = true; return; }
         if (behaviour() !== 'hold' && lastTap?.code === event.code && now - lastTap.at < DOUBLE_TAP_MS) {
           lastTap = null; current.started = now; current.toggled = true;
@@ -125,8 +130,8 @@ export function VoiceLayer({ viewState, keymap, onOpenSettings }: { viewState?: 
       const modifiers = binding.split('+').slice(0, -1).map(m => m === 'Ctrl' ? 'Control' : m);
       pressed = { kind, at: Date.now(), code: event.code, modifiers, stops: false };
       setDictationKeyHeld(true);
-      // Pressed while listening (a tap started it): this press stops it.
-      if (dictating()) { pressed.stops = true; void stopDictation(); return; }
+      // A second press finishes toggle dictation.
+      if (dictating()) { pressed.stops = true; finishFromKey(kind); return; }
       begin(kind, behaviour() === 'toggle' ? 'toggle' : 'hold');
     };
     const release = (held: number, stops: boolean) => {
@@ -137,9 +142,9 @@ export function VoiceLayer({ viewState, keymap, onOpenSettings }: { viewState?: 
     };
     const keyup = (event: KeyboardEvent) => {
       if (lone && event.code === lone.code) {
-        const { at, started, toggled, stops } = lone; dropLone();
+        const { kind, at, started, toggled, stops } = lone; dropLone();
         const now = Date.now();
-        if (stops) { event.preventDefault(); event.stopImmediatePropagation(); if (dictating()) void stopDictation(); return; }
+        if (stops) { event.preventDefault(); event.stopImmediatePropagation(); if (dictating()) finishFromKey(kind); return; }
         if (toggled) { event.preventDefault(); event.stopImmediatePropagation(); return; }
         if (started) {
           event.preventDefault(); event.stopImmediatePropagation();
@@ -263,7 +268,7 @@ export function VoicePill({ state, keymap, onOpenSettings, inline }: { state: Re
     </div>;
   }
   const what = state.phase === 'starting' ? 'Starting the microphone…' : state.phase === 'stopping' ? 'Finishing…' : state.kind === 'palette' ? 'Say a command' : 'Listening';
-  const hint = state.mode === 'hold' ? 'Release to finish' : keyText ? `${key && isLoneModifier(key) ? 'Tap ' : ''}${keyText} to finish` : 'Stop to finish';
+  const hint = state.mode === 'hold' ? 'Release to finish' : keyText ? `${key && isLoneModifier(key) ? 'Tap ' : ''}${keyText} to ${state.kind === 'composer' ? 'send' : 'finish'}` : 'Stop to finish';
   const level = state.level ?? (state.hearing ? 0.6 : 0.12);
   // Sending while listening waits for the last words (Composer, finishAndSend); ⌘↵ is Send now, a plain send while the agent is idle.
   const sendChord = state.kind === 'composer' ? bindings(keymap?.['chat.send-now']).find(isChord) : undefined;
@@ -279,7 +284,7 @@ export function VoicePill({ state, keymap, onOpenSettings, inline }: { state: Re
       <Icon name={state.onDevice ? 'lock' : 'cloud'} size={12}/>{state.onDevice ? 'On-device' : 'Online'}
     </span>}
     <span className="voice-pill-hint">{hint}{sendChord && <> · <kbd>{displayBinding(sendChord).join(' ')}</kbd> send</>} · <kbd>Esc</kbd> cancel</span>
-    <button type="button" className="icon-button voice-pill-stop" aria-label="Stop dictation" title={`Stop and keep the text${keyText ? ` · ${keyText}` : ''}`} onClick={() => void stopDictation()} disabled={state.phase !== 'listening'}><Icon name="stop" size={13}/></button>
+    <button type="button" className="icon-button voice-pill-stop" aria-label="Stop dictation" title="Stop and keep the text" onClick={() => void stopDictation()} disabled={state.phase !== 'listening'}><Icon name="stop" size={13}/></button>
     <button type="button" className="icon-button voice-pill-close" aria-label="Cancel dictation" title="Cancel · Esc" onClick={cancelDictation}><Icon name="close" size={13}/></button>
     {tip && <span className="voice-pill-tip" role="note">
       <span>If {keyText} does nothing, another app (ChatGPT, Raycast, Alfred) may use it.</span>

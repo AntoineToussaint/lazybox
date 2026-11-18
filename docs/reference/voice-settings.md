@@ -22,7 +22,7 @@ Shortcuts). The two voice keys are part of your shortcuts.
 | --- | --- | --- |
 | Dictate | `Right ⌥` or `⌥Space` | Hold to dictate into the message box you are working in. **Change…** records a new key (press a chord, or press and release `Right ⌥` or `Right ⌘` alone); **Reset** goes back to the default. If `⌥Space` does nothing, another app (ChatGPT, Raycast, Alfred) may use it: pick another key. |
 | Say a command | `⌥⇧Space` | Hold to open the command palette and say what to run. |
-| How the key works | Hold to talk, tap to keep listening | *Hold to talk*: listening stops when you release. *Press to start, press again to stop*: listening goes on until the next press, "stop", or `Esc`. With `Right ⌥` alone, a tap is a double tap: tap it twice to keep listening, once to stop. |
+| How the key works | Hold to talk, tap to keep listening | *Hold to talk*: listening stops when you release. *Press to start, press again to send*: press again to finish dictation and send. Say "stop" to keep the draft or press `Esc` to cancel. With `Right ⌥` alone, tap twice to start and once to send. |
 
 A voice key must be one key held with `⌥`, `⌃` or `⌘` (`Ctrl+Alt+M`), a
 function key (`F5`), or `Right ⌥` or `Right ⌘` alone (`AltRight`, `MetaRight`

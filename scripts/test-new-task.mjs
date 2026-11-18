@@ -32,6 +32,7 @@ try {
 
   for (const scheme of ['dark', 'light']) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
+    await context.addInitScript(() => localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'));
     const page = await context.newPage(); page.setDefaultTimeout(15000);
     const errors = []; page.on('pageerror', e => errors.push(String(e)));
     await page.goto(`${base}#token=${f.token}`);
@@ -142,6 +143,9 @@ try {
       // The window shows the new conversation in its new workspace.
       await expect(page.getByRole('combobox', { name: 'Session', exact: true })).toHaveValue(session.id);
       await expect(page.getByRole('combobox', { name: 'Workspace', exact: true })).toHaveValue(created.id);
+      const taskTab = page.locator('.dv-active-tab .dock-tab[data-kind="chat"]');
+      await expect(taskTab).toBeVisible();
+      await expect(taskTab).not.toHaveAttribute('data-preview');
 
       // ⌘N again: the last repositories and mode are remembered; the message is not.
       await page.keyboard.press('Meta+n');

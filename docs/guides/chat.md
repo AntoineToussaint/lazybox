@@ -342,7 +342,8 @@ private folder.
 The left of the message box's controls shows who answers, the agent and model
 (*Claude · Opus 5.5*), and how full its context is: a small meter and a
 percentage, amber from 60% and red from 85%, the same reading as the chat
-header's (a conversation that has not started shows neither). Click the agent
+header's. If the agent reports the number of tokens used before it reports
+the window capacity, both show the token count. Click the agent
 to switch model. Click either meter, or type `/cost`, for the usage popover:
 the context window once the agent has reported usage (`/context` opens it
 before that) and the conversation's **token cost**: input, cache read, cache write and output,

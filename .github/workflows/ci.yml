@@ -6,7 +6,7 @@
 # | Job        | Runner       | Release gate it mirrors                         |
 # | ---------- | ------------ | ----------------------------------------------- |
 # | plan       | ubuntu-24.04 | reads the catalog; emits the UI shard matrix    |
-# | go         | macos-15     | core: fmt-check, go vet, `make test`, race run, |
+# | go         | macos-15     | core: go vet, `make test`, race run,           |
 # |            |              | then the launcher's `make test-environments`    |
 # | go-linux   | ubuntu-24.04 | core on Linux: fmt-check, go vet, `make test`,  |
 # |            |              | race run (the Runner on a Linux machine)        |
@@ -50,9 +50,9 @@ concurrency:
 env:
   # Dev's installed LTS; package.json's engines floor is 24.
   NODE_VERSION: "26"
-  # Three UI shards keep a shard at about 40 gates (~115 today), about a
-  # quarter of an hour each on a Linux runner.
-  UI_SHARDS: "3"
+  # About 20 gates per Linux runner. More shards shorten the UI critical path
+  # at the cost of additional copies of dependency and browser setup.
+  UI_SHARDS: "6"
 
 defaults:
   run:
@@ -65,6 +65,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       ui: ${{ steps.shards.outputs.ui }}
+      playwright-image: ${{ steps.shards.outputs.playwright-image }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -78,6 +79,8 @@ jobs:
           node scripts/release-gates.mjs list release
           matrix="$(node scripts/release-gates.mjs shards ui "$UI_SHARDS")"
           echo "ui=$matrix" >> "$GITHUB_OUTPUT"
+          version="$(node -p 'require("./package-lock.json").packages["node_modules/@playwright/test"].version')"
+          echo "playwright-image=mcr.microsoft.com/playwright:v${version}-noble" >> "$GITHUB_OUTPUT"
 
   go:
     name: go (vet, test, race, launcher)
@@ -102,8 +105,8 @@ jobs:
       # box; a runner is ours alone, so builds use every core.
       - name: Use every core for builds
         run: echo "GO_BUILD_JOBS=$(sysctl -n hw.ncpu)" >> "$GITHUB_ENV"
-      - name: Format and vet
-        run: make fmt-check check-go
+      - name: Vet
+        run: make check-go GOMAXPROCS="$GO_BUILD_JOBS"
       - name: Test (GOMAXPROCS = cores)
         run: make test GOMAXPROCS="$GO_BUILD_JOBS"
       # The packages that keep agents and commands alive across a Runner
@@ -112,11 +115,11 @@ jobs:
       - name: Race-check the restart packages (GOMAXPROCS=1)
         run: make test-outlive GOMAXPROCS=1
       # The launcher (environments, service, restart, gates): macOS-only, as
-      # the launcher refuses other hosts.
-      - run: make deps
+      # the launcher refuses other hosts. The race target installed npm deps.
       - uses: ./.github/actions/playwright
         with:
           browsers: chromium
+          chromium-shell-only: 'true'
       - run: make test-environments
       - name: README and CONTRIBUTING name only what exists
         run: node scripts/export-check.mjs
@@ -159,7 +162,7 @@ jobs:
       - name: Use every core for builds
         run: echo "GO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
       - name: Format and vet
-        run: make fmt-check check-go
+        run: make fmt-check check-go GOMAXPROCS="$GO_BUILD_JOBS"
       - name: Test (GOMAXPROCS = cores)
         run: make test GOMAXPROCS="$GO_BUILD_JOBS"
       - name: Race-check the restart packages (GOMAXPROCS=1)
@@ -219,9 +222,12 @@ jobs:
           cache-dependency-path: package-lock.json
       # The agent browser's Chromium (Playwright's headless shell) and its
       # system libraries: the browser-service tests launch it.
-      - name: Agent browser
-        run: make browser && sudo env "PATH=$PATH" node_modules/.bin/playwright-core install-deps chromium
-      # typecheck + npm workspace links + test:client + test:worker
+      - run: make deps
+      - uses: ./.github/actions/playwright
+        with:
+          browsers: chromium
+          chromium-shell-only: 'true'
+      # Typecheck, workspace links, client and both workers' tests.
       - run: make check-workspaces
 
   desktop:
@@ -252,6 +258,10 @@ jobs:
     name: ui ${{ matrix.shard }}
     needs: plan
     runs-on: ubuntu-24.04
+    # Includes the exact browsers and Ubuntu libraries used by the lockfile.
+    # Installing system packages per shard can take longer than the tests.
+    container:
+      image: ${{ needs.plan.outputs.playwright-image }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -263,10 +273,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
-      - run: make deps
-      - uses: ./.github/actions/playwright
-        with:
-          browsers: chromium webkit
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       # The gate runner, not `npm run` directly: same env scrubbing, process
       # groups and per-gate deadlines as staging, and every gate in the shard
       # runs even after one fails. --retry-flaky runs a failed UI gate once

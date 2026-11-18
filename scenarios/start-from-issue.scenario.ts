@@ -31,7 +31,7 @@ export default scenario({
       expect.exactText(css('.item-source-title'), 'Fix refund rounding'),
       caption('Lazybox reads the issue: its **repository**, a **branch**, a **name**'),
       highlight(source, { label: 'The issue, quoted for the agent' }),
-      expect.exactText(css('.new-task-chip'), ['acme/api']),
+      expect.exactText(css('.new-task-chip-name'), ['acme/api']),
       expect.exactText(css('[data-testid="new-task-branch"]'), '812-fix-refund-rounding'),
       highlight(css('[data-testid="new-task-branch"]'), { label: 'Its own branch', hold: 1.4 }),
       caption('See exactly what the agent will get'),

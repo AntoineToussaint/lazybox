@@ -51,28 +51,33 @@ claim that the phone development journey is released.
 
 ## CI
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull
-request (and on pushes to `main`), so a regression fails
-the PR that causes it rather than staging. It runs the release catalog split
-into parallel jobs:
+[The CI workflow](.github/workflows/ci.yml) has two profiles. Pull requests
+run **fast** on Linux. Pushes to `main` and release builds run **full**.
+To qualify a branch before merging, open **Actions → CI → Run workflow**
+and choose the branch and **full**. Manual runs default to full.
 
-| Job | Runner | Runs |
+| Check | Fast | Full |
 | --- | --- | --- |
-| `go` | macOS | Go vet and tests at full parallelism, `make test-outlive` (`-race`, `GOMAXPROCS=1`), then the launcher's `make test-environments` |
-| `go-linux` | Linux | Go format, vet, tests and race run on Ubuntu 24.04, with a systemd user manager (lingering) so the scope tests run ([SESSION_HOSTS.md](SESSION_HOSTS.md#on-linux)) |
-| `generated` | Linux | `make check-generated`: Codefly + Buf regeneration drift, `buf lint`, `buf breaking` |
-| `typescript` | Linux | `make check-workspaces`: typecheck, workspace links, client and both workers' tests |
-| `desktop` | macOS | `make check-desktop` |
-| `ui` ×6 | Linux | every `scope: "ui"` gate, through this gate runner |
-| `typos` | Linux | spelling across the repository ([`typos.toml`](typos.toml)) |
+| Catalog, spelling, export, private-file checks | Yes | Yes |
+| TypeScript, client and worker tests | Yes | Yes |
+| Codefly and Buf regeneration, wire compatibility | Yes | Yes |
+| Linux Go | Format and vet | Format, vet, full tests and restart race checks |
+| macOS Go and launcher | — | Full tests, restart race checks and launcher tests |
+| macOS Tauri | — | Build, format, tests and clippy |
+| Playwright | Workspace, inbox, send recovery and voice, in parallel | Every UI gate across six shards |
 
-The UI matrix comes from this catalog, never a copy of it:
-`release-gates.mjs shards ui <count>` splits the UI gates into disjoint shards,
+Both profiles publish the `ci` result. Fast CI checks the common paths
+before merge. The full profile covers native and cross-platform behavior and
+the complete UI catalog. The release workflow always calls the full profile.
+
+The UI matrix reads the same catalog as local checks.
+`release-gates.mjs shards ui <count>` splits the UI gates into disjoint shards.
+Fast CI selects its smoke gates with `--only` before sharding,
 and each shard runs `release-gates.mjs run ui --only <ids>`, so it gets the same
 environment scrubbing, process groups and deadlines as staging. An `--only`
 report records its selection and can never promote a release. CI adds
 `--retry-flaky` ([Flaky in CI](#flaky-in-ci)). Adding a gate to
-the catalog adds it to CI with no workflow edit; an unclassified `test:` script
+the catalog adds it to full CI with no workflow edit; an unclassified `test:` script
 fails the first job, as it fails staging. A failed shard uploads the
 screenshots its suites saved (`.cache/*.png`, `/tmp/lazybox-*.png`) and its
 gate report. The suites drive Playwright as a library, so there are no traces.

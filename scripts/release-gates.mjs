@@ -180,13 +180,15 @@ export function validateReleaseReceipt(report, catalog, sourceDigest) {
 
 async function main() {
   const [action, profile = 'release', ...rest] = process.argv.slice(2);
-  const usage = 'Use release-gates.mjs list [profile] | shards <profile> <count> | run [profile] [--only <id,...>] [--report <path>] [--retry-flaky]';
+  const usage = 'Use release-gates.mjs list [profile] | shards <profile> <count> [--only <id,...>] | run [profile] [--only <id,...>] [--report <path>] [--retry-flaky]';
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const catalog = await loadGateCatalog(root);
   if (action === 'list' && !rest.length) { for (const gate of selectGates(catalog, profile)) console.log(`${gate.id}: ${gate.command} ${gate.args.join(' ')}`); return; }
   // GitHub Actions matrix: one entry per shard, each naming its gates.
-  if (action === 'shards' && rest.length === 1) {
-    const shards = shardGates(selectGates(catalog, profile), Number(rest[0]));
+  if (action === 'shards') {
+    const [count, flag, selection] = rest;
+    if (rest.length !== 1 && !(rest.length === 3 && flag === '--only' && selection)) throw new Error(usage);
+    const shards = shardGates(selectGates(catalog, profile, selection?.split(',')), Number(count));
     console.log(JSON.stringify({ include: shards.map((gates, index) => ({ shard: `${index + 1}-of-${shards.length}`, gates: gates.join(',') })) }));
     return;
   }

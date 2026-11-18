@@ -14,7 +14,7 @@ node scripts/release-gates.mjs run ui
 node scripts/release-gates.mjs run core
 node scripts/release-gates.mjs run native
 node scripts/release-gates.mjs run ui --only inbox,chat-scroll   # named gates
-node scripts/release-gates.mjs shards ui 3                       # CI's matrix
+node scripts/release-gates.mjs shards ui 6                       # CI's matrix
 node scripts/release-gates.mjs run ui --only inbox --retry-flaky # CI: a failed UI gate runs once more
 ```
 
@@ -58,12 +58,12 @@ into parallel jobs:
 
 | Job | Runner | Runs |
 | --- | --- | --- |
-| `go` | macOS | `make fmt-check check-go`, `make test` at full parallelism, `make test-outlive` (`-race`, `GOMAXPROCS=1`), then the launcher's `make test-environments` |
-| `go-linux` | Linux | the same Go checks, tests and race run on Ubuntu 24.04, with a systemd user manager (lingering) so the scope tests run ([SESSION_HOSTS.md](SESSION_HOSTS.md#on-linux)) |
+| `go` | macOS | Go vet and tests at full parallelism, `make test-outlive` (`-race`, `GOMAXPROCS=1`), then the launcher's `make test-environments` |
+| `go-linux` | Linux | Go format, vet, tests and race run on Ubuntu 24.04, with a systemd user manager (lingering) so the scope tests run ([SESSION_HOSTS.md](SESSION_HOSTS.md#on-linux)) |
 | `generated` | Linux | `make check-generated`: Codefly + Buf regeneration drift, `buf lint`, `buf breaking` |
-| `typescript` | Linux | `make check-workspaces`: typecheck, workspace links, `test:client`, `test:worker` |
+| `typescript` | Linux | `make check-workspaces`: typecheck, workspace links, client and both workers' tests |
 | `desktop` | macOS | `make check-desktop` |
-| `ui` ×3 | Linux | every `scope: "ui"` gate, through this gate runner |
+| `ui` ×6 | Linux | every `scope: "ui"` gate, through this gate runner |
 | `typos` | Linux | spelling across the repository ([`typos.toml`](typos.toml)) |
 
 The UI matrix comes from this catalog, never a copy of it:
@@ -76,6 +76,9 @@ the catalog adds it to CI with no workflow edit; an unclassified `test:` script
 fails the first job, as it fails staging. A failed shard uploads the
 screenshots its suites saved (`.cache/*.png`, `/tmp/lazybox-*.png`) and its
 gate report. The suites drive Playwright as a library, so there are no traces.
+
+The launcher and browser worker tests use a cached Chromium headless shell.
+The UI shards install the full Chromium and WebKit set for suites that need it.
 
 The Go suite runs on macOS, where the desktop's Runner runs, and on Linux,
 where a Runner for remote use runs ([REMOTE_RUNNERS.md](REMOTE_RUNNERS.md)).

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -104,6 +105,8 @@ type Manager struct {
 	files indexCache
 	// order is the person's order of their workspaces (arrangement.go).
 	order []string
+	// starts is the branch each repository starts from, by identity (start_from.go).
+	starts map[string]Start
 }
 
 func New(root string, repositories []Repository) (*Manager, error) {
@@ -246,6 +249,7 @@ func New(root string, repositories []Repository) (*Manager, error) {
 		keys[c.RequestKey], work[c.WorkID], m.items[c.ID] = true, true, c
 	}
 	m.loadArrangement()
+	m.loadStarts()
 	return m, nil
 }
 
@@ -758,6 +762,57 @@ func (m *Manager) Reconcile(id, expectedOwner, reason string, processesStopped b
 	c.LastOwnershipResolution = expectedOwner + ": " + reason
 	c = clone(c)
 	c.OwnerExecutionIDs = c.OwnerExecutionIDs[1:]
+	m.settleLocked(&c)
+	if err := m.save(c); err != nil {
+		return Collection{}, err
+	}
+	return clone(c), nil
+}
+
+// UncertainOwners are the workspace's sessions a previous Runner recorded and
+// this one did not re-attach: nothing confirms their processes stopped.
+func (m *Manager) UncertainOwners(id string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.items[id]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	if !c.OwnershipUncertain {
+		return nil, nil
+	}
+	var owners []string
+	for _, owner := range c.OwnerExecutionIDs {
+		if !m.adopted[owner] {
+			owners = append(owners, owner)
+		}
+	}
+	return owners, nil
+}
+
+// ResolveOwner settles one uncertain owner, in any order: the Runner checked
+// that its processes are gone, stopped them, or the person said they had
+// stopped (resolution says which). Unlike Reconcile it needs no particular
+// owner first; it still only resolves an owner that is uncertain.
+func (m *Manager) ResolveOwner(id, owner, resolution string) (Collection, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.items[id]
+	if !ok {
+		return Collection{}, os.ErrNotExist
+	}
+	if m.closed {
+		return Collection{}, errors.New("collection manager closed")
+	}
+	if strings.TrimSpace(resolution) == "" || len(resolution) > 1024 {
+		return Collection{}, errors.New("a resolution is required")
+	}
+	if !c.OwnershipUncertain || m.adopted[owner] || !slices.Contains(c.OwnerExecutionIDs, owner) {
+		return Collection{}, errors.New("that session's ownership is not unconfirmed")
+	}
+	c = clone(c)
+	c.LastOwnershipResolution = owner + ": " + resolution
+	c.OwnerExecutionIDs = slices.DeleteFunc(c.OwnerExecutionIDs, func(value string) bool { return value == owner })
 	m.settleLocked(&c)
 	if err := m.save(c); err != nil {
 		return Collection{}, err

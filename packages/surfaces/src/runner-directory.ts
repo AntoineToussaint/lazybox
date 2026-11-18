@@ -18,21 +18,78 @@ export const OWN_RUNNER = 'window';
 /** A target in some Runner of the window. Without `runner`, the Runner the page shows. */
 export type RunnerTarget = ViewTarget & { runner?: string };
 
-/** What the person chose about the listed Runners: those hidden from the window, and the one it opens on. App-wide. */
-export type RunnerPreferences = { hidden: string[]; primary: string };
+/**
+ * What the person chose about the listed Runners, app-wide: those hidden from
+ * the window, the other local Runners shown in it (`shown`: they are opt-in),
+ * the one it opens on, and the Runners it has already pointed out once
+ * (`noticed`, the hint "Lazybox Working is also running on this Mac").
+ */
+export type RunnerPreferences = { hidden: string[]; shown: string[]; primary: string; noticed: string[] };
 export const RUNNER_PREFERENCES = 'runners.v1';
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 export const validRunnerId = (value: unknown): value is string => typeof value === 'string' && ID.test(value) && value !== OWN_RUNNER;
+const ids = (value: unknown) => Array.isArray(value) ? [...new Set(value.filter(validRunnerId) as string[])].slice(0, 64) : [];
+export const emptyRunnerPreferences = (): RunnerPreferences => ({ hidden: [], shown: [], primary: '', noticed: [] });
 
 export function parseRunnerPreferences(text: string | null | undefined): RunnerPreferences {
   try {
     const value = text && text.length < 64 * 1024 ? JSON.parse(text) : null;
     if (value && typeof value === 'object' && !Array.isArray(value)) {
-      const hidden = Array.isArray(value.hidden) ? [...new Set(value.hidden.filter(validRunnerId) as string[])].slice(0, 64) : [];
-      return { hidden, primary: validRunnerId(value.primary) ? value.primary : '' };
+      const primary = validRunnerId(value.primary) ? value.primary : '';
+      // A primary Runner was chosen to be shown: before `shown` existed, that was the one explicit "show".
+      const shown = ids(value.shown);
+      if (primary && !shown.includes(primary)) shown.push(primary);
+      return { hidden: ids(value.hidden), shown, primary, noticed: ids(value.noticed) };
     }
   } catch { /* a corrupt choice falls back to the defaults */ }
-  return { hidden: [], primary: '' };
+  return emptyRunnerPreferences();
+}
+
+/**
+ * Another Runner on this computer that a launcher registered (Dev, Working,
+ * the installed release): a window shows only its own Runner unless the person
+ * opts in, so Dev's window never looks as if it shared Working's state. A
+ * Runner the person added by file, or a computer they added, is shown.
+ */
+export const optInRunner = (listing: Pick<RunnerListing, 'source'> & Partial<Pick<RunnerListing, 'remote'>>) => listing.source === 'registered' && !listing.remote;
+/** Whether the window leaves a listed Runner out: hidden by the person, or a local Runner they have not chosen to show. */
+export function runnerHidden(listing: Pick<RunnerListing, 'id' | 'source'> & Partial<Pick<RunnerListing, 'remote'>>, preferences: RunnerPreferences): boolean {
+  if (preferences.hidden.includes(listing.id)) return true;
+  // The primary Runner was chosen too: the window opens on it.
+  return optInRunner(listing) && !preferences.shown.includes(listing.id) && preferences.primary !== listing.id;
+}
+/** The preferences with a Runner shown or hidden in this window. */
+export function withRunnerShown(preferences: RunnerPreferences, id: string, shown: boolean): RunnerPreferences {
+  const without = (list: string[]) => list.filter(value => value !== id);
+  return shown
+    ? { ...preferences, hidden: without(preferences.hidden), shown: [...without(preferences.shown), id] }
+    : { ...preferences, hidden: [...without(preferences.hidden), id], shown: without(preferences.shown), primary: preferences.primary === id ? '' : preferences.primary };
+}
+/** The preferences without a Runner the person forgot or removed. */
+export const withoutRunner = (preferences: RunnerPreferences, id: string): RunnerPreferences => ({
+  hidden: preferences.hidden.filter(value => value !== id), shown: preferences.shown.filter(value => value !== id),
+  primary: preferences.primary === id ? '' : preferences.primary, noticed: preferences.noticed,
+});
+/**
+ * The other local Runners running now that the window leaves out by default
+ * and has not pointed out yet: the hint names the first, once, and every one
+ * of them is then noticed.
+ */
+export function unnoticedRunners(listings: readonly RunnerListing[], preferences: RunnerPreferences): RunnerListing[] {
+  return listings.filter(listing => !listing.current && listing.state === 'running' && optInRunner(listing) && validRunnerId(listing.id)
+    && !preferences.hidden.includes(listing.id) && !preferences.shown.includes(listing.id) && !preferences.noticed.includes(listing.id));
+}
+/**
+ * The window's own channel, by its brand: "Dev" or "Working" when it is not
+ * the release app. From its own Runner's listing, else the app's identity
+ * (AppInfo.channel: "release", or the bundle id of Dev's or Working's app).
+ */
+export function windowChannel(ownChannel: string, appChannel = ''): string {
+  if (ownChannel) return ownChannel === 'Release' ? '' : ownChannel;
+  const app = appChannel.toLowerCase();
+  if (!app || app === 'release') return '';
+  const last = app.split('.').pop() || '';
+  return CHANNELS[last] && CHANNELS[last] !== 'Release' ? CHANNELS[last] : '';
 }
 
 /**
@@ -95,7 +152,7 @@ export function orderRunners(listings: readonly RunnerListing[], preferences: Ru
   for (const listing of listings) {
     if (listing.current || !validRunnerId(listing.id) || seen.has(listing.id)) continue;
     seen.add(listing.id);
-    rows.push({ id: listing.id, label: runnerLabel(listing), channel: runnerChannel(listing), own: false, health: health(listing.id, listing), hidden: preferences.hidden.includes(listing.id), primary: primary === listing.id, listing });
+    rows.push({ id: listing.id, label: runnerLabel(listing), channel: runnerChannel(listing), own: false, health: health(listing.id, listing), hidden: runnerHidden(listing, preferences), primary: primary === listing.id, listing });
   }
   // Two Runners with one name (two checkouts' Dev) are told apart by where they were found.
   const counts = new Map<string, number>();

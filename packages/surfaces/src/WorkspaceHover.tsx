@@ -198,7 +198,8 @@ export function WorkspaceHoverCard({ open, workspace, repositoryNames, sessions,
   const agents = hoverAgents(sessions, info?.profiles || []);
   const runs = details.runtime === undefined || details.processes === undefined ? undefined : hoverRuns(workspace.id, details.runtime?.actions, details.processes?.processes);
   const cost = costLine(details.telemetry || undefined);
-  const ready = workspace.state === 'ready' && !workspace.ownershipUncertain;
+  // A workspace whose ownership is unconfirmed starts by settling it (WorkspaceRow).
+  const ready = workspace.state === 'ready';
   const reveal = contextMenuPlatform().revealInFinder;
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
 

@@ -1,0 +1,9 @@
+/* RepositoryReplacement.tsx: a repository whose history changed on GitHub, and replacing Lazybox's copy. */
+.repository-replacement{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--warn-line-subtle);border-radius:8px;background:var(--warn-bg);font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--text-secondary);overflow-wrap:anywhere}
+.repository-replacement p{margin:0}
+.repository-replacement-lead strong{font-weight:600;color:var(--text)}
+.repository-replacement-effects{display:flex;flex-direction:column;gap:6px}
+.repository-replacement-names{color:var(--text);font-weight:500}
+.repository-replacement-status{color:var(--text-muted)}
+.repository-replacement-error{padding:6px 8px;border-radius:6px;background:var(--danger-bg);color:var(--danger-strong)}
+.repository-replacement-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}

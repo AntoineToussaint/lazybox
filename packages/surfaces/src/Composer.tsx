@@ -157,7 +157,7 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
     <div className="row">
       {info}
       {vim.mode && <span className="vim-mode-chip" data-mode={vim.mode} role="status" aria-label={`Vim ${vim.mode} mode`} title="Vim editing: Esc for normal mode, i to type, Enter in normal mode sends. Turn it off in Settings → Shortcuts.">{vim.status}</span>}
-      {session?.instructionsPending && !session.closed && <span className="composer-chip" role="status" title="The shared Lazybox instructions changed since this conversation started. The update is sent with your next message.">Instructions updated</span>}
+      {session?.instructionsPending && !session.closed && <span className="composer-chip" role="status" title="What Lazybox tells agents changed since this conversation started. Only what changed goes to the agent, with your next message that starts a turn.">Instructions updated</span>}
       {dictation.supported && <button type="button" className="icon-button composer-mic" aria-label={dictation.active ? 'Stop dictation' : 'Dictate'} aria-pressed={dictation.active} title={dictation.active ? 'Stop dictation and keep the text' : dictateHint} disabled={!canCompose || sending} onClick={dictation.toggle}><Icon name="mic"/></button>}
       <button type="button" className="icon-button" aria-label="Snippets" title={`Snippets · ${keymap['snippets.open']}`} disabled={!canCompose || sending} onClick={onOpenSnippets}><Icon name="snippets"/></button>
       <button type="button" className="attachment" aria-label={embedded ? 'Attach files' : undefined} disabled={!canAttach} onClick={() => fileInput.current?.click()}>{embedded ? <><Icon name="attach"/> <span className="attachment-label">Attach</span></> : '+ Attach files'}</button>

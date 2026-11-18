@@ -661,6 +661,11 @@ type ReviewEvent struct {
 	Majors          int    `json:"majors"`
 	Minors          int    `json:"minors"`
 	Nits            int    `json:"nits"`
+	// The review's state ("cancelled", "stopped" once the person ended it),
+	// and who ended it and when (Unix seconds).
+	State     string `json:"state,omitempty"`
+	StoppedBy string `json:"stoppedBy,omitempty"`
+	StoppedAt int64  `json:"stoppedAt,omitempty"`
 }
 
 // recordReviewEvent puts a review event in the source conversation's newest
@@ -672,10 +677,18 @@ func (b *Bench) recordReviewEvent(source *Execution, kind string, run reviews.Ru
 		return
 	}
 	data, _ := json.Marshal(ReviewEvent{Review: run.ID, Workspace: head.CollectionID, ReviewerSession: run.ReviewerSession, ReviewerLabel: run.ReviewerLabel, SourceSession: run.SourceSession, SourceLabel: run.SourceLabel,
-		Scope: run.Scope, ScopeLabel: run.ScopeLabel, Turn: run.Turn, Blockers: counts.Blockers, Majors: counts.Majors, Minors: counts.Minors, Nits: counts.Nits})
+		Scope: run.Scope, ScopeLabel: run.ScopeLabel, Turn: run.Turn, Blockers: counts.Blockers, Majors: counts.Majors, Minors: counts.Minors, Nits: counts.Nits,
+		State: run.State, StoppedBy: run.StoppedBy, StoppedAt: run.StoppedAt})
 	text := run.ReviewerLabel + " is reviewing " + lowerFirst(run.ScopeLabel)
 	if kind == "review_finished" {
-		text = run.ReviewerLabel + " reviewed " + lowerFirst(run.ScopeLabel) + " · " + counts.Summary()
+		switch run.State {
+		case reviews.RunCancelled:
+			text = "Review cancelled · " + plural(counts.Total(), "finding", "findings") + " kept"
+		case reviews.RunStopped:
+			text = "Review stopped · " + plural(counts.Total(), "finding", "findings") + " kept"
+		default:
+			text = run.ReviewerLabel + " reviewed " + lowerFirst(run.ScopeLabel) + " · " + counts.Summary()
+		}
 	}
 	_ = b.Record(head, agent.Event{Type: kind, Text: text, Status: run.State, RequestID: run.ID, Data: data})
 }
@@ -698,6 +711,10 @@ func (b *Bench) recordReviewEvidence(run reviews.Run, counts reviews.Counts, fin
 	if finished {
 		ev.Detail = counts.Summary()
 		ev.Outcome = work.OutcomePass
+		if run.State == reviews.RunCancelled || run.State == reviews.RunStopped {
+			// Ended by hand before it finished: no verdict, unless a blocker was filed.
+			ev.Detail, ev.Outcome = run.State+" · "+counts.Summary(), work.OutcomeUnknown
+		}
 		if counts.Blockers > 0 {
 			ev.Outcome = work.OutcomeFail
 		}
@@ -735,11 +752,22 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match) {
 		return
 	}
 	counts := reviews.CountFindings(review, m.Run.ID)
-	first := m.Run.State == reviews.RunRunning
+	first, endedByHand := false, false
 	// The round the reviewer just finished, and what the loop does next.
 	var action reviews.Action
 	var run reviews.Run
 	_, err = b.Reviews.Update(m.Workspace, func(rv *reviews.Review) error {
+		for _, r := range rv.Runs {
+			if r.ID != m.Run.ID {
+				continue
+			}
+			// A review the person ended by hand stays as they left it: the
+			// turn its cancel or Stop interrupted is not a round's end.
+			if endedByHand = r.State == reviews.RunCancelled || r.State == reviews.RunStopped; endedByHand {
+				return reviews.Unchanged
+			}
+			first = r.State == reviews.RunRunning
+		}
 		var err error
 		if action, err = reviews.RoundEnded(rv, m.Run.ID, time.Now().Unix()); err != nil {
 			return err
@@ -755,7 +783,7 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match) {
 		}
 		return nil
 	})
-	if err != nil {
+	if err != nil || endedByHand {
 		return
 	}
 	defer b.reviewAct(m.Workspace, run, action)

@@ -77,6 +77,18 @@
 .repository-browser-row > button {
   font-size: calc(11px * var(--text-scale));
 }
+/* Replace copy… opened under its row. */
+.repository-browser-replace {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 12px 12px;
+  font-size: calc(12px * var(--text-scale));
+  color: var(--text-secondary);
+}
+.repository-browser-replace > p {
+  margin: 0;
+}
 .repository-browser-empty {
   padding: 24px 16px;
   color: var(--text-subtle);

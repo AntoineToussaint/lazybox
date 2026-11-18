@@ -39,7 +39,14 @@ func TestRealServiceNavigatesReadsClicksAndShowsFrames(t *testing.T) {
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(site.URL, "http://"))
 	var p int
 	fmt.Sscan(port, &p)
-	m, err := New(Config{Script: script, Root: t.TempDir(), LoopbackPorts: func(context.Context, string) []int { return []int{p} }, AskTimeout: 30 * time.Second})
+	root, err := os.MkdirTemp("", "browser-e2e-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Chromium can still be flushing its cache as the test ends; a cleanup that
+	// races it must not fail the test.
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	m, err := New(Config{Script: script, Root: root, LoopbackPorts: func(context.Context, string) []int { return []int{p} }, AskTimeout: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

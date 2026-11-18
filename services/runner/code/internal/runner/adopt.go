@@ -440,7 +440,13 @@ func (b *Bench) endLost(ctx context.Context, r sessionstore.Record, why string) 
 		// the conversation still ends, with no queued message to carry.
 		record = engine.Attachment{}
 	}
-	if err = b.saveCarried(r.ID, record.Queue); err != nil {
+	return b.endInterrupted(ctx, r, record, why)
+}
+
+// endInterrupted is endLost once the attachment is read: the notice, the
+// carried messages and the interrupted snapshot, then the attachment goes.
+func (b *Bench) endInterrupted(ctx context.Context, r sessionstore.Record, record engine.Attachment, why string) error {
+	if err := b.saveCarried(r.ID, record.Queue); err != nil {
 		return err
 	}
 	spool, err := b.openJournal(r.ID)

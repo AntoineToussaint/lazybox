@@ -1,7 +1,7 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {create} from '@bufbuild/protobuf';import {JournalEventSchema} from '@lazybox/protocol';
 import {appendTranscript,emptyTranscript} from '../packages/surfaces/src/transcript-model';
-import {boxAfterCommand,commandLine,decideSend,emptyCatalog,findCommand,lazyboxCommands,mergeCatalog,mergeModels,modelChoices,modelRestartText,paletteCommand,parseSlash,providerCommands,rankChoices,rankCommands,resolveModel,sameModel,shortTokens,slashCommandList,slashMenu,snippetCommands,type SlashContext} from '../packages/surfaces/src/slash-commands';
+import {boxAfterCommand,commandLine,decideSend,DEFAULT_MODEL,emptyCatalog,findCommand,lazyboxCommands,MODEL_CHOICES_SHOWN,mergeCatalog,mergeModels,modelChoices,permissionBlocked,shownModelChoices,modelRestartText,paletteCommand,parseSlash,providerCommands,rankChoices,rankCommands,resolveModel,sameModel,shortTokens,slashCommandList,slashMenu,snippetCommands,type SlashContext} from '../packages/surfaces/src/slash-commands';
 
 const ctx=(over:Partial<SlashContext>={}):SlashContext=>({provider:'claude',live:true,busy:false,coding:true,workspace:true,permission:'ask',planWorkflow:false,livePermission:true,model:'claude-opus-5-5',liveModel:true,resumable:true,models:[{value:'claude-opus-5-5',displayName:'Opus 5.5',description:'Most capable'},{value:'claude-sonnet-5',displayName:'Sonnet 5',description:'Fast'}],agentMessage:true,shellBlock:true,compact:true,detail:'smart',subscriptions:1,...over});
 const catalog=mergeCatalog(emptyCatalog(),{commands:[{name:'compact',description:'Clear history but keep a summary',argumentHint:'<instructions>',builtin:true},{name:'review-pr',description:'Review a pull request',argumentHint:'<number>'},{name:'/init',description:'Initialize CLAUDE.md',argumentHint:''},{name:'model',description:'native model picker',argumentHint:''},{name:'exit',description:'Exit',argumentHint:''},{name:'bad name',description:'',argumentHint:''}],models:[{value:'opus',displayName:'Opus'}],terminal:['exit']});
@@ -193,3 +193,31 @@ test('the conversation: the agent\'s catalog is kept, commands run are one line,
  add('model_changed','claude-sonnet-5',undefined,'live');add('permission_changed','yolo',undefined,'live');
  assert.deepEqual(state.messages.slice(3).map(m=>[m.type,m.text]),[['command','Compacted context: 156k → 61k tokens'],['command','Switched model to claude-sonnet-5'],['command','Permissions: YOLO']]);
  assert.equal(state.reportedModel,'claude-sonnet-5');});
+
+test('the mode an agent is in is the current choice, never a blocked one: only YOLO in plan mode is',()=>{
+ // A Codex conversation in YOLO: YOLO is current (selected), not unavailable.
+ const perms=lazyboxCommands(ctx({permission:'yolo'})).find(c=>c.name==='permissions')!.choices!;
+ assert.deepEqual(perms.map(c=>[c.value,!!c.current,c.disabled||'']),[['ask',false,''],['read-only',false,''],['yolo',true,'']]);
+ assert.equal(permissionBlocked('','yolo'),'','the current mode is not blocked');
+ assert.equal(permissionBlocked('plan','yolo'),'YOLO is unavailable in plan mode');
+ assert.equal(permissionBlocked('plan','ask'),'');});
+
+test('a conversation on the provider\'s default model has a current choice: Default',()=>{
+ // Codex on its own default (no model asked for, none reported yet): Default is current, the models follow.
+ const codex=modelChoices([{value:'gpt-6.1-sol',displayName:'GPT-6.1-Sol',description:''},{value:'gpt-6-luna',displayName:'GPT-6-Luna',description:''}],'');
+ assert.deepEqual(codex.map(c=>[c.value,c.label,!!c.current]),[[DEFAULT_MODEL,'Default',true],['gpt-6.1-sol','GPT-6.1-Sol',false],['gpt-6-luna','GPT-6-Luna',false]]);
+ const {items,best}=rankChoices('',codex);assert.equal(items[best].value,'gpt-6.1-sol','Default is not offered as a switch');
+ // Claude Code lists its own Default entry: that one is current, not a second Default.
+ const claude=modelChoices(mergeModels(claudeBuiltIn,claudeListed),'');
+ assert.deepEqual(claude.filter(c=>c.current).map(c=>c.label),['Default (recommended)']);
+ assert.equal(claude.filter(c=>c.value===DEFAULT_MODEL).length,1);
+ // Through /model: the context's model is empty.
+ assert.equal(lazyboxCommands(ctx({model:'',models:[],providerModels:claudeBuiltIn})).find(c=>c.name==='model')!.choices!.find(c=>c.current)!.label,'Default');});
+
+test('the ⋯ menu shows the first models and the current one, the rest behind More',()=>{
+ const twelve=Array.from({length:12},(_,i)=>({value:`m${i}`,current:i===9}));
+ const {shown,more}=shownModelChoices(twelve,false);
+ assert.deepEqual(shown.map(c=>c.value),['m0','m1','m2','m3','m9'],'the current model is shown wherever it is listed');
+ assert.equal(more,7);
+ assert.equal(shownModelChoices(twelve,true).shown.length,12);
+ assert.equal(shownModelChoices(twelve.slice(0,MODEL_CHOICES_SHOWN+1),false).more,0,'one hidden model is not worth a More button');});

@@ -19,14 +19,14 @@ import (
 
 const conversationUsage = `Usage:
   lazybox conversation new --title "…" (--brief "…" | --brief - | --brief-artifact ID)
-                           [--workspace same|new] [--provider claude|codex|…] [--profile ID] [--model M]
-                           [--reason "why"] [--timeout 90s] [--no-wait]
+                           [--workspace same|new [--start-from BRANCH]] [--provider claude|codex|…]
+                           [--profile ID] [--model M] [--reason "why"] [--timeout 90s] [--no-wait]
 
 Asks the person to start a conversation with this brief; they start it in one
 click (Start, Edit… or Deny, in this conversation, the Inbox or on their
 phone). It is a conversation of its own, in this workspace (or, with
---workspace new, one with new branches from this one's), and its first
-message is the brief. With an Orchestrator grant in force it starts at once,
+--workspace new, one with new branches from this one's, or from origin's
+BRANCH with --start-from), and its first message is the brief. With an Orchestrator grant in force it starts at once,
 as an agent of your mission.
 
 Exit codes: 0 started · 4 the person declined · 5 no answer yet (the request
@@ -51,6 +51,7 @@ func (c *cli) conversationNew(args []string) error {
 	brief := f.String("brief", "", "its first message: what to do, done when, boundaries (- reads stdin; at most 8 KB)")
 	artifact := f.String("brief-artifact", "", "an artifact of this workspace that holds the brief (lazybox artifact put … prints its id)")
 	workspace := f.String("workspace", "same", "same: this workspace's files; new: a workspace of its own, on new branches from this one's")
+	startFrom := f.String("start-from", "", "with --workspace new: the branch of origin its repositories start from (fetched first), instead of this workspace's branches")
 	provider := f.String("provider", "", "the agent: claude, codex or an ACP agent (default: yours)")
 	profile := f.String("profile", "", "the subscription it runs on (default: yours, or the provider's first)")
 	model := f.String("model", "", "the model (default: yours for the same agent, else its default)")
@@ -85,7 +86,7 @@ func (c *cli) conversationNew(args []string) error {
 	if err != nil {
 		return err
 	}
-	return c.askToStart(cl, &pb.RequestConversationStartRequest{SessionId: me, Title: *title, Brief: *brief, BriefArtifactId: *artifact, Workspace: *workspace, Provider: *provider, ProfileId: *profile, Model: *model, Reason: *reason}, *wait, *noWait)
+	return c.askToStart(cl, &pb.RequestConversationStartRequest{SessionId: me, Title: *title, Brief: *brief, BriefArtifactId: *artifact, Workspace: *workspace, StartFrom: *startFrom, Provider: *provider, ProfileId: *profile, Model: *model, Reason: *reason}, *wait, *noWait)
 }
 
 // askToStart asks the person to start a conversation and waits, at most

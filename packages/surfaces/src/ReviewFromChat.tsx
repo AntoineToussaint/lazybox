@@ -8,7 +8,8 @@ import { Icon } from './Icons';
 import { LiveIndicator } from './LiveIndicator';
 import type { MenuItem } from './context-menu-model';
 import { showConversation, useReviewLauncher, type ReviewLauncher } from './review-client';
-import { reviewButtonTitle, type ReviewerChoice } from './review-model';
+import { reviewButtonTitle, reviewInProgress, type ReviewerChoice } from './review-model';
+import { useCancelReview } from './ReviewCancel';
 import { showMenuNotice } from './ContextMenu';
 import { useWorkspaceReview } from './useWorkspaceReview';
 import './review-agents.css';
@@ -44,9 +45,15 @@ export function useChatReview({ session, sessionID, onError }: { session?: Sessi
     showMenuNotice(`Starting ${reviewer.label}’s review…`);
     void launcher.start({ scope: 'changes' }, reviewer, focus);
   };
-  /** The ⋯ menu's item (the button folds into it in a slim panel). */
-  const menuItems: MenuItem[] = shown ? [{ label: `Review with ${launcher.choices[0].label}`, icon: 'review', disabled: !!launcher.busy && 'A review is starting', run: () => start() }] : [];
-  return { launcher, shown, running, start, menuItems, workspaceId };
+  // The review this conversation can cancel: the one it is the reviewer of, or its own newest one under way.
+  const underWay = asReviewer ? (reviewInProgress(asReviewer) ? asReviewer : undefined) : runs?.find(run => run.sourceSessionId === sessionID && reviewInProgress(run));
+  const cancelling = useCancelReview(workspaceId);
+  /** The ⋯ menu's items: Review (the button folds into it in a slim panel), and Cancel review while one is under way. */
+  const menuItems: MenuItem[] = [
+    ...(shown ? [{ label: `Review with ${launcher.choices[0].label}`, icon: 'review', disabled: !!launcher.busy && 'A review is starting', run: () => start() }] : []),
+    ...(underWay ? [{ label: 'Cancel review', icon: 'stop', run: () => cancelling.request(underWay) }] : []),
+  ];
+  return { launcher, shown, running, start, menuItems, workspaceId, underWay, dialog: cancelling.dialog };
 }
 export type ChatReview = ReturnType<typeof useChatReview>;
 

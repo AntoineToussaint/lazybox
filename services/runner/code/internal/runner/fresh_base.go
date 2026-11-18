@@ -32,9 +32,10 @@ func (b *Bench) RefreshBases(ctx context.Context, members []collections.MemberSp
 // new workspace branch, so the branch starts from origin as it is now, not
 // from a source copy's stale branch or the branch the person's checkout has
 // out (collections/base.go resolves which ref that is). It runs for every
-// repository added to a new or an existing workspace without an explicit
-// base: New task, Add repository, Start from an issue, an agent's repository
-// request and `lazybox new`.
+// repository added to a new or an existing workspace that starts from the
+// default branch: New task, Add repository, Start from an issue, an agent's
+// repository request and `lazybox new`. A branch chosen to start from
+// instead is fetched by refreshStart (start_from.go).
 //
 // It never fails the workspace. When origin cannot be reached the branch
 // starts from the last known default branch and progress says so, once:
@@ -53,23 +54,12 @@ func (b *Bench) refreshBase(ctx context.Context, identity, repositoryID, name st
 	if err := progress(identity, "Updating "+name+" from origin"); err != nil {
 		return err
 	}
-	git := gitpublish.Git{}
-	fetch := func(token string) error {
-		_, err := git.RefreshDefault(ctx, path, token)
+	// The GitHub connection's credential, inside its scope only; without a
+	// connection, the person's own Git setup (a credential helper) tries.
+	err := b.withOrigin(ctx, path, func(token string) error {
+		_, err := gitpublish.Git{}.RefreshDefault(ctx, path, token)
 		return err
-	}
-	var err error
-	if origin, e := git.Origin(ctx, path); e == nil && origin.HTTPS && b.GitHub != nil {
-		// The GitHub connection's credential, inside its scope only; without a
-		// connection, the person's own Git setup (a credential helper) tries.
-		called := false
-		err = b.GitHub.WithCredential(ctx, func(token string) error { called = true; return fetch(token) })
-		if !called {
-			err = fetch("")
-		}
-	} else {
-		err = fetch("")
-	}
+	})
 	if err == nil || errors.Is(err, gitpublish.ErrNoOrigin) || ctx.Err() != nil {
 		return nil
 	}

@@ -737,18 +737,23 @@ func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gate
 			}
 		}
 	}
+	var briefing []briefingSection
 	if parent == nil {
 		prefs := b.Preferences.Snapshot()
-		shared := b.sharedInstructions(selected.Provider, purpose)
+		// The briefing's sections, each at the version recorded below.
+		briefing = b.briefingSections(selected.Provider, purpose, collectionID, b.browserFor(selected.Provider, purpose, collectionID))
 		if options.Instructions == "" {
 			options.Instructions = b.Config.Defaults.Instructions
 		}
-		contextText += "\n" + shared.settings + "\n" + shared.provider + "\n" + options.Instructions
-		if shared.briefing != "" {
-			contextText += "\n" + shared.briefing
+		contextText += "\n" + sectionText(briefing, "settings") + "\n" + sectionText(briefing, "provider") + "\n" + options.Instructions
+		var rest []string
+		for _, s := range briefing {
+			if s.id != "settings" && s.id != "provider" {
+				rest = append(rest, s.text)
+			}
 		}
-		if browser := b.browserBriefing(selected.Provider, purpose, collectionID, b.browserFor(selected.Provider, purpose, collectionID)); browser != "" {
-			contextText += "\n" + browser
+		if len(rest) > 0 {
+			contextText += "\n" + strings.Join(rest, "\n\n")
 		}
 		if options.Workflow == "" {
 			options.Workflow = b.Config.Defaults.Workflow
@@ -838,8 +843,12 @@ func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gate
 	adapter := b.sessionAdapter(e, selected, options, conversationID)
 	record := sessionstore.Record{ID: id, ConversationID: conversationID, Previous: previous, WorkID: workID, CollectionID: collectionID, Cwd: cwd, Purpose: purpose, Context: contextText, ProfileID: profile, Provider: selected.Provider, ProfileBinding: profileBinding(selected), Options: options, GatewayID: b.GatewayID(e), Title: filepath.Base(cwd), CreatedAt: time.Now().UTC(), Snapshot: engine.Snapshot{ID: id, Profile: profile, Purpose: purpose, Reference: resume}}
 	if parent != nil {
-		// A successor continues the conversation, including updates it already received.
+		// A successor continues the conversation, including updates it already
+		// received: it has the briefing its predecessor had.
 		record.Instructions = parent.Instructions
+		record.Briefing = parent.Briefing
+	} else {
+		record.Briefing = briefingVersions(briefing)
 	}
 	offered := e.browserTools
 	record.BrowserTools = &offered

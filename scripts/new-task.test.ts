@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { modeOf, nameFromPrompt, NO_CHOICES, parseTaskChoices, rankRepositories, rememberTask, TASK_MODES, taskBranch, taskName, taskProblem } from '../packages/surfaces/src/new-task-model.ts';
+import { effectiveStart, isDefaultStart, rankBranches, startLabel, startsFor, validBranchName } from '../packages/surfaces/src/start-from-model.ts';
 
 test('a task is named from its first message, at a word, capitalized', () => {
   assert.equal(nameFromPrompt('fix the login redirect loop when the session expires after a deploy'), 'Fix the login redirect loop');
@@ -91,4 +92,39 @@ test('modes map to the Runner\'s permission and workflow', () => {
   assert.deepEqual([modeOf('plan').permission, modeOf('plan').workflow], ['ask', 'plan']);
   assert.deepEqual([modeOf('yolo').permission, modeOf('yolo').workflow], ['yolo', 'execute']);
   assert.equal(modeOf('nonsense').id, 'default');
+});
+
+test('start from: the choice made here, else the remembered one, else the default; the chip names the default', () => {
+  const info = { defaultBranch: 'main', startFrom: 'feat/v2', recent: ['feat/v2'], branches: [] };
+  assert.equal(effectiveStart(undefined, info), 'feat/v2');
+  assert.equal(effectiveStart('release/1.4', info), 'release/1.4');
+  assert.equal(effectiveStart('', info), '', 'choosing the default here overrides the remembered branch');
+  assert.equal(effectiveStart(undefined, undefined), '');
+  assert.equal(startLabel('', info), 'main');
+  assert.equal(startLabel('', undefined), 'default branch');
+  assert.equal(startLabel('feat/v2', info), 'feat/v2');
+  assert.ok(isDefaultStart('main', info) && isDefaultStart('', info) && !isDefaultStart('feat/v2', info));
+  assert.deepEqual(startsFor(['a', 'b'], { a: 'feat/x', c: 'y' }), { a: 'feat/x' }, 'only chosen repositories of this task are sent');
+});
+
+test('start from: the default first, then recent, the most active, then all by name; a search ranks matches and offers a typed name', () => {
+  const day = 86_400_000;
+  const ages: [string, number][] = [['main', 5], ['feat/v2', 1], ['old', 400], ['fix/a', 2], ['b', 3], ['c', 4], ['d', 6], ['e', 7], ['gone', 0]];
+  const branches = ages.map(([name, ago]) => ({ name, committedAtUnixMillis: ago ? BigInt(1_800_000_000_000 - ago * day) : 0n }));
+  const info = { defaultBranch: 'main', startFrom: '', recent: ['e', 'merged-away'], branches };
+  const rows = rankBranches(info);
+  assert.deepEqual(rows.map(row => [row.name, row.section]), [
+    ['main', 'default'], ['e', 'recent'],
+    ['feat/v2', 'active'], ['fix/a', 'active'], ['b', 'active'], ['c', 'active'], ['d', 'active'],
+    ['gone', 'all'], ['old', 'all'],
+  ]);
+  assert.ok(!rows.some(row => row.name === 'merged-away'), 'a remembered branch origin no longer has is not offered');
+  const found = rankBranches(info, 'fix');
+  assert.equal(found[0].name, 'fix/a');
+  assert.deepEqual(found.at(-1), { name: 'fix', section: 'typed', positions: [] }, 'a name not listed can still be chosen');
+  assert.ok(!rankBranches(info, 'main').some(row => row.section === 'typed'), 'an exact name is not offered twice');
+  assert.ok(!rankBranches(info, 'a b').some(row => row.section === 'typed'), 'not a branch name');
+  // Not on the Runner yet: nothing listed, a typed name is still offered.
+  assert.deepEqual(rankBranches({ defaultBranch: '', startFrom: '', recent: [], branches: [], unregistered: true }, 'feat/x').map(row => row.section), ['typed']);
+  assert.ok(validBranchName('feat/v2-command-output') && !validBranchName('-x') && !validBranchName('a..b') && !validBranchName('x.lock') && !validBranchName('HEAD'));
 });

@@ -88,8 +88,9 @@ func (Local) Launch(ctx context.Context, root string, opts Options) (*Client, er
 // Description is a host as its record tells it, for an inventory.
 type Description struct {
 	ID, Backend string
-	// PID is the host process.
+	// PID is the host process; Started its start time (Record.Started).
 	PID                int
+	Started            int64
 	Kind, Owner, Label string
 	// Tmux is set for a host started in tmux.
 	Tmux *TmuxWindow
@@ -116,7 +117,7 @@ func Describe(root, id string) (Description, error) {
 	if err != nil {
 		return Description{}, err
 	}
-	return Description{ID: r.ID, Backend: r.Backend, PID: r.PID, Kind: r.Kind, Owner: r.Owner, Label: r.Label, Tmux: r.Tmux}, nil
+	return Description{ID: r.ID, Backend: r.Backend, PID: r.PID, Started: r.Started, Kind: r.Kind, Owner: r.Owner, Label: r.Label, Tmux: r.Tmux}, nil
 }
 
 // shellQuote quotes s for a POSIX shell when it needs it.

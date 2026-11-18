@@ -7,7 +7,7 @@ import { AgentEventSchema, SessionSchema, type Session } from '@lazybox/protocol
 import type { RunnerListing } from '@lazybox/platform';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { elsewhere, groupByMachine, healthLabel, isRemote, launchRunner, linkStateText, routeLabel, rttText, runnerStateText, THIS_MACHINE, thisMachineLabel, localTarget, mergeInboxes, orderRunners, OWN_RUNNER, parseRunnerPreferences, rowTarget, runnerChannel, runnerCounts, runnerHealth, runnerLabel, scopedKey, shortPath, splitKey, validRunnerId } from '../packages/surfaces/src/runner-directory.ts';
+import { elsewhere, emptyRunnerPreferences, groupByMachine, healthLabel, optInRunner, runnerHidden, unnoticedRunners, windowChannel, withoutRunner, withRunnerShown, type RunnerPreferences, isRemote, launchRunner, linkStateText, routeLabel, rttText, runnerStateText, THIS_MACHINE, thisMachineLabel, localTarget, mergeInboxes, orderRunners, OWN_RUNNER, parseRunnerPreferences, rowTarget, runnerChannel, runnerCounts, runnerHealth, runnerLabel, scopedKey, shortPath, splitKey, validRunnerId } from '../packages/surfaces/src/runner-directory.ts';
 import { agentSections } from '../packages/surfaces/src/agents-model.ts';
 import { parsePeek, peekKey } from '../packages/surfaces/src/peek-model.ts';
 import { listingKey } from '../packages/surfaces/src/runner-locator.ts';
@@ -20,13 +20,56 @@ function session(id: string, init: Partial<Session> & { updated?: number } = {})
 const question = create(AgentEventSchema, { type: 'question', requestId: 'q1' });
 const listing = (id: string, init: Partial<RunnerListing> = {}): RunnerListing => ({ id, name: id, source: 'registered', current: false, state: 'running', url: `http://127.0.0.1:1/${id}`, token: `t-${id}`, ...init });
 const online = () => 'online' as const;
+const prefs = (init: Partial<RunnerPreferences> = {}): RunnerPreferences => ({ ...emptyRunnerPreferences(), ...init });
+
+test('a window shows only its own Runner: another local one is opt-in, a computer or a Runner added by hand is shown', () => {
+  const working = listing('working', { channel: 'working' });
+  const added = listing('checkout-two', { source: 'added' });
+  const remote = listing('buildbox', { remote: { host: 'build-box', route: 'ssh' } });
+  assert.equal(optInRunner(working), true);
+  assert.equal(optInRunner(added), false);
+  assert.equal(optInRunner(remote), false);
+  const rows = orderRunners([listing('dev', { current: true }), working, added, remote], prefs(), online);
+  assert.deepEqual(rows.map(row => [row.id, row.hidden]), [[OWN_RUNNER, false], ['buildbox', false], ['checkout-two', false], ['working', true]]);
+  // Shown once the person opts in, hidden again when they turn it off; a remote computer hides only when asked.
+  const shown = withRunnerShown(prefs(), 'working', true);
+  assert.deepEqual(shown, prefs({ shown: ['working'] }));
+  assert.equal(runnerHidden(working, shown), false);
+  const off = withRunnerShown({ ...shown, primary: 'working' }, 'working', false);
+  assert.deepEqual(off, prefs({ hidden: ['working'] }), 'hiding the primary also stops it being the primary');
+  assert.equal(runnerHidden(remote, withRunnerShown(prefs(), 'buildbox', false)), true);
+  // The primary is shown: the window opens on it.
+  assert.equal(runnerHidden(working, prefs({ primary: 'working' })), false);
+  assert.deepEqual(withoutRunner(prefs({ hidden: ['a'], shown: ['working'], primary: 'working', noticed: ['working'] }), 'working'), prefs({ hidden: ['a'], noticed: ['working'] }));
+  // Saved preferences round-trip, shown and noticed included.
+  assert.deepEqual(parseRunnerPreferences(JSON.stringify(prefs({ shown: ['working'], noticed: ['working', 'release'] }))), prefs({ shown: ['working'], noticed: ['working', 'release'] }));
+});
+
+test('the hint names another local Runner running now, once', () => {
+  const listings = [listing('dev', { current: true }), listing('working'), listing('release', { state: 'stopped' }), listing('buildbox', { remote: { host: 'build-box', route: 'ssh' } }), listing('mine', { source: 'added' })];
+  assert.deepEqual(unnoticedRunners(listings, prefs()).map(row => row.id), ['working'], 'not the window\'s own, a stopped one, a computer or one added by hand');
+  assert.deepEqual(unnoticedRunners(listings, prefs({ noticed: ['working'] })), [], 'pointed out once');
+  assert.deepEqual(unnoticedRunners(listings, prefs({ shown: ['working'] })), [], 'already shown');
+  assert.deepEqual(unnoticedRunners(listings, prefs({ hidden: ['working'] })), [], 'hidden on purpose');
+});
+
+test('the brand says which Lazybox the window is, except the release app', () => {
+  assert.equal(windowChannel('Dev'), 'Dev');
+  assert.equal(windowChannel('Working', 'release'), 'Working');
+  assert.equal(windowChannel('Release'), '');
+  assert.equal(windowChannel('', 'ai.lazybox.v2.dev'), 'Dev');
+  assert.equal(windowChannel('', 'ai.lazybox.v2.working'), 'Working');
+  assert.equal(windowChannel('', 'release'), '');
+  assert.equal(windowChannel('', 'ai.lazybox.v2.desktop'), '', 'a plain build names no channel');
+  assert.equal(windowChannel(''), '', 'a browser tab without a listing');
+});
 
 test('preferences keep valid ids only, once, and never the window\'s own', () => {
-  assert.deepEqual(parseRunnerPreferences(null), { hidden: [], primary: '' });
-  assert.deepEqual(parseRunnerPreferences('not json'), { hidden: [], primary: '' });
-  assert.deepEqual(parseRunnerPreferences('[]'), { hidden: [], primary: '' });
-  assert.deepEqual(parseRunnerPreferences(JSON.stringify({ hidden: ['a', 'a', 'b/c', 7, OWN_RUNNER, 'ok-1.x'], primary: OWN_RUNNER })), { hidden: ['a', 'ok-1.x'], primary: '' });
-  assert.deepEqual(parseRunnerPreferences(JSON.stringify({ hidden: [], primary: 'working' })), { hidden: [], primary: 'working' });
+  assert.deepEqual(parseRunnerPreferences(null), prefs({ hidden: [], primary: '' }));
+  assert.deepEqual(parseRunnerPreferences('not json'), prefs({ hidden: [], primary: '' }));
+  assert.deepEqual(parseRunnerPreferences('[]'), prefs({ hidden: [], primary: '' }));
+  assert.deepEqual(parseRunnerPreferences(JSON.stringify({ hidden: ['a', 'a', 'b/c', 7, OWN_RUNNER, 'ok-1.x'], primary: OWN_RUNNER })), prefs({ hidden: ['a', 'ok-1.x'], primary: '' }));
+  assert.deepEqual(parseRunnerPreferences(JSON.stringify({ hidden: [], primary: 'working' })), prefs({ hidden: [], shown: ['working'], primary: 'working' }), 'a primary chosen before shown existed stays shown');
   assert.equal(validRunnerId('../x'), false);
   assert.equal(validRunnerId('3f2a9c0d1e4b5a6c'), true);
 });
@@ -57,31 +100,31 @@ test('names: the launchers\' channels read as Dev, Working and Release; others k
 
 test('order: the primary, then the window\'s own, then running, then the rest; the own listing folds into the window', () => {
   const listings = [listing('zeta'), listing('dev', { current: true }), listing('alpha', { state: 'stopped', url: undefined, token: undefined }), listing('working')];
-  const rows = orderRunners(listings, { hidden: ['zeta'], primary: '' }, online);
+  const rows = orderRunners(listings, prefs({ hidden: ['zeta'], primary: '' }), online);
   assert.deepEqual(rows.map(row => row.id), [OWN_RUNNER, 'working', 'zeta', 'alpha']);
   assert.equal(rows[0].label, 'Dev');
   assert.equal(rows[0].own, true);
   assert.equal(rows[0].primary, true);
   assert.equal(rows.find(row => row.id === 'zeta')!.hidden, true);
-  const primary = orderRunners(listings, { hidden: [], primary: 'working' }, online);
+  const primary = orderRunners(listings, prefs({ hidden: [], primary: 'working' }), online);
   assert.deepEqual(primary.map(row => row.id).slice(0, 2), ['working', OWN_RUNNER]);
   assert.equal(primary.find(row => row.own)!.primary, false);
   // A primary that is no longer listed falls back to the window's own.
-  assert.equal(orderRunners(listings, { hidden: [], primary: 'gone' }, online)[0].id, OWN_RUNNER);
+  assert.equal(orderRunners(listings, prefs({ hidden: [], primary: 'gone' }), online)[0].id, OWN_RUNNER);
   // Without a listing for it, the window's own Runner is still there.
-  assert.deepEqual(orderRunners([], { hidden: [], primary: '' }, online, 'This Mac').map(row => [row.id, row.label]), [[OWN_RUNNER, 'This Mac']]);
+  assert.deepEqual(orderRunners([], prefs({ hidden: [], primary: '' }), online, 'This Mac').map(row => [row.id, row.label]), [[OWN_RUNNER, 'This Mac']]);
   // Two checkouts' Dev are told apart by where they were found; an id is listed once.
-  const twins = orderRunners([listing('a', { name: 'dev', locator: '/src/one/runners/dev.json' }), listing('b', { name: 'dev', locator: '/src/two/runners/dev.json' }), listing('b')], { hidden: [], primary: '' }, online);
+  const twins = orderRunners([listing('a', { name: 'dev', locator: '/src/one/runners/dev.json' }), listing('b', { name: 'dev', locator: '/src/two/runners/dev.json' }), listing('b')], prefs({ hidden: [], primary: '' }), online);
   assert.deepEqual(twins.filter(row => !row.own).map(row => row.label), ['Dev · …/runners/dev.json', 'Dev · …/runners/dev.json']);
   assert.equal(twins.length, 3);
 });
 
 test('the window opens on its primary only while that Runner runs and is shown', () => {
-  const running = orderRunners([listing('working')], { hidden: [], primary: 'working' }, online);
+  const running = orderRunners([listing('working')], prefs({ hidden: [], primary: 'working' }), online);
   assert.equal(launchRunner(running), 'working');
-  assert.equal(launchRunner(orderRunners([listing('working', { state: 'stopped' })], { hidden: [], primary: 'working' }, online)), OWN_RUNNER);
-  assert.equal(launchRunner(orderRunners([listing('working')], { hidden: ['working'], primary: 'working' }, online)), OWN_RUNNER);
-  assert.equal(launchRunner(orderRunners([listing('working')], { hidden: [], primary: '' }, online)), OWN_RUNNER);
+  assert.equal(launchRunner(orderRunners([listing('working', { state: 'stopped' })], prefs({ hidden: [], primary: 'working' }), online)), OWN_RUNNER);
+  assert.equal(launchRunner(orderRunners([listing('working')], prefs({ hidden: ['working'], primary: 'working' }), online)), OWN_RUNNER);
+  assert.equal(launchRunner(orderRunners([listing('working')], prefs({ hidden: [], primary: '' }), online)), OWN_RUNNER);
 });
 
 test('the merged inbox: most urgent first across Runners, other Runners\' rows keyed under them', () => {

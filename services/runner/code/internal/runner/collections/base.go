@@ -21,12 +21,15 @@ import (
 //  3. HEAD, only for a repository with neither: one without origin.
 //
 // An explicit base (a branch, a commit, an orchestrator's parent branch) is
-// used as given.
+// used as given. A branch the person chose to start from ("Start from",
+// runner/start_from.go) is fetched first as well and arrives here as
+// refs/remotes/origin/<branch>; BranchBase is its offline fallback.
 
-// Base is where a new workspace branch starts when none is chosen.
+// Base is where a new workspace branch starts: the default when none is
+// chosen (DefaultBase), or a chosen branch's last fetch (BranchBase).
 type Base struct {
 	Ref    string    // the ref resolved (refs/remotes/origin/main…)
-	Branch string    // origin's default branch name, empty when unknown
+	Branch string    // the branch's name (origin's default for DefaultBase), empty when unknown
 	Commit string    // the commit it names
 	AsOf   time.Time // when it was last updated: the last fetch, else its commit's time
 }
@@ -40,19 +43,49 @@ func (m *Manager) DefaultBase(ctx context.Context, repositoryID string) (Base, e
 	if !ok {
 		return Base{}, os.ErrNotExist
 	}
-	base := m.defaultBase(ctx, r.Path)
-	commit, err := m.git(ctx, r.Path, "rev-parse", "--verify", "--end-of-options", base.Ref+"^{commit}")
+	return m.stamp(ctx, r.Path, m.defaultBase(ctx, r.Path))
+}
+
+// BranchBase resolves a branch the person chose to start from as last
+// fetched (refs/remotes/origin/<branch>), without contacting origin: the
+// offline fallback for a chosen branch, as DefaultBase is for the default.
+// A repository without that remote-tracking branch has nothing to fall back
+// on (os.ErrNotExist); one without origin uses its own branch.
+func (m *Manager) BranchBase(ctx context.Context, repositoryID, branch string) (Base, error) {
+	m.mu.Lock()
+	r, ok := m.repos[repositoryID]
+	m.mu.Unlock()
+	if !ok || branch == "" || strings.HasPrefix(branch, "-") {
+		return Base{}, os.ErrNotExist
+	}
+	if _, err := m.git(ctx, r.Path, "check-ref-format", "refs/heads/"+branch); err != nil {
+		return Base{}, os.ErrNotExist
+	}
+	ref := "refs/remotes/origin/" + branch
+	if remote, _ := m.git(ctx, r.Path, "config", "--get", "remote.origin.url"); remote == "" {
+		ref = "refs/heads/" + branch
+	}
+	base, err := m.stamp(ctx, r.Path, Base{Ref: ref, Branch: branch})
+	if err != nil {
+		return Base{}, os.ErrNotExist
+	}
+	return base, nil
+}
+
+// stamp adds the commit a base names and when it was last updated.
+func (m *Manager) stamp(ctx context.Context, path string, base Base) (Base, error) {
+	commit, err := m.git(ctx, path, "rev-parse", "--verify", "--end-of-options", base.Ref+"^{commit}")
 	if err != nil {
 		return Base{}, err
 	}
 	base.Commit = commit
-	if gitDir, err := m.git(ctx, r.Path, "rev-parse", "--path-format=absolute", "--git-common-dir"); err == nil {
+	if gitDir, err := m.git(ctx, path, "rev-parse", "--path-format=absolute", "--git-common-dir"); err == nil {
 		if info, err := os.Stat(gitDir + "/FETCH_HEAD"); err == nil {
 			base.AsOf = info.ModTime()
 		}
 	}
 	if base.AsOf.IsZero() {
-		if seconds, err := m.git(ctx, r.Path, "log", "-1", "--format=%ct", commit); err == nil {
+		if seconds, err := m.git(ctx, path, "log", "-1", "--format=%ct", commit); err == nil {
 			if n, err := strconv.ParseInt(seconds, 10, 64); err == nil {
 				base.AsOf = time.Unix(n, 0)
 			}

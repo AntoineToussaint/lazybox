@@ -222,6 +222,21 @@ export function mergeCatalog(previous: CommandCatalog, payload: Record<string, u
 export type PermissionMode = 'ask' | 'read-only' | 'yolo';
 export const PERMISSION_LABELS: Record<PermissionMode, string> = { ask: 'Ask for approval', 'read-only': 'Read only', yolo: 'YOLO' };
 const PERMISSION_DETAILS: Record<PermissionMode, string> = { ask: 'Asks before commands and edits', 'read-only': 'Reads and plans, changes nothing', yolo: 'Runs everything without asking' };
+/**
+ * Why an agent cannot take a permission mode now (YOLO in plan mode), or ''.
+ * The mode it is in is never blocked: every list shows it as the current,
+ * selected choice, and choosing it again changes nothing.
+ */
+export const permissionBlocked = (workflow: string | undefined, mode: string) => mode === 'yolo' && workflow === 'plan' ? 'YOLO is unavailable in plan mode' : '';
+/** The model choices the ⋯ menu shows before "More": the first of the provider's list, and the current one wherever it is. */
+export const MODEL_CHOICES_SHOWN = 4;
+export function shownModelChoices<T extends { current?: boolean }>(choices: readonly T[], expanded: boolean): { shown: T[]; more: number } {
+  // One hidden model is not worth a "More" button.
+  if (expanded || choices.length <= MODEL_CHOICES_SHOWN + 1) return { shown: [...choices], more: 0 };
+  const current = choices.findIndex(choice => choice.current);
+  const shown = choices.filter((_, i) => i < MODEL_CHOICES_SHOWN || i === current);
+  return { shown, more: choices.length - shown.length };
+}
 export const DETAIL_CHOICES: SlashChoice[] = [
   { value: 'quiet', label: 'Quiet', detail: 'Only what the agent says, its decisions and edits' },
   { value: 'smart', label: 'Smart', detail: 'Runs of tool calls fold into one line' },
@@ -274,7 +289,7 @@ export function lazyboxCommands(ctx: SlashContext): SlashCommand[] {
   const agentName = ctx.agentName || agentTitle(ctx.provider);
   const restart = (live: boolean) => live ? '' : ctx.resumable ? ' (restarts the agent; the conversation continues)' : '';
   const models = modelChoices(mergeModels(ctx.providerModels || [], ctx.models), ctx.model);
-  const permissions: SlashChoice[] = (['ask', 'read-only', 'yolo'] as PermissionMode[]).map(mode => ({ value: mode, label: PERMISSION_LABELS[mode], detail: PERMISSION_DETAILS[mode] + restart(ctx.livePermission), current: ctx.permission === mode, disabled: mode === 'yolo' && ctx.planWorkflow ? 'YOLO is unavailable in plan mode' : undefined, keywords: mode === 'yolo' ? 'bypass dangerous skip' : mode === 'ask' ? 'approve default' : 'plan readonly' }));
+  const permissions: SlashChoice[] = (['ask', 'read-only', 'yolo'] as PermissionMode[]).map(mode => ({ value: mode, label: PERMISSION_LABELS[mode], detail: PERMISSION_DETAILS[mode] + restart(ctx.livePermission), current: ctx.permission === mode, disabled: permissionBlocked(ctx.planWorkflow ? 'plan' : '', mode) || undefined, keywords: mode === 'yolo' ? 'bypass dangerous skip' : mode === 'ask' ? 'approve default' : 'plan readonly' }));
   return [
     { key: 'lazybox:model', name: 'model', group: 'lazybox', icon: 'sparkle', argumentHint: '<name>', description: ctx.liveModel ? `Switch ${agentName}'s model` : `Switch ${agentName}'s model${restart(false)}`, choices: models, freeArgument: true, disabled: unless(notLive), keywords: 'opus sonnet haiku gpt' },
     { key: 'lazybox:permissions', name: 'permissions', group: 'lazybox', icon: 'shield', argumentHint: 'ask|read-only|yolo', aliases: ['permission', 'yolo'], description: 'Ask, Read only or YOLO', choices: permissions, disabled: unless(notLive, !ctx.coding && 'Assistants are read-only') },
@@ -355,6 +370,10 @@ export function mergeModels(provider: readonly ProviderModel[], listed: readonly
   return out;
 }
 
+/** The choice standing for "the provider's default model", when the conversation names none. */
+export const DEFAULT_MODEL = 'default';
+const DEFAULT_MODEL_CHOICE: SlashChoice = { value: DEFAULT_MODEL, label: 'Default', detail: 'The agent\'s own default model · its name shows once the agent reports it', current: true, keywords: 'default' };
+
 /**
  * The choices of `/model`: each model by its name, its id and description
  * after, the current one marked. A current model the list lacks (a custom
@@ -362,6 +381,15 @@ export function mergeModels(provider: readonly ProviderModel[], listed: readonly
  * the current model changes nothing (useSlashCommands' switchModel).
  */
 export function modelChoices(models: readonly ProviderModel[], current: string): SlashChoice[] {
+  // No model named yet: the conversation runs on the provider's own default
+  // (no id was asked for, and the agent has not said which). That is the
+  // current choice, so the list never reads as "none of these": the agent's
+  // own Default entry where it lists one (Claude Code's `default`), else one.
+  if (!current.trim()) {
+    const listed = models.findIndex(model => model.value.toLowerCase() === DEFAULT_MODEL);
+    const choices = models.map((model, i): SlashChoice => ({ value: model.value, label: model.displayName, detail: [model.value !== model.displayName ? model.value : '', model.description].filter(Boolean).join(' · '), current: i === listed, keywords: model.value }));
+    return listed < 0 ? [DEFAULT_MODEL_CHOICE, ...choices] : choices;
+  }
   // Every entry that is the current model is marked (an id and its alias), so
   // none of them is offered first as a switch (rankChoices skips the current).
   let same = models.map(model => sameModel(model, current));

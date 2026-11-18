@@ -75,6 +75,7 @@ Open the parts of the workspace in front.
 | Review this workspace’s changes | `]] ⇧r` | `]] Shift+r` |
 | Review changes with Codex | — | — |
 | Review changes with Claude | — | — |
+| Cancel review | — | — |
 | Browse files | `]] e` | `]] e` |
 | Open a terminal | — | — |
 | Open in Terminal | — | — |
@@ -199,6 +200,7 @@ These work while the panel or card has focus, never while you type in a text fie
 | Sub-agent card, chip or Background work row | `Delete` or `⌫` stops a running sub-agent or background command (the main agent continues) · `Space` opens a card in a floating panel · `Esc` closes its steps |
 | Changes | `n` / `p` next / previous hunk · `Shift+N` / `Shift+P` next / previous file · `v` marks the file viewed and moves on · `s` switches unified / split |
 | Review comment | `⌘↵` saves · `Esc` cancels · `Tab` to a line's **+** then `Enter` starts a comment (`Shift+Enter` extends the range) |
+| Agent review card | `Esc` cancels the review under way (it asks first when the reviewer has filed findings; they are kept) |
 | Inbox | `j` / `k` move · `Enter` opens · `m` marks seen |
 | Any row you can peek | `⌥`-click or `Space` peeks it · in the peek `←` / `→` step through rows, `⌘↵` opens it, `Space` or `Esc` closes |
 | Sidebar workspace row | `F2` renames · `⌥↓` opens its card · `⌥⇧↑` / `⌥⇧↓` move it up or down (or drag it; `Esc` puts it back) |

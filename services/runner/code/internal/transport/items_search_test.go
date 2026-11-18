@@ -86,7 +86,7 @@ func TestWorkspaceFromAnItemRecordsItsOriginAndBriefsTheAgent(t *testing.T) {
 	progress := func(string, string) error { return nil }
 	ref := &pb.ItemRef{Provider: "github", Key: "team/api#812"}
 	// No repositories, no branch, no name: the item's own.
-	w, err := s.Bench.PrepareWorkspaceFromItem(ctx, "from-issue", "", "", nil, ref, progress)
+	w, err := s.Bench.PrepareWorkspaceFromItem(ctx, "from-issue", "", "", nil, nil, ref, progress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestWorkspaceFromAnItemRecordsItsOriginAndBriefsTheAgent(t *testing.T) {
 		t.Fatalf("origin %+v", w.Origin)
 	}
 	// A retry with the same key is the same workspace (its branch is not "taken").
-	if again, err := s.Bench.PrepareWorkspaceFromItem(ctx, "from-issue", "", "", nil, ref, progress); err != nil || again.ID != w.ID {
+	if again, err := s.Bench.PrepareWorkspaceFromItem(ctx, "from-issue", "", "", nil, nil, ref, progress); err != nil || again.ID != w.ID {
 		t.Fatal("retry made another workspace", err)
 	}
 	got, err := s.GetCollection(ctx, &pb.CollectionRequest{CollectionId: w.ID})
@@ -109,7 +109,7 @@ func TestWorkspaceFromAnItemRecordsItsOriginAndBriefsTheAgent(t *testing.T) {
 		t.Fatal(found, err)
 	}
 	// Start another: a new branch beside the first.
-	second, err := s.Bench.PrepareWorkspaceFromItem(ctx, "another", "", "", nil, ref, progress)
+	second, err := s.Bench.PrepareWorkspaceFromItem(ctx, "another", "", "", nil, nil, ref, progress)
 	if err != nil || second.Members[0].Branch != "812-fix-refund-rounding-2" {
 		t.Fatal(second, err)
 	}
@@ -144,7 +144,7 @@ func TestWorkspaceFromAnItemGoesOnWhenTheProviderCannotBeRead(t *testing.T) {
 	s, fake, _ := itemService(t)
 	fake.Close()
 	messages := []string{}
-	w, err := s.Bench.PrepareWorkspaceFromItem(context.Background(), "offline", "Refunds", "", []string{"github:team/api"}, &pb.ItemRef{Provider: "github", Key: "team/api#812"}, func(_, m string) error { messages = append(messages, m); return nil })
+	w, err := s.Bench.PrepareWorkspaceFromItem(context.Background(), "offline", "Refunds", "", []string{"github:team/api"}, nil, &pb.ItemRef{Provider: "github", Key: "team/api#812"}, func(_, m string) error { messages = append(messages, m); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

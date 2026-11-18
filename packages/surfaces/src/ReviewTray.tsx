@@ -7,7 +7,7 @@ import { Icon } from './Icons';
 import { LiveIndicator } from './LiveIndicator';
 import { composeInConversation } from './compose';
 import { showConversation } from './review-client';
-import { loopActive, loopLine, loopModes, loopNeedsYou } from './review-model';
+import { endedByHand, loopActive, loopLine, loopModes, loopNeedsYou } from './review-model';
 import { authorLabel, dispositionLabel, freshnessLabel, groupByFile, isFinding, isPending, isProposed, linesLabel, location, matchesFilter, matchesQuery, reviewAuthors, reviewExcerpt, reviewMessage, runSummary, severities, severityLabel, trayFilters, type ReviewQuery, type TrayFilter } from './review-model';
 import type { WorkspaceReviewState } from './useWorkspaceReview';
 import './review.css';
@@ -107,7 +107,7 @@ function ReviewRuns({ runs, workspaceId, review, focus, onFocus }: { runs: reado
   return <ul className="review-runs" aria-label="Agent reviews">
     {[...runs].sort((a, b) => rank(a) - rank(b)).slice(0, 4).map(run => <li key={run.id} className={`is-${run.state}${focus === run.id ? ' is-focused' : ''}${loopNeedsYou(run) ? ' needs-you' : ''}`} aria-label={`${run.reviewerLabel} review of ${run.scopeLabel}`} data-review={run.id}>
       <div className="review-run-head">
-        <span className="review-run-mark" aria-hidden="true">{run.state === 'running' ? <LiveIndicator tone="busy"/> : <Icon name={run.state === 'failed' || run.blockers ? 'alert' : 'check'} size={13}/>}</span>
+        <span className="review-run-mark" aria-hidden="true">{run.state === 'running' ? <LiveIndicator tone="busy"/> : <Icon name={endedByHand(run) ? 'stop' : run.state === 'failed' || run.blockers ? 'alert' : 'check'} size={13}/>}</span>
         <button type="button" className="review-run-summary" title="Show only this review's findings" onClick={() => onFocus(run)}>{runSummary(run)}</button>
         <button type="button" className="review-icon" aria-label={`Open ${run.reviewerLabel}'s review conversation`} title="Open the review conversation" onClick={() => showConversation({ collectionId: workspaceId, sessionId: run.reviewerSessionId })}><Icon name="chat" size={13}/></button>
       </div>

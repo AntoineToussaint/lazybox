@@ -3,7 +3,9 @@
 // the chosen mode, and the message sent — in that order, once. The sheet
 // remembers the repositories, agent and mode; ⌘Enter starts in the background;
 // Escape keeps an unsent message; the palette and the empty states open it;
-// "Start without a repository" makes an empty workspace; ⌘⇧N still opens the
+// "Start without a repository" makes an empty workspace; each repository's "from
+// main ▾" chip (or ⌥B) picks the branch it starts from, which the Runner
+// remembers for next time; ⌘⇧N still opens the
 // quick New conversation in the workspace in front. Screenshots in
 // .cache/new-sheet-*.png, dark and light. WebKit, the desktop app's engine.
 import { testViteCache } from './fixtures/vite-cache.mjs';
@@ -60,7 +62,7 @@ try {
       await search.fill('fixture-team/api');
       await expect(list.getByRole('option').first()).toContainText('fixture-team/api');
       await page.keyboard.press('Enter');
-      await expect(sheet.locator('.new-task-chip')).toHaveText(['fixture-team/api']);
+      await expect(sheet.locator('.new-task-chip-name')).toHaveText(['fixture-team/api']);
       await search.fill('web');
       await expect(list.getByRole('option', { name: /fixture-team\/web/ })).toBeVisible();
       await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowUp');
@@ -76,7 +78,34 @@ try {
       await page.keyboard.press('Backspace');
       await expect(sheet.locator('.new-task-chip')).toHaveCount(1);
       await search.fill('fixture-team/web'); await page.keyboard.press('Enter');
-      await expect(sheet.locator('.new-task-chip')).toHaveText(['fixture-team/api', 'fixture-team/web']);
+      await expect(sheet.locator('.new-task-chip-name')).toHaveText(['fixture-team/api', 'fixture-team/web']);
+      // Start from: each repository says where its branch starts; neither is on the Runner yet,
+      // so nothing is listed, and origin is not asked before a picker opens.
+      const apiStart = sheet.locator('[data-start-from="github:fixture-team/api"]'), webStart = sheet.locator('[data-start-from="github:fixture-team/web"]');
+      await expect(apiStart).toHaveText(/from\s*default branch/);
+      assert.equal(f.branchListings.length, 0, 'origin is asked only when a picker opens');
+      // Keyboard only: ⌥B from the search opens the first repository's picker; a typed branch is offered.
+      await search.focus();
+      await page.keyboard.press('Alt+KeyB');
+      const picker = sheet.getByRole('dialog', { name: 'Start fixture-team/api from' });
+      await expect(picker).toBeVisible();
+      const branchSearch = picker.getByRole('combobox', { name: 'Branch of fixture-team/api to start from' });
+      await expect(branchSearch).toBeFocused();
+      await expect(picker).toContainText('listed once the repository is on this Runner');
+      await page.keyboard.type('feat/v2-command-output');
+      await expect(picker.getByRole('option', { name: /Start from feat\/v2-command-output/ })).toBeVisible();
+      await page.keyboard.press('Enter');
+      await expect(picker).toHaveCount(0);
+      await expect(sheet).toBeVisible();
+      await expect(apiStart).toHaveText(/from\s*feat\/v2-command-output/);
+      await expect(apiStart).toBeFocused();
+      // Escape closes a picker, not the sheet; focus goes back to its chip.
+      await page.keyboard.press('Alt+KeyB');
+      await expect(picker).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(picker).toHaveCount(0);
+      await expect(sheet).toBeVisible();
+      await expect(apiStart).toBeFocused();
       // Edit the branch; the name stays.
       await sheet.getByRole('button', { name: 'Edit', exact: true }).click();
       await sheet.getByRole('textbox', { name: 'Branch' }).fill('feature/response-cache');
@@ -101,6 +130,7 @@ try {
       assert.equal(prepare.name, 'Add a response cache to the API');
       assert.deepEqual(prepare.repositoryIdentities, ['github:fixture-team/api', 'github:fixture-team/web']);
       assert.equal(prepare.branch, 'feature/response-cache');
+      assert.deepEqual(prepare.startFrom, { 'github:fixture-team/api': 'feat/v2-command-output' }, 'only the choice made is sent; web keeps its default');
       assert.ok(prepare.requestKey);
       const created = f.collections.at(-1);
       assert.equal(open.collectionId, created.id);
@@ -116,9 +146,49 @@ try {
       // ⌘N again: the last repositories and mode are remembered; the message is not.
       await page.keyboard.press('Meta+n');
       await expect(sheet).toBeVisible();
-      await expect(sheet.locator('.new-task-chip')).toHaveText(['fixture-team/api', 'fixture-team/web']);
+      await expect(sheet.locator('.new-task-chip-name')).toHaveText(['fixture-team/api', 'fixture-team/web']);
       await expect(sheet.getByRole('combobox', { name: 'Mode' })).toHaveValue('plan');
       await expect(prompt).toHaveValue('');
+      // The choice is remembered per repository by the Runner: api starts from it again, plainly
+      // shown; web says its default by name now it is on the Runner.
+      await expect(apiStart).toHaveText(/from\s*feat\/v2-command-output/);
+      await expect(apiStart).not.toHaveAttribute('data-default');
+      await expect(webStart).toHaveText(/from\s*main/);
+      await expect(webStart).toHaveAttribute('data-default');
+      assert.equal(f.branchListings.length, 0, 'still not asked: no picker opened');
+      // Pick a branch from the chip: origin's branches, its default first, then recent, active, all.
+      await webStart.click();
+      const webPicker = sheet.getByRole('dialog', { name: 'Start fixture-team/web from' });
+      await expect(webPicker).toBeVisible();
+      await expect.poll(() => f.branchListings.filter(id => id === 'github:fixture-team/web').length).toBe(1);
+      await expect(webPicker.getByRole('option').first()).toContainText('main');
+      await expect(webPicker.getByRole('option').first()).toContainText('default');
+      await expect(webPicker.locator('.start-from-section')).toHaveText(['Active', 'All branches']);
+      await expect(webPicker.getByRole('option').nth(1)).toHaveText('feat/v2-command-output');
+      await page.mouse.move(0, 0);
+      await sheet.screenshot({ path: '.cache/new-sheet-start-from-dark.png' });
+      await webPicker.getByRole('combobox').fill('rel');
+      await expect(webPicker.getByRole('option').first()).toHaveText('release/1.4');
+      await webPicker.getByRole('option', { name: 'release/1.4' }).click();
+      await expect(webPicker).toHaveCount(0);
+      await expect(webStart).toHaveText(/from\s*release\/1\.4/);
+      // Reopened within the minute: origin is not asked again.
+      await webStart.click();
+      await expect(webPicker).toBeVisible();
+      await page.keyboard.press('Escape');
+      assert.equal(f.branchListings.filter(id => id === 'github:fixture-team/web').length, 1, 'origin\'s list is reused for a minute');
+      await expect(webStart).toBeFocused();
+      // Keyboard only, back to the default: from the message, ⌥B (api, the first), ↑/↓ to main, Enter.
+      await prompt.focus();
+      await page.keyboard.press('Alt+KeyB');
+      await expect(picker).toBeVisible();
+      await expect(picker.locator('.start-from-section')).toHaveText(['Recent', 'Active', 'All branches']);
+      await expect(picker.getByRole('option').nth(1)).toHaveText(/feat\/v2-command-output/);
+      await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowUp');
+      await expect(picker.getByRole('option').first()).toHaveAttribute('aria-selected', 'true');
+      await page.keyboard.press('Enter');
+      await expect(apiStart).toHaveText(/from\s*main/);
+      await expect(apiStart).toHaveAttribute('data-default');
       // Escape keeps an unsent message for next time.
       await prompt.fill('Write the migration notes');
       await page.keyboard.press('Escape');
@@ -191,5 +261,5 @@ try {
     assert.deepEqual(errors, [], `no page errors (${scheme})`);
     await context.close();
   }
-  console.log('PASS: ⌘N sheet — workspace, conversation and message in one step, remembered choices, background start, kept draft, palette and empty state, empty workspace, ⌘⇧N unchanged. Fixture only.');
+  console.log('PASS: ⌘N sheet — workspace, conversation and message in one step, remembered choices, start-from branch (chip, ⌥B, remembered), background start, kept draft, palette and empty state, empty workspace, ⌘⇧N unchanged. Fixture only.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

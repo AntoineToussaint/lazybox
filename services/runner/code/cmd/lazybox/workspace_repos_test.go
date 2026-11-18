@@ -90,7 +90,7 @@ func TestAgentAsksForARepositoryFromTheCLI(t *testing.T) {
 	}()
 	until(t, "the agent waits", func() bool { return strings.Contains(r.session(session.Id).String(), "repository_request") })
 	time.Sleep(50 * time.Millisecond)
-	added, err := r.bench.AddRequestedRepositories(context.Background(), "answer", r.collection.Id, waiting[0].Id, []string{module.GitIdentity}, func(string, string) error { return nil })
+	added, err := r.bench.AddRequestedRepositories(context.Background(), "answer", r.collection.Id, waiting[0].Id, []string{module.GitIdentity}, nil, func(string, string) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

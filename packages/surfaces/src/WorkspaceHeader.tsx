@@ -10,6 +10,7 @@ import { AttentionCenter } from './Inbox';
 import { useSyncExternalStore, type ReactNode } from 'react';
 import { RunControl } from './RunControl';
 import { RunnerIndicator } from './RunnerControl';
+import { useWindowChannel } from './RunnerDirectory';
 import { PullRequestPills } from './PullRequestsPanel';
 import { useGitSummaries } from './useGitSummaries';
 import { shortcut } from './workbench';
@@ -70,10 +71,14 @@ export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, f
   useActionRevision();
   const keysOf = (id: 'task.new' | 'conversation.new') => { const first = bindings(keymap[id])[0]; return first ? displayBinding(first).join('') : ''; };
   const taskKeys = fixedWorkspace ? undefined : keysOf('task.new'), conversationKeys = keysOf('conversation.new');
+  const channel = useWindowChannel(app);
   // The window's title bar in the desktop app (title-bar.ts): its empty parts move the window.
   return <header className="workspace-header" data-window-drag-region="deep">
     <button className="mobile-navigation-button icon-button" aria-label="Open workspace navigator" aria-expanded={navigatorOpen} onClick={onOpenNavigator}><Icon name="sidebar"/></button>
-    <div className="workspace-brand"><span className="brand-mark">l<span>↗</span></span><strong>lazybox</strong></div>
+    <div className="workspace-brand"><span className="brand-mark">l<span>↗</span></span><strong>lazybox</strong>
+      {/* Which Lazybox this window is, unmistakably, when it is not the release app: Dev's and Working's windows look alike otherwise. */}
+      {channel && <span className="brand-channel" data-channel={channel.toLowerCase()} title={`This window is Lazybox ${channel}: it shows ${channel}'s Runner`}>{channel}</span>}
+    </div>
     <nav aria-label="Pages">
       {pages.map(value => <button key={value.id} disabled={pending} className={!settings && value.id === selectedPage ? 'selected' : ''} aria-current={!settings && value.id === selectedPage ? 'page' : undefined} onClick={() => onSelectPage(value.id)}>{value.name}</button>)}
       {!fixedWorkspace && <button className={settings ? 'selected' : ''} aria-current={settings ? 'page' : undefined} onClick={onOpenSettings}>Settings</button>}

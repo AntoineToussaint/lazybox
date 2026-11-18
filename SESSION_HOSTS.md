@@ -223,6 +223,13 @@ conversation's host record left on disk with nothing listening on it.
   do; the app shows it as a notice line. Sending a message resumes the agent
   through the provider's own session (`Bench.Resume` with the saved reference),
   as a continuation of the same conversation.
+- **The workspace.** Its record still names that session as working in it,
+  which a Runner that did not re-attach it reads as "Owner uncertain". The
+  Runner checks at startup that none of the session's recorded processes
+  runs (no host left, a PID free or another program's, a command from before
+  the computer started) and clears the mark itself
+  ([unconfirmed ownership](RESOURCE_OWNERSHIP.md#unconfirmed-ownership)).
+  Before this, the mark stayed until someone reconciled it from the CLI.
 - **Queued messages.** The messages waiting behind the interrupted turn move
   from the attachment record to `<id>.carried.json` (private: it can hold image
   bytes). The conversation keeps listing them as queued, and resuming delivers

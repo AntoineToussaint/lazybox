@@ -100,6 +100,8 @@ const tail = [
   { id: 'review.start', title: 'Review this workspace’s changes', group: 'Workspace', icon: 'review', keys: '] ] Shift+r', scope: 'global', keywords: 'agent cross review findings second opinion codex claude default reviewer /review' },
   { id: 'review.codex', title: 'Review changes with Codex', group: 'Workspace', icon: 'review', keys: '', scope: 'global', keywords: 'agent cross review findings second opinion codex' },
   { id: 'review.claude', title: 'Review changes with Claude', group: 'Workspace', icon: 'review', keys: '', scope: 'global', keywords: 'agent cross review findings second opinion claude' },
+  // The review under way stops: its reviewer interrupted and ended, no further round; its findings kept (ReviewCancel.tsx).
+  { id: 'review.cancel', title: 'Cancel review', group: 'Workspace', icon: 'stop', keys: '', scope: 'global', keywords: 'stop abort end agent cross review reviewer codex claude loop round' },
   { id: 'files.explorer', title: 'Browse files', group: 'Workspace', icon: 'folder', keys: '] ] e', scope: 'global', safe: true, keywords: 'explorer tree' },
   { id: 'terminal.open', title: 'Open a terminal', group: 'Workspace', icon: 'terminal', keys: '', scope: 'global', keywords: 'shell console' },
   // The person's own terminal app at the workspace's folder (handoff.tsx); a browser copies the cd.

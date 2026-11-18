@@ -6,14 +6,22 @@
 > [Runners on your other computers](remote-computers.md)).
 
 A *Runner* is the service that runs your agents. Each has its own workspaces,
-conversations and settings. When the window finds more than one, it shows them
-all side by side, and the page shows one of them at a time.
+conversations and settings, and nothing is shared between two of them.
+
+**A window shows its own Runner.** The brand at the top left says which
+Lazybox it is when it is not the installed app: *Dev* or *Working*. Another
+Runner on this Mac shows only once you choose to show it; the first time one
+is found running, a hint says so once (*Lazybox Working is also running on
+this Mac. Show it here?*). A computer you added, and a Runner you added by its
+file, show without asking. Once a window shows more than one Runner, it shows
+them side by side, and the page shows one of them at a time.
 
 ## Where the other Runners come from
 
 - **The launchers' Runners.** Dev, Working and the installed app each register
   where they run in `~/.config/lazybox/runners/`, which `lazybox runners`
-  lists. The window finds them by itself, running or not.
+  lists. The window finds them by itself, running or not, and lists them in
+  **Settings → Runners**; turn on **Show in this window** to see one here.
 - **Runners you add.** **Settings → Runners → Add a Runner on this computer**
   takes the file a Runner is found through: a locator from
   `~/.config/lazybox/runners/`, or the `endpoint.json` a Runner writes in its
@@ -63,8 +71,10 @@ Every Runner with its health, version and the file it was found through:
 
 - **Show** switches the page to it.
 - **Make primary**: the window opens on this Runner when it is running.
-- **Shown**: hide a Runner you do not use from this window (the window's own
-  Runner cannot be hidden).
+- **Show in this window**: on for the window's own Runner (always), a
+  computer or a Runner you added; off until you turn it on for another
+  launcher's Runner on this Mac (Dev, Working, the installed app). A Runner
+  that is not shown is not contacted at all.
 
 Each Runner keeps its own settings: **Settings → Runner**, Subscriptions,
 Repositories and the rest are those of the Runner the page shows.

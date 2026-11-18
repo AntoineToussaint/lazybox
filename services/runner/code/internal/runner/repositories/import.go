@@ -63,6 +63,7 @@ func (Git) CloneWithProgress(ctx context.Context, source, destination, token str
 type Library interface {
 	Repositories() []collections.Repository
 	RegisterRepository(context.Context, collections.Repository) (collections.Repository, error)
+	ReplaceRepository(context.Context, collections.Repository) (collections.Repository, []collections.Repository, error)
 }
 type Importer struct {
 	mu      sync.Mutex
@@ -139,9 +140,73 @@ func (i *Importer) ImportWithProgress(ctx context.Context, repo github.Repositor
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return collections.Repository{}, err
 	}
+	if err := i.clone(ctx, repo, token, progress, destination, record); err != nil {
+		return collections.Repository{}, err
+	}
+	return i.library.RegisterRepository(ctx, record)
+}
+
+// Replace makes a fresh copy of repo, as GitHub has it now, and registers it
+// in place of the copy the library has under its name (ReplaceRepository).
+// The old copy stays on disk, hidden: workspaces made from it keep their
+// worktrees, which Git registered in it. It is for a repository whose
+// history changed on GitHub since Lazybox copied it: a force-push with a new
+// root, or a new repository that took the name. It answers the new copy and
+// the ones it replaced.
+func (i *Importer) Replace(ctx context.Context, repo github.Repository, token string, progress func(string) error) (collections.Repository, []collections.Repository, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err := Validate(repo); err != nil {
+		return collections.Repository{}, nil, err
+	}
+	taken := map[string]bool{}
+	for _, r := range i.library.Repositories() {
+		taken[r.ID] = true
+	}
+	// A new directory and registration of its own: the old ID, if it is this
+	// repository's, stays the old copy's.
+	base := "github-" + strconv.FormatInt(repo.ID, 10)
+	id := base
+	for n := 2; ; n++ {
+		if _, err := os.Lstat(filepath.Join(i.root, id)); errors.Is(err, os.ErrNotExist) && !taken[id] && !i.registered(id) {
+			break
+		}
+		if n > 100 {
+			return collections.Repository{}, nil, errors.New("too many replaced copies of this repository")
+		}
+		id = base + "-" + strconv.Itoa(n)
+	}
+	destination := filepath.Join(i.root, id)
+	record := collections.Repository{ID: id, Name: repo.Name, Path: filepath.Join(destination, "source.git"), SourceURL: repo.HTMLURL, GitHubID: repo.ID}
+	if err := i.clone(ctx, repo, token, progress, destination, record); err != nil {
+		return collections.Repository{}, nil, err
+	}
+	return i.library.ReplaceRepository(ctx, record)
+}
+
+// registered reports a registration with id, hidden ones included, where the
+// library can say.
+func (i *Importer) registered(id string) bool {
+	if lookup, ok := i.library.(interface {
+		Repository(string) (collections.Repository, bool)
+	}); ok {
+		_, found := lookup.Repository(id)
+		return found
+	}
+	return false
+}
+
+// Owns reports a source copy this importer made (as opposed to a checkout the
+// person registered, which Lazybox never replaces).
+func (i *Importer) Owns(r collections.Repository) bool { return i.owns(r) }
+
+// clone makes the bare copy of repo at destination/source.git with its
+// ownership record, staged and renamed into place so a crash leaves either
+// nothing or a complete copy.
+func (i *Importer) clone(ctx context.Context, repo github.Repository, token string, progress func(string) error, destination string, record collections.Repository) error {
 	staging, err := os.MkdirTemp(i.root, ".clone-")
 	if err != nil {
-		return collections.Repository{}, err
+		return err
 	}
 	defer os.RemoveAll(staging)
 	clone := filepath.Join(staging, "source.git")
@@ -151,19 +216,19 @@ func (i *Importer) ImportWithProgress(ctx context.Context, repo github.Repositor
 		err = i.git.Clone(ctx, repo.CloneURL, clone, token)
 	}
 	if err != nil {
-		return collections.Repository{}, err
+		return err
 	}
 	// A pushed worktree branch gets its remote-tracking ref (fetchspec.go).
 	if _, err = EnsureOriginFetch(ctx, clone); err != nil {
-		return collections.Repository{}, err
+		return err
 	}
 	data, err := json.Marshal(record)
 	if err != nil {
-		return collections.Repository{}, err
+		return err
 	}
 	marker, err := os.OpenFile(filepath.Join(clone, "lazybox-source.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		return collections.Repository{}, err
+		return err
 	}
 	_, err = marker.Write(data)
 	if err == nil {
@@ -171,25 +236,22 @@ func (i *Importer) ImportWithProgress(ctx context.Context, repo github.Repositor
 	}
 	err = errors.Join(err, marker.Close())
 	if err != nil {
-		return collections.Repository{}, err
+		return err
 	}
 	// Reserve the parent exclusively. Rename then targets our own new directory,
 	// so an external checkout appearing concurrently cannot be overwritten.
 	if err = os.Mkdir(destination, 0700); err != nil {
-		return collections.Repository{}, errors.New("repository destination appeared during import; refusing to overwrite")
+		return errors.New("repository destination appeared during import; refusing to overwrite")
 	}
 	if err = os.Rename(clone, record.Path); err != nil {
 		_ = os.Remove(destination)
-		return collections.Repository{}, err
+		return err
 	}
 	parent, err := os.Open(destination)
 	if err != nil {
-		return collections.Repository{}, err
+		return err
 	}
 	err = parent.Sync()
 	_ = parent.Close()
-	if err != nil {
-		return collections.Repository{}, err
-	}
-	return i.library.RegisterRepository(ctx, record)
+	return err
 }

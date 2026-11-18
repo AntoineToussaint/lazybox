@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -393,6 +394,139 @@ func (b *Bench) ControlReview(workspace, id, action, mode string, rounds int) (r
 		return nil
 	})
 	return run, err
+}
+
+// ---- Ending a review by hand -------------------------------------------------
+
+// CancelReview is the person's cancel of a review under way (GITHUB.md,
+// "Cancelling a review"). The cancel is recorded first, so no round starts
+// after it whatever the reviewer's turn does next; then the reviewer's
+// running turn is interrupted and its session ended. Its conversation and
+// the findings it filed are kept. workspace may be empty: the review's own.
+// It returns the review's workspace and the review as cancelled.
+func (b *Bench) CancelReview(ctx context.Context, workspace, id, by string) (string, reviews.Run, error) {
+	if b.Reviews == nil {
+		return "", reviews.Run{}, errors.New("reviews are not available on this Runner")
+	}
+	if workspace == "" {
+		var err error
+		if workspace, err = b.reviewWorkspace(id); err != nil {
+			return "", reviews.Run{}, err
+		}
+	}
+	var run reviews.Run
+	already := false
+	_, err := b.Reviews.Update(workspace, func(rv *reviews.Review) (err error) {
+		run, err = reviews.Cancel(rv, id, by, time.Now().Unix())
+		already = errors.Is(err, reviews.Unchanged)
+		return err
+	})
+	if err != nil {
+		return workspace, run, err
+	}
+	if !already {
+		b.asks().broadcast()
+		b.reviewEndedByHand(workspace, run)
+	}
+	return workspace, run, b.endReviewer(ctx, run)
+}
+
+// reviewWorkspace is the workspace that keeps a review.
+func (b *Bench) reviewWorkspace(id string) (string, error) {
+	for _, w := range b.reviewWorkspaces() {
+		review, err := b.Reviews.Load(w)
+		if err != nil {
+			continue
+		}
+		for _, r := range review.Runs {
+			if r.ID == id {
+				return w, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("review %q not found: %w", id, os.ErrNotExist)
+}
+
+// endReviewer interrupts a cancelled review's reviewer if it is mid-turn,
+// then ends its session as End session does: its conversation stays, and a
+// new session can continue it.
+func (b *Bench) endReviewer(ctx context.Context, run reviews.Run) error {
+	e, err := b.Get(run.ReviewerSession)
+	if err != nil {
+		return nil // already gone: nothing runs
+	}
+	if latest, err := b.latest(e); err == nil {
+		e = latest
+	}
+	s := e.Engine.Snapshot()
+	if s.Closed {
+		return nil
+	}
+	if s.Busy {
+		stop, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Best effort: ending the session below stops the turn regardless.
+		_, _ = e.Engine.Apply(stop, agent.Operation{ID: "review-cancel-" + strings.TrimPrefix(run.ID, "rv-"), Kind: agent.Interrupt})
+		cancel()
+	}
+	if err = b.StopExecution(ctx, e.ID); err != nil {
+		return fmt.Errorf("the review is cancelled, but %s's session could not be ended: %w", firstOf(run.ReviewerLabel, "the reviewer"), err)
+	}
+	return nil
+}
+
+// ReviewerRuns are the reviews session's conversation is the reviewer of.
+func (b *Bench) ReviewerRuns(session string) []reviews.Match {
+	if b.Reviews == nil {
+		return nil
+	}
+	ids := []string{session}
+	if e, err := b.Get(session); err == nil {
+		ids = append(ids, conversationOf(e))
+	}
+	var out []reviews.Match
+	for _, m := range b.Reviews.RunsOf(ids...) {
+		if m.Role == reviews.RoleReviewer {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// ReviewerEndedByHand follows the person ending a conversation by hand —
+// reviews.EndedInterrupted (Stop), EndedSession (End session) or
+// EndedDeleted — for the reviews it was the reviewer of (ReviewerRuns,
+// read before a delete): one under way stops, said on its card, rather than
+// wait on a reviewer that will not report.
+func (b *Bench) ReviewerEndedByHand(matches []reviews.Match, how string) {
+	for _, m := range matches {
+		var run reviews.Run
+		_, err := b.Reviews.Update(m.Workspace, func(rv *reviews.Review) (err error) {
+			run, err = reviews.ReviewerEnded(rv, m.Run.ID, how, "You", time.Now().Unix())
+			if errors.Is(err, reviews.Unchanged) {
+				run = reviews.Run{}
+			}
+			return err
+		})
+		if err != nil || run.ID == "" {
+			continue
+		}
+		b.asks().broadcast()
+		b.reviewEndedByHand(m.Workspace, run)
+	}
+}
+
+// reviewEndedByHand tells the author's conversation, and the mission task
+// the review is evidence on, that the person ended the review.
+func (b *Bench) reviewEndedByHand(workspace string, run reviews.Run) {
+	review, err := b.Reviews.Load(workspace)
+	if err != nil {
+		return
+	}
+	counts := reviews.CountFindings(review, run.ID)
+	if source, err := b.Get(run.SourceSession); err == nil {
+		b.recordReviewEvent(source, "review_finished", run, counts)
+	}
+	b.recordReviewEvidence(run, counts, true)
 }
 
 // ---- Questions between the two agents --------------------------------------

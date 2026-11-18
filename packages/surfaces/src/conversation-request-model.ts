@@ -14,6 +14,8 @@ export type StartRequestView = {
   title: string; brief: string; reason: string;
   /** "same" or "new". */
   mode: 'same' | 'new';
+  /** mode "new": the branch of origin it starts from; empty for this workspace's branches. */
+  startFrom?: string;
   provider: string; profile: string; model: string; permission: string;
   artifact?: { id: string; title: string; version: number };
   /** Conversations live in the asking workspace now, the asking one included. */
@@ -30,7 +32,7 @@ export function startRequestOf(request: AgentEvent): StartRequestView {
   return {
     id: text(data.id) || request.requestId, session: text(data.sessionId), conversation: text(data.conversationId), workspace: text(data.collectionId),
     from: text(data.fromTitle), title: text(data.title) || request.text.replace(/^Start a conversation: /, ''), brief: text(data.brief), reason: text(data.reason),
-    mode: data.workspace === 'new' ? 'new' : 'same',
+    mode: data.workspace === 'new' ? 'new' : 'same', startFrom: text(data.startFrom) || undefined,
     provider: text(data.provider), profile: text(data.profileId), model: text(data.model), permission: text(data.permission),
     artifact: artifact ? { id: artifact, title: text(data.briefArtifactTitle) || artifact, version: number(data.briefArtifactVersion) } : undefined,
     sharedWith: number(data.sharedWith), createdAt: number(data.createdAtUnixMillis), expiresAt: number(data.expiresAtUnixMillis),
@@ -47,8 +49,8 @@ export function briefPreview(brief: string, lines = 3, limit = 280): { text: str
 }
 
 /** Where the new conversation works, in the person's words. */
-export function workspaceWords(view: Pick<StartRequestView, 'mode' | 'sharedWith'>): { label: string; detail: string } {
-  if (view.mode === 'new') return { label: 'A new workspace', detail: 'Its own branches, started from this workspace’s' };
+export function workspaceWords(view: Pick<StartRequestView, 'mode' | 'sharedWith' | 'startFrom'>): { label: string; detail: string } {
+  if (view.mode === 'new') return { label: 'A new workspace', detail: view.startFrom ? `Its own branches, started from origin’s ${view.startFrom}` : 'Its own branches, started from this workspace’s' };
   const others = Math.max(0, view.sharedWith);
   return { label: 'This one', detail: others > 1 ? `Shared with ${others} running conversations: they edit the same files` : others === 1 ? 'Shared with this conversation: they edit the same files' : 'This workspace’s files' };
 }

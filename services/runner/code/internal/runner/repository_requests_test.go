@@ -78,7 +78,7 @@ func (f *requestFixture) ask(t *testing.T, query, reason string) RepositoryReque
 
 func (f *requestFixture) add(t *testing.T, request string, identities ...string) collections.Collection {
 	t.Helper()
-	ws, err := f.b.AddRequestedRepositories(context.Background(), "answer-"+request, f.workspace.ID, request, identities, func(string, string) error { return nil })
+	ws, err := f.b.AddRequestedRepositories(context.Background(), "answer-"+request, f.workspace.ID, request, identities, nil, func(string, string) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestDeclinedRequestIsSentToAnAgentThatNoLongerWaits(t *testing.T) {
 	if _, err = f.b.DeclineRepositoryRequest(r.ID, ""); err == nil {
 		t.Fatal("a request was answered twice")
 	}
-	if _, err = f.b.AddRequestedRepositories(context.Background(), "late", f.workspace.ID, r.ID, []string{f.tools}, func(string, string) error { return nil }); err == nil {
+	if _, err = f.b.AddRequestedRepositories(context.Background(), "late", f.workspace.ID, r.ID, []string{f.tools}, nil, func(string, string) error { return nil }); err == nil {
 		t.Fatal("a declined request was added")
 	}
 }
@@ -228,7 +228,7 @@ func TestChoosingAnotherRepositoryAnswersTheRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := f.ask(t, "module-directory", "")
-	if _, err = f.b.AddRequestedRepositories(context.Background(), "cross", other.ID, next.ID, []string{f.module}, func(string, string) error { return nil }); !errors.Is(err, ErrInvalidRepositoryRequest) {
+	if _, err = f.b.AddRequestedRepositories(context.Background(), "cross", other.ID, next.ID, []string{f.module}, nil, func(string, string) error { return nil }); !errors.Is(err, ErrInvalidRepositoryRequest) {
 		t.Fatal("a request was answered in another workspace", err)
 	}
 }

@@ -170,6 +170,27 @@ try{
  // Like every choice in the menu, Remove closes it; open again, the rest is listed.
  await expect.poll(async()=>{await page.keyboard.press('Escape');await chatWindow.getByLabel('Session actions',{exact:true}).click();return allowed.getByRole('listitem').allTextContents();},{timeout:5000}).toEqual(['commands starting with npm run']);
  await page.keyboard.press('Escape');
+ // ── The ⋯ menu's permissions: the current mode is selected (pressed, enabled), never greyed out;
+ // greyed is only a mode the agent cannot take (YOLO in plan mode), which says why and changes nothing.
+ session.workflow='plan';
+ await page.reload();
+ await chatWindow.getByLabel('Session actions',{exact:true}).click();
+ const permissions=page.getByRole('group',{name:'Permissions'});
+ const ask=permissions.getByRole('button',{name:'Ask for approval',exact:true}),yolo=permissions.getByRole('button',{name:'YOLO',exact:true});
+ await expect(ask).toHaveAttribute('aria-pressed','true');await expect(ask).toBeEnabled();
+ assert.equal(await ask.getAttribute('aria-disabled'),null,'the current mode is not unavailable');
+ await expect(yolo).toHaveAttribute('aria-pressed','false');await expect(yolo).toHaveAttribute('aria-disabled','true');
+ await expect(yolo).toHaveAttribute('title','YOLO is unavailable in plan mode');
+ const pressedLook=await ask.evaluate(node=>getComputedStyle(node).borderStyle),blockedLook=await yolo.evaluate(node=>getComputedStyle(node).borderStyle);
+ assert.notEqual(pressedLook,blockedLook,'a blocked mode does not look like the current one');
+ await page.screenshot({path:'.cache/chat-decisions-permissions.png'});
+ const permissionApplies=applied('permission').length;
+ await yolo.click({force:true}); // aria-disabled: Playwright waits for it to be enabled; a person can still click it
+ await expect(page.locator('.context-menu-notice')).toHaveText('YOLO is unavailable in plan mode');
+ await chatWindow.getByLabel('Session actions',{exact:true}).click();
+ await ask.click();
+ assert.equal(applied('permission').length,permissionApplies,'neither the current nor a blocked mode applies anything');
+ await page.keyboard.press('Escape');
  assert.deepEqual(errors,[]);
  console.log('PASS: always-allowed choices listed in the session menu after a restart, with Remove; question cards (single, multi, Other…, preview, 1–9/arrows/Space/⌘↵, echo), approvals (command, cwd, risk hints, 1 of N and header count, Deny with reason via n, Always allow at the workspace scope, y from the chat) and inline tool lines (grouped reads/edits, exit/duration, failure line, running spinner, ANSI output, diff, full details), inline edit diffs, a quiet thinking line and the latest plan as a live checklist. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

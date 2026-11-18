@@ -82,6 +82,10 @@ const KINDS: Record<string, Kind> = {
   // A tracked pull request's reactions (runner/item_reactions.go): the person chose to send them.
   pr_checks: { icon: 'pullRequest', tone: 'warn', kind: 'PR checks', fallback: 'The pull request’s failing checks' },
   pr_review: { icon: 'review', tone: 'review', kind: 'PR review', fallback: 'The pull request’s review on GitHub' },
+  // What changed in the agent's briefing since the conversation started,
+  // sent with the person's next message (runner/briefing.go, briefing_updated).
+  briefing_update: { icon: 'sparkle', tone: 'muted', kind: 'Lazybox update', fallback: 'Lazybox told {agent} about new features' },
+  instructions_update: { icon: 'sparkle', tone: 'muted', kind: 'Instructions update', fallback: 'Lazybox gave {agent} its updated instructions' },
 };
 const UNKNOWN: Kind = { icon: 'sparkle', tone: 'neutral', kind: 'From Lazybox', fallback: 'A message from Lazybox' };
 
@@ -90,7 +94,7 @@ export function systemEventView(origin: MessageOrigin, agentName = 'the agent'):
   const k = KINDS[origin.kind] || UNKNOWN;
   return {
     icon: k.icon, tone: k.tone, kind: k.kind,
-    line: origin.summary.trim() || k.fallback,
+    line: (origin.summary.trim() || k.fallback).replaceAll('{agent}', agentName),
     detail: origin.detail.trim(),
     copy: origin.copy.trim(),
     sentBy: origin.from ? `${origin.from}’s message, as Lazybox gave it to ${agentName}` : `What Lazybox told ${agentName}`,

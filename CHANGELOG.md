@@ -27,6 +27,7 @@ leave out.
 
 ### Install and updates
 
+- **Track never covers the message** The Track button is an icon in a gutter the message keeps free, so hovering a message no longer hides its text.
 - **A Mac app with everything inside** Download the disk image, open it and drag Lazybox to Applications. It brings its Runner, the Claude worker, Node and Claude Code: you only sign in.
 - **Install from a clone** make install checks what the build needs and names the command for anything missing, builds Lazybox on your Mac with no keys or secrets, installs it in Applications and sets up its Runner and the lazybox command. make update pulls and reinstalls, keeping your data; make uninstall removes it. A build from source never checks for updates: Settings → Updates and About say it updates with make update.
 - **Agents keep working when the window is closed** The first launch sets up the Runner, a background service that starts when you log in. Quit Lazybox and your agents keep going.
@@ -50,6 +51,7 @@ leave out.
 
 - **No separate title bar** On a Mac every window's own header is its title bar, as in VS Code or Slack: the close, minimize and zoom buttons sit at its left, its empty parts move the window, and a double-click there does what System Settings says. Full screen gives the room back.
 - **Runners on your other computers (preview)** Settings → Runners → Add a computer lists your ~/.ssh/config hosts, installs and starts Lazybox's Runner there over your own ssh, and adds this Mac as its owner with a key of its own. Its workspaces then open here as the whole page, the sidebar groups Runners by computer with the round trip and Reconnecting…, and its agents keep working while your laptop sleeps. From a terminal: lazybox remote add, ls and rm.
+- **Each window shows its own Runner** Dev's window no longer lists Working's workspaces and agents by default, or the reverse, so the two never look as if they shared state. The brand says Dev or Working, a hint says once when another Lazybox runs on this Mac, and Settings → Runners → Show in this window brings it in. A computer you added still shows.
 - **Conversations are tabs** A workspace opens with its conversations as tabs, most recent first. A click brings one forward, ⌘-click opens one behind, and a tab you close stays closed. Prefer one preview tab? Settings → Chat.
 - **Split, move, put back** Drag a tab to split, or right-click for Open beside, below or in a new window. Put back in main window (⇧⌘D) returns a panel exactly where it was.
 - **Panels from the keyboard** ⌥⌘ and an arrow moves between panels, ⌃1 to ⌃9 pick a tab, ⌘T opens a conversation in the group you are in, and ⌃⌥⇧Esc puts back the default layout and shortcuts.
@@ -61,6 +63,8 @@ leave out.
 - **Steadier panels and dialogs** A workspace whose saved pages cannot be read still opens, on the default layout, with a notice. Menus close on a click outside or Esc without closing what is under them, dialogs give the focus back, and red buttons read right in light mode.
 - **Keys go where you look** With two conversations side by side, y, a or n answers the one you last used; ⌘\ and ⌥⌘←/→ belong to the editor only while you type in it. In the Inbox, a click outside keeps the note you are writing, and j and k stop on tasks and plans waiting for you.
 - **New work starts from today's main** Adding a repository to a workspace (New task, Add repository, Start from an issue, lazybox new) first fetches its default branch from origin and starts the workspace's branch there, never from a stale copy or another branch; your checkout is not touched. Offline, it starts from the last main Lazybox knows and says so. A branch you chose to continue starts where you said.
+- **Start from another branch** Each repository in New task shows where its branch starts, from main ▾. Click it or press ⌥B to pick another branch of origin from a searchable list (recent and most active first); Lazybox fetches it first and remembers the choice per repository, so the next task starts there too. Add repository and lazybox new --start-from take the same choice.
+- **A repository whose history changed on GitHub** When a repository was force-pushed with a new history, or a new repository took its name, New task says so plainly instead of "repository identity changed", and Replace Lazybox's copy shows what it changes, copies it afresh and starts again. Workspaces made from the old copy keep their worktrees. Settings → Repositories offers Replace copy… too.
 - **New task in the header** The header's main button is New task ⌘N: repositories, an agent and what to do, in one sheet. The chat icon beside it starts a conversation in the workspace you are in (⇧⌘N), and the welcome's second step is Start a task.
 - **Tabs behind stay out of the way** A conversation in a tab behind another no longer holds a live connection; it catches up the moment you bring it forward. In a browser window with many tabs, a review's card and the window's other reads no longer wait behind them.
 - **Tidier agent rows** A conversation whose sub-agents are listed under it no longer repeats their count on its own line, and a sub-agent panel says Ended without a report once.
@@ -78,6 +82,7 @@ leave out.
 
 - **Send now** While the agent works, ↵ queues your message and ⌘↵ sends it now: the current step stops and your message is the next turn. A queued message shows once, above the message box.
 - **Who answers, and how full the context is** Under your message: the agent and model, and a context meter that turns amber at 60% and red at 85%. /model lists the models you can switch to.
+- **The ⋯ menu shows what is current** A conversation's permission mode and model are shown selected, like Activity detail: YOLO no longer looks unavailable when it is the mode in use, and only a mode the agent cannot take (YOLO in plan mode) is greyed, with why. A conversation on its agent's default model shows Default as current, a Codex conversation names its model from the start, and a long list of models shows the first few, then More.
 - **Attachments are boxes** Files, images, PDFs and big pastes sit above the message as boxes you preview, reorder and remove. Claude, Codex and ACP agents all receive them.
 - **A quieter conversation** What Lazybox tells an agent is one event line, a restart is a small mark, background work is counted, and the usage popover breaks down what tokens cost.
 - **Long conversations open at once** The latest turns show first; earlier ones load behind them.
@@ -88,6 +93,7 @@ leave out.
 - **Diagrams that render, or say why** A Mermaid diagram that cannot be drawn names the reason, and one that failed for a passing reason renders again by itself.
 - **An agent that runs agents** /orchestrate lets one conversation start and drive agents for a mission: a plan you approve, a budget, and limits you set. The missions board shows their work as it happens.
 - **Ask an agent to start a conversation** Tell an agent in its chat to start another conversation and it asks you in a card: Start opens it as a tab, Edit… changes the title, brief, agent or workspace first, Deny says why. The card says when it would share the workspace with other running agents and offers a new workspace in one click; the Inbox and your phone show it too.
+- **Older conversations learn what's new** A conversation that started before Lazybox gained something (handing work to Codex with lazybox conversation new --provider, say) hears only what changed with your next message, once and never mid-turn, shown as one quiet line you can open: Lazybox told Claude about new features.
 - **Steer Claude mid-turn** A queued message has Steer for Claude, as for Codex: the agent reads it after the step it is on, without stopping. ⌘↵ still stops and sends.
 - **Keyboard all the way** ⌘K commands keep your draft, the model under the message box opens /model from the keyboard, a restart asks in a card Enter confirms, and the Enter that confirms Japanese, Chinese or Korean input no longer sends.
 - **A steadier conversation** No false Reconnecting when nothing is happening; text added while a message sends is kept; past 256 sub-agents the oldest finished ones make room; dismissed failures stay dismissed; typing in a long conversation no longer rescans it; what you do right after inserting a snippet (select all, then Delete) is no longer undone.
@@ -100,6 +106,7 @@ leave out.
 - **The other agent reviews** Codex reviews Claude's work and Claude reviews Codex's, or choose a reviewer in Settings → Agents & workspaces.
 - **Clean means clean** A review with majors still open says so, and Send findings puts them in the author's message box for you to send.
 - **One review at a time** Review in the header and /review start through one launcher, so a double start never runs two reviews of the same work.
+- **Cancel a review** Cancel review on its card (or Esc on it, the reviewer's ⋯ menu, ⌘K, lazybox review cancel) stops the reviewer now and starts no further round; its conversation and findings stay, and Review again starts it over. Ending the reviewer's conversation yourself stops the review too, so a card never stays reviewing.
 
 ### Pull requests and issues
 
@@ -142,6 +149,7 @@ leave out.
 - **Agents outlive the Runner** Restarting or updating the Runner leaves agents, commands and terminals running; the new Runner picks them back up within seconds, and an approval that was waiting stays waiting.
 - **Back after your Mac restarts** A conversation whose agent was running keeps its checkpoints, commands and queued messages, and resumes the agent's own session with your next message.
 - **Said plainly when something is off** No network, a Runner on another version than the app, an update that did not finish: one sentence each, with the fix.
+- **Owner uncertain, settled** A workspace or conversation a previous Lazybox left with agents or commands it can't confirm stopped no longer blocks new conversations and deleting with no way out. Lazybox checks each recorded process by its ID and start time and clears what is gone by itself, which after your Mac restarts is everything. Otherwise Delete, New conversation, the workspace's page and the conversation show which agent or command, its PID and command line, and whether it runs, with Stop them and continue, or They're already stopped, continue.
 
 ### Security
 

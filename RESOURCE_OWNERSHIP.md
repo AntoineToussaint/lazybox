@@ -42,6 +42,56 @@ starting kills the program too, never leaving it outside the group. It does not
 make a lost process reconnectable. Historical conversation recovery remains conservative and does
 not automatically replay messages, approvals or provider effects.
 
+## Unconfirmed ownership
+
+A workspace records the sessions (conversations' attempts) that work in it. A
+Runner that starts reads those records, re-attaches the agents it can
+([session hosts](SESSION_HOSTS.md)), and is left with the ones it did not:
+their **ownership is unconfirmed** ("Owner uncertain" on the workspace's row).
+Nothing this Runner holds says their agent and commands stopped, and one that
+still ran would be writing in the workspace with no Runner watching. So until
+it is settled the workspace takes no new conversation, is not archived or
+deleted, and the conversation is not deleted or resumed. A conversation can be
+unconfirmed on its own too ("needs recovery"): a previous Runner left it open,
+or one of its commands' stop was never confirmed.
+
+`GetOwnership` (owner only) says what is unconfirmed, for a workspace or a
+conversation: each recorded agent and command, its PID and command line where
+recorded, and whether a process with that identity still runs, checked by the
+Runner (`internal/runner/ownership.go`):
+
+- A session host that answers with its secret token is the recorded one:
+  **running**. One whose record is gone or that refuses connections is gone,
+  and its program with it (processguard): **gone**.
+- A host that does not answer is checked by its PID **and start time**
+  (`internal/procid`, recorded in the host's record): the same start is the
+  same process (**running**); a free PID or one with another start time (the
+  system gave the number to another program) is **gone**. A record without a
+  start time and a live PID is **unknown**: a PID alone is never an identity.
+- A command that started before the computer last started is **gone**.
+- No host left for an agent means its agent is gone: every agent runs in one.
+
+What it proves gone it settles there and then, and the Runner does the same
+for every unconfirmed session when it starts (`SettleProvenOwnership`, after
+re-attaching): after the computer restarts nobody is asked anything.
+Otherwise the person chooses (`ResolveOwnership`, owner only):
+
+- **Stop them and continue** stops exactly the recorded processes that run:
+  a host that answers through its own control connection, one this Runner
+  holds as its owner would, and one that does not answer by `SIGKILL` only
+  while its PID still has the recorded start time. Never a recycled PID, never
+  a process-name match.
+- **They're already stopped, continue** records the person's word, as
+  `processes_stopped` does on resume. It is refused for a process the Runner
+  can see running.
+
+Settling records the resolution on the workspace (`lastOwnershipResolution`)
+and on each unconfirmed command (`<id>.settled` beside its journal), and ends
+a conversation the previous Runner left open as interrupted, with a notice and
+its queued messages kept: it continues by sending a message, as after a reboot.
+The older `ReconcileCollection` (one named owner at a time, with a reason)
+remains for scripts.
+
 ## Agent credentials
 
 The owner's `endpoint.json` holds the bearer that can do anything: approve,
@@ -139,8 +189,9 @@ subagents. Restart is required to adopt changed Runner configuration.
   cleanup capability; this is reported as uncertain, not silently repaired.
 - Other subprocess paths (Git operations, login helpers and snippet tools) and
   provider behavior that creates detached groups need individual qualification.
-- An evidence-based reconciliation operation for uncertain managed resources;
-  no automatic slot release based only on process names or historical PIDs.
+- Evidence for processes outside a session host: a `lazybox run` pipe's PID
+  has no recorded start time, so a live PID there stays "unknown" (see
+  [Unconfirmed ownership](#unconfirmed-ownership)).
 - Per-attempt quotas, resource accounting and Linux runtime qualification.
 
 Codefly remains the native service supervisor. Hub agent/assignment state remains

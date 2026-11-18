@@ -16,10 +16,10 @@ import (
 // comments, quoted as external content, after the person's own words.
 
 type fromItem struct {
-	reference, name, branch, profile, permission string
-	repos                                        []string
-	another, noComments                          bool
-	message                                      string
+	reference, name, branch, startFrom, profile, permission string
+	repos                                                   []string
+	another, noComments                                     bool
+	message                                                 string
 }
 
 func (c *cli) newFromItem(o fromItem) error {
@@ -88,7 +88,7 @@ func (c *cli) newFromItem(o fromItem) error {
 			return fail(exitFailure, "no agent subscription on this Runner: add one in Settings → Subscriptions")
 		}
 	}
-	stream, err := cl.PrepareWorkspace(c.ctx, connect.NewRequest(&pb.PrepareWorkspaceRequest{RequestKey: commands.ID(), Name: o.name, RepositoryIdentities: identities, Branch: o.branch, Item: ref}))
+	stream, err := cl.PrepareWorkspace(c.ctx, connect.NewRequest(&pb.PrepareWorkspaceRequest{RequestKey: commands.ID(), Name: o.name, RepositoryIdentities: identities, Branch: o.branch, StartFrom: startsFor(identities, o.startFrom), Item: ref}))
 	if err != nil {
 		return cl.explain(err)
 	}
@@ -134,6 +134,20 @@ func (c *cli) newFromItem(o fromItem) error {
 	c.out("%s\n", created.Id)
 	c.note("Started “%s” from %s on %s; the agent has the issue. Follow it with: lazybox watch %s\n", created.Name, ref.Key, branch, opened.Session.Id)
 	return nil
+}
+
+// startsFor is --start-from for every repository of a new workspace; nil
+// without it, so each starts from its remembered branch (WORKSPACES.md, "Start from").
+func startsFor(identities []string, branch string) map[string]string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return nil
+	}
+	starts := map[string]string{}
+	for _, identity := range identities {
+		starts[identity] = branch
+	}
+	return starts
 }
 
 // itemMessage is the first message: the person's words (or a plain request to

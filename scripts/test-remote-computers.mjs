@@ -27,6 +27,8 @@ Object.assign(box.collections[1], { name: 'Nightly evals' });
 const state = { added: false, remote: { host: 'build-box', route: 'ssh', machine: 'build-box', os: 'Linux', fingerprint: 'SHA256:q1w2e3r4t5y6u7i8o9p0', state: 'connected', rttMs: 42, code: '', problem: '' }, adds: [], removes: [] };
 const runners = () => [
   { id: 'dev', name: 'dev', channel: 'dev', product: 'Lazybox Dev', source: 'registered', locator: '/Users/me/.config/lazybox/runners/dev.json', current: true, state: 'running' },
+  // Another local Runner, running: opt-in, so this window leaves it out (and never calls it) while the computer the person added shows.
+  { id: 'working', name: 'working', channel: 'working', product: 'Lazybox', source: 'registered', locator: '/Users/me/.config/lazybox/runners/working.json', current: false, state: 'running', url: '/__lazybox/runner/working-never-called', token: 'not-a-token' },
   ...(state.added ? [{ id: 'buildbox', name: 'build-box', product: 'Lazybox', source: 'registered', locator: '/Users/me/.config/lazybox/runners/build-box.json', current: false, state: 'running', url: '/__lazybox/runner/box', token: box.token, remote: { ...state.remote } }] : []),
 ];
 const hosts = [
@@ -91,6 +93,10 @@ try {
       await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Settings' }).click();
       await page.getByRole('tab', { name: 'Runners', exact: true }).click();
     };
+    // Working, on this Mac, is pointed out once and left out; dismissed here.
+    const hint = page.locator('.toast').filter({ hasText: 'Lazybox Working is also running on this Mac' });
+    await hint.getByRole('button', { name: 'Dismiss' }).click();
+    await expect(hint).toHaveCount(0);
 
     if (scheme === 'dark') {
       // One Runner, no computer yet: no machine headers.
@@ -154,6 +160,9 @@ try {
     await expect(boxGroup).toHaveAttribute('data-health', 'online');
     await expect(boxGroup).toContainText('GPU training');
     await expect(mac.locator('.runner-group')).toContainText('Alpha feature');
+    // The computer added explicitly is shown; Working, another local Runner, is not (opt-in).
+    await expect(mac.locator('.runner-group')).toHaveCount(1);
+    await expect(page.locator('.runner-group[data-runner=working]')).toHaveCount(0);
     await page.mouse.move(0, 0);
     await page.locator('.panel-collections').screenshot({ path: `.cache/remote-computers-sidebar-${scheme}.png` }).catch(() => {});
 

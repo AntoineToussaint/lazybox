@@ -1,13 +1,13 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { Collection } from '@lazybox/protocol';
-import type { RunnerDirectoryHost, RunnerListing, ViewStateStore } from '@lazybox/platform';
+import type { AppHost, RunnerDirectoryHost, RunnerListing, ViewStateStore } from '@lazybox/platform';
 import { RunnerStateProvider, useRunner, useRunnerState, type RunnerConnection, type RunnerState } from './RunnerContext';
 import { useRunnerListing } from './runner-locator';
 import { useWorkspaceCatalog } from './useWorkspaceCatalog';
 import { AttentionScope, markSeenIn, readSeenText, subscribeAttention, useAttentionHost, useAttentionRoot, useInbox } from './useAttention';
 import { conversationKey, parseSeen, seenMark, type AttentionState } from './attention';
 import { mergeConversations } from './conversation-model';
-import { healthLabel, launchRunner, mergeInboxes, orderRunners, OWN_RUNNER, parseRunnerPreferences, RUNNER_PREFERENCES, runnerHealth, splitKey, type RunnerHealth, type RunnerInbox, type RunnerPreferences, type RunnerRow, type RunnerSummary } from './runner-directory';
+import { healthLabel, launchRunner, mergeInboxes, orderRunners, OWN_RUNNER, parseRunnerPreferences, RUNNER_PREFERENCES, runnerHealth, runnerLabel, splitKey, unnoticedRunners, windowChannel, withRunnerShown, type RunnerHealth, type RunnerInbox, type RunnerPreferences, type RunnerRow, type RunnerSummary } from './runner-directory';
 import { PREFERENCE_EVENT, readPreference, writePreference } from './view-state';
 import { showToast } from './toasts';
 import { Icon } from './Icons';
@@ -128,7 +128,9 @@ export function RunnerDirectoryProvider({ host, viewState, ownName = '', childre
   const reread = useCallback(async () => { await rereadListing().catch(() => {}); }, [rereadListing]);
 
   const fetch = own.connection.fetch;
-  const connected = listings.filter(listing => !listing.current && listing.url && listing.token && !preferences.hidden.includes(listing.id) && summaries.some(row => row.id === listing.id));
+  // Only the Runners the window shows are connected: a hidden one (another local Runner by default) is not called at all.
+  const connected = listings.filter(listing => !listing.current && listing.url && listing.token && summaries.some(row => row.id === listing.id && !row.hidden));
+  useRunnerHint(listings, preferences, setPreferences, ready && !!host);
   const value = useMemo<Directory>(() => ({ runners, shown: runners.filter(row => !row.hidden), multi, active, activate, target, preferences, setPreferences, host, listError, ready, launching, reread }),
     [runners, multi, active, activate, target, preferences, setPreferences, host, listError, ready, launching, reread]);
   return <DirectoryContext.Provider value={value}>
@@ -136,6 +138,35 @@ export function RunnerDirectoryProvider({ host, viewState, ownName = '', childre
     {multi && runners.filter(row => row.state && !row.hidden).map(row => <RunnerStateProvider key={row.id} state={row.state!}><RunnerExtras id={row.id} onExtras={reportExtras}/></RunnerStateProvider>)}
     {children}
   </DirectoryContext.Provider>;
+}
+
+/**
+ * One quiet hint, the first time another local Runner is found running: the
+ * window shows only its own Runner, so it says once that Working (or Dev)
+ * runs too and offers to show it here. Each Runner is pointed out once, ever
+ * (`noticed`); dismissing the hint is enough.
+ */
+function useRunnerHint(listings: readonly RunnerListing[], preferences: RunnerPreferences, setPreferences: (next: RunnerPreferences) => void, ready: boolean) {
+  const latest = useRef(preferences); latest.current = preferences;
+  const unnoticed = useMemo(() => ready ? unnoticedRunners(listings, preferences) : [], [ready, listings, preferences]);
+  useEffect(() => {
+    if (!unnoticed.length) return;
+    const first = unnoticed[0], label = runnerLabel(first);
+    // Working's app is called plain "Lazybox": the hint names it by its channel.
+    const name = label === 'Release' ? 'The installed Lazybox' : `Lazybox ${label}`;
+    setPreferences({ ...latest.current, noticed: [...latest.current.noticed, ...unnoticed.map(listing => listing.id)].slice(-64) });
+    showToast({ id: 'runner-hint', tone: 'info', title: `${name} is also running on this Mac`, body: 'Show it here? (Settings → Runners)', timeout: 20_000,
+      button: { label: 'Show it here', run: () => setPreferences(withRunnerShown(latest.current, first.id, true)) } });
+  }, [unnoticed, setPreferences]);
+}
+
+/** The window's channel by its brand ("Dev", "Working"); empty for the release app. */
+export function useWindowChannel(app?: AppHost): string {
+  const directory = useRunnerDirectory();
+  const own = directory?.runners.find(row => row.own)?.channel || '';
+  const [appChannel, setAppChannel] = useState('');
+  useEffect(() => { if (own || !app) return; let live = true; void app.info().then(info => { if (live) setAppChannel(info.channel); }, () => {}); return () => { live = false; }; }, [app, own]);
+  return windowChannel(own, appChannel);
 }
 
 /** Another Runner's connection: its own link, bearer and renewal, from its listing. */

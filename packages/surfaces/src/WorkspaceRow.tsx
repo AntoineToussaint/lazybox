@@ -15,6 +15,7 @@ import { useUnread } from "./useAttention";
 import { SessionMark, useLiveStatus } from "./LiveIndicator";
 import { generatedName, repositoryGroups, suggestWorkspaceName } from "./repository-model";
 import { useWorkspaceHover, WorkspaceHoverCard } from "./WorkspaceHover";
+import { OwnershipDialog } from "./OwnershipPanel";
 import "./inbox.css";
 
 /**
@@ -88,9 +89,21 @@ export function WorkspaceRow({
   const marker = featured ? unread(featured) : "";
   const line = featured ? agentLine(featured, info?.profiles || [], Math.max(0, conversationCount - 1)) : undefined;
   const rename = () => { setName(workspace.name); setError(""); setEditing(true); };
+  // What a previous Lazybox left here unconfirmed: shown and settled first,
+  // then the action that waited for it goes on ("then").
+  const [settling, setSettling] = useState<{ then(): void }>();
+  const newConversation = async () => {
+    if (!workspace.ownershipUncertain) return onNewConversation();
+    // The Runner clears by itself what it proves stopped: then nothing is asked.
+    try {
+      if ((await api.getOwnership({ collectionId: workspace.id, sessionId: "" }, { timeoutMs: 30_000 })).settled) { onSaved(); onNewConversation(); return; }
+    } catch { /* the dialog says what failed */ }
+    setSettling({ then: onNewConversation });
+  };
   // The ⋯ menu and the row's context menu: one list.
   const items: MenuItem[] = [
-    { label: "New conversation", icon: "plus", disabled: (workspace.state !== "ready" || workspace.ownershipUncertain) && "The workspace is not ready", run: onNewConversation },
+    { label: "New conversation", icon: "plus", disabled: workspace.state !== "ready" && "The workspace is not ready", run: newConversation },
+    workspace.ownershipUncertain && { label: "Settle unconfirmed processes…", icon: "alert", run: () => setSettling({ then: onSaved }) },
     "separator",
     { label: "Add repositories…", icon: "repository", run: onAdd },
     { label: "Manage repositories…", icon: "sliders", run: onManage },
@@ -197,7 +210,7 @@ export function WorkspaceRow({
             )}
           </span>
           {workspace.ownershipUncertain && (
-            <span className="workspace-owner-uncertain" role="img" aria-label="Owner uncertain" title="Owner uncertain: a previous Runner left agents or commands here that it cannot confirm have stopped. New conversations and deleting wait until it is reconciled.">
+            <span className="workspace-owner-uncertain" role="img" aria-label="Owner uncertain" title="Owner uncertain: a previous Lazybox left agents or commands here that it can’t confirm stopped. New conversations and deleting wait until that is settled. New conversation, or Settle unconfirmed processes in this workspace’s menu, shows which and lets you stop them or say they’ve stopped.">
               <Icon name="alert" size={12} />
             </span>
           )}
@@ -236,11 +249,16 @@ export function WorkspaceRow({
           className="workspace-new-conversation icon-button"
           aria-label={`New conversation in ${workspace.name}`}
           title="New conversation"
-          disabled={workspace.state !== "ready" || workspace.ownershipUncertain}
-          onClick={onNewConversation}
+          disabled={workspace.state !== "ready"}
+          onClick={newConversation}
         >
           <Icon name="plus" size={15} />
         </button>
+      )}
+      {settling && (
+        <OwnershipDialog target={{ collectionId: workspace.id }} title="Settle what a previous Lazybox left here" subject={workspace.name}
+          what="New conversations and deleting this workspace wait" onClose={() => setSettling(undefined)}
+          onSettled={() => { const then = settling.then; setSettling(undefined); onSaved(); then(); }}/>
       )}
       {!editing && (
         <ActionMenu ref={action} label={`Actions for ${workspace.name}`}>
@@ -249,7 +267,7 @@ export function WorkspaceRow({
       )}
       {hover && card.open && !editing && (
         <WorkspaceHoverCard open={card.open} workspace={workspace} repositoryNames={repositoryNames} sessions={hover.sessions} summary={hover.summary} links={hover.links}
-          onOpen={onSelect} onNewConversation={onNewConversation} onOpenConversation={hover.onOpenConversation} />
+          onOpen={onSelect} onNewConversation={newConversation} onOpenConversation={hover.onOpenConversation} />
       )}
     </div>
   );

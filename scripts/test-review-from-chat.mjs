@@ -142,6 +142,99 @@ try{
  await page.screenshot({path:'.cache/review-from-chat-fallback.png'});
  fixture.availability.codex.installed=true;
 
+ // 8. Cancel review (GITHUB.md, "Cancelling a review"): from the card, the keyboard, the reviewer's ⋯ menu and ⌘K.
+ const cancels=()=>fixture.mutations.filter(m=>m.method==='CancelReview').map(m=>m.body);
+ const lastCard=()=>chat().locator('.messages:visible .review-card').last();
+ const newest=()=>fixture.reviewOf('alpha').runs.at(-1);
+ // 8a. The card, with nothing filed yet: no question, it stops at once and says what it kept.
+ await expect(lastCard()).toContainText('Claude is reviewing changes');
+ await lastCard().getByRole('button',{name:'Cancel review'}).click();
+ await expect.poll(()=>cancels().length).toBe(1);
+ assert.equal(cancels()[0].reviewId,fallback.id);
+ await expect(page.getByRole('dialog',{name:'Cancel review'})).toHaveCount(0);
+ await expect(lastCard()).toContainText('Review cancelled · 0 findings kept');
+ await expect(lastCard()).toContainText('You cancelled it');
+ await expect(lastCard().getByRole('button',{name:'Cancel review'})).toHaveCount(0);
+ assert.equal(fixture.sessions.find(s=>s.id===fallback.reviewerSessionId).closed,true,'its session ended');
+ assert.equal(newest().stoppedBy,'You');
+ await page.screenshot({path:'.cache/review-cancelled-card.png'});
+ // Review again: the same scope, by the same reviewer.
+ await lastCard().getByRole('button',{name:'Review again'}).click();
+ await expect.poll(()=>starts().length).toBe(6);
+ assert.deepEqual(pick(starts()[5]),{provider:'',profileId:fallback.reviewerProfileId,focus:'',scope:'changes',compare:''});
+ await expect(lastCard()).toContainText('Claude is reviewing changes');
+
+ // 8b. The keyboard, with a finding filed: Esc on the card asks first; Esc in the question keeps it reviewing.
+ const again=newest();
+ fixture.fileFinding(again.id,{path:'src/handler.go',startLine:3,snippet:['x'],severity:'major',title:'Wrap the error'});
+ await expect(lastCard()).toContainText('1 major so far',{timeout:15000});
+ await lastCard().focus();
+ await page.keyboard.press('Escape');
+ const ask=page.getByRole('dialog',{name:'Cancel review'});
+ await expect(ask).toBeVisible();
+ await expect(ask).toContainText('1 finding filed');
+ await expect(ask).toContainText('stays in the Review tray');
+ await page.screenshot({path:'.cache/review-cancel-confirm.png'});
+ await page.keyboard.press('Escape');
+ await expect(ask).toHaveCount(0);
+ assert.equal(cancels().length,1,'Esc in the question keeps the review');
+ await expect(lastCard()).toContainText('Claude is reviewing changes');
+ await lastCard().focus();
+ await page.keyboard.press('Escape');
+ await ask.getByRole('button',{name:'Cancel review'}).click();
+ await expect.poll(()=>cancels().length).toBe(2);
+ await expect(lastCard()).toContainText('Review cancelled · 1 finding kept');
+ assert.equal(fixture.reviewOf('alpha').comments.filter(c=>c.reviewId===again.id).length,1,'the finding is kept');
+
+ // 8c. The reviewer conversation's ⋯ menu.
+ // Another review, by whichever reviewer is the default now (Codex is back).
+ const another=async count=>{
+  await chat().locator('.chat-heading').getByRole('button',{name:/^Review with /}).click();
+  await expect.poll(()=>starts().length).toBe(count);
+  const run=newest();
+  await expect(lastCard()).toContainText(`${run.reviewerLabel} is reviewing changes`);
+  return run;
+ };
+ const viaMenu=await another(7);
+ // The card's Open conversation shows the reviewer (the page is full of review tabs by now).
+ const openReviewer=async run=>{
+  await lastCard().getByRole('button',{name:'Open conversation'}).click();
+  await expect(chat().locator('.chat-heading')).toContainText(`Review · Changes · ${run.reviewerLabel}`);
+  await expect(chat().locator('.messages:visible')).toContainText(`Asked ${run.reviewerLabel} to review Claude's work`);
+  await chat().locator('.chat-heading').getByLabel('Session actions',{exact:true}).click();
+ };
+ const backToWork=async()=>{await page.getByRole('navigation',{name:'Workspaces'}).getByText('Harden the handler',{exact:true}).first().click();await expect(chat().locator('.messages:visible')).toContainText('REPLY_ONE');};
+ await openReviewer(viaMenu);
+ await page.getByRole('button',{name:'Cancel review'}).click();
+ await expect.poll(()=>cancels().length).toBe(3);
+ assert.equal(cancels()[2].reviewId,viaMenu.id);
+ await backToWork();
+ await expect(lastCard()).toContainText('Review cancelled · 0 findings kept');
+
+ // 8d. ⌘K "Cancel review".
+ const viaPalette=await another(8);
+ await page.keyboard.press(`${mod}+k`);
+ const commands=page.getByRole('dialog',{name:'Command palette'});
+ await commands.getByRole('combobox',{name:'Search commands'}).fill('cancel review');
+ await expect(commands.getByRole('option').first()).toContainText('Cancel review');
+ await page.keyboard.press('Enter');
+ await expect.poll(()=>cancels().length).toBe(4);
+ assert.equal(cancels()[3].reviewId,viaPalette.id);
+ await expect(lastCard()).toContainText('Review cancelled · 0 findings kept');
+
+ // 8e. Ending the reviewer by hand (its ⋯ End session) moves the card out of "reviewing": Review stopped.
+ const ended=await another(9);
+ await openReviewer(ended);
+ await page.getByRole('button',{name:'End session',exact:true}).click();
+ await expect.poll(()=>fixture.mutations.filter(m=>m.method==='StopSessionResources'&&m.body.sessionId===ended.reviewerSessionId).length).toBe(1);
+ await backToWork();
+ await expect(lastCard()).toContainText('Review stopped · 0 findings kept');
+ await expect(lastCard()).toContainText(`You ended ${ended.reviewerLabel}'s conversation; the review stopped.`);
+ await expect(lastCard().getByRole('button',{name:'Cancel review'})).toHaveCount(0);
+ await expect(lastCard().getByRole('button',{name:'Review again'})).toBeVisible();
+ assert.equal(cancels().length,4,'ending it is not a cancel');
+ await page.screenshot({path:'.cache/review-stopped-card.png'});
+
  assert.deepEqual(errors,[]);
- console.log('Review from the chat: the header button, /review <focus> and ⌘K; the other agent by default, the fallback said; a background tab with its findings; the sidebar row focuses it.');
+ console.log('Review from the chat: the header button, /review <focus> and ⌘K; the other agent by default, the fallback said; a background tab with its findings; the sidebar row focuses it; cancelled from the card, Esc, the reviewer’s menu and ⌘K; stopped when its reviewer is ended.');
 }finally{await browser?.close();await server.close();await fixture.close();}

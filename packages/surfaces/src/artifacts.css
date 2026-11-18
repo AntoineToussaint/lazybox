@@ -2,12 +2,13 @@
 .visually-hidden{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 
 /* The message action: quiet until the message is hovered or focused. */
-.message:has(.message-artifact-actions){position:relative}
-.message-artifact-actions{position:absolute;top:8px;right:0;display:flex;align-items:center;gap:6px;z-index:1}
-.message-artifact-button{display:inline-flex;align-items:center;gap:5px;padding:3px 8px!important;font-size:calc(11px * var(--text-scale))!important;border-radius:6px!important;background:var(--surface-hover)!important;border:1px solid var(--line-strong)!important;color:var(--text-tertiary)!important;opacity:0;transition:opacity .12s}
+/* Track sits in a gutter the message keeps free, so it never covers text. */
+.message:has(.message-artifact-actions){position:relative;padding-right:32px}
+.message-artifact-actions{position:absolute;top:6px;right:0;display:flex;flex-direction:column;align-items:flex-end;gap:6px;z-index:1}
+.message-artifact-button{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0!important;font-size:calc(11px * var(--text-scale))!important;border-radius:6px!important;background:var(--surface-hover)!important;border:1px solid var(--line-strong)!important;color:var(--text-tertiary)!important;opacity:0;transition:opacity .12s}
 .message:hover .message-artifact-button,.message-artifact-button:focus-visible{opacity:1}
 .message-artifact-button:hover{color:var(--text)!important;border-color:var(--accent-line)!important}
-.message-artifact-note{max-width:320px;padding:4px 8px;border-radius:6px;background:var(--surface-selected);border:1px solid var(--line-strong);color:var(--text-secondary);font-size:calc(11px * var(--text-scale));line-height:1.4}
+.message-artifact-note{max-width:320px;position:absolute;top:32px;right:0;white-space:normal;padding:4px 8px;border-radius:6px;background:var(--surface-selected);border:1px solid var(--line-strong);color:var(--text-secondary);font-size:calc(11px * var(--text-scale));line-height:1.4}
 @media (hover:none){.message-artifact-button{opacity:1}}
 
 /* An artifact in the conversation (ArtifactCard): published by an agent, or tracked from a message. */

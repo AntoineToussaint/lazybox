@@ -36,10 +36,14 @@ import (
 // starts an agent under the grant, exactly as `lazybox agents spawn` does.
 // Nothing an agent sends ever answers a request; there is no auto-approval.
 
-// conversationBriefing is every coding agent's one line on starting another
-// conversation, apart from commandBriefing so the two change independently.
+// conversationBriefing is every coding agent's section on starting another
+// conversation, a versioned section of its own (briefing.go). It names
+// providers: an agent asked to hand work to Codex must know it can, and that
+// neither its own sub-agent tool nor a subscription switch does that.
 const conversationBriefing = `## Starting another conversation
-To start another conversation (e.g. the person asks you to), run ` + "`lazybox conversation new --title \"…\" --brief \"…\"`" + ` (` + "`--brief -`" + ` reads it from stdin, ` + "`--brief-artifact ID`" + ` hands over an artifact, ` + "`--workspace new`" + ` gives it its own branches); the person approves it in one click.`
+To start another conversation (e.g. the person asks you to), run ` + "`lazybox conversation new --title \"…\" --brief \"…\"`" + ` (` + "`--brief -`" + ` reads it from stdin, ` + "`--brief-artifact ID`" + ` hands over an artifact, ` + "`--workspace new`" + ` gives it its own branches); the person approves it in one click.
+- To hand work to another agent, including one of a different provider (e.g. Codex), use ` + "`lazybox conversation new --provider codex …`" + ` (` + "`--provider`" + ` takes claude, codex or an ACP agent; ` + "`--model`" + ` and ` + "`--profile`" + ` choose its model and subscription). Your own sub-agent tool only starts copies of yourself.
+- Switching this conversation's subscription never changes its provider: it continues with the same agent on another account of that provider. To continue with another provider, start a conversation with ` + "`--provider`" + ` and hand over the context with ` + "`--brief-artifact ID`" + `.`
 
 // Conversation start request states.
 const (
@@ -77,6 +81,9 @@ type ConversationStartAsk struct {
 	// Workspace is "same" (default) or "new".
 	Workspace                string
 	Provider, Profile, Model string
+	// StartFrom: with Workspace "new", the branch of origin its repositories
+	// start from instead of the asking workspace's branches.
+	StartFrom string
 }
 
 // ConversationStartAnswer is the person's answer: "start" with their edits
@@ -100,10 +107,12 @@ type ConversationStart struct {
 	Brief  string `json:"brief,omitempty"`
 	Reason string `json:"reason,omitempty"`
 	// Mode is "same" or "new".
-	Mode     string `json:"mode"`
-	Provider string `json:"provider"`
-	Profile  string `json:"profile"`
-	Model    string `json:"model,omitempty"`
+	Mode string `json:"mode"`
+	// StartFrom: Mode "new" from this branch of origin, not the asking workspace's branches.
+	StartFrom string `json:"startFrom,omitempty"`
+	Provider  string `json:"provider"`
+	Profile   string `json:"profile"`
+	Model     string `json:"model,omitempty"`
 	// Permission and Gateway are the asking conversation's: the new one gets no more.
 	Permission      string `json:"permission,omitempty"`
 	Gateway         string `json:"gateway,omitempty"`
@@ -375,6 +384,14 @@ func (b *Bench) RequestConversationStart(ctx context.Context, ask ConversationSt
 	if r.Mode == "new" && (e.CollectionID == "" || b.Collections == nil) {
 		return ConversationStart{}, fmt.Errorf("%w: --workspace new needs a workspace to branch from; this conversation has none", ErrInvalidConversationStart)
 	}
+	if r.StartFrom = strings.TrimSpace(ask.StartFrom); r.StartFrom != "" {
+		if r.Mode != "new" {
+			return ConversationStart{}, fmt.Errorf("%w: --start-from needs --workspace new (this workspace's files are already on their branches)", ErrInvalidConversationStart)
+		}
+		if len(r.StartFrom) > 255 || strings.HasPrefix(r.StartFrom, "-") || strings.ContainsAny(r.StartFrom, " \t\n\x00~^:?*[\\") {
+			return ConversationStart{}, fmt.Errorf("%w: --start-from %q is not a branch name", ErrInvalidConversationStart, r.StartFrom)
+		}
+	}
 	profile, err := b.startProfile(e.Profile, strings.TrimSpace(ask.Provider), strings.TrimSpace(ask.Profile))
 	if err != nil {
 		return ConversationStart{}, err
@@ -453,7 +470,7 @@ func (b *Bench) startUnderGrant(ctx context.Context, e *Execution, r Conversatio
 		}
 		brief = strings.TrimSpace(brief + "\n\n" + ref)
 	}
-	spawn := SpawnRequest{Session: e.ID, Title: r.Title, Brief: brief, Model: strings.TrimSpace(ask.Model), Workspace: r.Mode}
+	spawn := SpawnRequest{Session: e.ID, Title: r.Title, Brief: brief, Model: strings.TrimSpace(ask.Model), Workspace: r.Mode, StartFrom: r.StartFrom}
 	if ask.Profile != "" || ask.Provider != "" {
 		spawn.Profile = r.Profile
 	}
@@ -588,7 +605,7 @@ func (b *Bench) AnswerConversationStart(ctx context.Context, id string, a Conver
 		return ConversationStart{}, err
 	}
 	return b.resolveConversationStart(id, func(current *ConversationStart) {
-		current.Title, current.Brief, current.Mode, current.Profile, current.Provider, current.Model = r.Title, r.Brief, r.Mode, r.Profile, r.Provider, r.Model
+		current.Title, current.Brief, current.Mode, current.StartFrom, current.Profile, current.Provider, current.Model = r.Title, r.Brief, r.Mode, r.StartFrom, r.Profile, r.Provider, r.Model
 		current.State, current.StartedSession, current.StartedConversation, current.StartedWorkspace, current.StartedTitle = StartStarted, started.ID, conversationOf(started), started.CollectionID, r.Title
 	})
 }
@@ -612,6 +629,9 @@ func (b *Bench) editConversationStart(r *ConversationStart, a ConversationStartA
 		}
 		if r.Mode == "new" && r.Workspace == "" {
 			return fmt.Errorf("%w: a new workspace needs one to branch from; the asking conversation has none", ErrInvalidConversationStart)
+		}
+		if r.Mode != "new" {
+			r.StartFrom = "" // this workspace's files: there is nothing to start
 		}
 	}
 	if a.Profile != "" && a.Profile != r.Profile {
@@ -643,7 +663,7 @@ func (b *Bench) startPeer(ctx context.Context, r ConversationStart) (*Execution,
 		if b.Collections == nil || r.Workspace == "" {
 			return nil, fmt.Errorf("%w: a new workspace needs one to branch from", ErrInvalidConversationStart)
 		}
-		created, err := b.childWorkspace(ctx, r.Workspace, r.Title, "conversation-"+r.ID)
+		created, err := b.childWorkspace(ctx, r.Workspace, r.Title, "conversation-"+r.ID, r.StartFrom)
 		if err != nil {
 			return nil, err
 		}

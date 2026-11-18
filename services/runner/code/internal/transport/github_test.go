@@ -3,8 +3,10 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +41,12 @@ func (*fixtureGitHub) Repositories(context.Context, string, int64, int) ([]githu
 }
 func (*fixtureGitHub) Repository(context.Context, string, int64) (github.Repository, error) {
 	return githubRepo(), nil
+}
+func (*fixtureGitHub) RepositoryNamed(_ context.Context, _ string, name string) (github.Repository, error) {
+	if repo := githubRepo(); strings.EqualFold(name, repo.FullName) {
+		return repo, nil
+	}
+	return github.Repository{}, errors.New("GitHub has no repository by that name")
 }
 func (f *fixtureGitHub) Items(context.Context, string, string, int) ([]github.Item, bool, error) {
 	f.itemsCalls++

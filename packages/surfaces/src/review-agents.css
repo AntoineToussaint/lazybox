@@ -69,6 +69,11 @@
 .review-card-actions button{padding:3px 10px;font-size:calc(12px * var(--text-scale));border-radius:6px;border:1px solid var(--line-strong);background:var(--surface-active);color:var(--text-soft);cursor:pointer;width:auto}
 .review-card-actions button:hover{background:var(--surface-selected)}
 .review-card-actions button.primary{background:var(--accent-solid);border-color:transparent;color:var(--on-accent-solid)}
+/* Cancel review, Review again: an icon before the words. */
+.review-card-actions button:has(svg){display:inline-flex;align-items:center;gap:4px}
+.review-card-actions button.review-card-cancel:hover{color:var(--danger);border-color:var(--danger-line)}
+.review-card:focus-visible{outline:2px solid var(--accent-line);outline-offset:1px}
+.review-card.is-cancelled .review-card-icon,.review-card.is-stopped .review-card-icon{color:var(--text-muted)}
 
 .review-start-error,.review-action-error{display:flex;align-items:center;gap:8px}
 .review-start-error button,.review-action-error button{border:0;background:transparent;color:inherit;cursor:pointer;width:auto;padding:0 4px}

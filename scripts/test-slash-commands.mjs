@@ -17,6 +17,11 @@ const alpha=f.openEvents('alpha-session');alpha.push({type:'command_catalog',pro
 f.openEvents('beta-session');
 f.sessions.push({...structuredClone(f.sessions[1]),id:'codex-session',conversationId:'codex-conversation',title:'Codex refactor',provider:'codex',profileId:'codex-default',model:'gpt-6.1-sol',modelReported:true,busy:false,status:'ready',capabilities:{...f.sessions[1].capabilities,liveModel:true,resume:true,steer:true}});
 f.openEvents('codex-session').push({type:'command_catalog',providerDataJson:data({models:[{value:'gpt-6.1-sol',displayName:'GPT-6.1-Sol',description:'Workhorse'},{value:'gpt-6-astra',displayName:'GPT-6-Astra',description:'Frontier'},{value:'gpt-6-luna',displayName:'GPT-6-Luna',description:'Fast'},{value:'gpt-5.5',displayName:'GPT-5.5',description:'Legacy'}]})});
+// A Codex conversation of the "Work" subscription in YOLO, on Codex's own default model (none asked for, none reported
+// yet), whose app-server lists a dozen models: the ⋯ menu marks YOLO and Default as current, and switches for real.
+const manyModels=['gpt-6.1-sol','gpt-6-astra','gpt-6-luna','gpt-5.5','gpt-5.5-mini','gpt-5.4','gpt-5.4-mini','gpt-5.3','gpt-5.2','gpt-5.1','gpt-5','gpt-5-mini'].map(value=>({value,displayName:value.toUpperCase(),description:''}));
+f.sessions.push({...structuredClone(f.sessions[1]),id:'codex-default-session',conversationId:'codex-default-conversation',title:'Work refactor',provider:'codex',profileId:'codex-default',model:'',modelReported:false,permission:'yolo',busy:false,status:'ready',capabilities:{...f.sessions[1].capabilities,liveModel:true,livePermission:true,resume:true,steer:true}});
+f.openEvents('codex-default-session').push({type:'command_catalog',providerDataJson:data({models:manyModels})});
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,logLevel:'error',root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:f.url}}}});let browser;
 const mod='Meta';
 const applies=()=>f.mutations.filter(m=>m.method==='Apply');
@@ -266,6 +271,42 @@ try{
  await expect.poll(()=>applies().findLast(m=>m.body.sessionId==='codex-session')?.body.model?.model).toBe('gpt-6-luna');
  await expect(codexChat.locator('.command-line').filter({hasText:'Switched model to gpt-6-luna'})).toBeVisible();
  await expect(codexChat.locator('.restart-model')).toHaveCount(0);
+
+ // The ⋯ menu says what is current: YOLO is selected (pressed, not greyed out), and the provider's
+ // Default is the current model when the conversation names none. Twelve models: the first few, then More.
+ await go(`${base}/?view=workspace&collection=beta&session=codex-default-session#token=${f.token}`);
+ await page.getByText('Work refactor',{exact:true}).first().click();
+ const workChat=page.locator('.embedded-chat:visible').filter({hasText:'Work refactor'}).first();
+ await expect(workChat.getByRole('textbox',{name:'Message',exact:true})).toBeEnabled();
+ await workChat.locator('summary[aria-label="Session actions"]').click();
+ const workMenu=workChat.locator('.session-menu');
+ const permissionGroup=workMenu.getByRole('group',{name:'Permissions'}),modelGroup=workMenu.getByRole('group',{name:'Model'});
+ const yolo=permissionGroup.getByRole('button',{name:'YOLO',exact:true});
+ await expect(yolo).toHaveAttribute('aria-pressed','true');await expect(yolo).toBeEnabled();
+ assert.equal(await yolo.getAttribute('aria-disabled'),null,'the current mode is not unavailable');
+ await expect(permissionGroup.getByRole('button',{name:'Ask for approval',exact:true})).toHaveAttribute('aria-pressed','false');
+ await expect(modelGroup.getByRole('button',{name:'Default',exact:true})).toHaveAttribute('aria-pressed','true');
+ await expect(modelGroup.locator('button[aria-pressed=true]')).toHaveCount(1);
+ await expect(modelGroup.locator('button[data-model]')).toHaveCount(4);
+ const more=modelGroup.getByRole('button',{name:'More (9)'});
+ await page.screenshot({path:'.cache/slash-session-menu-default.png'});
+ // Choosing the current mode changes nothing.
+ const workApplied=applies().filter(m=>m.body.sessionId==="codex-default-session").length;
+ await yolo.click();
+ await workChat.locator('summary[aria-label="Session actions"]').click();
+ assert.equal(applies().filter(m=>m.body.sessionId==='codex-default-session').length,workApplied,"the current mode applies nothing");
+ // More shows the rest in place (the menu stays open) and the keyboard moves to the first one it revealed; a model there switches live.
+ await more.click();
+ await expect(modelGroup.locator('button[data-model]')).toHaveCount(13);
+ await expect(modelGroup.getByRole('button',{name:'GPT-5.5',exact:true})).toBeFocused();
+ await modelGroup.getByRole('button',{name:'GPT-5.4',exact:true}).click();
+ await expect.poll(()=>applies().findLast(m=>m.body.sessionId==='codex-default-session')?.body.model?.model).toBe('gpt-5.4');
+ await expect(workChat.locator('.command-line').filter({hasText:'Switched model to gpt-5.4'})).toBeVisible();
+ // The model it switched to is then the current one, and Default is gone.
+ await workChat.locator('summary[aria-label="Session actions"]').click();
+ await expect(modelGroup.getByRole('button',{name:'GPT-5.4',exact:true})).toHaveAttribute('aria-pressed','true');
+ await expect(modelGroup.getByRole('button',{name:'Default',exact:true})).toHaveCount(0);
+ await page.keyboard.press('Escape');
 
  // Vim: in insert mode the menu works and Esc closes it first; normal mode keeps its keys.
  await go(`${base}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);

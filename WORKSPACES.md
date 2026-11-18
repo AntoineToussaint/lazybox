@@ -41,7 +41,9 @@ identity does not expose another account's cached remote discovery.
 
 Repository selection is keyed by logical identity. The Runner resolves checkout
 paths and revalidates remote identity during preparation. **A new workspace
-branch starts from origin's default branch as it is now**: before creating
+branch starts from origin's default branch as it is now** (or from another
+branch the person chose for that repository: [Start from another
+branch](#start-from-another-branch)): before creating
 the worktree (New task, Add repository, Start from an issue, an agent's
 repository request, `lazybox new`, `lazybox create-collection --spec`), the Runner asks
 origin which branch its HEAD names (never assuming `main`), fetches it into
@@ -60,6 +62,53 @@ names use the repository name, adding a numeric suffix only for collisions.
 Explicit folder names still require uniqueness. Successful source preparations
 remain reusable after a later failure; retrying the same request does not clone
 again or create another workspace.
+
+### Start from another branch
+
+When the work belongs on a long-lived branch rather than the default one (a
+new product line developed on `feat/v2-command-output` while `main` is the
+released one), a repository's workspace can **start from** that branch of
+origin instead (`internal/runner/start_from.go`):
+
+- **New task.** Each chosen repository shows a quiet chip, **from main ▾**.
+  Clicking it, or `⌥B` (the focused repository's chip, else the first), opens
+  a searchable picker of origin's branches: origin's default first, then the
+  branches chosen lately, the five most recently committed (*Active*), then all
+  of them by name. Typing filters; a name origin has but the list does not
+  show yet can be typed and chosen (*Start from `x`*), and the Runner checks it
+  with origin. `↑`/`↓`, `↵` picks, `Esc` closes the picker (not the sheet).
+  The list is asked of origin only when a picker opens (one `ls-remote`,
+  nothing fetched) and reused for a minute; until then the chip uses what the
+  Runner already has, without the network. A repository not on the Runner yet
+  lists nothing; a typed branch still works.
+- **Add repository** and **New workspace** show the same chips under the
+  repository list, with the same picker and `⌥B`.
+- **Remembered per repository.** The Runner keeps the last choice by
+  repository identity (beside the workspace records, in
+  `.lazybox-collections/start-from.json`; it survives a restart). The next
+  workspace of that repository starts there without asking: New task's chip
+  already says **from feat/v2-command-output**, plainly where a default
+  reads quietly, and Add repository, Start from an issue, an agent's
+  repository request and `lazybox new` use it too. Choosing origin's default
+  branch again forgets it. A remembered branch that origin has since deleted
+  (merged) starts from the default branch instead, says so once (*feat/x is no
+  longer on origin; api starts from its default branch*) and is forgotten.
+- **Fresh, with the same offline fallback.** The chosen branch is fetched
+  first into `refs/remotes/origin/<branch>` (`gitpublish.RefreshBranch`;
+  `origin/HEAD` is left alone) and the workspace branches from that commit.
+  If origin cannot be reached it starts from the branch's last fetch and says
+  so: *Couldn't update api; started from feat/x as of Nov 17 09:12*
+  (`collections.BranchBase`). A branch this Runner never fetched cannot start a
+  workspace offline, and one origin does not have fails the preparation with
+  *api has no branch feat/x on origin: choose another to start from* — neither
+  is guessed.
+- **Elsewhere.** `PrepareWorkspace.start_from` maps repository identity to
+  branch (a repository not named uses its remembered branch; `""` or the
+  default branch's name means origin's default). `lazybox new … --start-from
+  B` (with `--from` for an issue too) applies B to every repository.
+  `lazybox conversation new --workspace new --start-from B` starts the new
+  workspace's repositories from origin's B, fetched first, instead of the
+  asking workspace's branches; the person sees it on the request.
 
 ## When an agent needs another repository
 
@@ -243,6 +292,36 @@ Older location-based caches retain their chosen folders but require an explicit
 refresh. The normalization reads origin configuration without a network request;
 unknown SSH aliases and GitHub Enterprise hosts are not guessed. Renames across
 old and new remote names cannot be reconciled offline by this identity model.
+
+### When a repository's history changes
+
+A GitHub repository is listed by its name (`github:owner/name`) and, once listed
+or copied, by GitHub's ID for it. The name can come to mean another history:
+the repository is renamed away and a new one (a new ID, a new root commit) is
+made under its name, or its history is force-pushed with a new root. Making a
+workspace from Lazybox's copy, or from a listing whose GitHub ID GitHub now
+gives another name, would silently mix two histories, so New task refuses it
+(`RepositoryReplaced`; it used to say only "repository identity changed;
+refresh and retry", which refreshing did not fix). The Runner checks a copy's
+GitHub ID against the name only when GitHub answers: offline it is not refused.
+
+The error card says plainly what happened ("The repository's history changed
+on GitHub since Lazybox copied it", or that the name now belongs to another
+repository) and offers **Replace Lazybox's copy**. It asks first and shows what
+changes (`RefreshRepositoryIdentity` without `confirm`): the repository GitHub
+has now, and the workspaces made from the old copy. Confirming clones a fresh
+copy into a directory of its own, registers it in place of the old one, and
+retries the start. **Settings → Repositories** offers the same for any GitHub
+repository (Replace copy…), for example after a force-push, which Lazybox
+does not detect by itself.
+
+Workspaces made from the old copy keep working: their worktrees are registered
+in the old copy, which stays on disk, hidden from the library (as Remove does),
+never deleted. Their branches and commits are untouched; pushing from them
+still goes to `github.com/owner/name`, which now has the new history, so a push
+of the old branch there needs care. New workspaces, and repositories added
+later, use the fresh copy. Only a copy Lazybox made is replaced; a checkout you
+registered yourself is yours to update with Git.
 
 It skips descendant symlinks, hidden folders, dependencies and build output, and
 stops descending when it finds a Git checkout or bare source. Each scan is bounded
@@ -994,8 +1073,11 @@ history remain. The destructive operation is not performed when opening the dial
 
 A durable deleting state supports retry after partial removal; deletion never
 silently becomes success when a process, source identity, root path, or Git
-registration cannot be verified. Unknown ownership after a Runner crash requires
-reconciliation. External pipe producers are not Runner-owned processes and cannot
+registration cannot be verified. Unknown ownership after a Runner crash ("Owner
+uncertain") must be settled first, and the dialog says which agents and commands
+and offers Stop them and continue, or They're already stopped, continue
+([unconfirmed ownership](RESOURCE_OWNERSHIP.md#unconfirmed-ownership)); the
+Runner clears by itself what it proves stopped. External pipe producers are not Runner-owned processes and cannot
 be declared stopped by cancelling a log reader. Tombstones prevent retried create
 requests from resurrecting deleted workspaces. Deleted workspaces are hidden from
 the workspace list, and their conversation history cannot resume into missing files.

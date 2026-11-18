@@ -407,3 +407,108 @@ func TestFindingsSentMidRoundWaitForTheFix(t *testing.T) {
 		t.Fatal("the fix begun right after sending did not start round 2")
 	}
 }
+
+// Cancelled mid-round: the loop ends there, the round closes, a question
+// waiting goes unanswered, the findings stay, and nothing the agents do next
+// starts another round — neither the turn the cancel interrupted nor the
+// author's next fix.
+func TestCancelMidRoundStopsTheLoopAndKeepsTheFindings(t *testing.T) {
+	f := newLoop(t, LoopAuto, 3)
+	blocker := f.file("logged", "blocker")
+	f.roundEnded()
+	f.send(blocker.ID)
+	if a := f.authorTurn(2, 1, f.clock); !a.Rereview || f.run.Round != 2 {
+		t.Fatalf("round 2: %+v %+v", a, f.run)
+	}
+	minor := f.file("naming", "minor")
+	f.update(func(r *Review) (err error) {
+		_, err = NewAsk(r, f.run.ID, Ask{From: RoleAuthor, To: RoleReviewer, FromSession: "e-auth", ToSession: "e-rev", Question: "Which line?"}, f.now())
+		return err
+	})
+	var cancelled Run
+	f.update(func(r *Review) (err error) { cancelled, err = Cancel(r, f.run.ID, "You", f.now()); return })
+	if f.run.State != RunCancelled || f.run.StopReason != StopCancelled || f.run.Phase != PhaseDone || f.run.StoppedBy != "You" || f.run.StoppedAt == 0 || cancelled.ID != f.run.ID {
+		t.Fatalf("cancelled: %+v", f.run)
+	}
+	if f.run.Detail != "You cancelled the review in round 2; 2 findings kept." || f.run.Rounds[1].EndedAt == 0 || f.run.Asks[0].State != AskExpired {
+		t.Fatalf("cancelled round and question: %q %+v %+v", f.run.Detail, f.run.Rounds[1], f.run.Asks)
+	}
+	if !strings.HasSuffix(kinds(f.run), "cancelled") || f.run.Timeline[len(f.run.Timeline)-1].Actor != "You" {
+		t.Fatalf("timeline: %s", kinds(f.run))
+	}
+	// The interrupted turn ends: not a round's end, nothing sent.
+	if a := f.roundEnded(); a.Rereview || a.SendFindings != nil || a.Escalate != "" || f.run.State != RunCancelled {
+		t.Fatalf("the interrupted turn acted: %+v %+v", a, f.run)
+	}
+	// The author changes files again: no round 3.
+	if a := f.authorTurn(3, 2, f.clock); a.Rereview || f.run.Round != 2 || len(f.run.Rounds) != 2 {
+		t.Fatalf("a cancelled loop started a round: %+v %+v", a, f.run)
+	}
+	rv, _ := f.s.Load("w")
+	if got := Findings(rv, f.run.ID); len(got) != 2 || got[0].ID != blocker.ID || got[1].ID != minor.ID {
+		t.Fatalf("findings kept: %+v", got)
+	}
+	// Cancelling again changes nothing; a review already over cannot be cancelled.
+	f.update(func(r *Review) error {
+		if _, err := Cancel(r, f.run.ID, "You", f.now()); !errors.Is(err, Unchanged) {
+			t.Fatalf("cancelled twice: %v", err)
+		}
+		return nil
+	})
+	g := newLoop(t, LoopOff, 1)
+	g.roundEnded()
+	g.update(func(r *Review) error {
+		r.Runs[0].State = RunDone // as the Runner records the reviewer's turn's end
+		if _, err := Cancel(r, g.run.ID, "You", g.now()); !errors.Is(err, ErrReviewEnded) {
+			t.Fatalf("cancelled a finished review: %v", err)
+		}
+		return nil
+	})
+}
+
+// The person ends the reviewer by hand: Stop while it reviews, End session
+// or Delete at any point of a loop under way, stops the review; Stop on a
+// reviewer that is only talking to the person after its round changes nothing.
+func TestEndingTheReviewerByHandStopsTheReview(t *testing.T) {
+	stopped := func(f *loopFixture, how string) (Run, error) {
+		var out Run
+		_, err := f.s.Update("w", func(r *Review) (err error) { out, err = ReviewerEnded(r, f.run.ID, how, "You", f.now()); return })
+		f.update(func(*Review) error { return nil })
+		return out, err
+	}
+	f := newLoop(t, LoopAsk, 3)
+	f.file("logged", "major")
+	if run, err := stopped(f, EndedInterrupted); err != nil || run.State != RunStopped || run.StopReason != StopEnded || run.Detail != "You stopped Codex's turn; the review stopped." || f.run.Rounds[0].EndedAt == 0 {
+		t.Fatalf("stopped mid-round: %+v %v", run, err)
+	}
+	if a := f.roundEnded(); a.Rereview || f.run.State != RunStopped {
+		t.Fatalf("the stopped turn ended a round: %+v", f.run)
+	}
+	// After its round, in triage: Stop is the person talking to it; End session stops the loop.
+	g := newLoop(t, LoopAsk, 3)
+	blocker := g.file("logged", "blocker")
+	g.roundEnded()
+	g.update(func(r *Review) error { r.Runs[0].State = RunDone; return nil })
+	g.send(blocker.ID)
+	if g.run.Phase != PhaseFixing {
+		t.Fatalf("fixing: %+v", g.run)
+	}
+	if _, err := stopped(g, EndedInterrupted); err != nil || g.run.StopReason != "" {
+		t.Fatalf("a Stop outside a round stopped the loop: %+v %v", g.run, err)
+	}
+	if _, err := stopped(g, EndedSession); err != nil || g.run.State != RunStopped || g.run.Detail != "You ended Codex's conversation; the review stopped." {
+		t.Fatalf("ended session: %+v %v", g.run, err)
+	}
+	if a := g.authorTurn(2, 1, g.clock); a.Rereview {
+		t.Fatal("a stopped loop re-reviewed")
+	}
+	h := newLoop(t, LoopOff, 1)
+	if _, err := stopped(h, EndedDeleted); err != nil || h.run.Detail != "You deleted Codex's conversation; the review stopped." {
+		t.Fatalf("deleted: %+v %v", h.run, err)
+	}
+	// Once it is over, ending it again changes nothing.
+	h.roundEnded()
+	if _, err := stopped(h, EndedSession); err != nil || h.run.Detail != "You deleted Codex's conversation; the review stopped." {
+		t.Fatalf("ended twice: %+v %v", h.run, err)
+	}
+}

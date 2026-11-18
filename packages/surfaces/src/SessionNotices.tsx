@@ -3,6 +3,8 @@ import type { Session } from '@lazybox/protocol';
 import { LiveIndicator } from './LiveIndicator';
 import type { LiveStatus } from './live-status';
 import { humanError } from './human-error';
+import { OwnershipPanel } from './OwnershipPanel';
+import { useRunner } from './RunnerContext';
 
 /** A saved conversation: continue it by sending, or resume it explicitly when it needs recovery first. */
 export function ResumeBar({ session, canResumeOnSend, onResume, onError }: {
@@ -12,11 +14,15 @@ export function ResumeBar({ session, canResumeOnSend, onResume, onError }: {
   onResume(processesStopped: boolean): Promise<boolean>;
   onError(message: string): void;
 }) {
+  const { refresh } = useRunner();
   const [resuming, setResuming] = useState(false);
-  const [processesStopped, setProcessesStopped] = useState(false);
+  // What a previous Lazybox left unconfirmed, settled here (OwnershipPanel):
+  // the session says so on its next refresh.
+  const [settled, setSettled] = useState('');
+  const recovery = session.recoveryRequired && settled !== session.id;
   const resume = async () => {
     if (resuming) return; setResuming(true); onError('');
-    try { if (await onResume(processesStopped)) setProcessesStopped(false); }
+    try { await onResume(false); }
     catch (error) { onError(humanError(error)); } finally { setResuming(false); }
   };
   return <div className="resume-bar">
@@ -25,10 +31,9 @@ export function ResumeBar({ session, canResumeOnSend, onResume, onError }: {
       ? <p>{session.resumeBlocked}</p>
       : canResumeOnSend
         ? <small>Send a message to continue with this conversation’s saved account and permissions.</small>
-        : <>
-          {session.recoveryRequired && <label><input type="checkbox" checked={processesStopped} onChange={event => setProcessesStopped(event.target.checked)}/>I have stopped or reconciled the previous agent and its commands.</label>}
-          <button disabled={resuming || !session.providerReference || !session.capabilities?.resume || (session.recoveryRequired && !processesStopped)} onClick={() => void resume()}>{resuming ? 'Resuming…' : 'Resume conversation'}</button>
-        </>}
+        : recovery
+          ? <OwnershipPanel key={session.id} target={{ sessionId: session.id }} what="Resuming this conversation waits" autoFocus={false} onSettled={() => { setSettled(session.id); refresh(); }}/>
+          : <button disabled={resuming || !session.providerReference || !session.capabilities?.resume} onClick={() => void resume()}>{resuming ? 'Resuming…' : 'Resume conversation'}</button>}
   </div>;
 }
 

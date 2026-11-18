@@ -74,6 +74,70 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 	return r, nil
 }
 
+// ReplaceRepository makes r the library's entry for its repository in place of
+// the current one, a fresh copy of a repository whose history changed. The
+// entries it replaces are hidden, never removed: workspaces made from them
+// keep their worktrees and still find their source copy (as RemoveRepository
+// keeps them). Every other workspace and new one uses r. It answers the
+// registrations it hid.
+func (m *Manager) ReplaceRepository(ctx context.Context, r Repository) (Repository, []Repository, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return Repository{}, nil, errors.New("collection manager closed")
+	}
+	if _, ok := m.repos[r.ID]; ok {
+		return Repository{}, nil, errors.New("a replacement needs a registration of its own")
+	}
+	name := gitidentity.GitHubName(r.SourceURL)
+	if name == "" {
+		return Repository{}, nil, errors.New("only a GitHub repository's copy is replaced")
+	}
+	identity := "github:" + name
+	var replaced []Repository
+	previous := map[string]Repository{}
+	for _, old := range m.repositories() {
+		if gitidentity.Repository(m.common[old.ID], old.SourceURL) != identity {
+			continue
+		}
+		previous[old.ID] = old
+		hidden := old
+		hidden.Hidden = true
+		m.repos[old.ID] = hidden
+		replaced = append(replaced, old)
+	}
+	// Registering saves the library with the old entries hidden, in one write.
+	added, err := m.registerRepository(ctx, r)
+	if err != nil {
+		for id, old := range previous {
+			m.repos[id] = old
+		}
+		return Repository{}, nil, err
+	}
+	return added, replaced, nil
+}
+
+// RepositoryUsers are the workspaces (not deleted) with a member made from
+// repository id.
+func (m *Manager) RepositoryUsers(id string) []Collection {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Collection
+	for _, c := range m.items {
+		if c.State == "deleted" {
+			continue
+		}
+		for _, member := range c.Members {
+			if member.RepositoryID == id {
+				out = append(out, clone(c))
+				break
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // AddLocalRepository registers an existing checkout using its canonical Git
 // provider identity when available, with local Git identity as a fallback.
 // Independent clones and worktrees of the same GitHub repo return one entry.

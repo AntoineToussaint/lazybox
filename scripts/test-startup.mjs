@@ -38,7 +38,7 @@ try {
   for (const provider of ['claude', 'codex']) {
     // The agent picker is a select-only combobox (AgentPicker.tsx).
     await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
-    await page.getByRole('option', { name: provider === 'claude' ? /^Claude/ : /^Codex/ }).click();
+    await page.getByRole('listbox').getByRole('option', { name: provider === 'claude' ? /^Claude/ : /^Codex/ }).first().click();
     await expect(page.getByLabel('Account profile')).toHaveValue(`${provider}-default`);
     const before = opens.length;
     await page.getByRole('button', { name: `Start ${provider === 'claude' ? 'Claude' : 'Codex'} ↗` }).click();

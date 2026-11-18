@@ -205,6 +205,11 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	if notice, untested := versionNotice(initialized); untested {
 		s.events <- notice
 	}
+	// The model Codex resolved for this thread, its own default included: the
+	// picker marks it from the start instead of none (a default has no id).
+	if ev, ok := readyEvent(s.model); ok {
+		s.events <- ev
+	}
 	go s.read()
 	// The models this subscription can switch to, for /model and the picker.
 	go s.reportModels()
@@ -813,6 +818,9 @@ func (s *session) read() {
 				ev.Data = m.Params
 				if ev.AgentID == "root" {
 					compactions.usage(m.Params)
+					// Codex's usage names no model: the one in force does, so the
+					// session reports what it runs on (metering's LatestModel).
+					ev.Data = withModel(m.Params, s.currentModel())
 				}
 			case "thread/compacted":
 				// Deprecated for the contextCompaction item; said once either way.

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/processguard"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/procid"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/redact"
 )
 
@@ -172,7 +173,8 @@ func serve() int {
 	h.proxyKey = rand.Text()
 	h.proxy = "http://" + web.Addr().String() + "/" + h.proxyKey
 	go func() { _ = (&http.Server{Handler: h, ReadHeaderTimeout: 30 * time.Second}).Serve(web) }()
-	record := Record{Protocol: Protocol, ID: cfg.ID, PID: os.Getpid(), Port: control.Addr().(*net.TCPAddr).Port, Token: cfg.Token, Proxy: h.proxy, Backend: BackendSessionHost, Kind: cfg.Kind, Owner: cfg.Owner, Label: cfg.Label, Tmux: cfg.Tmux}
+	self, _ := procid.Of(os.Getpid())
+	record := Record{Protocol: Protocol, ID: cfg.ID, PID: os.Getpid(), Started: self.Start, Port: control.Addr().(*net.TCPAddr).Port, Token: cfg.Token, Proxy: h.proxy, Backend: BackendSessionHost, Kind: cfg.Kind, Owner: cfg.Owner, Label: cfg.Label, Tmux: cfg.Tmux}
 	if cfg.Tmux != nil {
 		record.Backend = BackendTmux
 		// The window shows the program; its closing stops it.

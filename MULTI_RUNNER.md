@@ -44,6 +44,21 @@ header and leaves the Inbox; nothing is an error. Settings → Runners lists
 them all: show, make primary (the window opens on it), hide, add by file,
 forget.
 
+**Opt-in by default (2026-11-18).** Showing Working's workspaces in Dev's
+window by default read as shared state ("Dev and non-Dev share state!"), so a
+window now shows **only its own Runner** until the person opts in. Another
+launcher's Runner on this machine (`source: registered`, no `remote`) is
+hidden unless the person chose it (`RunnerPreferences.shown`, Settings →
+Runners → *Show in this window*, or *Show it here* on the hint) or made it
+primary; a Runner added by file and a computer added with *Add a computer*
+are shown, and anything can still be hidden (`hidden`). A hidden Runner is not
+connected at all. The first time another local Runner is found running, one
+dismissible toast says so ("Lazybox Working is also running on this Mac. Show
+it here? (Settings → Runners)"); each Runner is pointed out once (`noticed`).
+Saved preferences from before keep a primary shown. The brand carries the
+window's channel ("Dev", "Working"; nothing for the release app), from its own
+Runner's listing, else `AppInfo.channel`.
+
 **How.**
 
 - **Discovery** (`apps/desktop/src-tauri/src/runners.rs`, `runner_list`,
@@ -87,8 +102,8 @@ forget.
 **Not in step 2.** Missions and plans awaiting approval are the page's
 Runner's only (the Inbox counts them for that Runner). A workspace window or a
 detached chat of another Runner (the host opens windows on its own Runner).
-Two app instances (Dev's and Working's) showing each other both notify for
-both; hide a Runner in one of them to stop that.
+Two app instances (Dev's and Working's) that both opted in to show each other
+both notify for both; hide a Runner in one of them to stop that.
 
 **Verification.** `scripts/runner-directory.test.ts` (preferences, health,
 order, launch Runner, merged inbox keys and seen marks, targets, Agents
@@ -97,14 +112,21 @@ running vs stopped by probe, the window's own without its bearer, endpoint
 files others can read and non-loopback origins refused, locator vs endpoint
 files); `attention.rs` (a destination's Runner is validated and read back);
 `test:multi-runner` (two fake Runners at once plus a stopped one, WebKit, dark
-and light: grouping, versions and counts, merged inbox with badges, a pin, a
+and light: only the window's own Runner by default, the brand's "Dev", the
+hint once and never again once dismissed, a hidden Runner never called, opting
+in from the hint and from Settings; then grouping, versions and counts, merged inbox with badges, a pin, a
 peek, an approval and a new task each reaching only their Runner, switching
 pages from the sidebar, Agents and ⌘K, the Inbox popover badged, ⌘N's Runner picker with the message
 kept, a notification naming its Runner, one Runner going offline and coming
 back, folding, Settings → Runners hide and primary, the primary opening the
 window and a stopped Runner handing the page back).
 
-**Not verified in the real desktop app:** `runner_list` against real Dev and
+`test:remote-computers` also lists a running local Working: left out while
+the computer added over SSH shows.
+
+**Not verified in the real desktop app:** the brand's channel read from
+`AppInfo.channel` (Dev's and Working's bundle ids) when the listing has no
+`current` row, `runner_list` against real Dev and
 Working launchers and their locators, the HTTP capability added at run time
 for a second origin (the code path is the one `adopt` already uses), a
 notification click carrying a Runner through macOS, and the owner-only

@@ -129,20 +129,28 @@ func (b *Bench) RepositoryCatalogSnapshot(ctx context.Context, refresh bool) ([]
 // PrepareWorkspace owns source materialization; clients submit stable identities,
 // never temporary UI paths. Successful sources are reused when the request retries.
 func (b *Bench) PrepareWorkspace(ctx context.Context, key, workspaceID, name, branch string, identities []string, progress func(string, string) error) (collections.Collection, error) {
-	return b.prepareWorkspace(ctx, key, workspaceID, name, branch, identities, "", nil, progress)
+	return b.prepareWorkspace(ctx, key, workspaceID, name, branch, identities, nil, "", nil, progress)
+}
+
+// PrepareWorkspaceFrom is PrepareWorkspace with the branch each repository
+// starts from, by identity (start_from.go): a repository not named starts
+// from its remembered branch, else origin's default; one named is
+// remembered for the next workspace.
+func (b *Bench) PrepareWorkspaceFrom(ctx context.Context, key, workspaceID, name, branch string, identities []string, starts map[string]string, progress func(string, string) error) (collections.Collection, error) {
+	return b.prepareWorkspace(ctx, key, workspaceID, name, branch, identities, starts, "", nil, progress)
 }
 
 // AddRequestedRepositories is PrepareWorkspace adding to a workspace in
 // answer to an agent's request (repository_requests.go): once the
 // repositories are added, the request is answered with them and the agent told.
-func (b *Bench) AddRequestedRepositories(ctx context.Context, key, workspaceID, requestID string, identities []string, progress func(string, string) error) (collections.Collection, error) {
+func (b *Bench) AddRequestedRepositories(ctx context.Context, key, workspaceID, requestID string, identities []string, starts map[string]string, progress func(string, string) error) (collections.Collection, error) {
 	if err := b.checkRepositoryRequest(requestID, workspaceID); err != nil {
 		return collections.Collection{}, err
 	}
-	return b.prepareWorkspace(ctx, key, workspaceID, "", "", identities, requestID, nil, progress)
+	return b.prepareWorkspace(ctx, key, workspaceID, "", "", identities, starts, requestID, nil, progress)
 }
 
-func (b *Bench) prepareWorkspace(ctx context.Context, key, workspaceID, name, branch string, identities []string, requestID string, origin *collections.Origin, progress func(string, string) error) (collections.Collection, error) {
+func (b *Bench) prepareWorkspace(ctx context.Context, key, workspaceID, name, branch string, identities []string, starts map[string]string, requestID string, origin *collections.Origin, progress func(string, string) error) (collections.Collection, error) {
 	if b.Collections == nil {
 		return collections.Collection{}, errors.New("workspace storage unavailable")
 	}
@@ -151,6 +159,9 @@ func (b *Bench) prepareWorkspace(ctx context.Context, key, workspaceID, name, br
 	}
 	if len(identities) > 64 {
 		return collections.Collection{}, errors.New("select at most 64 repositories")
+	}
+	if err := checkStarts(starts); err != nil {
+		return collections.Collection{}, err
 	}
 	if workspaceID == "" && (strings.TrimSpace(name) == "" || len(name) > 128 || strings.IndexFunc(name, unicode.IsControl) >= 0) {
 		return collections.Collection{}, errors.New("workspace name must contain 1–128 bytes")
@@ -179,6 +190,7 @@ func (b *Bench) prepareWorkspace(ctx context.Context, key, workspaceID, name, br
 		seen[id] = true
 	}
 	members := []collections.MemberSpec{}
+	var plans []startPlan
 	for _, id := range identities {
 		row := byID[id]
 		if err = progress(id, "Preparing "+row.Name); err != nil {
@@ -196,7 +208,9 @@ func (b *Bench) prepareWorkspace(ctx context.Context, key, workspaceID, name, br
 						return e
 					}
 					if "github:"+strings.ToLower(remote.FullName) != id {
-						return errors.New("repository identity changed; refresh and retry")
+						// The ID Lazybox listed under this name is another
+						// name's now: the name means another repository.
+						return &RepositoryReplaced{Identity: id, Name: row.Name}
 					}
 					repo, e = b.RepositoryImporter.ImportWithProgress(ctx, remote, token, func(message string) error { return progress(id, row.Name+" · "+message) })
 					return e
@@ -208,12 +222,21 @@ func (b *Bench) prepareWorkspace(ctx context.Context, key, workspaceID, name, br
 				return collections.Collection{}, fmt.Errorf("could not prepare %s: %w", row.Name, err)
 			}
 			repoID = repo.ID
+		} else if err = b.replacedCopy(ctx, id, row.Name, repoID); err != nil {
+			return collections.Collection{}, fmt.Errorf("could not prepare %s: %w", row.Name, err)
 		}
-		// The new branch starts from origin's default branch as it is now.
-		if err = b.refreshBase(ctx, id, repoID, row.Name, progress); err != nil {
+		// The new branch starts from origin's default branch as it is now, or
+		// from the branch chosen (or last chosen) to start from, fetched first.
+		start, chosen := starts[id]
+		if !chosen {
+			start = b.Collections.StartFrom(repoID).Branch
+		}
+		base, plan, err := b.resolveStart(ctx, id, repoID, row.Name, strings.TrimSpace(start), chosen, progress)
+		if err != nil {
 			return collections.Collection{}, err
 		}
-		members = append(members, collections.MemberSpec{RepositoryID: repoID, BaseRef: "HEAD"})
+		plans = append(plans, plan)
+		members = append(members, collections.MemberSpec{RepositoryID: repoID, BaseRef: base})
 	}
 	if err = progress("", "Creating worktrees"); err != nil {
 		return collections.Collection{}, err
@@ -240,6 +263,8 @@ func (b *Bench) prepareWorkspace(ctx context.Context, key, workspaceID, name, br
 	if err != nil {
 		return workspace, err
 	}
+	// The next workspace of each repository starts where this one did.
+	b.rememberStarts(plans)
 	// The new worktrees exist: copy listed files and start setup (or say
 	// which scripts wait for approval). Setup runs on in the Actions panel.
 	added := []string{}

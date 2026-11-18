@@ -67,7 +67,7 @@ func (b *Bench) restore(r sessionstore.Record) (*Execution, error) {
 	state := r.Snapshot
 	uncertain := !state.Closed || state.Fault == "native_exit_unconfirmed"
 	for _, c := range b.Commands.List(r.ID) {
-		if c.Error == "command ownership unconfirmed after Runner restart" || c.CleanupUnconfirmed() {
+		if c.OwnershipUnconfirmed() {
 			uncertain = true
 		}
 	}

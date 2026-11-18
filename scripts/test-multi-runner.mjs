@@ -1,7 +1,10 @@
 // Several Runners in one window (MULTI_RUNNER.md step 2, audit brief R8):
 // two fake Runners at once — "Dev", the window's own, and "Working", found
 // through the page's Runner list — plus a registered Runner that is not
-// running. Workspaces groups by Runner (collapsible, name, channel, version,
+// running. By default the window shows only its own Runner (the brand says
+// "Dev") and hints once that Working runs too; the other local Runners are
+// shown after an opt-in (the hint, or Settings → Runners), and a hidden one is
+// never called. Then: Workspaces groups by Runner (collapsible, name, channel, version,
 // health); the Inbox and Agents merge both Runners with a Runner badge; every
 // action goes to the Runner the row belongs to and never to the other (pin,
 // approve, peek, start a task); a workspace or conversation of the other
@@ -70,10 +73,52 @@ try {
       window.Notification = class { static permission = 'granted'; static async requestPermission() { return 'granted'; }
         constructor(title, options) { this.title = title; this.body = options?.body; window.__notices.push(this); } close() {} };
     });
+    const workingCalls = working.calls.length;
     await page.goto(`${base}&collection=alpha&session=alpha-session#token=${dev.token}`);
 
-    // Workspaces: one section per Runner, the page's first-class, the stopped one saying so.
+    // By default a window shows only its own Runner: Working and the release are opt-in, so Dev's window never
+    // looks as if it shared Working's state. The brand says which Lazybox this is. One quiet hint names Working.
     const groups = page.locator('.runner-group');
+    await expect(page.locator('.workspace-brand .brand-channel')).toHaveText('Dev');
+    const hint = page.locator('.toast').filter({ hasText: 'Lazybox Working is also running on this Mac' });
+    await expect(hint).toContainText('Show it here? (Settings → Runners)');
+    await expect(page.locator('.toast').filter({ hasText: /Release|installed Lazybox/ })).toHaveCount(0);
+    await expect(page.locator('.panel-collections')).toContainText('Alpha feature');
+    await expect(groups).toHaveCount(0);
+    await expect(page.locator('.panel-collections')).not.toContainText('Billing service');
+    assert.equal(working.calls.length, workingCalls, 'a Runner the window does not show is not called');
+    await page.screenshot({ path: `.cache/multi-runner-own-only-${scheme}.png` });
+    const showInWindow = async (...ids) => {
+      await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Settings' }).click();
+      await page.getByRole('tab', { name: 'Runners', exact: true }).click();
+      const list = page.getByRole('list', { name: 'Runners' });
+      for (const id of ids) {
+        const row = list.locator(`.runners-item[data-runner=${id}]`);
+        await expect(row).toHaveAttribute('data-hidden', 'true');
+        await expect(row).toContainText('Not shown in this window');
+        await row.getByRole('switch', { name: 'Show in this window' }).click();
+        await expect(row).not.toHaveAttribute('data-hidden');
+      }
+      await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+    };
+    if (scheme === 'dark') {
+      // Dismissed, the hint does not come back; Working stays out until the person opts in, in Settings → Runners.
+      await hint.getByRole('button', { name: 'Dismiss' }).click();
+      navigating = true; await page.reload(); await page.waitForLoadState('load'); navigating = false;
+      await expect(page.locator('.panel-collections')).toContainText('Alpha feature');
+      await page.waitForTimeout(1000);
+      await expect(page.locator('.toast').filter({ hasText: 'also running on this Mac' })).toHaveCount(0);
+      await expect(groups).toHaveCount(0);
+      assert.equal(working.calls.length, workingCalls, 'still not called');
+      await showInWindow('working', 'release');
+    } else {
+      // "Show it here" opts in from the hint; the release (not running) from Settings.
+      await hint.getByRole('button', { name: 'Show it here' }).click();
+      await expect(groups).toHaveCount(2);
+      await showInWindow('release');
+    }
+
+    // Workspaces: one section per Runner, the page's first-class, the stopped one saying so.
     await expect(groups).toHaveCount(3);
     const devGroup = groups.filter({ has: page.locator('.runner-group-name', { hasText: /^Dev$/ }) });
     const workingGroup = groups.filter({ has: page.locator('.runner-group-name', { hasText: /^Working$/ }) });

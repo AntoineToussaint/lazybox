@@ -1,12 +1,13 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { ReviewRun } from '@lazybox/protocol';
 import { ActionMenu } from './ActionMenu';
 import { ActionMenuItems } from './ActionMenuItems';
 import { Icon } from './Icons';
 import { LiveIndicator } from './LiveIndicator';
 import type { MenuItem } from './context-menu-model';
-import { showConversation, showReview, type ReviewLauncher, type ReviewScope } from './review-client';
-import { countsSummary, isPending, isProposed, loopLine, loopNeedsYou, reviewMessage, runSummary } from './review-model';
+import { showConversation, showReview, useReviewLauncher, type ReviewLauncher, type ReviewScope } from './review-client';
+import { countsSummary, endedByHand, isPending, isProposed, loopLine, loopNeedsYou, reviewAgain, reviewInProgress, reviewMessage, runSummary } from './review-model';
+import { useCancelReview } from './ReviewCancel';
 import { composeInConversation } from './compose';
 import { errorText } from './PullRequestFlow';
 import { showMenuNotice } from './ContextMenu';
@@ -79,9 +80,21 @@ export function ReviewAlert({ text, id, note }: { text: string; id: string; note
 export function ReviewCard({ data }: { data: ReviewCardData }) {
   const review = useWorkspaceReview(data.workspace);
   const live = useMemo(() => review.review?.runs.find(run => run.id === data.review), [review.review, data.review]);
-  const run = live || { state: data.finished ? 'done' : 'running', reviewerLabel: data.reviewerLabel, scopeLabel: data.scopeLabel, blockers: data.blockers || 0, majors: data.majors || 0, minors: data.minors || 0, nits: data.nits || 0, detail: '', loop: '', phase: '', round: 1, maxRounds: 1, paused: false, stopReason: '', sourceLabel: '', sourceSessionId: '', fallback: '', focus: '' };
+  const run = live || { state: data.state || (data.finished ? 'done' : 'running'), reviewerLabel: data.reviewerLabel, scopeLabel: data.scopeLabel, blockers: data.blockers || 0, majors: data.majors || 0, minors: data.minors || 0, nits: data.nits || 0, detail: '', loop: '', phase: '', round: 1, maxRounds: 1, paused: false, stopReason: '', sourceLabel: '', sourceSessionId: '', fallback: '', focus: '' };
   const loop = loopLine(run), needsYou = loopNeedsYou(run);
-  const running = run.state === 'running', failed = run.state === 'failed';
+  const running = run.state === 'running', failed = run.state === 'failed', ended = endedByHand(run);
+  // Under way, it can be cancelled (Cancel review, or Esc on the card); once cancelled or stopped, started again.
+  const canCancel = !!live && reviewInProgress(live);
+  const cancelling = useCancelReview(data.workspace);
+  const again = ended && live ? reviewAgain(live) : undefined;
+  const launcher = useReviewLauncher(data.workspace, again && live ? { id: live.sourceSessionId, profileId: '', provider: live.sourceProvider } : undefined);
+  useEffect(() => { if (launcher.error) { showMenuNotice(`Could not start the review: ${launcher.error}`); launcher.setError(''); } }, [launcher.error]);
+  const onKeyDown = (event: ReactKeyboardEvent) => {
+    // Only from the card itself or its buttons, never a dialog it opened.
+    if (event.key !== 'Escape' || !canCancel || !live || event.defaultPrevented || !event.currentTarget.contains(event.target as Node)) return;
+    event.preventDefault(); event.stopPropagation();
+    cancelling.request(live);
+  };
   const findings = run.blockers + run.majors + run.minors + run.nits;
   // Findings still to hand to the author (to triage or accepted, not sent): one click puts them
   // in its message box, exactly as filed, as the tray's Send does. Nothing is sent for the person.
@@ -94,8 +107,12 @@ export function ReviewCard({ data }: { data: ReviewCardData }) {
     catch (e) { showMenuNotice(`Could not mark the findings sent: ${errorText(e)}`); }
   };
   const canSend = !running && !failed && unsent.length > 0 && !!run.sourceSessionId;
-  return <div className={`review-card is-${run.state}${run.blockers ? ' has-blockers' : ''}${needsYou ? ' needs-you' : ''}`} role="group" aria-label={`${run.reviewerLabel} review`} data-review={data.review}>
-    <span className="review-card-icon" aria-hidden="true">{running ? <LiveIndicator tone="busy"/> : <Icon name={failed ? 'alert' : run.blockers ? 'alert' : 'check'} size={14}/>}</span>
+  const stoppedAt = live?.stoppedAtUnix ? new Date(Number(live.stoppedAtUnix) * 1000).toLocaleString([], { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' }) : '';
+  // Focusable while it can be cancelled, so Esc on it cancels it.
+  return <><div className={`review-card is-${run.state}${run.blockers ? ' has-blockers' : ''}${needsYou ? ' needs-you' : ''}`} role="group" aria-label={`${run.reviewerLabel} review`} data-review={data.review}
+    tabIndex={canCancel ? 0 : undefined} aria-keyshortcuts={canCancel ? 'Escape' : undefined} onKeyDown={onKeyDown}
+    title={ended && live?.stoppedBy ? `${live.stoppedBy} ${run.state === 'cancelled' ? 'cancelled' : 'stopped'} it${stoppedAt ? ` · ${stoppedAt}` : ''}` : undefined}>
+    <span className="review-card-icon" aria-hidden="true">{running ? <LiveIndicator tone="busy"/> : <Icon name={ended ? 'stop' : failed ? 'alert' : run.blockers ? 'alert' : 'check'} size={14}/>}</span>
     <span className="review-card-text" role="status" aria-live="polite">{runSummary(run)}{loop && <small className="review-card-loop">{loop}</small>}
       {(run.fallback || run.focus) && <small className="review-card-note">{[run.fallback, run.focus && `Focus: ${run.focus}`].filter(Boolean).join(' · ')}</small>}</span>
     {!running && !failed && findings > 0 && <span className="review-card-counts" aria-hidden="true">
@@ -105,9 +122,13 @@ export function ReviewCard({ data }: { data: ReviewCardData }) {
       {run.nits > 0 && <span className="review-severity sev-nit">{run.nits}</span>}
     </span>}
     <span className="review-card-actions">
+      {again && <button type="button" className="primary" disabled={!!launcher.busy || !!launcher.unavailable} title={launcher.unavailable || `${run.reviewerLabel} reviews ${run.scopeLabel.toLowerCase()} again, in a new read-only conversation`}
+        onClick={() => void launcher.start(again.scope, again.choice, live?.focus || '')}><Icon name="review" size={12}/>{launcher.busy ? 'Starting…' : 'Review again'}</button>}
       {canSend && <button type="button" className="primary" title={`Put ${unsent.length === 1 ? 'the finding' : `the ${unsent.length} findings`} in ${author}'s message box, exactly as filed; you send it`} onClick={() => void send()}>Send {unsent.length} finding{unsent.length === 1 ? '' : 's'} to {author}</button>}
-      <button type="button" className={!running && findings && !canSend ? 'primary' : ''} title={findings ? `Triage ${countsSummary(run)} in the Review tray` : 'Open the Review tray'} onClick={() => showReview({ collectionId: data.workspace, reviewId: data.review })}>Open review</button>
+      <button type="button" className={!running && findings && !canSend && !again ? 'primary' : ''} title={findings ? `Triage ${countsSummary(run)} in the Review tray` : 'Open the Review tray'} onClick={() => showReview({ collectionId: data.workspace, reviewId: data.review })}>Open review</button>
       <button type="button" title={`Open ${run.reviewerLabel}'s review conversation: ask it about a finding`} onClick={() => showConversation({ collectionId: data.workspace, sessionId: data.reviewerSession })}>Open conversation</button>
+      {canCancel && live && <button type="button" className="review-card-cancel" aria-keyshortcuts="Escape" title={`Cancel review (Esc): ${run.reviewerLabel} stops now and no further round starts; its findings are kept`}
+        onClick={() => cancelling.request(live)}><Icon name="stop" size={12}/>Cancel review</button>}
     </span>
-  </div>;
+  </div>{cancelling.dialog}</>;
 }

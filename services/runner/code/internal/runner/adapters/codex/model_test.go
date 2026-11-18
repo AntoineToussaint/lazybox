@@ -32,6 +32,47 @@ func TestLiveModelSwitchAppliesToFollowingTurns(t *testing.T) {
 	}
 }
 
+// A thread on Codex's default model still says which model that is: once at
+// start (session_ready, as the Claude worker does) and on every usage of the
+// main agent, so the picker marks it and metering reports it. A switch is
+// what usage then names.
+func TestSessionSaysTheModelItRunsOn(t *testing.T) {
+	t.Setenv("FIXTURE_COMPACTION", "1")
+	self, _ := os.Executable()
+	s, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Host: &agent.Hosting{Root: fixtureRoot(t)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ready := receive(t, s, "session_ready")
+	if string(ready.Data) != `{"model":"fixture-model"}` || ready.AgentID != "root" {
+		t.Fatalf("ready: %+v %s", ready, ready.Data)
+	}
+	if _, err = s.Apply(context.Background(), agent.Operation{ID: "m", Kind: agent.Model, Model: "gpt-6-luna"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Apply(context.Background(), agent.Operation{ID: "go", Kind: agent.Message, Text: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	usage := receive(t, s, "usage")
+	var data struct {
+		Model      string          `json:"model"`
+		TokenUsage json.RawMessage `json:"tokenUsage"`
+	}
+	if err = json.Unmarshal(usage.Data, &data); err != nil || data.Model != "gpt-6-luna" || len(data.TokenUsage) == 0 {
+		t.Fatalf("usage: %s %v", usage.Data, err)
+	}
+	if _, ok := readyEvent(""); ok {
+		t.Fatal("no model is nothing to say")
+	}
+	if got := string(withModel(json.RawMessage(`{"model":"theirs"}`), "ours")); got != `{"model":"theirs"}` {
+		t.Fatalf("a model Codex named was replaced: %s", got)
+	}
+	if got := string(withModel(json.RawMessage(`not json`), "ours")); got != `not json` {
+		t.Fatalf("unreadable params changed: %s", got)
+	}
+}
+
 // A session lists the models its own app-server offers (its subscription's),
 // every page, without the hidden ones or repeats, once, as a command_catalog.
 func TestSessionReportsItsModelsForThePicker(t *testing.T) {

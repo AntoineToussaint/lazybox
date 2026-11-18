@@ -387,6 +387,31 @@ func TestCodexUsageReplayDoesNotInventContextCategories(t *testing.T) {
 	}
 }
 
+// Codex's usage names no model; the adapter adds the one in force, and the
+// session then reports it (LatestModel), so the picker marks the model a
+// default-model conversation runs on.
+func TestCodexUsageReportsTheModelInForce(t *testing.T) {
+	ctx := context.Background()
+	s := store(t)
+	sc := scope()
+	sc.Provider = "codex"
+	native := &agenttest.Adapter{}
+	a := Adapter{Native: native, Store: s, Prices: DefaultRates(), Scope: sc}
+	session, err := a.Open(ctx, agent.Open{ID: "execution", Profile: "account"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	native.Session.Events <- agent.Event{Type: "usage", AgentID: "root", Data: json.RawMessage(`{"threadId":"fixture","model":"gpt-6.1-sol","tokenUsage":{"last":{"totalTokens":10},"modelContextWindow":1000}}`)}
+	if _, err = session.Receive(ctx); err != nil {
+		t.Fatal(err)
+	}
+	model, err := s.LatestModel(ctx, sc.Execution)
+	if err != nil || model != "gpt-6.1-sol" {
+		t.Fatalf("model %q %v", model, err)
+	}
+}
+
 func TestContextDetailsSurviveStorage(t *testing.T) {
 	s := store(t)
 	ctx := context.Background()

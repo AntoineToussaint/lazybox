@@ -76,6 +76,9 @@ type API interface {
 	Repositories(context.Context, string, int64, int) ([]Repository, bool, error)
 	UserRepositories(context.Context, string, int) ([]Repository, bool, error)
 	Repository(context.Context, string, int64) (Repository, error)
+	// RepositoryNamed is the repository GitHub has under owner/name now,
+	// which may be another repository than the one that had the name before.
+	RepositoryNamed(context.Context, string, string) (Repository, error)
 	Items(context.Context, string, string, int) ([]Item, bool, error)
 }
 type Client struct {
@@ -309,6 +312,21 @@ func (c *Client) Repository(ctx context.Context, token string, id int64) (Reposi
 		return Repository{}, errors.New("could not initialize GitHub client")
 	}
 	repo, response, err := client.Repositories.GetByID(ctx, id)
+	if err != nil {
+		return Repository{}, apiError(err, response)
+	}
+	return mapRepository(repo), nil
+}
+func (c *Client) RepositoryNamed(ctx context.Context, token, fullName string) (Repository, error) {
+	owner, name, ok := strings.Cut(fullName, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		return Repository{}, errors.New("repository owner/name required")
+	}
+	client, err := c.apiClient(token)
+	if err != nil {
+		return Repository{}, errors.New("could not initialize GitHub client")
+	}
+	repo, response, err := client.Repositories.Get(ctx, owner, name)
 	if err != nil {
 		return Repository{}, apiError(err, response)
 	}

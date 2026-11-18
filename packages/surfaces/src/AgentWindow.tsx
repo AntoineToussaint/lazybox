@@ -38,6 +38,7 @@ import { NewSessionForm, useSessionLauncher } from './NewSessionForm';
 import { agentTitle } from './providers';
 import { ChatHeader, ChatStatus, SessionHeader, SessionInspection, WindowTopbar, type HeaderStats } from './ChatHeader';
 import { ReviewChatButton, useChatReview } from './ReviewFromChat';
+import { refreshWorkspaceReview } from './useWorkspaceReview';
 import { TelemetryPanel } from './TelemetryPanel';
 import { ToolActivity } from './ToolActivity';
 import { BrowsingBadge } from './BrowserPanel';
@@ -254,7 +255,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
     if (!snippetText && (message.trim() || files.length) && !canSend) {
       const why = sendingRef.current || sending ? 'Still sending your previous message…'
         : !session ? 'Still connecting to this conversation…'
-        : !canCompose ? (session.recoveryRequired ? 'This conversation needs recovery first: use Resume above.' : session.resumeBlocked ? 'This conversation cannot be continued from here.' : 'This conversation has ended.')
+        : !canCompose ? (session.recoveryRequired ? 'A previous Lazybox left this conversation’s processes unconfirmed: settle that above first.' : session.resumeBlocked ? 'This conversation cannot be continued from here.' : 'This conversation has ended.')
         : session.fault ? `${faultSentence(session.fault)} Resume it or start a new conversation to continue.`
         : '';
       if (why) setError(why);
@@ -333,8 +334,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
     } catch (e) { setError(humanError(e)); }
   };
   const close = async () => {
-    try { const result = await api.stopSessionResources({ sessionId: sessionID }); setSession(result.session); }
-    catch (e) { setError(humanError(e)); }
+    try {
+      const result = await api.stopSessionResources({ sessionId: sessionID }); setSession(result.session);
+      // Ending a reviewer stops its review: its card says so at once.
+      if (result.session?.collectionId) refreshWorkspaceReview(result.session.collectionId);
+    } catch (e) { setError(humanError(e)); }
   };
   const live = useLiveStatus(session, events);
   // Send now from the keyboard (⌘↵): the typed message, or with an empty box
@@ -569,6 +573,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
           {deleting && session && <DeleteConversationDialog session={session} onClose={() => setDeleting(false)} onDeleted={() => { setDeleting(false); newSession(); }}/>}
           {fileLinks.element}
           {slash.dialogs}
+          {chatReview.dialog}
           {transcript.error && <TranscriptNotice error={transcript.error} onRetry={transcript.retry}/>}
           <CodeRunContext.Provider value={codeRuns}><MessageArea api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail}

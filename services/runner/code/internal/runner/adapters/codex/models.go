@@ -88,6 +88,40 @@ func catalogEvent(models []agent.ModelChoice) (agent.Event, bool) {
 	return agent.Event{Type: "command_catalog", AgentID: "root", Data: data}, true
 }
 
+// readyEvent says the model a new thread runs on, as the Claude worker's
+// session_ready does; false when Codex named none.
+func readyEvent(model string) (agent.Event, bool) {
+	if strings.TrimSpace(model) == "" {
+		return agent.Event{}, false
+	}
+	data, err := json.Marshal(map[string]string{"model": model})
+	if err != nil {
+		return agent.Event{}, false
+	}
+	return agent.Event{Type: "session_ready", AgentID: "root", Data: data}, true
+}
+
+// withModel adds the model in force to a usage notification's params, which
+// name none; params it cannot read, or that name one, pass as they are.
+func withModel(params json.RawMessage, model string) json.RawMessage {
+	if model == "" {
+		return params
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(params, &fields) != nil || fields == nil {
+		return params
+	}
+	if _, named := fields["model"]; named {
+		return params
+	}
+	fields["model"], _ = json.Marshal(model)
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return params
+	}
+	return data
+}
+
 // reportModels lists the session's models on its own app-server and says
 // them once, beside the conversation: a slow or failed listing never holds up
 // the session, and /model then falls back to the Runner's list.

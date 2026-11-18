@@ -187,6 +187,11 @@ func configureRunnerAt(ctx context.Context, config *adapters.Configuration, addr
 	} else if err = bench.StopUnclaimedHosts(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "V2 Runner: some agents of a previous Runner were not stopped: %v\n", err)
 	}
+	// What a previous Runner left unaccounted for and is provably gone (after
+	// the computer restarts, all of it) is settled here, not asked about.
+	if err = bench.SettleProvenOwnership(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "V2 Runner: could not check every process a previous Runner recorded: %v\n", err)
+	}
 	shutdown := bench.Close
 	if keepAgents {
 		shutdown = bench.Detach

@@ -129,11 +129,26 @@ try {
   await d
     .getByRole("checkbox", { name: "fixture-team/web", exact: true })
     .check();
+  // Start from: the added repository's branch starts from another branch of origin (⌥B, type, Enter).
+  await page.keyboard.press("Alt+KeyB");
+  const startPicker = d.getByRole("dialog", { name: "Start fixture-team/web from" });
+  await expect(startPicker.getByRole("combobox")).toBeFocused();
+  await page.keyboard.type("release/1.4");
+  await expect(startPicker.getByRole("option").first()).toContainText("release/1.4");
+  await page.keyboard.press("Enter");
+  await expect(startPicker).toHaveCount(0);
+  await expect(d).toBeVisible();
+  await expect(d.locator('[data-start-from="github:fixture-team/web"]')).toHaveText(/from\s*release\/1\.4/);
   await d
     .getByRole("button", { name: "Add to workspace", exact: true })
     .click();
   await expect(d).toHaveCount(0);
   assert.equal(created.members.length, 3);
+  assert.deepEqual(
+    f.mutations.filter((m) => m.method === "PrepareWorkspace").at(-1).body.startFrom,
+    { "github:fixture-team/web": "release/1.4" },
+    "Add repository sends the branch it starts from",
+  );
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(
     page.getByRole("tab", { name: "GitHub", exact: true }),

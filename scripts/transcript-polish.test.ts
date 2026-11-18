@@ -68,6 +68,31 @@ test('a message Lazybox wrote is an event of the conversation, never "You", and 
   assert.ok(isSystemEvent(note) && !isSystemEvent(typed));
 });
 
+test('what Lazybox told the agent of its own changes is one quiet event before the message it went with, never "You"', () => {
+  cursor = 0n;
+  const DELTA = '[Lazybox] Since this conversation started, Lazybox added or changed the following; everything else you were told still holds.\n- Start another conversation with any agent (Claude, Codex, …) when the person asks: `lazybox conversation new --provider P --title T --brief-artifact ID`.';
+  const t = fold(emptyTranscript(),
+    record(0, { type: 'operation_accepted', text: 'continue this with Codex', operationId: 'm1' }),
+    // The Runner journals the update once the message is accepted, naming it.
+    record(5, { type: 'briefing_updated', text: DELTA, status: 'features', operationId: 'm1', data: { sections: ['conversations'], versions: { conversations: '2' } } }),
+    record(10, { type: 'message_delta', text: 'I will ask the person to start it.', turnId: 't1' }),
+  );
+  const [update, typed, reply] = t.messages;
+  assert.equal(typed.text, 'continue this with Codex');
+  assert.equal(typed.origin, undefined, 'the person’s message stays theirs');
+  assert.equal(update.type, 'briefing', 'never a message the person sent');
+  assert.equal(update.text, DELTA, 'it opens to exactly what the agent received');
+  assert.ok(isSystemEvent(update));
+  assert.equal(reply.text, 'I will ask the person to start it.');
+  const view = systemEventView(update.origin!, 'Claude');
+  assert.equal(view.line, 'Lazybox told Claude about new features');
+  assert.equal(view.sentBy, 'What Lazybox told Claude');
+  assert.equal(view.tone, 'muted');
+  // Only the person's own instructions changed: said as such. Without its message in view, it ends the list.
+  const settings = fold(t, record(20, { type: 'briefing_updated', text: '[Lazybox] …', status: 'instructions', operationId: 'gone' }));
+  assert.equal(systemEventView(settings.messages.at(-1)!.origin!, 'Codex').line, 'Lazybox gave Codex its updated instructions');
+});
+
 test('a question between agents is one event, not the question twice', () => {
   cursor = 0n;
   const line = 'Codex asked Claude: why does Handle log instead of returning?';

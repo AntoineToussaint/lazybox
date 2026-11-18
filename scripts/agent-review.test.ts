@@ -2,7 +2,7 @@ import { create } from '@bufbuild/protobuf';
 import { JournalEventSchema, ReviewCommentSchema, ReviewRunSchema } from '@lazybox/protocol';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loopLine, loopNeedsYou, loopActive, reviewTabBadge, unavailableAgents, reviewerModeOf, reviewButtonTitle } from '../packages/surfaces/src/review-model.ts';
+import { loopLine, loopNeedsYou, loopActive, reviewTabBadge, unavailableAgents, reviewerModeOf, reviewButtonTitle, reviewInProgress, reviewAgain, endedByHand, findingsKept } from '../packages/surfaces/src/review-model.ts';
 import { authorLabel, countsSummary, dispositionLabel, isPending, matchesFilter, matchesQuery, parseSeverity, reviewAuthors, reviewerChoices, reviewMessage, runSummary, severityRank } from '../packages/surfaces/src/review-model.ts';
 import { appendTranscript, emptyTranscript } from '../packages/surfaces/src/transcript-model.ts';
 import { reviewRequest } from '../packages/surfaces/src/slash-commands.ts';
@@ -110,6 +110,10 @@ test('a review of the conversation is one card where it started, updated when it
   const cards = state.messages.filter(m => m.type === 'review');
   assert.equal(cards.length, 1);
   assert.deepEqual([cards[0].review?.finished, cards[0].review?.blockers, cards[0].review?.reviewerSession, state.messages.indexOf(cards[0])], [true, 1, 'review-1', 1]);
+  // Cancelled: the same card says so, even without the Runner's review record.
+  add('review_finished', 'Review cancelled · 1 finding kept', data({ blockers: 1, state: 'cancelled', stoppedBy: 'You', stoppedAt: 1700000000 }));
+  assert.equal(state.messages.filter(m => m.type === 'review').length, 1);
+  assert.equal(state.messages.find(m => m.type === 'review')?.review?.state, 'cancelled');
   // An event without the review's data is not a card.
   add('review_started', 'malformed', new TextEncoder().encode('{}'));
   assert.equal(state.messages.filter(m => m.type === 'review').length, 1);
@@ -157,6 +161,31 @@ test('a review tab says how the review went: a live dot, then its findings, done
   assert.equal(reviewTabBadge(run({ blockers: 1 })).tone, 'failed');
   assert.deepEqual(reviewTabBadge(run({})), { text: 'done', tone: 'done', label: 'Codex is done · no open findings' });
   assert.equal(reviewTabBadge(run({ state: 'failed', detail: 'The reviewer stopped.' })).text, 'failed');
+  assert.deepEqual(reviewTabBadge(run({ state: 'cancelled', majors: 2 })), { text: 'cancelled', tone: 'done', label: "Codex's review was cancelled · 2 findings kept" });
+  assert.equal(reviewTabBadge(run({ state: 'stopped' })).text, 'stopped');
+});
+
+test('a review the person cancelled or stopped says so, keeps its findings, and can be started again', () => {
+  const run = (fields: Record<string, unknown>) => create(ReviewRunSchema, { reviewerLabel: 'Codex', reviewerProvider: 'codex', sourceLabel: 'Claude', scopeLabel: 'Changes', scope: 'changes', loop: 'ask', round: 1, maxRounds: 3, phase: 'reviewing', state: 'running', ...fields });
+  // Under way: running, or its loop waiting for the next round; never once it ended.
+  assert.equal(reviewInProgress(run({})), true);
+  assert.equal(reviewInProgress(run({ state: 'done', phase: 'fixing' })), true);
+  assert.equal(reviewInProgress(run({ state: 'done', phase: 'done', stopReason: 'clean' })), false);
+  assert.equal(reviewInProgress(run({ state: 'cancelled', phase: 'done', stopReason: 'cancelled' })), false);
+  const cancelled = run({ state: 'cancelled', phase: 'done', stopReason: 'cancelled', round: 2, blockers: 1, minors: 1, stoppedBy: 'You' });
+  assert.equal(runSummary(cancelled), 'Review cancelled · 2 findings kept');
+  assert.equal(loopLine(cancelled), 'You cancelled it in round 2');
+  assert.equal(endedByHand(cancelled), true);
+  assert.equal(findingsKept(run({ nits: 1 })), '1 finding kept');
+  const stopped = run({ state: 'stopped', phase: 'done', stopReason: 'ended', detail: "You ended Codex's conversation; the review stopped." });
+  assert.equal(runSummary(stopped), 'Review stopped · 0 findings kept');
+  assert.equal(loopLine(stopped), "You ended Codex's conversation; the review stopped.");
+  assert.equal(loopNeedsYou(stopped), false);
+  // Review again: the same scope, by the same reviewer.
+  assert.deepEqual(reviewAgain(cancelled), { scope: { scope: 'changes', compare: '' }, choice: { key: 'codex', label: 'Codex', provider: 'codex', profileId: '' } });
+  assert.deepEqual(reviewAgain(run({ scope: 'turn', turn: 3, reviewerProfileId: 'codex-work' })).scope, { scope: 'turn', turn: 3 });
+  assert.equal(reviewAgain(run({ reviewerProfileId: 'codex-work' })).choice.profileId, 'codex-work');
+  assert.deepEqual(reviewAgain(run({ scope: 'pr', member: 'api' })).scope, { scope: 'pr', member: 'api' });
 });
 
 test('the agents asking each other, and a loop asking you, are labelled lines', () => {

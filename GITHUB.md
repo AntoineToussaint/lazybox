@@ -521,10 +521,10 @@ body. Nothing is sent for you.
 **Following it.** The tray lists the workspace's reviews, live
 (`Codex is reviewing turn 3 · 1 blocker so far`). The author's conversation
 gets a card where the review started (`review_started`): live while it runs,
-then `Codex reviewed turn 3 · 2 blockers, 3 minor` with **Open review** (the
-tray, on that review's findings) and **Open conversation**. A review is done
-when the reviewer's turn ends (`review_finished`); one whose conversation
-ended or failed first says so.
+with **Cancel review** ([below](#cancelling-a-review)), then `Codex reviewed
+turn 3 · 2 blockers, 3 minor` with **Open review** (the tray, on that review's
+findings) and **Open conversation**. A review is done when the reviewer's turn
+ends (`review_finished`); one whose conversation ended or failed first says so.
 
 **Missions.** When the author conversation is an attempt on a mission task,
 the review is evidence on that task (`review:<id>`, kind `review`): pending
@@ -614,6 +614,45 @@ providers: whether Claude's plan mode lets the reviewer run `lazybox review add`
 without an approval prompt (it may ask once), and whether Codex's read-only
 sandbox reaches the Runner (the brief points it at Lazybox's command tool when
 it does not).
+
+### Cancelling a review
+
+A review under way — its reviewer working, or its loop waiting for the next
+round — can be cancelled from:
+
+| Where | How |
+| --- | --- |
+| The review's card in the author's conversation | **Cancel review**, or `Esc` while the card has the focus |
+| The reviewer conversation's ⋯ menu (and the author's, for its review under way) | **Cancel review** |
+| ⌘K | **Cancel review** (the page's conversation's review, else the workspace's newest under way) |
+| The person's terminal | `lazybox review cancel [<review-id>] [--workspace W]` ([CLI](services/runner/code/cmd/lazybox/README.md)) |
+
+It asks first only when the reviewer has already filed findings (*Cancel this
+review?*, with **Keep reviewing** focused); with none, it cancels at once.
+
+**What cancelling does** (`CancelReview`, owner only; an agent's credential is
+refused). The Runner records the cancel on the review first — state and stop
+reason `cancelled`, `stopped_by` (*You*) and `stopped_at_unix`, a `cancelled`
+line in its timeline, the round under way closed, a question between the agents
+still waiting left unanswered — so nothing the agents do next starts another
+round: neither the turn it then interrupts nor the author's next fix. It then
+interrupts the reviewer's running turn and ends its session as **End session**
+does. Its conversation stays (read it, or continue it in a new session) and so
+do the findings it filed, in the tray as they were. The author's conversation
+records it (`review_finished` with the state, who and when), and a mission task
+it was evidence on gets no verdict from it (a blocker it filed still fails it).
+The card then reads **Review cancelled · 2 findings kept**, *You cancelled it in
+round 2*, with **Review again**: the same scope by the same reviewer, with the
+same focus, in a new read-only conversation.
+
+**Ending the reviewer by hand** stops its review too, so a card never stays
+*reviewing* on a reviewer that will not report: **Stop** while it reviews (an
+interrupted turn is not taken for the round's end), **End session**, or
+deleting its conversation, at any point of a loop under way. The review reads
+`stopped` (stop reason `ended`), the card **Review stopped · N findings kept**
+with what happened (*You ended Codex's conversation; the review stopped.*) and
+**Review again**. A Stop while the reviewer only talks to you after its round
+changes nothing.
 
 ## Start a workspace from an issue
 

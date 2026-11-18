@@ -1,0 +1,41 @@
+/* "Start from" (StartFrom.tsx): a quiet chip on each chosen repository, and
+   the branch picker it opens below the field. */
+.start-from-chip,.new-task-chip button.start-from-chip{display:inline-flex;justify-content:flex-start;width:auto;align-items:center;gap:3px;min-width:0;max-width:220px;height:calc(18px * var(--text-scale));padding:0 5px 0 6px;border:0;border-left:1px solid var(--accent-line);border-radius:0;background:transparent;color:var(--text);font:inherit;font-size:calc(11px * var(--text-scale));cursor:pointer}
+.start-from-chip[data-default],.new-task-chip button.start-from-chip[data-default]{color:var(--text-subtle)}
+.start-from-chip:hover:not(:disabled),.start-from-chip[aria-expanded=true],.new-task-chip button.start-from-chip:hover:not(:disabled),.new-task-chip button.start-from-chip[aria-expanded=true]{color:var(--text);background:var(--surface-strong);border-radius:4px}
+.start-from-chip:focus-visible{outline:2px solid var(--focus);outline-offset:1px;border-radius:4px}
+.start-from-from{color:var(--text-muted)}
+.start-from-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:calc(11px * var(--code-scale))}
+.start-from-chip svg{flex:none;opacity:.7}
+
+.start-from-picker{position:absolute;z-index:41;top:calc(100% + 4px);left:124px;right:0;display:flex;flex-direction:column;max-height:min(340px,46dvh);border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-hover);box-shadow:0 12px 32px color-mix(in srgb,var(--shadow) calc(47% * var(--shadow-strength)),transparent);font-family:var(--font-ui)}
+.start-from-search{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);color:var(--text-muted)}
+.start-from-picker .start-from-search input{flex:1;width:auto;min-width:0;padding:4px 0;border:0;border-radius:0;background:transparent;box-shadow:none;font-size:calc(13px * var(--text-scale));color:var(--text)}
+.start-from-picker .start-from-search input:focus,.start-from-picker .start-from-search input:focus-visible{outline:0}
+.start-from-search:focus-within{color:var(--accent)}
+.start-from-asking{flex:none;font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.start-from-list{flex:1;min-height:0;overflow:auto;margin:0;padding:4px;list-style:none}
+.start-from-list li{display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:5px;font-size:calc(13px * var(--text-scale));color:var(--text-soft);cursor:pointer}
+.start-from-list li.active{background:var(--accent-bg);color:var(--text)}
+.start-from-list li small{margin-left:auto;font-size:calc(10px * var(--text-scale));color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em}
+.start-from-list li small+svg,.start-from-list li>svg:last-child{flex:none;color:var(--accent)}
+.start-from-list .start-from-section{padding:8px 9px 3px;font-size:calc(10px * var(--text-scale));text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);cursor:default}
+.start-from-list .start-from-empty{color:var(--text-muted);cursor:default}
+.start-from-option{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.start-from-option.mono{font-family:var(--font-mono);font-size:calc(12px * var(--code-scale))}
+.start-from-option code{font-family:var(--font-mono);font-size:calc(12px * var(--code-scale))}
+.start-from-note{margin:0;padding:6px 10px;border-top:1px solid var(--line);font-size:calc(11px * var(--text-scale));color:var(--text-subtle)}
+
+/* New workspace and Add repositories: each chosen repository with its chip,
+   a few lines at most (it scrolls), the picker opening above them. */
+.workspace-start-from-field{position:relative;flex:none;margin:10px 0 0}
+.workspace-start-from small{font-size:calc(11px * var(--text-scale));color:var(--text-muted);line-height:calc(22px * var(--text-scale))}
+.workspace-start-from{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;max-height:calc(64px * var(--text-scale));overflow:auto;padding:2px;font-size:calc(12px * var(--text-scale));color:var(--text-tertiary)}
+.workspace-start-from-label{display:inline-flex;align-items:center;gap:6px;color:var(--text-tertiary)}
+.workspace-start-from>.workspace-start-from-repo{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:100%;padding:1px 2px 1px 8px;border:1px solid var(--line);border-radius:999px;color:var(--text)}
+.workspace-start-from-field .start-from-picker{left:0;top:auto;bottom:calc(100% + 4px);max-height:min(300px,40dvh)}
+
+@media (max-width:620px){
+  .start-from-picker{left:0}
+  .start-from-chip{max-width:140px}
+}

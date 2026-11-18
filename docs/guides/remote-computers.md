@@ -59,8 +59,10 @@ lazybox remote rm build-box         # forget it here, and revoke this Mac's key 
 
 ## In the window
 
-- **The sidebar groups Runners by computer**: *This Mac* (Dev, Working, the
-  installed app), then each computer you added, with how it is reached (*SSH*).
+- **The sidebar groups Runners by computer**: *This Mac* (this window's own
+  Runner, and Dev, Working or the installed app's if you chose to show them),
+  then each computer you added, with how it is reached (*SSH*). A computer you
+  added shows without asking.
   The round trip shows when it is slow (over 300 ms), and always when you rest
   the pointer on the computer's name.
 - **When the link drops** (your Mac slept, you changed Wi-Fi, the computer

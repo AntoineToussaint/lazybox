@@ -32,6 +32,7 @@ test("the card says where the conversation would work, and with how many others"
   assert.deepEqual(workspaceWords({ mode: "same", sharedWith: 3 }), { label: "This one", detail: "Shared with 3 running conversations: they edit the same files" });
   assert.equal(workspaceWords({ mode: "same", sharedWith: 1 }).detail, "Shared with this conversation: they edit the same files");
   assert.equal(workspaceWords({ mode: "new", sharedWith: 3 }).label, "A new workspace");
+  assert.equal(workspaceWords({ mode: "new", sharedWith: 1, startFrom: "feat/v2" }).detail, "Its own branches, started from origin’s feat/v2", "--start-from shows on the request");
   assert.deepEqual(briefPreview("One\nTwo\nThree\nFour"), { text: "One\nTwo\nThree", more: true });
   assert.deepEqual(briefPreview("Short"), { text: "Short", more: false });
   assert.equal(briefPreview("x".repeat(400)).text.length, 280);

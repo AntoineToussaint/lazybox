@@ -220,6 +220,13 @@ request. What you allow for the whole workspace is saved in the workspace's
   the text the agent received. Events that follow each other read as one
   block. Lazybox's messages are not among the prompts `↑` recalls or `⌥↑`
   jumps to.
+- **What Lazybox gained since the conversation started.** A conversation
+  lives for days; when Lazybox learns something new for agents meanwhile (a
+  new command, a changed rule) or you change Settings → Agents, the composer
+  shows *Instructions updated*, and your next message that starts a turn
+  carries only what changed, never mid-turn. It shows as one quiet line before
+  your message, *Lazybox told Claude about new features*, that opens to
+  exactly what the agent received. Each change is told once.
 - **Runner restarts** that interrupted nothing leave only a small mark (its
   count and last time on hover), one until you next send a message. A restart
   that left something uncertain — a message it could not confirm, a command

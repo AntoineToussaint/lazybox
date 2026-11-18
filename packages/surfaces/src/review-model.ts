@@ -185,11 +185,19 @@ export function countsSummary(run: Pick<ReviewRun, 'blockers' | 'majors' | 'mino
   return parts.length ? parts.join(', ') : 'no open findings';
 }
 const lowerFirst = (text: string) => text.startsWith('PR ') ? text : text.charAt(0).toLowerCase() + text.slice(1);
+type Counted = Pick<ReviewRun, 'blockers' | 'majors' | 'minors' | 'nits'>;
+const findingCount = (run: Counted) => run.blockers + run.majors + run.minors + run.nits;
+/** "2 findings kept": what a review the person ended leaves to act on. */
+export const findingsKept = (run: Counted) => { const n = findingCount(run); return `${n} finding${n === 1 ? '' : 's'} kept`; };
+/** The person ended it by hand: cancelled it, or stopped, ended or deleted its reviewer while it reviewed. */
+export const endedByHand = (run: Pick<ReviewRun, 'state'>) => run.state === 'cancelled' || run.state === 'stopped';
 /** What a review did, in one line for its card: "Codex reviewed turn 3 · 2 blockers, 3 minor". */
 export function runSummary(run: Pick<ReviewRun, 'state' | 'reviewerLabel' | 'scopeLabel' | 'blockers' | 'majors' | 'minors' | 'nits' | 'detail'>): string {
   const scope = lowerFirst(run.scopeLabel || 'the changes');
-  if (run.state === 'running') return `${run.reviewerLabel} is reviewing ${scope}${run.blockers + run.majors + run.minors + run.nits ? ` · ${countsSummary(run)} so far` : ''}`;
+  if (run.state === 'running') return `${run.reviewerLabel} is reviewing ${scope}${findingCount(run) ? ` · ${countsSummary(run)} so far` : ''}`;
   if (run.state === 'failed') return run.detail || `${run.reviewerLabel} could not review ${scope}`;
+  if (run.state === 'cancelled') return `Review cancelled · ${findingsKept(run)}`;
+  if (run.state === 'stopped') return `Review stopped · ${findingsKept(run)}`;
   return `${run.reviewerLabel} reviewed ${scope} · ${countsSummary(run)}`;
 }
 
@@ -220,6 +228,9 @@ export function loopLine(run: LoopRun): string {
     case 'error': return `Stopped: ${run.detail || 'an error'} · needs you`;
     case 'stopped': return 'You stopped the loop';
     case 'taken_over': return 'You took over';
+    case 'cancelled': return run.round > 1 ? `You cancelled it in round ${run.round}` : 'You cancelled it';
+    // Its reviewer was stopped, ended or deleted by hand: the Runner says which.
+    case 'ended': return run.detail || 'You ended the reviewer';
   }
   if (!run.loop || run.loop === 'off') return '';
   const of = `Round ${run.round} of ${run.maxRounds}`, paused = run.paused ? ' · paused' : '';
@@ -240,6 +251,7 @@ export function reviewTabBadge(run: Pick<ReviewRun, 'state' | 'reviewerLabel' | 
   const findings = run.blockers + run.majors + run.minors + run.nits;
   if (run.state === 'running') return { text: findings ? String(findings) : '', tone: 'busy', label: `${run.reviewerLabel} is reviewing${findings ? ` · ${countsSummary(run)} so far` : ''}` };
   if (run.state === 'failed') return { text: 'failed', tone: 'failed', label: run.detail || `${run.reviewerLabel} could not review` };
+  if (run.state === 'cancelled' || run.state === 'stopped') return { text: run.state, tone: 'done', label: `${run.reviewerLabel}'s review ${run.state === 'cancelled' ? 'was cancelled' : 'stopped'} · ${findingsKept(run)}` };
   if (!findings) return { text: 'done', tone: 'done', label: `${run.reviewerLabel} is done · no open findings` };
   return { text: `${findings} finding${findings === 1 ? '' : 's'}`, tone: run.blockers ? 'failed' : 'warn', label: `${run.reviewerLabel} is done · ${countsSummary(run)}` };
 }
@@ -247,6 +259,16 @@ export function reviewTabBadge(run: Pick<ReviewRun, 'state' | 'reviewerLabel' | 
 export const loopNeedsYou = (run: LoopRun) => ['max_rounds', 'stuck', 'error'].includes(run.stopReason) || (run.phase === 'triage' && !run.stopReason && (run.loop === 'ask' || run.paused));
 /** Whether the person can still steer the loop. */
 export const loopActive = (run: LoopRun) => !!run.loop && run.loop !== 'off' && !run.stopReason && run.phase !== 'done' && !!run.phase;
+/** A review still under way, which the person can cancel: its reviewer works, or its loop waits for the next round. */
+export const reviewInProgress = (run: LoopRun & Pick<ReviewRun, 'state'>) => run.state === 'running' || loopActive(run);
+/** The same review again (its scope, reviewer and focus), for "Review again" once one was cancelled or stopped. */
+export function reviewAgain(run: Pick<ReviewRun, 'scope' | 'turn' | 'compare' | 'member' | 'reviewerLabel' | 'reviewerProvider' | 'reviewerProfileId'>): { scope: { scope: 'changes'; compare: string } | { scope: 'turn'; turn: number } | { scope: 'pr'; member: string }; choice: ReviewerChoice } {
+  const scope = run.scope === 'turn' ? { scope: 'turn' as const, turn: run.turn } : run.scope === 'pr' ? { scope: 'pr' as const, member: run.member } : { scope: 'changes' as const, compare: run.compare };
+  const choice: ReviewerChoice = run.reviewerProfileId
+    ? { key: `profile:${run.reviewerProfileId}`, label: run.reviewerLabel, provider: run.reviewerProvider, profileId: run.reviewerProfileId }
+    : { key: run.reviewerProvider, label: run.reviewerLabel, provider: run.reviewerProvider, profileId: '' };
+  return { scope, choice };
+}
 export const loopModes: { value: string; label: string }[] = [
   { value: 'ask', label: 'Ask me between rounds' }, { value: 'auto', label: 'Send findings automatically' }, { value: 'off', label: 'One pass, no re-review' },
 ];

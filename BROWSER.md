@@ -128,8 +128,9 @@ reported), and offers **Give Claude the browser** for it.
 them rather than a headless browser of your own, the person watches in the
 Agent browser panel — or why it has none (it started before the browser was
 available, or the browser is off for the workspace or everywhere) and how the
-person gives it one. When that changes, the agent hears it with its next
-message, like any change of the shared instructions.
+person gives it one. When that changes, the agent hears the section as it now
+reads with its next message, like any change of its briefing
+([COMMAND_OUTPUT.md](COMMAND_OUTPUT.md#the-briefing-and-what-running-conversations-hear-when-it-changes)).
 
 ## The engine, and why
 

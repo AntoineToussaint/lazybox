@@ -7,6 +7,7 @@ import {
   repositoryOrganization,
 } from "./repository-model";
 import { GitHubSettings } from "./GitHubSettings";
+import { ReplaceRepositoryCopy } from "./RepositoryReplacement";
 import "./repository-browser.css";
 export const RepositoryHostContext = createContext<
   Pick<
@@ -44,7 +45,9 @@ export function RepositoryBrowser({
     [localPath, setLocalPath] = useState(""),
     [busy, setBusy] = useState(false),
     [sourceError, setSourceError] = useState(""),
-    [removing, setRemoving] = useState<string>();
+    [removing, setRemoving] = useState<string>(),
+    [replacing, setReplacing] = useState<string>(),
+    [replacedNote, setReplacedNote] = useState("");
   const entries = [...(catalog?.entries || [])].sort(compareRepositories),
     visible = entries.filter((r) =>
       r.name.toLowerCase().includes(query.trim().toLowerCase()),
@@ -136,6 +139,9 @@ export function RepositoryBrowser({
           {error || sourceError}
         </p>
       )}
+      {replacedNote && (
+        <p className="repository-catalog-notice" role="status">{replacedNote}</p>
+      )}
       {refreshing && (
         <p className="repository-catalog-notice" role="status">
           Refreshing GitHub repositories… Saved results remain available.
@@ -213,6 +219,19 @@ export function RepositoryBrowser({
                 ) : (
                   <>
                     <span title={repo.name}>{repo.name.includes("/")?repo.name.slice(repo.name.indexOf("/")+1):repo.name}</span>
+                    {repo.repositoryId && repo.identity.startsWith("github:") && (
+                      // A history GitHub replaced (a force-push with a new root,
+                      // or a new repository under the name): a fresh copy.
+                      <button
+                        type="button"
+                        aria-label={`Replace Lazybox’s copy of ${repo.name}`}
+                        aria-expanded={replacing === repo.identity}
+                        title="Copy it again from GitHub, for example after its history was force-pushed"
+                        onClick={() => setReplacing(replacing === repo.identity ? undefined : repo.identity)}
+                      >
+                        Replace copy…
+                      </button>
+                    )}
                     <button
                       type="button"
                       aria-label={`Remove ${repo.name} from suggestions`}
@@ -223,6 +242,22 @@ export function RepositoryBrowser({
                   </>
                 )}
               </div>
+              {replacing === repo.identity && (
+                <div className="repository-browser-replace">
+                  <p>Replace Lazybox’s copy of {repo.name} with the repository as GitHub has it now. Do this when its history was replaced on GitHub (a force-push with a new root, or a new repository under the same name).</p>
+                  <ReplaceRepositoryCopy
+                    replacement={{ identity: repo.identity, name: repo.name, hasCopy: true }}
+                    lead={false}
+                    autoFocus
+                    onCancel={() => setReplacing(undefined)}
+                    onReplaced={(done) => {
+                      setReplacing(undefined);
+                      setReplacedNote(`Replaced Lazybox’s copy of ${done.name || repo.name}. New workspaces start from it.`);
+                      void reload();
+                    }}
+                  />
+                </div>
+              )}
             </Fragment>
           ))
         )}

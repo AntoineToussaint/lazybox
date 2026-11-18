@@ -52,10 +52,14 @@ briefing):
 
 ```text
 lazybox conversation new --title "Review all modules" --brief "What to do, done when, boundaries"
-                         [--brief - | --brief-artifact ID] [--workspace same|new]
+                         [--brief - | --brief-artifact ID] [--workspace same|new [--start-from B]]
                          [--provider claude|codex|…] [--profile ID] [--model M] [--reason "why"]
                          [--timeout 90s] [--no-wait]
 ```
+
+With `--workspace new`, the new workspace's branches start from this one's;
+`--start-from B` starts them from origin's branch `B` instead, fetched first
+(the request says so).
 
 `--brief -` reads the brief from stdin (at most 8 KB). For a longer brief,
 publish it as an artifact (`lazybox artifact put … --kind spec`) and pass

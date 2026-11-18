@@ -68,7 +68,7 @@ func TestNewConversationGetsTheBrowserWhenTheRunnerHasIt(t *testing.T) {
 	if !strings.Contains(saved.Context, "You have a browser") || !strings.Contains(saved.Context, "Agent browser panel") {
 		t.Fatalf("briefing does not say the agent has the browser:\n%s", saved.Context)
 	}
-	if update := b.InstructionsUpdate(e); update != "" {
+	if update := b.BriefingUpdate(e).Text; update != "" {
 		t.Fatalf("a new conversation already has its browser section: %q", update)
 	}
 }
@@ -117,7 +117,7 @@ func TestGiveTheBrowserRestartsAnAgentStartedWithoutItAndKeepsTheConversation(t 
 	if got := b.BrowserAccess(e); got != BrowserCanGive {
 		t.Fatalf("access %q, want %q", got, BrowserCanGive)
 	}
-	update := b.InstructionsUpdate(e)
+	update := b.BriefingUpdate(e).Text
 	if !strings.Contains(update, "You do not have Lazybox's agent browser") || !strings.Contains(update, "Give Codex the browser") {
 		t.Fatalf("the agent must hear how the person gives it the browser: %q", update)
 	}
@@ -142,7 +142,7 @@ func TestGiveTheBrowserRestartsAnAgentStartedWithoutItAndKeepsTheConversation(t 
 	if got := b.BrowserAccess(next); got != BrowserHas {
 		t.Fatalf("access %q, want %q", got, BrowserHas)
 	}
-	if update := b.InstructionsUpdate(next); !strings.Contains(update, "You have a browser") {
+	if update := b.BriefingUpdate(next).Text; !strings.Contains(update, "You have a browser") {
 		t.Fatalf("the restarted agent must hear it has the browser now: %q", update)
 	}
 	journaled(t, next, `"browser_given"`)

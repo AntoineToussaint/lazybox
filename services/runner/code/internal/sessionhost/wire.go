@@ -59,9 +59,13 @@ type Record struct {
 	Protocol int    `json:"protocol"`
 	ID       string `json:"id"`
 	PID      int    `json:"pid"`
-	Port     int    `json:"port"`
-	Token    string `json:"token"`
-	Proxy    string `json:"proxy"`
+	// Started is the host process's start time (procid): with PID, its
+	// identity. A PID the system has since given to another program does not
+	// match. Zero for a host started before it was recorded.
+	Started int64  `json:"started,omitempty"`
+	Port    int    `json:"port"`
+	Token   string `json:"token"`
+	Proxy   string `json:"proxy"`
 	// Backend is how the host was started: BackendSessionHost (also what an
 	// empty value, from a host started before backends existed, means) or
 	// BackendTmux. It changes nothing on the wire.

@@ -24,7 +24,7 @@ type ConversationStartCredentials interface {
 
 func wireConversationStart(r runner.ConversationStart) *pb.ConversationStartRequest {
 	return &pb.ConversationStartRequest{Id: r.ID, SessionId: r.Session, ConversationId: r.Conversation, CollectionId: r.Workspace, FromTitle: r.From, Title: r.Title, Brief: r.Brief, Reason: r.Reason,
-		Workspace: r.Mode, Provider: r.Provider, ProfileId: r.Profile, Model: r.Model, Permission: r.Permission,
+		Workspace: r.Mode, StartFrom: r.StartFrom, Provider: r.Provider, ProfileId: r.Profile, Model: r.Model, Permission: r.Permission,
 		BriefArtifactId: r.Artifact, BriefArtifactTitle: r.ArtifactTitle, BriefArtifactVersion: r.ArtifactVersion, SharedWith: uint32(max(r.SharedWith, 0)),
 		State: r.State, DeclineReason: r.DeclineReason, StartedSessionId: r.StartedSession, StartedConversationId: r.StartedConversation, StartedCollectionId: r.StartedWorkspace, StartedTitle: r.StartedTitle,
 		Child: r.Child, MissionTitle: r.MissionTitle, CreatedAtUnixMillis: millis(r.CreatedAt), ExpiresAtUnixMillis: millis(r.ExpiresAt), ResolvedAtUnixMillis: millis(r.ResolvedAt)}
@@ -43,7 +43,7 @@ func (s *Service) RequestConversationStart(ctx context.Context, r *pb.RequestCon
 		return nil, grpcError(codes.InvalidArgument, errors.New("session required"))
 	}
 	request, err := s.Bench.RequestConversationStart(ctx, runner.ConversationStartAsk{Session: r.SessionId, Title: r.Title, Brief: r.Brief, Artifact: r.BriefArtifactId, Reason: r.Reason,
-		Workspace: r.Workspace, Provider: r.Provider, Profile: r.ProfileId, Model: r.Model})
+		Workspace: r.Workspace, Provider: r.Provider, Profile: r.ProfileId, Model: r.Model, StartFrom: r.StartFrom})
 	if err != nil {
 		return nil, agentError(err)
 	}

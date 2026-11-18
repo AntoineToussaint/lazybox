@@ -135,6 +135,7 @@ func (c *cli) newWorkspace(args []string) error {
 	var repos multiFlag
 	f.Var(&repos, "repo", "a repository: owner/name, its catalog name, identity or path (repeat for several)")
 	branch := f.String("branch", "", "the branch for every repository (default: the Runner's)")
+	startFrom := f.String("start-from", "", "the branch of origin every repository starts from, fetched first (default: the one last chosen for it, else origin's default branch); remembered for the next workspace")
 	from := f.String("from", "", "start from an issue: its link or owner/name#N (the workspace, its branch and the agent's first message come from it)")
 	name := f.String("name", "", "with --from: the workspace's name (default: the issue's title)")
 	profile := f.String("profile", "", "with --from: the agent subscription (default: Claude's)")
@@ -153,10 +154,10 @@ func (c *cli) newWorkspace(args []string) error {
 		if len(positional) == 1 {
 			message = positional[0]
 		}
-		return c.newFromItem(fromItem{reference: *from, name: *name, branch: *branch, profile: *profile, permission: *permission, repos: repos, another: *another, noComments: *noComments, message: message})
+		return c.newFromItem(fromItem{reference: *from, name: *name, branch: *branch, startFrom: *startFrom, profile: *profile, permission: *permission, repos: repos, another: *another, noComments: *noComments, message: message})
 	}
 	if len(positional) != 1 || len(repos) == 0 {
-		return fail(exitUsage, "usage: lazybox new <workspace-name> --repo R [--repo R…] [--branch B]")
+		return fail(exitUsage, "usage: lazybox new <workspace-name> --repo R [--repo R…] [--branch B] [--start-from B]")
 	}
 	cl, err := c.dial()
 	if err != nil {
@@ -174,7 +175,7 @@ func (c *cli) newWorkspace(args []string) error {
 		}
 		identities = append(identities, entry.Identity)
 	}
-	stream, err := cl.PrepareWorkspace(c.ctx, connect.NewRequest(&pb.PrepareWorkspaceRequest{RequestKey: commands.ID(), Name: positional[0], RepositoryIdentities: identities, Branch: *branch}))
+	stream, err := cl.PrepareWorkspace(c.ctx, connect.NewRequest(&pb.PrepareWorkspaceRequest{RequestKey: commands.ID(), Name: positional[0], RepositoryIdentities: identities, Branch: *branch, StartFrom: startsFor(identities, *startFrom)}))
 	if err != nil {
 		return cl.explain(err)
 	}

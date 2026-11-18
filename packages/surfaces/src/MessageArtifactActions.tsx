@@ -114,7 +114,7 @@ export function MessageArtifactActions({ message }: { message: TranscriptMessage
   </div> : null}<span ref={anchor} className="message-artifact-actions">
     <button type="button" className="message-artifact-button" aria-label="Track as artifact…" title="Track as artifact… (or right-click the message)" onClick={() => void startTrack()}
 >
-      <Icon name="artifact" size={14}/><span>Track</span>
+      <Icon name="artifact" size={14}/>
     </button>
     {note && <span className="message-artifact-note" role="status">{note}</span>}
     {open?.kind === 'track' && <TrackArtifactDialog collectionId={scope.collectionId} content={message.text} source={source} existing={open.existing.filter(a => newerThanLatest(a, scope, message))} files={open.files} preferFile={open.preferFile}

@@ -7,6 +7,15 @@ service RunnerService {
   rpc ListSnippets(InfoRequest) returns (SnippetCatalog);
   rpc GetRepositoryCatalog(GetRepositoryCatalogRequest) returns (RepositoryCatalog);
   rpc PrepareWorkspace(PrepareWorkspaceRequest) returns (stream WorkspacePreparation);
+  // A repository's branches for New task's "Start from" choice, its default
+  // branch and the branch it last started from (WORKSPACES.md, "Start from").
+  rpc ListRepositoryBranches(ListRepositoryBranchesRequest) returns (RepositoryBranches);
+  // The owner's only. Replaces Lazybox's copy of a GitHub repository whose
+  // history changed on GitHub since Lazybox copied it (a force-push with a
+  // new root, or a new repository that took its name) with a fresh copy of
+  // what GitHub has now. Without confirm it only says what that changes.
+  // Workspaces made from the old copy keep their worktrees on it.
+  rpc RefreshRepositoryIdentity(RefreshRepositoryIdentityRequest) returns (RepositoryIdentityRefresh);
   rpc Version(VersionRequest) returns (VersionResponse);
   rpc GetRunnerSettings(InfoRequest) returns (RunnerSettings);
   rpc SaveRunnerSettings(RunnerSettings) returns (RunnerSettings);
@@ -96,6 +105,16 @@ service RunnerService {
   rpc ArrangeWorkspaces(ArrangeWorkspacesRequest) returns (ListCollectionsResponse);
   rpc ArchiveCollection(CollectionRequest) returns (CollectionResponse);
   rpc ReconcileCollection(ReconcileCollectionRequest) returns (CollectionResponse);
+  // The owner's only. What a previous Runner left unconfirmed in a workspace
+  // or a conversation (RESOURCE_OWNERSHIP.md, "Unconfirmed ownership"): each
+  // recorded agent and command, its PID and command line, and whether a
+  // process with that identity still runs, checked by the Runner. What it
+  // proves gone it settles there and then.
+  rpc GetOwnership(OwnershipRequest) returns (Ownership);
+  // The owner's only. Settles it: stop exactly the recorded processes that
+  // still run (checked by identity, never a PID given to another program
+  // since), or record the person's word that they stopped.
+  rpc ResolveOwnership(ResolveOwnershipRequest) returns (Ownership);
   rpc OpenSession(OpenSessionRequest) returns (SessionResponse);
   rpc OpenAssistant(OpenAssistantRequest) returns (SessionResponse);
   rpc RenameConversation(RenameConversationRequest) returns (SessionResponse);
@@ -248,6 +267,12 @@ service RunnerService {
   // Owner only. Controls a review's loop: pause, resume, stop, take over,
   // and how findings reach the author between rounds.
   rpc UpdateReviewRun(UpdateReviewRunRequest) returns (WorkspaceReview);
+  // Owner only. Cancels a review under way (GITHUB.md, "Cancelling a
+  // review"): no further round of its loop starts, the reviewer's running
+  // turn is interrupted and its session ended. Its conversation and the
+  // findings it filed are kept; the review reads "cancelled", with who
+  // cancelled it and when. The reply is the review's workspace review.
+  rpc CancelReview(CancelReviewRequest) returns (WorkspaceReview);
   // One agent asks the other a question (`lazybox ask author|reviewer`): an
   // agent credential may ask only for its own execution, and only between the
   // author and the reviewer of one review in the same workspace. The question
@@ -1540,6 +1565,45 @@ message ReconcileCollectionRequest {
   bool processes_stopped = 3;
   string reason = 4;
 }
+// One of: a workspace, or a conversation (any of its attempts).
+message OwnershipRequest {
+  string collection_id = 1;
+  string session_id = 2;
+}
+// One process a previous Runner recorded, as the Runner checked it.
+message OwnedProcess {
+  // "agent" or "command".
+  string kind = 1;
+  string session_id = 2;
+  string command_id = 3;
+  // The conversation's title, or the command's.
+  string label = 4;
+  // What it runs, where recorded or seen; empty when unknown.
+  string command_line = 5;
+  // 0 when no process ID is recorded.
+  int32 pid = 6;
+  // "running": a process with the recorded identity runs; "gone": proved
+  // gone; "unknown": nothing recorded lets the Runner tell.
+  string state = 7;
+  // Why, in plain words.
+  string detail = 8;
+}
+message Ownership {
+  repeated OwnedProcess processes = 1;
+  // Nothing is unconfirmed (any more).
+  bool settled = 2;
+  // What the Runner settled by itself, if anything.
+  string note = 3;
+}
+message ResolveOwnershipRequest {
+  string collection_id = 1;
+  string session_id = 2;
+  // Stop the recorded processes that still run. Without it, the person says
+  // they have stopped (refused for a process the Runner sees running).
+  bool stop = 3;
+  // Optional, with the person's word: why they know.
+  string reason = 4;
+}
 message SessionResponse {
   Session session = 1;
 }
@@ -2069,8 +2133,79 @@ message PrepareWorkspaceRequest {
   string repository_request_id = 6;
   // A new workspace started from a work item: recorded as its origin.
   ItemRef item = 7;
+  // The branch each repository starts from, by repository identity
+  // (WORKSPACES.md, "Start from"): fetched from origin first, then the new
+  // branch starts at origin/<branch>. A repository not named starts from the
+  // branch last chosen for it, else origin's default branch; one named with
+  // "" or origin's default branch starts there and forgets the last choice.
+  // A repository named here is remembered for the next workspace.
+  map<string, string> start_from = 8;
 }
-message WorkspacePreparation { string identity = 1; string message = 2; Collection collection = 3; }
+message ListRepositoryBranchesRequest {
+  string repository_identity = 1;
+  // Ask origin for its branches now (one ls-remote, nothing fetched); false
+  // answers at once from what the Runner already has, without the network.
+  bool remote = 2;
+}
+message RepositoryBranch {
+  string name = 1;
+  string commit = 2;
+  // Its last commit's time, when the Runner has that commit; 0 otherwise.
+  int64 committed_at_unix_millis = 3;
+}
+// What a repository's "Start from" choice offers.
+message RepositoryBranches {
+  string repository_identity = 1;
+  // Origin's default branch: as origin names it (remote), else as last fetched; empty when unknown.
+  string default_branch = 2;
+  // The branch new workspaces of this repository start from when none is
+  // chosen: the person's last choice; empty for the default branch.
+  string start_from = 3;
+  // Branches chosen lately, newest first.
+  repeated string recent = 4;
+  // Origin's branches, most recently committed first, then by name: from
+  // origin (remote) or as last fetched.
+  repeated RepositoryBranch branches = 5;
+  // Origin could not be asked: the branches are the last known ones.
+  string error = 6;
+  // The branches came from origin just now.
+  bool remote = 7;
+  // The repository is not on this Runner yet: no branches until it is
+  // prepared; a typed branch name is still checked then.
+  bool unregistered = 8;
+}
+message WorkspacePreparation {
+  string identity = 1; string message = 2; Collection collection = 3;
+  // Sent just before the stream fails because this repository's history
+  // changed on GitHub (RefreshRepositoryIdentity is the way forward).
+  RepositoryReplacement replaced = 4;
+}
+message RepositoryReplacement {
+  string identity = 1;
+  string name = 2;
+  // Lazybox has a copy of the old history (else only its listing is old).
+  bool has_copy = 3;
+}
+message RefreshRepositoryIdentityRequest {
+  // github:owner/name, as the repository catalog has it.
+  string identity = 1;
+  // Replace the copy; without it, only say what that changes.
+  bool confirm = 2;
+}
+message RepositoryIdentityRefresh {
+  string identity = 1;
+  // owner/name as GitHub has it now.
+  string name = 2;
+  // "replaced": the name now belongs to another GitHub repository than
+  // Lazybox's copy or listing. Empty: the same repository.
+  string reason = 3;
+  bool has_copy = 4;
+  // Workspaces made from the copy being replaced: they keep their worktrees.
+  repeated string workspaces = 5;
+  // Done (confirm), and the new copy's registration.
+  bool replaced = 6;
+  string repository_id = 7;
+}
 
 message Snippet { string key = 1; string category = 2; string description = 3; string body = 4; string origin = 5; repeated string next = 6; }
 message SnippetCatalog { repeated Snippet snippets = 1; }
@@ -2347,7 +2482,8 @@ message ReviewRun {
   string compare = 14;
   string pull_request_url = 15;
   // "running" while the reviewer works, "done" once it ended its turn,
-  // "failed" when it could not.
+  // "failed" when it could not, "cancelled" when the person cancelled the
+  // review, "stopped" when they ended its reviewer by hand while it reviewed.
   string state = 16;
   // A sentence about the state, for the person.
   string detail = 17;
@@ -2373,8 +2509,9 @@ message ReviewRun {
   // (findings sent; the author's turn), done.
   string phase = 30;
   bool paused = 31;
-  // Why the loop ended: clean, max_rounds, stuck, error, stopped, taken_over;
-  // "" while it runs.
+  // Why the loop ended: clean, max_rounds, stuck, error, stopped, taken_over,
+  // cancelled (CancelReview), ended (the person ended the reviewer by hand:
+  // Stop, End session, Delete); "" while it runs.
   string stop_reason = 32;
   repeated ReviewRound rounds = 33;
   repeated ReviewTimelineEntry timeline = 34;
@@ -2383,6 +2520,14 @@ message ReviewRun {
   string fallback = 35;
   // The focus the person gave (`/review <focus>`), if any.
   string focus = 36;
+  // Who ended the review by hand ("You"), with state "cancelled" (it was
+  // cancelled) or "stopped" (its reviewer was stopped, ended or deleted while
+  // it reviewed), and when; empty and 0 otherwise.
+  string stopped_by = 37;
+  int64 stopped_at_unix = 38;
+  // pr: the workspace repository whose pull request is reviewed, so the
+  // same review can be started again.
+  string member = 39;
 }
 message WorkspaceReview {
   repeated ReviewComment comments = 1;
@@ -2456,6 +2601,11 @@ message UpdateReviewRunRequest {
   string action = 3;
   string loop = 4;
   uint32 max_rounds = 5;
+}
+message CancelReviewRequest {
+  // The review's workspace; "" finds the workspace that keeps review_id.
+  string collection_id = 1;
+  string review_id = 2;
 }
 message AskAgentRequest {
   // The asking execution.
@@ -3750,6 +3900,9 @@ message RequestConversationStartRequest {
   string model = 8;
   // Why, in a line the person decides from (optional).
   string reason = 9;
+  // With workspace new: the branch of origin every repository starts from,
+  // fetched first, instead of this workspace's branches.
+  string start_from = 10;
 }
 message ConversationStartRequest {
   string id = 1;
@@ -3789,6 +3942,9 @@ message ConversationStartRequest {
   int64 created_at_unix_millis = 26;
   int64 expires_at_unix_millis = 27;
   int64 resolved_at_unix_millis = 28;
+  // workspace new: the branch of origin it starts from; empty for the asking
+  // workspace's branches.
+  string start_from = 29;
 }
 message WaitConversationStartRequest {
   string request_id = 1;

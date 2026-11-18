@@ -43,6 +43,12 @@ const (
 	// RunnerServicePrepareWorkspaceProcedure is the fully-qualified name of the RunnerService's
 	// PrepareWorkspace RPC.
 	RunnerServicePrepareWorkspaceProcedure = "/lazybox.bench.v1.RunnerService/PrepareWorkspace"
+	// RunnerServiceListRepositoryBranchesProcedure is the fully-qualified name of the RunnerService's
+	// ListRepositoryBranches RPC.
+	RunnerServiceListRepositoryBranchesProcedure = "/lazybox.bench.v1.RunnerService/ListRepositoryBranches"
+	// RunnerServiceRefreshRepositoryIdentityProcedure is the fully-qualified name of the
+	// RunnerService's RefreshRepositoryIdentity RPC.
+	RunnerServiceRefreshRepositoryIdentityProcedure = "/lazybox.bench.v1.RunnerService/RefreshRepositoryIdentity"
 	// RunnerServiceVersionProcedure is the fully-qualified name of the RunnerService's Version RPC.
 	RunnerServiceVersionProcedure = "/lazybox.bench.v1.RunnerService/Version"
 	// RunnerServiceGetRunnerSettingsProcedure is the fully-qualified name of the RunnerService's
@@ -190,6 +196,12 @@ const (
 	// RunnerServiceReconcileCollectionProcedure is the fully-qualified name of the RunnerService's
 	// ReconcileCollection RPC.
 	RunnerServiceReconcileCollectionProcedure = "/lazybox.bench.v1.RunnerService/ReconcileCollection"
+	// RunnerServiceGetOwnershipProcedure is the fully-qualified name of the RunnerService's
+	// GetOwnership RPC.
+	RunnerServiceGetOwnershipProcedure = "/lazybox.bench.v1.RunnerService/GetOwnership"
+	// RunnerServiceResolveOwnershipProcedure is the fully-qualified name of the RunnerService's
+	// ResolveOwnership RPC.
+	RunnerServiceResolveOwnershipProcedure = "/lazybox.bench.v1.RunnerService/ResolveOwnership"
 	// RunnerServiceOpenSessionProcedure is the fully-qualified name of the RunnerService's OpenSession
 	// RPC.
 	RunnerServiceOpenSessionProcedure = "/lazybox.bench.v1.RunnerService/OpenSession"
@@ -396,6 +408,9 @@ const (
 	// RunnerServiceUpdateReviewRunProcedure is the fully-qualified name of the RunnerService's
 	// UpdateReviewRun RPC.
 	RunnerServiceUpdateReviewRunProcedure = "/lazybox.bench.v1.RunnerService/UpdateReviewRun"
+	// RunnerServiceCancelReviewProcedure is the fully-qualified name of the RunnerService's
+	// CancelReview RPC.
+	RunnerServiceCancelReviewProcedure = "/lazybox.bench.v1.RunnerService/CancelReview"
 	// RunnerServiceAskAgentProcedure is the fully-qualified name of the RunnerService's AskAgent RPC.
 	RunnerServiceAskAgentProcedure = "/lazybox.bench.v1.RunnerService/AskAgent"
 	// RunnerServiceWaitAgentAskProcedure is the fully-qualified name of the RunnerService's
@@ -656,6 +671,15 @@ type RunnerServiceClient interface {
 	ListSnippets(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.SnippetCatalog], error)
 	GetRepositoryCatalog(context.Context, *connect.Request[gen.GetRepositoryCatalogRequest]) (*connect.Response[gen.RepositoryCatalog], error)
 	PrepareWorkspace(context.Context, *connect.Request[gen.PrepareWorkspaceRequest]) (*connect.ServerStreamForClient[gen.WorkspacePreparation], error)
+	// A repository's branches for New task's "Start from" choice, its default
+	// branch and the branch it last started from (WORKSPACES.md, "Start from").
+	ListRepositoryBranches(context.Context, *connect.Request[gen.ListRepositoryBranchesRequest]) (*connect.Response[gen.RepositoryBranches], error)
+	// The owner's only. Replaces Lazybox's copy of a GitHub repository whose
+	// history changed on GitHub since Lazybox copied it (a force-push with a
+	// new root, or a new repository that took its name) with a fresh copy of
+	// what GitHub has now. Without confirm it only says what that changes.
+	// Workspaces made from the old copy keep their worktrees on it.
+	RefreshRepositoryIdentity(context.Context, *connect.Request[gen.RefreshRepositoryIdentityRequest]) (*connect.Response[gen.RepositoryIdentityRefresh], error)
 	Version(context.Context, *connect.Request[gen.VersionRequest]) (*connect.Response[gen.VersionResponse], error)
 	GetRunnerSettings(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.RunnerSettings], error)
 	SaveRunnerSettings(context.Context, *connect.Request[gen.RunnerSettings]) (*connect.Response[gen.RunnerSettings], error)
@@ -745,6 +769,16 @@ type RunnerServiceClient interface {
 	ArrangeWorkspaces(context.Context, *connect.Request[gen.ArrangeWorkspacesRequest]) (*connect.Response[gen.ListCollectionsResponse], error)
 	ArchiveCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	ReconcileCollection(context.Context, *connect.Request[gen.ReconcileCollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
+	// The owner's only. What a previous Runner left unconfirmed in a workspace
+	// or a conversation (RESOURCE_OWNERSHIP.md, "Unconfirmed ownership"): each
+	// recorded agent and command, its PID and command line, and whether a
+	// process with that identity still runs, checked by the Runner. What it
+	// proves gone it settles there and then.
+	GetOwnership(context.Context, *connect.Request[gen.OwnershipRequest]) (*connect.Response[gen.Ownership], error)
+	// The owner's only. Settles it: stop exactly the recorded processes that
+	// still run (checked by identity, never a PID given to another program
+	// since), or record the person's word that they stopped.
+	ResolveOwnership(context.Context, *connect.Request[gen.ResolveOwnershipRequest]) (*connect.Response[gen.Ownership], error)
 	OpenSession(context.Context, *connect.Request[gen.OpenSessionRequest]) (*connect.Response[gen.SessionResponse], error)
 	OpenAssistant(context.Context, *connect.Request[gen.OpenAssistantRequest]) (*connect.Response[gen.SessionResponse], error)
 	RenameConversation(context.Context, *connect.Request[gen.RenameConversationRequest]) (*connect.Response[gen.SessionResponse], error)
@@ -897,6 +931,12 @@ type RunnerServiceClient interface {
 	// Owner only. Controls a review's loop: pause, resume, stop, take over,
 	// and how findings reach the author between rounds.
 	UpdateReviewRun(context.Context, *connect.Request[gen.UpdateReviewRunRequest]) (*connect.Response[gen.WorkspaceReview], error)
+	// Owner only. Cancels a review under way (GITHUB.md, "Cancelling a
+	// review"): no further round of its loop starts, the reviewer's running
+	// turn is interrupted and its session ended. Its conversation and the
+	// findings it filed are kept; the review reads "cancelled", with who
+	// cancelled it and when. The reply is the review's workspace review.
+	CancelReview(context.Context, *connect.Request[gen.CancelReviewRequest]) (*connect.Response[gen.WorkspaceReview], error)
 	// One agent asks the other a question (`lazybox ask author|reviewer`): an
 	// agent credential may ask only for its own execution, and only between the
 	// author and the reviewer of one review in the same workspace. The question
@@ -1169,6 +1209,18 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServicePrepareWorkspaceProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("PrepareWorkspace")),
+			connect.WithClientOptions(opts...),
+		),
+		listRepositoryBranches: connect.NewClient[gen.ListRepositoryBranchesRequest, gen.RepositoryBranches](
+			httpClient,
+			baseURL+RunnerServiceListRepositoryBranchesProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("ListRepositoryBranches")),
+			connect.WithClientOptions(opts...),
+		),
+		refreshRepositoryIdentity: connect.NewClient[gen.RefreshRepositoryIdentityRequest, gen.RepositoryIdentityRefresh](
+			httpClient,
+			baseURL+RunnerServiceRefreshRepositoryIdentityProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("RefreshRepositoryIdentity")),
 			connect.WithClientOptions(opts...),
 		),
 		version: connect.NewClient[gen.VersionRequest, gen.VersionResponse](
@@ -1469,6 +1521,18 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceReconcileCollectionProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("ReconcileCollection")),
+			connect.WithClientOptions(opts...),
+		),
+		getOwnership: connect.NewClient[gen.OwnershipRequest, gen.Ownership](
+			httpClient,
+			baseURL+RunnerServiceGetOwnershipProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("GetOwnership")),
+			connect.WithClientOptions(opts...),
+		),
+		resolveOwnership: connect.NewClient[gen.ResolveOwnershipRequest, gen.Ownership](
+			httpClient,
+			baseURL+RunnerServiceResolveOwnershipProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("ResolveOwnership")),
 			connect.WithClientOptions(opts...),
 		),
 		openSession: connect.NewClient[gen.OpenSessionRequest, gen.SessionResponse](
@@ -1889,6 +1953,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceUpdateReviewRunProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("UpdateReviewRun")),
+			connect.WithClientOptions(opts...),
+		),
+		cancelReview: connect.NewClient[gen.CancelReviewRequest, gen.WorkspaceReview](
+			httpClient,
+			baseURL+RunnerServiceCancelReviewProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("CancelReview")),
 			connect.WithClientOptions(opts...),
 		),
 		askAgent: connect.NewClient[gen.AskAgentRequest, gen.AgentAsk](
@@ -2409,6 +2479,8 @@ type runnerServiceClient struct {
 	listSnippets                 *connect.Client[gen.InfoRequest, gen.SnippetCatalog]
 	getRepositoryCatalog         *connect.Client[gen.GetRepositoryCatalogRequest, gen.RepositoryCatalog]
 	prepareWorkspace             *connect.Client[gen.PrepareWorkspaceRequest, gen.WorkspacePreparation]
+	listRepositoryBranches       *connect.Client[gen.ListRepositoryBranchesRequest, gen.RepositoryBranches]
+	refreshRepositoryIdentity    *connect.Client[gen.RefreshRepositoryIdentityRequest, gen.RepositoryIdentityRefresh]
 	version                      *connect.Client[gen.VersionRequest, gen.VersionResponse]
 	getRunnerSettings            *connect.Client[gen.InfoRequest, gen.RunnerSettings]
 	saveRunnerSettings           *connect.Client[gen.RunnerSettings, gen.RunnerSettings]
@@ -2459,6 +2531,8 @@ type runnerServiceClient struct {
 	arrangeWorkspaces            *connect.Client[gen.ArrangeWorkspacesRequest, gen.ListCollectionsResponse]
 	archiveCollection            *connect.Client[gen.CollectionRequest, gen.CollectionResponse]
 	reconcileCollection          *connect.Client[gen.ReconcileCollectionRequest, gen.CollectionResponse]
+	getOwnership                 *connect.Client[gen.OwnershipRequest, gen.Ownership]
+	resolveOwnership             *connect.Client[gen.ResolveOwnershipRequest, gen.Ownership]
 	openSession                  *connect.Client[gen.OpenSessionRequest, gen.SessionResponse]
 	openAssistant                *connect.Client[gen.OpenAssistantRequest, gen.SessionResponse]
 	renameConversation           *connect.Client[gen.RenameConversationRequest, gen.SessionResponse]
@@ -2529,6 +2603,7 @@ type runnerServiceClient struct {
 	listReviewFindings           *connect.Client[gen.ListReviewFindingsRequest, gen.ReviewFindings]
 	setReviewFindingState        *connect.Client[gen.SetReviewFindingStateRequest, gen.ReviewFinding]
 	updateReviewRun              *connect.Client[gen.UpdateReviewRunRequest, gen.WorkspaceReview]
+	cancelReview                 *connect.Client[gen.CancelReviewRequest, gen.WorkspaceReview]
 	askAgent                     *connect.Client[gen.AskAgentRequest, gen.AgentAsk]
 	waitAgentAsk                 *connect.Client[gen.WaitAgentAskRequest, gen.AgentAsk]
 	listProcesses                *connect.Client[gen.ListProcessesRequest, gen.ProcessInventory]
@@ -2629,6 +2704,16 @@ func (c *runnerServiceClient) GetRepositoryCatalog(ctx context.Context, req *con
 // PrepareWorkspace calls lazybox.bench.v1.RunnerService.PrepareWorkspace.
 func (c *runnerServiceClient) PrepareWorkspace(ctx context.Context, req *connect.Request[gen.PrepareWorkspaceRequest]) (*connect.ServerStreamForClient[gen.WorkspacePreparation], error) {
 	return c.prepareWorkspace.CallServerStream(ctx, req)
+}
+
+// ListRepositoryBranches calls lazybox.bench.v1.RunnerService.ListRepositoryBranches.
+func (c *runnerServiceClient) ListRepositoryBranches(ctx context.Context, req *connect.Request[gen.ListRepositoryBranchesRequest]) (*connect.Response[gen.RepositoryBranches], error) {
+	return c.listRepositoryBranches.CallUnary(ctx, req)
+}
+
+// RefreshRepositoryIdentity calls lazybox.bench.v1.RunnerService.RefreshRepositoryIdentity.
+func (c *runnerServiceClient) RefreshRepositoryIdentity(ctx context.Context, req *connect.Request[gen.RefreshRepositoryIdentityRequest]) (*connect.Response[gen.RepositoryIdentityRefresh], error) {
+	return c.refreshRepositoryIdentity.CallUnary(ctx, req)
 }
 
 // Version calls lazybox.bench.v1.RunnerService.Version.
@@ -2879,6 +2964,16 @@ func (c *runnerServiceClient) ArchiveCollection(ctx context.Context, req *connec
 // ReconcileCollection calls lazybox.bench.v1.RunnerService.ReconcileCollection.
 func (c *runnerServiceClient) ReconcileCollection(ctx context.Context, req *connect.Request[gen.ReconcileCollectionRequest]) (*connect.Response[gen.CollectionResponse], error) {
 	return c.reconcileCollection.CallUnary(ctx, req)
+}
+
+// GetOwnership calls lazybox.bench.v1.RunnerService.GetOwnership.
+func (c *runnerServiceClient) GetOwnership(ctx context.Context, req *connect.Request[gen.OwnershipRequest]) (*connect.Response[gen.Ownership], error) {
+	return c.getOwnership.CallUnary(ctx, req)
+}
+
+// ResolveOwnership calls lazybox.bench.v1.RunnerService.ResolveOwnership.
+func (c *runnerServiceClient) ResolveOwnership(ctx context.Context, req *connect.Request[gen.ResolveOwnershipRequest]) (*connect.Response[gen.Ownership], error) {
+	return c.resolveOwnership.CallUnary(ctx, req)
 }
 
 // OpenSession calls lazybox.bench.v1.RunnerService.OpenSession.
@@ -3229,6 +3324,11 @@ func (c *runnerServiceClient) SetReviewFindingState(ctx context.Context, req *co
 // UpdateReviewRun calls lazybox.bench.v1.RunnerService.UpdateReviewRun.
 func (c *runnerServiceClient) UpdateReviewRun(ctx context.Context, req *connect.Request[gen.UpdateReviewRunRequest]) (*connect.Response[gen.WorkspaceReview], error) {
 	return c.updateReviewRun.CallUnary(ctx, req)
+}
+
+// CancelReview calls lazybox.bench.v1.RunnerService.CancelReview.
+func (c *runnerServiceClient) CancelReview(ctx context.Context, req *connect.Request[gen.CancelReviewRequest]) (*connect.Response[gen.WorkspaceReview], error) {
+	return c.cancelReview.CallUnary(ctx, req)
 }
 
 // AskAgent calls lazybox.bench.v1.RunnerService.AskAgent.
@@ -3661,6 +3761,15 @@ type RunnerServiceHandler interface {
 	ListSnippets(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.SnippetCatalog], error)
 	GetRepositoryCatalog(context.Context, *connect.Request[gen.GetRepositoryCatalogRequest]) (*connect.Response[gen.RepositoryCatalog], error)
 	PrepareWorkspace(context.Context, *connect.Request[gen.PrepareWorkspaceRequest], *connect.ServerStream[gen.WorkspacePreparation]) error
+	// A repository's branches for New task's "Start from" choice, its default
+	// branch and the branch it last started from (WORKSPACES.md, "Start from").
+	ListRepositoryBranches(context.Context, *connect.Request[gen.ListRepositoryBranchesRequest]) (*connect.Response[gen.RepositoryBranches], error)
+	// The owner's only. Replaces Lazybox's copy of a GitHub repository whose
+	// history changed on GitHub since Lazybox copied it (a force-push with a
+	// new root, or a new repository that took its name) with a fresh copy of
+	// what GitHub has now. Without confirm it only says what that changes.
+	// Workspaces made from the old copy keep their worktrees on it.
+	RefreshRepositoryIdentity(context.Context, *connect.Request[gen.RefreshRepositoryIdentityRequest]) (*connect.Response[gen.RepositoryIdentityRefresh], error)
 	Version(context.Context, *connect.Request[gen.VersionRequest]) (*connect.Response[gen.VersionResponse], error)
 	GetRunnerSettings(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.RunnerSettings], error)
 	SaveRunnerSettings(context.Context, *connect.Request[gen.RunnerSettings]) (*connect.Response[gen.RunnerSettings], error)
@@ -3750,6 +3859,16 @@ type RunnerServiceHandler interface {
 	ArrangeWorkspaces(context.Context, *connect.Request[gen.ArrangeWorkspacesRequest]) (*connect.Response[gen.ListCollectionsResponse], error)
 	ArchiveCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	ReconcileCollection(context.Context, *connect.Request[gen.ReconcileCollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
+	// The owner's only. What a previous Runner left unconfirmed in a workspace
+	// or a conversation (RESOURCE_OWNERSHIP.md, "Unconfirmed ownership"): each
+	// recorded agent and command, its PID and command line, and whether a
+	// process with that identity still runs, checked by the Runner. What it
+	// proves gone it settles there and then.
+	GetOwnership(context.Context, *connect.Request[gen.OwnershipRequest]) (*connect.Response[gen.Ownership], error)
+	// The owner's only. Settles it: stop exactly the recorded processes that
+	// still run (checked by identity, never a PID given to another program
+	// since), or record the person's word that they stopped.
+	ResolveOwnership(context.Context, *connect.Request[gen.ResolveOwnershipRequest]) (*connect.Response[gen.Ownership], error)
 	OpenSession(context.Context, *connect.Request[gen.OpenSessionRequest]) (*connect.Response[gen.SessionResponse], error)
 	OpenAssistant(context.Context, *connect.Request[gen.OpenAssistantRequest]) (*connect.Response[gen.SessionResponse], error)
 	RenameConversation(context.Context, *connect.Request[gen.RenameConversationRequest]) (*connect.Response[gen.SessionResponse], error)
@@ -3902,6 +4021,12 @@ type RunnerServiceHandler interface {
 	// Owner only. Controls a review's loop: pause, resume, stop, take over,
 	// and how findings reach the author between rounds.
 	UpdateReviewRun(context.Context, *connect.Request[gen.UpdateReviewRunRequest]) (*connect.Response[gen.WorkspaceReview], error)
+	// Owner only. Cancels a review under way (GITHUB.md, "Cancelling a
+	// review"): no further round of its loop starts, the reviewer's running
+	// turn is interrupted and its session ended. Its conversation and the
+	// findings it filed are kept; the review reads "cancelled", with who
+	// cancelled it and when. The reply is the review's workspace review.
+	CancelReview(context.Context, *connect.Request[gen.CancelReviewRequest]) (*connect.Response[gen.WorkspaceReview], error)
 	// One agent asks the other a question (`lazybox ask author|reviewer`): an
 	// agent credential may ask only for its own execution, and only between the
 	// author and the reviewer of one review in the same workspace. The question
@@ -4170,6 +4295,18 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServicePrepareWorkspaceProcedure,
 		svc.PrepareWorkspace,
 		connect.WithSchema(runnerServiceMethods.ByName("PrepareWorkspace")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceListRepositoryBranchesHandler := connect.NewUnaryHandler(
+		RunnerServiceListRepositoryBranchesProcedure,
+		svc.ListRepositoryBranches,
+		connect.WithSchema(runnerServiceMethods.ByName("ListRepositoryBranches")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceRefreshRepositoryIdentityHandler := connect.NewUnaryHandler(
+		RunnerServiceRefreshRepositoryIdentityProcedure,
+		svc.RefreshRepositoryIdentity,
+		connect.WithSchema(runnerServiceMethods.ByName("RefreshRepositoryIdentity")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceVersionHandler := connect.NewUnaryHandler(
@@ -4470,6 +4607,18 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceReconcileCollectionProcedure,
 		svc.ReconcileCollection,
 		connect.WithSchema(runnerServiceMethods.ByName("ReconcileCollection")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceGetOwnershipHandler := connect.NewUnaryHandler(
+		RunnerServiceGetOwnershipProcedure,
+		svc.GetOwnership,
+		connect.WithSchema(runnerServiceMethods.ByName("GetOwnership")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceResolveOwnershipHandler := connect.NewUnaryHandler(
+		RunnerServiceResolveOwnershipProcedure,
+		svc.ResolveOwnership,
+		connect.WithSchema(runnerServiceMethods.ByName("ResolveOwnership")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceOpenSessionHandler := connect.NewUnaryHandler(
@@ -4890,6 +5039,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceUpdateReviewRunProcedure,
 		svc.UpdateReviewRun,
 		connect.WithSchema(runnerServiceMethods.ByName("UpdateReviewRun")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceCancelReviewHandler := connect.NewUnaryHandler(
+		RunnerServiceCancelReviewProcedure,
+		svc.CancelReview,
+		connect.WithSchema(runnerServiceMethods.ByName("CancelReview")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceAskAgentHandler := connect.NewUnaryHandler(
@@ -5410,6 +5565,10 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceGetRepositoryCatalogHandler.ServeHTTP(w, r)
 		case RunnerServicePrepareWorkspaceProcedure:
 			runnerServicePrepareWorkspaceHandler.ServeHTTP(w, r)
+		case RunnerServiceListRepositoryBranchesProcedure:
+			runnerServiceListRepositoryBranchesHandler.ServeHTTP(w, r)
+		case RunnerServiceRefreshRepositoryIdentityProcedure:
+			runnerServiceRefreshRepositoryIdentityHandler.ServeHTTP(w, r)
 		case RunnerServiceVersionProcedure:
 			runnerServiceVersionHandler.ServeHTTP(w, r)
 		case RunnerServiceGetRunnerSettingsProcedure:
@@ -5510,6 +5669,10 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceArchiveCollectionHandler.ServeHTTP(w, r)
 		case RunnerServiceReconcileCollectionProcedure:
 			runnerServiceReconcileCollectionHandler.ServeHTTP(w, r)
+		case RunnerServiceGetOwnershipProcedure:
+			runnerServiceGetOwnershipHandler.ServeHTTP(w, r)
+		case RunnerServiceResolveOwnershipProcedure:
+			runnerServiceResolveOwnershipHandler.ServeHTTP(w, r)
 		case RunnerServiceOpenSessionProcedure:
 			runnerServiceOpenSessionHandler.ServeHTTP(w, r)
 		case RunnerServiceOpenAssistantProcedure:
@@ -5650,6 +5813,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceSetReviewFindingStateHandler.ServeHTTP(w, r)
 		case RunnerServiceUpdateReviewRunProcedure:
 			runnerServiceUpdateReviewRunHandler.ServeHTTP(w, r)
+		case RunnerServiceCancelReviewProcedure:
+			runnerServiceCancelReviewHandler.ServeHTTP(w, r)
 		case RunnerServiceAskAgentProcedure:
 			runnerServiceAskAgentHandler.ServeHTTP(w, r)
 		case RunnerServiceWaitAgentAskProcedure:
@@ -5839,6 +6004,14 @@ func (UnimplementedRunnerServiceHandler) GetRepositoryCatalog(context.Context, *
 
 func (UnimplementedRunnerServiceHandler) PrepareWorkspace(context.Context, *connect.Request[gen.PrepareWorkspaceRequest], *connect.ServerStream[gen.WorkspacePreparation]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.PrepareWorkspace is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) ListRepositoryBranches(context.Context, *connect.Request[gen.ListRepositoryBranchesRequest]) (*connect.Response[gen.RepositoryBranches], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ListRepositoryBranches is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) RefreshRepositoryIdentity(context.Context, *connect.Request[gen.RefreshRepositoryIdentityRequest]) (*connect.Response[gen.RepositoryIdentityRefresh], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.RefreshRepositoryIdentity is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) Version(context.Context, *connect.Request[gen.VersionRequest]) (*connect.Response[gen.VersionResponse], error) {
@@ -6039,6 +6212,14 @@ func (UnimplementedRunnerServiceHandler) ArchiveCollection(context.Context, *con
 
 func (UnimplementedRunnerServiceHandler) ReconcileCollection(context.Context, *connect.Request[gen.ReconcileCollectionRequest]) (*connect.Response[gen.CollectionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ReconcileCollection is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) GetOwnership(context.Context, *connect.Request[gen.OwnershipRequest]) (*connect.Response[gen.Ownership], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.GetOwnership is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) ResolveOwnership(context.Context, *connect.Request[gen.ResolveOwnershipRequest]) (*connect.Response[gen.Ownership], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ResolveOwnership is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) OpenSession(context.Context, *connect.Request[gen.OpenSessionRequest]) (*connect.Response[gen.SessionResponse], error) {
@@ -6319,6 +6500,10 @@ func (UnimplementedRunnerServiceHandler) SetReviewFindingState(context.Context, 
 
 func (UnimplementedRunnerServiceHandler) UpdateReviewRun(context.Context, *connect.Request[gen.UpdateReviewRunRequest]) (*connect.Response[gen.WorkspaceReview], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.UpdateReviewRun is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) CancelReview(context.Context, *connect.Request[gen.CancelReviewRequest]) (*connect.Response[gen.WorkspaceReview], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.CancelReview is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) AskAgent(context.Context, *connect.Request[gen.AskAgentRequest]) (*connect.Response[gen.AgentAsk], error) {

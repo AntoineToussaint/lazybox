@@ -34,12 +34,15 @@ export type LineageNote = { kind: string; conversation: string; session: string;
 /** An agent review of this conversation's work (the Runner's review_started /
  * review_finished events): its card follows the review live; the counts here
  * are what the last event said, for when the review record is gone. */
-export type ReviewNote = { review: string; workspace: string; reviewerSession: string; reviewerLabel: string; scopeLabel: string; blockers: number; majors: number; minors: number; nits: number; finished: boolean };
+export type ReviewNote = { review: string; workspace: string; reviewerSession: string; reviewerLabel: string; scopeLabel: string; blockers: number; majors: number; minors: number; nits: number; finished: boolean;
+  /** "cancelled" or "stopped" when the person ended it by hand (the event says so). */
+  state?: string };
 function reviewNote(data: Record<string, unknown>, finished: boolean): ReviewNote | undefined {
   const text = (key: string) => typeof data[key] === 'string' ? data[key] as string : '';
   const count = (key: string) => typeof data[key] === 'number' ? data[key] as number : 0;
   if (!text('review') || !text('reviewerSession')) return;
-  return { review: text('review'), workspace: text('workspace'), reviewerSession: text('reviewerSession'), reviewerLabel: text('reviewerLabel') || 'Reviewer', scopeLabel: text('scopeLabel'), blockers: count('blockers'), majors: count('majors'), minors: count('minors'), nits: count('nits'), finished };
+  const state = text('state') === 'cancelled' || text('state') === 'stopped' ? text('state') : '';
+  return { review: text('review'), workspace: text('workspace'), reviewerSession: text('reviewerSession'), reviewerLabel: text('reviewerLabel') || 'Reviewer', scopeLabel: text('scopeLabel'), blockers: count('blockers'), majors: count('majors'), minors: count('minors'), nits: count('nits'), finished, ...(state ? { state } : {}) };
 }
 /** `requests`: what each question or approval asked, to say how it was answered. */
 export type Transcript = { messages: TranscriptMessage[]; recent: JournalEvent[]; activity: JournalEvent[]; activityTruncated: boolean; cursor: bigint; appendToLast: boolean; reportedModel:string; subagents: Subagents; requests: Record<string, RequestNote>; /** The agent's slash commands and models (`command_catalog`). */ catalog: CommandCatalog;
@@ -288,6 +291,20 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
       next.appendToLast = false;
       continue;
     }
+    // What Lazybox told the agent of its own changes (runner/briefing.go): one
+    // quiet event, opened to exactly what the agent received, just before the
+    // message it went with. Never the person's words.
+    if (event.type === 'briefing_updated' && event.text) {
+      const message: TranscriptMessage = { id: record.cursor.toString(), type: 'briefing', text: event.text, turnId: event.turnId, origin: briefingOrigin(event.status) };
+      const at = event.operationId ? lastWith(list(), event.operationId) : -1;
+      if (at < 0) add(message);
+      else {
+        list().splice(at, 0, message); owned.add(message);
+        if (next.turnStart !== undefined && at <= next.turnStart) next.turnStart++;
+      }
+      next.appendToLast = false;
+      continue;
+    }
     const notice = noticeOf(record);
     if (notice) {
       // The same uncertainty twice in a row is one line that says how often.
@@ -433,6 +450,15 @@ function receiptOf(record: JournalEvent): { id: string; delivery: string } | und
   const event = record.event;
   if (event?.type === 'receipt' && event.operationId) return { id: event.operationId, delivery: event.status };
   return undefined;
+}
+/** A briefing update's event: Lazybox's new features, or only the person's changed instructions. */
+function briefingOrigin(status: string): MessageOrigin {
+  return { kind: status === 'instructions' ? 'instructions_update' : 'briefing_update', summary: '', detail: '', copy: '', from: '' };
+}
+/** The latest of the recent messages with this operation ID, or -1. */
+function lastWith(messages: readonly TranscriptMessage[], operationId: string): number {
+  for (let i = messages.length - 1; i >= Math.max(0, messages.length - 400); i--) if (messages[i].operationId === operationId) return i;
+  return -1;
 }
 const ACTIVITY_TYPES = new Set(['tool_catalog', 'tool_activity', 'turn_ended', 'failure', 'session_closed']);
 const BOUNDARY_TYPES = new Set(['turn_started', 'turn_ended', 'session_closed', 'approval', 'question', 'request_resolved']);

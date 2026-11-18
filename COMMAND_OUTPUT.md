@@ -299,6 +299,51 @@ lazybox, and it calls this one by its full path, which the briefing names
 (also `$LAZYBOX_V2_CLI`). The launcher builds the CLI from the Runner's own
 source; the Runner briefs agents only when the binary exists.
 
+### The briefing, and what running conversations hear when it changes
+
+An agent's briefing is a list of sections, each with an ID and a version
+(`runner/briefing.go`): the person's Settings → Agents text (`settings`) and
+its provider part (`provider`), the Runner's own sections (`workspace`, `run`,
+`documents`, `conversations`), and the conversation's browser (`browser`,
+[BROWSER.md](BROWSER.md)). A Runner section's version is a number with a
+history: each version has a one-line note of what it changed and a phrase it
+brought into the text. The person's text and the browser are versioned by a
+hash of their text.
+
+A conversation records the version of each section it was told
+(`sessionstore.Record.Briefing`), at its start and after each update; a
+successor (a resume, a restart) inherits it. When one is behind, the next
+message the person sends **that starts a turn** carries one compact note
+(`op.Context`, out of band beside the person's text):
+
+```text
+[Lazybox] Since this conversation started, Lazybox added or changed the following; everything else you were told still holds.
+- Start another conversation with any agent (Claude, Codex, …) when the person asks: `lazybox conversation new --provider P --title T --brief-artifact ID` (or `--brief "…"`), which the person approves in one click. Your own sub-agent tool only starts copies of yourself, and switching this conversation's subscription never changes its provider.
+```
+
+- **Only the delta.** A Runner section behind contributes the notes of the
+  versions it missed (from the last that restates the section), never its
+  whole text; the person's text and the browser, short and theirs, are given
+  as they now read; text the person removed is said removed.
+- **Once.** Delivery records the new versions durably and journals a
+  `briefing_updated` event (the text, the message's operation ID, the
+  sections and versions). The conversation shows that event as one quiet line
+  before the message it went with, *Lazybox told Claude about new features*
+  (or *… its updated instructions* when only the person's text changed), that
+  opens to exactly what the agent received; the composer shows *Instructions
+  updated* while one is due.
+- **Never mid-turn.** While a turn runs or messages wait in the queue, a
+  message goes without the update, which waits for the next one that starts a
+  turn.
+- **Conversations from before versions were recorded** are placed from what
+  they were told (their start context and any whole update an older Runner
+  sent): a section whose current text they hold is current; otherwise they are
+  at the highest version whose phrase they hold.
+
+Changing a Runner section's text is a version of its own:
+`TestEachBuiltinSectionTextIsPinnedToItsVersion` pins each text, and fails
+until the change has its version, phrase and note in `builtinBriefings`.
+
 ### Which lazybox agents run
 
 Putting the CLI first on the PATH an agent starts with is not enough. Claude
@@ -378,7 +423,7 @@ environment its agent started with. One started with the integration reads its
 files again for every command, so a newer Runner's files apply to its next
 command. One started before the integration existed keeps only the CLI first
 on its initial PATH: its agent gets the briefing's full-path fallback with its
-next message (the instructions update, step 3 of the roadmap), and a new
+next message (the briefing update, step 3 of the roadmap), and a new
 conversation gets the integration.
 
 The UI reads the CLI the same however it was called: the live bar, tool lines
@@ -392,7 +437,7 @@ and `${LAZYBOX_V2_CLI}` as `lazybox`.
 |---|---|---|
 | 1 | `lazybox run`: live console, full-output file, compact failure-first view, real exit status | Done |
 | 2 | Briefing and PATH for every coding agent; launcher builds the CLI for Dev and staged releases | Done |
-| 3 | **Deliver changed instructions to live sessions.** A session is stale when a current shared section (Settings text, provider text, command briefing) is missing from what it started with and it has not received this update. The chat shows a note; the update travels with the next message as its own block, worded as a replacement (Claude: a text block ahead of the user's; Codex: an input item, since this `turn/start` has no context field). Recorded per conversation and inherited by resumes, so it is sent once. Removing text from Settings is not propagated. | Done |
+| 3 | **Deliver changed instructions to live sessions.** Each briefing section is versioned and each conversation records what it was told; one behind gets only what changed, as one compact note with its next message that starts a turn (Claude: a text block ahead of the user's; Codex: an input item, since this `turn/start` has no context field), once, never mid-turn, shown as one quiet event ([The briefing](#the-briefing-and-what-running-conversations-hear-when-it-changes)). Inherited by resumes. Text removed from Settings is said removed. | Done |
 | 4 | **Live permission change** from the session menu (Ask / Read only / YOLO). Claude: `setPermissionMode()`, and while in YOLO the worker approves tool requests itself, so sessions started without the bypass flag still switch. Codex: `approvalPolicy`/`sandboxPolicy` on following turns. Saved to the session record, so resume and account rotation keep it. A request already waiting still needs one answer. | Done |
 | 5 | **Console polish.** Open the console when a run starts in the viewed session; label each run with what the agent received (bytes in → out, filter, exit); open the full-output file from the console. | Done, except opening the file: the console copies its path, since a browser view cannot open local files and the desktop shell has no open-file action yet |
 | 6 | **Measure before going further.** Record per-run bytes in/out and the gortk filter in telemetry. Judge by cost per completed task and failure rate, not bytes saved. | Recording done (telemetry `commands`); no report or analysis yet |

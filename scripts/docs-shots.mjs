@@ -801,8 +801,10 @@ shot('settings-files', async ({ f, open }) => {
 });
 
 // Several Runners: Dev (this window's) and Working side by side, the release one stopped.
-shot('several-runners', async ({ f, open, addRunner }) => {
+shot('several-runners', async ({ f, open, addRunner, context }) => {
   realistic(f); cacheTranscript(f);
+  // Another Runner on this Mac is opt-in: this window was told to show Working and the release (Settings → Runners).
+  await context.addInitScript(() => localStorage.setItem('lazybox:runners.v1', JSON.stringify({ shown: ['working', 'release'], noticed: ['working', 'release'] })));
   f.versionInfo.version = '0.1.22-dev';
   Object.assign(f.sessions[1], { status: 'waiting_input', agents: mainAgent('waiting_input', Date.now() - 5 * MIN), pending: [question('q-release', 'Which version should the notes start from?')] });
   const working = await addRunner('working');

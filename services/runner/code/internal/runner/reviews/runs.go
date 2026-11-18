@@ -23,6 +23,11 @@ const (
 	RunRunning = "running"
 	RunDone    = "done"
 	RunFailed  = "failed"
+	// RunCancelled: the person cancelled the review (CancelReview).
+	RunCancelled = "cancelled"
+	// RunStopped: the person stopped or ended the reviewer conversation by
+	// hand (Stop, End session, Delete) while it reviewed.
+	RunStopped = "stopped"
 )
 
 // Scopes a review covers.
@@ -85,6 +90,10 @@ type Run struct {
 	Timeline    []Entry `json:"timeline,omitempty"`
 	FixingSince int64   `json:"fixingSince,omitempty"`
 	Asks        []Ask   `json:"asks,omitempty"`
+	// Who ended the review by hand (cancelled it, or ended its reviewer),
+	// and when: "You" for the person.
+	StoppedBy string `json:"stoppedBy,omitempty"`
+	StoppedAt int64  `json:"stoppedAt,omitempty"`
 }
 
 // Counts are a review's findings by severity that are still to act on

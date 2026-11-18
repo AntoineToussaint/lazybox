@@ -1,0 +1,23 @@
+/* OwnershipPanel.tsx: what a previous Lazybox left unconfirmed, and the way forward. */
+.ownership-panel{display:flex;flex-direction:column;gap:10px;margin:14px 0 0;font-size:calc(12.5px * var(--text-scale));line-height:1.5;color:var(--text-secondary)}
+.ownership-panel>p{margin:0;overflow-wrap:anywhere}
+.ownership-lead strong{font-weight:600;color:var(--text)}
+.ownership-status,.ownership-hint{font-size:calc(12px * var(--text-scale));color:var(--text-muted)}
+.ownership-error{padding:8px 10px;border-radius:6px;background:var(--danger-bg);color:var(--danger-strong);font-size:calc(12px * var(--text-scale))}
+.ownership-list{display:flex;flex-direction:column;gap:6px;max-height:240px;margin:0;padding:0;overflow:auto;list-style:none}
+.ownership-process{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.ownership-process[data-state=running]{border-color:var(--warn-line)}
+.ownership-process-head{display:flex;align-items:center;gap:7px;min-width:0;color:var(--text)}
+.ownership-process-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ownership-process-kind{color:var(--text-muted)}
+.ownership-state{flex:none;padding:1px 7px;border-radius:10px;font-size:calc(10.5px * var(--text-scale));border:1px solid var(--line);color:var(--text-muted)}
+.ownership-state[data-tone=running]{border-color:var(--warn-line);background:var(--warn-bg);color:var(--warn-soft)}
+.ownership-state[data-tone=gone]{border-color:var(--ok-line-subtle);color:var(--ok-soft)}
+.ownership-process-command{display:block;font-family:var(--font-mono);font-size:calc(11px * var(--code-scale));color:var(--text-secondary);overflow-wrap:anywhere;user-select:text}
+.ownership-process>small{font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.ownership-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-top:4px}
+.ownership-actions>button{display:inline-flex;align-items:center;gap:6px}
+.draggable-dialog.ownership-dialog{width:min(520px,calc(100vw - 32px))}
+/* Inline, where the workspace's note was (WorkspaceHome). */
+.workspace-home .ownership-panel{max-width:560px;padding:12px;border:1px solid var(--warn-line-subtle);border-radius:8px;background:var(--warn-bg)}
+.resume-bar .ownership-panel{margin:0}

@@ -23,6 +23,8 @@ const (
 	RunnerService_ListSnippets_FullMethodName                 = "/lazybox.bench.v1.RunnerService/ListSnippets"
 	RunnerService_GetRepositoryCatalog_FullMethodName         = "/lazybox.bench.v1.RunnerService/GetRepositoryCatalog"
 	RunnerService_PrepareWorkspace_FullMethodName             = "/lazybox.bench.v1.RunnerService/PrepareWorkspace"
+	RunnerService_ListRepositoryBranches_FullMethodName       = "/lazybox.bench.v1.RunnerService/ListRepositoryBranches"
+	RunnerService_RefreshRepositoryIdentity_FullMethodName    = "/lazybox.bench.v1.RunnerService/RefreshRepositoryIdentity"
 	RunnerService_Version_FullMethodName                      = "/lazybox.bench.v1.RunnerService/Version"
 	RunnerService_GetRunnerSettings_FullMethodName            = "/lazybox.bench.v1.RunnerService/GetRunnerSettings"
 	RunnerService_SaveRunnerSettings_FullMethodName           = "/lazybox.bench.v1.RunnerService/SaveRunnerSettings"
@@ -73,6 +75,8 @@ const (
 	RunnerService_ArrangeWorkspaces_FullMethodName            = "/lazybox.bench.v1.RunnerService/ArrangeWorkspaces"
 	RunnerService_ArchiveCollection_FullMethodName            = "/lazybox.bench.v1.RunnerService/ArchiveCollection"
 	RunnerService_ReconcileCollection_FullMethodName          = "/lazybox.bench.v1.RunnerService/ReconcileCollection"
+	RunnerService_GetOwnership_FullMethodName                 = "/lazybox.bench.v1.RunnerService/GetOwnership"
+	RunnerService_ResolveOwnership_FullMethodName             = "/lazybox.bench.v1.RunnerService/ResolveOwnership"
 	RunnerService_OpenSession_FullMethodName                  = "/lazybox.bench.v1.RunnerService/OpenSession"
 	RunnerService_OpenAssistant_FullMethodName                = "/lazybox.bench.v1.RunnerService/OpenAssistant"
 	RunnerService_RenameConversation_FullMethodName           = "/lazybox.bench.v1.RunnerService/RenameConversation"
@@ -143,6 +147,7 @@ const (
 	RunnerService_ListReviewFindings_FullMethodName           = "/lazybox.bench.v1.RunnerService/ListReviewFindings"
 	RunnerService_SetReviewFindingState_FullMethodName        = "/lazybox.bench.v1.RunnerService/SetReviewFindingState"
 	RunnerService_UpdateReviewRun_FullMethodName              = "/lazybox.bench.v1.RunnerService/UpdateReviewRun"
+	RunnerService_CancelReview_FullMethodName                 = "/lazybox.bench.v1.RunnerService/CancelReview"
 	RunnerService_AskAgent_FullMethodName                     = "/lazybox.bench.v1.RunnerService/AskAgent"
 	RunnerService_WaitAgentAsk_FullMethodName                 = "/lazybox.bench.v1.RunnerService/WaitAgentAsk"
 	RunnerService_ListProcesses_FullMethodName                = "/lazybox.bench.v1.RunnerService/ListProcesses"
@@ -237,6 +242,15 @@ type RunnerServiceClient interface {
 	ListSnippets(ctx context.Context, in *InfoRequest, opts ...grpc.CallOption) (*SnippetCatalog, error)
 	GetRepositoryCatalog(ctx context.Context, in *GetRepositoryCatalogRequest, opts ...grpc.CallOption) (*RepositoryCatalog, error)
 	PrepareWorkspace(ctx context.Context, in *PrepareWorkspaceRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspacePreparation], error)
+	// A repository's branches for New task's "Start from" choice, its default
+	// branch and the branch it last started from (WORKSPACES.md, "Start from").
+	ListRepositoryBranches(ctx context.Context, in *ListRepositoryBranchesRequest, opts ...grpc.CallOption) (*RepositoryBranches, error)
+	// The owner's only. Replaces Lazybox's copy of a GitHub repository whose
+	// history changed on GitHub since Lazybox copied it (a force-push with a
+	// new root, or a new repository that took its name) with a fresh copy of
+	// what GitHub has now. Without confirm it only says what that changes.
+	// Workspaces made from the old copy keep their worktrees on it.
+	RefreshRepositoryIdentity(ctx context.Context, in *RefreshRepositoryIdentityRequest, opts ...grpc.CallOption) (*RepositoryIdentityRefresh, error)
 	Version(ctx context.Context, in *VersionRequest, opts ...grpc.CallOption) (*VersionResponse, error)
 	GetRunnerSettings(ctx context.Context, in *InfoRequest, opts ...grpc.CallOption) (*RunnerSettings, error)
 	SaveRunnerSettings(ctx context.Context, in *RunnerSettings, opts ...grpc.CallOption) (*RunnerSettings, error)
@@ -326,6 +340,16 @@ type RunnerServiceClient interface {
 	ArrangeWorkspaces(ctx context.Context, in *ArrangeWorkspacesRequest, opts ...grpc.CallOption) (*ListCollectionsResponse, error)
 	ArchiveCollection(ctx context.Context, in *CollectionRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
 	ReconcileCollection(ctx context.Context, in *ReconcileCollectionRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
+	// The owner's only. What a previous Runner left unconfirmed in a workspace
+	// or a conversation (RESOURCE_OWNERSHIP.md, "Unconfirmed ownership"): each
+	// recorded agent and command, its PID and command line, and whether a
+	// process with that identity still runs, checked by the Runner. What it
+	// proves gone it settles there and then.
+	GetOwnership(ctx context.Context, in *OwnershipRequest, opts ...grpc.CallOption) (*Ownership, error)
+	// The owner's only. Settles it: stop exactly the recorded processes that
+	// still run (checked by identity, never a PID given to another program
+	// since), or record the person's word that they stopped.
+	ResolveOwnership(ctx context.Context, in *ResolveOwnershipRequest, opts ...grpc.CallOption) (*Ownership, error)
 	OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*SessionResponse, error)
 	OpenAssistant(ctx context.Context, in *OpenAssistantRequest, opts ...grpc.CallOption) (*SessionResponse, error)
 	RenameConversation(ctx context.Context, in *RenameConversationRequest, opts ...grpc.CallOption) (*SessionResponse, error)
@@ -478,6 +502,12 @@ type RunnerServiceClient interface {
 	// Owner only. Controls a review's loop: pause, resume, stop, take over,
 	// and how findings reach the author between rounds.
 	UpdateReviewRun(ctx context.Context, in *UpdateReviewRunRequest, opts ...grpc.CallOption) (*WorkspaceReview, error)
+	// Owner only. Cancels a review under way (GITHUB.md, "Cancelling a
+	// review"): no further round of its loop starts, the reviewer's running
+	// turn is interrupted and its session ended. Its conversation and the
+	// findings it filed are kept; the review reads "cancelled", with who
+	// cancelled it and when. The reply is the review's workspace review.
+	CancelReview(ctx context.Context, in *CancelReviewRequest, opts ...grpc.CallOption) (*WorkspaceReview, error)
 	// One agent asks the other a question (`lazybox ask author|reviewer`): an
 	// agent credential may ask only for its own execution, and only between the
 	// author and the reviewer of one review in the same workspace. The question
@@ -769,6 +799,26 @@ func (c *runnerServiceClient) PrepareWorkspace(ctx context.Context, in *PrepareW
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RunnerService_PrepareWorkspaceClient = grpc.ServerStreamingClient[WorkspacePreparation]
+
+func (c *runnerServiceClient) ListRepositoryBranches(ctx context.Context, in *ListRepositoryBranchesRequest, opts ...grpc.CallOption) (*RepositoryBranches, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RepositoryBranches)
+	err := c.cc.Invoke(ctx, RunnerService_ListRepositoryBranches_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) RefreshRepositoryIdentity(ctx context.Context, in *RefreshRepositoryIdentityRequest, opts ...grpc.CallOption) (*RepositoryIdentityRefresh, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RepositoryIdentityRefresh)
+	err := c.cc.Invoke(ctx, RunnerService_RefreshRepositoryIdentity_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
 func (c *runnerServiceClient) Version(ctx context.Context, in *VersionRequest, opts ...grpc.CallOption) (*VersionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -1264,6 +1314,26 @@ func (c *runnerServiceClient) ReconcileCollection(ctx context.Context, in *Recon
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CollectionResponse)
 	err := c.cc.Invoke(ctx, RunnerService_ReconcileCollection_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) GetOwnership(ctx context.Context, in *OwnershipRequest, opts ...grpc.CallOption) (*Ownership, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ownership)
+	err := c.cc.Invoke(ctx, RunnerService_GetOwnership_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) ResolveOwnership(ctx context.Context, in *ResolveOwnershipRequest, opts ...grpc.CallOption) (*Ownership, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ownership)
+	err := c.cc.Invoke(ctx, RunnerService_ResolveOwnership_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1991,6 +2061,16 @@ func (c *runnerServiceClient) UpdateReviewRun(ctx context.Context, in *UpdateRev
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(WorkspaceReview)
 	err := c.cc.Invoke(ctx, RunnerService_UpdateReviewRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) CancelReview(ctx context.Context, in *CancelReviewRequest, opts ...grpc.CallOption) (*WorkspaceReview, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkspaceReview)
+	err := c.cc.Invoke(ctx, RunnerService_CancelReview_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2872,6 +2952,15 @@ type RunnerServiceServer interface {
 	ListSnippets(context.Context, *InfoRequest) (*SnippetCatalog, error)
 	GetRepositoryCatalog(context.Context, *GetRepositoryCatalogRequest) (*RepositoryCatalog, error)
 	PrepareWorkspace(*PrepareWorkspaceRequest, grpc.ServerStreamingServer[WorkspacePreparation]) error
+	// A repository's branches for New task's "Start from" choice, its default
+	// branch and the branch it last started from (WORKSPACES.md, "Start from").
+	ListRepositoryBranches(context.Context, *ListRepositoryBranchesRequest) (*RepositoryBranches, error)
+	// The owner's only. Replaces Lazybox's copy of a GitHub repository whose
+	// history changed on GitHub since Lazybox copied it (a force-push with a
+	// new root, or a new repository that took its name) with a fresh copy of
+	// what GitHub has now. Without confirm it only says what that changes.
+	// Workspaces made from the old copy keep their worktrees on it.
+	RefreshRepositoryIdentity(context.Context, *RefreshRepositoryIdentityRequest) (*RepositoryIdentityRefresh, error)
 	Version(context.Context, *VersionRequest) (*VersionResponse, error)
 	GetRunnerSettings(context.Context, *InfoRequest) (*RunnerSettings, error)
 	SaveRunnerSettings(context.Context, *RunnerSettings) (*RunnerSettings, error)
@@ -2961,6 +3050,16 @@ type RunnerServiceServer interface {
 	ArrangeWorkspaces(context.Context, *ArrangeWorkspacesRequest) (*ListCollectionsResponse, error)
 	ArchiveCollection(context.Context, *CollectionRequest) (*CollectionResponse, error)
 	ReconcileCollection(context.Context, *ReconcileCollectionRequest) (*CollectionResponse, error)
+	// The owner's only. What a previous Runner left unconfirmed in a workspace
+	// or a conversation (RESOURCE_OWNERSHIP.md, "Unconfirmed ownership"): each
+	// recorded agent and command, its PID and command line, and whether a
+	// process with that identity still runs, checked by the Runner. What it
+	// proves gone it settles there and then.
+	GetOwnership(context.Context, *OwnershipRequest) (*Ownership, error)
+	// The owner's only. Settles it: stop exactly the recorded processes that
+	// still run (checked by identity, never a PID given to another program
+	// since), or record the person's word that they stopped.
+	ResolveOwnership(context.Context, *ResolveOwnershipRequest) (*Ownership, error)
 	OpenSession(context.Context, *OpenSessionRequest) (*SessionResponse, error)
 	OpenAssistant(context.Context, *OpenAssistantRequest) (*SessionResponse, error)
 	RenameConversation(context.Context, *RenameConversationRequest) (*SessionResponse, error)
@@ -3113,6 +3212,12 @@ type RunnerServiceServer interface {
 	// Owner only. Controls a review's loop: pause, resume, stop, take over,
 	// and how findings reach the author between rounds.
 	UpdateReviewRun(context.Context, *UpdateReviewRunRequest) (*WorkspaceReview, error)
+	// Owner only. Cancels a review under way (GITHUB.md, "Cancelling a
+	// review"): no further round of its loop starts, the reviewer's running
+	// turn is interrupted and its session ended. Its conversation and the
+	// findings it filed are kept; the review reads "cancelled", with who
+	// cancelled it and when. The reply is the review's workspace review.
+	CancelReview(context.Context, *CancelReviewRequest) (*WorkspaceReview, error)
 	// One agent asks the other a question (`lazybox ask author|reviewer`): an
 	// agent credential may ask only for its own execution, and only between the
 	// author and the reviewer of one review in the same workspace. The question
@@ -3375,6 +3480,12 @@ func (UnimplementedRunnerServiceServer) GetRepositoryCatalog(context.Context, *G
 func (UnimplementedRunnerServiceServer) PrepareWorkspace(*PrepareWorkspaceRequest, grpc.ServerStreamingServer[WorkspacePreparation]) error {
 	return status.Error(codes.Unimplemented, "method PrepareWorkspace not implemented")
 }
+func (UnimplementedRunnerServiceServer) ListRepositoryBranches(context.Context, *ListRepositoryBranchesRequest) (*RepositoryBranches, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRepositoryBranches not implemented")
+}
+func (UnimplementedRunnerServiceServer) RefreshRepositoryIdentity(context.Context, *RefreshRepositoryIdentityRequest) (*RepositoryIdentityRefresh, error) {
+	return nil, status.Error(codes.Unimplemented, "method RefreshRepositoryIdentity not implemented")
+}
 func (UnimplementedRunnerServiceServer) Version(context.Context, *VersionRequest) (*VersionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Version not implemented")
 }
@@ -3524,6 +3635,12 @@ func (UnimplementedRunnerServiceServer) ArchiveCollection(context.Context, *Coll
 }
 func (UnimplementedRunnerServiceServer) ReconcileCollection(context.Context, *ReconcileCollectionRequest) (*CollectionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReconcileCollection not implemented")
+}
+func (UnimplementedRunnerServiceServer) GetOwnership(context.Context, *OwnershipRequest) (*Ownership, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetOwnership not implemented")
+}
+func (UnimplementedRunnerServiceServer) ResolveOwnership(context.Context, *ResolveOwnershipRequest) (*Ownership, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveOwnership not implemented")
 }
 func (UnimplementedRunnerServiceServer) OpenSession(context.Context, *OpenSessionRequest) (*SessionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method OpenSession not implemented")
@@ -3734,6 +3851,9 @@ func (UnimplementedRunnerServiceServer) SetReviewFindingState(context.Context, *
 }
 func (UnimplementedRunnerServiceServer) UpdateReviewRun(context.Context, *UpdateReviewRunRequest) (*WorkspaceReview, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateReviewRun not implemented")
+}
+func (UnimplementedRunnerServiceServer) CancelReview(context.Context, *CancelReviewRequest) (*WorkspaceReview, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelReview not implemented")
 }
 func (UnimplementedRunnerServiceServer) AskAgent(context.Context, *AskAgentRequest) (*AgentAsk, error) {
 	return nil, status.Error(codes.Unimplemented, "method AskAgent not implemented")
@@ -4057,6 +4177,42 @@ func _RunnerService_PrepareWorkspace_Handler(srv interface{}, stream grpc.Server
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RunnerService_PrepareWorkspaceServer = grpc.ServerStreamingServer[WorkspacePreparation]
+
+func _RunnerService_ListRepositoryBranches_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRepositoryBranchesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ListRepositoryBranches(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ListRepositoryBranches_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ListRepositoryBranches(ctx, req.(*ListRepositoryBranchesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_RefreshRepositoryIdentity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RefreshRepositoryIdentityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).RefreshRepositoryIdentity(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_RefreshRepositoryIdentity_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).RefreshRepositoryIdentity(ctx, req.(*RefreshRepositoryIdentityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
 
 func _RunnerService_Version_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(VersionRequest)
@@ -4954,6 +5110,42 @@ func _RunnerService_ReconcileCollection_Handler(srv interface{}, ctx context.Con
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).ReconcileCollection(ctx, req.(*ReconcileCollectionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_GetOwnership_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OwnershipRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).GetOwnership(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_GetOwnership_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).GetOwnership(ctx, req.(*OwnershipRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_ResolveOwnership_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveOwnershipRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ResolveOwnership(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ResolveOwnership_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ResolveOwnership(ctx, req.(*ResolveOwnershipRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -6193,6 +6385,24 @@ func _RunnerService_UpdateReviewRun_Handler(srv interface{}, ctx context.Context
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).UpdateReviewRun(ctx, req.(*UpdateReviewRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_CancelReview_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelReviewRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).CancelReview(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_CancelReview_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).CancelReview(ctx, req.(*CancelReviewRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -7729,6 +7939,14 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RunnerService_GetRepositoryCatalog_Handler,
 		},
 		{
+			MethodName: "ListRepositoryBranches",
+			Handler:    _RunnerService_ListRepositoryBranches_Handler,
+		},
+		{
+			MethodName: "RefreshRepositoryIdentity",
+			Handler:    _RunnerService_RefreshRepositoryIdentity_Handler,
+		},
+		{
 			MethodName: "Version",
 			Handler:    _RunnerService_Version_Handler,
 		},
@@ -7927,6 +8145,14 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReconcileCollection",
 			Handler:    _RunnerService_ReconcileCollection_Handler,
+		},
+		{
+			MethodName: "GetOwnership",
+			Handler:    _RunnerService_GetOwnership_Handler,
+		},
+		{
+			MethodName: "ResolveOwnership",
+			Handler:    _RunnerService_ResolveOwnership_Handler,
 		},
 		{
 			MethodName: "OpenSession",
@@ -8195,6 +8421,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateReviewRun",
 			Handler:    _RunnerService_UpdateReviewRun_Handler,
+		},
+		{
+			MethodName: "CancelReview",
+			Handler:    _RunnerService_CancelReview_Handler,
 		},
 		{
 			MethodName: "AskAgent",

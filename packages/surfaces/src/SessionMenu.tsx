@@ -1,4 +1,4 @@
-import type { RefObject } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import type { Session } from '@lazybox/protocol';
 import { useConfirmCard } from './confirm-card';
 import { ActionMenu } from './ActionMenu';
@@ -6,7 +6,7 @@ import { ActionMenuItems } from './ActionMenuItems';
 import type { MenuItem } from './context-menu-model';
 import { ACTIVITY_LABELS, type ActivityDetailState } from './activity-detail';
 import { ACTIVITY_DETAILS } from './tool-lines';
-import type { SlashChoice } from './slash-commands';
+import { permissionBlocked, shownModelChoices, type SlashChoice } from './slash-commands';
 import { showMenuNotice } from './ContextMenu';
 import { requestRename } from './ConversationTitle';
 import { conversationHandoffItems, useHandoffMenus } from './handoff';
@@ -46,9 +46,14 @@ type SessionActions = {
   sessionID?: string;
 };
 export type ActivityChoice = Pick<ActivityDetailState, 'detail' | 'fallback' | 'overridden' | 'choose'>;
-/** A permission the agent can take now, or why not. */
-const permissionBlocked = (session: Session, mode: string) => mode === 'yolo' && session.workflow === 'plan' ? 'YOLO is unavailable in plan mode' : session.permission === mode;
 const takesPermissions = (session?: Session): session is Session => !!session && !session.closed && !['help', 'planning', 'summary'].includes(session.purpose);
+/** Choose a permission mode: the current one changes nothing, a blocked one says why, else live or with a restart. */
+function choosePermission(session: Session, mode: string, live: (mode: string) => void, restart: (mode: string) => void) {
+  const blocked = permissionBlocked(session.workflow, mode);
+  if (blocked) { showMenuNotice(blocked); return; }
+  if (session.permission === mode) return;
+  if (session.capabilities?.livePermission) live(mode); else restart(mode);
+}
 
 /** What can be done to a conversation: the chat's ⋯ menu and its header's context menu, one list. */
 export function sessionMenuItems({ session, allowStart, onChangePermission, onRestartWithPermission, onSwitchSubscription, onGiveBrowser, onNewSession, onClose, onDelete, activity, models, sessionID }: SessionActions): MenuItem[] {
@@ -56,12 +61,13 @@ export function sessionMenuItems({ session, allowStart, onChangePermission, onRe
     activity && { label: 'Activity detail', icon: 'activity', submenu: [
       ...ACTIVITY_DETAILS.map(detail => ({ label: ACTIVITY_LABELS[detail].label + (detail === activity.fallback ? ' (default)' : ''), checked: activity.detail === detail, run: () => activity.choose(detail) })),
     ] },
+    // The current choice is checked, never disabled: disabled is for a choice that cannot be taken (YOLO in plan mode).
     takesPermissions(session) && { label: 'Permissions', icon: 'sliders', submenu: PERMISSION_CHOICES.map(([mode, label]) => ({
-      label, checked: session.permission === mode, disabled: permissionBlocked(session, mode),
-      run: () => session.capabilities?.livePermission ? onChangePermission(mode) : onRestartWithPermission(mode),
+      label, checked: session.permission === mode, disabled: permissionBlocked(session.workflow, mode) || undefined,
+      run: () => choosePermission(session, mode, onChangePermission, onRestartWithPermission),
     })) },
     models && session && !session.closed && { label: 'Model', icon: 'sparkle', disabled: models.disabled, submenu: [
-      ...models.choices.map(choice => ({ label: choice.label + (models.live ? '' : ' (restarts the agent)'), checked: !!choice.current, run: () => models.choose(choice.value) })),
+      ...models.choices.map(choice => ({ label: choice.label + (models.live || choice.current ? '' : ' (restarts the agent)'), checked: !!choice.current, run: () => models.choose(choice.value) })),
       'separator', { label: 'Other model…', run: models.pick },
     ] },
     session && !session.closed && { label: 'Switch subscription…', run: onSwitchSubscription },
@@ -116,17 +122,15 @@ export function SessionMenu({ session, sessionID, accountName, stream, allowStar
     </dl>}
     {takesPermissions(session) && <div className="session-permission" role="group" aria-label="Permissions">
       <strong>Permissions{session.permission ? '' : ' · CLI settings'}{session.capabilities?.livePermission ? '' : ' · restart needed'}</strong>
-      {PERMISSION_CHOICES.map(([mode, label]) => <button key={mode} aria-pressed={session.permission === mode}
-        disabled={!!permissionBlocked(session, mode)}
-        title={mode === 'yolo' && session.workflow === 'plan' ? 'YOLO is unavailable in plan mode' : session.capabilities?.livePermission ? undefined : 'This agent started before live permission changes: it restarts in this mode and the conversation continues'}
-        onClick={() => session.capabilities?.livePermission ? onChangePermission(mode) : onRestartWithPermission(mode)}>{label}</button>)}
+      {/* The current mode is selected (pressed), like Smart below: never greyed. Greyed is only a mode it cannot take, with why. */}
+      {PERMISSION_CHOICES.map(([mode, label]) => {
+        const current = session.permission === mode, blocked = permissionBlocked(session.workflow, mode);
+        return <button key={mode} aria-pressed={current} aria-disabled={blocked ? true : undefined} data-blocked={blocked ? true : undefined}
+          title={blocked || (current ? 'The current mode' : session.capabilities?.livePermission ? undefined : 'This agent started before live permission changes: it restarts in this mode and the conversation continues')}
+          onClick={() => choosePermission(session, mode, onChangePermission, onRestartWithPermission)}>{label}</button>;
+      })}
     </div>}
-    {models && session && !session.closed && <div className="session-permission session-model" role="group" aria-label="Model">
-      <strong>Model{models.live ? '' : ' · restart needed'}</strong>
-      {models.choices.map(choice => <button key={choice.value} aria-pressed={!!choice.current} disabled={!!models.disabled} title={[choice.detail, models.live ? '' : 'Restarts the agent between turns; the conversation continues'].filter(Boolean).join(' · ') || undefined}
-        onClick={() => models.choose(choice.value)}>{choice.label}</button>)}
-      <button disabled={!!models.disabled} title="Any model id, typed in the message box (/model)" onClick={models.pick}>Other…</button>
-    </div>}
+    {models && session && !session.closed && <ModelChoiceGroup models={models}/>}
     {activity && <ActivityDetailChoice activity={activity}/>}
     {session && !session.closed && session.permissionGrants.length > 0 && <AlwaysAllowed session={session}/>}
     {session?.closed && !allowStart && <span>Saved conversation</span>}
@@ -167,6 +171,30 @@ function AlwaysAllowed({ session }: { session: Session }) {
       <span>{grantLabel(grant.label)}</span>
       <button type="button" aria-label={`Remove always allow: ${grant.label.replaceAll('`', '')}`} title="Remove: the agent asks again" onClick={() => void revoke(grant.id, grant.label)}><Icon name="close" size={11}/></button>
     </li>)}</ul>
+  </div>;
+}
+
+/**
+ * The model picker of the ⋯ menu: the current model selected (the provider's
+ * Default when the conversation names none), the first of the provider's
+ * list, and "More models" for the rest, in place; "Other…" types any id.
+ */
+function ModelChoiceGroup({ models }: { models: ModelChoices }) {
+  const [expanded, setExpanded] = useState(false);
+  const { shown, more } = shownModelChoices(models.choices, expanded);
+  // "More" goes away as it opens: the keyboard moves to the first model it revealed.
+  const group = useRef<HTMLDivElement>(null);
+  const revealed = useRef<string>('');
+  useEffect(() => { if (expanded && revealed.current) group.current?.querySelector<HTMLButtonElement>(`button[data-model="${CSS.escape(revealed.current)}"]`)?.focus(); }, [expanded]);
+  const expand = () => { revealed.current = models.choices.find(choice => !shown.includes(choice))?.value || ''; setExpanded(true); };
+  const restart = models.live ? '' : 'Restarts the agent between turns; the conversation continues';
+  return <div ref={group} className="session-permission session-model" role="group" aria-label="Model">
+    <strong>Model{models.live ? '' : ' · restart needed'}</strong>
+    {shown.map(choice => <button key={choice.value} data-model={choice.value} aria-pressed={!!choice.current} disabled={!!models.disabled}
+      title={[choice.detail, choice.current ? 'The current model' : restart].filter(Boolean).join(' · ') || undefined}
+      onClick={() => models.choose(choice.value)}>{choice.label}</button>)}
+    {more > 0 && <button type="button" data-keep-open aria-expanded={false} title={`${more} more of this agent's models`} onClick={expand}>{`More (${more})`}</button>}
+    <button disabled={!!models.disabled} title="Any model id, typed in the message box (/model)" onClick={models.pick}>Other…</button>
   </div>;
 }
 

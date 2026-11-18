@@ -42,6 +42,12 @@ const (
 	StopError     = "error"
 	StopStopped   = "stopped"
 	StopTakenOver = "taken_over"
+	// StopCancelled: the person cancelled the review (CancelReview): the
+	// reviewer's turn interrupted, its session ended, its findings kept.
+	StopCancelled = "cancelled"
+	// StopEnded: the person ended the reviewer by hand (Stop, End session,
+	// Delete) while the review was under way.
+	StopEnded = "ended"
 )
 
 // DefaultMaxRounds bounds a loop when nobody said otherwise.
@@ -409,6 +415,87 @@ func Control(rv *Review, runID, action, mode string, maxRounds int, now int64) e
 		return fmt.Errorf("unknown review control %q", action)
 	}
 	return nil
+}
+
+// ErrReviewEnded refuses to cancel a review that has already ended.
+var ErrReviewEnded = errors.New("this review has already ended")
+
+// InProgress reports whether a review is still under way: its reviewer
+// works, or its loop waits for the next round.
+func (r Run) InProgress() bool { return r.State == RunRunning || r.Active() }
+
+// endByHand ends a review the person ended: the loop stops, the round under
+// way closes where it is, and questions still waiting go unanswered.
+func (r *Run) endByHand(now int64, state, reason, by, text string) {
+	if round := r.current(); round != nil && round.EndedAt == 0 {
+		round.EndedAt = now
+	}
+	for i := range r.Asks {
+		if r.Asks[i].State == AskPending {
+			r.Asks[i].State = AskExpired
+		}
+	}
+	r.State, r.StopReason, r.Phase, r.Paused = state, reason, PhaseDone, false
+	r.StoppedBy, r.StoppedAt, r.UpdatedAt = by, now, now
+	r.Detail = text
+	r.note(now, reason, by, text, "")
+}
+
+// Cancel is the person's cancel of a review under way (CancelReview): no
+// further round starts, and the findings filed so far are kept. The Runner
+// then interrupts the reviewer's turn and ends its session.
+func Cancel(rv *Review, runID, by string, now int64) (Run, error) {
+	r, err := findRun(rv, runID)
+	if err != nil {
+		return Run{}, err
+	}
+	if r.State == RunCancelled {
+		return *r, errUnchanged
+	}
+	if !r.InProgress() {
+		return *r, ErrReviewEnded
+	}
+	kept := CountFindings(*rv, r.ID).Total()
+	who := firstNonEmpty(by, "You")
+	text := fmt.Sprintf("%s cancelled the review; %s kept.", who, plural(kept, "finding", "findings"))
+	if r.Round > 0 {
+		text = fmt.Sprintf("%s cancelled the review in round %d; %s kept.", who, r.Round, plural(kept, "finding", "findings"))
+	}
+	r.endByHand(now, RunCancelled, StopCancelled, who, text)
+	return *r, nil
+}
+
+// How the person ended a reviewer by hand.
+const (
+	EndedInterrupted = "interrupted"
+	EndedSession     = "ended"
+	EndedDeleted     = "deleted"
+)
+
+// ReviewerEnded follows the person ending a review's reviewer by hand: its
+// turn stopped while it reviewed, its session ended, or its conversation
+// deleted. The review stops there rather than waiting on a reviewer that
+// will not report; a stop that interrupted no review changes nothing.
+func ReviewerEnded(rv *Review, runID, how, by string, now int64) (Run, error) {
+	r, err := findRun(rv, runID)
+	if err != nil {
+		return Run{}, err
+	}
+	reviewing := r.State == RunRunning && (r.Phase == "" || r.Phase == PhaseReviewing)
+	if !r.InProgress() || (how == EndedInterrupted && !reviewing) {
+		return *r, errUnchanged
+	}
+	who := firstNonEmpty(by, "You")
+	text := map[string]string{
+		EndedInterrupted: fmt.Sprintf("%s stopped %s's turn; the review stopped.", who, r.ReviewerLabel),
+		EndedSession:     fmt.Sprintf("%s ended %s's conversation; the review stopped.", who, r.ReviewerLabel),
+		EndedDeleted:     fmt.Sprintf("%s deleted %s's conversation; the review stopped.", who, r.ReviewerLabel),
+	}[how]
+	if text == "" {
+		return Run{}, fmt.Errorf("unknown way to end a reviewer %q", how)
+	}
+	r.endByHand(now, RunStopped, StopEnded, who, text)
+	return *r, nil
 }
 
 // Verdict is the reviewer's resolve or reopen of one of its findings.

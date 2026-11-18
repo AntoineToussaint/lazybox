@@ -186,7 +186,8 @@ func (s *session) record(ctx context.Context, ev agent.Event) (bool, error) {
 		usage := object(body["tokenUsage"])
 		last := object(usage["last"])
 		total := object(usage["total"])
-		c := ContextSnapshot{Scope: s.scope, Agent: actor, Source: "sdk", Used: count(last["totalTokens"]), Capacity: count(usage["modelContextWindow"])}
+		// The adapter adds the model in force (Codex's own usage names none).
+		c := ContextSnapshot{Scope: s.scope, Agent: actor, Model: str(body["model"]), Source: "sdk", Used: count(last["totalTokens"]), Capacity: count(usage["modelContextWindow"])}
 		if err := s.adapter.Store.PutContext(ctx, c); err != nil {
 			return true, err
 		}

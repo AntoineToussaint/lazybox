@@ -15,13 +15,16 @@ import (
 // starts the reviewer (Changes → Review with…) and briefs it; its findings
 // land in the person's Review tray as comments written by that agent. The
 // agent's credential may file findings only in the review it is the reviewer
-// of, in its own workspace.
+// of, in its own workspace. `lazybox review cancel` is the person's (owner
+// credential only): it cancels a review under way, as its card's Cancel
+// review does.
 
 const reviewUsage = `Usage:
   lazybox review add --file <repository>/<path> --line N[-M] --severity blocker|major|minor|nit --title "one line" [--body "details" | --body -] [--key KEY]
   lazybox review list
   lazybox review resolve <finding-id> --note "how it was fixed"
-  lazybox review reopen <finding-id> --note "what is still wrong"`
+  lazybox review reopen <finding-id> --note "what is still wrong"
+  lazybox review cancel [<review-id>] [--workspace W]   (yours: cancel a review under way; its findings are kept)`
 
 func (c *cli) review(args []string) error {
 	if c.subcommandHelp(args, reviewUsage) {
@@ -36,6 +39,8 @@ func (c *cli) review(args []string) error {
 		return c.reviewVerdict(args[1:], "resolved")
 	case "reopen":
 		return c.reviewVerdict(args[1:], "open")
+	case "cancel":
+		return c.reviewCancel(args[1:])
 	}
 	fmt.Fprintln(c.stderr, reviewUsage)
 	return fail(exitUsage, "unknown review command %q", args[0])
@@ -205,5 +210,91 @@ func (c *cli) reviewVerdict(args []string, state string) error {
 		word = "Still open"
 	}
 	c.out("%s: %s %s · %s\n", word, r.Finding.Id, r.Finding.Severity, r.Finding.Title)
+	return nil
+}
+
+// underWay reports whether a review is still going: its reviewer works, or
+// its loop waits for the next round.
+func underWay(run *pb.ReviewRun) bool {
+	return run.State == "running" || (run.Phase != "" && run.Phase != "done" && run.StopReason == "" && run.Loop != "off")
+}
+
+// reviewCancel cancels a review under way (the person's, owner credential
+// only): the one named, else the only one under way in the workspace
+// (--workspace, or the one this shell works in).
+func (c *cli) reviewCancel(args []string) error {
+	f := c.flags("review")
+	workspace := f.String("workspace", "", "the workspace whose review under way to cancel (lazybox ls lists them)")
+	positional, err := c.parse(f, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) > 1 {
+		return fail(exitUsage, "usage: lazybox review cancel [<review-id>] [--workspace W]")
+	}
+	if len(positional) == 0 && *workspace == "" && c.getenv("LAZYBOX_V2_COLLECTION_ID") == "" {
+		return fail(exitUsage, "name the review (lazybox review cancel <review-id>) or its workspace (--workspace W)")
+	}
+	cl, err := c.dial()
+	if err != nil {
+		return err
+	}
+	collection := ""
+	if *workspace != "" {
+		k, err := loadCatalog(c.ctx, cl)
+		if err != nil {
+			return err
+		}
+		w, err := k.findWorkspace(*workspace)
+		if err != nil {
+			return err
+		}
+		collection = w.Id
+	}
+	id := ""
+	if len(positional) == 1 {
+		// The Runner finds the review's workspace when none is named.
+		id = positional[0]
+	} else {
+		if collection == "" {
+			collection = c.getenv("LAZYBOX_V2_COLLECTION_ID")
+		}
+		tray, err := got(cl.ListReviewComments(c.ctx, connect.NewRequest(&pb.ListReviewCommentsRequest{CollectionId: collection})))
+		if err != nil {
+			return err
+		}
+		var going []*pb.ReviewRun
+		for _, run := range tray.Runs {
+			if underWay(run) {
+				going = append(going, run)
+			}
+		}
+		switch len(going) {
+		case 0:
+			return fail(exitUsage, "no review is under way in this workspace")
+		case 1:
+			id = going[0].Id
+		default:
+			for _, run := range going {
+				fmt.Fprintf(c.stderr, "  %s\t%s reviewing %s\n", run.Id, run.ReviewerLabel, run.ScopeLabel)
+			}
+			return fail(exitUsage, "%d reviews are under way here: name one (lazybox review cancel <review-id>)", len(going))
+		}
+	}
+	out, err := got(cl.CancelReview(c.ctx, connect.NewRequest(&pb.CancelReviewRequest{CollectionId: collection, ReviewId: id})))
+	if err != nil {
+		return err
+	}
+	if c.json {
+		return c.printProtoJSON(out)
+	}
+	for _, run := range out.Runs {
+		if run.Id == id {
+			kept := run.Blockers + run.Majors + run.Minors + run.Nits
+			c.out("Review cancelled · %d %s kept · %s's conversation ended (%s).\n", kept, plural(int(kept), "finding", "findings"), run.ReviewerLabel, run.ReviewerTitle)
+			return nil
+		}
+	}
+	c.out("Review cancelled.\n")
 	return nil
 }

@@ -55,7 +55,7 @@ func (b *Bench) ResolveItem(reference string) (*pb.ItemRef, error) {
 // item's title. Reading the item only fills in what was left out and the
 // origin's snapshot: when the provider cannot be reached the start goes on
 // with the reference alone.
-func (b *Bench) PrepareWorkspaceFromItem(ctx context.Context, key, name, branch string, identities []string, ref *pb.ItemRef, progress func(string, string) error) (collections.Collection, error) {
+func (b *Bench) PrepareWorkspaceFromItem(ctx context.Context, key, name, branch string, identities []string, starts map[string]string, ref *pb.ItemRef, progress func(string, string) error) (collections.Collection, error) {
 	if b.Collections == nil {
 		return collections.Collection{}, errors.New("workspace storage unavailable")
 	}
@@ -89,7 +89,7 @@ func (b *Bench) PrepareWorkspaceFromItem(ctx context.Context, key, name, branch 
 			name = strings.TrimSpace(name[:125]) + "…"
 		}
 	}
-	return b.prepareWorkspace(ctx, key, "", name, branch, identities, "", origin, progress)
+	return b.prepareWorkspace(ctx, key, "", name, branch, identities, starts, "", origin, progress)
 }
 
 // originBriefing is the workspace briefing's line about where the work came

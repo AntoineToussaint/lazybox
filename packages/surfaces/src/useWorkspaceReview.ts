@@ -78,6 +78,8 @@ export function useWorkspaceReview(workspaceId: string) {
       source.change(client => client.setReviewDisposition({ collectionId, ids, disposition, sessionId: to?.sessionId || '', sessionTitle: to?.sessionTitle || '', note })),
     /** A review's loop: pause, resume, stop, take_over, or loop (with its mode and rounds). */
     updateRun: (reviewId: string, action: string, loop = '', maxRounds = 0) => source.change(client => client.updateReviewRun({ collectionId, reviewId, action, loop, maxRounds })),
+    /** Cancel a review under way: its reviewer's turn interrupted and session ended, its findings kept. */
+    cancelRun: (reviewId: string) => source.change(client => client.cancelReview({ collectionId, reviewId }, { timeoutMs: 30000 })),
     setAutoResolve: (enabled: boolean) => source.change(client => client.setReviewAutoResolve({ collectionId, enabled })),
   }), [snapshot, source, collectionId]);
 }

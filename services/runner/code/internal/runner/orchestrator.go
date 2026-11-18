@@ -318,6 +318,9 @@ type SpawnRequest struct {
 	Profile, Model, Permission, Role string
 	// Workspace is "same" (default) or "new".
 	Workspace string
+	// StartFrom: with Workspace "new", the branch of origin every repository
+	// starts from (fetched first) instead of the parent workspace's branches.
+	StartFrom string
 }
 
 // Spawn starts a child of the calling orchestrator: a conversation within
@@ -426,7 +429,7 @@ func (b *Bench) Spawn(ctx context.Context, r SpawnRequest) (LineageView, error) 
 		if parent.CollectionID == "" || b.Collections == nil {
 			return LineageView{}, fmt.Errorf("%w: --workspace new needs a workspace to branch from; this conversation has none", work.ErrRefused)
 		}
-		created, err := b.childWorkspace(ctx, parent.CollectionID, title, firstOf(r.Operation, fmt.Sprint(time.Now().UnixNano())))
+		created, err := b.childWorkspace(ctx, parent.CollectionID, title, firstOf(r.Operation, fmt.Sprint(time.Now().UnixNano())), r.StartFrom)
 		if err != nil {
 			return LineageView{}, err
 		}
@@ -482,17 +485,25 @@ func (b *Bench) Spawn(ctx context.Context, r SpawnRequest) (LineageView, error) 
 
 // childWorkspace creates a workspace with the parent workspace's
 // repositories, each on a new branch started from the parent's branch.
-func (b *Bench) childWorkspace(ctx context.Context, parent, title, key string) (string, error) {
+func (b *Bench) childWorkspace(ctx context.Context, parent, title, key, startFrom string) (string, error) {
 	c, err := b.Collections.Get(parent)
 	if err != nil {
 		return "", err
 	}
 	spec := collections.Spec{Name: truncateRunes(title, 120)}
+	startFrom = strings.TrimSpace(startFrom)
 	for _, m := range c.Members {
 		if !m.Ready || m.RepositoryID == "" {
 			continue
 		}
-		spec.Members = append(spec.Members, collections.MemberSpec{Name: m.Name, RepositoryID: m.RepositoryID, BaseRef: firstOf(m.Branch, m.BaseRef)})
+		base := firstOf(m.Branch, m.BaseRef)
+		if startFrom != "" {
+			// A branch of origin chosen to start from, fetched first (start_from.go).
+			if base, _, err = b.refreshStart(ctx, "", m.RepositoryID, m.Name, startFrom, func(string, string) error { return nil }); err != nil {
+				return "", fmt.Errorf("%w: %v", work.ErrRefused, err)
+			}
+		}
+		spec.Members = append(spec.Members, collections.MemberSpec{Name: m.Name, RepositoryID: m.RepositoryID, BaseRef: base})
 	}
 	if len(spec.Members) == 0 {
 		return "", fmt.Errorf("%w: the workspace has no repository to branch from", work.ErrRefused)

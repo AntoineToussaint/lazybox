@@ -8,6 +8,7 @@ import { repositoryLabel } from './repository-model';
 import { useConversationIndex } from './useConversationIndex';
 import { LiveStatusLabel } from './LiveIndicator';
 import { conversationName } from './conversation-model';
+import { OwnershipPanel } from './OwnershipPanel';
 import type { ViewTarget } from './workspace-model';
 import './workspace-home.css';
 
@@ -17,7 +18,7 @@ import './workspace-home.css';
  * and the changes. Never a form: starting asks in the New conversation dialog.
  */
 export function WorkspaceHome({ workspace, viewState, onNewConversation, onShowModule, onTarget }: { workspace: Collection; viewState?: ViewStateStore; onNewConversation?(workspaceId: string): void; onShowModule?(kind: 'terminal' | 'changes'): void; onTarget(target: ViewTarget): void }) {
-  const { api, revision } = useRunner();
+  const { api, revision, refresh } = useRunner();
   const keymap = useKeymap(viewState);
   const index = useConversationIndex();
   const [repositories, setRepositories] = useState<Repository[]>([]);
@@ -31,7 +32,11 @@ export function WorkspaceHome({ workspace, viewState, onNewConversation, onShowM
     return { key: member.spec?.name || member.path, label: repo ? repositoryLabel(repo) : member.spec?.name || 'Repository', branch: member.spec?.branch || '', ready: member.ready };
   });
   const branches = [...new Set(members.map(member => member.branch).filter(Boolean))];
-  const ready = workspace.state === 'ready' && !workspace.ownershipUncertain;
+  // What a previous Lazybox left unconfirmed here, settled from this page: the
+  // workspace list says so on its next poll.
+  const [settled, setSettled] = useState('');
+  const unconfirmed = workspace.ownershipUncertain && settled !== workspace.id;
+  const ready = workspace.state === 'ready' && !unconfirmed;
   const recent = index.sessions.filter(session => session.collectionId === workspace.id).slice(0, 3);
   const shortcut = keymap['conversation.new'];
   return <section className="workspace-home" aria-labelledby={`workspace-home-${workspace.id}`}>
@@ -44,7 +49,9 @@ export function WorkspaceHome({ workspace, viewState, onNewConversation, onShowM
         </div>
       </header>
       {members.length > 0 && <ul className="workspace-home-repos" aria-label="Repositories">{members.map(member => <li key={member.key}><Icon name="folder" size={13}/><span title={member.label}>{member.label}</span>{branches.length > 1 && member.branch && <small><Icon name="branch" size={11}/>{member.branch}</small>}{!member.ready && <small className="pending">Preparing…</small>}</li>)}</ul>}
-      {!ready && <p className="workspace-home-note" role="status">{workspace.ownershipUncertain ? 'Another Runner may own this workspace. Conversations can still be read.' : 'This workspace is getting ready. You can start once its repositories are in place.'}</p>}
+      {unconfirmed
+        ? <OwnershipPanel key={workspace.id} target={{ collectionId: workspace.id }} what="New conversations and deleting this workspace wait" autoFocus={false} onSettled={() => { setSettled(workspace.id); refresh(); }}/>
+        : !ready && <p className="workspace-home-note" role="status">This workspace is getting ready. You can start once its repositories are in place.</p>}
       <div className="workspace-home-actions">
         <button className="primary" disabled={!ready || !onNewConversation} onClick={() => onNewConversation?.(workspace.id)}><Icon name="plus" size={15}/>Start a conversation{shortcut && <kbd>{shortcut}</kbd>}</button>
         <button disabled={!ready || !onShowModule} onClick={() => onShowModule?.('terminal')}><Icon name="terminal" size={15}/>Open a terminal</button>

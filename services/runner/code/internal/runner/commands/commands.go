@@ -127,9 +127,12 @@ type Command struct {
 	hostID      string
 	hostRoot    string
 	hostBackend sessionhost.Backend
-	seq         uint64
-	detaching   bool
-	following   chan struct{}
+	// recordedHost is the host a finished command ran in, as its journal
+	// recorded it: what to check when its stop was never confirmed.
+	recordedHost string
+	seq          uint64
+	detaching    bool
+	following    chan struct{}
 
 	// A followed pipe: what the Runner asks of its `lazybox run`, the channel
 	// closed to wake a waiting FollowPipe, and when the run was last heard.
@@ -285,9 +288,13 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 		}
 		if !state.Done {
 			state.Done = true
-			state.Error = "command ownership unconfirmed after Runner restart"
+			state.Error = ErrOwnershipUnconfirmed.Error()
 		}
-		c := &Command{spool: spool, status: state, finished: make(chan struct{})}
+		// Settled since: checked stopped, or the person said so (settle.go).
+		if note, ok := m.settledNote(state.ID); ok && state.OwnershipUnconfirmed() {
+			state.Error = note
+		}
+		c := &Command{spool: spool, status: state, finished: make(chan struct{}), recordedHost: host}
 		close(c.finished)
 		c.once.Do(func() {})
 		m.items[state.ID] = c

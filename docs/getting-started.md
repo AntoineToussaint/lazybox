@@ -132,6 +132,25 @@ link into the message, or choose **From an issue…**, to
 [start from an issue](guides/start-from-an-issue.md). The steps below do the
 same one at a time.
 
+### Start from another branch
+
+Each repository in the sheet shows where its new branch starts: **from
+main ▾**, origin's default branch. When your work lives on another branch
+(say a new version developed on `feat/v2` while `main` is the released one),
+click the chip or press **⌥B** (`Alt+B`): a searchable list of origin's
+branches opens, its default first, then the ones you chose lately, the most
+active, then all of them. Type to filter (or a branch name it does not show
+yet), `↑`/`↓` and `↵` to choose, `Esc` to close. Lazybox fetches that branch
+first, so the workspace starts from it as it is on origin now.
+
+The choice is **remembered per repository**: the next New task (and Add
+repository, Start from an issue, `lazybox new`) starts that repository from
+the same branch without asking, and the chip says so — **from feat/v2**.
+Choose the default branch again to go back. Offline, the workspace starts from
+the branch as last fetched, and says so. **Add repositories…** and **New
+workspace** have the same chips. From the command line: `lazybox new <name>
+--repo R --start-from feat/v2`.
+
 ## Your first workspace
 
 A **workspace** is a named place to work: one or several repositories, each

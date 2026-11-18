@@ -58,7 +58,7 @@ try {
   await expect(source.locator('.item-source-title')).toHaveText('Fix refund rounding');
   await expect(source.locator('.item-source-provider')).toHaveText('GitHub');
   // The issue's repository is chosen; the workspace and branch come from the issue.
-  await expect(sheet.locator('.new-task-chip')).toHaveText(['fixture-team/api']);
+  await expect(sheet.locator('.new-task-chip-name')).toHaveText(['fixture-team/api']);
   await expect(sheet.getByTestId('new-task-branch')).toHaveText('812-fix-refund-rounding');
   await expect(sheet.locator('.new-task-name')).toHaveText('Fix refund rounding');
   // Item text is not the person's: the Runner's YOLO default becomes Ask.

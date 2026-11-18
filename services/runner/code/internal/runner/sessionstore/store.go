@@ -33,9 +33,14 @@ type Record struct {
 	Snapshot             engine.Snapshot
 	ProviderSettings     json.RawMessage
 	ResumeBlocked        string
-	// Instructions is the last shared-instructions update delivered to this
-	// conversation after it started; Context holds what it started with.
+	// Instructions is the last whole shared-instructions update delivered to
+	// this conversation by a Runner from before Briefing; Context holds what
+	// it started with. Both are read only to place such a conversation.
 	Instructions string `json:",omitempty"`
+	// Briefing is the version of each briefing section this conversation was
+	// given, by section ID (runner/briefing.go): at its start, then with each
+	// update. Nil in a record from before Lazybox kept it.
+	Briefing map[string]string `json:",omitempty"`
 	// BrowserTools: the agent was started with the agent browser's tools.
 	// Nil in a record from before Lazybox kept it.
 	BrowserTools *bool `json:",omitempty"`

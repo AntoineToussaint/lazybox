@@ -117,6 +117,16 @@ export async function startRunnerFixture() {
     { id: '102', name: 'web', fullName: 'fixture-team/web', private: false, defaultBranch: 'main', htmlUrl: 'https://github.com/fixture-team/web' },
   ];
   let catalogRemote=[], catalogUpdated='0';const preparationFailures=new Set();const prepared=[];
+  // "Start from": origin's branches for every repository (main the default; the
+  // newest commit first), the branch each repository last started from, and
+  // how often origin was asked (the picker asks only when it opens).
+  const originBranches=[['main',5],['feat/v2-command-output',1],['release/1.4',30],['fix/login-redirect',2],['chore/deps',12],['docs/guide',8],['spike/cache',90],['feat/payments',3],['wip/old-idea',400]].map(([name,daysAgo])=>({name,commit:createHash('sha1').update(name).digest('hex'),committedAtUnixMillis:String(Date.UTC(2026,10,17)-daysAgo*86400000)}));
+  const startFrom=new Map();const branchListings=[];
+  // What a previous Runner left unconfirmed, by workspace or conversation id (GetOwnership).
+  const ownership=new Map();
+  // Repositories whose history changed on "GitHub" since Lazybox copied them, by
+  // identity: PrepareWorkspace refuses them until RefreshRepositoryIdentity replaces the copy.
+  const replacedRepositories=new Map();const refreshedRepositories=[];
   // How agents' requests for a repository were answered, by request id.
   const repositoryRequests=new Map();
   const catalogEntries=()=>{const rows=new Map();for(const r of catalogRemote)rows.set('github:'+r.fullName.toLowerCase(),{identity:'github:'+r.fullName.toLowerCase(),name:r.fullName});for(const r of discovery.roots.flatMap(root=>root.repositories||[]))rows.set(r.gitIdentity||r.path,{identity:r.gitIdentity||r.path,name:r.gitIdentity?.startsWith('github:')?r.gitIdentity.slice(7):r.name,path:r.path});for(const r of library){const identity=r.gitIdentity||'local:'+r.id;rows.set(identity,{...rows.get(identity),identity,name:r.gitIdentity?.startsWith('github:')?r.gitIdentity.slice(7):r.name||r.id,repositoryId:r.id});}return [...rows.values()];};
@@ -219,7 +229,11 @@ export async function startRunnerFixture() {
   const providerOf=session=>session?.provider||profiles.find(p=>p.id===session?.profileId)?.provider||'claude';
   const providerName=provider=>provider==='codex'?'Codex':'Claude';
   const reviewEvent=(type,collectionId,run)=>{const counts=runCounts(collectionId,run);const lower=run.scopeLabel.startsWith('PR ')?run.scopeLabel:run.scopeLabel[0].toLowerCase()+run.scopeLabel.slice(1);const summary=counts.blockers+counts.majors+counts.minors+counts.nits?[counts.blockers&&`${counts.blockers} blocker${counts.blockers>1?'s':''}`,counts.majors&&`${counts.majors} major`,counts.minors&&`${counts.minors} minor`,counts.nits&&`${counts.nits} nit${counts.nits>1?'s':''}`].filter(Boolean).join(', '):'no open findings';
-    eventStreams.get(run.sourceSessionId)?.push({type,requestId:run.id,status:run.state,text:type==='review_started'?`${run.reviewerLabel} is reviewing ${lower}`:`${run.reviewerLabel} reviewed ${lower} · ${summary}`,providerDataJson:Buffer.from(JSON.stringify({review:run.id,workspace:collectionId,reviewerSession:run.reviewerSessionId,reviewerLabel:run.reviewerLabel,sourceSession:run.sourceSessionId,sourceLabel:run.sourceLabel,scope:run.scope,scopeLabel:run.scopeLabel,turn:run.turn,...counts})).toString('base64')});};
+    // Ended by hand (cancelled, or its reviewer stopped): said so, with who and when, as the Runner records it.
+    const total=counts.blockers+counts.majors+counts.minors+counts.nits,kept=`${total} finding${total===1?'':'s'} kept`;
+    const finished=run.state==='cancelled'?`Review cancelled · ${kept}`:run.state==='stopped'?`Review stopped · ${kept}`:`${run.reviewerLabel} reviewed ${lower} · ${summary}`;
+    const byHand=run.state==='cancelled'||run.state==='stopped'?{state:run.state,stoppedBy:run.stoppedBy,stoppedAt:Number(run.stoppedAtUnix)}:{};
+    eventStreams.get(run.sourceSessionId)?.push({type,requestId:run.id,status:run.state,text:type==='review_started'?`${run.reviewerLabel} is reviewing ${lower}`:finished,providerDataJson:Buffer.from(JSON.stringify({review:run.id,workspace:collectionId,reviewerSession:run.reviewerSessionId,reviewerLabel:run.reviewerLabel,sourceSession:run.sourceSessionId,sourceLabel:run.sourceLabel,scope:run.scope,scopeLabel:run.scopeLabel,turn:run.turn,...counts,...byHand})).toString('base64')});};
   const runOf=id=>{for(const [collectionId,r] of reviews){const run=r.runs.find(x=>x.id===id);if(run)return {collectionId,run};}throw new Error(`fixture review ${id} not found`);};
   /** `lazybox review add` from the reviewer: a proposed finding, idempotent by key. */
   // The loop (GITHUB.md, "The review loop"), as the Runner runs it: rounds,
@@ -232,6 +246,16 @@ export async function startRunnerFixture() {
   const escalate=(collectionId,run,text)=>eventStreams.get(run.sourceSessionId)?.push({type:'review_escalated',requestId:run.id,status:run.stopReason,text,providerDataJson:Buffer.from(JSON.stringify({review:run.id,workspace:collectionId,reviewerSession:run.reviewerSessionId,reviewerLabel:run.reviewerLabel,sourceLabel:run.sourceLabel})).toString('base64')});
   const stopLoop=(collectionId,run,reason,text,escalates)=>{Object.assign(run,{stopReason:reason,phase:'done',detail:text});loopNote(run,escalates?'escalated':'stopped','Lazybox',text);if(escalates)escalate(collectionId,run,text);};
   const active=run=>!!run.phase&&run.phase!=='done'&&!run.stopReason;
+  // Ending a review by hand (GITHUB.md, "Cancelling a review"), as the Runner does: the loop stops,
+  // the round closes, and the author's conversation is told, with who and when.
+  const inProgress=run=>run.state==='running'||active(run);
+  const endByHand=(collectionId,run,state,reason,text)=>{const now=unix(),round=run.rounds?.at(-1);if(round&&!round.endedAtUnix)round.endedAtUnix=now;
+    Object.assign(run,{state,stopReason:reason,phase:'done',paused:false,stoppedBy:'You',stoppedAtUnix:now,updatedAtUnix:now,detail:text});loopNote(run,reason,'You',text);reviewEvent('review_finished',collectionId,run);};
+  const closeReviewer=run=>{const s=sessions.find(x=>x.id===run.reviewerSessionId);if(s&&!s.closed)Object.assign(s,{closed:true,busy:false,status:'stopped'});};
+  /** The person stopped (`interrupted`, while it reviews), ended (`ended`) or deleted (`deleted`) a reviewer: its review under way stops. */
+  const reviewerEnded=(sessionId,how)=>{for(const [collectionId,r] of reviews)for(const run of r.runs){
+    if(run.reviewerSessionId!==sessionId||!inProgress(run)||(how==='interrupted'&&!(run.state==='running'&&run.phase==='reviewing')))continue;
+    endByHand(collectionId,run,'stopped','ended',`You ${{interrupted:`stopped ${run.reviewerLabel}'s turn`,ended:`ended ${run.reviewerLabel}'s conversation`,deleted:`deleted ${run.reviewerLabel}'s conversation`}[how]}; the review stopped.`);}};
   const exchangeLine=(run,text)=>{for(const id of [run.reviewerSessionId,run.sourceSessionId])eventStreams.get(id)?.push({type:'review_exchange',requestId:run.id,text,providerDataJson:Buffer.from(JSON.stringify({review:run.id,reviewerSession:run.reviewerSessionId,sourceSession:run.sourceSessionId})).toString('base64')});};
   /** `lazybox ask`: one agent asks, the other answers; both conversations show it. */
   const exchange=(id,{from='reviewer',question,answer})=>{const {run}=runOf(id);const [asker,answerer]=from==='reviewer'?[run.reviewerLabel,run.sourceLabel]:[run.sourceLabel,run.reviewerLabel];
@@ -262,7 +286,7 @@ export async function startRunnerFixture() {
       author:'agent',authorLabel:run.reviewerLabel,authorSessionId:run.reviewerSessionId,severity,title,reviewId:run.id,findingKey:key,round:run.round||1};
     r.comments.push(c);loopNote(run,'filed',run.reviewerLabel,`${severity[0].toUpperCase()+severity.slice(1)}: ${title} (${member}/${path}:${startLine})`,c.id);return c;};
   /** The reviewer's turn ends: the review is done, and the author's conversation is told. */
-  const finishReview=id=>{const {collectionId,run}=runOf(id);run.state='done';run.updatedAtUnix=unix();
+  const finishReview=id=>{const {collectionId,run}=runOf(id);if(run.state==='cancelled'||run.state==='stopped')return run;run.state='done';run.updatedAtUnix=unix();
     if(run.phase==='reviewing'){const r=reviewOf(collectionId),round=run.rounds.at(-1);let filed=0,stillOpen=0,blockers=0;
       for(const c of r.comments.filter(c=>c.reviewId===run.id)){if(c.round===run.round)filed++;else if(c.round<run.round&&liveFinding(c)&&c.delivered){c.stillOpenRounds=(c.stillOpenRounds||0)+1;stillOpen++;}if(liveFinding(c)&&c.severity==='blocker')blockers++;}
       const resolved=run.timeline.filter(e=>e.round===run.round&&e.kind==='resolved').length;Object.assign(round,{endedAtUnix:unix(),filed,resolved,stillOpen,blockers});
@@ -570,6 +594,23 @@ actions:
         }
         return json(reviewReply(body.collectionId));
       }
+      case 'CancelReview': {
+        mutations.push({method,body});
+        const found=[...reviews].map(([collectionId,r])=>({collectionId,run:r.runs.find(x=>x.id===body.reviewId)})).find(x=>x.run&&(!body.collectionId||x.collectionId===body.collectionId));
+        if(!found)return error('not_found',`review "${body.reviewId}" not found`);
+        const {collectionId,run}=found;
+        if(run.state!=='cancelled'){
+          if(!inProgress(run))return error('failed_precondition','this review has already ended');
+          const counts=runCounts(collectionId,run),kept=counts.blockers+counts.majors+counts.minors+counts.nits;
+          endByHand(collectionId,run,'cancelled','cancelled',`You cancelled the review${run.round>0?` in round ${run.round}`:''}; ${plural(kept,'finding','findings')} kept.`);
+        }
+        closeReviewer(run);
+        return json(reviewReply(collectionId));
+      }
+      case 'StopSessionResources': {
+        mutations.push({method,body});const session=sessions.find(s=>s.id===body.sessionId);if(!session)return error('not_found','Session not found');
+        Object.assign(session,{closed:true,busy:false,status:'stopped'});reviewerEnded(session.id,'ended');return json({session});
+      }
       case 'StartReview': {
         mutations.push({method,body});
         const collection=collections.find(c=>c.id===body.collectionId);if(!collection)return error('not_found','Workspace missing');
@@ -695,10 +736,23 @@ actions:
         return json({ repository });
       }
       case 'GetRepositoryCatalog': {if(body.refresh&&github.state==='connected'){catalogRemote=structuredClone(githubRepositories);catalogUpdated=String(Math.floor(Date.now()/1000));}return json({entries:catalogEntries(),sources:[{id:'github',state:github.state,detail:github.authMethod==='github_app'?'GitHub App access is limited to its installed repositories.':'Repositories visible to this personal token.',updatedAt:catalogUpdated}],refreshSeconds:300});}
+      case 'ListRepositoryBranches': {
+       const choice=catalogEntries().find(r=>r.identity===body.repositoryIdentity);if(!choice)return error('not_found','Unknown repository identity');
+       if(!library.some(r=>r.id===choice.repositoryId))return json({repositoryIdentity:body.repositoryIdentity,unregistered:true});
+       if(body.remote)branchListings.push(body.repositoryIdentity);
+       const start=startFrom.get(body.repositoryIdentity)||{branch:'',recent:[]};
+       // Without asking origin: the branches as last fetched (the default and the ones started from).
+       const known=body.remote?originBranches:originBranches.filter(b=>b.name==='main'||start.recent.includes(b.name));
+       return json({repositoryIdentity:body.repositoryIdentity,defaultBranch:'main',startFrom:start.branch,recent:start.recent,branches:[...known].sort((a,b)=>Number(b.committedAtUnixMillis)-Number(a.committedAtUnixMillis)),remote:!!body.remote});
+      }
       case 'PrepareWorkspace': {
        mutations.push({method,body});const values=[];const members=[];
-       for(const identity of body.repositoryIdentities||[]){const choice=catalogEntries().find(r=>r.identity===identity);if(!choice)return error('not_found','Unknown repository identity');let repo=library.find(r=>r.id===choice.repositoryId);if(!repo){if(preparationFailures.delete(identity)){res.writeHead(200,{'Content-Type':'application/connect+json'});res.end(Buffer.concat([...values.map(v=>frame(v)),frame({error:{code:'failed_precondition',message:'Fixture preparation failure'}},2)]));return;}const remote=githubRepositories.find(r=>'github:'+r.fullName.toLowerCase()===identity);repo={id:remote?'github-'+remote.id:'local-'+(library.length+1),name:choice.name.split('/').at(-1),path:choice.path||'/fixture/repos/'+remote.id,gitIdentity:identity};library.push(repo);prepared.push(identity);}values.push({identity,message:'Preparing '+choice.name});members.push({repositoryId:repo.id,name:repo.name||repo.id,...(body.branch&&!body.collectionId?{branch:body.branch}:{})});}
-       let collection=requests.get(body.requestKey);if(!collection){if(body.collectionId){collection=collections.find(c=>c.id===body.collectionId);if(!collection)return error('not_found','Missing workspace');collection.members.push(...members.map(spec=>({spec,path:collection.root+'/'+spec.name,ready:true})));}else{const id='created-'+collections.length;collection={id,name:body.name,...(body.item?{origin:{provider:body.item.provider||'github',key:body.item.key}}:{}),root:'/fixture/collections/'+id,state:'ready',members:members.map(spec=>({spec,path:'/fixture/collections/'+id+'/'+spec.name,ready:true}))};collections.push(collection);}requests.set(body.requestKey,collection);}values.push({message:'Ready',collection});
+       for(const [identity,branch] of Object.entries(body.startFrom||{}))if(branch&&!originBranches.some(b=>b.name===branch))return error('failed_precondition',`${identity.replace(/^github:/,'')} has no branch ${branch} on origin: choose another to start from`);
+       const rememberStarts=()=>{for(const [identity,branch] of Object.entries(body.startFrom||{})){const old=startFrom.get(identity)||{branch:'',recent:[]};if(!branch||branch==='main')startFrom.set(identity,{branch:'',recent:old.recent});else startFrom.set(identity,{branch,recent:[branch,...old.recent.filter(b=>b!==branch)].slice(0,8)});}};
+       for(const identity of body.repositoryIdentities||[]){const choice=catalogEntries().find(r=>r.identity===identity);if(!choice)return error('not_found','Unknown repository identity');
+        const changed=replacedRepositories.get(identity);if(changed){res.writeHead(200,{'Content-Type':'application/connect+json'});res.end(Buffer.concat([...values.map(v=>frame(v)),frame({identity,replaced:{identity,name:choice.name,hasCopy:!!changed.hasCopy}}),frame({error:{code:'failed_precondition',message:`could not prepare ${choice.name}: ${changed.hasCopy?"the repository's history changed on GitHub since Lazybox copied it; replace Lazybox's copy to continue":'on GitHub this name now belongs to another repository than the one Lazybox listed; use the repository GitHub has now to continue'}`}},2)]));return;}
+        let repo=library.find(r=>r.id===choice.repositoryId);if(!repo){if(preparationFailures.delete(identity)){res.writeHead(200,{'Content-Type':'application/connect+json'});res.end(Buffer.concat([...values.map(v=>frame(v)),frame({error:{code:'failed_precondition',message:'Fixture preparation failure'}},2)]));return;}const remote=githubRepositories.find(r=>'github:'+r.fullName.toLowerCase()===identity);repo={id:remote?'github-'+remote.id:'local-'+(library.length+1),name:choice.name.split('/').at(-1),path:choice.path||'/fixture/repos/'+remote.id,gitIdentity:identity};library.push(repo);prepared.push(identity);}values.push({identity,message:'Preparing '+choice.name});members.push({repositoryId:repo.id,name:repo.name||repo.id,...(body.branch&&!body.collectionId?{branch:body.branch}:{})});}
+       let collection=requests.get(body.requestKey);if(!collection){if(body.collectionId){collection=collections.find(c=>c.id===body.collectionId);if(!collection)return error('not_found','Missing workspace');collection.members.push(...members.map(spec=>({spec,path:collection.root+'/'+spec.name,ready:true})));}else{const id='created-'+collections.length;collection={id,name:body.name,...(body.item?{origin:{provider:body.item.provider||'github',key:body.item.key}}:{}),root:'/fixture/collections/'+id,state:'ready',members:members.map(spec=>({spec,path:'/fixture/collections/'+id+'/'+spec.name,ready:true}))};collections.push(collection);}requests.set(body.requestKey,collection);}rememberStarts();values.push({message:'Ready',collection});
        // Answering an agent's request for a repository: the request is resolved (the agent told)
        // once the repository is in the workspace, as the Runner does, not when preparation starts.
        const answer=()=>{if(!body.repositoryRequestId)return;
@@ -714,6 +768,14 @@ actions:
        // preparationDelayMs streams each step apart, as a clone does.
        if(runner.preparationDelayMs){for(const value of values){res.write(frame(value));await new Promise(resolve=>setTimeout(resolve,runner.preparationDelayMs));}answer();res.end(frame({},2));return;}
        answer();res.end(stream(values));return;
+      }
+      case 'RefreshRepositoryIdentity': {
+       const choice=catalogEntries().find(r=>r.identity===body.identity);if(!choice||!body.identity?.startsWith('github:'))return error('failed_precondition','only a GitHub repository\'s copy can be replaced');
+       const changed=replacedRepositories.get(body.identity),copy=library.find(r=>(r.gitIdentity||'')===body.identity);
+       const answer={identity:body.identity,name:choice.name,reason:changed?'replaced':'',hasCopy:!!copy||!!changed?.hasCopy,workspaces:changed?.workspaces||[]};
+       if(!body.confirm)return json(answer);
+       mutations.push({method,body});replacedRepositories.delete(body.identity);refreshedRepositories.push(body.identity);
+       return json({...answer,replaced:true,repositoryId:'github-replaced-'+refreshedRepositories.length});
       }
       case 'DeclineRepositoryRequest': {
        mutations.push({method,body});const pending=sessions.flatMap(s=>s.pending||[]).find(p=>p.requestId===body.requestId);if(!pending)return error('failed_precondition','This request was already answered');
@@ -763,7 +825,7 @@ actions:
       case 'SearchWorkspaceFiles': {const files=treeFiles(body.collectionId);const found=body.query?files.map(p=>fuzzy(p,body.query)).filter(Boolean).sort((a,b)=>b.score-a.score||a.path.localeCompare(b.path)).slice(0,body.limit||50):[];return json({matches:found.map(({path,positions})=>({path,positions})),indexed:files.length});}
       case 'ReadWorkspaceFile': {const key=body.collectionId+'/'+body.path; if(treeFolders(body.collectionId).has(body.path))return json({path:body.path,directory:true,entries:listFolder(body.collectionId,body.path)}); if(!workspaceFiles.has(key))workspaceFiles.set(key,{path:body.path,text:'# File preview\nA retained file.\n',version:'v1',binary:false,truncated:false});return json(workspaceFiles.get(key));}
       case 'SaveWorkspaceFile': {const key=body.collectionId+'/'+body.path,file=workspaceFiles.get(key);if(file.version!==body.expectedVersion)return error('aborted','File changed on the Runner');Object.assign(file,{text:body.text,version:crypto.randomUUID()});mutations.push({method,body});return json(file);}
-      case 'DeleteConversation': {const session=sessions.find(s=>s.id===body.sessionId);if(session&&!session.closed&&!body.stopSessions)return error('failed_precondition','Agent running');if(session)sessions.splice(sessions.indexOf(session),1);mutations.push({method,body});return json({});}
+      case 'DeleteConversation': {const session=sessions.find(s=>s.id===body.sessionId);if(session&&!session.closed&&!body.stopSessions)return error('failed_precondition','Agent running');if(session){reviewerEnded(session.id,'deleted');sessions.splice(sessions.indexOf(session),1);}mutations.push({method,body});return json({});}
       case 'ResumeSession': {
         const previous=sessions.find(s=>s.id===body.sessionId);if(!previous)return error('not_found','Missing conversation');
         // Like the Runner (Bench.reconnect): a live conversation that only lost its stream re-attaches its agent in place.
@@ -776,8 +838,27 @@ actions:
       case 'GetSession': { const session = sessions.find(value => value.id === body.sessionId); if (session && frozenSessions.has(session.id)) return json({ session: frozenSessions.get(session.id) }); return session ? json({ session }) : error('not_found', 'Fixture session not found'); }
       case 'ListCommands': { const workspace = sessions.find(value => value.id === body.sessionId)?.collectionId; return json({ commands: commands.filter(value => value.sessionId === body.sessionId || (!value.sessionId && value.collectionId && value.collectionId === workspace)).map(listedCommand) }); }
       case 'ClaimCommandShare': { const command = commands.find(value => value.id === body.commandId); if (!command) return error('not_found', 'Command missing'); const claimed = !!command.shareWith && command.done && !claimedShares.has(command.id); if (claimed) claimedShares.add(command.id); return json({ claimed, status: wireCommand(command) }); }
-      case 'PreviewWorkspaceDeletion': return json({activeSessionIds:sessions.filter(s=>s.collectionId===body.collectionId&&!s.closed).map(s=>s.id),dirtyRepositories:['api'],filesOutsideRepositories:false});
-      case 'DeleteWorkspace': {const index=collections.findIndex(c=>c.id===body.collectionId);if(index<0||body.confirmName!==collections[index].name)return error('failed_precondition','Confirm name');if(!body.stopSessions||!body.discardChanges)return error('failed_precondition','Explicit cleanup consent required');mutations.push({method,body});const collection=collections.splice(index,1)[0];for(const s of sessions.filter(s=>s.collectionId===collection.id)){s.closed=true;s.status='stopped';}return json({collection:{...collection,state:'deleted'}});}
+      case 'PreviewWorkspaceDeletion': if(collections.find(c=>c.id===body.collectionId)?.ownershipUncertain)return json({activeSessionIds:[],dirtyRepositories:[],filesOutsideRepositories:false,blocked:'Previous process ownership is unconfirmed; reconcile the workspace before deleting it.'});return json({activeSessionIds:sessions.filter(s=>s.collectionId===body.collectionId&&!s.closed).map(s=>s.id),dirtyRepositories:['api'],filesOutsideRepositories:false});
+      // Unconfirmed ownership (RESOURCE_OWNERSHIP.md): what a test recorded with
+      // `ownership.set(id, {processes, provable})`, checked and settled as the Runner does.
+      case 'GetOwnership': case 'ResolveOwnership': {
+       const id=body.collectionId||body.sessionId,collection=body.collectionId&&collections.find(c=>c.id===id),session=body.sessionId&&sessions.find(s=>s.id===id);
+       if(!collection&&!session)return error('not_found','No such workspace or conversation');
+       const unconfirmed=collection?collection.ownershipUncertain:session.recoveryRequired;const record=ownership.get(id)||{processes:[]};
+       const settle=note=>{if(collection){collection.ownershipUncertain=false;collection.ownerExecutionId='';collection.ownerExecutionIds=[];collection.lastOwnershipResolution=note;}else{session.recoveryRequired=false;session.closed=true;}ownership.delete(id);};
+       if(method==='GetOwnership'){
+        if(!unconfirmed)return json({settled:true});
+        if(record.provable){settle('Lazybox checked that none of its processes are running');return json({settled:true,note:'Lazybox checked that none of the recorded processes are running and cleared the mark.'});}
+        return json({processes:record.processes});
+       }
+       mutations.push({method,body});
+       if(!unconfirmed)return json({settled:true});
+       const running=record.processes.filter(p=>p.state==='running');
+       if(body.stop){if(record.stopFails)return error('failed_precondition',record.stopFails);for(const p of running)Object.assign(p,{state:'gone',detail:'Lazybox stopped it.'});if(record.processes.some(p=>p.state==='unknown'))return error('failed_precondition',`Lazybox cannot check the command "${record.processes.find(p=>p.state==='unknown').label}". If you know it stopped, choose They're already stopped`);settle('Lazybox stopped its processes');return json({settled:true});}
+       if(running.length)return error('failed_precondition',`the ${running[0].kind} of "${running[0].label}" is still running (PID ${running[0].pid}): stop it first, or choose Stop them and continue`);
+       settle('You confirmed its processes had stopped'+(body.reason?': '+body.reason:''));return json({settled:true});
+      }
+      case 'DeleteWorkspace': {const index=collections.findIndex(c=>c.id===body.collectionId);if(index<0||body.confirmName!==collections[index].name)return error('failed_precondition','Confirm name');if(collections[index].ownershipUncertain)return error('failed_precondition','Previous process ownership is unconfirmed; reconcile the workspace before deleting it.');if(!body.stopSessions||!body.discardChanges)return error('failed_precondition','Explicit cleanup consent required');mutations.push({method,body});const collection=collections.splice(index,1)[0];for(const s of sessions.filter(s=>s.collectionId===collection.id)){s.closed=true;s.status='stopped';}return json({collection:{...collection,state:'deleted'}});}
       case 'WatchEvents': {
         const channel=eventStreams.get(body.sessionId);if(channel){res.writeHead(200,{'Content-Type':'application/connect+json'});res.flushHeaders();
           // Like the Runner, each replayed record says where the retained history ends.
@@ -1061,6 +1142,8 @@ actions:
         if(session?.applyDelayMs&&body.message)await new Promise(resolve=>setTimeout(resolve,session.applyDelayMs));
         // `turnOver`: the turn ended in the Runner before the client's view of it, as the engine says it.
         if(session?.turnOver&&body.interrupt)return error('failed_precondition','no active turn');
+        // Like the Runner: Stop on a reviewer mid-review stops its review.
+        if(session?.busy&&!session.closed&&body.interrupt)reviewerEnded(session.id,'interrupted');
         // Like the Runner: a stop names a sub-agent it knows running, by the provider's id; else nothing is running.
         // `notRunning`: the Runner's own state moved on after the snapshot the client shows.
         if(session&&body.stopAgent){const agent=(session.agents||[]).find(a=>a.id===body.stopAgent.agentId);if(!agent||!agent.nativeId||agent.notRunning||!['running','starting','waiting_input','waiting_approval'].includes(agent.status))return error('failed_precondition','sub-agent is not running');}
@@ -1120,6 +1203,15 @@ actions:
             const image=!!session.capabilities?.images&&images<4&&data.length<=6<<20&&/^image\/(png|jpeg|gif|webp)$/.test(file.mediaType||'');if(image)images++;
             return {name:file.name,mediaType:file.mediaType||'application/octet-stream',path,size:data.length,delivery:image?'image':data.length<=256<<10&&isText(data)?'text':'file'};});
           eventStreams.get(session.id)?.push({type:'operation_accepted',text:body.message.text||'',providerDataJson:Buffer.from(JSON.stringify({files})).toString('base64')});
+        }
+        // Like the Runner: a conversation behind on its briefing gets what changed with its
+        // next message that starts a turn, journaled after the message it went with
+        // (runner/briefing.go). Opt-in: session.briefingUpdate is the update's text.
+        else if(session&&body.message&&session.briefingUpdate&&!session.busy){
+          const ch=eventStreams.get(session.id);
+          ch?.push({type:'operation_accepted',operationId:body.operationId,text:body.message.text||''});
+          ch?.push({type:'briefing_updated',operationId:body.operationId,text:session.briefingUpdate,status:'features',providerDataJson:Buffer.from(JSON.stringify({sections:['conversations'],versions:{conversations:'2'}})).toString('base64')});
+          session.briefingUpdate='';session.instructionsPending=false;
         }
         // Like the Runner, which journals every message it accepts; opt-in (runner.journalMessages) so tests that count events keep theirs.
         else if(session&&body.message&&runner.journalMessages)eventStreams.get(session.id)?.push({type:'operation_accepted',operationId:body.operationId,text:body.message.text||''});
@@ -1225,7 +1317,7 @@ actions:
   const endpoint = join(directory, 'endpoint.json');
   const publish = () => writeFile(endpoint, JSON.stringify({ url, token, runnerId: 'fixturerunneridentity' }), { mode: 0o600 });
   await publish();
-  return { claudeAuth, arrangement, get runnerSettings() { return runnerSettings; }, freezeSession: id => frozenSessions.set(id, structuredClone(sessions.find(value => value.id === id))), thawSession: id => frozenSessions.delete(id), items, versionInfo, reviewBriefs, fileFinding, finishReview, authorFixed, resolveFinding, reopenFinding, exchange, power, config, extensions, browser, artifacts: artifactStore, themeFolder, remote, checkpoints, setCheckpoints, attachments, set telemetry(fn) { telemetry = fn; }, set attachmentReadDelayMs(value) { attachmentReadDelayMs = value; }, set terminalStartDelayMs(value) { terminalStartDelayMs = value; }, terminalOutput, set tailReadDelayMs(value) { tailReadDelayMs = value; }, runner, missions, processes, processHosting, terminals, commands, runtimeCommands, runtimes, runtimeFor, finishSetup, runtimeTiming, previewPort, startRun, startTerminalRun, streamCommand, claimedShares, githubRepositories, preparationFailures, prepared, repositoryRequests, workspaceFiles, openEvents, reviews, reviewOf, diffs, workingFiles,
+  return { claudeAuth, arrangement, get runnerSettings() { return runnerSettings; }, freezeSession: id => frozenSessions.set(id, structuredClone(sessions.find(value => value.id === id))), thawSession: id => frozenSessions.delete(id), items, versionInfo, reviewBriefs, fileFinding, finishReview, authorFixed, resolveFinding, reopenFinding, exchange, power, config, extensions, browser, artifacts: artifactStore, themeFolder, remote, checkpoints, setCheckpoints, attachments, set telemetry(fn) { telemetry = fn; }, set attachmentReadDelayMs(value) { attachmentReadDelayMs = value; }, set terminalStartDelayMs(value) { terminalStartDelayMs = value; }, terminalOutput, set tailReadDelayMs(value) { tailReadDelayMs = value; }, runner, missions, processes, processHosting, terminals, commands, runtimeCommands, runtimes, runtimeFor, finishSetup, runtimeTiming, previewPort, startRun, startTerminalRun, streamCommand, claimedShares, githubRepositories, preparationFailures, prepared, startFrom, branchListings, ownership, replacedRepositories, refreshedRepositories, repositoryRequests, workspaceFiles, openEvents, reviews, reviewOf, diffs, workingFiles,
     availability, acp, tracked,
     /** A conversation's open journal, without replacing it (openEvents starts a new one). */
     eventsOf: id => eventStreams.get(id),

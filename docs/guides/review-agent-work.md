@@ -92,6 +92,13 @@ can talk to it like any other.
 - **Clean ✓** means nothing at major or above is open (a minor or a nit may
   be, and it says so). The loop works on blockers, so it can end with majors
   open: the card then says *No blockers · 2 major open*.
+- **Cancel review** on the card (or `Esc` on it, the reviewer's ⋯ menu, ⌘K
+  *Cancel review*, or `lazybox review cancel` in your terminal) stops a review
+  under way: the reviewer stops now, its session ends and no further round
+  starts. Its conversation and the findings it filed stay. It asks first only
+  when there are findings. The card then reads *Review cancelled · 2 findings
+  kept*, with **Review again**. Stopping, ending or deleting the reviewer's
+  conversation yourself stops the review the same way: *Review stopped*.
 
 Other ways in: a turn's ⋯ menu (**Review this turn with Codex**), the pull
 request card (**Review the PR with Codex**) and ⌘K.

@@ -337,6 +337,15 @@ its turn here first. A conversation on a subscription Lazybox keeps apart from
 your own CLI sign-in says so instead: its history is in that subscription's
 private folder.
 
+## Claude Code and Codex capabilities
+
+Both native adapters support attachments, approvals, resuming, subagents,
+and switching models and permissions where the running provider supports it.
+Codex offers structured questions in Plan mode. Claude Code also offers them
+in Execute mode. Stopping an individual subagent is available when the
+Claude worker advertises it. The chat uses the session's capabilities to
+decide which controls to offer.
+
 ## What it costs
 
 The left of the message box's controls shows who answers, the agent and model

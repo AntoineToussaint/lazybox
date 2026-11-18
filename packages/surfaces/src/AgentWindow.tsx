@@ -492,6 +492,21 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
 
   // Review from the chat: the header's Review button, its ⋯ item, the right-click menu and `/review`.
   const chatReview = useChatReview({ session: assistant ? undefined : session, sessionID, onError: setError });
+  const openFreshConversation = async (source: Session, profileId: string, draft = '') => {
+    const sameAccount = source.profileId === profileId;
+    const opened = await api.openSession({ profileId, collectionId: source.collectionId, cwd: source.collectionId ? '' : source.workingDirectory,
+      options: { model: sameAccount ? source.model : '', permission: source.permission, workflow: source.workflow, gatewayId: sameAccount && source.gatewayId !== 'direct' ? source.gatewayId : '', rotationProfileIds: [], instructions: '', noRotation: false } });
+    if (!opened.session) throw new Error('Runner did not return the new conversation');
+    if (draft) writeDraft(viewState, opened.session.id, { text: draft, files: [], operationId: '' });
+    setSession(undefined); setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
+    setSessionID(opened.session.id); onSessionChange?.(opened.session.id); refresh();
+  };
+  const continueInCodex = session && allowStart && !assistant ? async (profileId: string) => {
+    const pending = queued.filter(entry => !entry.origin).map(entry => entry.text.trim()).filter(Boolean);
+    const lastRequest = conversation.findLast(entry => entry.type === 'operation_accepted' && !entry.origin)?.text.trim();
+    const draft = [...new Set([...(pending.length ? pending : [lastRequest]), message.trim()].filter(Boolean))].join('\n\n');
+    await openFreshConversation(session, profileId, draft);
+  } : undefined;
   // Slash commands: the menu over the message box, and Lazybox's own commands (useSlashCommands.tsx).
   const provider = activeProfile?.provider || session?.provider || launcher.provider;
   const slash = useSlashCommands({
@@ -512,11 +527,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
       interrupt: () => void interrupt(), setPermission, switchSubscription: () => setSwitchingSubscription(true), adopt, giveBrowser: () => void giveBrowser(),
       clear: async () => {
         if (!session) return;
-        const opened = await api.openSession({ profileId: session.profileId, collectionId: session.collectionId, cwd: session.collectionId ? '' : session.workingDirectory,
-          options: { model: session.model, permission: session.permission, workflow: session.workflow, gatewayId: session.gatewayId && session.gatewayId !== 'direct' ? session.gatewayId : '', rotationProfileIds: [], instructions: '', noRotation: false } });
-        if (!opened.session) throw new Error('Runner did not return the new conversation');
-        setSession(undefined); setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
-        setSessionID(opened.session.id); onSessionChange?.(opened.session.id); refresh();
+        await openFreshConversation(session, session.profileId);
         showToast({ tone: 'info', title: 'New conversation', body: 'The previous one is kept in this workspace.' });
       },
       rename: async title => { const result = await api.renameConversation({ sessionId: sessionID, title }); setSession(result.session); refresh(); },
@@ -577,7 +588,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
           {transcript.error && <TranscriptNotice error={transcript.error} onRetry={transcript.retry}/>}
           <CodeRunContext.Provider value={codeRuns}><MessageArea api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail}
-            subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError}/>}/></CodeRunContext.Provider>
+            subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
           {!transcript.error && <LiveBar api={api} session={session} sessionID={sessionID} live={live} disconnected={disconnected} activity={transcript.activity} viewState={viewState} onInterrupt={() => void interrupt()}
             onOpenCommand={openCommand} onOpenFile={session?.collectionId ? openFile : undefined}/>}
           {!transcript.error && !disconnected && <QueuedMessages session={session} queued={queued} turnRunning={transcript.turnRunning} live={live} agentName={agentName} activity={transcript.activity} delivery={queuedDelivery} sendNowKey={sendNowKey}/>}

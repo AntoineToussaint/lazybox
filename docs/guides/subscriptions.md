@@ -81,9 +81,13 @@ provider again without starting any work. A limited account reads *Back at
 
 The conversation stops on its account and one card offers the choices:
 
-- **Switch to** the best other account of the same provider (or pick one): it
+- **Switch to** an available account of the same provider: it
   stays the same conversation, and the interrupted request picks up where it
-  stopped;
+  stopped.
+- **Continue in a new Codex conversation** appears when no account of the
+  current provider is ready and Codex can start. It opens in the same
+  workspace with your request in an editable draft. The previous conversation
+  and its queued messages stay where they are.
 - **Wait for reset**: it resumes by itself at the reset time while the window
   is open.
 

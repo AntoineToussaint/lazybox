@@ -185,8 +185,10 @@ try {
   await page.keyboard.press('Alt+Space');
   await listening();
   await say('look at the logs');
+  await say(' ');
+  await expect(message).toHaveValue('Look at the logs');
   const recognitions = await page.evaluate(() => window.__speech.created);
-  await page.evaluate(() => window.__speech.pause());
+  await page.evaluate(() => { window.__speech.say('', true); window.__speech.pause(); });
   await expect.poll(() => page.evaluate(() => window.__speech.created)).toBe(recognitions + 1);
   await listening();
   await expect(pill).toContainText('Listening');

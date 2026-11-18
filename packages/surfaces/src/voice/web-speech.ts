@@ -92,9 +92,16 @@ export function webRecognizer(): SpeechRecognizerHost | undefined {
         let heardThisRound = false;
         current.onresult = event => {
           for (let i = event.resultIndex; i < event.results.length; i++) {
-            const result = event.results[i], text = result[0]?.transcript || '';
+            const result = event.results[i];
+            let text = result[0]?.transcript || '';
+            // An empty update can arrive at a pause without a new transcript.
+            if (!text.trim()) {
+              if (!result.isFinal || !round[i]?.text) continue;
+              text = round[i].text;
+            }
             round[i] = { text, final: result.isFinal };
-            if (text.trim()) { heard = heardThisRound = true; lastHeard = Date.now(); }
+            heard = heardThisRound = true;
+            lastHeard = Date.now();
             listener({ kind: 'result', segment: offset + i, text, final: result.isFinal });
           }
         };

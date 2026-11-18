@@ -27,6 +27,7 @@ leave out.
 
 ### Install and updates
 
+- **Dictation keeps the start of your sentence** If the browser sends an empty speech result during a pause, the message box keeps the words already heard.
 - **Track never covers the message** The Track button is an icon in a gutter the message keeps free, so hovering a message no longer hides its text.
 - **A Mac app with everything inside** Download the disk image, open it and drag Lazybox to Applications. It brings its Runner, the Claude worker, Node and Claude Code: you only sign in.
 - **Install from a clone** make install checks what the build needs and names the command for anything missing, builds Lazybox on your Mac with no keys or secrets, installs it in Applications and sets up its Runner and the lazybox command. make update pulls and reinstalls, keeping your data; make uninstall removes it. A build from source never checks for updates: Settings → Updates and About say it updates with make update.

@@ -146,32 +146,7 @@ func (m *Manager) FinishDeletion(ctx context.Context, id string, discard bool, a
 		return Collection{}, err
 	}
 	for _, member := range c.Members {
-		repo, ok := m.repos[member.RepositoryID]
-		if !ok || m.common[repo.ID] != member.CommonDir {
-			return fail(errors.New("source repository changed; cleanup refused"))
-		}
-		listing, err := m.git(ctx, repo.Path, "worktree", "list", "--porcelain")
-		if err != nil {
-			return fail(err)
-		}
-		registered := false
-		for _, line := range strings.Split(listing, "\n") {
-			if line == "worktree "+member.Path {
-				registered = true
-			}
-		}
-		if !registered {
-			if _, err = os.Lstat(member.Path); !errors.Is(err, os.ErrNotExist) {
-				return fail(errors.New("worktree registration disappeared but its path remains"))
-			}
-			continue
-		}
-		args := []string{"worktree", "remove"}
-		if discard {
-			args = append(args, "--force")
-		}
-		args = append(args, "--", member.Path)
-		if _, err = m.git(ctx, repo.Path, args...); err != nil {
+		if err = m.removeWorktree(ctx, member, discard); err != nil {
 			return fail(err)
 		}
 	}
@@ -189,4 +164,42 @@ func (m *Manager) FinishDeletion(ctx context.Context, id string, discard bool, a
 		return Collection{}, err
 	}
 	return clone(c), nil
+}
+
+// removeWorktree also accepts an already-removed worktree so callers can retry
+// after Git succeeds and saving the workspace record fails.
+func (m *Manager) removeWorktree(ctx context.Context, member Member, discard bool) error {
+	repo, ok := m.repos[member.RepositoryID]
+	if !ok || m.common[repo.ID] != member.CommonDir {
+		return errors.New("source repository changed; cleanup refused")
+	}
+	return m.removeRegisteredWorktree(ctx, repo, member, discard)
+}
+
+func (m *Manager) removeRegisteredWorktree(ctx context.Context, repo Repository, member Member, discard bool) error {
+	listing, err := m.git(ctx, repo.Path, "worktree", "list", "--porcelain")
+	if err != nil {
+		return err
+	}
+	registered := false
+	for _, line := range strings.Split(listing, "\n") {
+		if line == "worktree "+member.Path {
+			registered = true
+		}
+	}
+	if !registered {
+		if _, err = os.Lstat(member.Path); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("worktree registration disappeared but its path remains")
+		}
+		return nil
+	}
+	args := []string{"worktree", "remove"}
+	if discard {
+		args = append(args, "--force")
+	}
+	args = append(args, "--", member.Path)
+	if _, err = m.git(ctx, repo.Path, args...); err != nil {
+		return err
+	}
+	return nil
 }

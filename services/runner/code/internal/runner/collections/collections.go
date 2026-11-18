@@ -526,7 +526,8 @@ func (m *Manager) planMembers(ctx context.Context, c Collection, specs []MemberS
 			return Collection{}, errors.New("worktree names must be unique safe path components (case insensitive)")
 		}
 		names[strings.ToLower(s.Name)] = true
-		if s.Branch == "" {
+		implicitBranch := s.Branch == ""
+		if implicitBranch {
 			s.Branch = c.Branch()
 			if branches[m.common[r.ID]+"\x00"+s.Branch] {
 				s.Branch += "-" + s.Name
@@ -539,16 +540,30 @@ func (m *Manager) planMembers(ctx context.Context, c Collection, specs []MemberS
 		if branches[branchKey] {
 			return Collection{}, errors.New("two worktrees cannot own the same branch")
 		}
-		branches[branchKey] = true
 		// Explicit branches are new branches too. Existing branches are never
 		// taken over; that requires a separate, deliberate adoption operation.
 		exists, err := m.branchExists(ctx, r.Path, s.Branch)
 		if err != nil {
 			return Collection{}, err
 		}
+		if exists && implicitBranch && c.State == "ready" {
+			// A previously removed checkout can leave its branch behind.
+			// Re-adding creates a new branch and leaves that history intact.
+			base := s.Branch
+			for suffix := 2; exists; suffix++ {
+				s.Branch = fmt.Sprintf("%s-%d", base, suffix)
+				branchKey = m.common[r.ID] + "\x00" + s.Branch
+				exists, err = m.branchExists(ctx, r.Path, s.Branch)
+				if err != nil {
+					return Collection{}, err
+				}
+				exists = exists || branches[branchKey]
+			}
+		}
 		if exists {
 			return Collection{}, errors.New("branch already exists; choose a new collection branch")
 		}
+		branches[branchKey] = true
 		// No explicit base: origin's default branch as last fetched (base.go),
 		// never the source copy's own stale branch or the checkout's current one.
 		if s.BaseRef == "HEAD" {

@@ -74,6 +74,7 @@ const (
 	RunnerService_UpdateRepositoryHome_FullMethodName         = "/lazybox.bench.v1.RunnerService/UpdateRepositoryHome"
 	RunnerService_CreateCollection_FullMethodName             = "/lazybox.bench.v1.RunnerService/CreateCollection"
 	RunnerService_AddCollectionRepositories_FullMethodName    = "/lazybox.bench.v1.RunnerService/AddCollectionRepositories"
+	RunnerService_RemoveCollectionRepository_FullMethodName   = "/lazybox.bench.v1.RunnerService/RemoveCollectionRepository"
 	RunnerService_GetCollection_FullMethodName                = "/lazybox.bench.v1.RunnerService/GetCollection"
 	RunnerService_ListCollections_FullMethodName              = "/lazybox.bench.v1.RunnerService/ListCollections"
 	RunnerService_ArrangeWorkspaces_FullMethodName            = "/lazybox.bench.v1.RunnerService/ArrangeWorkspaces"
@@ -340,6 +341,7 @@ type RunnerServiceClient interface {
 	UpdateRepositoryHome(ctx context.Context, in *UpdateRepositoryHomeRequest, opts ...grpc.CallOption) (*RepositoryHomeUpdate, error)
 	CreateCollection(ctx context.Context, in *CreateCollectionRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
 	AddCollectionRepositories(ctx context.Context, in *AddCollectionRepositoriesRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
+	RemoveCollectionRepository(ctx context.Context, in *RemoveCollectionRepositoryRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
 	GetCollection(ctx context.Context, in *CollectionRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
 	// The workspaces in the person's order (ArrangeWorkspaces).
 	ListCollections(ctx context.Context, in *ListCollectionsRequest, opts ...grpc.CallOption) (*ListCollectionsResponse, error)
@@ -1314,6 +1316,16 @@ func (c *runnerServiceClient) AddCollectionRepositories(ctx context.Context, in 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CollectionResponse)
 	err := c.cc.Invoke(ctx, RunnerService_AddCollectionRepositories_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) RemoveCollectionRepository(ctx context.Context, in *RemoveCollectionRepositoryRequest, opts ...grpc.CallOption) (*CollectionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CollectionResponse)
+	err := c.cc.Invoke(ctx, RunnerService_RemoveCollectionRepository_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3105,6 +3117,7 @@ type RunnerServiceServer interface {
 	UpdateRepositoryHome(context.Context, *UpdateRepositoryHomeRequest) (*RepositoryHomeUpdate, error)
 	CreateCollection(context.Context, *CreateCollectionRequest) (*CollectionResponse, error)
 	AddCollectionRepositories(context.Context, *AddCollectionRepositoriesRequest) (*CollectionResponse, error)
+	RemoveCollectionRepository(context.Context, *RemoveCollectionRepositoryRequest) (*CollectionResponse, error)
 	GetCollection(context.Context, *CollectionRequest) (*CollectionResponse, error)
 	// The workspaces in the person's order (ArrangeWorkspaces).
 	ListCollections(context.Context, *ListCollectionsRequest) (*ListCollectionsResponse, error)
@@ -3697,6 +3710,9 @@ func (UnimplementedRunnerServiceServer) CreateCollection(context.Context, *Creat
 }
 func (UnimplementedRunnerServiceServer) AddCollectionRepositories(context.Context, *AddCollectionRepositoriesRequest) (*CollectionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddCollectionRepositories not implemented")
+}
+func (UnimplementedRunnerServiceServer) RemoveCollectionRepository(context.Context, *RemoveCollectionRepositoryRequest) (*CollectionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveCollectionRepository not implemented")
 }
 func (UnimplementedRunnerServiceServer) GetCollection(context.Context, *CollectionRequest) (*CollectionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetCollection not implemented")
@@ -5172,6 +5188,24 @@ func _RunnerService_AddCollectionRepositories_Handler(srv interface{}, ctx conte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).AddCollectionRepositories(ctx, req.(*AddCollectionRepositoriesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_RemoveCollectionRepository_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveCollectionRepositoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).RemoveCollectionRepository(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_RemoveCollectionRepository_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).RemoveCollectionRepository(ctx, req.(*RemoveCollectionRepositoryRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -8311,6 +8345,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AddCollectionRepositories",
 			Handler:    _RunnerService_AddCollectionRepositories_Handler,
+		},
+		{
+			MethodName: "RemoveCollectionRepository",
+			Handler:    _RunnerService_RemoveCollectionRepository_Handler,
 		},
 		{
 			MethodName: "GetCollection",

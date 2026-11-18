@@ -402,3 +402,49 @@ have tried to release V1 under a V2 tag. The standalone repository
 - The repository is private: signed out, GitHub answers the feed with 404, so
   installed apps say *No update information is published* until it is public
   (First release checklist, step 5).
+
+## Persistent Linux Runner image
+
+Build the Linux release bundle, then use its release directory as the image
+build context. For example, for an arm64 pilot:
+
+```sh
+release_version=0.1.0
+node scripts/release/build.mjs --linux-only --version "$release_version"
+release_dir="dist/$release_version"
+bundle="lazybox-runner-$release_version-linux-arm64.tar.gz"
+bundle_sha=$(cut -d ' ' -f 1 "$release_dir/$bundle.sha256")
+docker build --platform linux/arm64 \
+  -f packaging/runner/Dockerfile \
+  --build-arg "LAZYBOX_VERSION=$release_version" \
+  --build-arg "LAZYBOX_BUNDLE_SHA256=$bundle_sha" \
+  -t "lazybox-runner:$release_version" "$release_dir"
+sh packaging/runner/smoke.sh "lazybox-runner:$release_version"
+```
+
+For amd64, select the x64 bundle and use `--platform linux/amd64`. The build
+checks both the archive digest and its file checksums.
+
+Run one container per private volume mounted at `/var/lib/lazybox`. The
+volume must be writable by UID and GID 10001. It holds the Runner state,
+worktrees, owner keys and configuration. The container starts the Runner in the
+foreground and uses the existing loopback listener. Use a container init to
+reap orphaned subprocesses. The Linux bundle leaves provider CLI installation
+and credentials to the operator.
+
+An operator with container exec access can invoke the existing owner-link
+endpoint on open stdin without a TTY. Resolve the endpoint from the same XDG
+environment as the Runner:
+
+```sh
+docker exec -i "$runner_container" sh -c '
+    exec lazybox --endpoint "$XDG_DATA_HOME/lazybox/state/endpoint.json" \
+        link serve --stdio --route container
+'
+```
+
+That command serves the enrolled client protocol. The smoke test exercises
+local readiness, protocol availability and owner-link identity persistence
+after replacing the container. Kubernetes delivery and a desktop transport
+for Kubernetes exec are separate integration work. Replacing the container
+restarts its processes.

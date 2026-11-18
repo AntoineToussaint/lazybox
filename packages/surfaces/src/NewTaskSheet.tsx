@@ -1,3 +1,4 @@
+import { BehaviorOptions, behaviorForProvider, CHECK_IN_FIRST, readDefaultBehavior, saveDefaultBehavior } from './BehaviorProfile';
 import { useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
 import { SubscriptionOptions } from './SubscriptionGroups';
 import type { RunnerClient } from '@lazybox/client-core';
@@ -39,9 +40,9 @@ import './new-task.css';
 
 /** The work item a task starts from (an issue), and whether its comments go to the agent. */
 type ItemChoice = { provider: string; key: string };
-type Draft = { prompt: string; identities: string[]; empty: boolean; name?: string; branch?: string; /** The branch each repository starts from, chosen in this sheet. */ starts?: Record<string, string>; provider: string; profile: string; mode: TaskMode; item?: ItemChoice; withoutComments?: boolean };
+type Draft = { prompt: string; identities: string[]; empty: boolean; name?: string; branch?: string; /** The branch each repository starts from, chosen in this sheet. */ starts?: Record<string, string>; provider: string; profile: string; mode: TaskMode; behaviorProfile?: string; item?: ItemChoice; withoutComments?: boolean };
 /** `message` is what is sent: the prompt, then the item's quoted context when there is one. */
-type Plan = { prompt: string; message: string; name: string; branch: string; identities: string[]; starts: Record<string, string>; empty: boolean; provider: string; profileId: string; mode: TaskMode; agent: string; item?: ItemChoice };
+type Plan = { prompt: string; message: string; name: string; branch: string; identities: string[]; starts: Record<string, string>; empty: boolean; provider: string; profileId: string; mode: TaskMode; behaviorProfile: string; agent: string; item?: ItemChoice };
 type Progress = (message: string) => void;
 /** Where a start got to, so trying again picks up there instead of making a second workspace. */
 type Attempt = { spec: string; requestKey: string; operationId: string; collectionId?: string; sessionId?: string; sent?: boolean; message?: string;
@@ -72,7 +73,7 @@ async function startTask(api: RunnerClient, plan: Plan, attempt: Attempt, progre
   if (!attempt.sessionId) {
     progress(`Starting ${plan.agent}…`);
     const mode = modeOf(plan.mode);
-    const opened = await api.openSession({ profileId: plan.profileId, collectionId: attempt.collectionId, options: { model: '', permission: mode.permission, workflow: mode.workflow, gatewayId: '', rotationProfileIds: [], noRotation: false, instructions: '' } });
+    const opened = await api.openSession({ profileId: plan.profileId, collectionId: attempt.collectionId, options: { model: '', permission: mode.permission, workflow: mode.workflow, behaviorProfile: plan.behaviorProfile, gatewayId: '', rotationProfileIds: [], noRotation: false, instructions: '' } });
     if (!opened.session) throw new Error('The Runner did not start the conversation.');
     attempt.sessionId = opened.session.id;
   }
@@ -183,6 +184,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
     prompt: '', identities: remembered.identities, empty: false, provider: remembered.provider || readLaunchChoices(viewState).provider || 'claude', profile: remembered.profile, mode: remembered.mode,
   });
   const change = (next: Partial<Draft>) => setDraft(current => { const value = { ...current, ...next }; unsent = value; return value; });
+  const behaviorProfile = behaviorForProvider(draft.behaviorProfile ?? readDefaultBehavior(viewState), draft.provider);
   const [query, setQuery] = useState(''), [listOpen, setListOpen] = useState(false), [active, setActive] = useState(0);
   const [editingName, setEditingName] = useState(draft.name !== undefined || draft.branch !== undefined);
   const [problem, setProblem] = useState<TaskProblem>(), [error, setError] = useState(failure);
@@ -277,7 +279,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
       if (found.field === 'name' || found.field === 'branch') setEditingName(true);
       return undefined;
     }
-    return { prompt: draft.prompt, message, name, branch, identities: draft.empty ? [] : draft.identities, starts: draft.empty ? {} : startsFor(draft.identities, draft.starts || {}), empty: draft.empty, provider: draft.provider, profileId, mode: safe.mode as TaskMode, agent, item: itemRef ? { provider: itemRef.provider, key: itemRef.key } : undefined };
+    return { prompt: draft.prompt, message, name, branch, identities: draft.empty ? [] : draft.identities, starts: draft.empty ? {} : startsFor(draft.identities, draft.starts || {}), empty: draft.empty, provider: draft.provider, profileId, mode: behaviorProfile === CHECK_IN_FIRST ? 'read-only' : safe.mode as TaskMode, behaviorProfile, agent, item: itemRef ? { provider: itemRef.provider, key: itemRef.key } : undefined };
   };
 
   const start = async (inBackground: boolean) => {
@@ -288,6 +290,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
     if (spec !== attempt.current.spec) attempt.current = { spec, requestKey: crypto.randomUUID(), operationId: crypto.randomUUID() };
     else if (value.message !== attempt.current.message) attempt.current.operationId = crypto.randomUUID();
     try { writePreference(viewState, CHOICES, JSON.stringify(rememberTask(remembered, { identities: value.identities, provider: value.provider, profile: value.profileId, mode: draft.mode }))); } catch { /* the next sheet starts from the defaults */ }
+    try { if (draft.behaviorProfile !== undefined) saveDefaultBehavior(viewState, value.behaviorProfile); } catch { /* the task can still start */ }
     attempt.current.message = value.message;
     setBusy(true); setError(''); setReplaced(undefined); setProgress('');
     background.current = inBackground;
@@ -442,13 +445,18 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
         </div>
       </div>
       <div className="new-task-field">
+        <label className="new-task-label" htmlFor={`${id}-behavior`}><Icon name="agent" size={13}/>Personality</label>
+        <div className="new-task-controls"><select id={`${id}-behavior`} value={behaviorProfile} disabled={busy} onChange={event => change({ behaviorProfile: event.target.value })}><BehaviorOptions provider={draft.provider}/></select></div>
+        {behaviorProfile === CHECK_IN_FIRST && <p className="new-task-hint">Starts read only so you can review the plan before edits.</p>}
+      </div>
+      <div className="new-task-field">
         <label className="new-task-label" htmlFor={`${id}-mode`}><Icon name="shield" size={13}/>Mode</label>
         <div className="new-task-controls">
-          <select id={`${id}-mode`} aria-label="Mode" value={draft.mode} disabled={busy} onChange={event => change({ mode: event.target.value as TaskMode })}>
+          <select id={`${id}-mode`} aria-label="Mode" value={behaviorProfile === CHECK_IN_FIRST ? 'read-only' : draft.mode} disabled={busy || behaviorProfile === CHECK_IN_FIRST} onChange={event => change({ mode: event.target.value as TaskMode })}>
             {TASK_MODES.map(mode => <option key={mode.id} value={mode.id}>{mode.id === 'default' ? defaultModeLabel(info, settings?.permission) : mode.label}</option>)}
           </select>
         </div>
-        {safe.guarded && <p className="new-task-hint" data-testid="new-task-item-mode">From an issue the agent asks first, not YOLO: its text is not yours. Choose YOLO to change that.</p>}
+        {safe.guarded && behaviorProfile !== CHECK_IN_FIRST && <p className="new-task-hint" data-testid="new-task-item-mode">From an issue the agent asks first, not YOLO: its text is not yours. Choose YOLO to change that.</p>}
       </div>
 
       {replaced && !problem && !busy

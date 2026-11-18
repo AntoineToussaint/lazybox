@@ -44,6 +44,7 @@ try {
   // A run starts while the user is typing and keeps running: the console opens on it, the composer keeps focus.
   await composer.click(); await composer.fill('typing while the agent runs tests');
   const run = fixture.streamCommand('alpha-session', 'go test ./...');
+  run.startedAtUnixMillis = String(Date.now() - 150_000);
   run.write('=== RUN   TestParse\n');
   await expect.poll(minimized, { timeout: 8000 }).toBe(false);
   await expect(page.locator('.command-panel select')).toHaveValue(run.id);
@@ -55,6 +56,12 @@ try {
   await expect(page.locator('.command-panel .console-state [role=status]')).toHaveText('Failed · exit 1');
   await expect(composer).toBeFocused();
   await expect(composer).toHaveValue('typing while the agent runs tests');
+  await expect(page.locator('.command-panel select option:checked')).toContainText(/2 min/);
+  const commandTime = page.locator('.command-history-time');
+  await expect(commandTime).toContainText(/2 min/);
+  await commandTime.click();
+  await expect(commandTime).toHaveAttribute('aria-pressed','true');
+  assert.equal(await commandTime.textContent(), await commandTime.getAttribute('title'));
   // The docked console is output, not chrome: the output keeps most of the panel and ends inside it.
   {
     const panel = await page.locator('.command-panel').boundingBox(), output = await page.getByTestId('console-output').boundingBox();

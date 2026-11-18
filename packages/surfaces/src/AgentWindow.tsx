@@ -1,3 +1,4 @@
+import { useDisplayDetail } from './display-detail';
 import { ArtifactsChip } from './ArtifactCard';
 import { DetachedArtifacts } from './DetachedArtifacts';
 import { AppearanceSync } from './appearance/AppearanceSync';
@@ -382,6 +383,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
   const agentName = agentTitle(activeProfile?.provider || session?.provider || launcher.provider, info?.profiles);
   const currentCommand = command || commands.at(-1)?.id;
   // How much tool activity this conversation shows: the default, or its own.
+  const display = useDisplayDetail(viewState);
   const activity = useConversationActivity(viewState, session?.conversationId || sessionID, mode === 'agent' && !!sessionID);
   const recall = usePromptRecall({
     viewState, sessionID, conversationKey: session?.conversationId || sessionID, conversation,
@@ -605,7 +607,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
           {handoffMessage && session?.collectionId && onOpenHandoff && <ConversationHandoff source={session} message={handoffMessage}
             open={onOpenHandoff} onClose={() => setHandoffMessage(undefined)}/>}
           <CodeRunContext.Provider value={codeRuns}><MessageArea onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
-            onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail}
+            onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
             subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
           {!transcript.error && <LiveBar api={api} session={session} sessionID={sessionID} live={live} disconnected={disconnected} activity={transcript.activity} viewState={viewState} onInterrupt={() => void interrupt()}
             onOpenCommand={openCommand} onOpenFile={session?.collectionId ? openFile : undefined}/>}

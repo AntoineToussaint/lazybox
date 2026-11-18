@@ -1,3 +1,4 @@
+import { ActivityTime, exactTime, relativeTime, useActivityClock, validActivityTime } from './ActivityTime';
 import { useEffect, useRef, useState } from 'react';
 import type { CommandStatus } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
@@ -11,6 +12,7 @@ import { Icon } from './Icons';
 
 export function CommandPanel({ target, onTarget, viewState, onOpenViewer }: { target: ViewTarget; onTarget(target: ViewTarget): void; viewState?: ViewStateStore; onOpenViewer?(sessionId: string, commandId: string): Promise<void> }) {
   const { api } = useRunner();
+  const now = useActivityClock();
   // Files the output names open in this workspace's editor.
   const fileLinks = useFileOpener(target.collectionId || undefined, viewState);
   const [commands, setCommands] = useState<CommandStatus[]>([]), [error, setError] = useState('');
@@ -46,7 +48,16 @@ export function CommandPanel({ target, onTarget, viewState, onOpenViewer }: { ta
   const followItem = <button type="button" className="console-follow" aria-pressed={follow} title={follow ? 'A new run replaces the output you see only when it finished and you have not used it for a while. Click to never switch by itself.' : 'The output never switches by itself; newer runs are offered above it. Click to follow new runs.'} onClick={() => setFollow(!follow)}><span className="console-follow-mark" aria-hidden="true">{follow && <Icon name="check"/>}</span><span>Follow new runs</span></button>;
   const mark = (command: CommandStatus) => command.done ? (command.exitCode === 0 || (command.exitCode === undefined && command.report?.exitCode === 0) ? '✓ ' : command.signal ? '■ ' : '✗ ') : '● ';
   // The run to read: the newest first, as people look for what just happened.
-  const picker = <label className="command-picker"><select aria-label="Command" title="Choose which command’s output to read" value={commands.some(command => command.id === selected) ? selected : ''} onChange={event => choose(event.target.value)}><option value="" disabled>Choose a command…</option>{[...commands].reverse().map(command => <option key={command.id} value={command.id}>{mark(command)}{command.title} · {runOrigin(command)}{command.done ? 'completed' : 'running'}</option>)}</select></label>;
+  const selectedAt = Number(commands.find(command => command.id === selected)?.startedAtUnixMillis);
+  const picker = <label className="command-picker"><select aria-label="Command" title="Choose which command’s output to read" value={commands.some(command => command.id === selected) ? selected : ''} onChange={event => choose(event.target.value)}>
+    <option value="" disabled>Choose a command…</option>
+    {[...commands].reverse().map(command => {
+      const at = Number(command.startedAtUnixMillis);
+      return <option key={command.id} value={command.id} title={validActivityTime(at) ? exactTime(at) : undefined}>
+        {mark(command)}{command.title} · {runOrigin(command)}{command.done ? 'completed' : 'running'}{validActivityTime(at) ? ` · ${relativeTime(at, now)}` : ''}
+      </option>;
+    })}
+  </select></label>;
   // Runs newer than the one shown: offered, never imposed. Show jumps to the newest.
   const newer = newerRuns(commands, selected), newest = newer.at(-1);
   const offer = newest && <button type="button" className="console-newer" data-running={!newest.done || undefined}
@@ -54,7 +65,7 @@ export function CommandPanel({ target, onTarget, viewState, onOpenViewer }: { ta
     title={`Show the newest run: ${newest.title}`} onClick={() => choose(newest.id)}>
     <span className="console-newer-count">{newer.length} newer</span><span className="console-newer-title">{newest.title}</span><span className="console-newer-show" aria-hidden="true">↵ Show</span>
   </button>;
-  const toolbar = <>{picker}{offer}</>;
+  const toolbar = <>{picker}{validActivityTime(selectedAt) && <ActivityTime key={selected} at={selectedAt} className="command-history-time"/>}{offer}</>;
   return <section className="command-panel">{error && <div className="error" role="alert">{error}</div>}{fileLinks.element}
     {!target.sessionId ? <p className="module-empty">Open a conversation to see the output of the commands it runs.</p> : <>
       {selected && commands.some(command => command.id === selected) ? <Console key={selected} api={api} command={selected} viewState={viewState} onError={setError} toolbar={toolbar} menu={followItem} onUse={() => noteConsoleUse(target.sessionId)} onOpenFile={target.collectionId ? (link, how) => void fileLinks.open(link, how) : undefined} onSendToAgent={text => offerToComposer(target.sessionId, text) ? '' : 'Show this conversation’s chat on the page to add the output to your message.'} onOpenViewer={onOpenViewer ? async () => { try { await onOpenViewer(target.sessionId, selected); } catch (error) { setError(String(error)); } } : undefined}/> : <>{commands.length > 0 && <div className="console-tools">{toolbar}</div>}<p className="module-empty">{selected ? 'That command’s output is no longer kept. Pick another one above.' : 'No command has run in this conversation yet. Output appears here when the agent, an action or `lazybox run` starts one.'}</p></>}

@@ -1,3 +1,4 @@
+import { useDisplayDetail } from './display-detail';
 import { useMemo } from 'react';
 import type { ViewStateStore } from '@lazybox/platform';
 import { ACTIVITY_LABELS, useActivityDefault } from './activity-detail';
@@ -22,6 +23,7 @@ const SAMPLE: ToolEntry[] = [
 
 /** Settings → Chat: how much of the agents' tool activity conversations show. */
 export function ChatSettings({ store }: { store?: ViewStateStore }) {
+  const display = useDisplayDetail(store);
   const [detail, setDetail] = useActivityDefault(store);
   const [tabs, setTabs] = useTabsSetting(store);
   const scope = useMemo(() => ({ root: ROOT, detail }), [detail]);
@@ -48,6 +50,11 @@ export function ChatSettings({ store }: { store?: ViewStateStore }) {
         <ToolLineContext.Provider value={scope}><ToolLines entries={SAMPLE} turn={SAMPLE}/></ToolLineContext.Provider>
         <p>Fixed: the owner can now read their own runtime, and the tests pass.</p>
       </div>
+    </SettingsGroup>
+    <SettingsGroup title="Timestamps" description="Reply times are available on hover, with keyboard focus, or by tapping the clock on touch screens.">
+      <label className="settings-row"><span className="settings-row-label">Always show timestamps</span>
+        <input type="checkbox" role="switch" checked={display.timestamps} onChange={event => display.customize({ timestamps: event.target.checked })}/>
+      </label>
     </SettingsGroup>
     <ChatTextSettings store={store}/>
   </section>;

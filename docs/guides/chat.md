@@ -85,6 +85,12 @@ The composer shows the model picker before the first message and shows the
 context percentage when the provider reports it. **Dictate** sits beside
 **Send**. Double-click a tool row or live command output to expand or collapse it.
 
+Agent replies show a timestamp on hover or keyboard focus. On touch, tap the
+timestamp to see the exact date and time. Date dividers stay visible, and
+**Settings → Chat → Always show timestamps** keeps reply times in view.
+Command history shows when each run started. Select a run to inspect its exact
+time in the output toolbar.
+
 ## Hand off to another conversation
 
 The workspace sidebar and chat tabs show an agent icon next to each conversation.

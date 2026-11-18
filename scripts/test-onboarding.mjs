@@ -36,6 +36,13 @@ try{
   const welcome=page.getByRole('dialog',{name:'Welcome to Lazybox'});
   await expect(welcome).toBeVisible();
   await expect(welcome.getByRole('button',{name:'Get started'})).toBeFocused();
+  await expect(welcome.getByRole('status').filter({hasText:'Runner connected and ready'})).toBeVisible();
+  await expect(welcome.getByRole('radio',{name:'Standard'})).toBeChecked();
+  await welcome.getByRole('radio',{name:'Focused'}).check();
+  await expect(welcome.getByLabel('Focused preview')).toContainText('Tests passed');
+  await expect(page.locator('main.workspace-shell')).toHaveAttribute('data-workspace-details','false');
+  await welcome.getByLabel('Agent personality').selectOption('hands-on-v2');
+  await expect(welcome.getByLabel('Personality preview')).toContainText('make a reversible fix');
   // The five keys, from the default (vim) keymap, and Go to file for this platform.
   const list=welcome.locator('dl[aria-label="The five keys that matter"]');
   await expect(list.locator('dt')).toHaveCount(5);
@@ -74,7 +81,9 @@ try{
   await help(page,'Welcome & getting started');
   await welcome.getByRole('button',{name:'New task',exact:true}).click();
   await expect(welcome).toHaveCount(0);
-  await expect(page.getByRole('dialog',{name:'New task'})).toBeVisible();
+  const task=page.getByRole('dialog',{name:'New task'});
+  await expect(task).toBeVisible();
+  await expect(task.getByLabel('Personality')).toHaveValue('hands-on-v2');
   await page.keyboard.press('Escape');await expect(page.getByRole('dialog',{name:'New task'})).toHaveCount(0);
   // Help → Keyboard shortcuts opens the shortcuts overlay (Customize there leads to Settings).
   await help(page,'Keyboard shortcuts');

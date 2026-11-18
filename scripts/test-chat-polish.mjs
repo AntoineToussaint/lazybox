@@ -12,7 +12,7 @@ const now=Date.now();
 Object.assign(f.sessions[0],{title:'Fix the flaky login test',provider:'claude',model:'claude-fable-5-1',modelReported:true,busy:true,status:'running',agents:[{id:'root',status:'running',phase:'tool',tool:'Bash',phaseSinceUnixMillis:String(now-12000),turnStartedAtUnixMillis:String(now-40000)}]});
 // A conversation that opened and never ran a turn, titled after its workspace folder.
 Object.assign(f.sessions[1],{title:'beta',provider:'claude',status:'starting',agents:[{id:'root',status:'starting'}]});
-const alpha=f.openEvents('alpha-session');alpha.push({type:'operation_accepted',text:'The login test is flaky, can you find out why?'});alpha.push({type:'message_delta',text:'Let me look at the test and the CI logs.'});alpha.push({type:'activity',status:'tool',name:'Bash'});
+const alpha=f.openEvents('alpha-session');alpha.push({type:'operation_accepted',text:'The login test is flaky, can you find out why?'});alpha.push({type:'message_delta',text:'Let me look at the test and the CI logs.'},new Date(now-150_000).toISOString());alpha.push({type:'activity',status:'tool',name:'Bash'});
 const beta=f.openEvents('beta-session');beta.push({type:'runner_reattached'});beta.push({type:'runner_reattached'});
 // Two conversations, each waiting for an approval, to show side by side.
 f.collections.push({id:'delta',name:'approvals',workId:'delta',root:'/fixture/collections/delta',state:'ready',members:[member(2,'delta','feature/approvals')]});
@@ -35,6 +35,16 @@ try{
  // One header: title, who and how, and the tools; no second or third bar.
  const chat=page.locator('.embedded-chat:visible').first(),header=chat.locator('.chat-heading');
  await expect(header.locator('.conversation-title')).toContainText('Fix the flaky login test');
+ const reply=chat.locator('article.message_delta').filter({hasText:'Let me look at the test'});
+ const replyTime=reply.getByRole('button',{name:/Show exact time/});
+ await expect(chat.locator('.message-day').first()).toBeVisible();
+ await expect(replyTime).toHaveCSS('opacity','0');
+ await reply.hover();
+ await expect(replyTime).toHaveCSS('opacity','1');
+ await replyTime.focus();
+ await page.keyboard.press('Enter');
+ await expect(replyTime).toHaveAttribute('aria-pressed','true');
+ assert.equal(await replyTime.textContent(),await replyTime.getAttribute('title'));
  // The model by the name people say; its id stays in the tooltip.
  await expect(header.locator('.chat-model')).toHaveText(/Claude · Fable 5\.1/);await expect(header.locator('.chat-model')).toHaveAttribute('title',/claude-fable-5-1/);
  await expect(header.locator('.chat-status')).toContainText('Running a command');

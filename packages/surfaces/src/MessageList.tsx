@@ -1,3 +1,4 @@
+import { ActivityTime, localDay, validActivityTime } from './ActivityTime';
 import type { OpenModifiers } from './file-links';
 import { Fragment, memo, useMemo, useRef, useState } from 'react';
 import type { HandoffMessage } from './ConversationHandoff';
@@ -46,7 +47,7 @@ function PersonText({ text, quoted, onOpenFile }: { text: string; quoted: boolea
 }
 
 type MessageMenu = (context: ContextMenuContext<MessageMenuDetail>) => MenuItem[];
-const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile, nameFor = ownName, sessionId = '', menu, turn }: { message: TranscriptMessage; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; nameFor?(id: string): string; sessionId?: string; menu?: MessageMenu; /** Quiet: every tool call of the turn this run of calls opens. */ turn?: ToolEntry[] }) {
+const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile, nameFor = ownName, sessionId = '', menu, turn, alwaysShowTime }: { message: TranscriptMessage; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; nameFor?(id: string): string; sessionId?: string; menu?: MessageMenu; alwaysShowTime?: boolean; /** Quiet: every tool call of the turn this run of calls opens. */ turn?: ToolEntry[] }) {
   if (m.type === 'switched' && m.switched) return <div className="subscription-switched" role="note"><span>{switchedLine(m.switched, nameFor)}</span></div>;
   if (m.type === 'subagent' && m.agentId) return <div className="subagent-anchor" data-message-id={m.id}><SubagentCard id={m.agentId}/></div>;
   if (m.type === 'tools') return m.tools ? <ToolLines entries={m.tools} turn={turn}/> : null;
@@ -65,12 +66,14 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
   // The person's own message needs no name over it: it is theirs (screen readers still hear "You").
   // What came from someone or something else is labelled: the agent, or an event (SystemEvent).
   const own = m.type === 'operation_accepted';
-  return <article className={'message ' + m.type} data-message-id={m.id} aria-label={own ? `You${m.steered ? ', steered' : ''}: ${ownSummary(m.text)}` : undefined}
+  return <article className={'message ' + m.type} data-message-id={m.id} data-time-visible={alwaysShowTime || undefined} aria-label={own ? `You${m.steered ? ', steered' : ''}: ${ownSummary(m.text)}` : undefined}
     onContextMenu={menu && contextMenu<MessageMenuDetail>('message', menu, { message: m, role: messageRole(m), sessionId }, 'Message actions')}>
     {/* A message steered into a running turn says so, where it reached the agent. */}
     {own
       ? m.steered && <span className="message-tag" title={`Given to ${agentName} inside its running turn`}>steered</span>
-      : <span className="eyebrow">{m.type === 'failure' ? 'Stopped' : agentName}</span>}
+      : <div className="message-byline"><span className="eyebrow">{m.type === 'failure' ? 'Stopped' : agentName}</span>
+        {m.type === 'message_delta' && validActivityTime(m.at) && <ActivityTime at={m.at} className="message-time"/>}
+      </div>}
     {/* Only an agent's own words offer to run their commands. */}
     {m.type === 'message_delta' ? <RunMessageContext.Provider value={m.id}><RichContent text={m.text} onOpenFile={onOpenFile}/><InlineRuns messageId={m.id}/></RunMessageContext.Provider> : <PersonText text={m.text} quoted={m.type === 'operation_accepted'} onOpenFile={onOpenFile}/>}
     {m.files?.length ? <SentAttachments files={m.files}/> : null}
@@ -86,7 +89,7 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
  * is added as the reader scrolls toward it. A render of the window that hosts
  * it (a keystroke in the composer) does not touch the rows.
  */
-export const MessageList = memo(function MessageList({ messages, visible, agentName, onOpenFile, onShowEarlier, nameFor, checkpoints, sessionId, onReveal, onHandoff, detail = 'verbose', loadingEarlier = false }: { messages: TranscriptMessage[]; visible: number; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; onShowEarlier(): void; /** A subscription's name by profile ID, for switch lines. */ nameFor?(id: string): string; checkpoints?: CheckpointScope; /** The conversation, for Quote in reply. */ sessionId?: string; /** Scroll a message into view, mounting earlier history when needed. */ onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; /** How much tool activity to show. */ detail?: ActivityDetail; /** Only the latest turns are in: the earlier history is being read (transcript `partial`). */ loadingEarlier?: boolean }) {
+export const MessageList = memo(function MessageList({ messages, visible, agentName, onOpenFile, onShowEarlier, nameFor, checkpoints, sessionId, onReveal, onHandoff, detail = 'verbose', loadingEarlier = false, alwaysShowTime }: { messages: TranscriptMessage[]; visible: number; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; onShowEarlier(): void; /** A subscription's name by profile ID, for switch lines. */ nameFor?(id: string): string; checkpoints?: CheckpointScope; /** The conversation, for Quote in reply. */ sessionId?: string; /** Scroll a message into view, mounting earlier history when needed. */ onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; /** How much tool activity to show. */ detail?: ActivityDetail; /** Only the latest turns are in: the earlier history is being read (transcript `partial`). */ loadingEarlier?: boolean; alwaysShowTime?: boolean }) {
   const hidden = Math.max(0, messages.length - visible);
   const checkpoint = useCheckpointUI(messages, checkpoints);
   // One stable menu for every row, so a new message does not re-render the others.
@@ -100,28 +103,45 @@ export const MessageList = memo(function MessageList({ messages, visible, agentN
   // Quiet: a turn's calls are one line, on its first run of calls.
   const turnCache = useRef<TurnCache>(new Map());
   const turns = useMemo(() => detail === 'quiet' ? turnActivity(messages, turnCache.current, hidden) : undefined, [messages, detail, hidden]);
-  const row = (m: TranscriptMessage) => <Fragment key={m.id}><MessageRow message={m} agentName={agentName} onOpenFile={onOpenFile} nameFor={nameFor} sessionId={sessionId} menu={menu} turn={turns?.get(m.id)}/>{checkpoint.marker(m.id)}</Fragment>;
+  const days = useMemo(() => messageDays(messages, hidden), [messages, hidden]);
+  const row = (m: TranscriptMessage) => <Fragment key={m.id}><MessageRow message={m} agentName={agentName} onOpenFile={onOpenFile} nameFor={nameFor} sessionId={sessionId} menu={menu} turn={turns?.get(m.id)} alwaysShowTime={alwaysShowTime}/>{checkpoint.marker(m.id)}</Fragment>;
   return <>
     {hidden > 0 && <button type="button" className="show-earlier" onClick={onShowEarlier}>Show earlier messages <small>{hidden.toLocaleString()} more</small></button>}
     {!hidden && loadingEarlier && messages.length > 0 && <div className="earlier-loading" role="status">Loading earlier messages…</div>}
-    {systemRuns(messages, hidden).map(run => Array.isArray(run)
-      ? <div key={`events:${run[0].id}`} className="system-event-group" role="group" aria-label={`${run.length} events from Lazybox`}>{run.map(row)}</div>
-      : row(run))}
+    {days.flatMap(({ day, runs }) => {
+      const first = runs[0];
+      const firstId = Array.isArray(first) ? first[0].id : first.id;
+      return [
+        day && <div key={`day:${firstId}`} className="message-day" role="separator" aria-label={day}>{day}</div>,
+        ...runs.map(run => Array.isArray(run)
+          ? <div key={`events:${run[0].id}`} className="system-event-group" role="group" aria-label={`${run.length} events from Lazybox`}>{run.map(row)}</div>
+          : row(run)),
+      ];
+    })}
     {checkpoint.overlay}
   </>;
 });
 
-/** The shown messages, with Lazybox's events that follow each other as one run (an array). */
-function systemRuns(messages: readonly TranscriptMessage[], from: number): (TranscriptMessage | TranscriptMessage[])[] {
-  const out: (TranscriptMessage | TranscriptMessage[])[] = [];
+/** Local calendar days, with consecutive Lazybox events grouped within each day. */
+function messageDays(messages: readonly TranscriptMessage[], from: number) {
+  type Run = TranscriptMessage | TranscriptMessage[];
+  const out: { day: string; runs: Run[] }[] = [];
+  let current = { day: '', runs: [] as Run[] };
   let run: TranscriptMessage[] = [];
-  const flush = () => { if (run.length > 1) out.push(run); else if (run.length) out.push(run[0]); run = []; };
+  const flush = () => { if (run.length > 1) current.runs.push(run); else if (run.length) current.runs.push(run[0]); run = []; };
   for (let i = from; i < messages.length; i++) {
     const message = messages[i];
+    const day = validActivityTime(message.at) ? localDay(message.at) : current.day;
+    if (current.day !== day) {
+      flush();
+      if (current.runs.length) out.push(current);
+      current = { day, runs: [] };
+    }
     if (isSystemEvent(message)) { run.push(message); continue; }
-    flush(); out.push(message);
+    flush(); current.runs.push(message);
   }
   flush();
+  if (current.runs.length) out.push(current);
   return out;
 }
 

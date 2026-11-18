@@ -71,3 +71,9 @@
 .help-menu>.action-popover>button{display:flex;align-items:center;gap:9px}
 .help-menu>.action-popover>button>svg{flex:none;color:var(--text-muted,var(--text-subtle))}
 .help-menu>.action-popover>hr{border:0;border-top:1px solid var(--line-strong);margin:4px 0}
+
+.onboarding-welcome{max-height:calc(100dvh - 32px);overflow:auto}
+.onboarding-steps>li.onboarding-choice{grid-template-columns:32px minmax(0,1fr);align-items:start}
+.setup-choice{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-weight:600}
+.setup-choice select{max-width:100%}
+.onboarding-choice .display-preview+p{margin-top:6px}

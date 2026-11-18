@@ -1,0 +1,9 @@
+.activity-time{padding:0 3px;border:0;background:transparent;color:var(--text-muted);font-size:calc(11px * var(--text-scale));font-variant-numeric:tabular-nums;white-space:nowrap}
+.activity-time:hover,.activity-time:focus-visible{color:var(--text)}
+.message-byline{display:flex;align-items:baseline;gap:8px}
+.message-time{opacity:0}
+.message:hover .message-time,.message:focus-within .message-time,.message[data-time-visible] .message-time,.message-time[aria-pressed="true"]{opacity:1}
+@media(hover:none){.message-time{opacity:1;min-height:24px}}
+.message-day{display:flex;align-items:center;gap:10px;margin:12px 0 4px;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.message-day::before,.message-day::after{content:"";height:1px;background:var(--line-subtle);flex:1}
+.command-history-time{flex:none}

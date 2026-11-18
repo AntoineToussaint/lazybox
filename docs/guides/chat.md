@@ -5,6 +5,7 @@ do there — answer, approve, steer, stop — is here, plus a clearer view of wh
 it did.
 
 - [Send, steer and stop](#send-steer-and-stop)
+- [Hand off to another conversation](#hand-off-to-another-conversation)
 - [Have another agent review the work](#have-another-agent-review-the-work)
 - [Answer questions and approvals](#answer-questions-and-approvals)
 - [Follow what it does](#follow-what-it-does)
@@ -79,6 +80,21 @@ it did.
   conversation continues (**Restart now**, or **Restart after this turn**).
 - **End session** stops the agent but keeps the conversation; sending a new
   message resumes it. **Delete conversation…** removes it.
+
+## Hand off to another conversation
+
+The workspace sidebar and chat tabs show an agent icon next to each conversation.
+Hover over the sidebar icon for the agent name.
+
+Right-click a message or a selection in a workspace chat and choose **Send to
+conversation…**. Choose another conversation in the same workspace and add an
+optional note. **Add to draft** opens that conversation and appends the quote,
+note, and source link to any existing draft. Review the draft and send it when
+ready. The source link in the sent message returns to the quoted message.
+
+If the destination is in its own window, put it back in the workspace first.
+[Artifacts](artifacts.md) keep longer-lived context in a versioned document associated with
+its workspace.
 
 ## Have another agent review the work
 

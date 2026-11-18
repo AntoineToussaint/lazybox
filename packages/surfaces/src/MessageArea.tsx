@@ -1,12 +1,15 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { RunnerClient } from '@lazybox/client-core';
 import type { Session } from '@lazybox/protocol';
 import type { OpenModifiers } from './file-links';
 import type { FileLink } from './file-reference';
+import { ConversationSourceContext, currentConversationSource } from './conversation-source';
+import { humanError } from './human-error';
+import type { HandoffMessage, OpenHandoffConversation } from './ConversationHandoff';
 import { ConversationLoading, MessageList } from './MessageList';
 import { MessageScopeProvider } from './MessageArtifactActions';
 import { useFileLinkTracking } from './FileArtifactActions';
-import { useRevealRequests } from './artifact-events';
+import { revealMessage, useRevealRequests, type RevealMessageRequest } from './artifact-events';
 import { PromptNavigator } from './PromptNavigator';
 import { RequestCard } from './session-parts';
 import { ToolLineContext } from './ToolLine';
@@ -14,6 +17,7 @@ import { latestPlanId, type ActivityDetail } from './tool-lines';
 import { exitFault, faultSentence, transportFault } from './subscription-model';
 import type { useChatScroll } from './useChatScroll';
 import type { useTranscript } from './useTranscript';
+import { PanelShownContext } from './useAttention';
 
 type ChatScroll = ReturnType<typeof useChatScroll>;
 type Transcript = ReturnType<typeof useTranscript>;
@@ -23,7 +27,7 @@ type Transcript = ReturnType<typeof useTranscript>;
  * the agent's pending requests (and a subscription limit) in the scrolling pane, and a way back to the
  * latest message once the reader scrolled away from it.
  */
-export function MessageArea({ api, session, sessionID, transcript, scroll, spoken, agentName, limited, nameFor, onOpenFile, onError, subscription, detail = 'smart' }: {
+export function MessageArea({ api, session, sessionID, transcript, scroll, spoken, agentName, limited, nameFor, onOpenFile, onError, onHandoff, onOpenHandoff, subscription, detail = 'smart' }: {
   api: RunnerClient;
   session?: Session;
   sessionID: string;
@@ -38,6 +42,8 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
   nameFor(id: string): string;
   onOpenFile?(reference: FileLink, how: OpenModifiers): void;
   onError(message: string): void;
+  onHandoff?(message: HandoffMessage): void;
+  onOpenHandoff?: OpenHandoffConversation;
   /** The subscription limit card and switch dialog, after the requests. */
   subscription?: ReactNode;
   /** How much of the agent's tool activity to show. */
@@ -48,7 +54,26 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
   const artifactScope = useMemo(() => session?.collectionId ? { collectionId: session.collectionId, sessionId: sessionID, conversationId: session.conversationId } : undefined, [session?.collectionId, session?.conversationId, sessionID]);
   // A file an agent named is tracked from its link, as from the Files tree.
   const fileTracking = useFileLinkTracking(artifactScope?.collectionId, scroll.paneRef);
-  useRevealRequests(sessionID, !transcript.loading && conversation.length > 0, scroll.revealMessage);
+  const shown = useContext(PanelShownContext);
+  useRevealRequests(sessionID, shown && !transcript.loading && !transcript.partial && conversation.length > 0, scroll.revealMessage);
+  const handoffWorkspace = session?.collectionId;
+  const sourceHost = useRef({ api, handoffWorkspace, onOpenHandoff, onError });
+  sourceHost.current = { api, handoffWorkspace, onOpenHandoff, onError };
+  const openSource = useCallback(async (source: RevealMessageRequest) => {
+    const { api, handoffWorkspace, onOpenHandoff, onError } = sourceHost.current;
+    if (!handoffWorkspace || !onOpenHandoff) return;
+    try {
+      const original = await currentConversationSource(api, handoffWorkspace, source);
+      const latest = sourceHost.current;
+      if (latest.api !== api || latest.handoffWorkspace !== handoffWorkspace || !latest.onOpenHandoff) return;
+      if (!original) {
+        onError('The source message is unavailable in this workspace.');
+        return;
+      }
+      if (latest.onOpenHandoff({ collectionId: handoffWorkspace, sessionId: original.sessionId, commandId: '' })) revealMessage(original);
+      else onError('Could not open the source conversation here.');
+    } catch (error) { onError('Could not open the source message. ' + humanError(error)); }
+  }, []);
   // Coding turns are checkpointed: each gets a marker to show or revert its changes.
   const coding = !!session && (!session.purpose || session.purpose === 'coding');
   // Tool lines show paths relative to the conversation's folder, and open files.
@@ -62,7 +87,7 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
         <div className="messages-content" ref={scroll.contentRef}>
           {transcript.loading && !conversation.length && <ConversationLoading replay={transcript.replay}/>}
           {!transcript.loading && !transcript.error && !spoken && <EmptyConversation agentName={agentName}/>}
-          <MessageScopeProvider scope={artifactScope}><ToolLineContext.Provider value={toolScope}><MessageList messages={spoken ? conversation : []} visible={scroll.visibleMessages} agentName={agentName} onOpenFile={onOpenFile} onShowEarlier={scroll.showEarlier} nameFor={nameFor} checkpoints={checkpoints} sessionId={sessionID} onReveal={scroll.revealMessage} detail={detail} loadingEarlier={transcript.partial}/></ToolLineContext.Provider></MessageScopeProvider>
+          <MessageScopeProvider scope={artifactScope}><ToolLineContext.Provider value={toolScope}><ConversationSourceContext.Provider value={onOpenHandoff && handoffWorkspace ? openSource : undefined}><MessageList messages={spoken ? conversation : []} visible={scroll.visibleMessages} agentName={agentName} onOpenFile={onOpenFile} onShowEarlier={scroll.showEarlier} nameFor={nameFor} checkpoints={checkpoints} sessionId={sessionID} onReveal={scroll.revealMessage} onHandoff={onHandoff} detail={detail} loadingEarlier={transcript.partial}/></ConversationSourceContext.Provider></ToolLineContext.Provider></MessageScopeProvider>
           {session?.fault && !limited && <FaultBanner api={api} session={session} sessionID={sessionID} onError={onError}/>}
           <PendingRequests api={api} session={session} sessionID={sessionID} agentName={agentName} onError={onError}/>
           {subscription}

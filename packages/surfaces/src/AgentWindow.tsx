@@ -7,7 +7,7 @@ import { SnippetPicker } from './SnippetPicker';
 import { useKeyboardNavigation, useKeyboardAction, useKeymap, useMenuSnippet, type KeyHint } from './keyboard';
 import { continueConversation } from './transcript-cache';
 import { useChatScroll } from './useChatScroll';
-import { sessionModelLabel, sessionAccountLabel, conversationTitle, titleFromMessage, branchSummary } from './conversation-model';
+import { sessionModelLabel, sessionAccountLabel, conversationProvider, conversationTitle, titleFromMessage, branchSummary } from './conversation-model';
 import { DeleteConversationDialog } from './DeleteConversationDialog';
 import { useFileOpener, type OpenModifiers } from './file-links';
 import type { FileLink } from './file-reference';
@@ -54,6 +54,8 @@ import { QueuedMessages, useQueuedDelivery } from './QueuedMessages';
 import { SubagentContext } from './subagent-view';
 import { BackgroundWorkButton, SubagentAttention } from './SubagentTray';
 import { SubagentPanel } from './SubagentPanel';
+import { ConversationHandoff, type HandoffMessage, type OpenHandoffConversation } from './ConversationHandoff';
+import type { PanelTitle } from './PanelRegistry';
 import { MessageArea } from './MessageArea';
 import { SubscriptionControls } from './SubscriptionSwitch';
 import { Composer } from './Composer';
@@ -97,6 +99,8 @@ export type AgentWindowProps = {
   mode?: 'agent' | 'console';
   viewState?: ViewStateStore;
   onViewChange?: (target: SurfaceTarget) => void | Promise<void>;
+  onOpenHandoff?: OpenHandoffConversation;
+  onChatTitle?(title: PanelTitle): void;
   onSessionChange?: (sessionId: string) => void;
   onOpenViewer?: (sessionId: string, commandId: string) => void | Promise<void>;
   /** Shows one of this conversation's managed commands in the host's command console. */
@@ -127,7 +131,7 @@ export function AgentWindow(props: AgentWindowProps) {
   </RunnerProvider>;
 }
 
-export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, workingDirectory = '', emptyWorkspace = false, initialSessionId = '', collectionId = '', embedded = false, showCommands = true, allowStart = true, autoStart = false, onOpenChat, initialCommandId = '', initialCommandsOpen, mode = 'agent', viewState, onViewChange, onSessionChange, onOpenViewer, onOpenCommand, onShowBrowser, keyboardHint = null }: Omit<AgentWindowProps, 'connection'> & { keyboardHint?: KeyHint | null }) {
+export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, workingDirectory = '', emptyWorkspace = false, initialSessionId = '', collectionId = '', embedded = false, showCommands = true, allowStart = true, autoStart = false, onOpenChat, initialCommandId = '', initialCommandsOpen, mode = 'agent', viewState, onViewChange, onSessionChange, onOpenViewer, onOpenCommand, onShowBrowser, onOpenHandoff, onChatTitle, keyboardHint = null }: Omit<AgentWindowProps, 'connection'> & { keyboardHint?: KeyHint | null }) {
   const { api, info, connecting, error: connectionError, refresh, revision } = useRunner();
   const keymap = useKeymap(viewState);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -159,6 +163,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
   // other read of the window (its review, its sessions) then waited forever.
   const shown = useContext(PanelShownContext);
   const transcript = useTranscript(api, sessionID, !!info && shown);
+  const [handoffMessage, setHandoffMessage] = useState<HandoffMessage>();
   const [session, setSession] = useState<Session | undefined>(transcript.reader.session);
   useMarkViewed(session, mode === 'agent');
   const workspace = useSessionWorkspace(api, session?.collectionId || collectionId, !!info, revision);
@@ -220,12 +225,12 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
   // this render has not seen it yet, and saving now survives this view
   // remounting. While a send is in flight the text waits: the send empties the
   // box when it is confirmed, and would erase it (and the draft it retries).
-  useComposeRequests(sessionID, canCompose && !sending, text => {
+  useComposeRequests(sessionID, shown && canCompose && !sending, text => {
     const current = viewState ? readDraft(viewState, sessionID).text : message;
     const next = current + (current.trim() ? '\n\n' : '') + text;
     setMessage(next); persistDraft(next, files, missingFiles); setUncertainSend(''); sendAttempt.current = null;
     requestAnimationFrame(() => { const node = composer.current; if (node) { node.focus(); node.setSelectionRange(node.value.length, node.value.length); } });
-  });
+  }, api);
 
   useEffect(() => {
     const control = new AbortController(); lifetime.current = control;
@@ -392,6 +397,12 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
     setSessionID(''); setSession(undefined); setCommands([]); setCommand(''); setMessage(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError(''); onSessionChange?.('');
   };
   const realTitle = conversationTitle(session);
+  const chatProvider = session?.id === sessionID ? conversationProvider(session, info?.profiles || []) : '';
+  const chatTitleRef = useRef(onChatTitle);
+  chatTitleRef.current = onChatTitle;
+  useEffect(() => {
+    if (sessionID) chatTitleRef.current?.({ text: realTitle, agent: { sessionId: sessionID, provider: chatProvider } });
+  }, [sessionID, realTitle, chatProvider]);
   // While only the latest turns are in (the earlier history still loading), the first of them is not the first message.
   const firstPrompt = transcript.partial ? '' : conversation.find(m => m.type === 'operation_accepted' && !m.origin)?.text || '';
   // An assistant conversation is about Lazybox, not the workspace's branches: its header names none.
@@ -591,7 +602,9 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
           {slash.dialogs}
           {chatReview.dialog}
           {transcript.error && <TranscriptNotice error={transcript.error} onRetry={transcript.retry}/>}
-          <CodeRunContext.Provider value={codeRuns}><MessageArea api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
+          {handoffMessage && session?.collectionId && onOpenHandoff && <ConversationHandoff source={session} message={handoffMessage}
+            open={onOpenHandoff} onClose={() => setHandoffMessage(undefined)}/>}
+          <CodeRunContext.Provider value={codeRuns}><MessageArea onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail}
             subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
           {!transcript.error && <LiveBar api={api} session={session} sessionID={sessionID} live={live} disconnected={disconnected} activity={transcript.activity} viewState={viewState} onInterrupt={() => void interrupt()}

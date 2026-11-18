@@ -1,0 +1,5 @@
+.conversation-handoff { width: min(460px, calc(100vw - 32px)); }
+.conversation-handoff form, .conversation-handoff label { display: grid; gap: 8px; }
+.conversation-handoff form { gap: 14px; }
+.conversation-handoff select, .conversation-handoff textarea { width: 100%; min-width: 0; }
+.conversation-handoff p { margin: 0; }

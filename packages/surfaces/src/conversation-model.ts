@@ -27,8 +27,8 @@ export function conversationName(session?:Session,fallback='New conversation'):s
  * would read the same are told apart by the start of their ids, and only then:
  * an id is not something to read.
  */
-export function conversationOption(session:Session,all:readonly Session[],provider:(profileId:string)=>string,label:(profileId:string)=>string|undefined):string{
- const words=(value:Session)=>[conversationName(value),provider(value.profileId),label(value.profileId)].filter(Boolean).join(' · ');
+export function conversationOption(session:Session,all:readonly Session[],provider:(profileId:string,session:Session)=>string,label:(profileId:string)=>string|undefined):string{
+ const words=(value:Session)=>[conversationName(value),provider(value.profileId,value),label(value.profileId)].filter(Boolean).join(' · ');
  const text=words(session);
  return all.some(other=>other.id!==session.id&&words(other)===text)?`${text} · ${session.id.slice(0,6)}`:text;
 }
@@ -121,9 +121,13 @@ export function sessionAccountLabel(session?:Session,profile?:Profile):string {
  if(profile?.isolation==='inherited'||session?.profileId==='claude-default'||session?.profileId==='codex-default')return 'Account not reported';
  return session?.profileId?'Saved account':'Loading account…';
 }
+export function conversationProvider(session: Session, profiles: readonly Profile[]): string {
+  return session.provider || profiles.find(profile => profile.id === session.profileId)?.provider || '';
+}
+
 export function conversationDetails(session:Session,profiles:readonly Profile[],includeAccount=true):string {
  const profile=profiles.find(value=>value.id===session.profileId);
- const provider=session.provider||profile?.provider||'';
+ const provider=conversationProvider(session,profiles);
  const agent=agentTitle(provider,profiles);
  return [agent,sessionModelLabel(session),includeAccount&&!isAcp(provider)?sessionAccountLabel(session,profile):''].filter(Boolean).join(' · ');
 }

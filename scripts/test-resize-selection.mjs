@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // Dragging a divider, an edge or a header never selects text, in WebKit (the
 // desktop app's engine) and in Chromium, against the fake Runner. Every kind of
 // drag handle is pressed with text selected beside it and dragged across text
@@ -140,7 +141,7 @@ async function run(type,name){
 }
 
   // A panel's own divider (Resizer): the Changes file list, dragged right across the diff.
-  await page.getByRole('button',{name:'Review changes',exact:true}).click();
+  await openWorkspaceChanges(page);
   const changes=page.getByRole('region',{name:'Workspace changes'});
   await changes.getByRole('navigation',{name:'Changed files'}).getByRole('button',{name:/src\/handler\.go/}).click();
   const line=changes.locator('.diff-view').getByText('a line long enough',{exact:false}).first();

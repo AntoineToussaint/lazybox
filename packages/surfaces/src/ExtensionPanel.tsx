@@ -11,8 +11,13 @@ import { ExtensionApprovalSheet } from './ExtensionApprovalSheet';
 import { Icon } from './Icons';
 import type { ModuleProps } from './PanelRegistry';
 import { useRunner } from './RunnerContext';
+import { useRunnerIdentity } from './RunnerDirectory';
 import { useSeen } from './useAttention';
 import { useExtensions } from './useExtensions';
+import { openInBrowser } from './web-links';
+import { TrackArtifactDialog } from './ArtifactDialogs';
+import { requestActionFocus, requestPreview } from './workspace-runtime';
+import { deliveredPulls } from './pull-requests-model';
 import './extensions.css';
 
 /**
@@ -57,7 +62,7 @@ class ExtensionBoundary extends Component<{ children: ReactNode }, { error?: str
   }
 }
 
-function ExtensionPanel({ viewState, collections, onPanelTitle }: ModuleProps) {
+function ExtensionPanel({ viewState, collections, workspaceId, onShowPanel, onPanelTitle }: ModuleProps) {
   const key = viewState ? `${viewState.key}:extension` : '';
   const [choice, setChoiceState] = useState<Choice | undefined>(() => readChoice(viewState, key));
   const setChoice = (next?: Choice) => { setChoiceState(next); try { viewState?.setItem(key, next ? JSON.stringify(next) : ''); } catch { /* a convenience */ } };
@@ -70,7 +75,7 @@ function ExtensionPanel({ viewState, collections, onPanelTitle }: ModuleProps) {
   }, [extension?.id, panel?.id, panel?.title]);
   if (!value) return <div className="extension-state" role="status">{error ? <><Icon name="alert" size={18}/><p>Extensions are not available: {error}</p></> : <p>Loading extensions…</p>}</div>;
   if (!choice || !extension || !panel) return <ExtensionHome extensions={value.extensions} examples={value.examples} directory={value.directory} missing={choice && !extension ? choice.id : ''} onChoose={setChoice}/>;
-  return <RunningExtension key={`${extension.id}/${panel.id}`} extension={extension} panelId={panel.id} collections={collections} onClose={() => setChoice(undefined)} onSwitch={setChoice}/>;
+  return <RunningExtension key={`${extension.id}/${panel.id}`} extension={extension} panelId={panel.id} collections={collections} workspaceId={workspaceId} onShowPanel={onShowPanel} onClose={() => setChoice(undefined)} onSwitch={setChoice}/>;
 }
 
 /** What can be shown, what waits for the person, and the examples. */
@@ -131,11 +136,15 @@ function ExtensionHome({ extensions, examples, directory, missing, onChoose }: {
 }
 
 /** One running panel: its session, its frame and its bridge. */
-function RunningExtension({ extension, panelId, collections, onClose, onSwitch }: { extension: Extension; panelId: string; collections: Collection[]; onClose(): void; onSwitch(choice: Choice): void }) {
+function RunningExtension({ extension, panelId, collections, workspaceId, onShowPanel, onClose, onSwitch }: { extension: Extension; panelId: string; collections: Collection[]; workspaceId: string; onShowPanel?: ModuleProps['onShowPanel']; onClose(): void; onSwitch(choice: Choice): void }) {
   const { api, connection } = useRunner();
+  const runner = useRunnerIdentity();
   const { value } = useExtensions();
   const { seen } = useSeen();
   const seenRef = useRef(seen); seenRef.current = seen;
+  const [draft, setDraft] = useState<{ workspaceId: string; content: string }>();
+  const current = useRef({ workspaceId, onShowPanel, runnerLabel: runner.label });
+  current.current = { workspaceId, onShowPanel, runnerLabel: runner.label };
   const collectionsRef = useRef(collections); collectionsRef.current = collections;
   const frame = useRef<HTMLIFrameElement>(null);
   const [session, setSession] = useState<ExtensionPanelSession>();
@@ -167,14 +176,82 @@ function RunningExtension({ extension, panelId, collections, onClose, onSwitch }
       return done;
     };
     const handlers: BridgeHandlers = {
-      hello: async () => ({ protocol: BRIDGE_PROTOCOL, extension: { id: extension.id, name: extension.name || extension.id, version: extension.version }, panel: { id: panel.id, title: panel.title }, grants: session.grants, hosts: session.hosts, theme: themePayload() }),
+      hello: async () => ({ protocol: BRIDGE_PROTOCOL, extension: { id: extension.id, name: extension.name || extension.id, version: extension.version }, panel: { id: panel.id, title: panel.title }, grants: session.grants, hosts: session.hosts, runnerLabel: current.current.runnerLabel, theme: themePayload() }),
+      'workspaces.focused': async () => {
+        const workspace = collectionsRef.current.find(value => value.id === current.current.workspaceId);
+        return { workspace: workspace ? projectWorkspaces([workspace]).workspaces[0] : null };
+      },
+      'github.open': async params => {
+        const raw = stringParam(params, 'url', 2048);
+        const url = URL.canParse(raw) ? new URL(raw) : undefined;
+        if (!url || url.origin !== 'https://github.com' || url.username || url.password ||
+          !/^\/[\w.-]+\/[\w.-]+\/(?:deployments\/?$|(?:pull|issues|actions\/runs)\/\d+(?:\/|$))/.test(url.pathname))
+          throw new BridgeRefusal('bad-request', 'Choose a GitHub issue, pull request or Actions run');
+        await openInBrowser(url.href);
+        return { shown: true };
+      },
+      'runtime.read': async params => {
+        const runtime = await client.getWorkspaceRuntime({ collectionId: stringParam(params, 'workspaceId') });
+        return {
+          services: runtime.actions.map(action => ({ id: action.key, name: action.name, member: action.member, port: action.port,
+            preview: !!action.url && action.runState?.state === 'running', state: action.runState?.state || 'idle', hasLog: !!action.runState?.commandId })),
+          setups: runtime.setups.map(setup => ({ member: setup.member, pendingApproval: setup.pendingApproval, state: setup.runState?.state || 'idle',
+            copied: setup.copiedFiles.length, missing: setup.missingFiles.length })),
+        };
+      },
+      'runtime.show': async params => {
+        const { workspaceId, onShowPanel } = current.current;
+        if (!workspaceId || workspaceId !== stringParam(params, 'workspaceId') || !onShowPanel) throw new BridgeRefusal('bad-request', 'Choose the active workspace first');
+        const target = stringParam(params, 'target');
+        const runtime = await client.getWorkspaceRuntime({ collectionId: workspaceId });
+        if (params.kind === 'preview' && runtime.actions.some(action => action.key === target && action.url && action.runState?.state === 'running')) {
+          requestPreview(workspaceId, target);
+          onShowPanel('preview');
+        } else if (params.kind === 'setup' && runtime.setups.some(setup => setup.member === target)) {
+          requestActionFocus(workspaceId, 'setup:' + target);
+          onShowPanel('actions');
+        } else if (params.kind === 'logs' && runtime.actions.some(action => action.key === target && action.runState?.commandId)) {
+          requestActionFocus(workspaceId, target);
+          onShowPanel('actions');
+        } else throw new BridgeRefusal('bad-request', 'That runtime target is unavailable');
+        return { shown: true };
+      },
+      'releases.list': async () => {
+        const { items, truncated } = await client.listReleaseWatch({}, { timeoutMs: 40_000 });
+        return { items: items.slice(0, 100).map(({ id, repository, environment, reason, url }) => ({ id, repository, environment, reason, url })), truncated: truncated || items.length > 100 };
+      },
+      'pulls.list': async params => {
+        const workspaceId = typeof params.workspaceId === 'string' ? stringParam(params, 'workspaceId') : undefined;
+        const result = await client.listLinks(workspaceId ? { collectionId: workspaceId } : { all: true });
+        return { pulls: deliveredPulls(result.links).slice(0, 100).map(pull => ({
+          key: pull.key, title: pull.title, repository: pull.repository, number: pull.number, status: pull.status,
+          workspaceId: pull.link.collectionId, sessionId: pull.link.sessionId, url: pull.url, detail: pull.detail,
+          checkUrl: pull.link.item?.pullRequest?.failingChecks?.[0]?.url || '',
+          checks: pull.link.item?.pullRequest?.checks || '',
+        })), error: result.trackingError };
+      },
+      'artifacts.list': async params => {
+        const result = await client.listArtifacts({ collectionId: stringParam(params, 'workspaceId') });
+        return { artifacts: result.artifacts.slice(0, 100).map(({ id, title, kind }) => ({ id, title, kind })) };
+      },
+      'artifacts.draft': async params => {
+        const workspaceId = stringParam(params, 'workspaceId');
+        if (workspaceId !== current.current.workspaceId) throw new BridgeRefusal('bad-request', 'Choose the active workspace first');
+        const content = stringParam(params, 'content', 12_000);
+        setDraft(existing => existing || { workspaceId, content });
+        return { shown: true };
+      },
+      'mailbox.list': async () => {
+        const { items, truncated } = await client.listMailbox({});
+        return { items: items.slice(0, 100).map(({ id, repository, title, reason, url, updatedAt }) => ({ id, repository, title, reason, url, updatedAt })), truncated: truncated || items.length > 100 };
+      },
       'workspaces.list': async () => projectWorkspaces((await client.listCollections({})).collections),
       'sessions.list': async params => {
-        const limit = Math.min(500, Math.max(1, Number(params.limit) || 200));
+        const limit = Math.min(100, Math.max(1, Number(params.limit) || 100));
         const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : undefined;
         return projectConversations((await client.listHistory({ limit, ...(workspaceId ? { collectionId: workspaceId } : {}) })).sessions, collectionsRef.current, workspaceId);
       },
-      'attention.list': async () => projectAttention((await client.listHistory({ limit: 300 })).sessions, collectionsRef.current, seenRef.current),
+      'attention.list': async () => projectAttention((await client.listHistory({ limit: 100 })).sessions, collectionsRef.current, seenRef.current),
       'commands.list': async params => projectCommands((await client.listCommands({ sessionId: stringParam(params, 'sessionId') })).commands),
       'missions.list': async () => projectMissions((await client.listMissions({})).missions),
       'usage.read': async params => {
@@ -275,6 +352,9 @@ function RunningExtension({ extension, panelId, collections, onClose, onSwitch }
       <button type="button" className="quiet" aria-label="Dismiss" onClick={() => setNotices(list => list.filter(x => x.key !== n.key))}>×</button>
     </li>)}</ul>}
     {reviewing && <ExtensionApprovalSheet extension={extension} onClose={() => setReviewing(false)}/>}
+    {draft && <TrackArtifactDialog collectionId={draft.workspaceId} content={draft.content} source={{ kind: 'edit' }}
+      onClose={() => setDraft(undefined)} onTracked={() => setDraft(undefined)}/>}
+
   </div>;
 }
 

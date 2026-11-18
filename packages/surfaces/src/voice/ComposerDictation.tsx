@@ -1,6 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
+import type { ViewStateStore } from '@lazybox/platform';
+import { useRunner } from '../RunnerContext';
+import { wisprRecognizer } from './wispr-recognizer';
 import { mergeDictation } from './voice-model';
-import { finishAndSend, registerDictationTarget, startDictation, stopDictation, takeOverDictation, useVoiceState, voiceState, recognizers, type DictationSink, type DictationTarget } from './voice-session';
+import { finishAndSend, registerDictationTarget, startDictation, stopDictation, takeOverDictation, useVoicePreferences, useVoiceState, voiceState, chosenRecognizer, type DictationSink, type DictationTarget } from './voice-session';
 
 /** The span of the draft still being recognized, drawn over the message box. */
 export type LiveRange = { start: number; end: number };
@@ -12,11 +15,12 @@ export type LiveRange = { start: number; end: number };
  * it was; typing or sending takes over (the words stay, the microphone
  * closes). The draft is saved when the dictation ends, not on every word.
  */
-export function useComposerDictation({ textarea, destination, value, enabled, onPreview, onCommit, onSend }: {
+export function useComposerDictation({ textarea, destination, value, enabled, store, onPreview, onCommit, onSend }: {
   textarea: RefObject<HTMLTextAreaElement | null>;
   destination: string;
   value: string;
   enabled: boolean;
+  store?: ViewStateStore;
   /** Show this text in the box (while dictating; not saved). */
   onPreview(text: string): void;
   /** The text the dictation leaves: saved like typing. */
@@ -24,7 +28,11 @@ export function useComposerDictation({ textarea, destination, value, enabled, on
   /** "Send" was said and sending by voice is on. */
   onSend(): void;
 }) {
-  const latest = useRef({ destination, value, enabled, onPreview, onCommit, onSend }); latest.current = { destination, value, enabled, onPreview, onCommit, onSend };
+  const { api } = useRunner();
+  const [preferences] = useVoicePreferences(store);
+  const wispr = wisprRecognizer(api);
+  const latest = useRef({ destination, value, enabled, preferences, wispr, onPreview, onCommit, onSend });
+  latest.current = { destination, value, enabled, preferences, wispr, onPreview, onCommit, onSend };
   const [live, setLive] = useState<LiveRange | null>(null);
   const [active, setActive] = useState(false);
   const pendingSend = useRef<string | null>(null);
@@ -42,6 +50,8 @@ export function useComposerDictation({ textarea, destination, value, enabled, on
   useEffect(() => {
     const own: DictationTarget = {
       kind: 'composer',
+      wispr: () => latest.current.wispr,
+      preferences: () => latest.current.preferences,
       element: () => textarea.current,
       label: () => latest.current.destination,
       available: () => latest.current.enabled && !!textarea.current && !textarea.current.disabled && !textarea.current.readOnly,
@@ -121,7 +131,7 @@ export function useComposerDictation({ textarea, destination, value, enabled, on
      */
     finishAndSend() { return active && voiceState().phase !== 'idle' && finishAndSend(); },
     /** Whether this window can dictate at all (a recognizer exists). */
-    supported: recognizers().length > 0,
+    supported: !!chosenRecognizer(preferences, wispr),
   };
 }
 

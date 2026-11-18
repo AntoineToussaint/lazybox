@@ -170,8 +170,9 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
   ], { sessionId: sessionID, commandId: managed?.id || '' }, 'Running turn actions');
   return <section className="live-bar" aria-label="What the agent is doing" onContextMenu={menu}>
     <div className="live-bar-row" onDoubleClick={event => {
-      if (!managed || tailHidden || (event.target instanceof Element && event.target.closest('button, a'))) return;
-      setExpanded(value => !value);
+      if (!managed || (event.target instanceof Element && event.target.closest('button, a'))) return;
+      if (tailHidden) { showOutput(true); setExpanded(true); }
+      else setExpanded(value => !value);
     }}>
       <LiveIndicator tone="busy"/>
       {/* The step and its time, as the status line says them. */}

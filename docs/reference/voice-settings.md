@@ -10,7 +10,7 @@ Shortcuts). The two voice keys are part of your shortcuts.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Engine | Automatic | Which speech recognition dictates. The desktop app uses **macOS speech recognition**; a browser uses its own. Shown as a choice only where there is more than one. |
+| Engine | Automatic | Which speech recognition dictates. The desktop app uses **macOS speech recognition**; a browser uses its own. Choose **Wispr Flow** to use the Wispr Voice Interface API through the connected Runner. |
 | Permissions | — | Microphone and (on the Mac) Speech Recognition: *Allowed*, *Not asked yet*, *Blocked*. **Allow…** asks; a blocked one has a button to the right page of System Settings. Rechecked when you come back to the window. |
 | Language | Automatic | What you speak. *Automatic* is your system's language. On the Mac, a language this Mac can only recognize through Apple's server is marked *needs Apple's server*. |
 | Use Apple's server when needed | Off | Mac only. Off: a language not available on-device does not dictate, and audio never leaves the Mac. On: such a language is sent to Apple while you dictate. |
@@ -18,9 +18,11 @@ Shortcuts). The two voice keys are part of your shortcuts.
 
 ## Wispr Flow
 
-Use **Get Wispr Flow** and **Setup guide** to install and sign in to the
-Wispr Flow app. **Try Wispr Flow** is an editable practice field. Its text
-is discarded when you leave Voice settings.
+Set `LAZYBOX_WISPR_API_KEY` in the Runner environment with a key from the
+[Wispr developer platform](https://api-docs.wisprflow.ai/quickstart). Select
+**Wispr Flow** under **Engine** and use the composer microphone.
+Each recording runs for up to 60 seconds. The Runner sends audio and the
+selected language to Wispr when recording finishes.
 
 ## Keys
 

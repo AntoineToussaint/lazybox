@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // The dividers inside panels (Resizer.tsx), against the fake Runner: in
 // Changes (the file list, the review tray, and the narrow Files / Review
 // column), the Artifacts list and its version history, Settings and the
@@ -105,7 +106,7 @@ try{
  };
 
  // 1. Changes (its own page, wide): the file list.
- await page.getByRole('button',{name:'Review changes',exact:true}).click();
+ await openWorkspaceChanges(page);
  const changes=page.getByRole('region',{name:'Workspace changes'});
  // A located element, not a role: folded, the list is hidden from the accessibility tree.
  const files=changes.locator('.changes-columns>nav');
@@ -151,7 +152,7 @@ try{
  if(!await tray.isVisible())await changes.getByRole('button',{name:/^Review comments/}).click();
  await expect.poll(()=>width(tray),{message:'the tray after a reload'}).toBe(trayChosen);
  await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('beta');
- if(!await files.isVisible())await page.getByRole('button',{name:'Review changes',exact:true}).click();
+ if(!await files.isVisible())await openWorkspaceChanges(page);
  await expect(files).toBeVisible();
  await expect.poll(()=>width(files),{message:'the file list in another workspace'}).toBe(chosen);
 

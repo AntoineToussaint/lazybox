@@ -71,7 +71,7 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
   const vimEditing = useVimPreferences(viewState).composer;
   const reservedKeys = useMemo(() => leaderKeys(keymap), [keymap]);
   const vim = useComposerVim({ textarea, enabled: vimEditing, value: message, resetKey: sessionID, reserved: reservedKeys, onSend: () => { if (canSend || missingFiles.length > 0 || !!message.trim()) textarea.current?.form?.requestSubmit(); } });
-  const dictation = useComposerDictation({ textarea, destination: conversationName(session), value: message, enabled: canCompose && !sending, onPreview: text => (onDictate || onChange)(text), onCommit: onChange,
+  const dictation = useComposerDictation({ textarea, store: viewState, destination: conversationName(session), value: message, enabled: canCompose && !sending, onPreview: text => (onDictate || onChange)(text), onCommit: onChange,
     onSend: () => textarea.current?.form?.requestSubmit() });
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const mod = event.metaKey || event.ctrlKey;

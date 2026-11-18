@@ -5,6 +5,16 @@ On-device and private by default. User guide:
 [docs/guides/voice.md](docs/guides/voice.md); every setting:
 [docs/reference/voice-settings.md](docs/reference/voice-settings.md).
 
+## Wispr Flow
+
+Select the Wispr Flow engine to start and stop dictation with the composer
+microphone. The client records up to 60 seconds, releases the microphone at
+stop, and sends mono 16 kHz PCM WAV to the Runner. The Runner calls the official
+Voice Interface API with its `LAZYBOX_WISPR_API_KEY`. The key stays on the
+Runner and the recording is discarded after processing. Cancel aborts capture
+or transcription. The transcript follows the same draft insertion path as the
+built-in engines.
+
 ## Shape
 
 ```
@@ -19,7 +29,8 @@ On-device and private by default. User guide:
                    CommandPalette (voice query)        SpeechRecognizerHost (platform)
                                                         ├─ desktop: macOS Speech, on-device
                                                         │   (apps/desktop/src-tauri/src/voice.rs)
-                                                        └─ browser: Web Speech (web-speech.ts)
+                                                        ├─ browser: Web Speech (web-speech.ts)
+                                                        └─ Wispr Flow: recording → Runner → Wispr API
 ```
 
 - **`packages/surfaces/src/voice/voice-model.ts`** — the pure part, unit-tested

@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // Inline review comments on the Changes page against the fake Runner: comment
 // on a range and on a removed line, edit, see the tray collect them, follow a
 // comment whose lines moved or changed, send the review to the conversation's
@@ -43,7 +44,7 @@ try{
  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
  await page.goto(url);
  await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');await page.getByRole('combobox',{name:'Session',exact:true}).selectOption('alpha-session');
- await page.getByRole('button',{name:'Review changes',exact:true}).click();
+ await openWorkspaceChanges(page);
  const changes=page.getByRole('region',{name:'Workspace changes'});
  const diff=changes.getByRole('grid',{name:'File diff'});
  await expect(diff).toContainText('log.Print("handle")');
@@ -123,7 +124,7 @@ try{
  const second=await context.newPage();second.setDefaultTimeout(10000);second.on('pageerror',e=>errors.push(String(e)));
  await second.goto(url);
  await second.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');await second.getByRole('combobox',{name:'Session',exact:true}).selectOption('alpha-session');
- await second.getByRole('button',{name:'Review changes',exact:true}).click();
+ await openWorkspaceChanges(second);
  const otherTray=second.getByRole('complementary',{name:'Review'});
  await otherTray.getByRole('button',{name:'Sent',exact:false}).first().click();
  await expect(otherTray.getByRole('button',{name:/Removed line 3/})).toBeVisible();

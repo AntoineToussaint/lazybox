@@ -120,7 +120,7 @@ test('the bridge client, its types and the Runner agree on every method and gran
   assert.deepEqual([...called].sort(), Object.keys(bridgeMethods).sort());
   assert.match(sdk, new RegExp(`var PROTOCOL = ${BRIDGE_PROTOCOL};`));
   const goGrants = [...goSource.matchAll(/Grant\w+\s+= "([a-z:]+)"/g)].map(m => m[1]).filter(g => g !== 'do:');
-  const bridgeGrants = Object.values(bridgeMethods).filter(g => g && g !== 'do:');
+  const bridgeGrants = [...new Set(Object.values(bridgeMethods).filter(g => g && g !== 'do:'))];
   assert.deepEqual([...goGrants].sort(), [...bridgeGrants].sort(), 'each Runner grant has its bridge method');
   for (const grant of [...bridgeGrants, 'do:']) assert.ok(types.includes(grant), `lazybox.d.ts documents ${grant}`);
   for (const grant of goGrants) assert.notEqual(describeGrant(grant).icon, 'alert', `the sheet describes ${grant}`);

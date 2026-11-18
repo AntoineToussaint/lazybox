@@ -18,7 +18,7 @@ const power = fileURLToPath(new URL('../../services/runner/code/internal/power/e
 const runtimeDir = join(power, 'runtime'), examplesDir = join(power, 'examples');
 const policy = JSON.parse(await readFile(join(runtimeDir, 'policy.json'), 'utf8'));
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png' };
-const runtimeFiles = ['shell.html', 'shell.js', 'shell.css', 'lazybox.js', 'lazybox.css'];
+const runtimeFiles = ['shell.html', 'shell.js', 'shell.css', 'lazybox.js', 'lazybox.css', 'workflow.js'];
 
 /** The manifests' YAML subset: scalars, `key: [a, b]`, lists of scalars and of `- id: …` mappings. */
 export function parseManifest(text) {
@@ -56,7 +56,7 @@ export async function createExtensionsFake({ mutations }) {
     const a = approvals.get(id);
     const grants = m.grants || [], hosts = m.network || [];
     const issues = [];
-    for (const [i, g] of grants.entries()) if (!/^(read:(workspaces|sessions|attention|commands|missions|usage)|show:conversations|send:messages|switch:(claude|codex)|do:[\w.-]+)$/.test(g)) issues.push({ path: `grants[${i}]`, line: 1, message: `there is no grant "${g}"`, severity: 'error' });
+    for (const [i, g] of grants.entries()) if (!/^(read:(workspaces|sessions|attention|commands|missions|usage|runtime|pulls|releases|artifacts|mailbox)|show:(conversations|runtime|github)|draft:artifact|send:messages|switch:(claude|codex)|do:[\w.-]+)$/.test(g)) issues.push({ path: `grants[${i}]`, line: 1, message: `there is no grant "${g}"`, severity: 'error' });
     // An account policy (EXTENSIONS.md): the subset parser keeps its key; its two fields are read from the text.
     const accountPolicy = m.accountPolicy !== undefined ? { providers: grants.filter(g => g.startsWith('switch:')).map(g => g.slice(7)), switchOnLimit: /^\s+switchOnLimit:\s*true\b/m.test(text), accounts: [] } : undefined;
     const state = issues.length || !m.name ? 'broken' : !a ? 'new' : !a.enabled ? 'disabled' : !subset(grants, a.grants) || !subset(hosts, a.hosts) ? 'review' : 'enabled';
@@ -175,6 +175,11 @@ export function extensionAllows(grants, method, body) {
     case 'ListHistory': return has('read:sessions') || has('read:attention');
     case 'ListCollections': return has('read:workspaces');
     case 'ListCommands': return has('read:commands') && !!body.sessionId;
+    case 'GetWorkspaceRuntime': return has('read:runtime') && !!body.collectionId;
+    case 'ListLinks': return has('read:pulls') && !body.sessionId && !body.focused && !!(body.all || body.collectionId);
+    case 'ListArtifacts': return has('read:artifacts') && !!body.collectionId && !body.includeRetired;
+    case 'ListReleaseWatch': return has('read:releases');
+    case 'ListMailbox': return has('read:mailbox');
     case 'ListMissions': return has('read:missions');
     case 'GetTelemetry': return has('read:usage');
     case 'Apply': return has('send:messages') && !!body.message && Object.keys(body).every(k => ['sessionId', 'operationId', 'message'].includes(k));

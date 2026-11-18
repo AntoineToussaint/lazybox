@@ -984,6 +984,17 @@ func (c *Command) detach() {
 	_ = c.spool.Close()
 }
 
+// CancelForegroundPipe wakes only a run that is still blocking its agent.
+func (c *Command) CancelForegroundPipe() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.status.CanBackground() || c.backgroundRequested || c.detaching {
+		return
+	}
+	c.stopRequested = true
+	c.wakeLocked()
+}
+
 func (c *Command) Cancel() error {
 	c.mu.Lock()
 	done, unconfirmed, detaching := c.status.Done, c.status.CleanupUnconfirmed(), c.detaching

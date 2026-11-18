@@ -137,7 +137,7 @@ func TestCheckExtensionHost(t *testing.T) {
 
 func TestBundledExtensionsLoadCleanly(t *testing.T) {
 	examples := ExtensionExamples()
-	if len(examples) != 3 {
+	if len(examples) != 9 {
 		t.Fatalf("examples: %+v", examples)
 	}
 	dir := t.TempDir()
@@ -151,7 +151,7 @@ func TestBundledExtensionsLoadCleanly(t *testing.T) {
 	}
 	e := NewExtensions(dir, filepath.Join(t.TempDir(), "extensions.json"))
 	snap := e.Snapshot()
-	if len(snap.Extensions) != 4 {
+	if len(snap.Extensions) != len(examples)+1 {
 		t.Fatalf("%+v", snap.Extensions)
 	}
 	for _, info := range snap.Extensions {

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/power"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -211,7 +212,7 @@ func TestApproveExtensionNeedsWhatTheSheetShowed(t *testing.T) {
 		t.Fatalf("missing: %v", err)
 	}
 	list, err := f.client.InstallExampleExtension(f.owner(t), &pb.InstallExampleExtensionRequest{Example: "agent-board"})
-	if err != nil || len(list.Examples) != 3 {
+	if err != nil || len(list.Examples) != len(power.ExtensionExamples()) {
 		t.Fatalf("%+v %v", list, err)
 	}
 	if _, err := f.client.InstallExampleExtension(f.owner(t), &pb.InstallExampleExtensionRequest{Example: "agent-board"}); status.Code(err) != codes.FailedPrecondition {

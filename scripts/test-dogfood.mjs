@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
@@ -21,7 +22,7 @@ try{
  const chat=page.locator('[data-panel-id="alpha-work-chat"]');await chat.getByRole('button',{name:'Rename conversation',exact:true}).click();await chat.getByRole('textbox',{name:'Conversation name',exact:true}).fill('Ship API contract');await chat.getByRole('button',{name:'Save conversation name',exact:true}).click();await expect(chat.locator('.conversation-title')).toContainText('Ship API contract');
  await page.getByRole('button',{name:'Conversation history',exact:true}).click();const history=page.getByRole('dialog',{name:'Conversation history',exact:true});const filter=history.getByRole('searchbox');await filter.fill('SHIP');await expect(history.getByRole('button',{name:/Ship API contract/})).toBeVisible();await filter.fill('missing');await expect(history.getByText('No conversation titles match this search.')).toBeVisible();await page.getByRole('button',{name:'Close conversation history'}).click();
  const message=chat.getByRole('textbox',{name:'Message',exact:true});await message.fill('Keep this draft through review');
- await page.getByRole('button',{name:'Review changes',exact:true}).click();const changes=page.getByRole('region',{name:'Workspace changes'});
+ await openWorkspaceChanges(page);const changes=page.getByRole('region',{name:'Workspace changes'});
  await expect(changes).toContainText('1 file changed on the branch · 2 uncommitted');
  // The first branch change opens by itself, compared with the workspace start.
  await expect(changes.getByLabel('File diff')).toContainText('+branch change');assert.equal(reads.at(-1).committed,true);assert.equal(reads.at(-1).member,'api');await expect(changes.getByRole('checkbox',{name:'Staged',exact:true})).toHaveCount(0);

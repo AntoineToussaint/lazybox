@@ -31,6 +31,24 @@ try {
   await expect(page.getByRole('button',{name:'Remove fixture-team/api from suggestions',exact:true})).toBeVisible();
   await expect(page.getByRole('button', { name: 'Manage repository access ↗', exact: true })).toHaveCount(0);
   assert.equal(fixture.mutations.filter(m=>m.method==='ImportGitHubRepository').length,0,'Connecting and discovery never clone');
+  assert.equal(fixture.calls.filter(call => call.method === 'ListMailbox').length, 0);
+  await page.route('**/ListMailbox', route => route.fulfill({ json: { items: [{
+    id: '1', repository: 'fixture-team/api', title: 'Review API rollout', reason: 'review_requested',
+    url: 'https://github.com/fixture-team/api/pull/5', workspaceIds: ['alpha'],
+  }] } }));
+  await page.route('**/ListReleaseWatch', route => route.fulfill({ json: { items: [{
+    id: 'release-1', repository: 'fixture-team/api', environment: 'Production', reason: 'deployment_approval',
+    url: 'https://github.com/fixture-team/api/actions/runs/5', workspaceIds: ['alpha'],
+  }] } }));
+  await page.getByLabel('Show GitHub Mailbox in Inbox on this device').check();
+  await page.getByLabel('Show GitHub deployments and approval requests in Inbox on this device').check();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work' }).click();
+  await page.getByRole('button', { name: /^Inbox.*2 GitHub items/ }).click();
+  const mailbox = page.getByRole('region', { name: 'GitHub Mailbox' });
+  await expect(mailbox.getByRole('link', { name: /Review API rollout/ })).toHaveAttribute('href', 'https://github.com/fixture-team/api/pull/5');
+  await expect(mailbox.getByRole('button', { name: 'Alpha feature' })).toBeVisible();
+  const release = page.getByRole('region', { name: 'Release Watch' });
+  await expect(release.getByRole('link', { name: /Production.*Deployment needs approval/ })).toHaveAttribute('href', 'https://github.com/fixture-team/api/actions/runs/5');
   await page.reload(); await settings();
   await expect(page.getByText('Connected as fixture-user', { exact: true })).toBeVisible();
   await expect(page.getByRole('button',{name:'Remove fixture-team/api from suggestions',exact:true})).toBeVisible();

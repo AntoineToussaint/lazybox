@@ -22,7 +22,7 @@ import type { ViewTarget, WorkspacePage } from './workspace-model';
  * page's own actions.
  */
 const PHONE = '(max-width: 479px)';
-export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, fixedWorkspace, navigatorOpen, collections, selection, viewState, workspaceID, info, terminalReady, canShowNewSession, editing, layoutMenu, changesShown, canOpenWorkspaceWindow, onOpenNavigator, onSelectPage, onOpenSettings, onOpenAttention, onShowChanges, onBrowseFiles, onShowTerminal, onNewConversation, onOpenRunner, onOpenWorkspaceWindow, onToggleEditing, onToggleConfiguring, onShowModule }: {
+export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, fixedWorkspace, navigatorOpen, collections, selection, viewState, workspaceID, info, terminalReady, canShowNewSession, editing, layoutMenu, canOpenWorkspaceWindow, onOpenNavigator, onSelectPage, onOpenSettings, onOpenAttention, onShowChanges, onBrowseFiles, onShowTerminal, onNewConversation, onOpenRunner, onOpenWorkspaceWindow, onToggleEditing, onToggleConfiguring, onShowModule }: {
   /** The desktop app, for its update notice (absent in a browser and in workspace windows). */
   app?: AppHost;
   pages: WorkspacePage[];
@@ -43,8 +43,6 @@ export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, f
   editing: boolean;
   /** The Panels and Layout menus, when the page is shown as a dock. */
   layoutMenu?: ReactNode;
-  /** A Changes panel is already on a page (its tab says "Changes"): the tool keeps only its icon. */
-  changesShown?: boolean;
   canOpenWorkspaceWindow: boolean;
   onOpenNavigator(): void;
   onSelectPage(id: string): void;
@@ -72,6 +70,11 @@ export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, f
   const keysOf = (id: 'task.new' | 'conversation.new') => { const first = bindings(keymap[id])[0]; return first ? displayBinding(first).join('') : ''; };
   const taskKeys = fixedWorkspace ? undefined : keysOf('task.new'), conversationKeys = keysOf('conversation.new');
   const channel = useWindowChannel(app);
+  const workspaceName = workspaceID ? collections.find(workspace => workspace.id === workspaceID)?.name || "Current workspace" : "No workspace selected";
+  const newConversation = <button className={`toolbar-action new-conversation-action${taskKeys !== undefined ? ' icon-only' : ''}`}
+    disabled={!info || pending || !canShowNewSession} aria-label="New conversation"
+    title={`${workspaceID ? `New conversation in ${workspaceName}` : 'New conversation in a new workspace'}${conversationKeys ? ` (${conversationKeys})` : ''}`}
+    onClick={onNewConversation}><Icon name={workspaceID ? 'chat' : 'plus'}/>{taskKeys === undefined && <span>New conversation</span>}</button>;
   // The window's title bar in the desktop app (title-bar.ts): its empty parts move the window.
   return <header className="workspace-header" data-window-drag-region="deep">
     <button className="mobile-navigation-button icon-button" aria-label="Open workspace navigator" aria-expanded={navigatorOpen} onClick={onOpenNavigator}><Icon name="sidebar"/></button>
@@ -85,16 +88,21 @@ export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, f
     </nav>
     <div className="workspace-header-actions">
       <AttentionCenter collections={collections} selection={selection} viewState={viewState} onOpen={onOpenAttention}/>
-      {!settings && <PullRequestPills workspaceId={workspaceID} branches={branches} onShowChanges={onShowChanges} onShowPanel={() => onShowModule('pulls')}/>}
-      <button className={`toolbar-action${changesShown ? ' icon-only' : ''}`} disabled={!workspaceID} aria-label="Review changes" title="Review changes" onClick={onShowChanges}><Icon name="branch"/>{!changesShown && <span>Changes</span>}</button>
-      <button className="toolbar-action phone-overflow" disabled={!workspaceID} aria-label="Browse files" title={`Browse files · Go to file ${shortcut('Mod+P')}`} onClick={onBrowseFiles}><Icon name="folder"/><span>Files</span></button>
-      <RunControl workspaceId={workspaceID} disabled={!terminalReady} onShowPanel={onShowModule}/>
-      <button className="toolbar-action phone-overflow" disabled={!terminalReady} aria-label="Open terminal" title="Open a terminal in this workspace" onClick={onShowTerminal}><Icon name="terminal"/><span>Terminal</span></button>
-      {/* One name for starting work: New task (⌘N) leads; a conversation in this workspace (⇧⌘N) is the secondary half. */}
-      <span className="new-work-split" role="group" aria-label="Start work">
+      <div className="workspace-tools" role="group" aria-label={workspaceName}>
+        <span className="workspace-tool-name" title={workspaceName}>{workspaceName}</span>
+        {!settings && !!workspaceID && <>
+          <PullRequestPills workspaceId={workspaceID} branches={branches} onShowChanges={onShowChanges} onShowPanel={() => onShowModule('pulls')}/>
+          <button className="toolbar-action phone-overflow" aria-label="Browse files" title={`Browse files · Go to file ${shortcut('Mod+P')}`} onClick={onBrowseFiles}><Icon name="folder"/><span>Files</span></button>
+          <RunControl workspaceId={workspaceID} disabled={!terminalReady} onShowPanel={onShowModule}/>
+          <button className="toolbar-action phone-overflow" disabled={!terminalReady} aria-label="Open terminal" title="Open a terminal in this workspace" onClick={onShowTerminal}><Icon name="terminal"/><span>Terminal</span></button>
+        </>}
+        {workspaceID && newConversation}
+      </div>
+
+      {(taskKeys !== undefined || !workspaceID) && <span className="new-work-split" role="group" aria-label="Start work">
         {taskKeys !== undefined && <button className="toolbar-action new-task-action" disabled={!actionEnabled('task.new')} aria-label="New task" title={`New task: repositories, an agent and what to do${taskKeys ? ` (${taskKeys})` : ''}`} onClick={() => runAction('task.new')}><Icon name="plus"/><span>New task</span>{taskKeys && <kbd>{taskKeys}</kbd>}</button>}
-        <button className={`toolbar-action new-conversation-action${taskKeys !== undefined ? ' icon-only' : ''}`} disabled={!info || pending || !canShowNewSession} aria-label="New conversation" title={`New conversation in this workspace${conversationKeys ? ` (${conversationKeys})` : ''}`} onClick={onNewConversation}><Icon name={taskKeys !== undefined ? 'chat' : 'plus'}/>{taskKeys === undefined && <span>New conversation</span>}</button>
-      </span>
+        {!workspaceID && newConversation}
+      </span>}
       {/* Panels, Layout and Help (with What's new) sit together: how the window is arranged and explained. */}
       {layoutMenu}
       <HelpMenu settings={!fixedWorkspace}/>
@@ -104,10 +112,13 @@ export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, f
         {canOpenWorkspaceWindow && <button onClick={onOpenWorkspaceWindow}>Open workspace window</button>}
         <button disabled={settings} onClick={onToggleEditing}>{editing ? 'Finish customizing' : 'Customize pages'}</button>
         <button disabled={settings} onClick={onToggleConfiguring}>Layout configuration</button>
+        {!settings && workspaceID && !phone && <button onClick={onShowChanges}>Review changes</button>}
+        {!settings && workspaceID && <button className="workspace-pulls-overflow" onClick={() => onShowModule('pulls')}>Pull requests in {workspaceName}</button>}
         {phone && <>
-          <small className="action-menu-heading">Workspace</small>
-          <button disabled={!workspaceID} onClick={onBrowseFiles}>Browse files</button>
-          <button disabled={!terminalReady} onClick={onShowTerminal}>Open terminal</button>
+          <small className="action-menu-heading">{workspaceName}</small>
+          <button disabled={settings || !workspaceID} onClick={onShowChanges}>Review changes</button>
+          <button disabled={settings || !workspaceID} onClick={onBrowseFiles}>Browse files</button>
+          <button disabled={settings || !terminalReady} onClick={onShowTerminal}>Open terminal</button>
           <small className="action-menu-heading">Help</small>
           <HelpItems settings={!fixedWorkspace}/>
         </>}

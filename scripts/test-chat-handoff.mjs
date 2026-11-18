@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // Fixture only (R12, R13): chat-side polish and handing work to your own tools.
 // - The header's Context meter is absent until the conversation has usage,
 //   then shows; /context still opens it before.
@@ -161,7 +162,7 @@ try {
     // R12 · At 1024×680 the Review tray goes under the files; the diff keeps its height and width.
     await leave(`${base}&collection=alpha&session=${alpha.id}#token=${f.token}`);
     await page.setViewportSize({ width: 1024, height: 680 });
-    await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+    await openWorkspaceChanges(page);
     const changes = page.getByRole('region', { name: 'Workspace changes' });
     await expect(changes.getByRole('grid', { name: 'File diff' })).toContainText('added');
     await changes.getByRole('button', { name: /^Review comments/ }).click();

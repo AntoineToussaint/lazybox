@@ -43,12 +43,13 @@ let host: VoiceHost = {};
 /** The desktop gives its native engines; without them the browser's are used. */
 export function configureVoice(next: VoiceHost) { host = next; }
 /** Every recognizer this window can use: the system's first. */
-export function recognizers(): SpeechRecognizerHost[] {
-  return [host.recognizer, webRecognizer()].filter((r): r is SpeechRecognizerHost => !!r);
+export function recognizers(wispr?: SpeechRecognizerHost): SpeechRecognizerHost[] {
+  return [host.recognizer, webRecognizer(), wispr].filter((r): r is SpeechRecognizerHost => !!r);
 }
-export function chosenRecognizer(preferences: VoicePreferences): SpeechRecognizerHost | undefined {
+export function chosenRecognizer(preferences: VoicePreferences, wispr?: SpeechRecognizerHost): SpeechRecognizerHost | undefined {
+  if (preferences.engine === 'wispr') return wispr;
   const all = recognizers();
-  return (preferences.engine === 'auto' ? undefined : all.find(r => r.id === preferences.engine)) || all[0];
+  return all.find(r => r.id === preferences.engine) || all[0];
 }
 export function synthesizer(): SpeechSynthesizerHost | undefined { return host.synthesizer || webSynthesizer(); }
 
@@ -68,6 +69,8 @@ export type DictationTarget = {
   element(): HTMLElement | null;
   label?(): string;
   available(): boolean;
+  wispr?(): SpeechRecognizerHost | undefined;
+  preferences?(): VoicePreferences;
   begin(): DictationSink | null;
 };
 export type VoiceState = {
@@ -143,6 +146,7 @@ type Run = {
   target: DictationTarget;
   sink: DictationSink;
   session?: RecognitionSession;
+  stopGraceMs?: number;
   dictation: Dictation;
   options: DictationOptions;
   settleTimer?: ReturnType<typeof setTimeout>;
@@ -181,29 +185,32 @@ const optionsFor = (p: VoicePreferences, language: string): DictationOptions => 
  * until the key is released; `toggle`: until it is pressed again, Stop, or a
  * spoken stop. Reading aloud stops: voice never talks over you.
  */
-export async function startDictation({ mode, target, kind }: { mode: 'hold' | 'toggle'; target?: DictationTarget; kind?: DictationKind }): Promise<boolean> {
+export async function startDictation({ mode, target, kind, wispr }: { mode: 'hold' | 'toggle'; target?: DictationTarget; kind?: DictationKind; wispr?: SpeechRecognizerHost }): Promise<boolean> {
   if (dictating()) return false;
   const chosen = target || resolveTarget(kind);
   if (!chosen) {
     showToast({ id: 'voice:no-target', tone: 'info', title: kind === 'palette' ? 'Open the command palette to say a command' : 'Open a conversation to dictate', body: 'Dictation types into the message box you are working in.' });
     return false;
   }
-  const p = preferences;
-  const recognizer = chosenRecognizer(p);
+  const p = chosen.preferences?.() || preferences;
+  const recognizer = chosenRecognizer(p, chosen.wispr?.() || wispr);
   if (!recognizer) {
-    fail('unsupported', 'This browser has no speech recognition. Use Chrome, Edge or Safari, or your keyboard’s dictation.', kind || chosen.kind);
+    fail('unsupported', p.engine === 'wispr' ? 'Wispr Flow microphone capture is unavailable in this window.' : 'This browser has no speech recognition. Use Chrome, Edge or Safari, or your keyboard’s dictation.', kind || chosen.kind);
     return false;
   }
   void stopReading();
   const sink = chosen.begin();
   if (!sink) return false;
   const id = ++runs;
-  const current: Run = { id, target: chosen, sink, dictation: emptyDictation(), options: optionsFor(p, p.language), over: false };
+  const current: Run = { id, target: chosen, sink, dictation: emptyDictation(), options: optionsFor(p, p.language), stopGraceMs: recognizer.stopGraceMs, over: false };
   run = current;
   set({ ...idle, phase: 'starting', kind: chosen.kind, destination: chosen.label?.(), mode, startedAt: Date.now(), engine: recognizer.label, reading: false });
   try {
     let status = await recognizer.status(p.language).catch(() => undefined);
     if (run !== current) return false;
+    if (recognizer.id === 'wispr' && !status?.available) {
+      throw new Error(status?.reason || 'microphone-permission: Allow microphone access for Lazybox.');
+    }
     // The first dictation asks for what it needs (the system's own prompts) instead of failing.
     if (status && recognizer.requestPermission && (status.microphone === 'not-determined' || status.speech === 'not-determined')) {
       status = await recognizer.requestPermission(p.language);
@@ -324,7 +331,7 @@ export async function stopDictation(): Promise<void> {
   if (!current || current.over || state.phase === 'stopping') return;
   if (!current.session) { end(current, 'stop'); return; }
   set({ phase: 'stopping' });
-  current.stopTimer = setTimeout(() => end(current, 'stop'), STOP_GRACE_MS);
+  current.stopTimer = setTimeout(() => end(current, 'stop'), current.stopGraceMs ?? STOP_GRACE_MS);
   try { await current.session.stop(); } catch { end(current, 'stop'); }
 }
 /**

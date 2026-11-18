@@ -143,6 +143,18 @@ const (
 	// RunnerServiceListGitHubItemsProcedure is the fully-qualified name of the RunnerService's
 	// ListGitHubItems RPC.
 	RunnerServiceListGitHubItemsProcedure = "/lazybox.bench.v1.RunnerService/ListGitHubItems"
+	// RunnerServiceListMailboxProcedure is the fully-qualified name of the RunnerService's ListMailbox
+	// RPC.
+	RunnerServiceListMailboxProcedure = "/lazybox.bench.v1.RunnerService/ListMailbox"
+	// RunnerServiceListReleaseWatchProcedure is the fully-qualified name of the RunnerService's
+	// ListReleaseWatch RPC.
+	RunnerServiceListReleaseWatchProcedure = "/lazybox.bench.v1.RunnerService/ListReleaseWatch"
+	// RunnerServiceWisprStatusProcedure is the fully-qualified name of the RunnerService's WisprStatus
+	// RPC.
+	RunnerServiceWisprStatusProcedure = "/lazybox.bench.v1.RunnerService/WisprStatus"
+	// RunnerServiceTranscribeWisprProcedure is the fully-qualified name of the RunnerService's
+	// TranscribeWispr RPC.
+	RunnerServiceTranscribeWisprProcedure = "/lazybox.bench.v1.RunnerService/TranscribeWispr"
 	// RunnerServiceSearchItemsProcedure is the fully-qualified name of the RunnerService's SearchItems
 	// RPC.
 	RunnerServiceSearchItemsProcedure = "/lazybox.bench.v1.RunnerService/SearchItems"
@@ -741,6 +753,10 @@ type RunnerServiceClient interface {
 	ListGitHubRepositories(context.Context, *connect.Request[gen.ListGitHubRepositoriesRequest]) (*connect.Response[gen.ListGitHubRepositoriesResponse], error)
 	ImportGitHubRepository(context.Context, *connect.Request[gen.ImportGitHubRepositoryRequest]) (*connect.Response[gen.ImportGitHubRepositoryResponse], error)
 	ListGitHubItems(context.Context, *connect.Request[gen.ListGitHubItemsRequest]) (*connect.Response[gen.ListGitHubItemsResponse], error)
+	ListMailbox(context.Context, *connect.Request[gen.ListMailboxRequest]) (*connect.Response[gen.ListMailboxResponse], error)
+	ListReleaseWatch(context.Context, *connect.Request[gen.ListReleaseWatchRequest]) (*connect.Response[gen.ListReleaseWatchResponse], error)
+	WisprStatus(context.Context, *connect.Request[gen.WisprStatusRequest]) (*connect.Response[gen.WisprStatusResponse], error)
+	TranscribeWispr(context.Context, *connect.Request[gen.TranscribeWisprRequest]) (*connect.Response[gen.TranscribeWisprResponse], error)
 	// Work items (PROJECTS_AND_INTEGRATIONS.md): search a provider for the
 	// picker, read one item with the context an agent is given, turn a pasted
 	// link into its reference, and find the workspaces started from one.
@@ -1421,6 +1437,30 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceListGitHubItemsProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("ListGitHubItems")),
+			connect.WithClientOptions(opts...),
+		),
+		listMailbox: connect.NewClient[gen.ListMailboxRequest, gen.ListMailboxResponse](
+			httpClient,
+			baseURL+RunnerServiceListMailboxProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("ListMailbox")),
+			connect.WithClientOptions(opts...),
+		),
+		listReleaseWatch: connect.NewClient[gen.ListReleaseWatchRequest, gen.ListReleaseWatchResponse](
+			httpClient,
+			baseURL+RunnerServiceListReleaseWatchProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("ListReleaseWatch")),
+			connect.WithClientOptions(opts...),
+		),
+		wisprStatus: connect.NewClient[gen.WisprStatusRequest, gen.WisprStatusResponse](
+			httpClient,
+			baseURL+RunnerServiceWisprStatusProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("WisprStatus")),
+			connect.WithClientOptions(opts...),
+		),
+		transcribeWispr: connect.NewClient[gen.TranscribeWisprRequest, gen.TranscribeWisprResponse](
+			httpClient,
+			baseURL+RunnerServiceTranscribeWisprProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("TranscribeWispr")),
 			connect.WithClientOptions(opts...),
 		),
 		searchItems: connect.NewClient[gen.SearchItemsRequest, gen.ItemPage](
@@ -2533,6 +2573,10 @@ type runnerServiceClient struct {
 	listGitHubRepositories       *connect.Client[gen.ListGitHubRepositoriesRequest, gen.ListGitHubRepositoriesResponse]
 	importGitHubRepository       *connect.Client[gen.ImportGitHubRepositoryRequest, gen.ImportGitHubRepositoryResponse]
 	listGitHubItems              *connect.Client[gen.ListGitHubItemsRequest, gen.ListGitHubItemsResponse]
+	listMailbox                  *connect.Client[gen.ListMailboxRequest, gen.ListMailboxResponse]
+	listReleaseWatch             *connect.Client[gen.ListReleaseWatchRequest, gen.ListReleaseWatchResponse]
+	wisprStatus                  *connect.Client[gen.WisprStatusRequest, gen.WisprStatusResponse]
+	transcribeWispr              *connect.Client[gen.TranscribeWisprRequest, gen.TranscribeWisprResponse]
 	searchItems                  *connect.Client[gen.SearchItemsRequest, gen.ItemPage]
 	getItem                      *connect.Client[gen.ItemRequest, gen.ItemDetail]
 	resolveItemUrl               *connect.Client[gen.ResolveItemUrlRequest, gen.ItemRef]
@@ -2896,6 +2940,26 @@ func (c *runnerServiceClient) ImportGitHubRepository(ctx context.Context, req *c
 // ListGitHubItems calls lazybox.bench.v1.RunnerService.ListGitHubItems.
 func (c *runnerServiceClient) ListGitHubItems(ctx context.Context, req *connect.Request[gen.ListGitHubItemsRequest]) (*connect.Response[gen.ListGitHubItemsResponse], error) {
 	return c.listGitHubItems.CallUnary(ctx, req)
+}
+
+// ListMailbox calls lazybox.bench.v1.RunnerService.ListMailbox.
+func (c *runnerServiceClient) ListMailbox(ctx context.Context, req *connect.Request[gen.ListMailboxRequest]) (*connect.Response[gen.ListMailboxResponse], error) {
+	return c.listMailbox.CallUnary(ctx, req)
+}
+
+// ListReleaseWatch calls lazybox.bench.v1.RunnerService.ListReleaseWatch.
+func (c *runnerServiceClient) ListReleaseWatch(ctx context.Context, req *connect.Request[gen.ListReleaseWatchRequest]) (*connect.Response[gen.ListReleaseWatchResponse], error) {
+	return c.listReleaseWatch.CallUnary(ctx, req)
+}
+
+// WisprStatus calls lazybox.bench.v1.RunnerService.WisprStatus.
+func (c *runnerServiceClient) WisprStatus(ctx context.Context, req *connect.Request[gen.WisprStatusRequest]) (*connect.Response[gen.WisprStatusResponse], error) {
+	return c.wisprStatus.CallUnary(ctx, req)
+}
+
+// TranscribeWispr calls lazybox.bench.v1.RunnerService.TranscribeWispr.
+func (c *runnerServiceClient) TranscribeWispr(ctx context.Context, req *connect.Request[gen.TranscribeWisprRequest]) (*connect.Response[gen.TranscribeWisprResponse], error) {
+	return c.transcribeWispr.CallUnary(ctx, req)
 }
 
 // SearchItems calls lazybox.bench.v1.RunnerService.SearchItems.
@@ -3857,6 +3921,10 @@ type RunnerServiceHandler interface {
 	ListGitHubRepositories(context.Context, *connect.Request[gen.ListGitHubRepositoriesRequest]) (*connect.Response[gen.ListGitHubRepositoriesResponse], error)
 	ImportGitHubRepository(context.Context, *connect.Request[gen.ImportGitHubRepositoryRequest]) (*connect.Response[gen.ImportGitHubRepositoryResponse], error)
 	ListGitHubItems(context.Context, *connect.Request[gen.ListGitHubItemsRequest]) (*connect.Response[gen.ListGitHubItemsResponse], error)
+	ListMailbox(context.Context, *connect.Request[gen.ListMailboxRequest]) (*connect.Response[gen.ListMailboxResponse], error)
+	ListReleaseWatch(context.Context, *connect.Request[gen.ListReleaseWatchRequest]) (*connect.Response[gen.ListReleaseWatchResponse], error)
+	WisprStatus(context.Context, *connect.Request[gen.WisprStatusRequest]) (*connect.Response[gen.WisprStatusResponse], error)
+	TranscribeWispr(context.Context, *connect.Request[gen.TranscribeWisprRequest]) (*connect.Response[gen.TranscribeWisprResponse], error)
 	// Work items (PROJECTS_AND_INTEGRATIONS.md): search a provider for the
 	// picker, read one item with the context an agent is given, turn a pasted
 	// link into its reference, and find the workspaces started from one.
@@ -4533,6 +4601,30 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceListGitHubItemsProcedure,
 		svc.ListGitHubItems,
 		connect.WithSchema(runnerServiceMethods.ByName("ListGitHubItems")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceListMailboxHandler := connect.NewUnaryHandler(
+		RunnerServiceListMailboxProcedure,
+		svc.ListMailbox,
+		connect.WithSchema(runnerServiceMethods.ByName("ListMailbox")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceListReleaseWatchHandler := connect.NewUnaryHandler(
+		RunnerServiceListReleaseWatchProcedure,
+		svc.ListReleaseWatch,
+		connect.WithSchema(runnerServiceMethods.ByName("ListReleaseWatch")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceWisprStatusHandler := connect.NewUnaryHandler(
+		RunnerServiceWisprStatusProcedure,
+		svc.WisprStatus,
+		connect.WithSchema(runnerServiceMethods.ByName("WisprStatus")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceTranscribeWisprHandler := connect.NewUnaryHandler(
+		RunnerServiceTranscribeWisprProcedure,
+		svc.TranscribeWispr,
+		connect.WithSchema(runnerServiceMethods.ByName("TranscribeWispr")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceSearchItemsHandler := connect.NewUnaryHandler(
@@ -5679,6 +5771,14 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceImportGitHubRepositoryHandler.ServeHTTP(w, r)
 		case RunnerServiceListGitHubItemsProcedure:
 			runnerServiceListGitHubItemsHandler.ServeHTTP(w, r)
+		case RunnerServiceListMailboxProcedure:
+			runnerServiceListMailboxHandler.ServeHTTP(w, r)
+		case RunnerServiceListReleaseWatchProcedure:
+			runnerServiceListReleaseWatchHandler.ServeHTTP(w, r)
+		case RunnerServiceWisprStatusProcedure:
+			runnerServiceWisprStatusHandler.ServeHTTP(w, r)
+		case RunnerServiceTranscribeWisprProcedure:
+			runnerServiceTranscribeWisprHandler.ServeHTTP(w, r)
 		case RunnerServiceSearchItemsProcedure:
 			runnerServiceSearchItemsHandler.ServeHTTP(w, r)
 		case RunnerServiceGetItemProcedure:
@@ -6190,6 +6290,22 @@ func (UnimplementedRunnerServiceHandler) ImportGitHubRepository(context.Context,
 
 func (UnimplementedRunnerServiceHandler) ListGitHubItems(context.Context, *connect.Request[gen.ListGitHubItemsRequest]) (*connect.Response[gen.ListGitHubItemsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ListGitHubItems is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) ListMailbox(context.Context, *connect.Request[gen.ListMailboxRequest]) (*connect.Response[gen.ListMailboxResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ListMailbox is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) ListReleaseWatch(context.Context, *connect.Request[gen.ListReleaseWatchRequest]) (*connect.Response[gen.ListReleaseWatchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ListReleaseWatch is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) WisprStatus(context.Context, *connect.Request[gen.WisprStatusRequest]) (*connect.Response[gen.WisprStatusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.WisprStatus is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) TranscribeWispr(context.Context, *connect.Request[gen.TranscribeWisprRequest]) (*connect.Response[gen.TranscribeWisprResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.TranscribeWispr is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) SearchItems(context.Context, *connect.Request[gen.SearchItemsRequest]) (*connect.Response[gen.ItemPage], error) {

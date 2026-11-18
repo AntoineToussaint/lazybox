@@ -410,12 +410,27 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 		if !ok {
 			return nil, rpcError(agent.ErrUnsupported)
 		}
+		var foreground []*commands.Command
+		if o.DeliverQueued.GetHow() == engine.DeliverNow && e.Engine.Snapshot().Busy {
+			for _, candidate := range s.Bench.Commands.List(e.ID) {
+				if candidate.CanBackground() {
+					if command, err := s.Bench.Commands.Get(candidate.ID); err == nil {
+						foreground = append(foreground, command)
+					}
+				}
+			}
+		}
 		receipt, err := queue.DeliverQueued(ctx, o.DeliverQueued.GetOperationId(), o.DeliverQueued.GetHow())
 		if errors.Is(err, engine.ErrNotQueued) {
 			return nil, grpcError(codes.FailedPrecondition, err)
 		}
 		if err != nil {
 			return nil, rpcError(err)
+		}
+		// A followed run is owned by its pipe broker and can outlive the
+		// provider's turn interrupt. Ask that broker to stop it as well.
+		for _, command := range foreground {
+			command.CancelForegroundPipe()
 		}
 		return &pb.Receipt{OperationId: receipt.ID, Delivery: receipt.Delivery, ProviderId: receipt.ProviderID, Error: receipt.Error}, nil
 	case *pb.ApplyRequest_StopAgent:

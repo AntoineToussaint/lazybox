@@ -1,3 +1,5 @@
+import { useRunner } from '../RunnerContext';
+import { wisprRecognizer } from './wispr-recognizer';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import type { ViewStateStore } from '@lazybox/platform';
 import { bindings, canonicalBinding, canonicalKey, chordFromEvent, displayBinding, isChord, isLoneModifier, runAction, useActions } from '../actions';
@@ -23,10 +25,11 @@ export const LONE_GRACE_MS = 1000;
  * chord and sequence dispatchers skip them (`hold` in actions.ts).
  */
 export function VoiceLayer({ viewState, keymap, onOpenSettings }: { viewState?: ViewStateStore; keymap: Keymap; onOpenSettings?(): void }) {
+  const { api } = useRunner();
   const [preferences] = useVoicePreferences(viewState);
   useEffect(() => { setVoicePreferencesContext(preferences); }, [preferences]);
   const state = useVoiceState();
-  const latest = useRef({ preferences, keymap }); latest.current = { preferences, keymap };
+  const latest = useRef({ preferences, keymap, api }); latest.current = { preferences, keymap, api };
 
   /** Say a command: the palette opens (if it is not), then listens. */
   const listenForCommand = (mode: 'hold' | 'toggle') => {
@@ -35,7 +38,7 @@ export function VoiceLayer({ viewState, keymap, onOpenSettings }: { viewState?: 
     let frames = 0;
     const attempt = () => {
       if (dictating()) return;
-      if (document.querySelector('dialog.command-palette[open]') || frames > 20) { void startDictation({ mode, kind: 'palette' }); return; }
+      if (document.querySelector('dialog.command-palette[open]') || frames > 20) { void startDictation({ mode, kind: 'palette', wispr: wisprRecognizer(latest.current.api) }); return; }
       frames++; requestAnimationFrame(attempt);
     };
     requestAnimationFrame(attempt);

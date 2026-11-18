@@ -1,3 +1,4 @@
+import { MailboxSettings, ReleaseWatchSettings } from './Mailbox';
 import { useEffect, useRef, useState } from 'react';
 import { Code, ConnectError } from '@lazybox/client-core';
 import type { GitHubConnection, GitHubSignIn } from '@lazybox/protocol';
@@ -80,6 +81,10 @@ export function GitHubSettings({ openSignIn, copySignInCode, onConnectionChange 
     {connection?.state === 'connected' && <p>{personal ? 'Connected with a personal token.' : 'GitHub App access: only repositories allowed by its installations. This can be less than your personal GitHub access.'}</p>}
     {connection?.state==='connected'&&!personal&&!disconnecting&&<button disabled={!!busy} onClick={()=>setDisconnecting(true)}>Use personal token…</button>}
     {error && <p role="alert" className="settings-error">{error}<button onClick={() => { setError(''); void run('Refreshing', async signal => { await readConnection(signal); }); }}>Retry</button></p>}
+    {connection?.state === 'connected' && <div className="github-inbox-options">
+      {connection.authMethod === 'personal_token' && <MailboxSettings/>}
+      <ReleaseWatchSettings/>
+    </div>}
     {!connection && !error && <p>Loading GitHub connection…</p>}
     {connection && <>
       {connection.error && <p className="settings-error" role="alert">{connection.error}</p>}

@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // The review loop against the fake Runner (GITHUB.md, "The review loop"):
 // round 1 finds a blocker, the reviewer asks the author a question and gets
 // the reply (both conversations show it), you send the blocker, the author's
@@ -46,7 +47,7 @@ try{
  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}#token=${fixture.token}`);
  await expect(page.locator('.messages:visible')).toContainText('REPLY_ONE');
- await page.getByRole('button',{name:'Review changes',exact:true}).click();
+ await openWorkspaceChanges(page);
  const changes=page.getByRole('region',{name:'Workspace changes'});
  const tray=changes.getByRole('complementary',{name:'Review'});
  const chat=page.locator('section.panel-chat:visible');

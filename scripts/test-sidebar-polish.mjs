@@ -15,5 +15,26 @@ assert.equal(await row.locator('.workspace-link').evaluate(node=>getComputedStyl
 await history.hover();await page.screenshot({path:'/tmp/lazybox-sidebar-history-hover.png'});
 await row.locator('summary').click();const r=await row.boundingBox(),a=await row.locator('summary').boundingBox();assert.ok(a.x+a.width<=r.x+r.width&&a.y>=r.y,'action must be inside row');const menu=row.locator('details>div');assert.ok((await menu.boundingBox()).height<250);await page.screenshot({path:'/tmp/lazybox-sidebar-menu.png'});
 await row.getByRole('button',{name:'Delete conversation…'}).click();const dialog=page.getByRole('dialog',{name:'Delete conversation',exact:true});await expect(dialog.getByRole('button',{name:'Cancel',exact:true})).toBeFocused();await expect(dialog.locator('header')).not.toHaveAttribute('title');assert.ok((await dialog.boundingBox()).width<=450);await expect(dialog.getByRole('button',{name:'Delete conversation',exact:true})).toBeEnabled();await page.screenshot({path:'/tmp/lazybox-sidebar-delete.png'});await dialog.getByRole('button',{name:'Cancel',exact:true}).click();assert.equal(f.mutations.length,0);
+// A timed-out history refresh must retain saved entries and the next successful retry clears the warning.
+let historyReads = 0;
+let historyFails = false;
+await page.route('**/ListHistory', route => {
+  const request = route.request().postDataJSON();
+  if (request.limit !== 100 || request.collectionId) return route.continue();
+  historyReads++;
+  if (!historyFails) return route.fulfill({ json: { sessions: [...f.sessions, { id: 'saved-only', collectionId: 'alpha', title: 'Saved history entry', historical: true, closed: true }] } });
+  return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ code: 'unavailable', message: 'fixture history unavailable' }) });
+});
+await expect.poll(() => historyReads, { timeout: 20000 }).toBeGreaterThan(0);
+historyFails = true;
+const warning = page.getByRole('alert').filter({ hasText: 'Could not refresh conversation history' });
+await expect(warning).toBeVisible({ timeout: 20000 });
+await history.click();
+const savedEntry = page.getByText('Saved history entry', { exact: true });
+await expect(savedEntry.first()).toBeVisible();
+await page.keyboard.press('Escape');
+historyFails = false;
+await warning.getByRole('button', { name: 'Retry history refresh' }).click();
+await expect(warning).toHaveCount(0);
 await page.setViewportSize({width:900,height:700});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:'/tmp/lazybox-sidebar-compact.png'});Object.assign(f.github,{state:'connected',authMethod:'github_app',login:'fixture-user',clientId:'fixture-client'});await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('tab',{name:'Repositories',exact:true}).click();await page.getByRole('button',{name:'Connections & folders',exact:true}).first().click();await expect(page.getByText('GitHub App access: only repositories allowed by its installations.',{exact:false})).toBeVisible();await page.getByRole('button',{name:'Use personal token…'}).click();await expect(page.getByRole('button',{name:'Disconnect this Runner',exact:true})).toBeVisible();await page.getByRole('button',{name:'Keep connected',exact:true}).click();assert.equal(f.mutations.length,0);console.log('PASS sidebar repository identity, compact row/menu geometry, safe dialog focus, narrow layout; no mutations.');
 }finally{await browser?.close();await server.close();await f.close();}

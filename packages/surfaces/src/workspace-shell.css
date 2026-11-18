@@ -42,7 +42,24 @@
 .workspace-shell .history-shortcut{margin-top:16px;border-top:1px solid var(--line);border-radius:0;padding-top:12px;padding-bottom:12px}
 .workspace-shell .new-session-dialog{width:min(520px,calc(100vw - 32px));padding:24px;background:var(--surface-raised);border-color:var(--line-strong)}
 .workspace-shell .new-session-dialog>header{margin-bottom:12px}
-.workspace-shell .new-session-dialog .quick-start-option{display:block;margin:0 0 8px auto;padding:6px 0;color:var(--accent);font-size:calc(12px * var(--text-scale))}
+.new-session-dialog .conversation-start-options{margin-top:16px}
+.new-session-dialog .quick-start-option{display:flex;width:100%;min-height:42px;align-items:center;justify-content:center;gap:8px}
+.new-session-dialog .conversation-start-options p{margin:8px 0 16px;color:var(--text-muted);text-align:center;font-size:calc(12px * var(--text-scale))}
+.new-session-dialog .conversation-start-options h3{margin:0;padding-top:14px;border-top:1px solid var(--line);font-size:calc(13px * var(--text-scale));font-weight:600}
+.new-session-dialog:has(.conversation-start-options) .open-form>.primary{background:var(--surface-raised);color:var(--text);border:1px solid var(--line-strong)}
+.workspace-header .workspace-tools{display:flex;align-items:center;gap:4px;min-width:0;padding-inline:8px;border-inline:1px solid var(--line)}
+.workspace-header .workspace-tool-name{min-width:0;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:calc(12px * var(--text-scale));font-weight:600}
+button.workspace-pulls-overflow{display:none}
+@media(max-width:1100px){
+  .workspace-header .workspace-tools .pr-pills{display:none}
+  button.workspace-pulls-overflow{display:flex}
+}
+@media(max-width:760px){
+  .workspace-shell .workspace-header{position:relative;height:68px;min-height:68px;padding-bottom:20px}
+  .workspace-header .workspace-tool-name{position:absolute;bottom:2px;left:8px;max-width:calc(100% - 16px);line-height:17px}
+  .workspace-header .workspace-tools{padding-inline:4px}
+}
+@media(max-width:479px){.workspace-header .workspace-tools>.phone-overflow{display:none!important}}
 .workspace-shell .new-session-dialog .session-setup{padding:8px 0}
 .workspace-shell .new-session-dialog .session-setup>.eyebrow,.workspace-shell .new-session-dialog .session-setup>h2,.workspace-shell .new-session-dialog .session-setup>p{display:none}
 .workspace-shell .mobile-navigation-button,.mobile-panel-switcher{display:none!important}
@@ -126,3 +143,5 @@
 .workspace-shell .new-session-dialog .conversation-scope strong{font-weight:500;color:var(--text)}
 .workspace-shell .new-session-dialog select{appearance:none;min-height:40px;padding:8px 30px 8px 10px;background-image:linear-gradient(45deg,transparent 50%,var(--text-muted) 50%),linear-gradient(135deg,var(--text-muted) 50%,transparent 50%);background-position:calc(100% - 15px) 50%,calc(100% - 10px) 50%;background-size:5px 5px;background-repeat:no-repeat}
 .workspace-shell .new-session-dialog .open-form>.primary{min-height:40px}
+.github-inbox-options{display:grid;gap:8px;margin:8px 0 12px}
+.github-inbox-options label{display:flex;align-items:center;gap:8px}

@@ -55,8 +55,22 @@ var extensionRPCs = map[string][]extensionRule{
 		r, ok := req.(*pb.ListCommandsRequest)
 		return ok && r.SessionId != ""
 	}}},
-	pb.RunnerService_ListMissions_FullMethodName: {{grant: power.GrantReadMissions}},
-	pb.RunnerService_GetTelemetry_FullMethodName: {{grant: power.GrantReadUsage}},
+	pb.RunnerService_GetWorkspaceRuntime_FullMethodName: {{grant: power.GrantReadRuntime, allow: func(_ principal, req any) bool {
+		r, ok := req.(*pb.WorkspaceRuntimeRequest)
+		return ok && r.CollectionId != ""
+	}}},
+	pb.RunnerService_ListLinks_FullMethodName: {{grant: power.GrantReadPulls, allow: func(_ principal, req any) bool {
+		r, ok := req.(*pb.ListLinksRequest)
+		return ok && r.SessionId == "" && !r.Focused && (r.All || r.CollectionId != "")
+	}}},
+	pb.RunnerService_ListArtifacts_FullMethodName: {{grant: power.GrantReadArtifacts, allow: func(_ principal, req any) bool {
+		r, ok := req.(*pb.ListArtifactsRequest)
+		return ok && r.CollectionId != "" && !r.IncludeRetired
+	}}},
+	pb.RunnerService_ListReleaseWatch_FullMethodName: {{grant: power.GrantReadReleases}},
+	pb.RunnerService_ListMailbox_FullMethodName:      {{grant: power.GrantReadMailbox}},
+	pb.RunnerService_ListMissions_FullMethodName:     {{grant: power.GrantReadMissions}},
+	pb.RunnerService_GetTelemetry_FullMethodName:     {{grant: power.GrantReadUsage}},
 	pb.RunnerService_Apply_FullMethodName: {{grant: power.GrantSendMessages, allow: func(_ principal, req any) bool {
 		r, ok := req.(*pb.ApplyRequest)
 		if !ok {

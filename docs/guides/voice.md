@@ -5,15 +5,16 @@ appear in the message box as you say them, you fix what you want, and you send.
 You can also say a command ("next agent that needs me", "open changes") and have
 replies read to you.
 
-On the Mac, recognition runs **on your Mac**: the audio never leaves it, and
-none of it is ever saved.
+The automatic engine on macOS recognizes speech on your Mac. Lazybox does not save dictation recordings.
 
 ## Dictate a message
 
-Open **Settings → Voice → Wispr Flow** for the app download, sign-in
-instructions, and a practice field. Sign in in the Wispr Flow app. Then focus
-the Lazybox message box and use your Wispr shortcut. Review the inserted text
-and send it through the usual composer controls.
+For direct Wispr Flow dictation, configure `LAZYBOX_WISPR_API_KEY` in the
+Runner environment with an approved [Wispr Voice Interface API key](https://api-docs.wisprflow.ai/quickstart).
+Select **Wispr Flow** under **Settings → Voice → Engine**, then click the
+composer microphone. Click **Stop dictation** to close the microphone and
+insert the transcript into your draft. Press Esc to discard a recording.
+The finished recording goes through this Runner to Wispr Flow.
 
 1. Click into a conversation's message box (or just have one on screen).
 2. **Hold `Right ⌥`** — the Option key on the right of the space bar, on its

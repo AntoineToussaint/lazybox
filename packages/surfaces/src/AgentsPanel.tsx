@@ -17,6 +17,7 @@ import { InlineConversationRename, useConversationActions } from './Conversation
 import { conversationRowGestures, useAgentsFocusRequests } from './conversation-requests';
 import { LiveIndicator } from './LiveIndicator';
 import { MissionInboxSection } from './MissionInbox';
+import { GitHubInboxSections, useGitHubInboxCount } from './Mailbox';
 import { PullRequestInboxSection, usePullInboxCount } from './PullRequestInbox';
 import type { ViewTarget } from './workspace-model';
 import './agents-panel.css';
@@ -118,8 +119,8 @@ export function AgentsPanel({ collections, target, viewState, onShowSession }: {
   const waiting = inbox.counts['needs-input'] + missionAttention;
   const visibleCount = sections.reduce((sum, section) => sum + section.rows.length, 0);
   // Three grouping choices leave less room: the short form says the same.
-  const pulls = usePullInboxCount();
-  const summary = filtering ? `${visibleCount} of ${inbox.rows.length}` : waiting ? `${waiting} waiting${inbox.multi ? '' : ' for you'}` : unread.length ? `${unread.length} to review` : pulls ? `${pulls} ${pulls === 1 ? 'pull request' : 'pull requests'} to look at` : inbox.rows.length ? 'Nothing needs you' : '';
+  const pulls = usePullInboxCount(), github = useGitHubInboxCount();
+  const summary = filtering ? `${visibleCount} of ${inbox.rows.length}` : waiting ? `${waiting} waiting${inbox.multi ? '' : ' for you'}` : unread.length ? `${unread.length} to review` : pulls ? `${pulls} ${pulls === 1 ? 'pull request' : 'pull requests'} to look at` : github ? `${github} GitHub items` : inbox.rows.length ? 'Nothing needs you' : '';
   return <div ref={panel} className="agents-panel" onKeyDown={keyDown} data-peek-list>
     <header className="agents-heading">
       <label className="agents-filter">
@@ -140,6 +141,7 @@ export function AgentsPanel({ collections, target, viewState, onShowSession }: {
     <div className="agents-list">
     {onShowSession && <MissionInboxSection onOpen={onShowSession}/>}
     {onShowSession && <PullRequestInboxSection collections={collections} onOpen={onShowSession}/>}
+    {onShowSession && <GitHubInboxSections collections={collections} onOpen={onShowSession}/>}
     {inbox.offline.map(row => <p key={row.id} className="agents-runner-offline" role="status" data-health={row.health}><RunnerBadge runner={row.id}/>{healthLabel[row.health]}. Its agents show here again once it answers.</p>)}
     {!inbox.rows.length && <div className="agents-empty"><Icon name="activity" size={20}/><p>Agents from every workspace show up here, the ones that need you first.</p></div>}
     {inbox.rows.length > 0 && filtering && !visibleCount && <div className="agents-empty"><p>No agent matches “{filter.trim()}”.</p><button onClick={() => setFilter('')}>Clear filter</button></div>}

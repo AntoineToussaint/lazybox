@@ -79,6 +79,7 @@
 /* A workspace's conversations: one line each — status mark, title, age. The
    ⋯ menu takes the age's place on hover or focus; never both at once. */
 .conversation-navigation .conversation-row>.conversation-link.conversation-link{align-items:center;gap:8px;padding:4px 8px!important}
+.conversation-type-icon{display:inline-flex;flex:none;color:var(--text-muted)}
 .conversation-navigation .conversation-row>.conversation-link .conversation-label{gap:1px}
 .conversation-navigation .conversation-row>.conversation-link:has(.conversation-agent){align-items:flex-start;padding:6px 8px!important}
 .conversation-navigation .conversation-row>.conversation-link:has(.conversation-agent)>.conversation-age{margin-top:2px}

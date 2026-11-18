@@ -1,4 +1,5 @@
-import { conversationTitle } from './conversation-model';
+import { agentIcon, agentTitle } from './providers';
+import { conversationProvider, conversationTitle } from './conversation-model';
 import { LeaderMenu } from './LeaderMenu';
 import { WorkspaceNavigator } from './WorkspaceNavigator';
 import { resetKeymap, useKeyboardAction, useKeyboardNavigation, useKeymap } from './keyboard';
@@ -944,7 +945,12 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
 
   const panelActions: PanelActions = {
     close: closePanel, showSession,
-    title: (panel, title) => setLiveTitles(titles => titles[panel.id]?.text === title?.text && titles[panel.id]?.icon === title?.icon ? titles : { ...titles, [panel.id]: title }),
+    title: (panel, title) => setLiveTitles(titles => {
+      const old = titles[panel.id];
+      if (old?.text === title?.text && old?.icon === title?.icon && old?.tooltip === title?.tooltip &&
+          old?.agent?.sessionId === title?.agent?.sessionId && old?.agent?.provider === title?.agent?.provider) return titles;
+      return { ...titles, [panel.id]: title };
+    }),
     retarget: (panel, target: RunnerTarget) => {
       if (panel.binding.mode !== 'pinned' || elsewhere(target, here)) { select(target); return; }
       const live = livePage(), next = localTarget(target), was = resolveTarget(panel, live.selection);
@@ -957,7 +963,9 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   };
   const moduleProps: SharedModuleProps = {
     workspaceId: workspaceID, chooseRepositoryFolder: host?.chooseRepositoryFolder, collections, error: catalogError, loaded: catalogLoaded, refresh: refreshCatalog,
-    onNewConversation: beginConversation, onShowSession: showSession, onShowPanel: showPanelFor, onShowModule: kind => kind === 'terminal' ? showTerminal() : showChanges(), onOpenViewer,
+    onNewConversation: beginConversation, onShowSession: showSession,
+    onOpenHandoff: target => target.collectionId === workspaceID && !current.current.pages.some(page => detachedFor(page, target)) && !!tabs.open(target, 'tab'),
+    onShowPanel: showPanelFor, onShowModule: kind => kind === 'terminal' ? showTerminal() : showChanges(), onOpenViewer,
   };
   const storeFor = (panel: Panel) => {
     if (viewState && !stores.has(panel.id)) stores.set(panel.id, { ...viewState, scope: `${viewState.scope || viewState.key}:workspace:${workspaceID || 'home'}`, key: `${viewState.scope || viewState.key}:workspace:${workspaceID || 'home'}:panel:${panel.id}` });
@@ -1038,6 +1046,15 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
               sidebarWidth={sidebarWidth} onSidebarWidth={saveSidebarWidth} popoutUrl={POPOUT_URL}
               closeLabel={(panel, title) => layout.pages.length > 1 && shownPanels(page).length === 1 && !page.detached.length && shownPanels(page)[0].id === panel.id ? `Close ${title} page` : `Close ${title} panel`}
               locked={locked} onArrange={next => { if (locked) return; const live = livePage(); changePage(followFrontTab(live, { ...live, ...next })); }}
+              agentOf={panel => {
+                if (panel.kind !== 'chat') return undefined;
+                const sessionId = resolveTarget(panel, page.selection).sessionId;
+                if (!sessionId) return undefined;
+                const session = info?.sessions.find(value => value.id === sessionId);
+                const saved = liveTitles[panel.id]?.agent;
+                const provider = (session && conversationProvider(session, info?.profiles || [])) || (saved?.sessionId === sessionId ? saved.provider : '');
+                return { icon: agentIcon(provider), label: agentTitle(provider, info?.profiles, 'Unknown agent') };
+              }}
               statusOf={panel => tabs.statusOf(panel, page.selection)}
               onTabDoubleClick={panel => { const live = livePage(); if (!shownPanels(live).some(value => value.id === panel.id && value.preview)) return false; changePage(keepTab(live, panel.id)); return true; }}
               onClose={closePanel}

@@ -1,7 +1,7 @@
 import { fileReference, type FileLink } from './file-reference';
 import { preloadEditor } from './editor-loader';
 import { isMac } from './workbench';
-import { Children, isValidElement, memo, useMemo, useState, type ReactNode } from 'react';
+import { Children, isValidElement, memo, useContext, useMemo, useState, type ReactNode } from 'react';
 import { MermaidDiagram } from './MermaidDiagram';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -20,6 +20,7 @@ import { codeBlockItems, fileLinkItems } from './chat-context-menu';
 import type { OpenModifiers } from './file-links';
 import { inlineRunItems, useRunnableBlock, useRunScope } from './code-runs';
 import { inlineCommand, pathProgramsIn, programAt } from './code-run';
+import { ConversationSourceContext, conversationSourceFromLink } from './conversation-source';
 import { headingSlug } from './docs-model';
 for (const [name, language] of Object.entries({json,bash,typescript,python,go,rust,yaml,diff})) hljs.registerLanguage(name,language);
 hljs.registerAliases(['js','javascript','tsx','jsx','ts'],{languageName:'typescript'});
@@ -76,12 +77,16 @@ export const RichContent=memo(function RichContent({text,onOpenFile,document:doc
  const fileMenu=(file:FileLink)=>contextMenu('file-link',()=>fileLinkItems(file,onOpenFile!),file);
  // In an agent's message, inline code that reads as a command offers to run it, from its menu only.
  const run=useRunScope();
+ const openSource = useContext(ConversationSourceContext);
  const programs=useMemo(()=>run?pathProgramsIn(text):[],[run,text]);
  const rawJSON=useMemo(()=>{if(doc||text.length>200000||!/^\s*[\[{]/.test(text))return false;try{JSON.parse(text);return true;}catch{return false;}},[text,doc]);
  const docComponents=useMemo(()=>doc?documentComponents(doc):undefined,[doc]);
  if(docComponents)return <div className="rich-content rich-document"><Markdown remarkPlugins={[remarkGfm]} components={{...components,...docComponents}}>{text}</Markdown></div>;
  return <div className="rich-content">{rawJSON?<CodeBlock text={text} language="json"/>:<Markdown remarkPlugins={[remarkGfm]} components={{...components,
- a:({href,children})=>{const file=href&&fileReference(href);return file&&onOpenFile?<button className="file-reference" title={fileTitle} onPointerEnter={preloadEditor} onClick={event=>onOpenFile(file,event)} onContextMenu={fileMenu(file)}>{children}</button>:components.a({href,children});},
+ a:({href,children})=>{
+  const source = openSource && href && conversationSourceFromLink(href);
+  if (source) return <a href={href} onClick={event => { event.preventDefault(); openSource(source); }}>{children}</a>;
+  const file=href&&fileReference(href);return file&&onOpenFile?<button className="file-reference" title={fileTitle} onPointerEnter={preloadEditor} onClick={event=>onOpenFile(file,event)} onContextMenu={fileMenu(file)}>{children}</button>:components.a({href,children});},
  code:({children,className,node})=>{const file=!className&&typeof children==='string'?fileReference(children,'automatic'):undefined;if(file&&onOpenFile)return <button className="file-reference inline-file" title={fileTitle} onPointerEnter={preloadEditor} onClick={event=>onOpenFile(file,event)} onContextMenu={fileMenu(file)}>{children}</button>;
   const command=run&&!className&&typeof children==='string'?inlineCommand(children,programAt(programs,node?.position?.start.offset)):'';
   return <code className={className} onContextMenu={command?contextMenu('inline-code',()=>inlineRunItems(run!.host,run!.messageId,command),{text:children,command}):undefined}>{children}</code>;}

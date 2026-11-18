@@ -36,6 +36,15 @@ const first=fixture.sessions.find(s=>s.id==='alpha-session');
 first.title='Main alpha conversation';
 for(const [id,title] of [['alpha-second','Second alpha conversation'],['alpha-third','Third alpha conversation'],['alpha-fourth','Fourth alpha conversation'],['alpha-fifth','Fifth alpha conversation'],['alpha-review','Review of the main conversation']])
  fixture.sessions.push({...structuredClone(first),id,workId:id,title,instructionsPending:false});
+const recipient=fixture.sessions.find(s=>s.id==='alpha-second');
+Object.assign(recipient,{profileId:'codex-default',busy:false,status:'done',agents:[]});
+fixture.sessions.find(s=>s.id==='alpha-third').profileId='unknown-profile';
+const sourceEvents=fixture.openEvents(first.id);
+sourceEvents.push({type:'message_delta',text:'Retained conversation for alpha-session'});
+sourceEvents.push({type:'operation_accepted',text:'How long does an entry live?'});
+sourceEvents.push({type:'message_delta',text:'A cache entry expires after ten minutes.'});
+fixture.openEvents(recipient.id).push({type:'message_delta',text:'Retained conversation for alpha-second'});
+fixture.runner.journalMessages=true;
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),logLevel:'warn',plugins:[react(),monacoVimCompat()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 await server.listen();
 await mkdir('.cache',{recursive:true});
@@ -78,11 +87,29 @@ try{
  browser=await webkit.launch({headless:true});
  await tabsOn();
  await previewTabs();
- console.log('PASS conversation tabs: with tabs on, a page an earlier build left with only its review in the preview tab comes back with every open conversation as a kept tab (capped), a click focuses its tab, a closed tab stays closed across a reload, a tab dropped on the sidebar stays out of it, ⌘W never closes the sidebar, a deleted conversation’s tab closes, another workspace’s conversation opens on its own page, a page from before tabs keeps its conversation as a kept tab, and the setting turns preview tabs back on; with it off, the preview tab (italic) is replaced by the next click, double-click and typing keep it, ⌘-click opens behind, one tab per conversation, the sidebar follows the tab in front, drag to an edge splits, Open beside splits right, tab menus, ⌘W and ⇧⌘T, ⌃⇥ walks tabs, a reload keeps the tabs, an orchestrator’s agent opens next to its parent and a preview parent is kept. WebKit, fake Runner fixture.');
+ await sourceAfterResume();
+ console.log('PASS conversation tabs: with tabs on, a page an earlier build left with only its review in the preview tab comes back with every open conversation as a kept tab (capped), a click focuses its tab, a closed tab stays closed across a reload, a tab dropped on the sidebar stays out of it, ⌘W never closes the sidebar, a deleted conversation’s tab closes, another workspace’s conversation opens on its own page, a page from before tabs keeps its conversation as a kept tab, and the setting turns preview tabs back on; with it off, the preview tab (italic) is replaced by the next click, double-click and typing keep it, ⌘-click opens behind, one tab per conversation, the sidebar follows the tab in front, drag to an edge splits, Open beside splits right, tab menus, ⌘W and ⇧⌘T, ⌃⇥ walks tabs, a reload keeps the tabs, an orchestrator’s agent opens next to its parent and a preview parent is kept. Sidebar and tab icons agree, and a workspace handoff preserves the receiving draft and links to its source. WebKit, fake Runner fixture.');
 }finally{
  await browser?.close();
  await server.close();
  await fixture.close?.();
+}
+
+/** A sent handoff still opens its source after that conversation resumes in a new execution. */
+async function sourceAfterResume(){
+ const id='alpha-source-successor';
+ Object.assign(first,{closed:true,status:'stopped',successorExecutionId:id});
+ fixture.sessions.push({...first,id,title:'Resumed source conversation',closed:false,status:'done',busy:false,previousExecutionId:first.id,successorExecutionId:''});
+ const continued=fixture.openEvents(id);
+ for(const record of sourceEvents.events) continued.push(record.event);
+ const context=await browser.newContext({viewport:{width:1600,height:900}});
+ try{
+  const page=await context.newPage();
+  await page.goto(origin+'/?view=workspace&collection=alpha&session='+recipient.id+'#token='+fixture.token);
+  await page.getByRole('link',{name:'source message',exact:true}).click();
+  await expect.poll(()=>tabsOf(page).inFront('Resumed source conversation')).toBe(true);
+  await expect(page.locator('article.message').filter({hasText:'A cache entry expires after ten minutes.'})).toHaveClass(/message-flash/);
+ }finally{await context.close();}
 }
 
 /** "Open a workspace's conversations as tabs", on as it is by default, on pages saved by earlier builds. */
@@ -115,6 +142,47 @@ async function tabsOn(){
  await expect.poll(()=>inFront('Main alpha conversation')).toBe(true);
  await expect(chatTabs).toHaveCount(6);
  await expect.poll(previews).toEqual([]);
+ // Agent identity matches in both places, including sessions with only a profile or an unknown provider.
+ for(const [title,agent] of [['Main alpha conversation','Claude'],['Second alpha conversation','Codex'],['Third alpha conversation','Unknown agent']]){
+  const rowIcon=row(title).getByRole('img',{name:agent,exact:true});
+  const tabIcon=tab(title).getByRole('img',{name:agent,exact:true});
+  await expect(rowIcon).toBeVisible();
+  await expect(tabIcon).toBeVisible();
+  assert.deepEqual(await rowIcon.locator('path').evaluateAll(paths=>paths.map(p=>p.getAttribute('d'))),
+    await tabIcon.locator('path').evaluateAll(paths=>paths.map(p=>p.getAttribute('d'))));
+  await expect(tab(title).locator('.dock-tab-status')).toBeVisible();
+ }
+ // Put selected text into another chat, after its draft. Only this workspace is offered.
+ const composer=page.locator('textarea[data-agent-composer]:visible');
+ await row('Second alpha conversation').click();
+ await composer.fill('Already drafted.');
+ await row('Main alpha conversation').click();
+ const source=page.locator('article.message').filter({hasText:'A cache entry expires after ten minutes.'});
+ const words=source.getByText('A cache entry expires after ten minutes.',{exact:true});
+ const selectedPoint=await words.evaluate(node=>{
+  const range=document.createRange();
+  range.setStart(node.firstChild,2);range.setEnd(node.firstChild,13);
+  const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+  const rect=range.getBoundingClientRect();
+  return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};
+ });
+ await page.mouse.click(selectedPoint.x,selectedPoint.y,{button:'right'});
+ await page.getByRole('menuitem',{name:'Send to conversation…'}).click();
+ const handoff=page.getByRole('dialog',{name:'Send to conversation'});
+ await expect(handoff.getByRole('option',{name:'Second alpha conversation · Codex'})).toBeAttached();
+ await expect(handoff.getByRole('option',{name:/Main alpha|beta/i})).toHaveCount(0);
+ await handoff.getByLabel('Conversation',{exact:true}).selectOption('alpha-second');
+ await handoff.getByLabel('Note (optional)').fill('Please check the TTL.');
+ const sentBefore=fixture.calls.filter(call=>call.body?.message).length;
+ await handoff.getByRole('button',{name:'Add to draft'}).click();
+ await expect.poll(()=>inFront('Second alpha conversation')).toBe(true);
+ await expect(composer).toHaveValue(/^Already drafted\.\n\nPlease check the TTL\.\n\nFrom “Main alpha conversation” .*\n\n> cache entry$/);
+ assert.equal(fixture.calls.filter(call=>call.body?.message).length,sentBefore);
+ await composer.press('Enter');
+ await page.getByRole('link',{name:'source message',exact:true}).click();
+ await expect.poll(()=>inFront('Main alpha conversation')).toBe(true);
+ await expect(source).toHaveClass(/message-flash/);
+ fixture.runner.journalMessages=false;
  // A tab closed stays closed when the workspace loads again; opening the conversation brings it back.
  await tab('Fifth alpha conversation').locator('.dock-tab-close').click();
  await expect(chatTabs).toHaveCount(5);

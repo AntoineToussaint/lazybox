@@ -4,6 +4,7 @@
  * `RichContent`; other features add to them through the `message`,
  * `code-block` and `file-link` scopes (see `ContextMenu.tsx`).
  */
+import type { HandoffMessage } from './ConversationHandoff';
 import { composeInConversation } from './compose';
 import { copyText, showMenuNotice, type ContextMenuContext } from './ContextMenu';
 import { fencedCode, quoteText, type MenuItem } from './context-menu-model';
@@ -23,7 +24,7 @@ export function quoteInReply(sessionId: string, text: string) {
 }
 
 /** A message's own items: quoting, copying, finding its prompt; then its turn's checkpoint actions. */
-export function messageItems(context: ContextMenuContext<MessageMenuDetail>, { prompt, onReveal, turn }: { prompt?: TranscriptMessage; onReveal?(id: string): void; turn: MenuItem[] }): MenuItem[] {
+export function messageItems(context: ContextMenuContext<MessageMenuDetail>, { prompt, onReveal, onHandoff, turn }: { prompt?: TranscriptMessage; onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; turn: MenuItem[] }): MenuItem[] {
   const { message, role, sessionId } = context.detail;
   const text = message.text;
   if (!text.trim()) return turn;
@@ -34,6 +35,7 @@ export function messageItems(context: ContextMenuContext<MessageMenuDetail>, { p
     !!sessionId && (quoted
       ? { label: 'Quote selection in reply', icon: 'quote', run: () => quoteInReply(sessionId, quoted) }
       : { label: 'Quote in reply', icon: 'quote', run: () => quoteInReply(sessionId, rendered()) }),
+    onHandoff && role !== 'notice' && { label: 'Send to conversation…', icon: 'send', run: () => onHandoff({ id: message.id, text: quoted || text }) },
     'separator',
     { label: 'Copy message', icon: 'copy', run: () => copyText(rendered(), 'Copied message') },
     { label: 'Copy as Markdown', icon: 'copy', run: () => copyText(text, 'Copied as Markdown') },

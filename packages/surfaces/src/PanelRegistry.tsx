@@ -2,6 +2,7 @@ import { useState, type ComponentType } from 'react';
 import type { Collection } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
 import { ChatPanel } from './AgentWindow';
+import type { OpenHandoffConversation } from './ConversationHandoff';
 import { ChangesPanel } from './ChangesPanel';
 import { CollectionPanel } from './CollectionPanel';
 import { CommandPanel } from './CommandPanel';
@@ -29,7 +30,7 @@ import { ExtensionModule } from './ExtensionPanel';
 import { useAskRequests } from './help-requests';
 
 /** What a panel's header shows while its module has something better than its kind's title: a web page's title and icon. */
-export type PanelTitle = { text: string; /** An image URL (a page's icon). */ icon?: string; tooltip?: string };
+export type PanelTitle = { text: string; /** An image URL (a page's icon). */ icon?: string; tooltip?: string; agent?: { sessionId: string; provider: string } };
 export type ModuleProps = {
   workspaceId: string;
   /** This panel's identity on its page, stable while it is open. */
@@ -46,6 +47,7 @@ export type ModuleProps = {
   onOpenChat?(): void;
   onNewConversation?(workspaceId: string): void;
   onShowSession?(target: ViewTarget): void;
+  onOpenHandoff?: OpenHandoffConversation;
   onShowPanel?(kind: string, target?: ViewTarget): void;
   onShowModule?(kind: 'terminal' | 'changes'): void;
   /** Closes this panel (a terminal panel whose last shell exited cleanly, a web page moved to its own window). */
@@ -56,7 +58,7 @@ export type ModuleProps = {
 /** `multiple`: a page may hold several panels of this kind (the page menu adds a new one). */
 export type PanelModule = { title: string; icon?: string; multiple?: boolean; Component: ComponentType<ModuleProps> };
 
-function ChatModule({ target, onTarget, viewState, collections, onOpenChat, onNewConversation, onShowModule, onShowPanel }: ModuleProps) {
+function ChatModule({ target, onTarget, viewState, collections, onOpenChat, onNewConversation, onShowModule, onShowPanel, onOpenHandoff, onPanelTitle }: ModuleProps) {
   const { api } = useRunner();
   const collection = collections.find(value => value.id === target.collectionId);
   // A workspace with no conversation open shows what it holds and how to start, not a form.
@@ -65,6 +67,7 @@ function ChatModule({ target, onTarget, viewState, collections, onOpenChat, onNe
   if (!target.collectionId && !target.sessionId) return <NewTaskStart viewState={viewState}/>;
   return <ChatPanel key={JSON.stringify([target.collectionId, conversationReader(api, target.sessionId).identity])} embedded showCommands={false} onOpenChat={onOpenChat}
     collectionId={target.collectionId} initialSessionId={target.sessionId}
+    onOpenHandoff={onOpenHandoff} onChatTitle={onPanelTitle}
     allowStart={!!collection && collection.state === 'ready' && !collection.ownershipUncertain}
     viewState={viewState}
     onShowBrowser={onShowPanel ? () => onShowPanel('browser') : undefined}

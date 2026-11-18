@@ -63,7 +63,7 @@ try{
  const agentMessage=chat.locator('article.message.message_delta').filter({hasText:'The parser fails'});
  await expect(agentMessage).toBeVisible();
  await open(agentMessage.locator('p').first(),{position:{x:4,y:6}});
- assert.deepEqual((await labels()).slice(0,8),['Quote in reply','Copy message','Copy as Markdown','Jump to prompt','Show changes in this turn','Review this turn with Codex','Review this turn with Claude','Revert to before this turn…']);
+ assert.deepEqual((await labels()).slice(0,9),['Quote in reply','Send to conversation…','Copy message','Copy as Markdown','Jump to prompt','Show changes in this turn','Review this turn with Codex','Review this turn with Claude','Revert to before this turn…']);
  assert.ok((await labels()).includes('Track as artifact…'),'the artifacts feature contributes to the message menu');
  await page.screenshot({path:'.cache/context-menu-message.png'});
  await item('Copy as Markdown').click();await expect(menu).toHaveCount(0);

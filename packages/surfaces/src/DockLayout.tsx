@@ -77,6 +77,8 @@ type Props = {
   /** A badge on a panel's tab ("3 findings", a live dot), beside its title. */
   badgeOf?(panel: Panel): { text: string; tone: string; label: string } | undefined;
   canClose(panel: Panel): boolean;
+  /** The agent icon shown in place of the generic chat icon. */
+  agentOf?(panel: Panel): { icon: string; label: string } | undefined;
   /** A conversation tab's status (working, needs you, failed, done), as a dot before its title. */
   statusOf?(panel: Panel): { state: string; label: string } | undefined;
   /** A tab double-clicked: true when the page handled it (a preview tab kept open); otherwise it maximizes. */
@@ -173,7 +175,7 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     if (element.title !== badge.label) { element.title = badge.label; element.setAttribute('aria-label', badge.label); }
   };
   /** Each tab, whose preview mark and status dot follow the page without a rebuild. */
-  const tabs = useRef(new Map<string, { tab: HTMLElement; status: HTMLElement }>());
+  const tabs = useRef(new Map<string, { tab: HTMLElement; status: HTMLElement; paintIcon(panel: Panel): void }>());
   const size = useRef({ width: 0, height: 0 });
   const [actionHosts, setActionHosts] = useState(() => new Map<string, HTMLElement>());
   /** Where each group's `+` is drawn, right after its tabs. */
@@ -213,6 +215,7 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     found.status.hidden = !status;
     if (status && found.status.dataset.state !== status.state) found.status.dataset.state = status.state;
     found.status.setAttribute('aria-hidden', 'true');
+    found.paintIcon(panel);
     const hint = tabHint(title, preview) + (status ? ` · ${status.label}` : '');
     if (found.tab.title !== hint) found.tab.title = hint;
   };
@@ -460,17 +463,36 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
             // Right-click: the group's menu, through the shared context menu (Workspace contributes it).
             tab.dataset.contextMenu = 'dock-tab';
             title.textContent = parameters.title;
-            const icon = () => {
-              const src = latest.current.imageOf?.(panel);
-              if (!src) return iconElement(latest.current.iconOf(panel), 14);
-              const image = tab.ownerDocument.createElement('img'); image.className = 'dock-tab-image'; image.src = src; image.alt = ''; return image;
+            let icon: SVGSVGElement | HTMLImageElement | undefined;
+            let iconKey = '';
+            const paintIcon = (panel: Panel) => {
+              const host = latest.current;
+              const agent = host.agentOf?.(panel);
+              const src = agent ? undefined : host.imageOf?.(panel);
+              const name = agent?.icon || host.iconOf(panel);
+              const key = JSON.stringify([src, name, agent?.label]);
+              if (icon && key === iconKey) return;
+              const owner = tab.ownerDocument;
+              let next: SVGSVGElement | HTMLImageElement;
+              if (src) {
+                const image = owner.createElement('img');
+                image.className = 'dock-tab-image'; image.src = src; image.alt = '';
+                next = image;
+              } else next = iconElement(name, 14, owner);
+              if (agent) {
+                next.removeAttribute('aria-hidden');
+                next.setAttribute('role', 'img');
+                next.setAttribute('aria-label', agent.label);
+              }
+              if (icon) icon.replaceWith(next); else tab.insertBefore(next, title);
+              icon = next; iconKey = key;
             };
             const badge = document.createElement('span'); badge.className = 'dock-tab-badge'; badge.setAttribute('role', 'status'); badge.hidden = true;
             badges.current.set(id, badge); disposers.push(() => { if (badges.current.get(id) === badge) badges.current.delete(id); });
-            tab.replaceChildren(icon(), status, title, badge);
+            tab.replaceChildren(status, title, badge);
             paintBadge(id, panel);
             const name = () => parameters.api.title || latest.current.titleOf(panel);
-            tabs.current.set(id, { tab, status });
+            tabs.current.set(id, { tab, status, paintIcon });
             decorateTab(id, panel, name());
             if (latest.current.canClose(panel)) {
               close.replaceChildren(iconElement('close', 12));
@@ -481,7 +503,7 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
             }
             /** The panel as it is now (a preview tab kept open changes its params). */
             const current = () => panelFrom(id, api.current?.getPanel(id)?.params ?? parameters.params);
-            const titled = parameters.api.onDidTitleChange(event => { title.textContent = event.title; tab.firstChild?.replaceWith(icon()); close.setAttribute('aria-label', latest.current.closeLabel?.(panel, event.title) ?? `Close ${event.title} panel`); decorateTab(id, current(), event.title); });
+            const titled = parameters.api.onDidTitleChange(event => { title.textContent = event.title; close.setAttribute('aria-label', latest.current.closeLabel?.(panel, event.title) ?? `Close ${event.title} panel`); decorateTab(id, current(), event.title); });
             disposers.push(() => titled.dispose(), () => { if (tabs.current.get(id)?.tab === tab) tabs.current.delete(id); });
             // A preview tab double-clicked is kept open; any other tab maximizes.
             tab.ondblclick = event => { event.preventDefault(); if (latest.current.onTabDoubleClick?.(current())) return; handle.toggleMaximize(id); };
